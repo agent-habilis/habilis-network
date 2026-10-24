@@ -727,6 +727,12 @@ pub const RELAY_REPROBE_BACKOFF_MAX: Duration = Duration::from_mins(5);
 /// host that is too loaded to answer: for a few walks, and it binds nothing.
 pub const RENDEZVOUS_PROBE: Duration = Duration::from_secs(1);
 
+/// How long a joiner waits on one busy rung of the loopback ladder at setup, before its first
+/// dial. A beacon of our mesh answers a loopback probe in a millisecond; a rung that says nothing
+/// in this time stays unread, and the walk reads it later. Short, because it is paid before
+/// `ready`, once per busy rung.
+pub const SETUP_RUNG_READ: Duration = Duration::from_millis(250);
+
 /// How long a departing member waits for its co-hosted rendezvous endpoint,
 /// and for an outstanding rival probe's endpoint, to close
 /// (`beacon::Rendezvous::shed_and_wait`, `beacon::RivalProbe::abort_and_close`).

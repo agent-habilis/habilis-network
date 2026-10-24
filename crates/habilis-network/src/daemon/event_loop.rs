@@ -39,7 +39,7 @@ use crate::{beacon, gossip, lifecycle};
 
 use super::app::NodeDriver;
 use super::beacon_arm::{
-    CohostArm, claims_at_startup, maybe_cohost, maybe_reclaim, note_rival_holds,
+    CohostArm, claims_at_startup, may_cohost, maybe_cohost, maybe_reclaim, note_rival_holds,
     offer_to_the_new_holder, probes_before_claim, release_rendezvous, schedule_rival_recheck,
     shed_rival_beacon_if_due, verdict_after_known_holders,
 };
@@ -315,6 +315,16 @@ async fn run_checked<A: NodeDriver>(
         if claimed {
             schedule_rival_recheck(&mut state, cohost, &rendezvous_params, &endpoint);
         }
+    } else if !rendezvous_params.bind_ports.is_empty() {
+        // A member that does not claim at startup walks first on the reclaim ticker, and its book
+        // left the busy rungs out: read them now, so its first link does not wait for that tick.
+        beacon::read_ladder(
+            &rendezvous_params,
+            &endpoint,
+            &state.address_book,
+            &mut state.rungs,
+        )
+        .await;
     }
 
     // Open the fast reclaim window for the first few seconds of the loop's
@@ -1098,6 +1108,20 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
                 maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
                 maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
+                // Outside the reclaim window and before the grace, no walk acts on the reading:
+                // a joiner that is not meshed yet applies it itself.
+                if !state.meshed
+                    && !may_cohost(cohost, state.meshed, started)
+                    && !rendezvous_params.bind_ports.is_empty()
+                {
+                    beacon::read_ladder(
+                        &rendezvous_params,
+                        ctx.endpoint,
+                        &state.address_book,
+                        &mut state.rungs,
+                    )
+                    .await;
+                }
             }
             () = closed_opt(&mut state.beacon_closing) => {
                 // The beacon that the re-check shed is closed: the id is free of our own corpse, so
