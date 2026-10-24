@@ -8,9 +8,9 @@
 //! by its path. The child itself checks that the endpoint is there when it
 //! reports ready.
 //!
-//! Part 2, the quit (R5): a node in a child process stops on an IPC `quit`.
-//! The child exits with 0, and its state file and its endpoint are gone, and
-//! on Windows its marker.
+//! Part 2, the quit (R5): a node in a child process stops on an IPC `quit` on
+//! Windows, and on the `SIGTERM` of `terminate` on Unix. The child exits with
+//! 0, and its state file and its endpoint are gone, and on Windows its marker.
 //!
 //! Part 3, the owner watch (R6): a node in a child process, with the pid of a
 //! second child process as its owner, stops when that owner is killed. The
@@ -56,9 +56,11 @@ use habilis_network::embed::{
 use habilis_network::net::TransportOpts;
 use habilis_network::protocol::message::Authored;
 use habilis_network::protocol::{LookupOpts, MeshId, Nickname};
-use habilis_network::runtime::ipc::{
-    IpcName, QuitTarget, active_endpoints, quit, send_to_endpoint,
-};
+#[cfg(windows)]
+use habilis_network::runtime::ipc::quit;
+#[cfg(unix)]
+use habilis_network::runtime::ipc::terminate;
+use habilis_network::runtime::ipc::{IpcName, QuitTarget, active_endpoints, send_to_endpoint};
 use habilis_network::runtime::{
     EventLoopConfig, SetupKind, SetupParams, derive_topic_mesh_with, run, setup_mesh,
 };
@@ -505,15 +507,19 @@ async fn quit_stops_a_cli_node_in_a_child_process() {
     };
     let nickname = Nickname::new(NICKNAME).expect("a valid nickname");
 
-    // `quit` and not `terminate`: on Unix the fallback signal of `terminate`
-    // would hide a quit that failed.
+    // On Windows the IPC quit. On Unix the IPC quit does not exist, and
+    // `terminate` sends `SIGTERM`.
     let target = QuitTarget {
         base: &base.0,
         mesh: &mesh,
         nickname: &nickname,
     };
-    if let Err(error) = quit(&target).await {
-        child.fail(&format!("the quit: {error}")).await;
+    #[cfg(windows)]
+    let stopped = quit(&target).await.map_err(anyhow::Error::from);
+    #[cfg(unix)]
+    let stopped = terminate(&target, child.process.id().expect("the pid of the child")).await;
+    if let Err(error) = stopped {
+        child.fail(&format!("the stop: {error}")).await;
     }
     if let Err(what) = child.exits_with_zero().await {
         child.fail(&what).await;

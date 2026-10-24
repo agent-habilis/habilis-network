@@ -27,7 +27,7 @@ The IPC of a daemon works on Windows, over a named pipe. A daemon stops graceful
 | R2. Runtime base | Done. `runtime_base` returns `<LocalAppData>\<product>\run`, and `ensure_runtime_base` rejects a reparse point at the base (`crates/habilis-network-util/src/lib.rs`). |
 | R3. IPC | Done. On Windows the endpoint is a named pipe with a random name and a DACL of the user, and a client checks the owner of the pipe. On Windows discovery reads a `<nick>.ipc` marker. On Unix a client finds the socket by its path, as on `main` (`crates/habilis-network/src/transport/ipc.rs`). |
 | R4. Process helpers | Done. `is_alive`, `live_start_time`, `comm_of` and `parent_of` have Windows versions in `process.rs`. `parent_of` also gives no parent when the creator has exited or is newer than its child. |
-| R5. Graceful stop | Done. The engine answers an IPC `quit` and takes the path of `SIGTERM`. `runtime::ipc::quit` and `runtime::ipc::terminate` send it on every OS (`crates/habilis-network/src/transport/ipc.rs`). |
+| R5. Graceful stop | Done. On Windows the engine answers an IPC `quit` and takes the path of `SIGTERM`. `runtime::ipc::terminate` stops a daemon on every OS: with the quit on Windows, with `SIGTERM` on Unix, as on `main` (`crates/habilis-network/src/transport/ipc.rs`). |
 | R6. Owner watch | Done. A daemon with `--owner-pid` watches its owner on every OS (`crates/habilis-network/src/daemon/shutdown.rs`). The watch of the parent pid stays Unix only. |
 | R7. Console events | Done. Ctrl-c, ctrl-break, close, logoff and shutdown feed the quit channel (`crates/habilis-network/src/daemon/shutdown.rs`). A logoff and a shutdown do not reach these listeners in a node that loaded `user32.dll`, and a node loads it: a CLI daemon gets them through a window (R13). |
 | R8. State file | Done. The replace and the remove of the state file and of the IPC marker run again for up to 50 ms while a reader blocks them (`crates/habilis-network-util/src/file_retry.rs`). |
@@ -36,7 +36,7 @@ The IPC of a daemon works on Windows, over a named pipe. A daemon stops graceful
 | R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the six steps of `host_lifecycle.rs` run. `cargo task ffi` and the smoke test of the Bun loader against the release DLL run in the `windows` job (R9). Open: the `e2e.yml` stream job, and the required-check setting of the repository. The Node loader (koffi) runs on no CI job, only in T3. Until the fix of #31 is in `agent-habilis/iroh`, a `[patch]` in the root `Cargo.toml` points the iroh family at that fix: on Windows the test relay logged a client reset as ERROR, which failed loopback tests under the rule of #22. The four loopback tests of #31 run on Windows again. The patch holds only in this workspace. |
 | R12. Runtime base of a Unix client | Partly done. `check_runtime_base` exists. The IPC client does not call it in this port, because the port leaves Unix as it is on `main` ([R14](#r14-unix-as-on-main)). The client check goes to its own change on `main`. See [R12](#r12-runtime-base-of-a-unix-client). |
 | R13. Logoff and shutdown | Done. A CLI daemon has a hidden window, and a logoff, a shutdown, a close by the Restart Manager or a `WM_CLOSE` feeds the quit channel (`crates/habilis-network-util/src/win_session.rs`, `crates/habilis-network/src/daemon/shutdown.rs`). |
-| R14. Unix as on `main` | In progress. The client check of R12 is out of the port, and on Unix a client finds a daemon by its socket path again. The IPC `quit` and the C header still change Unix. See [R14](#r14-unix-as-on-main). |
+| R14. Unix as on `main` | In progress. The client check of R12 is out of the port. On Unix a client finds a daemon by its socket path again, and the engine answers no IPC command. The C header still changes Unix. See [R14](#r14-unix-as-on-main). |
 
 [§2.2](#22-runtime-breaks) has no open item. The open lines of [§2.3](#23-tooling-and-tests) are still true, but their line numbers can be out of date.
 [§2.1](#21-build-blockers) is kept as the record of what R1 changed.
@@ -160,15 +160,15 @@ Add Windows versions in `crates/habilis-network-util/src/process.rs`:
 
 Done.
 
-**The command.** The engine answers `{"command":"quit","mesh":"<mesh id>"}` on the IPC endpoint, before the app sees the line. Every app with an IPC endpoint gets it, and an app command with that shape never reaches the app. A line that does not parse as that command goes to the app as before.
+**The command.** On Windows the engine answers `{"command":"quit","mesh":"<mesh id>"}` on the IPC endpoint, before the app sees the line. Every app with an IPC endpoint on Windows gets it, and an app command with that shape never reaches the app there. A line that does not parse as that command goes to the app as before. On Unix the engine answers no command, as on `main` ([R14](#r14-unix-as-on-main)): a daemon there stops on `SIGTERM`.
 
 **The path.** The daemon writes `{"ok":true}`, then feeds the quit channel that the signals and the owner watch feed. The shutdown then removes the state file and the marker, broadcasts `Left`, and exits. So the client has the answer before the process exits. The channel is fed also when the client does not read the answer.
 
 **The mesh guard.** A quit for another mesh is refused and stops nothing, so a stale marker cannot stop another session.
 
-**The client.** `runtime::ipc::quit(&QuitTarget)` sends the quit at the address of `send`: the runtime base, the mesh and the nickname. Its `QuitError` tells three cases apart: the quit was not heard (`Unreached`), the daemon is too old to know it (`OldDaemon`), or the daemon refused it (`Refused`). `runtime::ipc::terminate(&QuitTarget, pid)` sends the quit on every OS. On Unix it sends `SIGTERM` to `pid` when the quit was not heard or the daemon is too old. A daemon that refused the quit gets no signal. The caller must know that `pid` is the daemon of the target, for example from its `Info` answer.
+**The client.** `runtime::ipc::quit(&QuitTarget)` sends the quit at the address of `send`: the runtime base, the mesh and the nickname. Its `QuitError` tells the cases apart: the quit was not heard (`Unreached`), the daemon is too old to know it (`OldDaemon`), or the daemon refused it (`Refused`). On Unix it is `Unsupported` and opens no connection. `runtime::ipc::terminate(&QuitTarget, pid)` stops a daemon on every OS: on Windows it sends the quit, and on Unix it sends `SIGTERM` to `pid`. On Unix the caller must know that `pid` is the daemon of the target, for example from its `Info` answer.
 
-**Two `terminate` functions.** `util::process::terminate(pid)` does not change: it only signals a pid, and on Windows it returns `Unsupported`, because the util crate sits below the IPC. G3 renames it to `sigterm`, Unix only, when agent-gossip moves to `runtime::ipc::terminate`.
+**Two `terminate` functions.** `util::process::terminate(pid)` does not change: it only signals a pid, and on Windows it returns `Unsupported`, because the util crate sits below the IPC. It keeps its name, because a rename would break a caller on Unix.
 
 ### R6. Owner watch
 
@@ -278,7 +278,7 @@ It runs on every OS, so CI tests on Windows what T4 and T6 test by hand:
 
 1. Start a node in `Cli` driver mode, with a runtime base in a temporary directory.
 2. IPC `Info` returns the node, and `active_endpoints` finds it.
-3. IPC `quit` stops the node. The state file and the endpoint are gone.
+3. On Windows the IPC `quit` stops the node, and on Unix the `SIGTERM` of `terminate`. The state file and the endpoint are gone.
 4. Start a node with the pid of a child process as its owner. Kill the child. The node stops within one owner-watch interval plus the `Left` delay.
 5. On Windows, start a node in a console of its own. Ctrl-break and ctrl-c stop it by the graceful path.
 6. On Windows, send the window of one node a logoff (`WM_QUERYENDSESSION`, then `WM_ENDSESSION`), and post the window of another node a `WM_CLOSE`. Each stops its node by the graceful path, and the node logs the line of the event.
@@ -340,10 +340,10 @@ Done.
 
 - The client check of the runtime base ([R12](#r12-runtime-base-of-a-unix-client)) is out of the port.
 - On Unix a client finds a daemon by its socket path, as on `main`. The IPC marker is Windows only. `active_socket_paths` and `send_to_path` are back on Unix, with the signatures of `main`, and `active_endpoints` and `send_to_endpoint` work on every OS. The IPC log lines of Unix have the target, the text and the fields of `main`.
+- The engine answers the IPC `quit` only on Windows. On Unix every line reaches the app, `quit` is `QuitError::Unsupported`, and `terminate` sends `SIGTERM`. The signal handlers and the owner watch of Unix start where they started on `main`, after the bind of the IPC socket.
 
 To do.
 
-- The engine answers the IPC `quit` only on Windows. On Unix every line reaches the app, and `terminate` sends `SIGTERM`.
 - The lines and the messages that the port added to the daemon, such as the warn of a failed remove of the state file, are Windows only.
 - The C header keeps `long` on every target but Windows.
 
@@ -383,9 +383,9 @@ Start it after the engine work of [§3](#3-requirements-habilis-network).
 
 ### G3. Leave
 
-`leave` (`cli/session.rs`) stops the daemon with `runtime::ipc::terminate` (R5) in place of `util::process::terminate`. It already has the target (the runtime base, the mesh and the nickname) and the pid that its `Info` check confirms.
+`leave` (`cli/session.rs`) stops the daemon with `runtime::ipc::terminate` (R5) in place of `util::process::terminate`. It already has the target (the runtime base, the mesh and the nickname) and the pid that its `Info` check confirms. On Unix `runtime::ipc::terminate` sends the same `SIGTERM`, so `leave` does what it did before. On Windows it sends the IPC quit.
 
-With that change, rename `util::process::terminate` to `sigterm`, Unix only, and remove its Windows version, which returns `Unsupported`. `cli/session.rs` is its only caller outside the engine. The rename waits for this step, so that agent-gossip does not break before it.
+`util::process::terminate` keeps its name and its Windows version, which returns `Unsupported`: a rename would break a caller on Unix ([R14](#r14-unix-as-on-main)).
 
 ### G4. Skills
 

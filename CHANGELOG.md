@@ -45,16 +45,17 @@ published to a registry; pin it with
   `ensure_runtime_base` for a client, which create nothing and change nothing. The base is
   `Private` (a folder of this user with no group or other bits), `Absent`, or `Refused` with the
   reason. The IPC client of the engine does not call it yet.
-- A daemon stops on an IPC `quit`, on every OS: `{"command":"quit","mesh":"<mesh id>"}`. The
+- On Windows a daemon stops on an IPC `quit`: `{"command":"quit","mesh":"<mesh id>"}`. The
   engine answers it before the app sees the line. The daemon answers `{"ok":true}`, then takes
   the path of `SIGTERM`: it removes its state file and its marker, broadcasts `Left`, and exits.
-  A quit for another mesh is refused, so a stale marker cannot stop another session. On Windows
-  this is the only graceful stop. `runtime::ipc::quit(&QuitTarget)` sends it, at the address that
-  `send` takes (base, mesh, nickname), and returns a `QuitError` (`Unreached`, `OldDaemon`,
-  `Refused`). `runtime::ipc::terminate(&QuitTarget, pid)` sends it on every OS and, on Unix,
-  sends `SIGTERM` to `pid` when the quit was not heard or the daemon is too old to know it.
-  `util::process::terminate` does not change: it signals a pid, and on Windows it stays
-  `Unsupported`.
+  A quit for another mesh is refused, so a stale marker cannot stop another session. This is the
+  only graceful stop of another process there. `runtime::ipc::quit(&QuitTarget)` sends it,
+  at the address that `send` takes (base, mesh, nickname), and returns a `QuitError`
+  (`Unsupported`, `Unreached`, `OldDaemon`, `Refused`). `runtime::ipc::terminate(&QuitTarget,
+  pid)` stops a daemon on every OS: on Windows with the quit, on Unix with `SIGTERM` to `pid`, as
+  `util::process::terminate` does. On Unix the engine answers no command, every line reaches the app, and `quit` is
+  `QuitError::Unsupported`. `util::process::terminate` does not change: it signals a pid, and on
+  Windows it stays `Unsupported`.
 - On Windows, a daemon with `--owner-pid` (`EventLoopConfig::with_owner_pid`) stops when its
   owner exits, by the same watch as on Unix: every `PPID_WATCH_INTERVAL` (1.5 s) it compares the
   start time of the owner with the one it read at startup, so a reused pid does not fool it. The
@@ -299,10 +300,10 @@ published to a registry; pin it with
   keys of the handles before it binds the endpoint with its transports. Its fields are private,
   so an `InjectedEndpoint { .. }` literal no longer compiles. The transport wiring and the mesh
   check are crate-private.
-- The engine reserves one IPC command: a JSON object whose `command` is `"quit"` and whose
-  `mesh` is a valid mesh id. Such a line never reaches `NodeDriver::handle_ipc`. Any other line,
-  also a `quit` with no valid `mesh`, reaches the app as before. No app of this workspace or of
-  agent-gossip has a `quit` command.
+- On Windows the engine reserves one IPC command: a JSON object whose `command` is `"quit"` and
+  whose `mesh` is a valid mesh id. Such a line never reaches `NodeDriver::handle_ipc`. Any other
+  line, also a `quit` with no valid `mesh`, reaches the app as before. No app of this workspace
+  or of agent-gossip has a `quit` command. On Unix every line reaches the app.
 - A secret key no longer passes through a plain array that the engine writes and nobody wipes.
   The stretched password key, the keys that `SymmetricKey::derive` and `Seed::derive` make, the
   root of an invite, the salt and the token of a blob ticket, and the secret of a stream
