@@ -384,6 +384,17 @@ pub struct EventLoopState {
     pub(crate) left: BoundedFifoSet<Nickname>,
     /// The timestamps of [`Self::left`], pruned to its membership.
     pub(crate) left_at: HashMap<Nickname, UnixSecs>,
+    /// The keys that said goodbye. A key is minted per run, so a key that left never speaks again:
+    /// anything it signs afterwards is a replay, whatever its timestamp says. Keyed on the key
+    /// and not on the nickname, which another run may take.
+    ///
+    /// Bounded like `quiet` and `left`, by the same rule: keys are free, so an unbounded set is
+    /// a memory leak under churn. The bound is a second layer, not the first: a replay of a
+    /// frame this node still holds is dropped by [`Self::mark_seen`] before membership sees it,
+    /// whatever this set holds. What the bound gives up is narrow: a frame of a key that left
+    /// more than `QUIET_CAP` departures ago, that this node never held, counts as an arrival
+    /// until its author goes quiet.
+    pub(crate) left_keys: BoundedFifoSet<AuthorKey>,
     /// Presentation layer: peers for whom we have *surfaced* an
     /// arrival (synthetic `joined`, real `Presence::Joined`, or
     /// `peer_return`). Gates departure surfacing so a peer whose
@@ -970,6 +981,7 @@ impl EventLoopState {
             quiet_since: HashMap::new(),
             left: BoundedFifoSet::new(QUIET_CAP),
             left_at: HashMap::new(),
+            left_keys: BoundedFifoSet::new(QUIET_CAP),
             surfaced: HashSet::new(),
             last_sent_at: now,
             joined_at: UnixSecs::now(),
@@ -1372,10 +1384,27 @@ impl EventLoopState {
     /// alive tick re-probed (about 40 s with the relink cooldown).
     /// Remember that `nick` said goodbye at `at`. A later `left` of the same peer moves the mark
     /// forward, and an older one (a delayed copy) leaves it where it is.
-    pub(crate) fn note_left(&mut self, nick: &Nickname, at: UnixSecs) {
+    pub(crate) fn note_left(&mut self, nick: &Nickname, key: AuthorKey, at: UnixSecs) {
         self.left.insert(nick.clone());
+        self.left_keys.insert(key);
         let mark = self.left_at.entry(nick.clone()).or_insert(at);
         *mark = (*mark).max(at);
+    }
+
+    pub(crate) fn key_said_goodbye(&self, key: AuthorKey) -> bool {
+        self.left_keys.contains(&key)
+    }
+
+    /// Drop a departed key's presence frames from the log and from the indexes kept beside it,
+    /// as an eviction would (see `gossip::recv::push_to_log`).
+    pub(crate) fn drop_departed_presence(&mut self, key: &AuthorKey) {
+        for gone in self.message_log.drop_presence_of(key) {
+            let hash = gone.content_hash();
+            self.forget_hash(&hash);
+            if let Some(seq) = gone.seq {
+                self.forget_msg_seq(&gone.key(), seq, &hash);
+            }
+        }
     }
 
     /// Whether a message of `nick` stamped `at` was sent no later than the goodbye of `nick`.
@@ -1669,8 +1698,13 @@ impl EventLoopState {
     /// victim's id hashes to a different key and cannot suppress the genuine
     /// message. Delegates to the bounded [`BoundedFifoSet`], inverting its
     /// "was newly inserted" answer into "was a duplicate".
+    ///
+    /// A frame still in the message log is a duplicate too. The log keeps a frame as long as
+    /// anti-entropy may re-send it, while `seen` is fed by every kind, most of which the log
+    /// never keeps, so under enough of that traffic it forgets a retained frame first.
     pub(crate) fn mark_seen(&mut self, message: &Verified) -> bool {
-        !self.seen.insert(message.dedup_key())
+        let key = message.dedup_key();
+        self.message_log.contains(&key) || !self.seen.insert(key)
     }
 
     /// Try to reassemble the sharded body the `trigger` shard belongs to:
@@ -3549,6 +3583,29 @@ mod tests {
             "first sighting is not a duplicate"
         );
         assert!(state.mark_seen(&message), "second sighting is a duplicate");
+    }
+
+    /// A frame still in the message log has been processed. Anti-entropy re-sends any frame a
+    /// peer holds, and `seen` alone forgets one under enough traffic of the kinds the log never
+    /// keeps; the re-send would then be reprocessed and re-surfaced.
+    #[test]
+    fn a_retained_frame_stays_a_duplicate_after_seen_forgets_it() {
+        use crate::util::tuning::SEEN_IDS_CAP;
+
+        let mut state = fresh_state();
+        let message = msg_with_id(&MessageId::random());
+        assert!(
+            !state.mark_seen(&message),
+            "first sighting is not a duplicate"
+        );
+        state.message_log.push(message.clone());
+        for _ in 0..SEEN_IDS_CAP {
+            state.mark_seen(&msg_with_id(&MessageId::random()));
+        }
+        assert!(
+            state.mark_seen(&message),
+            "a re-send of a frame still in the log is a duplicate"
+        );
     }
 
     /// **One digest per peer per window.**

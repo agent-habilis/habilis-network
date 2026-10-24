@@ -1384,6 +1384,96 @@ async fn build_rendezvous_endpoint(
     }
 }
 
+/// What the busy rungs of a private ladder answer to an identity probe, by port, before a joiner's
+/// first dial. The book must name the rung that serves our beacon before the joiner subscribes:
+/// a first dial with no address that answers is one the gossip layer keeps for seconds before a
+/// re-graft can replace it. One throwaway endpoint per rung, as the walk's probes: a prober that
+/// reached the id at one rung may reuse that path for the next port and read a foreign rung as
+/// ours. All rungs at once, `budget` each, so eight silent rungs cost one budget. A rung whose
+/// prober did not bind is left unread, and read later by the walk. Each endpoint closes off this
+/// task: closing one that dialed a silent rung takes seconds.
+pub(crate) async fn read_busy_rungs(
+    params: &RendezvousParams,
+    budget: std::time::Duration,
+) -> Vec<(u16, ProbeAnswer)> {
+    let probes: Vec<_> = params
+        .bind_ports
+        .iter()
+        .copied()
+        .filter(|&port| rung_is_busy(port))
+        .map(|port| {
+            let id = params.id;
+            n0_future::task::spawn(async move {
+                let prober = match build_endpoint(
+                    &LookupOpts::loopback(),
+                    None,
+                    None,
+                    Vec::new(),
+                    TransportHandles::default(),
+                )
+                .await
+                {
+                    Ok(prober) => prober,
+                    Err(error) => {
+                        tracing::debug!(target: "habilis_network::beacon", port, %error, "no endpoint to read the busy rung with; the walk reads it");
+                        return None;
+                    }
+                };
+                let addr = EndpointAddr::new(id)
+                    .with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+                let answer = probe_answer(&prober, addr, budget).await;
+                tracing::debug!(target: "habilis_network::beacon", port, ?answer, "busy rung read at setup");
+                drop(n0_future::task::spawn(async move { prober.close().await }));
+                Some((port, answer))
+            })
+        })
+        .collect();
+    let mut read = Vec::with_capacity(probes.len());
+    for probe in probes {
+        if let Ok(Some(reading)) = probe.await {
+            read.push(reading);
+        }
+    }
+    read
+}
+
+/// Read the busy rungs of a private ladder without claiming one: admit the rung that serves our
+/// beacon, forget a foreign one, ask about the unknown ones. For a member that may not co-host
+/// yet: its book left the busy rungs out at setup (`register_rendezvous`), and until one is read
+/// as ours it has no address of the rendezvous that answers. The walk of the co-host arm reads the
+/// same way, but a joiner's first walk waits for the reclaim ticker, and its first link with it.
+pub(crate) async fn read_ladder(
+    params: &RendezvousParams,
+    peer: &Endpoint,
+    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    rungs: &mut RungWatch,
+) {
+    let node = peer.id();
+    let now = Instant::now();
+    for &port in &params.bind_ports {
+        if !rung_is_busy(port) {
+            continue;
+        }
+        match rungs.reading(port, now) {
+            RungRead::Ours => {
+                rungs.clear_foreign(port);
+                settle_on_rung(params, peer, peer_book, port).await;
+                return;
+            }
+            RungRead::Foreign | RungRead::SilentLongEnough => {
+                rungs.mark_foreign(port);
+                forget_rungs(params, peer, peer_book, |rung| rung == port).await;
+            }
+            RungRead::Silent => {
+                if !rungs.refused(port) {
+                    admit_rung(params, peer, peer_book, port).await;
+                }
+            }
+            RungRead::Unknown => rungs.ask(params, node, port, true),
+        }
+    }
+}
+
 /// What [`build_rendezvous_endpoint`] ended with.
 enum Walk {
     /// A rung was free (or, public, the endpoint was built): the beacon can stand up on it.
