@@ -13,7 +13,37 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const allowFile = process.env.STYLE_CHECK_ALLOW || "scripts/style-check/style-check.allow";
 
-type Rule = { name: string; pattern: RegExp; glob: string; why: string };
+// A rule is a per-line `pattern`, or a whole-file `scan` for a form that rustfmt can split across lines.
+// `skip` leaves a file out of the count.
+type Rule = {
+  name: string;
+  pattern?: RegExp;
+  scan?: (text: string) => number;
+  skip?: RegExp;
+  glob: string;
+  why: string;
+};
+
+// The public signatures that return anyhow. A `pub fn` whose signature up to `{` or `;` names
+// `anyhow::Result` or `anyhow::Error` (the match may run across lines). A `pub trait` body that
+// declares such a method. A `FromStr` or `TryFrom` impl with anyhow as its error. A `use` of
+// anyhow's `Result`, which would hide anyhow behind the alias. The `#[cfg(test)] mod tests` tail
+// is cut first, because tests keep anyhow.
+const ANYHOW_FN = /\bpub (?:const |async |unsafe )*fn \w+[^{;]*?->\s*(?:::)?anyhow::(?:Result|Error)\b/g;
+const ANYHOW_TRAIT_FN = /\bfn \w+[^{;]*?->\s*(?:::)?anyhow::(?:Result|Error)\b[^;{]*;/g;
+const ANYHOW_TRAIT = /^pub trait[\s\S]*?^}/gm;
+const ANYHOW_ERR = /\btype (?:Err|Error)\s*=\s*(?:::)?anyhow::Error\b/g;
+const ANYHOW_USE = /^\s*use (?:::)?anyhow::\{?[^;]*\bResult\b/gm;
+function countAnyhowPub(text: string): number {
+  const body = text.replace(/#\[cfg\(test\)\]\s*\n\s*mod tests\b[\s\S]*$/, "");
+  const traits = [...body.matchAll(ANYHOW_TRAIT)].map((m) => m[0]).join("\n");
+  return (
+    [...body.matchAll(ANYHOW_FN)].length +
+    [...traits.matchAll(ANYHOW_TRAIT_FN)].length +
+    [...body.matchAll(ANYHOW_ERR)].length +
+    [...body.matchAll(ANYHOW_USE)].length
+  );
+}
 
 const RULES: Rule[] = [
   {
@@ -52,6 +82,13 @@ const RULES: Rule[] = [
     glob: "*.rs",
     why: "Name a type lifetime for what it borrows ('frame, not 'a). The guide allows one letter only on a fn.",
   },
+  {
+    name: "anyhow_pub",
+    scan: countAnyhowPub,
+    skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/[^/]+\/src\/)/,
+    glob: "crates/**/*.rs",
+    why: "A public signature returns a typed error, not anyhow. A binary, a CLI and a private helper may keep anyhow.",
+  },
 ];
 
 // The files git knows, tracked or not yet, minus what .gitignore hides: the same list `git ls-files
@@ -69,8 +106,11 @@ function scan(rule: Rule): Map<string, number> {
   const counts = new Map<string, number>();
   for (const file of listFiles(rule.glob)) {
     if (!existsSync(path.join(ROOT, file))) continue;
-    const lines = readFileSync(path.join(ROOT, file), "utf8").split("\n");
-    const count = lines.filter((line) => rule.pattern.test(line)).length;
+    if (rule.skip?.test(file)) continue;
+    const text = readFileSync(path.join(ROOT, file), "utf8");
+    const count = rule.scan
+      ? rule.scan(text)
+      : text.split("\n").filter((line) => rule.pattern?.test(line)).length;
     if (count > 0) counts.set(file, count);
   }
   return counts;

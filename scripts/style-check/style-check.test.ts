@@ -121,3 +121,42 @@ test("two rows for one file", () => {
 test("comment and blank lines in the list", () => {
   expectExit("src/a.rs", violation, 0, "# a comment\n\ncatch_unwind|src/a.rs|1|a boundary");
 });
+
+// The anyhow_pub rule: a public signature that returns anyhow, in a library file.
+const anyhowFixture = [
+  "pub fn a() -> anyhow::Result<()> { Ok(()) }",
+  "pub fn b(",
+  "    x: u8,",
+  ") -> anyhow::Result<",
+  "    u8,",
+  "> {",
+  "    Ok(x)",
+  "}",
+  "pub(crate) fn c() -> anyhow::Result<()> { Ok(()) }",
+  "pub trait T {",
+  "    fn d(&self) -> anyhow::Result<()>;",
+  "}",
+  "impl std::str::FromStr for X {",
+  "    type Err = anyhow::Error;",
+  "    fn from_str(_: &str) -> Result<Self, Self::Err> { unimplemented!() }",
+  "}",
+  "use anyhow::Result;",
+  "#[cfg(test)]",
+  "mod tests {",
+  "    pub fn e() -> anyhow::Result<()> { Ok(()) }",
+  "}",
+].join("\n");
+const anyhowMain = "pub fn m() -> anyhow::Result<()> { Ok(()) }";
+test("anyhow_pub: five public forms, not the pub(crate), the test module, or the binary", () => {
+  expectExit("crates/demo/src/lib.rs", anyhowFixture, 1);
+  expectExit("crates/demo/src/main.rs", anyhowMain, 0);
+});
+test("anyhow_pub: the exact count is allowed", () => {
+  expectExit("crates/demo/src/lib.rs", anyhowFixture, 0, "anyhow_pub|crates/demo/src/lib.rs|5|fixture");
+});
+test("anyhow_pub: one more than allowed fails", () => {
+  expectExit("crates/demo/src/lib.rs", anyhowFixture.replace("#[cfg(test)]", "pub fn z() -> anyhow::Result<()> { Ok(()) }\n#[cfg(test)]"), 1, "anyhow_pub|crates/demo/src/lib.rs|5|fixture");
+});
+test("anyhow_pub: a stale count fails", () => {
+  expectExit("crates/demo/src/lib.rs", anyhowFixture, 1, "anyhow_pub|crates/demo/src/lib.rs|6|fixture");
+});
