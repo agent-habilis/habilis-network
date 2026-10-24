@@ -31,12 +31,12 @@ The IPC of a daemon works on Windows, over a named pipe. A daemon stops graceful
 | R6. Owner watch | Done. A daemon with `--owner-pid` watches its owner on every OS (`crates/habilis-network/src/daemon/shutdown.rs`). The watch of the parent pid stays Unix only. |
 | R7. Console events | Done. Ctrl-c, ctrl-break, close, logoff and shutdown feed the quit channel (`crates/habilis-network/src/daemon/shutdown.rs`). A logoff and a shutdown do not reach these listeners in a node that loaded `user32.dll`, and a node loads it: a CLI daemon gets them through a window (R13). |
 | R8. State file | Done. The replace and the remove of the state file and of the IPC marker run again for up to 50 ms while a reader blocks them (`crates/habilis-network-util/src/file_retry.rs`). |
-| R9. FFI | Done. The five calls that returned `long` return `int64_t` (`crates/habilis-network-ffi`), and the loaders read them as `i64`, koffi as `int64_t`. `cargo task ffi` reads `habilis_network_ffi.lib` with `llvm-nm.exe` (`tasks/src/ffi.rs`). |
+| R9. FFI | Done. On Windows the five calls that returned `long` return `int64_t`, through the `habilis_network_len` of the header, which stays `long` on every other target (`crates/habilis-network-ffi`). The loaders read them as `i64`, koffi as `int64_t` on Windows. `cargo task ffi` reads `habilis_network_ffi.lib` with `llvm-nm.exe` (`tasks/src/ffi.rs`). |
 | R10. Tooling and tests | Done. `cdp.rs` has no `win64` build and says why. Set `$CHROME_FOR_TESTING` to a local Chrome. |
 | R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the six steps of `host_lifecycle.rs` run. `cargo task ffi` and the smoke test of the Bun loader against the release DLL run in the `windows` job (R9). Open: the `e2e.yml` stream job, and the required-check setting of the repository. The Node loader (koffi) runs on no CI job, only in T3. Until the fix of #31 is in `agent-habilis/iroh`, a `[patch]` in the root `Cargo.toml` points the iroh family at that fix: on Windows the test relay logged a client reset as ERROR, which failed loopback tests under the rule of #22. The four loopback tests of #31 run on Windows again. The patch holds only in this workspace. |
 | R12. Runtime base of a Unix client | Partly done. `check_runtime_base` exists. The IPC client does not call it in this port, because the port leaves Unix as it is on `main` ([R14](#r14-unix-as-on-main)). The client check goes to its own change on `main`. See [R12](#r12-runtime-base-of-a-unix-client). |
 | R13. Logoff and shutdown | Done. A CLI daemon has a hidden window, and a logoff, a shutdown, a close by the Restart Manager or a `WM_CLOSE` feeds the quit channel (`crates/habilis-network-util/src/win_session.rs`, `crates/habilis-network/src/daemon/shutdown.rs`). |
-| R14. Unix as on `main` | In progress. The client check of R12 is out of the port. On Unix a client finds a daemon by its socket path again, and the engine answers no IPC command. The C header still changes Unix. See [R14](#r14-unix-as-on-main). |
+| R14. Unix as on `main` | Done. The client check of R12 is out of the port. On Unix a client finds a daemon by its socket path again, the engine answers no IPC command, the lines of the daemon are as on `main`, and the C header declares `long`. See [R14](#r14-unix-as-on-main). |
 
 [§2.2](#22-runtime-breaks) has no open item. The open lines of [§2.3](#23-tooling-and-tests) are still true, but their line numbers can be out of date.
 [§2.1](#21-build-blockers) is kept as the record of what R1 changed.
@@ -235,8 +235,8 @@ With a retry every 1 ms for up to 100 ms, no rename and no remove failed. The wo
 
 Done.
 
-- The five calls that returned `long` return `int64_t` in `habilis_network.h` and `i64` in `ffi.rs`. `long` is 32 bits on Windows: the Bun and Deno loaders read 64 bits, so a -1 came back as 4294967295. On 64-bit Linux and macOS the binary ABI does not change.
-- In `packages/habilis-network-ffi` the `CType` `'isize'` is `'i64'`, and the Node loader gives koffi `int64_t`. `abi.test.ts` holds the return type of each call against the header, and `smoke.test.ts` reads -1 from a call with a NULL handle.
+- The five calls that returned `long` return `habilis_network_len` in `habilis_network.h`, and `CLen` in `ffi.rs`. On Windows it is `int64_t` (`i64`): `long` is 32 bits there, and the Bun and Deno loaders read 64 bits, so a -1 came back as 4294967295. On every other target it is `long` (`c_long`), so the header of Linux and macOS declares the same types as on `main` ([R14](#r14-unix-as-on-main)). The first version of R9 used `int64_t` on every target, which on macOS is `long long`, another C type than `long`.
+- In `packages/habilis-network-ffi` the internal `CType` `'isize'` is `'i64'`, and the Node loader gives koffi `int64_t` on Windows and `long` elsewhere. `abi.test.ts` holds the return type of each call against the header, and the `#ifdef` of the type. `smoke.test.ts` reads -1 from a call with a NULL handle.
 - `cargo task ffi` (`tasks/src/ffi.rs`) reads `habilis_network_ffi.lib` on Windows with the `llvm-nm.exe` of the `llvm-tools` component. COFF symbols on x86_64 have no underscore, so the same parse reads them, as it reads ELF.
 
 ### R10. Tooling and tests
@@ -342,10 +342,7 @@ Done.
 - On Unix a client finds a daemon by its socket path, as on `main`. The IPC marker is Windows only. `active_socket_paths` and `send_to_path` are back on Unix, with the signatures of `main`, and `active_endpoints` and `send_to_endpoint` work on every OS. The IPC log lines of Unix have the target, the text and the fields of `main`.
 - The lines and the messages that the port added to the daemon are Windows only: the warn of a failed remove of the state file, the removal of the tmp file after a failed rename, the `info` line of the owner watch, and the "or cannot be read" of a refused owner. The `info` line of the parent watch, which is Unix only, is gone.
 - The engine answers the IPC `quit` only on Windows. On Unix every line reaches the app, `quit` is `QuitError::Unsupported`, and `terminate` sends `SIGTERM`. The signal handlers and the owner watch of Unix start where they started on `main`, after the bind of the IPC socket.
-
-To do.
-
-- The C header keeps `long` on every target but Windows.
+- The C header declares `long` on every target but Windows, through `habilis_network_len`, and `int64_t` on Windows.
 
 ## 4. Requirements: agent-gossip
 

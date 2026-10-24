@@ -250,15 +250,14 @@ published to a registry; pin it with
 
 ### Changed
 
-- **Breaking (C ABI on Windows and 32-bit targets; C header everywhere):** the five calls that
-  returned `long` return `int64_t`: `habilis_network_msg_recv`, `habilis_network_mesh_state_json`,
-  `habilis_network_mesh_peers_json`, `habilis_network_mesh_peer_count` and
-  `habilis_network_stream_read` (R9 of `docs/windows.md`). `long` is 32 bits on Windows, and the
-  Bun and Deno loaders read 64 bits, so a -1 or a -2 came back as a large positive value. On
-  64-bit Linux and macOS the binary ABI does not change; rebuild against the new
-  `include/habilis_network.h`. On macOS `int64_t` is `long long`, so a C caller that keeps these
-  calls in a `long (*)(...)` pointer must change its type. In `packages/habilis-network-ffi` the
-  `CType` `'isize'` is `'i64'`, and the Node loader passes it to koffi as `int64_t`, not `long`.
+- On Windows the five calls that returned `long` return `int64_t`: `habilis_network_msg_recv`,
+  `habilis_network_mesh_state_json`, `habilis_network_mesh_peers_json`,
+  `habilis_network_mesh_peer_count` and `habilis_network_stream_read` (R9 of `docs/windows.md`).
+  `long` is 32 bits on Windows, and the Bun and Deno loaders read 64 bits, so a -1 or a -2 came
+  back as a large positive value. The header names the type `habilis_network_len`: `int64_t`
+  under `_WIN32`, and `long` on every other target, so the type of each call on Linux and macOS
+  does not change. In `packages/habilis-network-ffi` the internal `CType` `'isize'` is `'i64'`, and
+  the Node loader passes it to koffi as `int64_t` on Windows and as `long` elsewhere.
   `abi.test.ts` holds the return type of each call against the header.
 - **Wire change:** the loopback port ladder of a private mesh now maps into `1024..=32767`, not
   `1024..=65535`. The ephemeral bind of another endpoint (Linux 32768-60999, macOS and Windows
