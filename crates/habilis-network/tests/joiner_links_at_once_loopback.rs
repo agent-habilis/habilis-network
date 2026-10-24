@@ -21,10 +21,9 @@ use habilis_network::protocol::{
 use habilis_network::runtime::{CoHostPolicy, Node, SetupKind, SetupParams, setup_mesh};
 use tokio::sync::Notify;
 
-/// Under the reclaim ticker (1 s), which is when a joiner's own walk first read the busy rung, and
-/// over the read itself: a probe builds a throwaway endpoint and dials the rung, about 550 ms on
-/// this host, and the ticker is what the read at startup saves.
-const FIRST_LINK: Duration = Duration::from_millis(900);
+/// Half of the reclaim ticker, which is when a joiner's first dial could be replaced at the
+/// earliest: with the busy rung read before that dial, the link is one loopback handshake.
+const FIRST_LINK: Duration = Duration::from_millis(500);
 
 /// A seed that differs from run to run, so that the ladder of one run is not the ladder of another
 /// run on the same host.

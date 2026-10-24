@@ -1384,6 +1384,48 @@ async fn build_rendezvous_endpoint(
     }
 }
 
+/// What the busy rungs of a private ladder answer to an identity probe, by port, before a joiner's
+/// first dial. The book must name the rung that serves our beacon before the joiner subscribes:
+/// a first dial with no address that answers is one the gossip layer keeps for seconds before a
+/// re-graft can replace it. One throwaway endpoint probes every busy rung, `budget` each; a rung
+/// that says nothing in that time is reported as such and read later by the walk. The endpoint
+/// closes off this task: closing one that dialed a silent rung takes seconds.
+pub(crate) async fn read_busy_rungs(
+    params: &RendezvousParams,
+    budget: std::time::Duration,
+) -> Vec<(u16, ProbeAnswer)> {
+    let busy: Vec<u16> = params
+        .bind_ports
+        .iter()
+        .copied()
+        .filter(|&port| rung_is_busy(port))
+        .collect();
+    if busy.is_empty() {
+        return Vec::new();
+    }
+    let Ok(prober) = build_endpoint(
+        &LookupOpts::loopback(),
+        None,
+        None,
+        Vec::new(),
+        TransportHandles::default(),
+    )
+    .await
+    else {
+        return Vec::new();
+    };
+    let mut read = Vec::with_capacity(busy.len());
+    for port in busy {
+        let addr = EndpointAddr::new(params.id)
+            .with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+        let answer = probe_answer(&prober, addr, budget).await;
+        tracing::debug!(target: "habilis_network::beacon", port, ?answer, "busy rung read at setup");
+        read.push((port, answer));
+    }
+    drop(n0_future::task::spawn(async move { prober.close().await }));
+    read
+}
+
 /// Read the busy rungs of a private ladder without claiming one: admit the rung that serves our
 /// beacon, forget a foreign one, ask about the unknown ones. For a member that may not co-host
 /// yet: its book left the busy rungs out at setup (`register_rendezvous`), and until one is read
