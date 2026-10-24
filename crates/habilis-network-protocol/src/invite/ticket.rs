@@ -200,7 +200,7 @@ impl InviteTicket {
             .ok_or(InviteError::Truncated("truncated mesh hash"))?;
         pos = hash_end;
         let mesh_hash = std::str::from_utf8(hash_bytes)
-            .map_err(InviteError::source("invalid mesh hash utf-8"))?
+            .map_err(InviteError::with_step("invalid mesh hash utf-8"))?
             .to_owned();
         let root_field = payload
             .get(pos..)
@@ -226,13 +226,13 @@ impl InviteTicket {
         let locked: LockedMesh = self
             .mesh_hash
             .parse()
-            .map_err(InviteError::source("invite carries an invalid mesh id"))?;
+            .map_err(InviteError::with_step("invite carries an invalid mesh id"))?;
         let issuer_pubkey = *locked
             .issuer_pubkey()
             .ok_or(InviteError::Refused("invite is for a non-invite-only mesh"))?;
         let root = self.unwrap_root(&locked, password)?;
         let pubkey = PublicKey::from_bytes(&issuer_pubkey)
-            .map_err(InviteError::source("invalid issuer public key"))?;
+            .map_err(InviteError::with_step("invalid issuer public key"))?;
         let signature = Signature::from_bytes(&self.sig);
         if !identity::verify(
             &pubkey,
@@ -258,7 +258,7 @@ impl InviteTicket {
             (true, Some(password)) => {
                 let wrap_key = crypto::invite_wrap_key(password, mesh.wrap_salt());
                 seal::open_symmetric(&wrap_key, &self.root_field)
-                    .map_err(InviteError::source("wrong password or corrupt invite"))?
+                    .map_err(InviteError::with_step("wrong password or corrupt invite"))?
             }
             (true, None) => {
                 return Err(InviteError::Refused(

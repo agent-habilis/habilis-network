@@ -157,7 +157,7 @@ impl CreateParams {
     /// # Errors
     /// Returns [`AdvertiseRequiresReachable`] if `advertise` is set on a
     /// loopback-only mesh.
-    pub fn resolve(self) -> Result<Resolved, AdvertiseRequiresReachable> {
+    pub fn resolve(self) -> std::result::Result<Resolved, AdvertiseRequiresReachable> {
         validate_advertise(&self.advertise, &self.config.lookups)?;
         let advertise_directory = self.advertise.directory();
         Ok(Resolved {

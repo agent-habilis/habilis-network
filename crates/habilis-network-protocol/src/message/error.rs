@@ -36,7 +36,7 @@ pub enum MessageError {
 impl MessageError {
     /// Wraps a JSON error. The step is a fixed text, so the message reads the
     /// same as the context it replaces.
-    pub(crate) fn source<E>(step: &'static str) -> impl FnOnce(E) -> Self
+    pub(crate) fn with_step<E>(step: &'static str) -> impl FnOnce(E) -> Self
     where
         E: Into<BoxedError>,
     {

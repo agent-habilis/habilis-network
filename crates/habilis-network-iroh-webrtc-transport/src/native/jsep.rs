@@ -23,7 +23,7 @@ use crate::DATA_CHANNEL_LABEL;
 #[non_exhaustive]
 pub enum JsepError {
     /// The UDP socket for the negotiation could not bind.
-    Bind(std::io::Error),
+    Bind(BoxedError),
     /// str0m had no pending change to turn into an offer.
     NoOffer,
     /// The envelope is not the kind this step takes.
@@ -98,8 +98,9 @@ impl std::fmt::Display for JsepError {
 impl std::error::Error for JsepError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Bind(error) => Some(error),
-            Self::Sdp { source, .. } | Self::Engine { source, .. } => Some(source.as_ref()),
+            Self::Bind(source) | Self::Sdp { source, .. } | Self::Engine { source, .. } => {
+                Some(source.as_ref())
+            }
             Self::NoOffer | Self::Envelope { .. } | Self::Timeout { .. } => None,
         }
     }
@@ -144,7 +145,9 @@ impl std::fmt::Debug for Negotiating {
 /// the SDP and there is no trickle message to add them later.
 async fn start(ice: &IceConfig) -> Result<Negotiating, JsepError> {
     let mut rtc = build_rtc(Instant::now());
-    let (socket, advertised) = bind_ephemeral_udp().await.map_err(JsepError::Bind)?;
+    let (socket, advertised) = bind_ephemeral_udp()
+        .await
+        .map_err(|error| JsepError::Bind(Box::new(error)))?;
     add_host_candidate(&mut rtc, advertised)?;
     // Same socket as the media, or the NAT mapping we learn describes a hole
     // the data will not arrive through.

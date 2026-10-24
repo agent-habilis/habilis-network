@@ -240,7 +240,8 @@ fn decode_relay_ladder(
 ) -> Result<Vec<RelayUrl>, ConfigError> {
     let mut ladder = Vec::with_capacity(count);
     for _ in 0..count {
-        let len = read_u16(bytes, pos).map_err(ConfigError::source("truncated relay URL length"))?
+        let len = read_u16(bytes, pos)
+            .map_err(ConfigError::with_step("truncated relay URL length"))?
             as usize;
         if len > MAX_RELAY_URL_BYTES {
             return Err(ConfigError::Invalid(format!("relay URL too long: {len}")));
@@ -253,10 +254,10 @@ fn decode_relay_ladder(
             .ok_or(ConfigError::Truncated("truncated relay URL"))?;
         *pos = end;
         let text =
-            std::str::from_utf8(raw).map_err(ConfigError::source("relay URL is not UTF-8"))?;
+            std::str::from_utf8(raw).map_err(ConfigError::with_step("relay URL is not UTF-8"))?;
         ladder.push(
             text.parse::<RelayUrl>()
-                .map_err(ConfigError::source("invalid relay URL"))?,
+                .map_err(ConfigError::with_step("invalid relay URL"))?,
         );
     }
     Ok(ladder)

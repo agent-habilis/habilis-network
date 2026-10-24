@@ -924,7 +924,7 @@ impl Message {
     /// Serialization of a field fails.
     pub(crate) fn serialize(&self) -> Result<Vec<u8>, MessageError> {
         let bytes = serde_json::to_vec(&Wire(self))
-            .map_err(MessageError::source("failed to serialize message"))?;
+            .map_err(MessageError::with_step("failed to serialize message"))?;
         if bytes.len() > MAX_MESSAGE_SIZE {
             return Err(MessageError::Oversize { bytes: bytes.len() });
         }
@@ -939,7 +939,7 @@ impl Message {
             return Err(MessageError::TooLarge);
         }
         let wire: WireIn = serde_json::from_slice(data)
-            .map_err(MessageError::source("failed to parse message JSON"))?;
+            .map_err(MessageError::with_step("failed to parse message JSON"))?;
         if wire.version != VERSION {
             return Err(MessageError::UnsupportedVersion(wire.version));
         }

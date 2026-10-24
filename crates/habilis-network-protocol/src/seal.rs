@@ -77,7 +77,7 @@ pub enum SealError {
 }
 
 impl SealError {
-    fn source<E>(step: &'static str) -> impl FnOnce(E) -> Self
+    fn with_step<E>(step: &'static str) -> impl FnOnce(E) -> Self
     where
         E: Into<Box<dyn Error + Send + Sync>>,
     {
@@ -192,23 +192,25 @@ pub fn unseal_from_body(
     body: &MessageBody,
 ) -> Result<String, SealError> {
     let envelope: Envelope = serde_json::from_str(body.as_str())
-        .map_err(SealError::source("body is not a sealed envelope"))?;
+        .map_err(SealError::with_step("body is not a sealed envelope"))?;
     if envelope.version != ENVELOPE_VERSION {
         return Err(SealError::UnsupportedVersion(envelope.version));
     }
-    let epk = decode_array::<32>(&envelope.epk).map_err(SealError::source("bad ephemeral key"))?;
-    let nonce = decode_array::<12>(&envelope.nonce).map_err(SealError::source("bad nonce"))?;
+    let epk =
+        decode_array::<32>(&envelope.epk).map_err(SealError::with_step("bad ephemeral key"))?;
+    let nonce = decode_array::<12>(&envelope.nonce).map_err(SealError::with_step("bad nonce"))?;
     let ct = bs58::decode(&envelope.ct)
         .into_vec()
-        .map_err(SealError::source("bad ciphertext"))?;
+        .map_err(SealError::with_step("bad ciphertext"))?;
     let plaintext = unseal(our_secret, &Sealed { epk, nonce, ct })?;
-    String::from_utf8(plaintext).map_err(SealError::source("decrypted payload is not valid UTF-8"))
+    String::from_utf8(plaintext)
+        .map_err(SealError::with_step("decrypted payload is not valid UTF-8"))
 }
 
 fn decode_array<const N: usize>(encoded: &str) -> Result<[u8; N], SealError> {
     let bytes = bs58::decode(encoded)
         .into_vec()
-        .map_err(SealError::source("invalid Base58"))?;
+        .map_err(SealError::with_step("invalid Base58"))?;
     bytes
         .try_into()
         .map_err(|_| SealError::Invalid(format!("expected {N} bytes")))

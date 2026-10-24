@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
 use habilis_network::iroh::Endpoint;
 use habilis_network::iroh::address_lookup::memory::MemoryLookup;
 use habilis_network::iroh::protocol::Router;
@@ -14,7 +13,8 @@ use habilis_network::net::direct::{
 };
 use habilis_network::net::{TransportOpts, add_peer_addr, address_book};
 use habilis_network::protocol::{
-    Lookup, LookupOpts, MeshConfig, RelayChoice, RelayLadder, Transport, TransportPolicy,
+    Lookup, LookupOpts, MeshConfig, RelayChoice, RelayLadder, RelayLadderError, Transport,
+    TransportPolicy,
 };
 use rand::RngCore as _;
 use serde::Deserialize;
@@ -281,14 +281,11 @@ impl StreamNode {
 
 /// The ladder `urls` name, or `None` for the default. Parsed as one list, so an
 /// empty or bad entry is an error rather than a shrunk ladder.
-fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
+fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>, RelayLadderError> {
     if urls.is_empty() {
         return Ok(None);
     }
-    urls.join(",")
-        .parse::<RelayLadder>()
-        .map(Some)
-        .map_err(|error| anyhow::anyhow!("{error}"))
+    urls.join(",").parse::<RelayLadder>().map(Some)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

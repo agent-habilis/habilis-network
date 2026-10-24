@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
 use habilis_network::iroh::endpoint::{Connection, SendStream};
 use habilis_network::iroh::protocol::{AcceptError, ProtocolHandler};
 use habilis_network::net::direct::{PROBE_DEADLINE, PayloadPath, refuse_unless_direct};
@@ -157,7 +156,9 @@ impl ProtocolHandler for StreamAcceptor {
     }
 }
 
-async fn read_header(conn: &Connection) -> Result<(SendStream, (StreamId, StreamSecret))> {
+async fn read_header(
+    conn: &Connection,
+) -> Result<(SendStream, (StreamId, StreamSecret)), Box<dyn std::error::Error + Send + Sync>> {
     let (send, mut recv) = conn.accept_bi().await?;
     let mut id = [0; ID_LEN];
     let mut secret = Zeroizing::new([0; SECRET_LEN]);
