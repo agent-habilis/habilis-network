@@ -1395,6 +1395,18 @@ impl EventLoopState {
         self.left_keys.contains(&key)
     }
 
+    /// Drop a departed key's presence frames from the log and from the indexes kept beside it,
+    /// as an eviction would (see `gossip::recv::push_to_log`).
+    pub(crate) fn drop_departed_presence(&mut self, key: &AuthorKey) {
+        for gone in self.message_log.drop_presence_of(key) {
+            let hash = gone.content_hash();
+            self.forget_hash(&hash);
+            if let Some(seq) = gone.seq {
+                self.forget_msg_seq(&gone.key(), seq, &hash);
+            }
+        }
+    }
+
     /// Whether a message of `nick` stamped `at` was sent no later than the goodbye of `nick`.
     pub(crate) fn sent_before_goodbye(&self, nick: &Nickname, at: UnixSecs) -> bool {
         self.left_at.get(nick).is_some_and(|left| at <= *left)

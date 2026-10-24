@@ -170,6 +170,7 @@ pub(crate) async fn handle_presence(
             return;
         }
         state.note_left(&message.author, message.key(), message.timestamp);
+        state.drop_departed_presence(&message.key());
         if state.peers.remove(message.author.as_str()) {
             state.write_peer_count();
         }
@@ -402,6 +403,74 @@ mod departed_tests {
         assert!(
             state.surfaced.contains(who.as_str()),
             "a replayed goodbye of the first run un-surfaced the second run"
+        );
+        endpoint.close().await;
+    }
+
+    /// A departed key's `joined` frames serve nobody once it is gone, and the log never evicts a
+    /// small author, so without this they stay resend subjects for the life of the node. Its chat
+    /// stays: a node that missed it can still backfill it.
+    #[test]
+    async fn a_departed_keys_presence_leaves_the_log() {
+        let (endpoint, sender) = endpoint_and_sender().await;
+        let identity = Identity::generate();
+        let our_pubkey = identity.author_key();
+        let mesh = MeshId::from("test");
+        let us = nick("us");
+        let sink = SilentSink;
+        let ctx = HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &us,
+            identity: &identity,
+            our_pubkey,
+            max_peers: 16,
+            rendezvous_id: endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let who = nick("swift-cedar");
+        let departed = Identity::generate();
+        let joined = Message::new_joined(&mesh, &who).sign(&departed);
+        let chat = Message::new_app(
+            &mesh,
+            &who,
+            crate::protocol::AppFrameParams {
+                tag: crate::protocol::AppTag::from("app_msg"),
+                to: None,
+                corr: None,
+                body: crate::protocol::MessageBody::from("kept"),
+            },
+        )
+        .sign(&departed);
+        let mut state = fresh_state();
+        state.peers.insert(who.clone());
+        state.message_log.push(joined.clone());
+        state.message_log.push(chat.clone());
+
+        let left = Message::new_left(&mesh, &who).sign(&departed);
+        let update = membership::compute_for(&left, &state);
+        let mut app = Inert;
+        handle_presence(
+            PresenceEvent {
+                message: &left,
+                subtype: PresenceSubtype::Left,
+                update: &update,
+                surfaceable: true,
+            },
+            &mut state,
+            &mut app,
+            &ctx,
+        )
+        .await;
+        assert!(
+            !state.message_log.contains(&joined.dedup_key()),
+            "the departed key's joined is still in the log"
+        );
+        assert!(
+            state.message_log.contains(&chat.dedup_key()),
+            "the departed key's chat left the log"
         );
         endpoint.close().await;
     }

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::protocol::message::Verified;
 use crate::protocol::message::sole_addressee;
-use crate::protocol::{AuthorKey, DedupKey, Nickname, UnixSecs};
+use crate::protocol::{AuthorKey, DedupKey, MessageKind, Nickname, PresenceSubtype, UnixSecs};
 
 /// Where a message sits in the log's total order: its timestamp, then its id
 /// key. Timestamps are whole seconds and a mesh puts hundreds of messages in one
@@ -178,6 +178,44 @@ impl MessageLog {
 
     pub(crate) fn contains(&self, key: &DedupKey) -> bool {
         self.keys.contains(key)
+    }
+
+    /// Drop the presence frames of `author` and return them, so the caller can prune the indexes
+    /// it keeps beside the log. A key that said goodbye never speaks again, and eviction charges
+    /// the fullest author, so a small departed author's `joined` frames would otherwise stay
+    /// resend subjects for the life of the node. Its chat and its `left` stay: a node that missed
+    /// them can still backfill them. Every node that holds the goodbye does the same, so the
+    /// retained set stays a function of the message set.
+    pub(crate) fn drop_presence_of(&mut self, author: &AuthorKey) -> Vec<Verified> {
+        let is_departed_presence = |msg: &Verified| {
+            msg.key() == *author
+                && matches!(
+                    msg.kind,
+                    MessageKind::Presence {
+                        subtype: PresenceSubtype::Joined | PresenceSubtype::Alive
+                    }
+                )
+        };
+        let mut dropped = Vec::new();
+        self.messages.retain(|msg| {
+            if is_departed_presence(msg) {
+                dropped.push(msg.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for gone in &dropped {
+            self.keys.remove(&gone.dedup_key());
+        }
+        match self.per_author.get_mut(author) {
+            Some(held) if *held > dropped.len() => *held -= dropped.len(),
+            Some(_) => {
+                self.per_author.remove(author);
+            }
+            None => {}
+        }
+        dropped
     }
 
     #[cfg(any(test, feature = "iroh-test-utils"))]
