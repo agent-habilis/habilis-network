@@ -199,7 +199,7 @@ Done.
 **Limits.**
 
 - A logoff and a shutdown do not reach these listeners. Windows does not give them to the console handler of a process that loaded `user32.dll` or `gdi32.dll`. A node loads both: iroh's `netwatch` uses COM through the `wmi` crate, and the runtime base uses `SHGetKnownFolderPath` of `shell32.dll`. On a node in `Cli` mode, `USER32.dll`, `GDI32.dll`, `ole32.dll` and `combase.dll` were loaded. The listeners stay, for a build that does not load them. A CLI daemon gets them through the window of R13.
-- Only a process with a console gets console events: a node in the foreground of a terminal. A process started with `DETACHED_PROCESS` has no console. With `CREATE_NO_WINDOW` it has a hidden console that nobody closes. The daemon of agent-gossip on Windows (G1) is one of these, so the IPC `quit` of R5 and the owner watch of R6 stop it, and the window of R13 gets its logoff and its shutdown.
+- Only a process with a console gets console events: a node in the foreground of a terminal. A process started with `DETACHED_PROCESS` has no console. With `CREATE_NO_WINDOW` it has a hidden console that nobody closes. The daemon of agent-gossip on Windows (G1) starts with `DETACHED_PROCESS`, so the IPC `quit` of R5 and the owner watch of R6 stop it, and the window of R13 gets its logoff and its shutdown.
 - A process in a new process group (`CREATE_NEW_PROCESS_GROUP`), or the child of a parent that ignores ctrl-c, ignores ctrl-c. Ctrl-break still reaches it.
 
 **The test.** Step 5 of the host lifecycle test starts a node in a console of its own and sends it ctrl-break and ctrl-c from a third process, through `win_console::send_console_event` of `habilis-network-util` (behind `test-fixtures`). Without the listeners, the ctrl-break test fails: the node exits with `0xC000013A`. No process can raise a close, so T6 tests it by hand.
@@ -366,23 +366,23 @@ Start it after the engine work of [§3](#3-requirements-habilis-network).
 
 ### G0. Prerequisite
 
-- Merge `chore-migrate-habilis-network` into agent-gossip `main`. On `main` the engine is still the old `fofoca` package.
+- `chore-migrate-habilis-network` is merged into agent-gossip `main`, so `main` uses this engine.
 - During development, point the engine at a local checkout:
 
   ```toml
   [patch."https://github.com/agent-habilis/habilis-network"]
-  habilis-network = { path = "../habilis-network/feat-windows-support/crates/habilis-network" }
+  habilis-network = { path = "../habilis-network/crates/habilis-network" }
   ```
 
   Add an entry for each engine crate that `Cargo.lock` pulls from that URL.
 
 ### G1. Detach
 
-`detach_if_owned` (`crates/agent-gossip/src/cli/mod.rs:161-216`) calls `setsid` in `pre_exec`.
+`detach_if_owned` (`crates/agent-gossip/src/cli/mod.rs:161-216` on `main`) calls `setsid` in `pre_exec`.
 
 - On Unix, keep it.
-- On Windows, spawn with `creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)`. If the spawn fails with access denied, try again without `CREATE_BREAKAWAY_FROM_JOB`.
-- On Windows, set stdin, stdout and stderr to null.
+- On Windows, spawn with `creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB)`. `CREATE_NO_WINDOW` is not set, because Windows ignores it with `DETACHED_PROCESS`. If the spawn fails with access denied, try again without `CREATE_BREAKAWAY_FROM_JOB`. Then the launcher warns that the daemon ends when the job ends.
+- On Windows, set stdin to null. Stdout and stderr inherit a file on disk. Any other handle gives null, and the daemon does not inherit it. With `--stderr-file` (G4), the daemon inherits that file as its stderr, so the `.stderr` file of the skill gets the errors of the start.
 
 ### G2. Unix-only code
 
@@ -391,7 +391,6 @@ Start it after the engine work of [§3](#3-requirements-habilis-network).
 - `home_dir` (`cli/agent.rs`) and `home_path` (`status.rs`): fall back to `USERPROFILE`.
 - On Unix `active_socket_paths` and `send_to_path` do not change, so `cli/doctor.rs` and `cli/session.rs` keep them. On Windows they use `active_endpoints` and `send_to_endpoint`, behind `cfg(windows)`.
 - The test fixtures build the path of the unix socket by hand (`agent-gossip-test-fixtures/src/lib.rs`, and the readiness checks of three `tests/*.rs` files). On Unix they keep working. On Windows they use `active_endpoints` and `send_to_endpoint`.
-- `docs/manual.txt` and `docs/windows-port/specs/E3-control-socket.md` name the old socket design. Update them.
 
 ### G3. Leave
 
@@ -404,24 +403,24 @@ Start it after the engine work of [§3](#3-requirements-habilis-network).
 The skill launch lines are bash. They use `/tmp/agent-gossip-$(id -u)` and `$PPID` (`skills/shared/daemon-session.md`, `skills/gossip-leave/workflow.md`).
 On Windows, Claude Code runs Bash tool calls in Git Bash. There, `$PPID` is an MSYS pid, not the Windows pid of the agent.
 
-- Add `--state-file auto` and `--owner-pid auto`. The binary finds the runtime base and the pid of its parent agent.
-- Change the skills to use `auto`, so the same skill text works on every OS.
+- On Windows only, `--owner-pid`, `--session-pid` and `--state-file` take `auto`, and a new `--stderr-file` takes a path or `auto`. The binary finds the runtime base and the agent: the first ancestor that is not a shell.
+- On Windows, `build.rs` renders the variants in `skills/shared/windows/` and `skills/gossip-leave/windows/`, which use `auto`. On Unix the flags and the skills do not change.
 - Update the snapshots in `crates/agent-gossip/src/cli/snapshots/`.
 
 ### G5. Distribution
 
-- Add a `windows-latest` job to CI. It builds, runs the tests, and runs a smoke test:
-  1. `agent-gossip create`, with `--owner-pid` set to the pid of the job shell.
-  2. `broadcast`, then `poll`.
-  3. `leave`. Then no `agent-gossip.exe` process stays, and the state file is gone.
-- Make the job a required check.
+- Add a `windows-latest` job to CI. It builds, runs the tests, and runs a smoke test (`scripts/windows-smoke.ps1`):
+  1. Start a stand-in owner process, then `agent-gossip create` with `--owner-pid` set to its pid.
+  2. `ready`, `a2a broadcast`, then `poll`.
+  3. `leave --session-pid`. Then no `agent-gossip.exe` process stays, and the state file is gone.
+- A required check is a setting of the repository, so the owner makes the job one.
 - Add `x86_64-pc-windows-msvc` to `release.yml`, packaged as a `.zip`.
 - Add a Windows install route to the README. Homebrew does not cover Windows.
 
 ## 5. Order of work
 
 Make one commit for each step where possible.
-Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 to R7 are done. Step 5 is done. R13 and R14 are done too, and R12 is partly done.
+Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 to R7 are done. Step 5 is done. R13 and R14 are done too, and R12 is partly done. Step 7 is in agent-habilis/agent-gossip#70, which is open.
 
 1. **Compile (R1, R10).** First check from macOS with `cargo xwin check --target x86_64-pc-windows-msvc`. Then build on the Windows machine.
 2. **CI (R11).** Add the `windows` job when the workspace compiles. From this step on, each change must be green on Windows.
@@ -437,7 +436,7 @@ The machine is Windows 11 x64.
 T1 to T4 also run on CI ([R11](#r11-windows-on-ci)). On the real machine, they confirm the CI result on a computer that is not a CI runner.
 T5 to T7 run only on the real machine.
 Run the commands in PowerShell unless the step says otherwise.
-Record each result as a checklist item in the PR #5 description.
+Record the results in a comment on PR #5.
 For each failure, attach the log from the log directory that `doctor` shows.
 
 ### 6.1 Machine setup
@@ -506,7 +505,7 @@ Do this after G0 to G5.
 Use one Windows peer and one macOS peer.
 
 1. Run `agent-gossip plug` on Windows.
-2. In Claude Code on Windows, run `/gossip-create`.
+2. In Claude Code on Windows, run `/gossip-create public`. Without `public`, `create` uses the loopback lookup, so a peer on another machine cannot reach the mesh.
 3. On macOS, run `/gossip-join <id>`.
 4. Broadcast from each side. Each side receives the message.
 5. `poll --long` on Windows wakes up when the macOS peer sends.
