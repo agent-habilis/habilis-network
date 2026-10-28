@@ -47,12 +47,16 @@ function leafHit(file: string, src: string): string | undefined {
   return `leaf file named for none of its public types (${types.join(", ")}). Rename it`;
 }
 
-// A mod.rs or lib.rs holds module declarations and re-exports. A definition in it (O11) is a hit.
+// A mod.rs or lib.rs holds module declarations and re-exports. Up to 20 lines of definitions are
+// small core glue (O13). More is a hit (O11): the items move into leaf files.
 const DEFINITION = /^(pub(\([^)]*\))? )?(unsafe )?(struct|enum|trait|union|fn|impl|const|static|type)\b/m;
+const GLUE_LINES = 20;
 function nonLeafHit(file: string, src: string): string | undefined {
   if (!/(^|\/)(mod|lib)\.rs$/.test(file)) return undefined;
   const body = src.split(/^#\[cfg\(test\)\]/m)[0] ?? "";
-  return DEFINITION.test(body) ? "mod.rs or lib.rs defines items. Move them into a leaf file" : undefined;
+  if (!DEFINITION.test(body)) return undefined;
+  const lines = body.split("\n").filter((line) => line.trim() !== "" && !/^\s*(\/\/|(pub(\([^)]*\))? )?(mod|use) )/.test(line));
+  return lines.length > GLUE_LINES ? "mod.rs or lib.rs defines items. Move them into a leaf file" : undefined;
 }
 
 function readAllow(): { allowed: Map<string, number>; problems: string[] } {

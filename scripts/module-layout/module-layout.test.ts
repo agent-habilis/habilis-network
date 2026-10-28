@@ -58,20 +58,31 @@ test("a mod.rs that only declares modules is not a leaf", () => {
   expectExit({ "crates/x/src/mod.rs": "pub mod inner;\npub use inner::Other;" }, 0);
 });
 
-test("a mod.rs that defines an item is refused", () => {
-  expectExit({ "crates/x/src/mod.rs": "pub struct Other;" }, 1);
+const constLines = (count: number) =>
+  Array.from({ length: count }, (_, i) => `const C${i}: u8 = ${i};`).join("\n");
+
+test("a mod.rs that defines more than 20 lines of items is refused", () => {
+  expectExit({ "crates/x/src/mod.rs": `pub mod inner;\n${constLines(21)}` }, 1);
 });
 
-test("a lib.rs that defines an item is refused", () => {
-  expectExit({ "crates/x/src/lib.rs": "pub fn f() {}" }, 1);
+test("a lib.rs that defines more than 20 lines of items is refused", () => {
+  expectExit({ "crates/x/src/lib.rs": constLines(21) }, 1);
 });
 
 test("a mod.rs with items only under cfg(test) is clean", () => {
   expectExit({ "crates/x/src/mod.rs": "pub mod inner;\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}" }, 0);
 });
 
+test("a mod.rs with 20 lines of items is clean (O13)", () => {
+  expectExit({ "crates/x/src/mod.rs": `pub mod inner;\n${constLines(20)}` }, 0);
+});
+
+test("a mod.rs with 21 lines of items is refused (O13)", () => {
+  expectExit({ "crates/x/src/mod.rs": `pub mod inner;\n${constLines(21)}` }, 1);
+});
+
 test("a counted mod.rs passes", () => {
-  expectExit({ "crates/x/src/mod.rs": "pub struct Other;" }, 0, "crates/x/src/mod.rs|1|items to move");
+  expectExit({ "crates/x/src/mod.rs": constLines(21) }, 0, "crates/x/src/mod.rs|1|items to move");
 });
 
 test("a file with a child module is not a leaf", () => {
