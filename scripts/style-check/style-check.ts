@@ -537,6 +537,12 @@ const RULES: Rule[] = [
     why: "A doc comment that only restates the item name adds nothing (D7). Say what the name does not say.",
   },
   {
+    name: "doc_basics",
+    pattern: /^\s*\/\/[\/!].*\b(?:this is an? (?:function|struct|trait|method|type|module|enum)|an? (?:struct|trait|enum) that|returns an? (?:Result|Option)\b)/i,
+    glob: "*.rs",
+    why: "A doc comment does not explain Rust: no `this is a function`, no `a struct that`, no `returns a Result` (D6). It says what the item does.",
+  },
+  {
     name: "anyhow_pub",
     scan: countAnyhowPub,
     skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/[^/]+\/src\/)/,

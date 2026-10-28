@@ -466,3 +466,11 @@ test("restating_doc: a doc that says more than the name passes", () => {
 test("restating_doc: a doc with an attribute between it and the item still counts", () => {
   expectExit("crates/demo/src/lib.rs", "/// Sets the foo.\n#[must_use]\npub fn foo() {}", 1, "");
 });
+
+// The doc_basics rule (D6): a doc comment that explains Rust itself fails.
+test("doc_basics: this is a function in a doc fails with no row", () => {
+  expectExit("crates/demo/src/lib.rs", "/// This is a function that parses the frame.\npub fn parse() {}", 1, "");
+});
+test("doc_basics: a doc that says what the item does passes", () => {
+  expectExit("crates/demo/src/lib.rs", "/// Parses the frame, or refuses a short one.\npub fn parse() {}", 0, "");
+});

@@ -145,7 +145,7 @@ pub fn encode_frame<T: Serialize>(msg: &T) -> Result<Vec<u8>> {
 /// How many body bytes follow a header.
 ///
 /// Checked against [`MAX_FRAME_BYTES`] *before* the caller allocates, which is
-/// the whole reason this is a function and not a `u32::from_le_bytes` at the
+/// the whole reason for a function, not a `u32::from_le_bytes` at the
 /// call site.
 ///
 /// # Errors
