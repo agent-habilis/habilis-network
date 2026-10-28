@@ -23,7 +23,7 @@
 /// Emits the struct, its derives, `as_str` and `Display`. Every extra past
 /// `error = ` is opt-in:
 ///
-/// - `deserialize` — validating `Deserialize` routed through `Self::new`, so a
+/// - `deserialize` — validating `Deserialize` routed through `Self::try_new`, so a
 ///   value off the wire is rejected at parse rather than reaching a consumer.
 /// - `from_str` — `FromStr`, same validation.
 /// - `as_ref` / `borrow` — `AsRef<str>` / `Borrow<str>`. `Borrow` is what lets
@@ -63,7 +63,7 @@ macro_rules! string_newtype {
                 D: ::serde::Deserializer<'de>,
             {
                 let raw = <String as ::serde::Deserialize>::deserialize(deserializer)?;
-                Self::new(raw).map_err(::serde::de::Error::custom)
+                Self::try_new(raw).map_err(::serde::de::Error::custom)
             }
         }
     };
@@ -72,7 +72,7 @@ macro_rules! string_newtype {
         impl ::std::str::FromStr for $name {
             type Err = $error;
             fn from_str(text: &str) -> ::std::result::Result<Self, Self::Err> {
-                Self::new(text)
+                Self::try_new(text)
             }
         }
     };
@@ -97,7 +97,7 @@ macro_rules! string_newtype {
         #[cfg(any(test, feature = "test-fixtures"))]
         impl ::std::convert::From<&str> for $name {
             fn from(text: &str) -> Self {
-                Self::new(text).expect(concat!("invalid ", stringify!($name), " in test fixture"))
+                Self::try_new(text).expect(concat!("invalid ", stringify!($name), " in test fixture"))
             }
         }
     };
@@ -125,13 +125,13 @@ mod tests {
         }
 
         let uuid = "b3f1c2d4-5e6a-4b8c-9d0e-1f2a3b4c5d6e";
-        check!(Nickname::new("lotus-anvil").expect("nick"), "lotus-anvil");
-        check!(MessageId::new(uuid).expect("id"), uuid);
-        check!(MessageBody::new("hello").expect("body"), "hello");
-        check!(AppTag::new("app_msg").expect("tag"), "app_msg");
-        check!(CorrId::new("corr-1").expect("corr"), "corr-1");
+        check!(Nickname::try_new("lotus-anvil").expect("nick"), "lotus-anvil");
+        check!(MessageId::try_new(uuid).expect("id"), uuid);
+        check!(MessageBody::try_new("hello").expect("body"), "hello");
+        check!(AppTag::try_new("app_msg").expect("tag"), "app_msg");
+        check!(CorrId::try_new("corr-1").expect("corr"), "corr-1");
         check!(ShardGroup::from_uuid_str(uuid).expect("group"), uuid);
-        check!(MeshName::new("kernel-parch").expect("name"), "kernel-parch");
+        check!(MeshName::try_new("kernel-parch").expect("name"), "kernel-parch");
     }
 
     /// Deserialization stays **validating** — the property the hand-written

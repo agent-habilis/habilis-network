@@ -66,7 +66,7 @@ fn is_base58_char(ch: char) -> bool {
 impl MeshId {
     /// # Errors
     /// The value is empty, over-long, or not valid base58.
-    pub fn new(value: impl Into<String>) -> Result<Self, MeshIdError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, MeshIdError> {
         let value = value.into();
         let len = value.len();
         if !(MIN_LEN..=MAX_LEN).contains(&len) {
@@ -86,19 +86,19 @@ impl TryFrom<String> for MeshId {
     type Error = MeshIdError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
+        Self::try_new(value)
     }
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
 impl From<&str> for MeshId {
     fn from(label: &str) -> Self {
-        if let Ok(id) = Self::new(label) {
+        if let Ok(id) = Self::try_new(label) {
             return id;
         }
         let mesh = super::Mesh::from_topic(label, super::MeshConfig::loopback())
             .expect("generated test mesh");
-        Self::new(mesh.to_string()).expect("generated test mesh id must be valid")
+        Self::try_new(mesh.to_string()).expect("generated test mesh id must be valid")
     }
 }
 
@@ -111,7 +111,7 @@ mod mesh_id_tests {
         use super::super::{Mesh, MeshConfig, MeshName};
         Mesh::new(
             crate::crypto::Seed::from_bytes([1u8; 32]),
-            MeshName::new("test").unwrap(),
+            MeshName::try_new("test").unwrap(),
             MeshConfig::loopback(),
         )
         .unwrap()
@@ -120,12 +120,12 @@ mod mesh_id_tests {
 
     #[test]
     fn new_accepts_well_formed_id() {
-        MeshId::new(valid_id()).unwrap();
+        MeshId::try_new(valid_id()).unwrap();
     }
 
     #[test]
     fn new_rejects_too_short() {
-        assert!(matches!(MeshId::new("a"), Err(MeshIdError::Length(_))));
+        assert!(matches!(MeshId::try_new("a"), Err(MeshIdError::Length(_))));
     }
 
     #[test]
@@ -133,11 +133,11 @@ mod mesh_id_tests {
         // `0`, `O`, `I`, `l` are not in the Base58 alphabet — and neither is
         // the glyph prefix ids used to carry, so a stale paste lands here too.
         assert!(matches!(
-            MeshId::new("AbCdEf0xyz"),
+            MeshId::try_new("AbCdEf0xyz"),
             Err(MeshIdError::Charset(_))
         ));
         assert!(matches!(
-            MeshId::new("AbCdEf0xyzZZ"),
+            MeshId::try_new("AbCdEf0xyzZZ"),
             Err(MeshIdError::Charset(_))
         ));
     }
@@ -145,7 +145,7 @@ mod mesh_id_tests {
     #[test]
     fn serde_transparent_round_trip() {
         let id_str = valid_id();
-        let id = MeshId::new(id_str.clone()).unwrap();
+        let id = MeshId::try_new(id_str.clone()).unwrap();
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(json, format!("\"{id_str}\""));
         let parsed: MeshId = serde_json::from_str(&json).unwrap();
@@ -157,7 +157,7 @@ mod mesh_id_tests {
         let mut mistyped = valid_id();
         let replacement = if mistyped.ends_with('1') { "2" } else { "1" };
         mistyped.replace_range(mistyped.len() - 1.., replacement);
-        assert_eq!(MeshId::new(mistyped), Err(MeshIdError::InvalidHash));
+        assert_eq!(MeshId::try_new(mistyped), Err(MeshIdError::InvalidHash));
     }
 
     #[test]
@@ -169,7 +169,7 @@ mod mesh_id_tests {
 
     #[test]
     fn every_mesh_id_decodes_as_a_mesh() {
-        let id = MeshId::new(valid_id()).unwrap();
+        let id = MeshId::try_new(valid_id()).unwrap();
         id.as_str().parse::<LockedMesh>().unwrap();
     }
 

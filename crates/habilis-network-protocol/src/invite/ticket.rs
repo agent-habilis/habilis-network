@@ -323,7 +323,7 @@ mod tests {
     fn creator() -> Mesh {
         let mut mesh = Mesh::new(
             Seed::from_bytes([1u8; 32]),
-            MeshName::new("t").unwrap(),
+            MeshName::try_new("t").unwrap(),
             MeshConfig::loopback(),
         )
         .unwrap();
@@ -456,7 +456,7 @@ mod tests {
     fn mint_refuses_a_non_invite_only_mesh() {
         let plain = Mesh::new(
             Seed::from_bytes([2u8; 32]),
-            MeshName::new("t").unwrap(),
+            MeshName::try_new("t").unwrap(),
             MeshConfig::loopback(),
         )
         .unwrap();
@@ -575,7 +575,7 @@ mod tests {
         // A bare mesh id is not an invite ticket (different framing).
         let plain = Mesh::new(
             Seed::from_bytes([3u8; 32]),
-            MeshName::new("t").unwrap(),
+            MeshName::try_new("t").unwrap(),
             MeshConfig::loopback(),
         )
         .unwrap();

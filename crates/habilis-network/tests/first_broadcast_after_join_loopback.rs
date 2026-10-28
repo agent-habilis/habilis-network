@@ -282,10 +282,10 @@ impl NodeDriver for Chat {
                 let frame = app_frame(
                     ctx,
                     AppFrameParams::new(
-                        AppTag::new("chat").expect("a valid app tag"),
+                        AppTag::try_new("chat").expect("a valid app tag"),
                         None,
                         None,
-                        MessageBody::new(text).expect("a short body"),
+                        MessageBody::try_new(text).expect("a short body"),
                     ),
                 );
                 let class = self.classify(&frame.authored());
@@ -327,7 +327,7 @@ impl LoggingMember {
                 topic_string: topic.to_owned(),
             },
             SetupParams::new(
-                Nickname::new(name).expect("valid nickname"),
+                Nickname::try_new(name).expect("valid nickname"),
                 Arc::new(Quiet),
             )
             .with_max_peers(16),

@@ -477,7 +477,7 @@ mod tests {
             let mut state = node.state();
             let (inbound, _unread) = mpsc::channel(1);
             let mut app = crate::membership::MembershipApp::new(inbound);
-            let name = crate::protocol::MeshName::new("test".to_owned()).expect("a name");
+            let name = crate::protocol::MeshName::try_new("test".to_owned()).expect("a name");
             let exit = announce_departure(
                 &mut state,
                 &mut app,

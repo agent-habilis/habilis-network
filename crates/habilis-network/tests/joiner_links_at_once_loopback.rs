@@ -117,7 +117,7 @@ impl Joined {
 }
 
 fn nick(name: &str) -> Nickname {
-    Nickname::new(name).expect("valid nickname")
+    Nickname::try_new(name).expect("valid nickname")
 }
 
 async fn spawn(mesh: &Mesh, name: &str, cohost: CoHostPolicy) -> (Node<Inert>, Arc<Joined>) {
@@ -151,7 +151,7 @@ fn a_joiner_meets_a_running_beacon_before_the_grace() {
         let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
         let mesh = Mesh::new(
             fresh_seed(),
-            MeshName::new("fast-join".to_owned()).expect("a name"),
+            MeshName::try_new("fast-join".to_owned()).expect("a name"),
             config,
         )
         .expect("a mesh");

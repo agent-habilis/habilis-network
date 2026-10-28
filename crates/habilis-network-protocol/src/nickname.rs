@@ -67,7 +67,7 @@ impl Nickname {
     /// Returns [`NicknameError`] if `value` is empty, longer than 32
     /// characters, or contains a forbidden scalar (see
     /// `is_forbidden`).
-    pub fn new(value: impl Into<String>) -> Result<Self, NicknameError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, NicknameError> {
         let value = value.into();
         let count = value.chars().count();
         if !(super::ident::MIN_CHARS..=super::ident::MAX_CHARS).contains(&count) {
@@ -87,7 +87,7 @@ impl Nickname {
     /// succeed.
     #[must_use]
     pub fn random() -> Self {
-        Self::new(super::wordlist::random_pair())
+        Self::try_new(super::wordlist::random_pair())
             .expect("wordlist combinations are always valid nicknames")
     }
 }
@@ -114,45 +114,45 @@ mod tests {
             "👨‍👩‍👧",       // ZWJ emoji sequence
             "alice!",   // punctuation symbol
         ] {
-            Nickname::new(ok).unwrap_or_else(|_| panic!("expected {ok} to validate"));
+            Nickname::try_new(ok).unwrap_or_else(|_| panic!("expected {ok} to validate"));
         }
     }
 
     #[test]
     fn new_rejects_empty_and_overlong() {
-        assert!(Nickname::new("").is_err());
+        assert!(Nickname::try_new("").is_err());
         let too_long = "a".repeat(super::super::ident::MAX_CHARS + 1);
-        assert!(Nickname::new(too_long).is_err());
+        assert!(Nickname::try_new(too_long).is_err());
     }
 
     #[test]
     fn length_cap_counts_characters_not_bytes() {
         // 32 multibyte chars (96 bytes) is fine; 33 is not.
-        assert!(Nickname::new("あ".repeat(32)).is_ok());
-        assert!(Nickname::new("あ".repeat(33)).is_err());
+        assert!(Nickname::try_new("あ".repeat(32)).is_ok());
+        assert!(Nickname::try_new("あ".repeat(33)).is_err());
     }
 
     #[test]
     fn new_rejects_unsafe_chars() {
-        assert!(Nickname::new("alice bot").is_err()); // space
-        assert!(Nickname::new("alice/bob").is_err()); // path sep
-        assert!(Nickname::new("alice\\bob").is_err()); // path sep
-        assert!(Nickname::new("alice\nbob").is_err()); // newline
-        assert!(Nickname::new("alice\0bob").is_err()); // NUL
-        assert!(Nickname::new("alice\u{7}bob").is_err()); // bell control
-        assert!(Nickname::new("alice\u{202E}bob").is_err()); // RLO (bidi override)
-        assert!(Nickname::new("alice\u{200F}bob").is_err()); // RLM (bidi mark)
-        assert!(Nickname::new("alice\u{61C}bob").is_err()); // ALM (Arabic letter mark)
-        assert!(Nickname::new("a<b").is_err()); // reserved for <nick>
-        assert!(Nickname::new("a>b").is_err()); // reserved for <nick>
-        assert!(Nickname::new("a#b").is_err()); // reserved for #mesh
+        assert!(Nickname::try_new("alice bot").is_err()); // space
+        assert!(Nickname::try_new("alice/bob").is_err()); // path sep
+        assert!(Nickname::try_new("alice\\bob").is_err()); // path sep
+        assert!(Nickname::try_new("alice\nbob").is_err()); // newline
+        assert!(Nickname::try_new("alice\0bob").is_err()); // NUL
+        assert!(Nickname::try_new("alice\u{7}bob").is_err()); // bell control
+        assert!(Nickname::try_new("alice\u{202E}bob").is_err()); // RLO (bidi override)
+        assert!(Nickname::try_new("alice\u{200F}bob").is_err()); // RLM (bidi mark)
+        assert!(Nickname::try_new("alice\u{61C}bob").is_err()); // ALM (Arabic letter mark)
+        assert!(Nickname::try_new("a<b").is_err()); // reserved for <nick>
+        assert!(Nickname::try_new("a>b").is_err()); // reserved for <nick>
+        assert!(Nickname::try_new("a#b").is_err()); // reserved for #mesh
     }
 
     #[test]
     fn random_always_validates() {
         for _ in 0..20 {
             let nickname = Nickname::random();
-            Nickname::new(nickname.as_str()).expect("random must round-trip");
+            Nickname::try_new(nickname.as_str()).expect("random must round-trip");
         }
     }
 

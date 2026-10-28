@@ -113,7 +113,7 @@ impl Ad {
     #[must_use]
     pub fn to_body(&self) -> MessageBody {
         let json = serde_json::to_string(self).expect("Ad always serializes to JSON");
-        MessageBody::new(json).expect("Ad JSON contains no control characters")
+        MessageBody::try_new(json).expect("Ad JSON contains no control characters")
     }
 
     /// Parse a directory message body as an ad. Returns `None` for any
@@ -283,12 +283,12 @@ mod tests {
     use crate::mesh::{LookupOpts, MeshName};
 
     fn directory(name: &str) -> MeshName {
-        MeshName::new(name).unwrap()
+        MeshName::try_new(name).unwrap()
     }
 
     /// The advertised mesh's id for a directory of the given name.
     fn advertised_id(name: &str) -> MeshId {
-        MeshId::new(directory_mesh(&directory(name), LookupOpts::public_preset()).to_string())
+        MeshId::try_new(directory_mesh(&directory(name), LookupOpts::public_preset()).to_string())
             .expect("directory mesh id is valid")
     }
 

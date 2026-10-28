@@ -77,7 +77,7 @@ impl std::error::Error for ChoiceError {}
 /// an unknown version is rejected.
 const VERSION: u8 = 2;
 const SEED_LEN: usize = 32;
-/// Wire bound for the encoded name in bytes. `MeshName::new` caps the
+/// Wire bound for the encoded name in bytes. `MeshName::try_new` caps the
 /// name at `ident::MAX_CHARS` scalar values; each is at most 4 UTF-8
 /// bytes, so the encoded form fits this many bytes (and inside the
 /// 1-byte length field).
@@ -656,7 +656,7 @@ impl LockedMesh {
         pos += name_len;
         let name_str = std::str::from_utf8(name_raw)
             .map_err(ConfigError::with_step("invalid mesh name UTF-8"))?;
-        let name = MeshName::new(name_str).map_err(ConfigError::with_step("invalid mesh name"))?;
+        let name = MeshName::try_new(name_str).map_err(ConfigError::with_step("invalid mesh name"))?;
 
         let config_len = lookup::read_u16(bytes, &mut pos)
             .map_err(ConfigError::with_step("truncated config length"))?

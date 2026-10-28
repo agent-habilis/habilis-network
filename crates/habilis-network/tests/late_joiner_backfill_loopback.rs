@@ -133,7 +133,7 @@ fn pin_antientropy_tick() {
 }
 
 fn nick(name: &str) -> Nickname {
-    Nickname::new(name).expect("valid nickname")
+    Nickname::try_new(name).expect("valid nickname")
 }
 
 async fn spawn(topic: &str, name: &str) -> (Node<Store>, Arc<Joined>) {

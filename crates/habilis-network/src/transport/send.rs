@@ -465,7 +465,7 @@ mod tests {
             &mesh(),
             &nick("alice"),
             AppFrameParams::new(
-                AppTag::new("app_msg").expect("a valid app tag"),
+                AppTag::try_new("app_msg").expect("a valid app tag"),
                 None,
                 None,
                 body(),
@@ -856,10 +856,10 @@ mod tests {
             &mesh(),
             &nick("alice"),
             AppFrameParams::new(
-                AppTag::new("app_req").expect("a valid app tag"),
+                AppTag::try_new("app_req").expect("a valid app tag"),
                 Some(nick("bob")),
                 Some(
-                    CorrId::new("00000000-0000-0000-0000-0000000000aa")
+                    CorrId::try_new("00000000-0000-0000-0000-0000000000aa")
                         .expect("a valid correlation id"),
                 ),
                 body(),
@@ -1131,7 +1131,7 @@ mod tests {
         heads: &serde_json::Value,
         asker: &Identity,
     ) -> Verified {
-        let body = MessageBody::new(serde_json::json!({ "heads": heads }).to_string())
+        let body = MessageBody::try_new(serde_json::json!({ "heads": heads }).to_string())
             .expect("a JSON body");
         Message::new_channel_digest(mesh, &nick("bob"), body, channel).sign(asker)
     }
@@ -1198,7 +1198,7 @@ mod tests {
         state.linked_endpoints.insert(bob_endpoint.id());
         let bob = Identity::generate();
         prove_identity(&mut state, &bob, bob_endpoint.id());
-        let body = MessageBody::new(
+        let body = MessageBody::try_new(
             serde_json::json!({ "heads": ["heads-we-do-not-hold"], "closing": true }).to_string(),
         )
         .expect("a JSON body");

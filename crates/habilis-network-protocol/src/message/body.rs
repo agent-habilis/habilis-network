@@ -48,7 +48,7 @@ impl MessageBody {
     /// # Errors
     /// Returns [`BodyError`] if `value` contains a disallowed control
     /// character (e.g. NUL or other C0/C1 controls).
-    pub fn new(value: impl Into<String>) -> Result<Self, BodyError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, BodyError> {
         let value = value.into();
         if value
             .chars()
@@ -73,29 +73,29 @@ mod body_tests {
 
     #[test]
     fn new_accepts_ascii() {
-        MessageBody::new("hello world").unwrap();
-        MessageBody::new("").unwrap();
-        MessageBody::new("special chars: !@#$%^&*()").unwrap();
+        MessageBody::try_new("hello world").unwrap();
+        MessageBody::try_new("").unwrap();
+        MessageBody::try_new("special chars: !@#$%^&*()").unwrap();
     }
 
     #[test]
     fn new_accepts_unicode() {
-        MessageBody::new("héllo").unwrap();
-        MessageBody::new("emoji 🎉").unwrap();
-        MessageBody::new("日本語のメッセージ").unwrap();
+        MessageBody::try_new("héllo").unwrap();
+        MessageBody::try_new("emoji 🎉").unwrap();
+        MessageBody::try_new("日本語のメッセージ").unwrap();
     }
 
     #[test]
     fn new_accepts_newline_and_tab() {
-        MessageBody::new("line one\nline two").unwrap();
-        MessageBody::new("col1\tcol2").unwrap();
-        MessageBody::new("crlf\r\nline").unwrap();
+        MessageBody::try_new("line one\nline two").unwrap();
+        MessageBody::try_new("col1\tcol2").unwrap();
+        MessageBody::try_new("crlf\r\nline").unwrap();
     }
 
     #[test]
     fn new_rejects_control_chars() {
-        assert!(MessageBody::new("nul\0byte").is_err());
-        assert!(MessageBody::new("bell\u{7}char").is_err());
+        assert!(MessageBody::try_new("nul\0byte").is_err());
+        assert!(MessageBody::try_new("bell\u{7}char").is_err());
     }
 
     #[test]

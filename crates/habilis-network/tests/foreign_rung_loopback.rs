@@ -77,7 +77,7 @@ async fn meet(foreign_rungs: &[usize]) -> (bool, [u16; 8]) {
     let (mesh, ladder) = loop {
         let mesh = Mesh::new(
             fresh_seed(),
-            MeshName::new("foreign-rung".to_owned()).expect("a name"),
+            MeshName::try_new("foreign-rung".to_owned()).expect("a name"),
             config.clone(),
         )
         .expect("a mesh");

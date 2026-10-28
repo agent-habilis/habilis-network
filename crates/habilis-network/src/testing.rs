@@ -57,7 +57,7 @@ pub(crate) fn fresh_state_with_book(address_book: memory::MemoryLookup) -> Event
 /// A nickname, panicking on an invalid one — a test fixture, so a bad literal
 /// should fail loudly at the assertion rather than be handled.
 pub(crate) fn nick(name: &str) -> Nickname {
-    Nickname::new(name.to_owned()).expect("valid test nickname")
+    Nickname::try_new(name.to_owned()).expect("valid test nickname")
 }
 
 /// A deterministic endpoint id from `seed`, so a test can name the same peer

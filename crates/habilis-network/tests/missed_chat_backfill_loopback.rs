@@ -82,10 +82,10 @@ impl NodeDriver for Chat {
             ctx.mesh,
             ctx.author,
             AppFrameParams::new(
-                AppTag::new("chat").expect("a valid app tag"),
+                AppTag::try_new("chat").expect("a valid app tag"),
                 None,
                 None,
-                MessageBody::new("\"hello\"").expect("a JSON body"),
+                MessageBody::try_new("\"hello\"").expect("a JSON body"),
             ),
         );
         frame.timestamp = frame.timestamp + AHEAD;
@@ -162,7 +162,7 @@ fn pin_antientropy_tick() {
 }
 
 fn nick(name: &str) -> Nickname {
-    Nickname::new(name).expect("valid nickname")
+    Nickname::try_new(name).expect("valid nickname")
 }
 
 async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Chat, Arc<Joined>) {

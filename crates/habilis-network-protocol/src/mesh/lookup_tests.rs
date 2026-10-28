@@ -17,7 +17,7 @@ fn bare_resolves_to_default_directory() {
 
 #[test]
 fn named_resolves_to_that_directory() {
-    let sel = DirectorySelection::Named(MeshName::new("gamedev").unwrap());
+    let sel = DirectorySelection::Named(MeshName::try_new("gamedev").unwrap());
     assert_eq!(sel.directory().unwrap().as_str(), "gamedev");
 }
 

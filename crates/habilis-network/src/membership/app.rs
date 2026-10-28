@@ -85,7 +85,7 @@ pub fn msg_body(text: &str) -> Result<MessageBody, crate::transport::SendError> 
             "message too large for one frame: send it as a stream instead".to_owned(),
         ));
     }
-    MessageBody::new(text.to_owned())
+    MessageBody::try_new(text.to_owned())
         .map_err(|error| crate::transport::SendError::Internal(error.into()))
 }
 
@@ -94,7 +94,7 @@ pub fn msg_body(text: &str) -> Result<MessageBody, crate::transport::SendError> 
 /// # Errors
 /// `to` is not a valid nickname.
 pub fn parse_to(to: Option<&str>) -> Result<Option<Nickname>, crate::transport::SendError> {
-    to.map(|nick| Nickname::new(nick.to_owned()))
+    to.map(|nick| Nickname::try_new(nick.to_owned()))
         .transpose()
         .map_err(|error| crate::transport::SendError::InvalidAddressee(error.to_string()))
 }
@@ -599,7 +599,7 @@ impl NodeDriver for MembershipApp {
                 let frame = app_frame(
                     ctx,
                     AppFrameParams::new(
-                        AppTag::new(MSG_TAG).expect("a valid app tag"),
+                        AppTag::try_new(MSG_TAG).expect("a valid app tag"),
                         to,
                         None,
                         body,
@@ -631,7 +631,7 @@ impl NodeDriver for MembershipApp {
                 let frame = app_frame(
                     ctx,
                     AppFrameParams::new(
-                        AppTag::new(MSG_TAG).expect("a valid app tag"),
+                        AppTag::try_new(MSG_TAG).expect("a valid app tag"),
                         to,
                         None,
                         body,
@@ -1184,7 +1184,7 @@ mod tests {
 
     /// The longest nickname there is: 32 four-byte scalars.
     fn widest_nick(seed: char) -> Nickname {
-        Nickname::new(std::iter::repeat_n(seed, 32).collect::<String>()).expect("32 scalars")
+        Nickname::try_new(std::iter::repeat_n(seed, 32).collect::<String>()).expect("32 scalars")
     }
 
     /// A mesh id well past the common case: every lookup and a four-rung
@@ -1203,7 +1203,7 @@ mod tests {
         )
         .expect("config");
         let mesh = derive_topic_mesh_config("standup", config).expect("mesh");
-        MeshId::new(mesh.to_string()).expect("id")
+        MeshId::try_new(mesh.to_string()).expect("id")
     }
 
     fn signed_len(text: &str) -> usize {
@@ -1211,10 +1211,10 @@ mod tests {
             &long_mesh(),
             &widest_nick('\u{1F980}'),
             AppFrameParams::new(
-                AppTag::new(MSG_TAG).expect("a valid app tag"),
+                AppTag::try_new(MSG_TAG).expect("a valid app tag"),
                 Some(widest_nick('\u{1F99E}')),
                 None,
-                MessageBody::new(text.to_owned()).expect("body"),
+                MessageBody::try_new(text.to_owned()).expect("body"),
             ),
         )
         .sign(&Identity::generate())

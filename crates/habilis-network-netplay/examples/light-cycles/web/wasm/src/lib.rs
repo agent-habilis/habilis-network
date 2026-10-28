@@ -165,7 +165,7 @@ impl LightCyclesPeer {
             ),
         )
         .map_err(to_js_error)?;
-        let author = Nickname::new(&nick).map_err(to_js_error)?;
+        let author = Nickname::try_new(&nick).map_err(to_js_error)?;
         let kind = SetupKind::Topic {
             mesh,
             topic_string: room_code,

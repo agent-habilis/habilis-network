@@ -110,7 +110,7 @@ impl MeshName {
     /// Returns [`NameError`] if `value` is empty, longer than 32 scalar
     /// values, or contains a forbidden character (control, whitespace, bidi
     /// formatting, or any of `< > #`).
-    pub fn new(value: impl Into<String>) -> Result<Self, NameError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, NameError> {
         let value = value.into();
         let count = value.chars().count();
         if !(ident::MIN_CHARS..=ident::MAX_CHARS).contains(&count) {
@@ -130,7 +130,7 @@ impl MeshName {
     /// constant, so selection and validation always succeed.
     #[must_use]
     pub fn random() -> Self {
-        Self::new(wordlist::random_pair()).expect("wordlist pair is always a valid mesh name")
+        Self::try_new(wordlist::random_pair()).expect("wordlist pair is always a valid mesh name")
     }
 
     /// Derive a `topic` mesh's display name from its shared string. A leading
@@ -183,7 +183,7 @@ impl MeshName {
             head
         };
 
-        Self::new(name).unwrap_or_else(|_| Self::new("topic").expect("`topic` is a valid name"))
+        Self::try_new(name).unwrap_or_else(|_| Self::try_new("topic").expect("`topic` is a valid name"))
     }
 
     /// The name as bytes.
@@ -283,7 +283,7 @@ mod tests {
         // (Letters/digits are obviously valid.)
         let url_specials = "-._~:/?[]@!$&'()*+,;=%";
         assert!(
-            MeshName::new(url_specials).is_ok(),
+            MeshName::try_new(url_specials).is_ok(),
             "the URL punctuation set must be a valid mesh name"
         );
         for ch in url_specials.chars() {

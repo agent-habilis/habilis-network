@@ -113,7 +113,7 @@ impl Joined {
 async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Pinger> {
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
-    let author = Nickname::new(nick).expect("valid nickname");
+    let author = Nickname::try_new(nick).expect("valid nickname");
     let config = setup_mesh(
         SetupKind::Topic {
             mesh,
@@ -148,8 +148,8 @@ fn each_peer_linked_only_by_gossip_answers_the_others_ping() {
         let bob = spawn(&topic, "bob", Arc::clone(&bob_saw)).await;
 
         let deadline = Duration::from_secs(45);
-        let alice_nick = Nickname::new("alice").expect("valid");
-        let bob_nick = Nickname::new("bob").expect("valid");
+        let alice_nick = Nickname::try_new("alice").expect("valid");
+        let bob_nick = Nickname::try_new("bob").expect("valid");
         assert!(
             alice_saw.wait_for(&bob_nick, deadline).await,
             "alice never saw bob join\n{}",
@@ -191,7 +191,7 @@ fn a_ping_sent_before_any_link_exists_is_answered_after_the_second_probe() {
 
         let alice = spawn(&topic, "alice", Arc::new(Joined::default())).await;
         let bob = spawn(&topic, "bob", Arc::new(Joined::default())).await;
-        let bob_nick = Nickname::new("bob").expect("valid");
+        let bob_nick = Nickname::try_new("bob").expect("valid");
 
         // No wait for `joined`: the round starts before the pair is linked.
         let rtts = ping(&alice).await;

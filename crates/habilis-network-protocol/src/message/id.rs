@@ -43,7 +43,7 @@ impl std::error::Error for IdError {}
 impl MessageId {
     /// # Errors
     /// The value is not a valid UUID.
-    pub fn new(value: impl Into<String>) -> Result<Self, IdError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, IdError> {
         let value = value.into();
         Uuid::parse_str(&value).map_err(|_| IdError(value.clone()))?;
         Ok(Self(value))
@@ -73,15 +73,15 @@ mod id_tests {
 
     #[test]
     fn new_accepts_uuid_v4() {
-        let id = MessageId::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let id = MessageId::try_new("550e8400-e29b-41d4-a716-446655440000").unwrap();
         assert_eq!(id.as_str(), "550e8400-e29b-41d4-a716-446655440000");
     }
 
     #[test]
     fn new_rejects_garbage() {
-        assert!(MessageId::new("not-a-uuid").is_err());
-        assert!(MessageId::new("").is_err());
-        assert!(MessageId::new("550e8400").is_err());
+        assert!(MessageId::try_new("not-a-uuid").is_err());
+        assert!(MessageId::try_new("").is_err());
+        assert!(MessageId::try_new("550e8400").is_err());
     }
 
     #[test]
@@ -89,7 +89,7 @@ mod id_tests {
         let first = MessageId::random();
         let second = MessageId::random();
         assert_ne!(first, second);
-        MessageId::new(first.as_str()).expect("random must round-trip through new");
+        MessageId::try_new(first.as_str()).expect("random must round-trip through new");
     }
 
     #[test]

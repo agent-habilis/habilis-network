@@ -175,14 +175,14 @@ impl AppTag {
     ///
     /// ```
     /// use habilis_network_protocol::AppTag;
-    /// assert!(AppTag::new("app_msg").is_ok());
+    /// assert!(AppTag::try_new("app_msg").is_ok());
     /// ```
     ///
     /// # Errors
     /// # Errors
     /// A [`AppTagError::Invalid`] when the tag is empty, longer than 32 bytes, or not
     /// an ASCII slug.
-    pub fn new(raw: impl Into<String>) -> Result<Self, AppTagError> {
+    pub fn try_new(raw: impl Into<String>) -> Result<Self, AppTagError> {
         let raw = raw.into();
         if !Self::validate(&raw) {
             return Err(AppTagError::Invalid);
@@ -215,14 +215,14 @@ impl CorrId {
     ///
     /// ```
     /// use habilis_network_protocol::CorrId;
-    /// assert!(CorrId::new("aaaa").is_ok());
+    /// assert!(CorrId::try_new("aaaa").is_ok());
     /// ```
     ///
     /// # Errors
     /// # Errors
     /// A [`CorrIdError::Invalid`] when the correlation id is empty or longer than 64
     /// bytes.
-    pub fn new(raw: impl Into<String>) -> Result<Self, CorrIdError> {
+    pub fn try_new(raw: impl Into<String>) -> Result<Self, CorrIdError> {
         let raw = raw.into();
         if !Self::validate(&raw) {
             return Err(CorrIdError::Invalid);
@@ -241,7 +241,7 @@ impl<'de> Deserialize<'de> for CorrId {
         // mints a 36-char UUID, so anything empty or wildly larger is a crafted
         // frame, not a correlation id. Mirrors [`AppTag`]'s bounded deserialize.
         let raw = String::deserialize(deserializer)?;
-        Self::new(raw).map_err(serde::de::Error::custom)
+        Self::try_new(raw).map_err(serde::de::Error::custom)
     }
 }
 
@@ -425,7 +425,7 @@ impl MessageKind {
     #[must_use]
     pub fn app_broadcast(tag: &str) -> Self {
         MessageKind::App {
-            tag: AppTag::new(tag).expect("a valid app tag"),
+            tag: AppTag::try_new(tag).expect("a valid app tag"),
             to: None,
             corr: None,
         }
@@ -441,7 +441,7 @@ impl MessageKind {
     #[must_use]
     pub fn app_to(tag: &str, to: Nickname, corr: Option<CorrId>) -> Self {
         MessageKind::App {
-            tag: AppTag::new(tag).expect("a valid app tag"),
+            tag: AppTag::try_new(tag).expect("a valid app tag"),
             to: Some(to),
             corr,
         }
@@ -453,7 +453,7 @@ fn default_ext() -> serde_json::Value {
 }
 
 fn empty_body() -> MessageBody {
-    MessageBody::new("").expect("empty string is always a valid MessageBody")
+    MessageBody::try_new("").expect("empty string is always a valid MessageBody")
 }
 
 /// A protocol frame — serialized as JSON on the wire. The transport

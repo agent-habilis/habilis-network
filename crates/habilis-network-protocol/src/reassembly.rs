@@ -314,7 +314,7 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Auth
     for slot in group.slots.values() {
         body.push_str(slot);
     }
-    let body = MessageBody::new(body).ok()?;
+    let body = MessageBody::try_new(body).ok()?;
     let header = group.header?;
     Some(synthesize_from(&header, body, group_id))
 }
@@ -387,7 +387,7 @@ impl ShardCache {
 /// If the envelope carries no shard header; callers only pass shard messages.
 pub fn synthesize_from(header: &Verified, body: MessageBody, group_id: &ShardGroup) -> Authored {
     let mut envelope = Message::clone(header);
-    envelope.id = MessageId::new(group_id.as_str()).expect("a shard group is a valid message id");
+    envelope.id = MessageId::try_new(group_id.as_str()).expect("a shard group is a valid message id");
     envelope.body = body;
     envelope.shard = None;
     envelope.seq = None;
@@ -433,7 +433,7 @@ mod tests {
             &MeshId::from("test"),
             &Nickname::from("author"),
             AppFrameParams {
-                tag: crate::AppTag::new("app_msg").expect("a valid app tag"),
+                tag: crate::AppTag::try_new("app_msg").expect("a valid app tag"),
                 to: None,
                 corr: None,
                 body: MessageBody::from(body),

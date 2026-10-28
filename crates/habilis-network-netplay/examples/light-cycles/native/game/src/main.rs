@@ -174,7 +174,7 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
             TransportPolicy::default().with_relay_transport(relay_transport),
         ),
     )?;
-    let author = Nickname::new(nick)?;
+    let author = Nickname::try_new(nick)?;
     let my_nick = author.clone();
     let kind = SetupKind::Topic {
         mesh,

@@ -428,7 +428,7 @@ mod join_password_tests {
     fn passworded_id() -> String {
         let mut mesh = Mesh::new(
             Seed::from_bytes([9u8; 32]),
-            MeshName::new("pw").unwrap(),
+            MeshName::try_new("pw").unwrap(),
             MeshConfig::loopback(),
         )
         .unwrap();

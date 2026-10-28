@@ -243,7 +243,7 @@ fn frame_for(
     to: Option<Nickname>,
     payload: String,
 ) -> Option<Verified> {
-    let (Ok(tag), Ok(body)) = (AppTag::new(tag), MessageBody::new(payload)) else {
+    let (Ok(tag), Ok(body)) = (AppTag::try_new(tag), MessageBody::try_new(payload)) else {
         return None;
     };
     Some(habilis_network::ops::app_frame(

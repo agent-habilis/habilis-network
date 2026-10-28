@@ -52,7 +52,7 @@ enum StateOp {
 #[cfg(any(test, feature = "adversarial"))]
 pub fn merge_body(merge: Value) -> Result<MessageBody, DocError> {
     let json = serde_json::to_string(&StateOp::Merge { merge }).map_err(DocError::encode)?;
-    Ok(MessageBody::new(json)?)
+    Ok(MessageBody::try_new(json)?)
 }
 
 /// Wrap one automerge change's raw bytes as a channel-event body. `merge` is the
@@ -68,7 +68,7 @@ pub fn change_body(change: &[u8], merge: Option<&Value>) -> Result<MessageBody, 
         merge: merge.cloned(),
     })
     .map_err(DocError::encode)?;
-    Ok(MessageBody::new(json)?)
+    Ok(MessageBody::try_new(json)?)
 }
 
 /// Decode a channel-event body back to raw automerge change bytes. `None` for a
@@ -95,7 +95,7 @@ pub fn encrypt_body(plain: &MessageBody, key: &SymmetricKey) -> Result<MessageBo
         data: bs58::encode(blob).into_string(),
     })
     .map_err(DocError::encode)?;
-    Ok(MessageBody::new(json)?)
+    Ok(MessageBody::try_new(json)?)
 }
 
 /// Recover the plaintext body string. With a `key` (passworded mesh) the body

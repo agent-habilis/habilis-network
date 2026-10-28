@@ -431,7 +431,7 @@ mod departed_tests {
             &mesh,
             &who,
             crate::protocol::AppFrameParams::new(
-                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                 None,
                 None,
                 crate::protocol::MessageBody::from("kept"),

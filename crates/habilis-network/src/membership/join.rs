@@ -192,7 +192,7 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership, Se
     let nickname = opts
         .nick
         .clone()
-        .map(Nickname::new)
+        .map(Nickname::try_new)
         .transpose()
         .map_err(|error| SetupError::internal(anyhow::anyhow!("{error}")))?;
     let (kind, author) = resolve_kind(opts, nickname)?;
@@ -346,7 +346,7 @@ pub fn resolve_kind(
                 &opts.transport,
             )
             .map_err(SetupError::Config)?;
-            let name = MeshName::new(
+            let name = MeshName::try_new(
                 opts.name
                     .clone()
                     .unwrap_or_else(|| "habilis-network".to_string()),

@@ -34,7 +34,7 @@ struct Bot {
 async fn spawn_bot(topic: &str, nick: &str) -> Bot {
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::public_preset()).expect("derive a loopback mesh");
-    let author = Nickname::new(nick).expect("valid nickname");
+    let author = Nickname::try_new(nick).expect("valid nickname");
     let kind = SetupKind::Topic {
         mesh,
         topic_string: topic.to_string(),

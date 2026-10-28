@@ -1136,7 +1136,7 @@ fn dispatch_channel(
 fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
     let body = plain
         .filter(|text| text != frame.body.as_str())
-        .and_then(|text| MessageBody::new(text).ok());
+        .and_then(|text| MessageBody::try_new(text).ok());
     match body {
         Some(body) => frame.with_body(body),
         None => frame.authored(),
@@ -1348,7 +1348,7 @@ fn decrypt_broadcast<F: std::ops::Deref<Target = Message>>(
         );
         return None;
     };
-    MessageBody::new(plain).ok()
+    MessageBody::try_new(plain).ok()
 }
 
 /// Unseal a directed body sealed to us. Returns the plaintext body, or `None` when
@@ -1359,7 +1359,7 @@ fn decrypt_directed<F: std::ops::Deref<Target = Message>>(
     state: &EventLoopState,
 ) -> Option<MessageBody> {
     match seal::unseal_from_body(&state.identity.seal_secret(), &message.body) {
-        Ok(plaintext) => MessageBody::new(plaintext).ok(),
+        Ok(plaintext) => MessageBody::try_new(plaintext).ok(),
         Err(error) => {
             tracing::warn!(target: "habilis_network::gossip", %error, author = %message.author, "dropping a directed frame sealed to us that failed to open");
             None
@@ -1860,7 +1860,7 @@ mod retain_own_broadcast_tests {
     #[test]
     fn own_unloggable_plumbing_is_not_retained() {
         let mut state = fresh_state();
-        let body = crate::protocol::MessageBody::new("{}".to_owned()).expect("valid body");
+        let body = crate::protocol::MessageBody::try_new("{}".to_owned()).expect("valid body");
         let peer_info =
             Message::new_peer_info(&MeshId::from("💬test"), &Nickname::from("me"), body)
                 .sign(&state.identity);
@@ -1877,7 +1877,7 @@ mod retain_own_broadcast_tests {
             &MeshId::from("💬test"),
             &Nickname::from("me"),
             message::AppFrameParams::new(
-                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                 to.map(Nickname::from),
                 None,
                 crate::protocol::MessageBody::from("hello"),
@@ -2350,7 +2350,7 @@ mod first_contact_tests {
             &node.mesh,
             &nick("alice"),
             message::AppFrameParams::new(
-                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                 None,
                 None,
                 MessageBody::from("hello"),
@@ -2672,7 +2672,7 @@ mod first_contact_tests {
             if let Some(proof) = proof {
                 json["proof"] = serde_json::Value::String(proof.to_owned());
             }
-            let body = MessageBody::new(json.to_string()).expect("an address body");
+            let body = MessageBody::try_new(json.to_string()).expect("an address body");
             Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(signed_by)
         };
         let bobs_proof = sign(&bob_endpoint_key, &node.mesh, &bob_signer);
@@ -2748,7 +2748,7 @@ mod first_contact_tests {
         assert!(ours.topology_view().edges.is_empty());
 
         let address = endpoint_addr_to_json(&EndpointAddr::new(author_key.public()));
-        let address_body = MessageBody::new(address.to_string()).expect("an address body");
+        let address_body = MessageBody::try_new(address.to_string()).expect("an address body");
         let peer_info = Message::new_peer_info(&node.mesh, &nick("alice-aa"), address_body)
             .sign(&Identity::generate());
         super::handle_peer_info(&peer_info, &mut state, &ctx).await;
@@ -2848,7 +2848,7 @@ mod first_contact_tests {
         use crate::protocol::peer_addr::endpoint_addr_to_json;
 
         let body =
-            MessageBody::new(endpoint_addr_to_json(addr).to_string()).expect("an address body");
+            MessageBody::try_new(endpoint_addr_to_json(addr).to_string()).expect("an address body");
         Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&Identity::generate())
     }
 
@@ -2894,7 +2894,7 @@ mod first_contact_tests {
             }
         };
         let body =
-            MessageBody::new(endpoint_addr_to_json(&iroh::EndpointAddr::new(lower)).to_string())
+            MessageBody::try_new(endpoint_addr_to_json(&iroh::EndpointAddr::new(lower)).to_string())
                 .expect("an address body");
         let peer_info =
             Message::new_peer_info(&node.mesh, &nick("lower"), body).sign(&Identity::generate());
@@ -2941,7 +2941,7 @@ mod first_contact_tests {
             }
         };
         let body =
-            MessageBody::new(endpoint_addr_to_json(&iroh::EndpointAddr::new(newcomer)).to_string())
+            MessageBody::try_new(endpoint_addr_to_json(&iroh::EndpointAddr::new(newcomer)).to_string())
                 .expect("an address body");
         let peer_info =
             Message::new_peer_info(&node.mesh, &nick("newcomer"), body).sign(&Identity::generate());
@@ -3041,7 +3041,7 @@ mod first_contact_tests {
         let mut app = Inert;
         let newcomer = Identity::generate();
         let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
-        let heads = || MessageBody::new(r#"{"heads":[]}"#.to_owned()).expect("a JSON body");
+        let heads = || MessageBody::try_new(r#"{"heads":[]}"#.to_owned()).expect("a JSON body");
 
         let mut digest_first = fresh_state();
         let digest =

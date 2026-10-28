@@ -1782,7 +1782,7 @@ impl EventLoopState {
         }
         // The concatenation of valid bodies is itself valid (no new control
         // chars), but fail closed rather than surface a malformed body.
-        let body = crate::protocol::MessageBody::new(body).ok()?;
+        let body = crate::protocol::MessageBody::try_new(body).ok()?;
         let header = slots[0].expect("shard 0 present");
         Some(super::reassembly::synthesize_from(
             header,
@@ -3247,7 +3247,7 @@ mod tests {
             &MeshId::from("test"),
             &nick("author-nick"),
             AppFrameParams::new(
-                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                 None,
                 None,
                 MessageBody::from("body"),

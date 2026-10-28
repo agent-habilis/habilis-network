@@ -18,7 +18,7 @@ fn test_round_trip() {
         &sid(),
         &nick("word-word"),
         AppFrameParams {
-            tag: AppTag::new("app_msg").expect("a valid app tag"),
+            tag: AppTag::try_new("app_msg").expect("a valid app tag"),
             to: None,
             corr: None,
             body: MessageBody::from("Hello, world!"),
@@ -34,7 +34,7 @@ fn test_round_trip() {
 #[test]
 fn app_tag_constructor_rejects_an_invalid_value() {
     assert_eq!(
-        AppTag::new("not-valid!"),
+        AppTag::try_new("not-valid!"),
         Err(AppTagError::Invalid),
         "a tag with a dash is refused"
     );
@@ -43,7 +43,7 @@ fn app_tag_constructor_rejects_an_invalid_value() {
 #[test]
 fn correlation_id_constructor_rejects_an_invalid_value() {
     assert_eq!(
-        super::CorrId::new(""),
+        super::CorrId::try_new(""),
         Err(CorrIdError::Invalid),
         "an empty id is refused"
     );
@@ -104,7 +104,7 @@ fn test_task_status_round_trip() {
         &sid(),
         &nick("word-word"),
         AppFrameParams {
-            tag: AppTag::new("app_status").expect("a valid app tag"),
+            tag: AppTag::try_new("app_status").expect("a valid app tag"),
             to: Some(target.clone()),
             corr: None,
             body: MessageBody::from(r#"{"kind":"status-update"}"#),
@@ -143,7 +143,7 @@ fn test_ext_round_trip() {
         &sid(),
         &nick("word-word"),
         AppFrameParams {
-            tag: AppTag::new("app_msg").expect("a valid app tag"),
+            tag: AppTag::try_new("app_msg").expect("a valid app tag"),
             to: None,
             corr: None,
             body: MessageBody::from("With ext."),
@@ -272,7 +272,7 @@ fn build_msg_bytes_message() {
     let identity = crate::identity::Identity::generate();
     let (bytes, built) = build_msg_bytes(
         BuildMsgParams {
-            tag: AppTag::new("app_msg").expect("a valid app tag"),
+            tag: AppTag::try_new("app_msg").expect("a valid app tag"),
             mesh: &sid(),
             author: &alice,
             body: MessageBody::from("hello"),
@@ -348,7 +348,7 @@ mod signing {
             MessageKind::app_to(
                 "app_req",
                 "calm-otter".into(),
-                Some(CorrId::new("aaaa").expect("a valid correlation id")),
+                Some(CorrId::try_new("aaaa").expect("a valid correlation id")),
             ),
             "{}",
         )
@@ -357,7 +357,7 @@ mod signing {
         msg.kind = MessageKind::app_to(
             "app_req",
             "calm-otter".into(),
-            Some(CorrId::new("bbbb").expect("a valid correlation id")),
+            Some(CorrId::try_new("bbbb").expect("a valid correlation id")),
         );
         assert!(!msg.verify_signature(), "`corr` is a signed field");
     }
@@ -541,7 +541,7 @@ mod snapshots {
                 "app_req",
                 Nickname::from("addressed-nick"),
                 Some(
-                    CorrId::new("00000000-0000-0000-0000-0000000000aa")
+                    CorrId::try_new("00000000-0000-0000-0000-0000000000aa")
                         .expect("a valid correlation id"),
                 ),
             ),
@@ -559,7 +559,7 @@ mod snapshots {
                 "app_resp",
                 Nickname::from("addressed-nick"),
                 Some(
-                    CorrId::new("00000000-0000-0000-0000-0000000000aa")
+                    CorrId::try_new("00000000-0000-0000-0000-0000000000aa")
                         .expect("a valid correlation id"),
                 ),
             ),
@@ -588,7 +588,7 @@ mod prop {
     }
 
     fn arb_nickname() -> impl Strategy<Value = Nickname> {
-        "[a-z]{3,8}-[a-z]{3,8}".prop_map(|raw| Nickname::new(raw).unwrap())
+        "[a-z]{3,8}-[a-z]{3,8}".prop_map(|raw| Nickname::try_new(raw).unwrap())
     }
 
     proptest! {
@@ -598,8 +598,8 @@ mod prop {
             body in arb_ascii_body(),
             author in arb_nickname(),
         ) {
-            let body = MessageBody::new(body).unwrap();
-            let msg = Message::new_app(&sid(), &author, AppFrameParams { tag: AppTag::new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
+            let body = MessageBody::try_new(body).unwrap();
+            let msg = Message::new_app(&sid(), &author, AppFrameParams { tag: AppTag::try_new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
             let bytes = msg.serialize().unwrap();
             let parsed = Message::parse(&bytes).unwrap();
             prop_assert_eq!(&parsed.body, &msg.body);
@@ -626,7 +626,7 @@ mod prop {
             // C0 controls excluding the allowed tab/newline/cr.
             body in "[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f]{1,10}",
         ) {
-            prop_assert!(MessageBody::new(body).is_err());
+            prop_assert!(MessageBody::try_new(body).is_err());
         }
 
         #[test]
@@ -637,9 +637,9 @@ mod prop {
             body in "\\P{C}{0,50}",
             author in arb_nickname(),
         ) {
-            let body = MessageBody::new(body).unwrap();
+            let body = MessageBody::try_new(body).unwrap();
             let expected = body.clone();
-            let msg = Message::new_app(&sid(), &author, AppFrameParams { tag: AppTag::new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
+            let msg = Message::new_app(&sid(), &author, AppFrameParams { tag: AppTag::try_new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
             let bytes = msg.serialize().unwrap();
             let parsed = Message::parse(&bytes).unwrap();
             prop_assert_eq!(&parsed.body, &expected);
@@ -653,10 +653,10 @@ mod prop {
                 &sid(),
                 &Nickname::from("nick-name"),
                 AppFrameParams {
-                    tag: AppTag::new("app_msg").expect("a valid app tag"),
+                    tag: AppTag::try_new("app_msg").expect("a valid app tag"),
                     to: None,
                     corr: None,
-                    body: MessageBody::new(body).unwrap(),
+                    body: MessageBody::try_new(body).unwrap(),
                 },
             );
             if let Ok(bytes) = msg.serialize() {
@@ -673,7 +673,7 @@ fn a_resend_trailer_is_outside_the_frame_and_the_signature() {
         &sid(),
         &nick("word-word"),
         AppFrameParams {
-            tag: AppTag::new("app_msg").expect("a valid app tag"),
+            tag: AppTag::try_new("app_msg").expect("a valid app tag"),
             to: None,
             corr: None,
             body: MessageBody::from("Hello, world!"),

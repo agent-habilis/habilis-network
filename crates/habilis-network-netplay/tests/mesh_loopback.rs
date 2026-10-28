@@ -59,7 +59,7 @@ struct Player {
 async fn spawn(topic: &str, nick: &str) -> Player {
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
-    let author = Nickname::new(nick).expect("valid nickname");
+    let author = Nickname::try_new(nick).expect("valid nickname");
     let kind = SetupKind::Topic {
         mesh,
         topic_string: topic.to_owned(),

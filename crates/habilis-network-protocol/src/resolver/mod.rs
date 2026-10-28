@@ -148,7 +148,7 @@ mod tests {
         use crate::mesh::{Mesh, MeshConfig, MeshName};
         Mesh::new(
             crate::crypto::Seed::from_bytes([1u8; 32]),
-            MeshName::new("test").unwrap(),
+            MeshName::try_new("test").unwrap(),
             MeshConfig::loopback(),
         )
         .unwrap()
@@ -182,7 +182,7 @@ mod tests {
         use crate::mesh::{Mesh, MeshConfig, MeshName};
         let mut mesh = Mesh::new(
             crate::crypto::Seed::from_bytes([5u8; 32]),
-            MeshName::new("t").unwrap(),
+            MeshName::try_new("t").unwrap(),
             MeshConfig::loopback(),
         )
         .unwrap();

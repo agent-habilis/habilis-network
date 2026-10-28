@@ -648,7 +648,7 @@ impl OptFlag<MeshName> {
         match self {
             DirectorySelection::Unset => None,
             DirectorySelection::Default => Some(
-                MeshName::new(DEFAULT_DIRECTORY).expect("DEFAULT_DIRECTORY is a valid mesh name"),
+                MeshName::try_new(DEFAULT_DIRECTORY).expect("DEFAULT_DIRECTORY is a valid mesh name"),
             ),
             DirectorySelection::Named(name) => Some(name.clone()),
         }

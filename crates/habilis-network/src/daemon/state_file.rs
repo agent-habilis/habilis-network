@@ -441,7 +441,7 @@ mod tests {
     use super::{MeshId, MeshName, Nickname, StateFile, clock};
 
     fn name(value: &str) -> MeshName {
-        MeshName::new(value).expect("valid mesh name")
+        MeshName::try_new(value).expect("valid mesh name")
     }
 
     fn unique_path(tag: &str) -> PathBuf {

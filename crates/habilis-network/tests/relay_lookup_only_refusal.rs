@@ -114,7 +114,7 @@ async fn spawn(
         ),
     )
     .expect("derive a relay-only mesh");
-    let author = Nickname::new(nick).expect("valid nickname");
+    let author = Nickname::try_new(nick).expect("valid nickname");
     let config = setup_mesh(
         SetupKind::Topic {
             mesh,
@@ -154,8 +154,8 @@ async fn pair_links(relay: &RelayUrl, relay_transport: bool, deadline: Duration)
     tokio::time::sleep(Duration::from_secs(12)).await;
     let bob = spawn(&topic, "bob", relay, relay_transport, Arc::clone(&bob_saw)).await;
 
-    let bob_nick = Nickname::new("bob").expect("valid");
-    let alice_nick = Nickname::new("alice").expect("valid");
+    let bob_nick = Nickname::try_new("bob").expect("valid");
+    let alice_nick = Nickname::try_new("alice").expect("valid");
     let linked = alice_saw.wait_for(&bob_nick, deadline).await
         && bob_saw.wait_for(&alice_nick, deadline).await;
 

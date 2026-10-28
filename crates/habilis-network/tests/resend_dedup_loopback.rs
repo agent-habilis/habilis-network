@@ -111,7 +111,7 @@ impl NodeDriver for Chat {
                 let frame = app_frame(
                     ctx,
                     AppFrameParams::new(
-                        AppTag::new("app_msg").expect("a valid app tag"),
+                        AppTag::try_new("app_msg").expect("a valid app tag"),
                         None,
                         None,
                         MessageBody::from(text.as_str()),
@@ -157,7 +157,7 @@ impl NodeDriver for Chat {
 }
 
 fn nick(name: &str) -> Nickname {
-    Nickname::new(name).expect("valid nickname")
+    Nickname::try_new(name).expect("valid nickname")
 }
 
 async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Arc<Mutex<Vec<String>>>) {

@@ -1647,7 +1647,7 @@ mod tests {
                 &MeshId::from("test"),
                 &Nickname::from("author"),
                 message::AppFrameParams::new(
-                    crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                    crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                     None,
                     None,
                     MessageBody::from(format!("m{index}").as_str()),
@@ -1668,7 +1668,7 @@ mod tests {
             windows: vec![WireWindow::encode(&newest), WireWindow::encode(&older)],
         };
         let json = serde_json::to_string(&digest_body).unwrap();
-        let body = MessageBody::new(json).expect("digest body has no control chars");
+        let body = MessageBody::try_new(json).expect("digest body has no control chars");
 
         // Worst-case envelope: a realistically long mesh id.
         let mesh = MeshId::from(
@@ -1766,7 +1766,7 @@ mod tests {
         let back: HeadsBody = serde_json::from_str(&json).expect("round-trip");
         assert_eq!(back.heads, heads);
 
-        let body = MessageBody::new(json).expect("heads body has no control chars");
+        let body = MessageBody::try_new(json).expect("heads body has no control chars");
         let digest = Message::new_state_digest(&mesh, &author, body).sign(&Identity::generate());
         let wire = digest.serialize().expect("serialize state digest");
         assert!(
@@ -1791,7 +1791,7 @@ mod tests {
             &MeshId::from("test"),
             &Nickname::from("author"),
             message::AppFrameParams::new(
-                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                 None,
                 None,
                 MessageBody::from(body),

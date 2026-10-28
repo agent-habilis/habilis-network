@@ -517,7 +517,7 @@ mod tests {
     }
 
     fn nick(text: &str) -> Nickname {
-        Nickname::new(text).expect("a valid nickname")
+        Nickname::try_new(text).expect("a valid nickname")
     }
 
     fn raw(message: &LobbyMessage) -> String {
@@ -593,7 +593,7 @@ mod tests {
         assert!(lobby.started().is_none());
     }
 
-    /// A nickname that `Nickname::new` refuses is not a presence.
+    /// A nickname that `Nickname::try_new` refuses is not a presence.
     #[test]
     fn a_presence_with_a_nickname_the_wire_refuses_is_dropped() {
         let mut lobby = Lobby::new(key(0xaa), nick("alice"));

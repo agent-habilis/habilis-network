@@ -11,7 +11,7 @@ fn dummy_seed() -> Seed {
 }
 
 fn dummy_name() -> MeshName {
-    MeshName::new("test").unwrap()
+    MeshName::try_new("test").unwrap()
 }
 
 fn custom_config() -> MeshConfig {
@@ -490,7 +490,7 @@ fn unknown_version_rejected() {
 
 #[test]
 fn mesh_id_round_trips_unicode_name() {
-    let name = MeshName::new("café-日本-🎉").unwrap();
+    let name = MeshName::try_new("café-日本-🎉").unwrap();
     let mesh = Mesh::new(dummy_seed(), name.clone(), MeshConfig::loopback()).unwrap();
     let decoded: LockedMesh = mesh.to_string().parse().expect("decode failed");
     assert_eq!(decoded.name(), &name);
@@ -500,7 +500,7 @@ fn mesh_id_round_trips_unicode_name() {
 fn mesh_id_round_trips_max_byte_name() {
     // 32 four-byte scalars = 128 bytes = the most the 1-byte name
     // length field can carry; exercises the encode/decode upper edge.
-    let name = MeshName::new("🎉".repeat(32)).unwrap();
+    let name = MeshName::try_new("🎉".repeat(32)).unwrap();
     assert_eq!(name.as_bytes().len(), 128);
     let mesh = Mesh::new(dummy_seed(), name.clone(), MeshConfig::public_preset()).unwrap();
     let decoded: LockedMesh = mesh.to_string().parse().expect("decode failed");
@@ -523,7 +523,7 @@ mod prop {
     }
 
     fn arb_name() -> impl Strategy<Value = MeshName> {
-        "[a-z][a-z0-9_-]{0,31}".prop_map(|raw| MeshName::new(raw).unwrap())
+        "[a-z][a-z0-9_-]{0,31}".prop_map(|raw| MeshName::try_new(raw).unwrap())
     }
 
     fn arb_config() -> impl Strategy<Value = MeshConfig> {

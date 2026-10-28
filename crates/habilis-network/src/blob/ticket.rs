@@ -254,7 +254,7 @@ mod tests {
         // blob decode must refuse it (wrong kind / structure).
         let mesh = mesh::Mesh::new(
             crate::protocol::Seed::from_bytes([1u8; 32]),
-            mesh::MeshName::new("t").unwrap(),
+            mesh::MeshName::try_new("t").unwrap(),
             mesh::MeshConfig::loopback(),
         )
         .unwrap()
@@ -272,7 +272,7 @@ mod tests {
 
         let mut creator = Mesh::new(
             crate::protocol::Seed::from_bytes([1u8; 32]),
-            MeshName::new("t").unwrap(),
+            MeshName::try_new("t").unwrap(),
             MeshConfig::loopback(),
         )
         .unwrap();

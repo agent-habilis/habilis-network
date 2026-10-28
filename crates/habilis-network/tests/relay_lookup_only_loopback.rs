@@ -93,7 +93,7 @@ async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Probe> {
         !mesh.transport().relay_transport,
         "the default policy keeps the relay for lookup only"
     );
-    let author = Nickname::new(nick).expect("valid nickname");
+    let author = Nickname::try_new(nick).expect("valid nickname");
     let config = setup_mesh(
         SetupKind::Topic {
             mesh,
@@ -117,8 +117,8 @@ fn two_loopback_nodes_mesh_with_the_relay_lookup_only() {
         let bob = spawn(&topic, "bob", Arc::clone(&bob_saw)).await;
 
         let deadline = Duration::from_secs(45);
-        let bob_nick = Nickname::new("bob").expect("valid");
-        let alice_nick = Nickname::new("alice").expect("valid");
+        let bob_nick = Nickname::try_new("bob").expect("valid");
+        let alice_nick = Nickname::try_new("alice").expect("valid");
         assert!(
             alice_saw.wait_for(&bob_nick, deadline).await,
             "alice never saw bob join: the graft gate held a direct pair"

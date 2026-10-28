@@ -832,7 +832,7 @@ mod topic_tests {
     use habilis_network_test_tracing::test;
 
     fn name(text: &str) -> MeshName {
-        MeshName::new(text).unwrap()
+        MeshName::try_new(text).unwrap()
     }
 
     const CFG_A: &[u8] = &[60, 0, 0]; // rate 60, lookups loopback
@@ -943,7 +943,7 @@ mod golden_tests {
     #[test]
     fn golden_derivations_keyed_by_a_secret() {
         let root = SymmetricKey::from_bytes(ROOT);
-        let name = MeshName::new("test").unwrap();
+        let name = MeshName::try_new("test").unwrap();
         assert_eq!(
             format!(
                 "{:?}",

@@ -214,7 +214,7 @@ fn mdns_only() -> LookupOpts {
 
 async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Member> {
     let mesh = derive_topic_mesh_with(topic, mdns_only()).expect("derive an mDNS-only mesh");
-    let author = Nickname::new(nick).expect("valid nickname");
+    let author = Nickname::try_new(nick).expect("valid nickname");
     let config = setup_mesh(
         SetupKind::Topic {
             mesh,
@@ -249,7 +249,7 @@ async fn round(members: usize, start: Start, index: usize) -> Result<Duration, S
     let names: Vec<String> = (0..members).map(|number| format!("peer{number}")).collect();
     let nicks: Vec<Nickname> = names
         .iter()
-        .map(|name| Nickname::new(name.as_str()).expect("valid nickname"))
+        .map(|name| Nickname::try_new(name.as_str()).expect("valid nickname"))
         .collect();
     let sinks: Vec<Arc<Joined>> = nicks.iter().map(|_| Arc::default()).collect();
 

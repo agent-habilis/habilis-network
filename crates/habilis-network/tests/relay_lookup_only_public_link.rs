@@ -124,7 +124,7 @@ async fn spawn_with(
         ),
     )
     .expect("derive");
-    let author = Nickname::new(nick).expect("valid nickname");
+    let author = Nickname::try_new(nick).expect("valid nickname");
     let config = setup_mesh(
         SetupKind::Topic {
             mesh,
@@ -160,8 +160,8 @@ fn two_ip_peers_link_through_the_gated_rendezvous() {
         let bob = spawn_with(&topic, "bob", &relay, Arc::clone(&bob_saw), ip_only).await;
 
         let deadline = Duration::from_secs(75);
-        let alice_nick = Nickname::new("alice").expect("valid");
-        let bob_nick = Nickname::new("bob").expect("valid");
+        let alice_nick = Nickname::try_new("alice").expect("valid");
+        let bob_nick = Nickname::try_new("bob").expect("valid");
         let alice_ok = alice_saw.wait_for(&bob_nick, deadline).await;
         let bob_ok = bob_saw.wait_for(&alice_nick, deadline).await;
         let _ = alice.leave().await;
@@ -217,8 +217,8 @@ fn a_webrtc_only_peer_links_through_the_beacon_lane() {
         .await;
 
         let deadline = Duration::from_secs(75);
-        let alice_nick = Nickname::new("alice").expect("valid");
-        let bob_nick = Nickname::new("bob").expect("valid");
+        let alice_nick = Nickname::try_new("alice").expect("valid");
+        let bob_nick = Nickname::try_new("bob").expect("valid");
         let alice_ok = alice_saw.wait_for(&bob_nick, deadline).await;
         let bob_ok = bob_saw.wait_for(&alice_nick, deadline).await;
         let _ = alice.leave().await;
