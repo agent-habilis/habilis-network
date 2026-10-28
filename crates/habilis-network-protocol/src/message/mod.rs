@@ -21,6 +21,8 @@ use super::nickname::Nickname;
 use super::{AuthorKey, ContentHash, DedupKey};
 use crate::newtype::string_newtype;
 
+mod channel;
+pub use channel::Channel;
 mod presence_subtype;
 pub use presence_subtype::PresenceSubtype;
 mod app_frame_params;
@@ -323,42 +325,6 @@ pub enum MessageKind {
     /// it rides gossip rather than a durable channel log.
     #[serde(rename = "linkstate")]
     LinkState,
-}
-
-/// Which shared-state channel an event/digest belongs to. The two channels share
-/// all machinery; this selects the wire kind, the log, and the surfaced name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Channel {
-    /// The shared state of the mesh.
-    State,
-    /// The metadata of the members.
-    Meta,
-}
-
-impl Channel {
-    pub(crate) fn event_kind(self) -> MessageKind {
-        match self {
-            Channel::State => MessageKind::State,
-            Channel::Meta => MessageKind::Meta,
-        }
-    }
-
-    pub(crate) fn digest_kind(self) -> MessageKind {
-        match self {
-            Channel::State => MessageKind::StateDigest,
-            Channel::Meta => MessageKind::MetaDigest,
-        }
-    }
-
-    /// The event name surfaced on the `--output json` stream (`state` / `meta`).
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Channel::State => "state",
-            Channel::Meta => "meta",
-        }
-    }
 }
 
 impl fmt::Display for MessageKind {
