@@ -1,7 +1,6 @@
-//! A stream node: one endpoint that produces streams, opens them, or both.
+//! The stream node: one endpoint that serves and opens streams.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use habilis_network::iroh::Endpoint;
 use habilis_network::iroh::address_lookup::memory::MemoryLookup;
@@ -13,76 +12,28 @@ use habilis_network::net::direct::{
 };
 use habilis_network::net::{TransportOpts, add_peer_addr, address_book};
 use habilis_network::protocol::{
-    Lookup, LookupOpts, MeshConfig, RelayChoice, RelayLadder, RelayLadderError, Transport,
-    TransportPolicy,
+    LookupOpts, MeshConfig, RelayChoice, RelayLadder, RelayLadderError, Transport, TransportPolicy,
 };
 use rand::RngCore as _;
-use serde::Deserialize;
 use zeroize::Zeroizing;
 
+use super::{ONLINE_WAIT, StreamOpts};
 use crate::code;
 use crate::error::StreamError;
 use crate::hash::{ID_LEN, SECRET_LEN, StreamHash, StreamId, StreamSecret};
 use crate::produce::{Producer, Registry, StreamAcceptor};
 use crate::read::{Reader, Refused};
 
-/// How long `create` waits for the endpoint to reach its home relay, so the
-/// hash it mints carries it. Best effort: it never blocks past this.
-const ONLINE_WAIT: Duration = Duration::from_secs(5);
-
-/// How a node finds peers and what may carry its bytes — the same three lists
-/// a mesh create takes, so a producer and a tab agree on them.
-///
-/// `Deserialize` so a browser hands its constructor a plain object;
-/// `deny_unknown_fields` so a typo is an error, not a silent loopback node.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-#[non_exhaustive]
-pub struct StreamOpts {
-    /// How peers find each other: any of `mdns`, `dht`, `relay`. None is a
-    /// loopback node.
-    pub lookup: Vec<Lookup>,
-    /// What may carry bytes: any of `udp`, `webrtc`, `relay`, with `udp` or
-    /// `webrtc` among them. Empty ⇒ `udp,webrtc`. `multihop` and `gossip` are refused: a
-    /// stream is one direct lane, and its node never joins a gossip mesh.
-    pub transport: Vec<Transport>,
-    /// A custom relay ladder, first preferred. Empty is the default ladder.
-    pub relay_urls: Vec<String>,
-}
-
-impl StreamOpts {
-    /// Set the lookups.
-    #[must_use]
-    pub fn with_lookup(mut self, lookup: impl IntoIterator<Item = Lookup>) -> Self {
-        self.lookup = lookup.into_iter().collect();
-        self
-    }
-
-    /// Set the transports.
-    #[must_use]
-    pub fn with_transport(mut self, transport: impl IntoIterator<Item = Transport>) -> Self {
-        self.transport = transport.into_iter().collect();
-        self
-    }
-
-    /// The relay URLs to dial, in the order given.
-    #[must_use]
-    pub fn with_relay_urls(mut self, relay_urls: impl IntoIterator<Item = String>) -> Self {
-        self.relay_urls = relay_urls.into_iter().collect();
-        self
-    }
-}
-
 /// One endpoint serving and opening streams. It never joins a gossip mesh.
 #[derive(Debug, Clone)]
 pub struct StreamNode {
-    endpoint: Endpoint,
+    pub(super) endpoint: Endpoint,
     router: Router,
     webrtc: WebRtcHandle,
     registry: Arc<Registry>,
     lookups: LookupOpts,
-    transport: TransportPolicy,
-    transports: TransportOpts,
+    pub(super) transport: TransportPolicy,
+    pub(super) transports: TransportOpts,
     ice: IceProfile,
     /// The address book of the endpoint: the producers this node has opened, and
     /// the peers of its WebRTC sessions.
@@ -293,136 +244,4 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>, RelayLadderError
         return Ok(None);
     }
     urls.join(",").parse::<RelayLadder>().map(Some)
-}
-
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests {
-    use habilis_network::runtime::refuse_in_browser;
-    use habilis_network_test_tracing::test;
-
-    use super::{Lookup, MeshConfig, StreamNode, StreamOpts, Transport, TransportOpts};
-    // A stream is one direct lane: a list that names `multihop` is refused
-    // before anything binds.
-    #[test]
-    async fn a_stream_node_refuses_multihop() {
-        let opts = StreamOpts {
-            transport: vec![Transport::Udp, Transport::Multihop],
-            ..StreamOpts::default()
-        };
-        let refused = StreamNode::bind(&opts)
-            .await
-            .expect_err("multihop is refused");
-        assert!(
-            refused.to_string().contains("no multihop"),
-            "the error names the reason: {refused}"
-        );
-    }
-
-    // A stream node never joins a gossip mesh: a list that names `gossip` is refused too.
-    #[test]
-    async fn a_stream_node_refuses_gossip() {
-        let opts = StreamOpts {
-            transport: vec![Transport::Udp, Transport::Gossip],
-            ..StreamOpts::default()
-        };
-        let refused = StreamNode::bind(&opts)
-            .await
-            .expect_err("gossip is refused");
-        assert!(
-            refused.to_string().contains("no gossip"),
-            "the error names the reason: {refused}"
-        );
-    }
-
-    // The mesh default has `multihop`. An empty list for a stream must not take it.
-    #[test]
-    async fn an_empty_list_is_udp_and_webrtc_for_a_stream() {
-        let node = StreamNode::bind(&StreamOpts::default())
-            .await
-            .expect("bind a loopback node");
-        let policy = node.transport;
-        assert!(policy.udp && policy.webrtc, "udp and webrtc are on");
-        assert!(!policy.multihop, "multihop is off");
-        node.endpoint.close().await;
-    }
-
-    // A browser has no UDP, so a list without `webrtc` leaves relay payload as
-    // its only path: without `relay` in the list, nothing carries its bytes.
-    #[test]
-    fn a_browser_refuses_a_list_with_no_path_it_can_run() {
-        let refused = |transport: &[Transport]| {
-            let config = MeshConfig::resolve(&[Lookup::Relay], None, transport).expect("valid");
-            let transports = TransportOpts::default().within(&config.transport);
-            refuse_in_browser(&config.lookups, config.transport, transports).is_err()
-        };
-        assert!(refused(&[Transport::Udp]), "udp only");
-        assert!(
-            !refused(&[Transport::Udp, Transport::Relay]),
-            "relay payload"
-        );
-        assert!(!refused(&[Transport::WebRtc]), "a data channel");
-    }
-
-    // A data channel's handshake crosses the relay, and a browser has no
-    // other way to reach a producer.
-    #[test]
-    fn a_browser_refuses_a_stream_with_no_relay_lookup() {
-        let config =
-            MeshConfig::resolve(&[Lookup::Dht], None, &[Transport::Udp, Transport::WebRtc])
-                .expect("valid");
-        let transports = TransportOpts::default().within(&config.transport);
-        let error = refuse_in_browser(&config.lookups, config.transport, transports)
-            .expect_err("no path to signal on");
-        assert_eq!(
-            error.to_string(),
-            habilis_network::runtime::BROWSER_NEEDS_RELAY_LOOKUP
-        );
-    }
-
-    // A reader runs only the paths the producer runs: an offer to a producer
-    // with no data channel would fail only after its whole JSEP round.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_reader_takes_the_producers_transport_list() {
-        let producer_node = StreamNode::bind(&StreamOpts {
-            transport: vec![Transport::Udp],
-            ..StreamOpts::default()
-        })
-        .await
-        .expect("bind");
-        let hash = producer_node.create().await.hash().clone();
-        let reader_node = StreamNode::bind_for(&hash).await.expect("bind for");
-        assert!(reader_node.transports.udp);
-        assert!(
-            !reader_node.transports.webrtc,
-            "no data channel to offer to"
-        );
-        producer_node.close().await;
-        reader_node.close().await;
-    }
-
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn opening_many_streams_adds_one_address_lookup() {
-        let producer_node = StreamNode::bind(&StreamOpts::default())
-            .await
-            .expect("bind");
-        let consumer_node = StreamNode::bind(&StreamOpts::default())
-            .await
-            .expect("bind");
-        let lookups = || {
-            consumer_node
-                .endpoint
-                .address_lookup()
-                .expect("an address book")
-                .len()
-        };
-        let before = lookups();
-        for _ in 0..5 {
-            let producer = producer_node.create().await;
-            consumer_node.open(producer.hash()).await.expect("open");
-        }
-        let after = lookups();
-        assert!(after <= before + 1, "{before} lookups grew to {after}");
-        producer_node.close().await;
-        consumer_node.close().await;
-    }
 }
