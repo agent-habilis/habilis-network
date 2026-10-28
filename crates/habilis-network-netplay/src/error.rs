@@ -4,7 +4,7 @@ use crate::frame::Frame;
 use crate::handle::PlayerHandle;
 
 /// Errors a rollback session can return.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
 #[non_exhaustive]
 #[must_use]
 pub enum RollbackError {
