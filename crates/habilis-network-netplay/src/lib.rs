@@ -49,33 +49,33 @@
 //! every frame and compares state checksums. Use it.
 
 #[cfg(test)]
-mod testutil;
+mod test_game;
 
 mod config;
-mod error;
 mod frame;
-mod handle;
 mod input_queue;
 mod mesh;
-mod protocol;
+mod peer_protocol;
+mod player_handle;
 mod request;
+mod rollback_error;
 mod saved_states;
 mod session;
 mod sync;
-mod sync_test;
+mod sync_test_session;
 mod time_sync;
 mod transport;
 
 pub use config::Config;
-pub use error::RollbackError;
 pub use frame::{Frame, InputStatus};
-pub use handle::PlayerHandle;
 pub use mesh::{
     Epoch, LOBBY_TAG, Lobby, LobbyError, MeshTransport, Outbound, ROLLBACK_TAG, RollbackDriver,
     SessionId, StartedMatch, Tick, TickSpan,
 };
-pub use protocol::PeerState;
+pub use peer_protocol::PeerState;
+pub use player_handle::PlayerHandle;
 pub use request::{Request, StateCell};
+pub use rollback_error::RollbackError;
 pub use session::{Event, P2PSession, SessionState};
-pub use sync_test::SyncTestSession;
+pub use sync_test_session::SyncTestSession;
 pub use transport::{Body, InputPacket, Message, Transport};

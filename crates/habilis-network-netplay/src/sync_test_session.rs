@@ -31,10 +31,10 @@
 use std::collections::BTreeMap;
 
 use crate::config::Config;
-use crate::error::RollbackError;
 use crate::frame::Frame;
-use crate::handle::PlayerHandle;
+use crate::player_handle::PlayerHandle;
 use crate::request::Request;
+use crate::rollback_error::RollbackError;
 use crate::sync::Sync;
 
 /// A local session that re-simulates every frame and compares checksums.

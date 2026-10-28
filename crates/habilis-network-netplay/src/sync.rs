@@ -26,11 +26,11 @@
 )]
 
 use crate::config::Config;
-use crate::error::RollbackError;
 use crate::frame::{Frame, InputStatus};
-use crate::handle::PlayerHandle;
 use crate::input_queue::InputQueue;
+use crate::player_handle::PlayerHandle;
 use crate::request::{Request, StateCell};
+use crate::rollback_error::RollbackError;
 use crate::saved_states::SavedStates;
 
 pub(crate) struct Sync<T: Config> {
@@ -248,11 +248,11 @@ impl<T: Config> Sync<T> {
 #[cfg(test)]
 mod tests {
     use super::Sync;
-    use crate::error::RollbackError;
     use crate::frame::{Frame, InputStatus};
-    use crate::handle::PlayerHandle;
+    use crate::player_handle::PlayerHandle;
     use crate::request::Request;
-    use crate::testutil::{TestGame, TestInput, TestRunner};
+    use crate::rollback_error::RollbackError;
+    use crate::test_game::{TestGame, TestInput, TestRunner};
     use habilis_network_test_tracing::test;
 
     /// Two players, generous prediction window, no input delay.

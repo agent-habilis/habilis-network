@@ -35,7 +35,7 @@ pub_const_fn|crates/habilis-network-chunks/src/coverage.rs|2|kept: ChunkHash and
 pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/link_metric.rs|2|kept: newtype rule (LinkMetric new and get)
 pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/app_id.rs|4|kept: newtype rule (AppId and UnderlayId new and get)
 pub_const_fn|crates/habilis-network-netplay/src/frame.rs|2|kept: newtype rule (Frame new and get)
-pub_const_fn|crates/habilis-network-netplay/src/handle.rs|2|kept: newtype rule (PlayerHandle new and index)
+pub_const_fn|crates/habilis-network-netplay/src/player_handle.rs|2|kept: newtype rule (PlayerHandle new and index)
 pub_const_fn|crates/habilis-network-netplay/src/mesh/lobby.rs|8|kept: newtype rule (Epoch, SessionId, Tick, TickSpan new, get, next, since)
 pub_const_fn|crates/habilis-network-protocol/src/author_key.rs|3|kept: newtype rule (from_bytes, as_bytes, to_bytes of a 32- or 16-byte key or hash)
 pub_const_fn|crates/habilis-network-protocol/src/content_hash.rs|2|kept: newtype rule (from_bytes, as_bytes, to_bytes of a 32- or 16-byte key or hash)
@@ -110,7 +110,7 @@ assert_no_message|crates/habilis-network-netplay/examples/light-cycles/web/wasm/
 assert_no_message|crates/habilis-network-netplay/src/frame.rs|3|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-netplay/src/input_queue.rs|17|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-netplay/src/mesh/lobby.rs|23|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-netplay/src/protocol.rs|7|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network-netplay/src/peer_protocol.rs|7|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-netplay/src/sync.rs|12|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-netplay/src/time_sync.rs|4|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-netplay/tests/convergence.rs|2|kept: assert without a message, to be given one (P13 rollout)
@@ -254,12 +254,12 @@ long_chain|crates/habilis-network-netplay/examples/light-cycles/web/wasm/src/rou
 long_chain|crates/habilis-network-netplay/src/input_queue.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-netplay/src/mesh/driver.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-netplay/src/mesh/lobby.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-netplay/src/protocol.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-netplay/src/peer_protocol.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-netplay/src/request.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-netplay/src/saved_states.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-netplay/src/session.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-netplay/src/sync.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-netplay/src/sync_test.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-netplay/src/sync_test_session.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/directory.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/invite/invite_ticket.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/mesh/lookup.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -510,7 +510,7 @@ pub_vec_return|crates/habilis-network-doc/src/wire.rs|1|parse_change_body: the o
 pub_vec_return|crates/habilis-network-iroh-multihop-transport/src/lib.rs|1|underlay_paths_for_test: a test helper whose owned list the test compares
 pub_vec_return|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|2|benchmark harness behind the bench feature: payload is an owned byte buffer, rtt_samples an owned list
 pub_vec_return|crates/habilis-network-netplay/src/session.rs|1|advance_frame: the owned requests of this frame, which the caller takes
-pub_vec_return|crates/habilis-network-netplay/src/sync_test.rs|1|advance_frame: the owned requests of this frame, which the caller takes
+pub_vec_return|crates/habilis-network-netplay/src/sync_test_session.rs|1|advance_frame: the owned requests of this frame, which the caller takes
 pub_vec_return|crates/habilis-network-protocol/src/base58_error.rs|1|decode: the owned decoded bytes
 pub_vec_return|crates/habilis-network-protocol/src/identity.rs|1|decode_hex: the owned decoded bytes
 pub_vec_return|crates/habilis-network-protocol/src/mesh/lookup.rs|1|to_bytes: the owned encoded byte buffer
@@ -648,7 +648,7 @@ abbrev_name|crates/habilis-network-logging/src/messages.rs|27|existing letter-de
 abbrev_name|crates/habilis-network-logging/src/log_sink.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/mesh/driver.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/mesh/transport.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-netplay/src/protocol.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-netplay/src/peer_protocol.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/session.rs|29|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/transport.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/lib.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count

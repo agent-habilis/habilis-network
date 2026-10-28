@@ -299,7 +299,7 @@ impl<T: Config> InputQueue<T> {
 mod tests {
     use super::InputQueue;
     use crate::frame::{Frame, InputStatus};
-    use crate::testutil::{TestGame, TestInput};
+    use crate::test_game::{TestGame, TestInput};
     use habilis_network_test_tracing::test;
 
     fn queue() -> InputQueue<TestGame> {

@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use habilis_network::protocol::{AuthorKey, Nickname};
 use serde::{Deserialize, Serialize};
 
-use crate::handle::PlayerHandle;
+use crate::player_handle::PlayerHandle;
 
 /// Which match this is, counting from 1; `0` before the first.
 ///

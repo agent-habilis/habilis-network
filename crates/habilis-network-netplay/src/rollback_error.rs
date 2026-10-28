@@ -1,7 +1,7 @@
 //! What can go wrong.
 
 use crate::frame::Frame;
-use crate::handle::PlayerHandle;
+use crate::player_handle::PlayerHandle;
 
 /// Errors a rollback session can return.
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]

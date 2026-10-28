@@ -11,7 +11,7 @@
 
 use crate::config::Config;
 use crate::frame::Frame;
-use crate::handle::PlayerHandle;
+use crate::player_handle::PlayerHandle;
 use crate::time_sync::{TimeSync, frame_advantage};
 use crate::transport::{Body, InputPacket, Message};
 
@@ -489,8 +489,8 @@ impl<T: Config> PeerProtocol<T> {
 mod tests {
     use super::{Body, PeerProtocol, PeerState, SYNC_RESEND_EVERY_TICKS};
     use crate::frame::Frame;
-    use crate::handle::PlayerHandle;
-    use crate::testutil::TestGame;
+    use crate::player_handle::PlayerHandle;
+    use crate::test_game::TestGame;
     use crate::transport::Message;
     use habilis_network_test_tracing::test;
 
@@ -503,7 +503,7 @@ mod tests {
             body: Body::Input(crate::transport::InputPacket {
                 start_frame: Frame::new(5),
                 ack_frame: None,
-                inputs: vec![crate::testutil::TestInput(7)],
+                inputs: vec![crate::test_game::TestInput(7)],
             }),
         };
         assert_eq!(
@@ -518,14 +518,14 @@ mod tests {
     #[test]
     fn an_old_packet_with_the_minus_one_ack_frame_is_a_parse_error() {
         let old = r#"{"magic":2882343476,"body":{"Input":{"start_frame":5,"ack_frame":-1,"inputs":[7]}}}"#;
-        let error = serde_json::from_str::<Message<crate::testutil::TestInput>>(old)
+        let error = serde_json::from_str::<Message<crate::test_game::TestInput>>(old)
             .expect_err("a negative frame is refused");
         assert!(error.to_string().contains("negative"), "{error}");
     }
 
     #[test]
     fn an_ack_frame_is_on_the_wire_only_when_there_is_one() {
-        let packet = |ack_frame| Message::<crate::testutil::TestInput> {
+        let packet = |ack_frame| Message::<crate::test_game::TestInput> {
             magic: 0xabcd_1234,
             body: Body::InputAck { ack_frame },
         };
@@ -537,7 +537,7 @@ mod tests {
             r#"{"magic":2882343476,"body":{"InputAck":{"ack_frame":4}}}"#
         );
         for json in [none, some] {
-            let back: Message<crate::testutil::TestInput> =
+            let back: Message<crate::test_game::TestInput> =
                 serde_json::from_str(&json).expect("round trips");
             assert_eq!(serde_json::to_string(&back).expect("serializes"), json);
         }
@@ -619,7 +619,7 @@ mod tests {
                 body: Body::Input(crate::transport::InputPacket {
                     start_frame: Frame::new(40),
                     ack_frame: Some(Frame::new(39)),
-                    inputs: vec![crate::testutil::TestInput(7)],
+                    inputs: vec![crate::test_game::TestInput(7)],
                 }),
             },
             &mut replies,

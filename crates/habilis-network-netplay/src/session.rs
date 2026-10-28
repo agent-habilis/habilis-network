@@ -19,11 +19,11 @@
 //! ```
 
 use crate::config::Config;
-use crate::error::RollbackError;
 use crate::frame::Frame;
-use crate::handle::PlayerHandle;
-use crate::protocol::{PeerEvent, PeerProtocol, PeerState};
+use crate::peer_protocol::{PeerEvent, PeerProtocol, PeerState};
+use crate::player_handle::PlayerHandle;
 use crate::request::Request;
+use crate::rollback_error::RollbackError;
 use crate::sync::Sync;
 use crate::transport::{Message, Transport};
 
