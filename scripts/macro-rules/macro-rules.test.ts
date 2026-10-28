@@ -67,6 +67,10 @@ test("a proc macro in crates is refused", () => {
   expectExit({ "crates/x/src/a.rs": "#[proc_macro_attribute]\npub fn test(a: TokenStream, b: TokenStream) -> TokenStream { b }" }, 1);
 });
 
+test("a row with no reason is refused", () => {
+  expectExit({ "crates/x/src/a.rs": macro }, 1, "crates/x/src/a.rs|1|");
+});
+
 test("two rows for one file are refused", () => {
   expectExit({ "crates/x/src/a.rs": macro }, 1, "crates/x/src/a.rs|1|a\ncrates/x/src/a.rs|1|b");
 });

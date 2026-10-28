@@ -36,7 +36,10 @@ function readAllow(): { allowed: Map<string, number>; problems: string[] } {
   if (!existsSync(file)) return { allowed, problems };
   for (const line of readFileSync(file, "utf8").split("\n")) {
     if (/^\s*(#|$)/.test(line)) continue;
-    const [target = "", count = ""] = line.split("|");
+    const [target = "", count = "", reason = ""] = line.split("|");
+    if (reason.trim() === "") {
+      problems.push(`macro-rules: ${allowFile} has a row for ${target} with no reason. Say why the macro stays.`);
+    }
     if (allowed.has(target)) {
       problems.push(`macro-rules: ${allowFile} has two rows for ${target}. Merge them.`);
     }
