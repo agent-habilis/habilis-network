@@ -645,6 +645,6 @@ impl ChunkSource for DiskOrigin {
 /// Exposed so a caller sizing its own buffers agrees with the chunking without
 /// restating the constant.
 #[must_use]
-pub const fn max_read_window() -> u64 {
+pub fn max_read_window() -> u64 {
     CHUNK_BYTES
 }

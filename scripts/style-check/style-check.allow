@@ -31,8 +31,7 @@ operator|crates/habilis-network-util/src/clock.rs|2|UnixSecs plus or minus a Dur
 operator|crates/habilis-network/src/gossip/app.rs|1|AppClass bit flags: BitOr joins two sets of flags.
 
 # pub_const_fn: a public const fn (U21). Each row is a count that may only go down.
-pub_const_fn|crates/habilis-network-chunks/src/fs.rs|1|kept: not yet classified; reviewer to confirm const stays (U21).
-pub_const_fn|crates/habilis-network-chunks/src/lib.rs|8|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-chunks/src/lib.rs|8|kept: ChunkHash and Root newtype accessors and constructors (from_bytes, as_bytes), plus trivial accessors (root, size, len, is_empty)
 pub_const_fn|crates/habilis-network-ffi/src/ffi.rs|3|kept: not yet classified; reviewer to confirm const stays (U21).
 pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/lib.rs|4|kept: not yet classified; reviewer to confirm const stays (U21).
 pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/metric.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
