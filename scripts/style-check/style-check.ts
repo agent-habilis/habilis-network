@@ -227,6 +227,18 @@ function countTurbofish(raw: string): number {
   return text.match(/\.(?:collect|parse)::<(?!_>)[^;]*?>\(/g)?.length ?? 0;
 }
 
+// The lets with no type whose value is a method chain of five or more calls. The reader must infer
+// the type of the result from the whole chain, so the let names it (P5). A typed let is not counted.
+function countUntypedLongChainLets(raw: string): number {
+  const text = blankStrings(stripComments(raw));
+  let count = 0;
+  for (const m of text.matchAll(/\blet\s+(?:mut\s+)?\w+\s*=\s*([^;]*);/g)) {
+    const calls = (m[1] ?? "").match(/\.\s*\w+\s*(?:::<[^>]*>\s*)?\(/g);
+    if (calls && calls.length >= CHAIN_LIMIT) count++;
+  }
+  return count;
+}
+
 function countAnyhowPub(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   const bare = new Set<string>();
@@ -369,6 +381,12 @@ const RULES: Rule[] = [
     scan: countTurbofish,
     glob: "crates/**/*.rs",
     why: "Name the type on the variable, not in a turbofish, for collect and parse (P2). A `_` that the compiler forces is allowed.",
+  },
+  {
+    name: "untyped_long_chain_let",
+    scan: countUntypedLongChainLets,
+    glob: "crates/**/*.rs",
+    why: "A let of a chain of five or more calls names its type (P5). The reader cannot infer the result from the chain alone.",
   },
   {
     name: "anyhow_pub",

@@ -336,3 +336,15 @@ test("dyn_param: a generic parameter is clean", () => {
 test("dyn_param: a dyn return is not a parameter", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f() -> Box<dyn Sink> { todo!() }", 0);
 });
+
+// The untyped_long_chain_let rule (P5): an untyped let of a five-call chain needs a row.
+const untypedChain = "pub fn f(v: Vec<u8>) -> usize {\n    let n = v.iter().map(|x| x + 1).filter(|x| *x > 1).take(3).count();\n    n\n}";
+test("untyped_long_chain_let: an untyped let of five calls fails with no row", () => {
+  expectExit("crates/demo/src/lib.rs", untypedChain, 1, "");
+});
+test("untyped_long_chain_let: a typed let passes", () => {
+  expectExit("crates/demo/src/lib.rs", untypedChain.replace("let n =", "let n: usize ="), 0, "long_chain|crates/demo/src/lib.rs|1|fixture");
+});
+test("untyped_long_chain_let: the exact count is allowed", () => {
+  expectExit("crates/demo/src/lib.rs", untypedChain, 0, "long_chain|crates/demo/src/lib.rs|1|fixture\nuntyped_long_chain_let|crates/demo/src/lib.rs|1|fixture");
+});
