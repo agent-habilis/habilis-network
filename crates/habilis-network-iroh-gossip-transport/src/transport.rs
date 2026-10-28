@@ -194,7 +194,7 @@ impl GossipHandle {
     /// of a peer with the gossip address.
     #[must_use]
     pub fn address_lookup(&self) -> impl AddressLookup + use<> {
-        crate::lookup::GossipLookup {
+        crate::gossip_lookup::GossipLookup {
             shared: Arc::clone(&self.shared),
         }
     }
@@ -205,7 +205,7 @@ impl GossipHandle {
     /// mesh topic would carry the bytes of a pair that has an IP path.
     #[must_use]
     pub fn path_selector(&self) -> Arc<dyn transports::PathSelector> {
-        Arc::new(crate::selector::GossipLadder::new(self.app_id()))
+        Arc::new(crate::gossip_ladder::GossipLadder::new(self.app_id()))
     }
 
     /// Allow frames to `dst`, or stop them. The engine calls this when the selected

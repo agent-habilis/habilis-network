@@ -2,9 +2,7 @@
 # Used by scripts/module-layout/module-layout.ts. Each leaf file that is named for none of its public types has one row. A row goes when the file is renamed or split.
 
 crates/habilis-network-ffi/src/ffi.rs|1|rename pending: public type(s) HabilisNetworkOpts, HabilisNetworkMsg, HabilisNetworkMesh, HabilisNetworkStreamOpts, HabilisNetworkStreams, HabilisNetworkProducer, HabilisNetworkReader
-crates/habilis-network-iroh-gossip-transport/src/lookup.rs|1|rename pending: public type(s) GossipLookup
 crates/habilis-network-iroh-gossip-transport/src/memory.rs|1|rename pending: public type(s) Hub
-crates/habilis-network-iroh-gossip-transport/src/selector.rs|1|rename pending: public type(s) GossipLadder
 crates/habilis-network-iroh-gossip-transport/src/sink.rs|1|rename pending: public type(s) GossipSink, ReceiveLoop
 crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|rename pending: public type(s) FrameSink, Delivery, Shared, GossipHandle
 crates/habilis-network-iroh-multihop-transport/src/underlay.rs|1|rename pending: public type(s) Delivered, Forwarder, ForwardAcceptor

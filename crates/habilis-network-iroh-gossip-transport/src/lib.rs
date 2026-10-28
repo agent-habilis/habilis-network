@@ -8,10 +8,10 @@ mod addr;
 mod budget;
 mod counters;
 pub mod frame;
-mod lookup;
+mod gossip_ladder;
+mod gossip_lookup;
 pub mod memory;
 mod recursion;
-mod selector;
 mod sink;
 mod transport;
 
