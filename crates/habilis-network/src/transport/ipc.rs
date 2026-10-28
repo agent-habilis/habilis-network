@@ -373,19 +373,16 @@ async fn round_trip<C: Serialize>(stream: Stream, cmd: &C) -> Result<String> {
 /// inside each mesh's folder (`<base>/<mesh-prefix>/`). Best-effort: a missing
 /// base yields an empty list. Drives the consumer's active-mesh discovery, so it
 /// walks the per-mesh subfolders.
-#[must_use]
-pub fn active_socket_paths(base: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let Ok(mesh_dirs) = std::fs::read_dir(base) else {
-        return Vec::new();
-    };
-    mesh_dirs
+pub fn active_socket_paths(base: &std::path::Path) -> impl Iterator<Item = std::path::PathBuf> {
+    std::fs::read_dir(base)
+        .into_iter()
+        .flatten()
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
         .flat_map(|dir| std::fs::read_dir(dir).into_iter().flatten().flatten())
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "sock"))
-        .collect()
 }
 
 #[cfg(test)]
