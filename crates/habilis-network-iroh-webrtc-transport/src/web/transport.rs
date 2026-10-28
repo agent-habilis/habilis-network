@@ -26,8 +26,9 @@ use web_sys::{MessageEvent, RtcDataChannel, RtcPeerConnection, RtcPeerConnection
 
 use super::jsep::{now_ms, sleep_ms};
 use crate::attach_error::AttachError;
-use crate::liveness::{ConnectionPhase, DISCONNECT_GRACE_MS, Verdict, judge_state};
+use crate::connection_phase::ConnectionPhase;
 use crate::registry::Registry;
+use crate::verdict::{DISCONNECT_GRACE_MS, Verdict, judge_state};
 use crate::{IN_QUEUE, OUT_QUEUE, custom_addr};
 
 /// Stop queueing into the channel above this much buffered data.

@@ -74,9 +74,14 @@ mod registry;
     all(not(feature = "web"), not(test)),
     expect(dead_code, reason = "the browser hub's watchdog; its tests still run")
 )]
-mod liveness;
+mod connection_phase;
 #[cfg(any(feature = "native", feature = "web"))]
 mod selector;
+#[cfg_attr(
+    all(not(feature = "web"), not(test)),
+    expect(dead_code, reason = "the browser hub's watchdog; its tests still run")
+)]
+mod verdict;
 #[cfg(feature = "test-hooks")]
 pub use habilis_network_iroh_transport_util::{Rung, expected_rung};
 #[cfg(feature = "test-hooks")]
