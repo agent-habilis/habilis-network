@@ -4,7 +4,7 @@
 # A Drop that runs while a panic unwinds must not panic: a second panic aborts the process.
 poison|crates/habilis-network/src/transport/pool.rs|2|InFlightDial::drop clears the in-flight entry during unwinding. register_dial must read the same map.
 # The guard of a test must survive a test that panicked, or it hides the failure that matters.
-poison|crates/habilis-network-test-tracing/src/lib.rs|2|lock helper of the test guard: the import and the call.
+poison|crates/habilis-network-test-tracing/src/guard.rs|2|lock helper of the test guard: the import and the call.
 
 # The light-cycles example uses native generators, a nightly-only feature.
 feature|crates/habilis-network-netplay/examples/light-cycles/native/game/src/lib.rs|1|coroutines, yield_expr (nightly example)
@@ -14,7 +14,7 @@ feature|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-
 catch_unwind|crates/habilis-network-ffi/src/ffi.rs|1|FFI boundary
 
 # The one catch_unwind outside the FFI boundary: the helper that the tests use to check a panic.
-catch_unwind|crates/habilis-network-test-tracing/src/lib.rs|1|catch_panic, the helper that the tests use to check a panic
+catch_unwind|crates/habilis-network-test-tracing/src/guard.rs|1|catch_panic, the helper that the tests use to check a panic
 
 # anyhow_pub: a public signature returns anyhow. Exceptions: test and benchmark helpers behind a
 # feature, not library API.
@@ -29,7 +29,9 @@ operator|crates/habilis-network-util/src/clock.rs|2|UnixSecs plus or minus a Dur
 operator|crates/habilis-network/src/gossip/app.rs|1|AppClass bit flags: BitOr joins two sets of flags.
 
 # pub_const_fn: a public const fn (U21). Each row is a count that may only go down.
-pub_const_fn|crates/habilis-network-chunks/src/lib.rs|8|kept: ChunkHash and Root newtype accessors and constructors (from_bytes, as_bytes), plus trivial accessors (root, size, len, is_empty)
+pub_const_fn|crates/habilis-network-chunks/src/chunk_hash.rs|4|kept: ChunkHash and Root newtype accessors and constructors (from_bytes, as_bytes), plus trivial accessors (root, size, len, is_empty)
+pub_const_fn|crates/habilis-network-chunks/src/chunk_map.rs|2|kept: ChunkHash and Root newtype accessors and constructors (from_bytes, as_bytes), plus trivial accessors (root, size, len, is_empty)
+pub_const_fn|crates/habilis-network-chunks/src/coverage.rs|2|kept: ChunkHash and Root newtype accessors and constructors (from_bytes, as_bytes), plus trivial accessors (root, size, len, is_empty)
 pub_const_fn|crates/habilis-network-ffi/src/ffi.rs|3|kept: C-edge empty values (empty), used by the FFI structs (reviewer to confirm const context)
 pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/metric.rs|2|kept: newtype rule (LinkMetric new and get)
 pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/role.rs|4|kept: newtype rule (AppId and UnderlayId new and get)
@@ -57,7 +59,7 @@ manual_eq_ord|crates/habilis-network-iroh-multihop-transport/src/graph.rs|3|Heap
 assert_no_message|crates/habilis-network-chunks/src/lib.rs|59|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-chunks/tests/conformance/cases.rs|1|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-chunks/tests/origin/cases.rs|25|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-doc/src/lib.rs|56|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network-doc/src/mesh_doc.rs|56|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-doc/src/wire.rs|9|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-ffi/tests/ffi_smoke.rs|20|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-gossip-transport/src/budget.rs|3|kept: assert without a message, to be given one (P13 rollout)
@@ -210,7 +212,7 @@ long_chain|crates/habilis-network-chunks/src/mem.rs|1|kept: statements with a ch
 long_chain|crates/habilis-network-chunks/tests/idb_browser/cases.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-chunks/tests/isolation.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-chunks/tests/origin/cases.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-doc/src/lib.rs|6|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-doc/src/mesh_doc.rs|6|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-ffi/src/ffi.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-ffi/src/mesh.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-gossip-transport/src/recursion.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -226,7 +228,7 @@ long_chain|crates/habilis-network-iroh-multihop-transport/src/topology.rs|5|kept
 long_chain|crates/habilis-network-iroh-multihop-transport/src/transport.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-multihop-transport/src/underlay.rs|6|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-multihop-transport/tests/e2e.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-iroh-transport-util/src/lib.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-iroh-transport-util/src/rung.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/host.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/join.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/path.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -280,13 +282,14 @@ long_chain|crates/habilis-network-stream/src/hash.rs|3|kept: statements with a c
 long_chain|crates/habilis-network-stream/src/node.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream/src/produce.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream/tests/stream.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-test-tracing/src/lib.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-test-tracing/src/guard.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-test-tracing/tests/atexit.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-test-tracing/tests/late.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-test-tracing/tests/twice.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-util/src/clock.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-util/src/process.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-wasm/src/lib.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-wasm/src/mesh_peer.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-wasm/src/tracing_console.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-wasm/src/stream.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/examples/mesh_peer.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/examples/mesh_peer_load.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -366,7 +369,7 @@ turbofish_collect_parse|crates/habilis-network-chunks/src/fs.rs|2|kept: collect 
 turbofish_collect_parse|crates/habilis-network-chunks/src/idb.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-chunks/tests/conformance/cases.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-chunks/tests/idb_browser/cases.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network-doc/src/lib.rs|10|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
+turbofish_collect_parse|crates/habilis-network-doc/src/mesh_doc.rs|10|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-ffi/src/ffi.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-iroh-gossip-transport/src/recursion.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-iroh-gossip-transport/src/selector.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
@@ -437,7 +440,7 @@ untyped_long_chain_let|crates/habilis-network-chunks/src/fs.rs|2|kept: a let of 
 untyped_long_chain_let|crates/habilis-network-chunks/src/idb.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-chunks/tests/idb_browser/cases.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-chunks/tests/origin/cases.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-doc/src/lib.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+untyped_long_chain_let|crates/habilis-network-doc/src/mesh_doc.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-ffi/src/ffi.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-gossip-transport/src/recursion.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-gossip-transport/src/selector.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
@@ -449,7 +452,7 @@ untyped_long_chain_let|crates/habilis-network-iroh-multihop-transport/src/topolo
 untyped_long_chain_let|crates/habilis-network-iroh-multihop-transport/src/transport.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-multihop-transport/src/underlay.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-multihop-transport/tests/e2e.rs|3|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-iroh-transport-util/src/lib.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+untyped_long_chain_let|crates/habilis-network-iroh-transport-util/src/rung.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/host.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/join.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-web/src/lib.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
@@ -473,10 +476,10 @@ untyped_long_chain_let|crates/habilis-network-protocol/src/mesh/tests.rs|2|kept:
 untyped_long_chain_let|crates/habilis-network-protocol/src/mesh/transport.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-protocol/src/reassembly.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-stream-cli/tests/binary.rs|4|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-test-tracing/src/lib.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+untyped_long_chain_let|crates/habilis-network-test-tracing/src/guard.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-test-tracing/tests/atexit.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-test-tracing/tests/twice.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-wasm/src/lib.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+untyped_long_chain_let|crates/habilis-network-wasm/src/tracing_console.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/examples/mesh_peer.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/examples/mesh_peer_load.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/beacon/mod.rs|4|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
@@ -513,7 +516,7 @@ untyped_long_chain_let|crates/habilis-network/tests/unknown_peer_requests_loopba
 untyped_long_chain_let|crates/habilis-network/tests/webrtc_full_roster_loopback.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 # pub_vec_return: a public function returns a Vec. The guide prefers an iterator. These keep a Vec:
 # each one returns an owned byte buffer or an owned list that the caller keeps.
-pub_vec_return|crates/habilis-network-doc/src/lib.rs|1|build_change: the owned bytes of a change frame, the wire encoding
+pub_vec_return|crates/habilis-network-doc/src/mesh_doc.rs|1|build_change: the owned bytes of a change frame, the wire encoding
 pub_vec_return|crates/habilis-network-doc/src/wire.rs|1|parse_change_body: the owned decoded bytes of a change body
 pub_vec_return|crates/habilis-network-iroh-multihop-transport/src/lib.rs|1|underlay_paths_for_test: a test helper whose owned list the test compares
 pub_vec_return|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|2|benchmark harness behind the bench feature: payload is an owned byte buffer, rtt_samples an owned list
@@ -528,7 +531,7 @@ pub_vec_return|crates/habilis-network-wasm/src/stream.rs|1|read: the owned bytes
 
 # pub_vec_param: a public function takes a Vec. The guide prefers impl IntoIterator when the function
 # only iterates. These keep the list, sort it, or hand it on as an owned value.
-pub_vec_param|crates/habilis-network-chunks/src/lib.rs|1|from_leaves: checks the length, then keeps the leaves in the tree
+pub_vec_param|crates/habilis-network-chunks/src/chunk_map.rs|1|from_leaves: checks the length, then keeps the leaves in the tree
 pub_vec_param|crates/habilis-network-iroh-multihop-transport/src/lib.rs|2|with_protocols: keeps the owned protocol handlers in the config; link_vector: sorts and filters the links in place
 pub_vec_param|crates/habilis-network-iroh-multihop-transport/src/topology.rs|1|signed: keeps the links in the signed link vector
 pub_vec_param|crates/habilis-network-iroh-webrtc-transport/src/lib.rs|1|attach_parts: keeps the owned JavaScript callbacks of the session
@@ -637,3 +640,7 @@ fn_import|crates/habilis-network/tests/path_ladder_loopback.rs|1|kept: a top-lev
 fn_import|crates/habilis-network/tests/send_ladder_matrix.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/tests/underlay_survives_link_loss_loopback.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/tests/underlay_webrtc_loopback.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
+
+fn_import|crates/habilis-network-logging/src/lib.rs|1|fn re-exported at the crate root, its public path (O11)
+fn_import|crates/habilis-network-util/src/lib.rs|1|fn re-exported at the crate root, its public path (O11)
+fn_import|crates/habilis-network-wasm/src/lib.rs|2|fn re-exported at the crate root, its public path (O11)

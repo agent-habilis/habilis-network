@@ -2,7 +2,7 @@
 # Used by scripts/pub-trait/pub-trait.ts. Keep each count exact: the check fails when it is too high or too low.
 
 # Two storage traits: ChunkStore builds on ChunkSource. Each backend (memory, disk, IndexedDB, OPFS) implements them.
-crates/habilis-network-chunks/src/lib.rs|2|generic bounds: ChunkSource and ChunkStore, one impl per storage backend
+crates/habilis-network-chunks/src/chunk_store.rs|2|generic bounds: ChunkSource and ChunkStore, one impl per storage backend
 
 # A dyn object: the transport holds one Arc<dyn FrameSink>, of any type.
 crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|dyn object: FrameSink, held as an Arc<dyn FrameSink>

@@ -12,7 +12,15 @@
 
 mod rung;
 
-pub use rung::*;
+pub use rung::{
+    GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID, best_of, blocked, climb,
+    custom_rung, datagrams, expected_rung, ip_remote, remote_id, remote_id_of, rung_of,
+    split_segments,
+};
+#[cfg(feature = "test-hooks")]
+pub use rung::{block_ip_paths, block_ip_to, block_rung, block_rung_to, is_blocked, is_blocked_to};
+#[cfg(not(feature = "test-hooks"))]
+pub use rung::{is_blocked, is_blocked_to};
 
 #[cfg(test)]
 mod tests {
