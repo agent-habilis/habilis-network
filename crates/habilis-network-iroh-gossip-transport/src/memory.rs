@@ -39,9 +39,9 @@ impl Hub {
     }
 
     /// Every frame sent so far.
-    #[must_use]
-    pub fn sent(&self) -> Vec<Bytes> {
-        locked(&self.inner).sent.clone()
+    pub fn sent(&self) -> impl Iterator<Item = Bytes> {
+        let sent = locked(&self.inner).sent.clone();
+        sent.into_iter()
     }
 
     /// Deliver `frame` to every member as if `from` had sent it.

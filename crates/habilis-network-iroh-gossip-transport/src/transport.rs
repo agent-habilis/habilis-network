@@ -685,7 +685,7 @@ mod tests {
             .expect("connect over gossip");
         echo_once(&connection, b"before").await;
 
-        let real = hub.sent().into_iter().next().expect("a frame was sent");
+        let real = hub.sent().next().expect("a frame was sent");
         let real = frame::decode(&real).expect("a frame");
         let forged = (Frame {
             dst: alice_handle.app_id(),
@@ -736,7 +736,7 @@ mod tests {
             alice_stats.queued > 0 && bob_stats.queued > 0,
             "{alice_stats:?} {bob_stats:?}"
         );
-        let sent = hub.sent();
+        let sent = hub.sent().collect::<Vec<_>>();
         assert_eq!(
             alice_stats.frames_out + bob_stats.frames_out,
             sent.len() as u64
