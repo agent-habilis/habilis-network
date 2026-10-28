@@ -25,176 +25,27 @@
 //! temp file first. A streaming produce path would have to rework hashing and the
 //! `MAX_BLOB_BYTES` check, which cannot run before the length is known.
 
-use std::path::PathBuf;
-use std::time::Duration;
-
-use anyhow::Result;
-use iroh::Endpoint;
-
-use crate::protocol::mesh::LookupOpts;
-use crate::transport::PayloadPath;
-
-use crate::protocol::{crypto, identity};
+mod blob_digest;
+mod consts;
 mod consume;
+mod content_id;
 mod error;
+mod offload_request;
+mod online;
 mod produce;
 mod store;
 mod ticket;
 
+pub use blob_digest::BlobDigest;
+pub(crate) use consts::{BAD_SECRET, BLOB_ALPN, DONE, RELAY_REFUSED_CODE, UNKNOWN_BLOB};
+pub use consts::{HASH_LEN, SECRET_LEN};
 pub use consume::fetch;
+pub use content_id::ContentId;
 pub use error::BlobError;
+pub use offload_request::{OffloadRequest, offload};
+pub(crate) use online::wait_online;
 pub use produce::BlobServer;
 pub use ticket::BlobTicket;
-
-/// An opaque content-group id the blob layer keys evictable blobs by.
-///
-/// Whatever the application groups content by — a task, a job, a conversation —
-/// it maps into this; the blob layer never names that type. `evict_content` then
-/// drops a whole group at once.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ContentId(String);
-
-impl ContentId {
-    /// Wraps `id` as it is. Nothing is checked.
-    #[must_use]
-    pub fn new(id: &str) -> Self {
-        Self(id.to_owned())
-    }
-}
-
-/// One offload: which file, where to spool it, which content group it belongs to,
-/// and the mesh password it inherits (so a scraped ticket cannot be redeemed
-/// without it).
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct OffloadRequest {
-    /// The file to offload.
-    pub path: PathBuf,
-    /// The directory where the blob is spooled.
-    pub spool_dir: PathBuf,
-    /// The content group that the blob belongs to.
-    pub content_id: ContentId,
-    /// The mesh password that the ticket inherits, so a scraped ticket cannot be redeemed without it.
-    pub password: Option<crypto::Password>,
-}
-
-/// Offload a file over the blob channel and return the [`BlobTicket`] that
-/// fetches it back. Lazily binds `server` on the first call (into
-/// `request.spool_dir`), reusing it thereafter — so a caller holds one
-/// `Option<BlobServer>` for its lifetime and passes it here each time.
-///
-/// The ticket is the whole result: `encode()` it into whatever reference the
-/// application uses, ship that string over gossip, and the peer calls
-/// [`fetch`]. Content-addressed dedup means offloading identical bytes twice
-/// returns the first ticket without re-paying the hash or the Argon2 stretch.
-///
-/// `relay_transport` must be the mesh's `transport.relay_transport`
-/// (`mesh.transport().relay_transport`): the ticket carries it so the fetcher
-/// applies the same rule, and a per-node value would let one member serve over
-/// the relay for everyone.
-///
-/// # Errors
-/// Binding the blob server, hashing, or snapshotting the file fails (e.g. the
-/// file is unreadable or exceeds `MAX_BLOB_BYTES`).
-///
-/// # Panics
-/// Panics if an internal invariant is violated.
-pub async fn offload(
-    server: &mut Option<BlobServer>,
-    lookups: &LookupOpts,
-    relay_transport: PayloadPath,
-    request: OffloadRequest,
-) -> Result<BlobTicket, BlobError> {
-    offload_checked(server, lookups, relay_transport, request)
-        .await
-        .map_err(BlobError::internal)
-}
-
-async fn offload_checked(
-    server: &mut Option<BlobServer>,
-    lookups: &LookupOpts,
-    relay_transport: PayloadPath,
-    request: OffloadRequest,
-) -> Result<BlobTicket> {
-    let OffloadRequest {
-        path,
-        spool_dir,
-        content_id,
-        password,
-    } = request;
-    if server.is_none() {
-        *server =
-            Some(BlobServer::start(lookups.clone(), spool_dir, password, relay_transport).await?);
-    }
-    server
-        .as_ref()
-        .expect("server set above")
-        .register(&path, content_id)
-        .await
-        .map_err(anyhow::Error::from)
-}
-
-/// ALPN for the blob channel — a raw bidirectional QUIC stream with its own
-/// protocol identity, distinct from `GOSSIP_ALPN` and the application's own bridge
-/// ALPN, so a mismatched dial is rejected at the QUIC handshake.
-pub(crate) const BLOB_ALPN: &[u8] = b"habilis-mesh/blob/1";
-
-/// Length of the bearer-capability secret carried in a blob ticket, and of the
-/// auth token opening the fetch stream (the raw secret, or its Argon2id stretch
-/// when passworded — same size either way).
-pub const SECRET_LEN: usize = 32;
-
-/// Length of the SHA-256 content hash that addresses a blob.
-pub const HASH_LEN: usize = 32;
-
-/// The SHA-256 of a blob's bytes: the name it is stored, ticketed and fetched
-/// under. Prints as lowercase hex, the same text as its spool file name.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BlobDigest([u8; HASH_LEN]);
-
-impl BlobDigest {
-    /// Wrap the 32 bytes of a SHA-256.
-    #[must_use]
-    pub const fn from_bytes(bytes: [u8; HASH_LEN]) -> Self {
-        Self(bytes)
-    }
-
-    /// The raw bytes, borrowed.
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; HASH_LEN] {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for BlobDigest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        identity::write_hex(formatter, &self.0)
-    }
-}
-
-impl std::fmt::Debug for BlobDigest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "BlobDigest({self})")
-    }
-}
-
-/// Fetch stream close code: the presented bearer secret matched no blob's secret.
-pub(crate) const BAD_SECRET: u32 = 1;
-
-/// Fetch stream close code: the requested content hash is not in the store.
-pub(crate) const UNKNOWN_BLOB: u32 = 2;
-/// The connection's selected path is the relay and the producer's mesh keeps
-/// the relay for lookup only.
-pub(crate) const RELAY_REFUSED_CODE: u32 = 3;
-
-/// Fetch stream close code: an orderly done from the producer.
-pub(crate) const DONE: u32 = 0;
-
-/// Best-effort wait (≤5s) for the endpoint to publish reachable addresses, so a
-/// freshly-minted ticket resolves immediately. Never blocks forever.
-async fn wait_online(endpoint: &Endpoint) {
-    let _ = tokio::time::timeout(Duration::from_secs(5), endpoint.online()).await;
-}
 
 #[cfg(test)]
 mod tests {
