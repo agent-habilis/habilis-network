@@ -313,3 +313,14 @@ test("untyped_generic_let: a typed let passes", () => {
 test("untyped_generic_let: the exact count is allowed", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(s: &str) -> Result<u8, std::num::ParseIntError> {\n    let n = s.parse()?;\n    Ok(n)\n}", 0, "untyped_generic_let|crates/demo/src/lib.rs|1|fixture");
 });
+
+// The turbofish_collect_parse rule (P2): a collect or parse turbofish needs a row.
+test("turbofish_collect_parse: a collect turbofish with no row fails", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(v: &[u8]) -> Vec<u8> {\n    v.iter().copied().collect::<Vec<u8>>()\n}", 1, "");
+});
+test("turbofish_collect_parse: a typed let passes", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(v: &[u8]) -> Vec<u8> {\n    let out: Vec<u8> = v.iter().copied().collect();\n    out\n}", 0, "");
+});
+test("turbofish_collect_parse: a forced _ passes", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(s: &str) -> Option<u8> {\n    s.parse::<_>().ok()\n}", 0, "");
+});

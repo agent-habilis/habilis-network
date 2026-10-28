@@ -217,6 +217,13 @@ function countUntypedGenericLets(raw: string): number {
   return text.match(pattern)?.length ?? 0;
 }
 
+// The turbofish of collect and parse: `.collect::<T>()`, `.parse::<T>()`. A typed `let` names the type
+// on the variable instead, so the reader finds it at the binding (P2). A `_` the compiler forces stays.
+function countTurbofish(raw: string): number {
+  const text = blankStrings(stripComments(raw));
+  return text.match(/\.(?:collect|parse)::<(?!_>)[^>]*>\(/g)?.length ?? 0;
+}
+
 function countAnyhowPub(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   const bare = new Set<string>();
@@ -332,6 +339,12 @@ const RULES: Rule[] = [
     scan: countUntypedGenericLets,
     glob: "crates/**/*.rs",
     why: "A let that takes its type from parse, into or try_into names the type (P4). The reader sees no type otherwise.",
+  },
+  {
+    name: "turbofish_collect_parse",
+    scan: countTurbofish,
+    glob: "crates/**/*.rs",
+    why: "Name the type on the variable, not in a turbofish, for collect and parse (P2). A `_` that the compiler forces is allowed.",
   },
   {
     name: "anyhow_pub",
