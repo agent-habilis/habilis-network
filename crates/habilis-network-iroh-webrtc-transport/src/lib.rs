@@ -256,8 +256,7 @@ impl WebRtcHandle {
     }
 
     /// The remote ids of every live session.
-    #[must_use]
-    pub fn live_peer_ids(&self) -> Vec<iroh_base::EndpointId> {
+    pub fn live_peer_ids(&self) -> impl Iterator<Item = iroh_base::EndpointId> {
         self.inner.live_peer_ids()
     }
 
@@ -338,8 +337,7 @@ impl WebRtcHandle {
     }
 
     /// Endpoint ids of every live session.
-    #[must_use]
-    pub fn live_peer_ids(&self) -> Vec<iroh_base::EndpointId> {
+    pub fn live_peer_ids(&self) -> impl Iterator<Item = iroh_base::EndpointId> {
         self.inner.live_peer_ids()
     }
 

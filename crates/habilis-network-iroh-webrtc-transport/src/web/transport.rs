@@ -494,9 +494,8 @@ impl BrowserHubTransport {
     }
 
     /// Endpoint ids of every live session.
-    #[must_use]
-    pub fn live_peer_ids(&self) -> Vec<EndpointId> {
-        self.sessions.live_ids()
+    pub fn live_peer_ids(&self) -> impl Iterator<Item = EndpointId> {
+        self.sessions.live_ids().into_iter()
     }
 
     /// Selected ICE remote candidate for `remote`, if a live session exists.

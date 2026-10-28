@@ -120,9 +120,8 @@ impl WebRtcTransport {
     }
 
     /// The remote ids of every live session.
-    #[must_use]
-    pub fn live_peer_ids(&self) -> Vec<EndpointId> {
-        self.registry.live_ids()
+    pub fn live_peer_ids(&self) -> impl Iterator<Item = EndpointId> {
+        self.registry.live_ids().into_iter()
     }
 
     /// A builder preset that makes this the endpoint's *only* transport

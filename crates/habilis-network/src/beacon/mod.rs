@@ -200,7 +200,7 @@ impl Rendezvous {
         self.lane
             .as_ref()
             .map_or_else(Dependents::default, |(handle, admission)| Dependents {
-                live: handle.live_peer_ids(),
+                live: handle.live_peer_ids().collect(),
                 own: vec![peer, self.endpoint.id()],
                 in_flight: admission.in_flight(),
             })

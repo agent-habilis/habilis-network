@@ -192,7 +192,7 @@ impl Sessions for WebRtcHandle {
     }
 
     fn live_peers(&self) -> Vec<EndpointId> {
-        self.live_peer_ids()
+        self.live_peer_ids().collect()
     }
 
     fn detach(&self, peer: &EndpointId) -> bool {
