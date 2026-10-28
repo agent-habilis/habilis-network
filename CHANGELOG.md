@@ -612,6 +612,10 @@ published to a registry; pin it with
 
 ### Fixed
 
+- On Windows, a directed send to a warm connection that has no direct path selected yet waits
+  for one, up to the path-select budget (5 s), as a cold send does, in place of failing at once.
+  A send that finds none still fails with the relay-only refusal, 5 s later. `deliver` gives that
+  verdict through `Delivered::Pending`, and `deliver_in_background` returns `true` (#45).
 - On Windows, the relay server no longer logs a client that reset its connection as "failed to
   handle connection" at error (#31). The fix is in agent-habilis/iroh (fdf6cc2); until it is
   merged there, a `[patch]` in the root `Cargo.toml` points the iroh family at it. The patch holds
