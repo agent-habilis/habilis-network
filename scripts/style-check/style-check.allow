@@ -136,7 +136,7 @@ assert_no_message|crates/habilis-network-protocol/src/message/tests.rs|85|kept: 
 assert_no_message|crates/habilis-network-protocol/src/message/wire_frame.rs|1|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-protocol/src/newtype.rs|7|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-protocol/src/nickname_error.rs|25|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-protocol/src/reassembly.rs|33|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network-protocol/src/reassembly/tests.rs|33|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-protocol/src/resolver/mod.rs|5|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-protocol/src/seal_error.rs|4|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-stream-cli/src/args.rs|8|kept: assert without a message, to be given one (P13 rollout)
@@ -267,7 +267,7 @@ long_chain|crates/habilis-network-protocol/src/mesh/name_error.rs|2|kept: statem
 long_chain|crates/habilis-network-protocol/src/mesh/tests.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/mesh/transport.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/message/app_tag.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-protocol/src/reassembly.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-protocol/src/reassembly/reassembly_store.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/wordlist.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream-cli/src/args.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream-cli/src/main.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -388,7 +388,7 @@ turbofish_collect_parse|crates/habilis-network-protocol/src/mesh/lookup.rs|18|ke
 turbofish_collect_parse|crates/habilis-network-protocol/src/mesh/tests.rs|4|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-protocol/src/message/wire_in.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-protocol/src/peer_addr_error.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network-protocol/src/reassembly.rs|7|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
+turbofish_collect_parse|crates/habilis-network-protocol/src/reassembly/tests.rs|7|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-protocol/src/resolver/mod.rs|4|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-stream/src/hash/mod.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-util/src/bounded_queue.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
@@ -463,7 +463,7 @@ untyped_long_chain_let|crates/habilis-network-protocol/src/mesh/lookup.rs|1|kept
 untyped_long_chain_let|crates/habilis-network-protocol/src/mesh/name_error.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-protocol/src/mesh/tests.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-protocol/src/mesh/transport.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-protocol/src/reassembly.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+untyped_long_chain_let|crates/habilis-network-protocol/src/reassembly/reassembly_store.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-stream-cli/tests/binary.rs|4|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-test-tracing/src/guard.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-test-tracing/tests/atexit.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
@@ -526,7 +526,7 @@ pub_vec_param|crates/habilis-network-iroh-multihop-transport/src/topology.rs|1|s
 pub_vec_param|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_handle.rs|1|attach_parts: keeps the owned JavaScript callbacks of the session
 pub_vec_param|crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|1|attach: takes the owned JavaScript callbacks, which it mutates
 pub_vec_param|crates/habilis-network-netplay/src/session.rs|1|new: keeps the owned player list of the session
-pub_vec_param|crates/habilis-network-protocol/src/reassembly.rs|1|insert: keeps the owned frames of the shard group in the cache
+pub_vec_param|crates/habilis-network-protocol/src/reassembly/shard_cache.rs|1|insert: keeps the owned frames of the shard group in the cache
 pub_vec_param|crates/habilis-network-wasm/src/stream_node.rs|1|write: the owned bytes handed to the stream at the JavaScript edge
 pub_vec_param|crates/habilis-network/src/daemon/setup.rs|2|bind: hands the owned ALPN list to the endpoint; with_protocols: keeps the owned protocol handlers
 pub_vec_param|crates/habilis-network/src/lookup/mod.rs|1|build_endpoint: hands the owned ALPN list to the endpoint
@@ -660,7 +660,7 @@ abbrev_name|crates/habilis-network-protocol/src/message/message.rs|11|existing l
 abbrev_name|crates/habilis-network-protocol/src/message/shard.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/message/tests.rs|107|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/peer_addr_error.rs|10|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/reassembly.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-protocol/src/reassembly/reassembly_store.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/seal_error.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream-cli/src/args.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream-cli/src/main.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count

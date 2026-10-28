@@ -25,7 +25,6 @@ crates/habilis-network-netplay/src/mesh/driver.rs|1|rename pending: public type(
 crates/habilis-network-netplay/src/mesh/transport.rs|1|rename pending: public type(s) MeshTransport, PendingTransport
 crates/habilis-network-protocol/src/crypto.rs|1|rename pending: public type(s) Seed, SymmetricKey, Keying, Password, TicketSecret, TicketAuth
 crates/habilis-network-protocol/src/directory.rs|1|rename pending: public type(s) Ad, Listing, ListingChange, Listings
-crates/habilis-network-protocol/src/reassembly.rs|1|rename pending: public type(s) ShardIngest, ReassemblyStore, RepairTicket, ShardCache
 crates/habilis-network/src/blob/error.rs|1|rename pending: public type(s) BlobError
 crates/habilis-network/src/blob/produce.rs|1|rename pending: public type(s) ServeLimits, BlobServer
 crates/habilis-network/src/blob/store.rs|1|rename pending: public type(s) BlobEntry, NewSecret, Registered, ContentMeta, BlobStore
