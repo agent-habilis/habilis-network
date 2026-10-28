@@ -706,7 +706,8 @@ abbrev_name|crates/habilis-network/src/lifecycle/heartbeat.rs|4|existing letter-
 abbrev_name|crates/habilis-network/src/lifecycle/mod.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/capability.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/mdns.rs|6|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/lookup/mod.rs|39|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/lookup/mod.rs|34|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/lookup/lan.rs|5|moved from mod.rs with the LAN code; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/endpoint.rs|2|moved from mod.rs with the endpoint builders; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/membership_app.rs|60|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/membership_event.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count

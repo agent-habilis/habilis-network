@@ -21,9 +21,16 @@ fn the_lan_tag_follows_the_topic() {
     let one = iroh_gossip::proto::TopicId::from_bytes([1u8; 32]);
     let other = iroh_gossip::proto::TopicId::from_bytes([2u8; 32]);
 
-    assert_eq!(super::lan_member_tag(&one), super::lan_member_tag(&one));
-    assert_ne!(super::lan_member_tag(&one), super::lan_member_tag(&other));
-    let user_data: Result<iroh::endpoint_info::UserData, _> = super::lan_member_tag(&one).parse();
+    assert_eq!(
+        super::lan::lan_member_tag(&one),
+        super::lan::lan_member_tag(&one)
+    );
+    assert_ne!(
+        super::lan::lan_member_tag(&one),
+        super::lan::lan_member_tag(&other)
+    );
+    let user_data: Result<iroh::endpoint_info::UserData, _> =
+        super::lan::lan_member_tag(&one).parse();
     assert!(user_data.is_ok(), "the tag must fit the user data");
 }
 
@@ -31,8 +38,8 @@ fn the_lan_tag_follows_the_topic() {
 #[cfg(all(feature = "host", feature = "mdns"))]
 #[test]
 fn only_our_tag_is_a_member_of_our_mesh() {
-    let ours = super::lan_member_tag(&iroh_gossip::proto::TopicId::from_bytes([1u8; 32]));
-    let foreign = super::lan_member_tag(&iroh_gossip::proto::TopicId::from_bytes([2u8; 32]));
+    let ours = super::lan::lan_member_tag(&iroh_gossip::proto::TopicId::from_bytes([1u8; 32]));
+    let foreign = super::lan::lan_member_tag(&iroh_gossip::proto::TopicId::from_bytes([2u8; 32]));
     let user = |text: &str| text.parse::<iroh::endpoint_info::UserData>().expect("fits");
 
     assert!(super::mdns::is_member_tag(Some(&user(&ours)), &ours));
@@ -123,7 +130,7 @@ async fn two_members_on_the_lan_link_with_no_beacon() {
         )
         .await
         .expect("a LAN endpoint");
-        super::tag_as_member(&endpoint, &topic).expect("the tag fits");
+        super::lan::tag_as_member(&endpoint, &topic).expect("the tag fits");
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let router = Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
@@ -135,7 +142,7 @@ async fn two_members_on_the_lan_link_with_no_beacon() {
             .split();
         let events = super::mdns::spawn_lan_contacts(
             &handle.expect("mDNS is wired on a LAN endpoint"),
-            super::lan_member_tag(&topic),
+            super::lan::lan_member_tag(&topic),
             endpoint.id(),
         )
         .await;
