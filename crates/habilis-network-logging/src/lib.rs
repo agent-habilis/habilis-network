@@ -4,9 +4,9 @@
 //! `--output json` (stdout) is a separate path and is unaffected by
 //! anything here.
 
-pub mod messages;
 #[cfg(feature = "host")]
 mod log_sink;
+pub mod messages;
 
 #[cfg(feature = "host")]
 pub use log_sink::LogSink;
