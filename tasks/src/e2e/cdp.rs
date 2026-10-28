@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::util::cdp::Browser;
 
-use super::{Harvest, Skip, server};
+use super::{Harvest, Skip, harness};
 
 /// Run one cell and harvest what the page published.
 pub(super) fn run(pressure: u32, timeout: Duration) -> Result<Harvest, Skip> {
@@ -18,7 +18,7 @@ pub(super) fn run(pressure: u32, timeout: Duration) -> Result<Harvest, Skip> {
     // The pressure level rides the URL: the page creates the contention itself,
     // and its deadlines have to scale with it or a slow cell reads as a stalled
     // one.
-    let url = format!("{}/?pressure={pressure}", server::URL);
+    let url = format!("{}/?pressure={pressure}", harness::URL);
     browser.navigate(&url);
     let published = browser.wait_for(super::DONE_SELECTOR, timeout);
 

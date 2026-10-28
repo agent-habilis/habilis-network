@@ -22,6 +22,7 @@ pub(crate) mod build;
 mod cdp;
 #[cfg(feature = "mesh")]
 mod chat;
+mod harness;
 mod loopback;
 #[cfg(feature = "mesh")]
 mod mesh;
@@ -29,12 +30,11 @@ mod mesh;
 mod multihop;
 #[cfg(feature = "mesh")]
 mod page;
-mod server;
 #[cfg(feature = "mesh")]
 mod stream;
 mod webdriver;
 
-use server::Harness;
+use harness::Harness;
 
 /// A sweep at pressure 8 is ~20× slower than at rest, so this is generous. A
 /// stall is *indefinite*, so being generous costs only wall-clock on a cell
