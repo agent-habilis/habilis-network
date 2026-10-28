@@ -11,8 +11,9 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+use super::inbound_packet::InboundPacket;
 use super::jsep::JsepError;
-use super::session::{InboundPacket, SessionRegistry};
+use super::session_registry::SessionRegistry;
 
 /// Consecutive receive errors a live session tolerates before giving up. Sized
 /// to ride out a burst of ICMP port-unreachables (one per dead STUN server,
@@ -369,7 +370,7 @@ pub(crate) async fn drive_session(
                         // The channel refused the write (e.g. buffer full or
                         // closing): drop the datagram, QUIC retransmits.
                         let total = dropped_rx.fetch_add(1, Ordering::Relaxed) + 1;
-                        super::session::note_dropped(&remote, total, "channel write refused");
+                        super::note_dropped::note_dropped(&remote, total, "channel write refused");
                     }
                 }
             }

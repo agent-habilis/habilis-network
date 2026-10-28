@@ -1,77 +1,7 @@
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+//! The native session registry.
 
-use bytes::Bytes;
-use iroh::EndpointId;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-
+use crate::native::session_handle::SessionHandle;
 use crate::registry::Registry;
-
-pub(crate) struct InboundPacket {
-    pub(crate) from: EndpointId,
-    pub(crate) payload: Bytes,
-}
-
-/// Rate-limited visibility for the lossy queues. `total` is the counter value
-/// *after* the increment.
-pub(crate) fn note_dropped(remote: &EndpointId, total: u64, context: &str) {
-    if crate::should_log_drop(total) {
-        if crate::drops_are_sustained(total) {
-            tracing::warn!(%remote, total, "webrtc lane dropping datagrams ({context})");
-        } else {
-            tracing::debug!(%remote, total, "webrtc lane dropping datagrams ({context})");
-        }
-    }
-}
-
-/// Aborts the session driver task when the handle leaves the registry, so
-/// a `detach` (or dropping the whole transport) reliably stops the str0m
-/// loop instead of detaching it.
-///
-/// Not at once: dropping the handle also closes the driver's outbound queue,
-/// and the driver answers that by closing the data channel, which is how the
-/// far side learns of the detach. [`CLOSE_GRACE`] lets that close go out; a
-/// driver still running after it is aborted.
-struct AbortOnDrop(JoinHandle<()>);
-
-const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        let abort = self.0.abort_handle();
-        match tokio::runtime::Handle::try_current() {
-            Ok(runtime) => {
-                runtime.spawn(async move {
-                    tokio::time::sleep(CLOSE_GRACE).await;
-                    abort.abort();
-                });
-            }
-            Err(_) => abort.abort(),
-        }
-    }
-}
-
-pub(crate) struct SessionHandle {
-    pub(crate) out_tx: mpsc::Sender<Bytes>,
-    pub(crate) dropped_tx: Arc<AtomicU64>,
-    /// Aborts the driver when the registry drops this handle.
-    _task: AbortOnDrop,
-}
-
-impl SessionHandle {
-    pub(crate) fn new(
-        out_tx: mpsc::Sender<Bytes>,
-        dropped_tx: Arc<AtomicU64>,
-        task: JoinHandle<()>,
-    ) -> Self {
-        Self {
-            out_tx,
-            dropped_tx,
-            _task: AbortOnDrop(task),
-        }
-    }
-}
 
 /// The native session registry.
 ///
@@ -83,7 +13,8 @@ pub(crate) type SessionRegistry = Registry<SessionHandle>;
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionHandle, SessionRegistry};
+    use super::SessionRegistry;
+    use crate::native::session_handle::SessionHandle;
     use habilis_network_test_tracing::test;
     use iroh::{EndpointId, SecretKey};
     use std::sync::Arc;

@@ -8,7 +8,7 @@ use iroh::endpoint::transports::{CustomSender, Transmit};
 use iroh_base::CustomAddr;
 use tokio::sync::mpsc::error::TrySendError;
 
-use super::session::SessionRegistry;
+use super::session_registry::SessionRegistry;
 use crate::{WEBRTC_TRANSPORT_ID, parse_custom_addr};
 
 pub(crate) struct WebRtcSender {
@@ -60,7 +60,7 @@ impl CustomSender for WebRtcSender {
                     // send loop for every transport. Drop and let QUIC
                     // retransmit.
                     let total = dropped_tx.fetch_add(1, Ordering::Relaxed) + 1;
-                    super::session::note_dropped(&remote, total, "outbound queue full");
+                    super::note_dropped::note_dropped(&remote, total, "outbound queue full");
                 }
                 Err(TrySendError::Closed(_)) => {
                     return Poll::Ready(Err(io::Error::from(io::ErrorKind::NotConnected)));

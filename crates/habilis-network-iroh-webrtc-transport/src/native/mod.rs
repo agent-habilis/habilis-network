@@ -5,8 +5,11 @@
 //! root, not here.
 
 mod driver;
+mod inbound_packet;
 mod jsep;
-mod session;
+mod note_dropped;
+mod session_handle;
+mod session_registry;
 pub mod stun;
 mod web_rtc_endpoint;
 mod web_rtc_sender;
