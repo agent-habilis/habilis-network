@@ -291,6 +291,19 @@ function countBoolParamNoComment(raw: string): number {
   return count;
 }
 
+// The receiver of a public as_, to_ or into_ method. The guide has as_ and to_ take a reference, and into_
+// take self. A by-value as_ or to_ is allowed on a Copy type, so each one has a counted row.
+function countSelfConvention(raw: string): number {
+  const text = stripTestModules(blankStrings(stripComments(raw)));
+  let count = 0;
+  for (const m of text.matchAll(/^[ \t]*pub (?:const )?fn (as|to|into)_\w+\s*\(\s*(&\s*(?:mut\s+)?)?self\b/gm)) {
+    const [, kind, ref] = m;
+    if (kind === "into" && ref !== undefined) count++;
+    if ((kind === "as" || kind === "to") && ref === undefined) count++;
+  }
+  return count;
+}
+
 // A public fn that returns a Vec. The guide prefers an iterator, so a Vec needs a counted allow row with its reason.
 function countPubVecReturn(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
@@ -597,6 +610,13 @@ const RULES: Rule[] = [
     skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
     glob: "crates/**/*.rs",
     why: "A public function with a bool parameter writes its purpose in a comment above the parameter, so a call site says what true means.",
+  },
+  {
+    name: "self_convention",
+    scan: countSelfConvention,
+    skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
+    glob: "crates/**/*.rs",
+    why: "A public as_ or to_ method takes a reference, and an into_ method takes self. A by-value as_ or to_ is a Copy type, and it has a counted row.",
   },
 ];
 

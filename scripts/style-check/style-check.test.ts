@@ -474,3 +474,18 @@ test("doc_basics: this is a function in a doc fails with no row", () => {
 test("doc_basics: a doc that says what the item does passes", () => {
   expectExit("crates/demo/src/lib.rs", "/// Parses the frame, or refuses a short one.\npub fn parse() {}", 0, "");
 });
+
+// The self_convention rule: as_ and to_ take a reference, into_ takes self (N1).
+const selfConv = (body: string) => `impl Demo {\n${body}\n}`;
+test("self_convention: a by-value as_ counts", () => {
+  expectExit("crates/demo/src/lib.rs", selfConv("    pub fn as_x(self) -> u8 {\n        1\n    }"), 1);
+});
+test("self_convention: a by-value to_ counts", () => {
+  expectExit("crates/demo/src/lib.rs", selfConv("    pub fn to_x(self) -> u8 {\n        1\n    }"), 1);
+});
+test("self_convention: an into_ by reference counts", () => {
+  expectExit("crates/demo/src/lib.rs", selfConv("    pub fn into_x(&self) -> u8 {\n        1\n    }"), 1);
+});
+test("self_convention: the guide's shapes are clean", () => {
+  expectExit("crates/demo/src/lib.rs", selfConv("    pub fn as_x(&self) -> u8 {\n        1\n    }\n    pub fn to_x(&self) -> u8 {\n        1\n    }\n    pub fn into_x(self) -> u8 {\n        1\n    }"), 0);
+});
