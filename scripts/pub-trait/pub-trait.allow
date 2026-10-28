@@ -29,4 +29,4 @@ crates/habilis-network/src/gossip/app.rs|1|generic bound: NodeApp, the app surfa
 crates/habilis-network/src/gossip/event.rs|1|dyn object: NodeSink, held as Arc<dyn NodeSink> and &dyn NodeSink
 
 # A generic bound: C: Serialize + Addressed on the IPC send; app command types implement it.
-crates/habilis-network/src/transport/ipc.rs|1|generic bound: Addressed on the IPC send, app command types implement it
+crates/habilis-network/src/transport/ipc/addressed.rs|1|generic bound: Addressed on the IPC send, app command types implement it

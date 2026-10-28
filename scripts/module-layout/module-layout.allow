@@ -42,7 +42,6 @@ crates/habilis-network/src/membership/event.rs|1|rename pending: public type(s) 
 crates/habilis-network/src/membership/join.rs|1|rename pending: public type(s) Opts, Membership
 crates/habilis-network/src/testing.rs|1|rename pending: public type(s) LogCapture, LaneNode
 crates/habilis-network/src/transport/admission.rs|1|rename pending: public type(s) Refusal, Sessions, SignalAdmission, BusyGuard, ConnectionHook, AdmissionGuard
-crates/habilis-network/src/transport/ipc.rs|1|rename pending: public type(s) Addressed
 crates/habilis-network/src/transport/probe.rs|1|rename pending: public type(s) DirectOutcome, PathKind, PathAction, PathChange, PairToClimb, NudgeAddrs, StepInput, Step, GraftRequest, GraftTarget
 crates/habilis-network/src/transport/webrtc.rs|1|rename pending: public type(s) SignalDeadlines, IceProfile, WebRtcSignalAcceptor, UdpTransport, NudgeAcceptor
 tasks/src/bench/native.rs|1|rename pending: public type(s) WebRtcPeer
