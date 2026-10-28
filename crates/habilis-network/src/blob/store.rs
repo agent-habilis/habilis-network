@@ -448,7 +448,7 @@ mod tests {
         let meta = ContentMeta {
             sha256: filler,
             size: super::MAX_BLOB_STORE_BYTES - 1,
-            content_id: group_a.clone(),
+            content_id: group_a,
         };
         store
             .snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))

@@ -127,7 +127,7 @@ impl<S> MeshReceiver<S> {
         expect(dead_code, reason = "read by the tests and the load run of the split")
     )]
     pub(crate) fn high_water_gauge(&self) -> Arc<AtomicUsize> {
-        self.high_water.clone()
+        Arc::clone(&self.high_water)
     }
 
     /// The topic receiver of a subscription that ended, for the drain of what it buffered. It does
@@ -182,7 +182,7 @@ where
     S: Stream<Item = TopicItem> + Unpin + Send + 'static,
 {
     let high_water = Arc::new(AtomicUsize::new(0));
-    let gauge = high_water.clone();
+    let gauge = Arc::clone(&high_water);
     let (data_tx, data) = mpsc::channel(capacity);
     let (control_tx, control) = mpsc::unbounded_channel();
     let (dead_tx, dead) = oneshot::channel();

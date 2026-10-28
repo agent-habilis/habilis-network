@@ -10,6 +10,7 @@
 
 #[cfg(feature = "multihop")]
 use std::collections::{BTreeSet, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -678,7 +679,7 @@ struct EventLoop<A: NodeDriver> {
     /// gossip (the derived name is lossy), `#name` otherwise.
     leave_label: String,
     author: Nickname,
-    sink: std::sync::Arc<dyn NodeSink>,
+    sink: Arc<dyn NodeSink>,
     max_peers: usize,
     state: EventLoopState,
     /// Application state behind the [`NodeDriver`] seam, disjoint from the mesh
@@ -804,7 +805,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
     let mut anchors = TickAnchors::now();
 
     // Owned Arc clone so the per-arm ctx can borrow it without colliding with `&mut state`.
-    let identity = state.identity.clone();
+    let identity = Arc::clone(&state.identity);
     // Our own author key, computed once for the per-message self-echo compare.
     let our_pubkey = identity.author_key();
     // Everything a HandlerCtx needs *except* the sender. The ctx itself
@@ -1222,7 +1223,7 @@ fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
     runtime_base: Option<&std::path::Path>,
     mesh: &MeshId,
     author: &Nickname,
-    sink: &std::sync::Arc<dyn NodeSink>,
+    sink: &Arc<dyn NodeSink>,
 ) -> Option<mpsc::Receiver<IpcMessage<C>>> {
     // In-process mode (in-process: library API or MCP): no socket. Returning `None` leaves
     // the loop's IPC `select!` arm inert (it pends forever), so the
@@ -1249,11 +1250,7 @@ fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
         }
     };
     let (ipc_tx, rx) = mpsc::channel::<IpcMessage<C>>(32);
-    tokio::spawn(ipc::serve::<C>(
-        listener,
-        ipc_tx,
-        std::sync::Arc::clone(sink),
-    ));
+    tokio::spawn(ipc::serve::<C>(listener, ipc_tx, Arc::clone(sink)));
     Some(rx)
 }
 
@@ -1278,33 +1275,33 @@ pub(crate) fn route_wake_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
 /// The wake of the multihop handle, which rings when its relay rule starts to refuse a
 /// hop and when it admits one that it refused.
 #[cfg(feature = "multihop")]
-fn route_wake_of(state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> {
+fn route_wake_of(state: &EventLoopState) -> Arc<tokio::sync::Notify> {
     state.multihop.as_ref().map_or_else(
-        || std::sync::Arc::new(tokio::sync::Notify::new()),
+        || Arc::new(tokio::sync::Notify::new()),
         habilis_network_iroh_multihop_transport::MultihopHandle::route_wake,
     )
 }
 
 /// Without the `multihop` feature there is no multihop transport: the wake never rings.
 #[cfg(not(feature = "multihop"))]
-fn route_wake_of(_state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> {
-    std::sync::Arc::new(tokio::sync::Notify::new())
+fn route_wake_of(_state: &EventLoopState) -> Arc<tokio::sync::Notify> {
+    Arc::new(tokio::sync::Notify::new())
 }
 
 /// The wake of the admission table of the multihop underlay, which rings when a round of the
 /// underlay ends, whatever its end. It is the table of the underlay, not `webrtc_admission`.
 #[cfg(feature = "multihop")]
-fn underlay_slot_freed_of(state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> {
+fn underlay_slot_freed_of(state: &EventLoopState) -> Arc<tokio::sync::Notify> {
     state.underlay_webrtc.as_ref().map_or_else(
-        || std::sync::Arc::new(tokio::sync::Notify::new()),
+        || Arc::new(tokio::sync::Notify::new()),
         |underlay| underlay.admission.slot_freed(),
     )
 }
 
 /// Without the `multihop` feature there is no underlay: the wake never rings.
 #[cfg(not(feature = "multihop"))]
-fn underlay_slot_freed_of(_state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> {
-    std::sync::Arc::new(tokio::sync::Notify::new())
+fn underlay_slot_freed_of(_state: &EventLoopState) -> Arc<tokio::sync::Notify> {
+    Arc::new(tokio::sync::Notify::new())
 }
 
 /// Build and emit the `ping_report` for the elapsed round, then clear

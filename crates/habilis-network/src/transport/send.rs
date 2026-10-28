@@ -413,6 +413,8 @@ async fn broadcast(sender: &MeshSender, bytes: WireFrame) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::UdpTransport;
     use habilis_network_test_tracing::test;
@@ -1231,7 +1233,7 @@ mod tests {
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
         state.linked_endpoints.insert(bob_endpoint.id());
-        let author = state.identity.clone();
+        let author = Arc::clone(&state.identity);
         prove_identity(&mut state, &author, bob_endpoint.id());
         let unknown = serde_json::json!(["heads-we-do-not-hold"]);
         let from_the_author = digest(&net.mesh, Channel::State, &unknown, &author);

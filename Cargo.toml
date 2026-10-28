@@ -246,6 +246,9 @@ string_add = "warn"
 # `expect` says why a panic is right. Tests may use `unwrap` (clippy.toml).
 unwrap_used = "warn"
 missing_assert_message = "warn"
+# Google Rust Style Guide, B3: a clone is a deep copy that is needed, not a stand-in for a borrow.
+clone_on_ref_ptr = "warn"
+redundant_clone = "warn"
 # Force `#[expect(...)]` over `#[allow(...)]` where the lint still fires, so a
 # suppression that goes stale (lint no longer triggers) becomes a build error
 # instead of silently lingering.

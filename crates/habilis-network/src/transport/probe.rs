@@ -1631,7 +1631,7 @@ mod tests {
 
         let natives: Vec<EndpointAddr> = (1..=6).map(native_shaped).collect();
         let browsers: Vec<EndpointAddr> = (11..=16).map(browser_shaped).collect();
-        let mut lane = browsers.clone();
+        let mut lane = browsers;
         lane.extend(natives.clone());
         let mut native_ids: Vec<_> = natives.iter().map(|addr| addr.id).collect();
         native_ids.sort_unstable();
@@ -2808,7 +2808,7 @@ mod tests {
                 ),
             );
         }
-        let mut ordered = ids.clone();
+        let mut ordered = ids;
         ordered.sort_unstable();
         let now = clock::Instant::now();
         let pick = |pick| super::next_fill(&state, 8, rendezvous, now, pick).map(|addr| addr.id);

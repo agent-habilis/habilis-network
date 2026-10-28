@@ -49,7 +49,7 @@ impl CustomEndpoint for WebRtcEndpoint {
     }
 
     fn create_sender(&self) -> Arc<dyn CustomSender> {
-        Arc::new(WebRtcSender::new(self.registry.clone()))
+        Arc::new(WebRtcSender::new(Arc::clone(&self.registry)))
     }
 
     /// No limit of our own: the sender splits any batch into one message per

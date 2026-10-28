@@ -245,7 +245,7 @@ mod tests {
         };
 
         for kind in [
-            joined.clone(),
+            joined,
             MessageKind::PeerInfo,
             MessageKind::app_broadcast("app_msg"),
             MessageKind::Presence {

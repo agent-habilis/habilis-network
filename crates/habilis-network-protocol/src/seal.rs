@@ -305,7 +305,7 @@ mod tests {
             open_symmetric(&key(2), &blob).is_err(),
             "a wrong key must not open the blob"
         );
-        let mut tampered = blob.clone();
+        let mut tampered = blob;
         *tampered.last_mut().unwrap() ^= 0x01;
         assert!(
             open_symmetric(&key(1), &tampered).is_err(),

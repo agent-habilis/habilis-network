@@ -76,10 +76,10 @@ impl WebRtcTransport {
             session,
             remote,
             generation,
-            self.registry.clone(),
+            Arc::clone(&self.registry),
             out_rx,
             self.inbound_tx.clone(),
-            dropped_tx.clone(),
+            Arc::clone(&dropped_tx),
         ));
         // `None` means the driver already failed and retired its own
         // generation while this spawn was returning. The handle drops, which
@@ -131,7 +131,7 @@ impl WebRtcTransport {
     /// `Builder::add_custom_transport` directly instead.
     pub fn preset(self: &Arc<Self>) -> impl Preset {
         ExclusivePreset {
-            factory: self.clone(),
+            factory: Arc::clone(self),
         }
     }
 }
@@ -158,7 +158,7 @@ impl CustomTransport for WebRtcTransport {
             custom_addr(self.local_id),
             self.local_addrs.clone(),
             receiver,
-            self.registry.clone(),
+            Arc::clone(&self.registry),
         )))
     }
 }

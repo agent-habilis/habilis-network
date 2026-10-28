@@ -959,7 +959,7 @@ mod verified {
             .expect("the original verifies");
         assert_eq!(canonical, original.canonical_bytes());
 
-        let mut edited = original.clone();
+        let mut edited = original;
         edited.body = "edited".into();
         assert!(
             edited.clone().verify_canonical().is_err(),

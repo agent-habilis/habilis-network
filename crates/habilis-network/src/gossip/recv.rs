@@ -2153,8 +2153,8 @@ mod first_contact_tests {
     use crate::protocol::message;
     use crate::transport::webrtc;
     use crate::util::{clock, tuning};
-    use std::sync::atomic;
     use std::sync::atomic::Ordering;
+    use std::sync::{Arc, atomic};
     use tokio::sync::mpsc;
     struct Inert;
 
@@ -2318,7 +2318,7 @@ mod first_contact_tests {
     }
 
     /// An app frame counts the times that it reaches the app.
-    struct Counting(std::sync::Arc<atomic::AtomicUsize>);
+    struct Counting(Arc<atomic::AtomicUsize>);
 
     #[async_trait::async_trait]
     impl NodeApp for Counting {
@@ -2344,8 +2344,8 @@ mod first_contact_tests {
         let node = Node::spawn().await;
         let ctx = node.ctx();
         let mut state = fresh_state();
-        let reads = std::sync::Arc::new(atomic::AtomicUsize::new(0));
-        let mut app = Counting(reads.clone());
+        let reads = Arc::new(atomic::AtomicUsize::new(0));
+        let mut app = Counting(Arc::clone(&reads));
         let frame = Message::new_app(
             &node.mesh,
             &nick("alice"),

@@ -390,7 +390,7 @@ impl UnicastPool {
     pub(crate) fn hold_next_dial(&self) -> Arc<tokio::sync::Notify> {
         let gate = Arc::new(tokio::sync::Notify::new());
         if let Ok(mut slot) = self.inner.dial_gate.lock() {
-            *slot = Some(gate.clone());
+            *slot = Some(Arc::clone(&gate));
         }
         gate
     }

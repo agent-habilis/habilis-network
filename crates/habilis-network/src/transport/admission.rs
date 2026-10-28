@@ -877,7 +877,7 @@ impl SignalAdmission {
     /// `DirectOutcome` is sent for it, because a verdict of `direct: false` would mark a lane peer
     /// relay-only.
     pub(crate) fn slot_freed(&self) -> Arc<tokio::sync::Notify> {
-        self.freed.clone()
+        Arc::clone(&self.freed)
     }
 
     fn release(&self, peer: EndpointId, epoch: u64) {

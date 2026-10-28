@@ -418,7 +418,7 @@ fn invalid_checksum_rejected() {
     let encoded = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback())
         .unwrap()
         .to_string();
-    let mut bad = encoded.clone();
+    let mut bad = encoded;
     let last_index = bad.len() - 1;
     let replacement = if bad.ends_with('1') { "2" } else { "1" };
     bad.replace_range(last_index.., replacement);
