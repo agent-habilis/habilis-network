@@ -1,0 +1,30 @@
+/// Why a pid cannot be the owner of a detached daemon.
+#[cfg(feature = "host")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+#[must_use]
+pub enum OwnerPidError {
+    /// The pid is `0` or `1`: init, or no process at all.
+    Reserved(u32),
+    /// The pid is the calling process's own.
+    OwnSelf(u32),
+    /// No live process has the pid.
+    NotRunning(u32),
+}
+
+#[cfg(feature = "host")]
+impl std::fmt::Display for OwnerPidError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Reserved(pid) => write!(
+                formatter,
+                "owner pid {pid} is init or invalid. Give a live process id greater than 1"
+            ),
+            Self::OwnSelf(pid) => write!(formatter, "owner pid {pid} is this process itself"),
+            Self::NotRunning(pid) => write!(formatter, "owner pid {pid} is not running"),
+        }
+    }
+}
+
+#[cfg(feature = "host")]
+impl std::error::Error for OwnerPidError {}

@@ -3,6 +3,12 @@
 //! Split out of `event_loop` because none of it is the loop — it is what runs
 //! once, on the way out, and it was the largest block of the file that never
 //! touched a tick.
+mod owned_endpoints;
+#[cfg(feature = "host")]
+mod owner;
+#[cfg(feature = "host")]
+mod owner_pid_error;
+mod quit_params;
 
 use std::time::Duration;
 
@@ -14,7 +20,7 @@ use super::app::NodeDriver;
 use super::handler_ctx::HandlerCtx;
 use super::state::EventLoopState;
 use crate::gossip::event::NodeEvent;
-use crate::protocol::{MeshName, Message};
+use crate::protocol::Message;
 #[cfg(all(unix, feature = "host"))]
 use crate::util::tuning::ppid_watch_interval;
 
@@ -23,6 +29,13 @@ use crate::util::process;
 #[cfg(feature = "host")]
 #[cfg(unix)]
 use tokio::signal::unix;
+
+pub(super) use owned_endpoints::OwnedEndpoints;
+#[cfg(feature = "host")]
+pub(crate) use owner::Owner;
+#[cfg(feature = "host")]
+pub use owner_pid_error::OwnerPidError;
+pub(super) use quit_params::QuitParams;
 /// Graceful shutdown: remove the statusline state file first, then
 /// announce `Left` and give the broadcast a moment to reach peers.
 /// Shared by both the external-quit and ctrl-c/SIGTERM/SIGHUP paths so
@@ -63,16 +76,6 @@ pub(super) async fn shutdown<Driver: NodeDriver>(
     // After the broadcast, so peers get the `Left` even when logging fails.
     lifecycle::log_leaving(quit.name.as_str());
     n0_future::time::sleep(Duration::from_millis(500)).await;
-}
-/// The mesh name (for the departure log line), the user-facing departure
-/// label (the raw topic string for a topic gossip, `#name` otherwise), and
-/// whether this quit should hard-exit the process — the plain values
-/// [`announce_departure`] needs beyond the loop state and the shared
-/// handler context.
-pub(super) struct QuitParams<'name> {
-    pub(super) name: &'name MeshName,
-    pub(super) leave_label: &'name str,
-    pub(super) exit_on_quit: bool,
 }
 /// Announce departure, and say whether the loop must hard-exit the process once it has ended.
 ///
@@ -153,36 +156,6 @@ pub fn validate_owner_pid(pid: u32) -> Result<(), OwnerPidError> {
     owner_start(pid).map(drop)
 }
 
-/// Why a pid cannot be the owner of a detached daemon.
-#[cfg(feature = "host")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
-pub enum OwnerPidError {
-    /// The pid is `0` or `1`: init, or no process at all.
-    Reserved(u32),
-    /// The pid is the calling process's own.
-    OwnSelf(u32),
-    /// No live process has the pid.
-    NotRunning(u32),
-}
-
-#[cfg(feature = "host")]
-impl std::fmt::Display for OwnerPidError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Reserved(pid) => write!(
-                formatter,
-                "owner pid {pid} is init or invalid. Give a live process id greater than 1"
-            ),
-            Self::OwnSelf(pid) => write!(formatter, "owner pid {pid} is this process itself"),
-            Self::NotRunning(pid) => write!(formatter, "owner pid {pid} is not running"),
-        }
-    }
-}
-
-#[cfg(feature = "host")]
-impl std::error::Error for OwnerPidError {}
 /// The start time of a valid owner, the one home of the owner checks.
 #[cfg(feature = "host")]
 fn owner_start(pid: u32) -> Result<u64, OwnerPidError> {
@@ -193,35 +166,6 @@ fn owner_start(pid: u32) -> Result<u64, OwnerPidError> {
         return Err(OwnerPidError::OwnSelf(pid));
     }
     process::live_start_time(pid).ok_or(OwnerPidError::NotRunning(pid))
-}
-/// The process a detached daemon lives for, in place of its parent. The pid
-/// alone cannot tell the owner from a later process that reuses the pid, so
-/// the start time captured at startup is what identifies it.
-#[cfg(feature = "host")]
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Owner {
-    pid: u32,
-    start: u64,
-}
-
-#[cfg(feature = "host")]
-impl Owner {
-    /// # Errors
-    /// See [`validate_owner_pid`].
-    pub(crate) fn try_new(pid: u32) -> Result<Self, OwnerPidError> {
-        Ok(Self {
-            pid,
-            start: owner_start(pid)?,
-        })
-    }
-
-    pub(crate) fn pid(self) -> u32 {
-        self.pid
-    }
-
-    fn lost(self) -> bool {
-        process::live_start_time(self.pid) != Some(self.start)
-    }
 }
 /// Detect orphaning by the spawning agent and route it through the same quit
 /// channel as a signal. A hard-killed parent (`kill -9`, a reinstall, an IDE
@@ -294,42 +238,6 @@ pub(super) fn never_quit() -> mpsc::Receiver<()> {
     let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
     std::mem::forget(quit_tx);
     quit_rx
-}
-
-/// What the loop closes as it ends: the router with its endpoint, and the multi-hop
-/// underlay, when the engine bound them. An injected endpoint is the caller's and stays
-/// open, though the router is still held to the end so its accept loop outlives the loop.
-pub(super) struct OwnedEndpoints {
-    pub(super) router: iroh::protocol::Router,
-    pub(super) owner: super::config::EndpointOwner,
-    #[cfg(feature = "multihop")]
-    pub(super) multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
-}
-
-impl OwnedEndpoints {
-    /// Dropping an endpoint that was never closed makes iroh log an ERROR and abort its
-    /// connections. `Router::shutdown` closes the router and its endpoint; the two
-    /// closes run together, as each can wait on peers that are already gone.
-    pub(super) async fn close(self) {
-        if self.owner != super::config::EndpointOwner::Engine {
-            return;
-        }
-        tokio::join!(
-            async {
-                // It fails only when a protocol handler panicked, which the task has
-                // already reported; the loop is ending either way.
-                if let Err(error) = self.router.shutdown().await {
-                    tracing::debug!(%error, "the router failed while it shut down");
-                }
-            },
-            async {
-                #[cfg(feature = "multihop")]
-                if let Some(handle) = self.multihop.as_ref() {
-                    handle.close().await;
-                }
-            },
-        );
-    }
 }
 
 #[cfg(all(unix, feature = "host"))]
