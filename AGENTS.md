@@ -195,6 +195,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - `scripts/script-language/script-language.ts` refuses a `.sh`, `.bash` or `.py` file, and a file with a shell or Python shebang. See the Scripts section.
 - `typecheck:scripts` in `package.json` runs `tsc --noEmit -p tsconfig.scripts.json`. The `typecheck` script runs it too.
 - `clippy::missing_panics_doc` (in `pedantic`, not silenced) refuses a public function that can panic and has no `# Panics` section. A probe fn with `expect` fails with "docs for function which may panic missing `# Panics` section" (2026-10-27).
+- `clippy::missing_assert_message` is on by name in `[workspace.lints]`: an `assert!` outside test code needs a message. A probe `assert!(flag)` fails with "assert without any message" (2026-10-27). Clippy does not look at test code, so about 570 message-less `assert!` calls in tests stay.
 
 ### Rules we decline, or leave to the reviewer
 
