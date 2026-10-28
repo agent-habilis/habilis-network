@@ -30,6 +30,10 @@ use crate::newtype::string_newtype;
 mod chain_ctx;
 #[cfg(any(test, feature = "test-fixtures"))]
 pub use chain_ctx::ChainCtx;
+#[cfg(any(test, feature = "test-fixtures"))]
+mod build_msg_params;
+#[cfg(any(test, feature = "test-fixtures"))]
+pub use build_msg_params::BuildMsgParams;
 #[expect(
     clippy::module_inception,
     reason = "the file is named for its type, Message, as O9 asks"
@@ -271,25 +275,6 @@ pub(super) fn empty_body() -> MessageBody {
 ///
 /// # Errors
 /// A [`MessageError`] from the message encoding: an oversized payload or a JSON failure.
-/// The inputs of a test message: the mesh, the author, the body, the chain and the app tag.
-#[cfg(any(test, feature = "test-fixtures"))]
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct BuildMsgParams<'mesh> {
-    /// The mesh of the message.
-    pub mesh: &'mesh MeshId,
-    /// The member that signs the message.
-    pub author: &'mesh Nickname,
-    /// The body to sign.
-    pub body: MessageBody,
-    /// Where the message sits in its author's chain.
-    pub chain: ChainCtx,
-    /// The app tag to stamp. A parameter, not a constant: this fixture is used
-    /// across crates, and hardcoding one consumer's tag made it build a frame
-    /// that consumer would then fail to recognise.
-    pub tag: AppTag,
-}
-
 #[cfg(any(test, feature = "test-fixtures"))]
 /// # Errors
 /// Serialization fails, or the message exceeds `MAX_MESSAGE_SIZE`.
