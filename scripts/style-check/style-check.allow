@@ -490,8 +490,6 @@ untyped_long_chain_let|crates/habilis-network/src/gossip/recv.rs|2|kept: a let o
 untyped_long_chain_let|crates/habilis-network/src/gossip/split.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/lookup/capability.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/lookup/mod.rs|3|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/src/membership/app.rs|5|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/src/lookup/mod.rs|5|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/membership/membership_app.rs|5|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/testing.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/transport/admission.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
@@ -574,12 +572,8 @@ self_convention|crates/habilis-network-protocol/src/mesh/transport.rs|1|Transpor
 self_convention|crates/habilis-network-protocol/src/topic_id.rs|1|TopicId::to_bytes: a Copy type, so self by value
 self_convention|crates/habilis-network-util/src/unix_secs.rs|2|UnixSecs::as_secs and to_le_bytes: a Copy type, so self by value
 # fn_import: a top-level function imported by its bare name (O23). Each row is a count that may only go down.
-fn_import|crates/habilis-network-iroh-gossip-transport/src/receive_loop.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-iroh-gossip-transport/src/gossip_handle.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-webrtc-transport/src/lib.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_handle.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_preferred.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-netplay/examples/light-cycles/native/game/src/ui.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
+fn_import|crates/habilis-network-netplay/examples/light-cycles/native/game/src/ui.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/runtime.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/tui/diff.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/tui/paint.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
@@ -602,8 +596,6 @@ fn_import|crates/habilis-network/src/lifecycle/heartbeat.rs|1|kept: a top-level 
 fn_import|crates/habilis-network/src/lifecycle/mod.rs|3|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/lookup/capability.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/lookup/mod.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network/src/membership/app.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network/src/lookup/mod.rs|3|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/membership/membership_app.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/membership/opts.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/membership/mod.rs|1|kept: a top-level function imported by its bare name (O23 rollout)

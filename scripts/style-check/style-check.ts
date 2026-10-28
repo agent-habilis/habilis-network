@@ -454,9 +454,13 @@ function countFnImports(raw: string): number {
   const { fns, mods } = declaredNames();
   const text = stripComments(raw);
   let count = 0;
-  for (const m of text.matchAll(/^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?use[ \t]+(?:[A-Za-z_][A-Za-z0-9_]*::)*([a-z_][a-z0-9_]*)[ \t]*;/gm)) {
-    const name = m[1] ?? "";
-    if ((fns.has(name) || STD_FNS.has(name)) && !mods.has(name) && !NOT_FNS.has(name)) count++;
+  for (const m of text.matchAll(/^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?use[ \t]+((?:[A-Za-z_][A-Za-z0-9_]*::)*)([a-z_][a-z0-9_]*)[ \t]*;/gm)) {
+    const root = (m[1] ?? "").split("::")[0] ?? "";
+    const name = m[2] ?? "";
+    // A fn of this workspace is imported through crate, super, self, one of its crates or a child module.
+    // Under any other root the name is a library module or fn, which only the list of known library fns can tell.
+    const local = root === "" || /^(?:crate|super|self|habilis_\w+)$/.test(root) || mods.has(root);
+    if ((local ? fns.has(name) : STD_FNS.has(name)) && !mods.has(name) && !NOT_FNS.has(name)) count++;
   }
   return count;
 }

@@ -517,6 +517,9 @@ test("fn_import: a bare function import with no row fails", () => {
 test("fn_import: a module import is clean", () => {
   expectExit("crates/demo/src/lib.rs", "pub mod wire {}\nuse crate::demo::wire;", 0, "");
 });
+test("fn_import: a module of an outside crate that shares a name with a local fn is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn broadcast() {}\nuse tokio::sync::broadcast;", 0);
+});
 test("fn_import: the exact count is allowed", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn build_mesh() {}\nuse crate::demo::build_mesh;", 0, "fn_import|crates/demo/src/lib.rs|1|fixture");
 });
