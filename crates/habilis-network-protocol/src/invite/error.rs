@@ -11,6 +11,7 @@ type BoxedError = Box<dyn Error + Send + Sync>;
 /// Why an invite ticket cannot be minted, decoded or redeemed.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum InviteError {
     /// The token is not a Base58Check text.
     Base58(Base58Error),

@@ -5,6 +5,7 @@ use iroh::EndpointId;
 /// Why an attach was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 pub enum AttachError {
     /// Someone already holds this peer's slot: a live session, or another
     /// negotiation partway through attaching one.

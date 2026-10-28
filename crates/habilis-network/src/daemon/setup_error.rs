@@ -17,6 +17,7 @@ use habilis_network_protocol::ConfigError;
 /// "creator unreachable" that the gossip-join skill describes) lands in `Internal`.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum SetupError {
     /// The id needs a password and none was given. A frontend prompts for it.
     PasswordRequired,

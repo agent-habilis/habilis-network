@@ -103,6 +103,7 @@ impl SignalEnvelope {
 /// Why a signal envelope does not name a usable endpoint.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum SignalError {
     /// The remote side answered with an error envelope.
     Remote {

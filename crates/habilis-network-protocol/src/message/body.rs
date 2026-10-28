@@ -26,6 +26,7 @@ string_newtype!(
 
 /// A message body with a control character other than tab or newline.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct BodyError(String);
 
 impl fmt::Display for BodyError {

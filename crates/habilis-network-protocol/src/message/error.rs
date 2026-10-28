@@ -12,6 +12,7 @@ type BoxedError = Box<dyn Error + Send + Sync>;
 /// Why a message does not parse or encode.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum MessageError {
     /// The bytes are larger than a message may be.
     TooLarge,
@@ -79,6 +80,7 @@ impl Error for MessageError {
 /// Why an app tag is refused: empty, longer than 32 bytes, or not an ASCII slug.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 pub enum AppTagError {
     /// The text is not a valid app tag.
     Invalid,
@@ -95,6 +97,7 @@ impl Error for AppTagError {}
 /// Why a correlation id is refused: empty or longer than 64 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 pub enum CorrIdError {
     /// The text is not a valid correlation id.
     Invalid,

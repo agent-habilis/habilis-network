@@ -10,6 +10,7 @@ type BoxedError = Box<dyn Error + Send + Sync>;
 /// Why a mesh config is refused, or a mesh identifier does not decode.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum ConfigError {
     /// A config that is well formed but refused: a combination of lookups and
     /// transports that cannot form a mesh, or a value over a wire limit.

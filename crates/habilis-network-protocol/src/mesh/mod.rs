@@ -42,6 +42,7 @@ pub use transport::{Transport, TransportPolicy};
 /// entry with a typo. Names the list and the choices, so the message stands
 /// on its own wherever it surfaces (a CLI, a JSON error, a C error slot).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct ChoiceError {
     list: &'static str,
     given: String,
@@ -144,6 +145,7 @@ pub struct LockedMesh {
 /// Why a [`LockedMesh`] would not unlock. The messages are the operator's text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 pub enum UnlockError {
     /// The id is invite-only: a bare hash never joins, redeem an invite.
     InviteOnly,

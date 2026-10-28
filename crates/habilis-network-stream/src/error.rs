@@ -12,6 +12,7 @@ type BoxedError = Box<dyn Error + Send + Sync>;
 /// Why a stream hash token does not decode.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum HashError {
     /// The token is not a stream hash of this kind.
     WrongKind,
@@ -71,6 +72,7 @@ impl Error for HashError {
 /// Why a stream call failed.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum StreamError {
     /// The options name a transport that a stream does not use.
     Options(&'static str),

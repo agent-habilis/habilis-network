@@ -844,6 +844,7 @@ pub struct RelayLadder(Vec<RelayUrl>);
 
 /// A relay ladder that couldn't be parsed (empty entry / invalid URL).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct RelayLadderError(String);
 
 impl fmt::Display for RelayLadderError {

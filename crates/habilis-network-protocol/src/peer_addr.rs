@@ -27,6 +27,7 @@ pub fn endpoint_addr_to_json(addr: &EndpointAddr) -> serde_json::Value {
 /// Why a JSON value does not decode to an endpoint address.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum PeerAddrError {
     /// The JSON has no endpoint id.
     Missing(&'static str),

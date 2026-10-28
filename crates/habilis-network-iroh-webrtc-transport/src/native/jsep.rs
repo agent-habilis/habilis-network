@@ -21,6 +21,7 @@ use crate::DATA_CHANNEL_LABEL;
 /// a caller can tell a bad envelope from a dead socket from a missed deadline.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum JsepError {
     /// The UDP socket for the negotiation could not bind.
     Bind(BoxedError),

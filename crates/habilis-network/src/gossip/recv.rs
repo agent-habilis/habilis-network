@@ -3471,15 +3471,19 @@ mod requeue_tests {
         let frame = node.frame_to_bob();
         let bytes = frame.serialize().expect("serialize");
         let now = clock::Instant::now();
-        crate::transport::resolve(&frame, bytes.clone(), &state)
-            .expect_err("no endpoint is known for bob yet");
+        drop(
+            crate::transport::resolve(&frame, bytes.clone(), &state)
+                .expect_err("no endpoint is known for bob yet"),
+        );
         assert!(requeue(&mut state, &ctx, frame.clone(), bytes.clone()));
         assert!(!state.lane_session_wanted(node.bob, now), "bob is unknown");
         assert_eq!(state.webrtc_admission.in_flight(), 0);
 
         state.note_peer_endpoint(nick("bob"), addr);
-        crate::transport::resolve(&frame, bytes.clone(), &state)
-            .expect_err("a lookup-only relay holds the frame");
+        drop(
+            crate::transport::resolve(&frame, bytes.clone(), &state)
+                .expect_err("a lookup-only relay holds the frame"),
+        );
         assert!(requeue(&mut state, &ctx, frame, bytes));
 
         assert!(

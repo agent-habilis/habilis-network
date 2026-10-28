@@ -10,6 +10,7 @@ type BoxedError = Box<dyn Error + Send + Sync>;
 /// Why a chunk store call failed.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum ChunkError {
     /// A value or a row is not what the call needs: a bad hex text, a row of
     /// the wrong length, a row that is not stored, or bytes that do not address

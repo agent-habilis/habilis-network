@@ -29,6 +29,7 @@ string_newtype!(
 
 /// A message id text that is not a valid UUID.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct IdError(String);
 
 impl fmt::Display for IdError {

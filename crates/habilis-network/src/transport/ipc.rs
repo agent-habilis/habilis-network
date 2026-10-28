@@ -265,6 +265,7 @@ impl std::error::Error for NoDaemon {}
 /// round trip that fails, or a response that is too large.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum IpcError {
     /// No daemon is listening on the socket.
     NoDaemon(NoDaemon),

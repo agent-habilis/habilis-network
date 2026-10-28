@@ -60,6 +60,7 @@ struct Envelope {
 /// Why a seal does not open, or a sealed body does not decode.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum SealError {
     /// The seal does not open, or a fixed check failed. The text says which.
     Failed(&'static str),

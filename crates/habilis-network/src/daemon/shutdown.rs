@@ -157,6 +157,7 @@ pub fn validate_owner_pid(pid: u32) -> Result<(), OwnerPidError> {
 #[cfg(feature = "host")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 pub enum OwnerPidError {
     /// The pid is `0` or `1`: init, or no process at all.
     Reserved(u32),

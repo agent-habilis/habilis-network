@@ -789,6 +789,7 @@ mod tests {
 /// Why a state file cannot be read as a snapshot.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum StateFileError {
     /// The file exists but cannot be read.
     Unreadable {

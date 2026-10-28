@@ -6,6 +6,7 @@ use crate::handle::PlayerHandle;
 /// Errors a rollback session can return.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 pub enum RollbackError {
     /// We have simulated `max_prediction` frames past the last confirmed one
     /// and cannot guess further — there would be no saved state left to roll

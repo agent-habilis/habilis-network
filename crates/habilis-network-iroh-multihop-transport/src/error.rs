@@ -5,6 +5,7 @@ use std::fmt;
 /// Why a multihop handle could not be built over its underlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 pub enum HandleError {
     /// A protocol was registered on the forwarder's own ALPN, which the forwarder keeps.
     ForwarderAlpn,

@@ -7,6 +7,7 @@ use habilis_network_protocol::message::BodyError;
 /// Why a shared-state change could not be built or wrapped for the wire.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum DocError {
     /// The merge is not a JSON object: the automerge document root is a map.
     NotAnObject,

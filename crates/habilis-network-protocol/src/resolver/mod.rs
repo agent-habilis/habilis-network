@@ -9,6 +9,7 @@ use crate::mesh::{LockedMesh, MeshIdError};
 /// Why a join target does not resolve to a locked mesh.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum ResolveError {
     /// The mesh id does not decode. The text names why.
     InvalidId(String),
@@ -54,6 +55,7 @@ pub enum JoinTarget {
 /// [`Unrecognized`]: JoinTargetError::Unrecognized
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 pub enum JoinTargetError {
     /// Looked like a mesh id (base58) but failed checksum/payload validation.
     MalformedMeshId(MeshIdError),

@@ -1504,12 +1504,16 @@ mod tests {
         };
         let webrtc =
             TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
-        super::refuse_in_browser(&lookups, webrtc, no_relay(&webrtc))
-            .expect_err("no relay to signal on");
+        drop(
+            super::refuse_in_browser(&lookups, webrtc, no_relay(&webrtc))
+                .expect_err("no relay to signal on"),
+        );
         let relay_payload =
             TransportPolicy::from_transports(&[Transport::Udp, Transport::Relay]).expect("valid");
-        super::refuse_in_browser(&lookups, relay_payload, no_relay(&relay_payload))
-            .expect_err("no relay to carry payload");
+        drop(
+            super::refuse_in_browser(&lookups, relay_payload, no_relay(&relay_payload))
+                .expect_err("no relay to carry payload"),
+        );
     }
 
     use tokio::sync::watch;

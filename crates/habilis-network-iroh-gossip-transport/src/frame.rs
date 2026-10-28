@@ -54,6 +54,7 @@ impl<'datagram> Frame<'datagram> {
 /// Why a datagram cannot be framed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 pub enum EncodeError {
     /// There is nothing to send.
     Empty,
@@ -67,6 +68,7 @@ pub enum EncodeError {
 /// Why bytes are not a frame this build reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 pub enum DecodeError {
     /// The first byte is not [`FRAME_KIND`]: this is another kind of message.
     NotAFrame,

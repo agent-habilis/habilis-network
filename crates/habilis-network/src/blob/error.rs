@@ -10,6 +10,7 @@ use std::fmt;
 /// [`BlobError::Internal`] holds the other causes, which no caller acts on.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum BlobError {
     /// The ticket is password-protected, and no password was given.
     PasswordRequired,

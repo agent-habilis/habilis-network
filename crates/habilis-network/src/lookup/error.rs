@@ -12,6 +12,7 @@ use iroh::EndpointId;
 /// caller acts on; it keeps their text and their chain.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum EndpointError {
     /// The peer is at its direct-peer cap and turned the offer away. `source` is the
     /// exchange error the refusal came from.

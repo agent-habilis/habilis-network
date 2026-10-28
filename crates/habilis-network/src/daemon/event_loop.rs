@@ -67,6 +67,7 @@ use crate::util::version;
 /// on a failure of one of its tasks or of its endpoint. It keeps their text and chain.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum EventLoopError {
     /// A cause no caller acts on. It keeps its text and its chain.
     Internal(Box<dyn std::error::Error + Send + Sync>),

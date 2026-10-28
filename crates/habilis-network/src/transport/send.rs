@@ -193,6 +193,7 @@ pub(crate) fn unicast_answer_target(
 /// is a variant and not a downcast. [`SendError::Internal`] holds the causes no caller acts on.
 #[derive(Debug)]
 #[non_exhaustive]
+#[must_use]
 pub enum SendError {
     /// The frame waits for a direct path: its peer's only path is the relay, which is lookup
     /// only on this mesh.
