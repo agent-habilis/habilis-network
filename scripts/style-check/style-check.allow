@@ -797,7 +797,7 @@ turbofish_collect_parse|crates/habilis-network-protocol/src/resolver/join_target
 turbofish_collect_parse|crates/habilis-network-protocol/src/resolver/resolve.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 pub_const_fn|crates/habilis-network-protocol/src/message/signer.rs|3|kept: trivial accessors of a signer and a constructor (moved from message/mod.rs)
 long_chain|crates/habilis-network/src/beacon/dependents.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-fn_import|crates/habilis-network/src/beacon/mod.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
+fn_import|crates/habilis-network/src/beacon/mod.rs|4|kept: a top-level function imported by its bare name (O23 rollout)
 abbrev_name|crates/habilis-network-protocol/src/message/wire_in.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/message/wire_out.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network-protocol/src/message/wire_in.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
