@@ -73,6 +73,12 @@ jobs:
           bun test scripts/pub-trait/pub-trait.test.ts
           bun scripts/pub-trait/pub-trait.ts
 
+      # A leaf file is named for its primary public type (O9). Renames are pending: see the allow list.
+      - name: Module layout
+        run: |
+          bun test scripts/module-layout/module-layout.test.ts
+          bun scripts/module-layout/module-layout.ts
+
       # `blob` is off by default (only agent-gossip enables it), so the line
       # above never lints `src/blob/` — ~1,300 lines including its own ALPN
       # server. `--all-features` below only *checks* it.

@@ -1,0 +1,124 @@
+# file|count|reason
+# Used by scripts/module-layout/module-layout.ts. Each leaf file that is named for none of its public types has one row. A row goes when the file is renamed or split.
+
+crates/habilis-network-chunks/src/error.rs|1|rename pending: public type(s) ChunkError
+crates/habilis-network-chunks/src/fs.rs|1|rename pending: public type(s) DiskStore, DiskOrigin
+crates/habilis-network-chunks/src/idb.rs|1|rename pending: public type(s) IdbStore
+crates/habilis-network-chunks/src/mem.rs|1|rename pending: public type(s) InMemoryStore
+crates/habilis-network-doc/src/error.rs|1|rename pending: public type(s) DocError
+crates/habilis-network-ffi/src/ffi.rs|1|rename pending: public type(s) HabilisNetworkOpts, HabilisNetworkMsg, HabilisNetworkMesh, HabilisNetworkStreamOpts, HabilisNetworkStreams, HabilisNetworkProducer, HabilisNetworkReader
+crates/habilis-network-ffi/src/stream.rs|1|rename pending: public type(s) Streams, Writer, Read, ReadEnd
+crates/habilis-network-iroh-gossip-transport/src/lookup.rs|1|rename pending: public type(s) GossipLookup
+crates/habilis-network-iroh-gossip-transport/src/memory.rs|1|rename pending: public type(s) Hub
+crates/habilis-network-iroh-gossip-transport/src/selector.rs|1|rename pending: public type(s) GossipLadder
+crates/habilis-network-iroh-gossip-transport/src/sink.rs|1|rename pending: public type(s) GossipSink, ReceiveLoop
+crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|rename pending: public type(s) FrameSink, Delivery, Shared, GossipHandle
+crates/habilis-network-iroh-multihop-transport/src/addr.rs|1|rename pending: public type(s) RouteHop, Route
+crates/habilis-network-iroh-multihop-transport/src/error.rs|1|rename pending: public type(s) HandleError
+crates/habilis-network-iroh-multihop-transport/src/lookup.rs|1|rename pending: public type(s) MultihopLookup, Chosen, RouteChooser
+crates/habilis-network-iroh-multihop-transport/src/metric.rs|1|rename pending: public type(s) LinkMetric
+crates/habilis-network-iroh-multihop-transport/src/role.rs|1|rename pending: public type(s) AppId, UnderlayId
+crates/habilis-network-iroh-multihop-transport/src/selector.rs|1|rename pending: public type(s) MultihopLadder
+crates/habilis-network-iroh-multihop-transport/src/transport.rs|1|rename pending: public type(s) Shared, MultihopTransport
+crates/habilis-network-iroh-multihop-transport/src/underlay.rs|1|rename pending: public type(s) Delivered, Forwarder, ForwardAcceptor
+crates/habilis-network-iroh-multihop-transport/src/wire.rs|1|rename pending: public type(s) Cell
+crates/habilis-network-iroh-webrtc-transport/src/attach.rs|1|rename pending: public type(s) AttachError
+crates/habilis-network-iroh-webrtc-transport/src/liveness.rs|1|rename pending: public type(s) ConnectionPhase, Verdict
+crates/habilis-network-iroh-webrtc-transport/src/native/driver.rs|1|rename pending: public type(s) NegotiatedSession, ChannelReadyTarget
+crates/habilis-network-iroh-webrtc-transport/src/native/endpoint.rs|1|rename pending: public type(s) WebRtcEndpoint
+crates/habilis-network-iroh-webrtc-transport/src/native/jsep.rs|1|rename pending: public type(s) JsepError, PendingOffer, PendingAnswer
+crates/habilis-network-iroh-webrtc-transport/src/native/sender.rs|1|rename pending: public type(s) WebRtcSender
+crates/habilis-network-iroh-webrtc-transport/src/native/session.rs|1|rename pending: public type(s) InboundPacket, SessionHandle, SessionRegistry
+crates/habilis-network-iroh-webrtc-transport/src/native/stun.rs|1|rename pending: public type(s) IceConfig
+crates/habilis-network-iroh-webrtc-transport/src/native/transport.rs|1|rename pending: public type(s) WebRtcTransport
+crates/habilis-network-iroh-webrtc-transport/src/selector.rs|1|rename pending: public type(s) WebRtcPreferred
+crates/habilis-network-iroh-webrtc-transport/src/signaling.rs|1|rename pending: public type(s) SignalEnvelope, SignalError
+crates/habilis-network-iroh-webrtc-transport/src/web/jsep.rs|1|rename pending: public type(s) IceServer, IceServers, BrowserSession, PendingOffer, PendingAnswer, PreAttachBacklog
+crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|1|rename pending: public type(s) InboundPacket, SessionCounters, SessionCounts, DataChannelCounters, SelectedPairStats, BrowserSessionGuard, BrowserHubTransport, BrowserRtcTransport
+crates/habilis-network-logging/src/sink.rs|1|rename pending: public type(s) LogSink
+crates/habilis-network-netplay/src/error.rs|1|rename pending: public type(s) RollbackError
+crates/habilis-network-netplay/src/handle.rs|1|rename pending: public type(s) PlayerHandle
+crates/habilis-network-netplay/src/mesh/driver.rs|1|rename pending: public type(s) Outbound, Mailboxes, RollbackDriver
+crates/habilis-network-netplay/src/mesh/transport.rs|1|rename pending: public type(s) MeshTransport, PendingTransport
+crates/habilis-network-netplay/src/protocol.rs|1|rename pending: public type(s) PeerState, PeerEvent, PeerProtocol
+crates/habilis-network-netplay/src/session.rs|1|rename pending: public type(s) SessionState, Event, P2PSession
+crates/habilis-network-netplay/src/sync_test.rs|1|rename pending: public type(s) SyncTestSession
+crates/habilis-network-netplay/src/testutil.rs|1|rename pending: public type(s) TestInput, TestState, TestGame, TestRunner
+crates/habilis-network-protocol/src/base58check.rs|1|rename pending: public type(s) Base58Error
+crates/habilis-network-protocol/src/crypto.rs|1|rename pending: public type(s) Seed, SymmetricKey, Keying, Password, TicketSecret, TicketAuth
+crates/habilis-network-protocol/src/directory.rs|1|rename pending: public type(s) Ad, Listing, ListingChange, Listings
+crates/habilis-network-protocol/src/invite/error.rs|1|rename pending: public type(s) InviteError
+crates/habilis-network-protocol/src/invite/ticket.rs|1|rename pending: public type(s) InviteTicket
+crates/habilis-network-protocol/src/mesh/error.rs|1|rename pending: public type(s) ConfigError
+crates/habilis-network-protocol/src/mesh/id.rs|1|rename pending: public type(s) MeshIdError
+crates/habilis-network-protocol/src/mesh/name.rs|1|rename pending: public type(s) NameError
+crates/habilis-network-protocol/src/message/body.rs|1|rename pending: public type(s) BodyError
+crates/habilis-network-protocol/src/message/error.rs|1|rename pending: public type(s) MessageError, AppTagError, CorrIdError
+crates/habilis-network-protocol/src/message/id.rs|1|rename pending: public type(s) IdError
+crates/habilis-network-protocol/src/message/wire.rs|1|rename pending: public type(s) WireFrame
+crates/habilis-network-protocol/src/nickname.rs|1|rename pending: public type(s) NicknameError
+crates/habilis-network-protocol/src/peer_addr.rs|1|rename pending: public type(s) PeerAddrError
+crates/habilis-network-protocol/src/reassembly.rs|1|rename pending: public type(s) ShardIngest, ReassemblyStore, RepairTicket, ShardCache
+crates/habilis-network-protocol/src/seal.rs|1|rename pending: public type(s) SealError
+crates/habilis-network-protocol/src/topic.rs|1|rename pending: public type(s) TopicId
+crates/habilis-network-stream/src/error.rs|1|rename pending: public type(s) HashError, StreamError
+crates/habilis-network-stream/src/hash.rs|1|rename pending: public type(s) StreamId, StreamSecret, StreamHash
+crates/habilis-network-stream/src/node.rs|1|rename pending: public type(s) StreamOpts, StreamNode
+crates/habilis-network-stream/src/produce.rs|1|rename pending: public type(s) Registry, StreamAcceptor, Producer
+crates/habilis-network-stream/src/read.rs|1|rename pending: public type(s) Refused, Reader
+crates/habilis-network-util/src/bounded_read.rs|1|rename pending: public type(s) LineRead
+crates/habilis-network-util/src/clock.rs|1|rename pending: public type(s) UnixSecs
+crates/habilis-network-util/src/logs.rs|1|rename pending: public type(s) LogConfig
+crates/habilis-network-wasm/src/stream.rs|1|rename pending: public type(s) StreamNode, Producer, Reader
+crates/habilis-network/src/blob/error.rs|1|rename pending: public type(s) BlobError
+crates/habilis-network/src/blob/produce.rs|1|rename pending: public type(s) ServeLimits, BlobServer
+crates/habilis-network/src/blob/store.rs|1|rename pending: public type(s) BlobEntry, NewSecret, Registered, ContentMeta, BlobStore
+crates/habilis-network/src/blob/ticket.rs|1|rename pending: public type(s) BlobTicket
+crates/habilis-network/src/daemon/app.rs|1|rename pending: public type(s) NodeDriver, IpcRequest
+crates/habilis-network/src/daemon/beacon_arm.rs|1|rename pending: public type(s) CohostArm
+crates/habilis-network/src/daemon/config.rs|1|rename pending: public type(s) DriverMode, CoHostPolicy, EndpointOwner, EventLoopConfig
+crates/habilis-network/src/daemon/ctx.rs|1|rename pending: public type(s) HandlerCtx
+crates/habilis-network/src/daemon/event_loop.rs|1|rename pending: public type(s) EventLoopError, TickGap, CtxParts
+crates/habilis-network/src/daemon/heal.rs|1|rename pending: public type(s) Resubscribe, ResubscribeEnv, GossipLink
+crates/habilis-network/src/daemon/message_log.rs|1|rename pending: public type(s) Bound, DigestWindow, WindowRange
+crates/habilis-network/src/daemon/params.rs|1|rename pending: public type(s) CreateParams, JoinParams, TopicParams, Resolved
+crates/habilis-network/src/daemon/setup.rs|1|rename pending: public type(s) SetupKind, InjectedEndpoint, SetupParams
+crates/habilis-network/src/daemon/shutdown.rs|1|rename pending: public type(s) QuitParams, OwnerPidError, Owner, OwnedEndpoints
+crates/habilis-network/src/daemon/state.rs|1|rename pending: public type(s) Reach, TestDrop, ParkedLinkStates, RosterEntry, RosterSnapshot, DirectState, RivalFlag, DirectCounts, EventLoopState, IdleCounters, PingRound, MeshSecrets, StateInit
+crates/habilis-network/src/gossip/antientropy.rs|1|rename pending: public type(s) DigestTrigger, ServeBudget, FastRounds, Plane, Answered
+crates/habilis-network/src/gossip/app.rs|1|rename pending: public type(s) AppClass, InboundApp, NodeApp
+crates/habilis-network/src/gossip/broadcast.rs|1|rename pending: public type(s) MergeCtx, StateMergeParams
+crates/habilis-network/src/gossip/lan.rs|1|rename pending: public type(s) LanGrafts
+crates/habilis-network/src/gossip/split.rs|1|rename pending: public type(s) TopicItem, Route, MeshReceiver
+crates/habilis-network/src/lifecycle/membership.rs|1|rename pending: public type(s) MembershipUpdate
+crates/habilis-network/src/lookup/capability.rs|1|rename pending: public type(s) NetworkCapability
+crates/habilis-network/src/lookup/error.rs|1|rename pending: public type(s) EndpointError
+crates/habilis-network/src/lookup/relay.rs|1|rename pending: public type(s) StoppableTask, RungRefresh
+crates/habilis-network/src/membership/app.rs|1|rename pending: public type(s) Inbound, Request, MembershipApp, UnknownPeer
+crates/habilis-network/src/membership/event.rs|1|rename pending: public type(s) MembershipEvent
+crates/habilis-network/src/membership/join.rs|1|rename pending: public type(s) Opts, Membership
+crates/habilis-network/src/testing.rs|1|rename pending: public type(s) LogCapture, LaneNode
+crates/habilis-network/src/transport/accept.rs|1|rename pending: public type(s) UnicastAcceptor
+crates/habilis-network/src/transport/admission.rs|1|rename pending: public type(s) Refusal, Sessions, SignalAdmission, BusyGuard, ConnectionHook, AdmissionGuard
+crates/habilis-network/src/transport/direct_gossip.rs|1|rename pending: public type(s) DirectOnlyGossip
+crates/habilis-network/src/transport/endpoint_proof.rs|1|rename pending: public type(s) ProvenEndpoints
+crates/habilis-network/src/transport/ipc.rs|1|rename pending: public type(s) Addressed
+crates/habilis-network/src/transport/outbox.rs|1|rename pending: public type(s) Resend, ResendOutbox
+crates/habilis-network/src/transport/path.rs|1|rename pending: public type(s) PayloadPath
+crates/habilis-network/src/transport/pool.rs|1|rename pending: public type(s) UnicastPool, WarmSend, Registration, InFlightDial
+crates/habilis-network/src/transport/probe.rs|1|rename pending: public type(s) DirectOutcome, PathKind, PathAction, PathChange, PairToClimb, NudgeAddrs, StepInput, Step, GraftRequest, GraftTarget
+crates/habilis-network/src/transport/redial.rs|1|rename pending: public type(s) Track, Redials
+crates/habilis-network/src/transport/send.rs|1|rename pending: public type(s) Delivered, PendingSend, SendError, Lane
+crates/habilis-network/src/transport/sender.rs|1|rename pending: public type(s) MeshSender
+crates/habilis-network/src/transport/underlay_webrtc.rs|1|rename pending: public type(s) Plan, Allowed, UnderlaySignalGate, UnderlayWebRtc
+crates/habilis-network/src/transport/webrtc.rs|1|rename pending: public type(s) SignalDeadlines, IceProfile, WebRtcSignalAcceptor, UdpTransport, NudgeAcceptor
+tasks/src/bench/native.rs|1|rename pending: public type(s) WebRtcPeer
+tasks/src/bench/run.rs|1|rename pending: public type(s) Sample, Rtt, Measured, Outcome
+tasks/src/bench/serve.rs|1|rename pending: public type(s) Static
+tasks/src/bench/web.rs|1|rename pending: public type(s) Engine, Browser
+tasks/src/e2e/mesh.rs|1|rename pending: public type(s) Native, BunServer
+tasks/src/e2e/server.rs|1|rename pending: public type(s) Harness
+tasks/src/gate.rs|1|rename pending: public type(s) Kind, Scope, Step
+tasks/src/util/cdp.rs|1|rename pending: public type(s) Browser
+tasks/src/util/page.rs|1|rename pending: public type(s) Evaluate, Started
+tasks/src/util/webdriver.rs|1|rename pending: public type(s) Driver, Session
