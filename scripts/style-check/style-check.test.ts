@@ -20,6 +20,9 @@ function check(file: string, content: string, allow = ""): { status: number; out
   copyFileSync(path.join(here, "style-check.ts"), path.join(repo, "scripts", "style-check", "style-check.ts"));
   writeFileSync(path.join(repo, "scripts", "style-check", "style-check.allow"), `${allow}\n`);
   mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
+  // A doc example in the demo crate, so the crate_example rule does not fire on every case.
+  mkdirSync(path.join(repo, "crates", "demo", "src"), { recursive: true });
+  writeFileSync(path.join(repo, "crates", "demo", "src", "example.rs"), "//! ```\n//! ```\n");
   writeFileSync(path.join(repo, file), `${content}\n`);
   spawnSync("git", ["init", "-q"], { cwd: repo });
   const proc = spawnSync(process.execPath, [path.join(repo, "scripts", "style-check", "style-check.ts")], {

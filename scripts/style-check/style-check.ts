@@ -19,6 +19,8 @@ type Rule = {
   name: string;
   pattern?: RegExp;
   scan?: (text: string) => number;
+  // A count from the file path alone, for a rule that reads other files of the crate.
+  scanFile?: (file: string) => number;
   skip?: RegExp;
   glob: string;
   why: string;
@@ -333,6 +335,14 @@ function countPubImplInto(raw: string): number {
   return count;
 }
 
+// A library crate whose source holds no doc example: a fenced code block in a `///` or `//!` comment.
+// Such a crate counts 1 in its lib.rs, so it needs a row with the reason (D2).
+function countCrateWithoutExample(file: string): number {
+  if (!/^crates\/[^/]+\/src\/lib\.rs$/.test(file)) return 0;
+  const proc = spawnSync("git", ["grep", "-l", "--untracked", "-E", "^\\s*(///|//!).*```", "--", path.dirname(file)], { cwd: ROOT, encoding: "utf8" });
+  return (proc.stdout ?? "").trim() === "" ? 1 : 0;
+}
+
 function countAnyhowPub(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   const bare = new Set<string>();
@@ -483,6 +493,12 @@ const RULES: Rule[] = [
     why: "A let of a chain of five or more calls names its type (P5). The reader cannot infer the result from the chain alone.",
   },
   {
+    name: "crate_example",
+    scanFile: countCrateWithoutExample,
+    glob: "crates/*/src/lib.rs",
+    why: "Every library crate shows how it works: a doc example (a fenced code block in a /// or //! comment) somewhere in its source. A crate without one needs a row with the reason (D2).",
+  },
+  {
     name: "anyhow_pub",
     scan: countAnyhowPub,
     skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/[^/]+\/src\/)/,
@@ -557,9 +573,11 @@ function scan(rule: Rule): Map<string, number> {
     if (!existsSync(path.join(ROOT, file))) continue;
     if (rule.skip?.test(file)) continue;
     const text = readFileSync(path.join(ROOT, file), "utf8");
-    const count = rule.scan
-      ? rule.scan(text)
-      : text.split("\n").filter((line) => rule.pattern?.test(line)).length;
+    const count = rule.scanFile
+      ? rule.scanFile(file)
+      : rule.scan
+        ? rule.scan(text)
+        : text.split("\n").filter((line) => rule.pattern?.test(line)).length;
     if (count > 0) counts.set(file, count);
   }
   return counts;

@@ -560,3 +560,12 @@ pub_impl_into|crates/habilis-network-protocol/src/message/id.rs|1|MessageId::new
 pub_impl_into|crates/habilis-network-protocol/src/message/mod.rs|2|AppTag::new and CorrId::new: validating constructors that take a &str or a String
 pub_impl_into|crates/habilis-network-protocol/src/nickname.rs|1|Nickname::new: a validating constructor that takes a &str or a String
 pub_impl_into|crates/habilis-network/src/lookup/mod.rs|1|a function that takes an address or anything that converts into one
+
+# crate_example: a library crate with no doc example (D2). Each row is a count that may only go down.
+crate_example|crates/habilis-network-bench-wasm/src/lib.rs|1|kept: no doc example yet in this crate; its entry point is to get one (D2 rollout)
+crate_example|crates/habilis-network-ffi/src/lib.rs|1|kept: no doc example yet in this crate; its entry point is to get one (D2 rollout)
+crate_example|crates/habilis-network-iroh-transport-util/src/lib.rs|1|kept: no doc example yet in this crate; its entry point is to get one (D2 rollout)
+crate_example|crates/habilis-network-logging/src/lib.rs|1|kept: no doc example yet in this crate; its entry point is to get one (D2 rollout)
+crate_example|crates/habilis-network-test-tracing-macros/src/lib.rs|1|kept: no doc example yet in this crate; its entry point is to get one (D2 rollout)
+crate_example|crates/habilis-network-test-tracing/src/lib.rs|1|kept: no doc example yet in this crate; its entry point is to get one (D2 rollout)
+crate_example|crates/habilis-network-wasm/src/lib.rs|1|kept: no doc example yet in this crate; its entry point is to get one (D2 rollout)

@@ -24,6 +24,15 @@
 //! held in `pending` and drained — through the same gate — once their deps land,
 //! so the gate is never bypassed by dependency buffering.
 
+//! # Example
+//!
+//! ```
+//! use habilis_network_doc::MeshDoc;
+//!
+//! let doc = MeshDoc::new_ungated();
+//! assert!(doc.to_json().is_object());
+//! ```
+
 pub mod wire;
 
 mod error;
