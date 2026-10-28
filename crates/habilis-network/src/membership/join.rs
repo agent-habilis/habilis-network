@@ -17,7 +17,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
-use super::app::{DEPARTURE_GRACE, INBOUND_CAP, Inbound, MembershipApp, Request};
+use super::membership_app::{DEPARTURE_GRACE, INBOUND_CAP, Inbound, MembershipApp, Request};
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use std::sync::atomic;

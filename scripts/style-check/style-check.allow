@@ -183,7 +183,7 @@ assert_no_message|crates/habilis-network/src/lifecycle/heartbeat.rs|17|kept: ass
 assert_no_message|crates/habilis-network/src/lifecycle/membership.rs|16|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/lifecycle/mod.rs|1|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/lookup/relay.rs|19|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network/src/membership/app.rs|7|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network/src/membership/membership_app.rs|7|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/membership/join.rs|23|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/transport/unicast_acceptor.rs|1|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/transport/admission.rs|53|kept: assert without a message, to be given one (P13 rollout)
@@ -309,7 +309,7 @@ long_chain|crates/habilis-network/src/lookup/capability.rs|2|kept: statements wi
 long_chain|crates/habilis-network/src/lookup/mdns.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/lookup/mod.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/lookup/relay.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/src/membership/app.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network/src/membership/membership_app.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/membership/event.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/testing.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/transport/admission.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -410,7 +410,7 @@ turbofish_collect_parse|crates/habilis-network/src/gossip/broadcast.rs|1|kept: c
 turbofish_collect_parse|crates/habilis-network/src/gossip/recv.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network/src/gossip/split.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network/src/lookup/relay.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/membership/app.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
+turbofish_collect_parse|crates/habilis-network/src/membership/membership_app.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network/src/membership/join.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network/src/transport/admission.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network/src/transport/payload_path.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
@@ -491,6 +491,8 @@ untyped_long_chain_let|crates/habilis-network/src/gossip/split.rs|1|kept: a let 
 untyped_long_chain_let|crates/habilis-network/src/lookup/capability.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/lookup/mod.rs|3|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/membership/app.rs|5|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+untyped_long_chain_let|crates/habilis-network/src/lookup/mod.rs|5|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+untyped_long_chain_let|crates/habilis-network/src/membership/membership_app.rs|5|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/testing.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/transport/admission.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/transport/admission/inner.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
@@ -601,6 +603,8 @@ fn_import|crates/habilis-network/src/lifecycle/mod.rs|3|kept: a top-level functi
 fn_import|crates/habilis-network/src/lookup/capability.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/lookup/mod.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/membership/app.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
+fn_import|crates/habilis-network/src/lookup/mod.rs|3|kept: a top-level function imported by its bare name (O23 rollout)
+fn_import|crates/habilis-network/src/membership/membership_app.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/membership/join.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/membership/mod.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/net.rs|4|kept: a top-level function imported by its bare name (O23 rollout)
@@ -707,7 +711,7 @@ abbrev_name|crates/habilis-network/src/lifecycle/mod.rs|9|existing letter-delete
 abbrev_name|crates/habilis-network/src/lookup/capability.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/mdns.rs|6|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/mod.rs|45|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/membership/app.rs|60|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/membership/membership_app.rs|60|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/event.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/join.rs|15|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/testing.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count

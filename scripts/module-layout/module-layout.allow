@@ -18,7 +18,6 @@ crates/habilis-network/src/lifecycle/membership.rs|1|rename pending: public type
 crates/habilis-network/src/lookup/capability.rs|1|rename pending: public type(s) NetworkCapability
 crates/habilis-network/src/lookup/error.rs|1|rename pending: public type(s) EndpointError
 crates/habilis-network/src/lookup/relay.rs|1|rename pending: public type(s) StoppableTask, RungRefresh
-crates/habilis-network/src/membership/app.rs|1|rename pending: public type(s) Inbound, Request, MembershipApp, UnknownPeer
 crates/habilis-network/src/membership/event.rs|1|rename pending: public type(s) MembershipEvent
 crates/habilis-network/src/membership/join.rs|1|rename pending: public type(s) Opts, Membership
 crates/habilis-network/src/testing.rs|1|rename pending: public type(s) LogCapture, LaneNode

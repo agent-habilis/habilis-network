@@ -6,17 +6,17 @@
 //! they resolve their options the same way, so that resolution lives here
 //! once. Bulk bytes do not ride a membership: they take a stream.
 
-mod app;
+mod membership_app;
 mod event;
 mod join;
 
 pub use crate::daemon::SetupError;
 pub use crate::transport::SendError;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-pub use app::Rung;
+pub use membership_app::Rung;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-pub use app::UnknownPeer;
-pub use app::{
+pub use membership_app::UnknownPeer;
+pub use membership_app::{
     DEPARTURE_GRACE, INBOUND_CAP, Inbound, MAX_MSG, MSG_TAG, MembershipApp, Request, msg_body,
     msg_fits, parse_to,
 };
