@@ -239,7 +239,8 @@ long_chain|crates/habilis-network-iroh-webrtc-transport/src/registry.rs|7|kept: 
 long_chain|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_preferred.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-webrtc-transport/src/web/pending_answer.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-webrtc-transport/src/web/pending_offer.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-iroh-webrtc-transport/src/web/transport/browser_hub_transport.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-webrtc-transport/tests/browser_harness/mod.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-webrtc-transport/tests/browser_matrix.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-logging/src/log_sink.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -537,7 +538,7 @@ pub_vec_param|crates/habilis-network-chunks/src/chunk_map.rs|1|from_leaves: chec
 pub_vec_param|crates/habilis-network-iroh-multihop-transport/src/lib.rs|2|with_protocols: keeps the owned protocol handlers in the config; link_vector: sorts and filters the links in place
 pub_vec_param|crates/habilis-network-iroh-multihop-transport/src/topology.rs|1|signed: keeps the links in the signed link vector
 pub_vec_param|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_handle.rs|1|attach_parts: keeps the owned JavaScript callbacks of the session
-pub_vec_param|crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|1|attach: takes the owned JavaScript callbacks, which it mutates
+pub_vec_param|crates/habilis-network-iroh-webrtc-transport/src/web/transport/browser_hub_transport.rs|1|attach: takes the owned JavaScript callbacks, which it mutates
 pub_vec_param|crates/habilis-network-netplay/src/p2p_session.rs|1|new: keeps the owned player list of the session
 pub_vec_param|crates/habilis-network-protocol/src/reassembly/shard_cache.rs|1|insert: keeps the owned frames of the shard group in the cache
 pub_vec_param|crates/habilis-network-wasm/src/stream_node.rs|1|write: the owned bytes handed to the stream at the JavaScript edge

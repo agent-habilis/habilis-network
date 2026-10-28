@@ -3,7 +3,6 @@
 
 crates/habilis-network-ffi/src/ffi.rs|1|rename pending: public type(s) HabilisNetworkOpts, HabilisNetworkMsg, HabilisNetworkMesh, HabilisNetworkStreamOpts, HabilisNetworkStreams, HabilisNetworkProducer, HabilisNetworkReader
 crates/habilis-network-iroh-multihop-transport/src/underlay.rs|1|rename pending: public type(s) Delivered, Forwarder, ForwardAcceptor
-crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|1|rename pending: public type(s) InboundPacket, SessionCounters, SessionCounts, DataChannelCounters, SelectedPairStats, BrowserSessionGuard, BrowserHubTransport, BrowserRtcTransport
 
 # O11: a mod.rs or lib.rs that defines items. Each row goes when the items move to leaf files.
 crates/habilis-network/src/lookup/mod.rs|1|defines items; to move into leaf files (O11)
