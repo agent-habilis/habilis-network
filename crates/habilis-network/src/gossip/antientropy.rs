@@ -446,7 +446,7 @@ fn heads_digest(
     if !state.overlay_reachable() {
         return None;
     }
-    let heads = state.doc(channel).heads();
+    let heads = state.doc(channel).heads().collect::<Vec<_>>();
     let body = super::json_body(&HeadsBody { heads, closing })?;
     Some(
         Message::new_channel_digest(origin.mesh, origin.author, body, channel)
@@ -758,7 +758,7 @@ async fn ask_back(
 /// body is the heads JSON), without building and signing one.
 fn heads_key_of(state: &EventLoopState, channel: Channel) -> u64 {
     let heads = HeadsBody {
-        heads: state.doc(channel).heads(),
+        heads: state.doc(channel).heads().collect::<Vec<_>>(),
         closing: false,
     };
     let mut hasher = hash_map::DefaultHasher::new();
@@ -1563,8 +1563,8 @@ mod tests {
         );
         let mut bob = rendezvous_only();
         assert_ne!(
-            bob.doc(Channel::Meta).heads(),
-            alice.doc(Channel::Meta).heads(),
+            bob.doc(Channel::Meta).heads().collect::<Vec<_>>(),
+            alice.doc(Channel::Meta).heads().collect::<Vec<_>>(),
             "bob joins knowing nothing"
         );
 
@@ -1579,8 +1579,8 @@ mod tests {
             "alice lacks nothing"
         );
         assert_eq!(
-            bob.doc(Channel::Meta).heads(),
-            alice.doc(Channel::Meta).heads(),
+            bob.doc(Channel::Meta).heads().collect::<Vec<_>>(),
+            alice.doc(Channel::Meta).heads().collect::<Vec<_>>(),
             "converged within one round"
         );
         assert_eq!(
