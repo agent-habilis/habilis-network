@@ -124,7 +124,7 @@ mod tests {
             consumer.contains("build_peer_endpoint(&ticket.lookups)"),
             "the blob consumer must build its endpoint with the peer builder"
         );
-        let lookup = include_str!("../lookup/mod.rs");
+        let lookup = include_str!("../lookup/peer.rs");
         let peer = &lookup[lookup
             .find("pub async fn build_peer_endpoint")
             .expect("the peer builder")..];
