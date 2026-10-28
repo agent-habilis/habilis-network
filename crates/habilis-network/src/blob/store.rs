@@ -5,211 +5,25 @@
 //! producing agent deleting or overwriting the original can't disturb the served
 //! bytes. Spool files are named by hex SHA-256 — traversal-safe and idempotent.
 
-use std::collections::{HashMap, HashSet};
+mod blob_entry;
+mod blob_store;
+mod content_meta;
+mod new_secret;
+mod registered;
+
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 
+#[cfg(test)]
 use crate::util::consts::MAX_BLOB_STORE_BYTES;
 
-use crate::protocol::crypto::TicketSecret;
-
-use super::{BlobDigest, ContentId};
-
-/// One spooled blob: the metadata the fetch path needs, plus the spool path to
-/// stream from. No bytes are held.
-pub(crate) struct BlobEntry {
-    pub path: PathBuf,
-    pub size: u64,
-    /// The value the producer compares a presented token against
-    /// (constant-time): the raw bearer secret, or — when the blob is
-    /// password-protected — the Argon2id stretch of the ticket's public salt.
-    pub secret: TicketSecret,
-    /// The public salt the ticket carries (equal to `secret` when not
-    /// passworded). Retained so a deduped re-registration mints a ticket that
-    /// still matches this entry's compare `secret`.
-    ticket_secret: TicketSecret,
-    /// Whether the minted ticket is password-protected.
-    password: bool,
-    /// Every content group that offloaded these bytes. The spool file goes
-    /// only when the last of them is evicted.
-    owners: HashSet<ContentId>,
-    /// Monotonic order of the last registration or claim, for oldest-first
-    /// eviction under disk pressure.
-    seq: u64,
-}
-
-/// The capability inputs for a fresh registration: the public salt the ticket
-/// carries, the value the fetch handshake is compared against (equal to the salt
-/// when not passworded, its Argon2id stretch otherwise), and the password flag.
-pub(crate) struct NewSecret {
-    pub ticket_secret: TicketSecret,
-    pub compare_secret: TicketSecret,
-    pub password: bool,
-}
-
-/// What a registration hands back for building the ticket: the public salt the
-/// ticket carries and whether it is password-protected.
-pub(crate) struct Registered {
-    pub ticket_secret: TicketSecret,
-    pub password: bool,
-}
-
-/// The content identity of a file being snapshotted into the store —
-/// [`BlobStore::snapshot`]'s content-addressing key plus the content group it
-/// is offloaded under, which becomes one of the blob's owners.
-pub(crate) struct ContentMeta {
-    pub(crate) sha256: BlobDigest,
-    pub(crate) size: u64,
-    pub(crate) content_id: ContentId,
-}
-
-/// One store per peer (per daemon). Holds the blobs this peer offloaded — its
-/// outbound inputs and produced outputs — content-addressed, never replicated.
-pub(crate) struct BlobStore {
-    spool_dir: PathBuf,
-    map: HashMap<BlobDigest, BlobEntry>,
-    total_bytes: u64,
-    next_seq: u64,
-}
-
-impl BlobStore {
-    /// Create the store, ensuring its spool directory exists.
-    ///
-    /// # Errors
-    /// The spool directory cannot be created.
-    pub(crate) fn try_new(spool_dir: PathBuf) -> Result<Self> {
-        fs::create_dir_all(&spool_dir).with_context(|| {
-            format!("creating the blob spool dir {} failed", spool_dir.display())
-        })?;
-        Ok(Self {
-            spool_dir,
-            map: HashMap::new(),
-            total_bytes: 0,
-            next_seq: 0,
-        })
-    }
-
-    /// Snapshot `src` into the spool under `sha256`, owned by `content_id`.
-    /// `ticket_secret` is the public salt the ticket will carry; `compare_secret`
-    /// is what the fetch handshake is checked against (equal to `ticket_secret`
-    /// when not passworded, its Argon2id stretch otherwise). Returns the salt +
-    /// password flag to mint the ticket — the existing entry's when this content
-    /// is already spooled (content-addressed dedup — first registration wins,
-    /// `content_id` joins its owners), so a fresh ticket still matches the
-    /// stored compare secret.
-    ///
-    /// # Errors
-    /// Snapshotting the file into the spool fails.
-    pub(crate) fn snapshot(
-        &mut self,
-        src: &Path,
-        meta: ContentMeta,
-        secret: &NewSecret,
-    ) -> Result<Registered> {
-        let ContentMeta {
-            sha256,
-            size,
-            content_id,
-        } = meta;
-        if let Some(registered) = self.claim(&sha256, &content_id) {
-            return Ok(registered);
-        }
-        let dest = self.spool_dir.join(sha256.to_string());
-        snapshot_file(src, &dest)?;
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        self.total_bytes += size;
-        self.map.insert(
-            sha256,
-            BlobEntry {
-                path: dest,
-                size,
-                secret: secret.compare_secret.clone(),
-                ticket_secret: secret.ticket_secret.clone(),
-                password: secret.password,
-                owners: HashSet::from([content_id]),
-                seq,
-            },
-        );
-        self.evict_to_budget();
-        Ok(Registered {
-            ticket_secret: secret.ticket_secret.clone(),
-            password: secret.password,
-        })
-    }
-
-    /// The entry for `hash`, if spooled.
-    pub(crate) fn get(&self, hash: &BlobDigest) -> Option<&BlobEntry> {
-        self.map.get(hash)
-    }
-
-    /// For an already-spooled blob (a content-addressed dedup hit), add
-    /// `content_id` to its owners, make it the newest blob for disk-pressure
-    /// eviction, and return its ticket fields; `None` when the blob is not
-    /// spooled. Lets the producer skip the ~100ms password stretch
-    /// when re-offloading content it already holds.
-    pub(crate) fn claim(
-        &mut self,
-        hash: &BlobDigest,
-        content_id: &ContentId,
-    ) -> Option<Registered> {
-        let entry = self.map.get_mut(hash)?;
-        entry.owners.insert(content_id.clone());
-        entry.seq = self.next_seq;
-        self.next_seq += 1;
-        Some(Registered {
-            ticket_secret: entry.ticket_secret.clone(),
-            password: entry.password,
-        })
-    }
-
-    /// Release `content_id`'s hold on every blob (called from the task
-    /// idle-timeout sweep), unlinking each spool file no group owns any more.
-    pub(crate) fn evict_content(&mut self, content_id: &ContentId) {
-        let doomed: Vec<BlobDigest> = self
-            .map
-            .iter_mut()
-            .filter_map(|(hash, entry)| {
-                (entry.owners.remove(content_id) && entry.owners.is_empty()).then_some(*hash)
-            })
-            .collect();
-        for hash in doomed {
-            self.remove(&hash);
-        }
-    }
-
-    /// Unlink the least recently registered or claimed blob first, until the
-    /// store is within `MAX_BLOB_STORE_BYTES`.
-    fn evict_to_budget(&mut self) {
-        while self.total_bytes > MAX_BLOB_STORE_BYTES {
-            let Some(oldest) = self
-                .map
-                .iter()
-                .min_by_key(|(_, entry)| entry.seq)
-                .map(|(hash, _)| *hash)
-            else {
-                break;
-            };
-            self.remove(&oldest);
-        }
-    }
-
-    fn remove(&mut self, hash: &BlobDigest) {
-        if let Some(entry) = self.map.remove(hash) {
-            self.total_bytes = self.total_bytes.saturating_sub(entry.size);
-            let _ = fs::remove_file(&entry.path);
-        }
-    }
-}
-
-impl Drop for BlobStore {
-    fn drop(&mut self) {
-        // Best-effort: on daemon shutdown/leave the whole spool dir goes.
-        let _ = fs::remove_dir_all(&self.spool_dir);
-    }
-}
+pub(crate) use blob_entry::BlobEntry;
+pub(crate) use blob_store::BlobStore;
+pub(crate) use content_meta::ContentMeta;
+pub(crate) use new_secret::NewSecret;
+pub(crate) use registered::Registered;
 
 /// Hardlink `src` into the spool at `dest`, falling back to a copy when the two
 /// are on different filesystems (hardlinks can't cross a mount). Idempotent — a
