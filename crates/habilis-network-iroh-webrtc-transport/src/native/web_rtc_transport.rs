@@ -10,8 +10,9 @@ use iroh_base::CustomAddr;
 use n0_watcher::Watchable;
 use tokio::sync::mpsc;
 
-use super::driver::{NegotiatedSession, drive_session};
+use super::driver;
 use super::inbound_packet::InboundPacket;
+use super::negotiated_session::NegotiatedSession;
 use super::session_handle::SessionHandle;
 use super::session_registry::SessionRegistry;
 use super::web_rtc_endpoint::WebRtcEndpoint;
@@ -74,7 +75,7 @@ impl WebRtcTransport {
             .reserve(remote)
             .ok_or(AttachError::AlreadyAttached(remote))?;
         let generation = reservation.generation();
-        let task = tokio::spawn(drive_session(
+        let task = tokio::spawn(driver::drive_session(
             session,
             remote,
             generation,

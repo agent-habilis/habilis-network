@@ -5,9 +5,11 @@ use std::time::Duration;
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 
-use super::driver::{ChannelReadyTarget, NegotiatedSession, drive_until_channel_ready};
+use super::channel_ready_target::ChannelReadyTarget;
+use super::driver;
 use super::ice_config::IceConfig;
 use super::jsep_error::JsepError;
+use super::negotiated_session::NegotiatedSession;
 use super::negotiating::{Negotiating, start};
 use crate::{DATA_CHANNEL_LABEL, SignalEnvelope};
 
@@ -101,7 +103,7 @@ impl PendingOffer {
             .accept_answer(pending, sdp_answer)
             .map_err(JsepError::sdp("accept SDP answer"))?;
         let target = ChannelReadyTarget::Offerer(channel_id);
-        let opened = drive_until_channel_ready(
+        let opened = driver::drive_until_channel_ready(
             &mut inner.rtc,
             &inner.socket,
             inner.advertised,

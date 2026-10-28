@@ -4,9 +4,11 @@ use iroh::EndpointId;
 use std::time::Duration;
 use str0m::change::SdpOffer;
 
-use super::driver::{ChannelReadyTarget, NegotiatedSession, drive_until_channel_ready};
+use super::channel_ready_target::ChannelReadyTarget;
+use super::driver;
 use super::ice_config::IceConfig;
 use super::jsep_error::JsepError;
+use super::negotiated_session::NegotiatedSession;
 use super::negotiating::{Negotiating, start};
 use crate::SignalEnvelope;
 
@@ -69,7 +71,7 @@ impl PendingAnswer {
     /// data channel does not open before `deadline`.
     pub async fn complete(self, deadline: Duration) -> Result<NegotiatedSession, JsepError> {
         let Self { mut inner } = self;
-        let channel_id = drive_until_channel_ready(
+        let channel_id = driver::drive_until_channel_ready(
             &mut inner.rtc,
             &inner.socket,
             inner.advertised,
