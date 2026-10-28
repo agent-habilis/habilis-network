@@ -310,7 +310,7 @@ long_chain|crates/habilis-network/src/lookup/mdns.rs|1|kept: statements with a c
 long_chain|crates/habilis-network/src/lookup/mod.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/lookup/relay.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/membership/membership_app.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/src/membership/event.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network/src/membership/membership_event.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/testing.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/transport/admission.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/transport/admission/inner.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -712,7 +712,7 @@ abbrev_name|crates/habilis-network/src/lookup/capability.rs|4|existing letter-de
 abbrev_name|crates/habilis-network/src/lookup/mdns.rs|6|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/mod.rs|45|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/membership_app.rs|60|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/membership/event.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/membership/membership_event.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/join.rs|15|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/testing.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/unicast_acceptor.rs|23|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count

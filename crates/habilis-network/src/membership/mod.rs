@@ -7,7 +7,7 @@
 //! once. Bulk bytes do not ride a membership: they take a stream.
 
 mod membership_app;
-mod event;
+mod membership_event;
 mod join;
 
 pub use crate::daemon::SetupError;
@@ -20,7 +20,7 @@ pub use membership_app::{
     DEPARTURE_GRACE, INBOUND_CAP, Inbound, MAX_MSG, MSG_TAG, MembershipApp, Request, msg_body,
     msg_fits, parse_to,
 };
-pub use event::{MembershipEvent, json_sink};
+pub use membership_event::{MembershipEvent, json_sink};
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub use join::blind_new_members;
 pub use join::{Membership, Opts, depart, join, resolve_kind};
