@@ -46,16 +46,6 @@ use habilis_network_util::consts::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX
 /// gossip target sees the orphan buffer alongside the frames feeding it.
 const LOG_TARGET: &str = "habilis_network::gossip";
 
-/// Logs a refusal as a WARN when its rate limit says one is due, with the number of refusals
-/// since the last WARN of its kind in the field `changes`.
-macro_rules! warn_refusal {
-    ($doc:expr, $message:literal, $($field:tt)*) => {
-        if let Some(changes) = $doc.warn_due($message) {
-            tracing::warn!(target: LOG_TARGET, changes, $($field)* $message);
-        }
-    };
-}
-
 /// A refusal that the WARN reports is logged for the first one of its kind and then for every
 /// `WARN_EVERY`th, with the number of refusals since the last WARN of that kind. An author who
 /// floods a channel would otherwise log one line per frame. This crate keeps no clock, because it
@@ -450,7 +440,11 @@ impl MeshDoc {
         };
         let author = frame.key();
         if change.actor_id().to_bytes() != author.as_bytes().as_slice() {
-            warn_refusal!(self, "dropping a channel change whose actor is not its signer's key", author = %frame.author,);
+            if let Some(changes) =
+                self.warn_due("dropping a channel change whose actor is not its signer's key")
+            {
+                tracing::warn!(target: LOG_TARGET, changes, author = %frame.author, "dropping a channel change whose actor is not its signer's key");
+            }
             return Ingested::Ignored;
         }
         let hash = change.hash();
@@ -499,7 +493,9 @@ impl MeshDoc {
     /// the actor id is derived from the key.
     fn apply(&mut self, change: Change, hash: ChangeHash, frame: Verified) -> bool {
         if let Err(error) = self.doc.apply_changes([change]) {
-            warn_refusal!(self, "dropping a channel change automerge refused", %error, author = %frame.author,);
+            if let Some(changes) = self.warn_due("dropping a channel change automerge refused") {
+                tracing::warn!(target: LOG_TARGET, changes, %error, author = %frame.author, "dropping a channel change automerge refused");
+            }
             return false;
         }
         self.applied.insert(hash);
@@ -534,17 +530,27 @@ impl MeshDoc {
             && let Some((victim, victim_seq)) = self.highest_of(&author)
         {
             if change.seq() >= victim_seq {
-                warn_refusal!(self, "channel orphan buffer full for this author; incoming higher-seq orphan refused", author = %frame.author,);
+                if let Some(changes) = self.warn_due("channel orphan buffer full for this author; incoming higher-seq orphan refused") {
+                    tracing::warn!(target: LOG_TARGET, changes, author = %frame.author, "channel orphan buffer full for this author; incoming higher-seq orphan refused");
+                }
                 self.dropped.push(frame.dedup_key());
                 return Ingested::Ignored;
             }
             if let Some(evicted) = self.pending.remove(&victim) {
                 self.dropped.push(evicted.frame.dedup_key());
             }
-            warn_refusal!(self, "channel orphan buffer full for this author; highest-seq orphan evicted", author = %frame.author,);
+            if let Some(changes) = self
+                .warn_due("channel orphan buffer full for this author; highest-seq orphan evicted")
+            {
+                tracing::warn!(target: LOG_TARGET, changes, author = %frame.author, "channel orphan buffer full for this author; highest-seq orphan evicted");
+            }
         }
         if self.pending.len() >= DOC_PENDING_TOTAL_MAX {
-            warn_refusal!(self, "channel orphan buffer full; incoming orphan dropped", author = %frame.author,);
+            if let Some(changes) =
+                self.warn_due("channel orphan buffer full; incoming orphan dropped")
+            {
+                tracing::warn!(target: LOG_TARGET, changes, author = %frame.author, "channel orphan buffer full; incoming orphan dropped");
+            }
             self.dropped.push(frame.dedup_key());
             return Ingested::Ignored;
         }
