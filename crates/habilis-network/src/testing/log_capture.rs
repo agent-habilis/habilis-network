@@ -1,0 +1,49 @@
+use std::sync::Arc;
+
+/// The logs that a test captured from its own thread, see [`LogCapture::start`].
+#[cfg(feature = "multihop")]
+#[derive(Clone, Default)]
+pub(crate) struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+#[cfg(feature = "multihop")]
+impl LogCapture {
+    /// Capture every event up to `level` that the calling thread logs, until the guard drops.
+    pub(crate) fn start(level: tracing::Level) -> (Self, tracing::subscriber::DefaultGuard) {
+        // While one dispatcher is the only one registered, `tracing` answers the interest of a
+        // callsite from the default of the thread that hits it first. A parallel test thread
+        // with no default of its own then caches "never" on a callsite that this capture
+        // needs, and the event is dropped. A second dispatcher, kept for the whole process,
+        // makes `tracing` ask every registered dispatcher instead.
+        static SECOND_DISPATCHER: std::sync::OnceLock<tracing::Dispatch> =
+            std::sync::OnceLock::new();
+        SECOND_DISPATCHER
+            .get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
+        let capture = Self::default();
+        let writer = capture.clone();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .with_max_level(level)
+                .finish(),
+        );
+        (capture, guard)
+    }
+
+    /// Everything that was captured so far.
+    pub(crate) fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("log buffer")).into_owned()
+    }
+}
+
+#[cfg(feature = "multihop")]
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log buffer").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}

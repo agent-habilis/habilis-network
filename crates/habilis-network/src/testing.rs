@@ -4,7 +4,9 @@
 //! made [`StateInit`] painful to extend: one new field meant editing six test
 //! modules that had no reason to know about it. One home instead.
 
-use crate::transport::UdpTransport;
+mod lane_node;
+mod log_capture;
+
 use std::sync::Arc;
 
 use iroh::{EndpointId, SecretKey};
@@ -14,13 +16,10 @@ use crate::protocol::identity::Identity;
 use crate::protocol::{AuthorKey, Nickname};
 use crate::util::clock::Instant;
 
-#[cfg(feature = "host")]
-use crate::daemon::handler_ctx;
-#[cfg(feature = "host")]
-use crate::gossip::event;
-#[cfg(feature = "host")]
-use crate::protocol::message;
 use iroh::address_lookup::memory;
+
+pub(crate) use lane_node::LaneNode;
+pub(crate) use log_capture::LogCapture;
 /// The key of the test author `name`: its bytes, zero-padded to 32. Two names keep the order
 /// that their bytes have, and a test reads the name back in a failure message.
 pub(crate) fn author_of(name: &str) -> AuthorKey {
@@ -79,54 +78,6 @@ pub(crate) fn silent_relay_rung() -> (std::net::TcpListener, iroh::RelayUrl) {
     (silent, rung)
 }
 
-/// The logs that a test captured from its own thread, see [`LogCapture::start`].
-#[cfg(feature = "multihop")]
-#[derive(Clone, Default)]
-pub(crate) struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
-
-#[cfg(feature = "multihop")]
-impl LogCapture {
-    /// Capture every event up to `level` that the calling thread logs, until the guard drops.
-    pub(crate) fn start(level: tracing::Level) -> (Self, tracing::subscriber::DefaultGuard) {
-        // While one dispatcher is the only one registered, `tracing` answers the interest of a
-        // callsite from the default of the thread that hits it first. A parallel test thread
-        // with no default of its own then caches "never" on a callsite that this capture
-        // needs, and the event is dropped. A second dispatcher, kept for the whole process,
-        // makes `tracing` ask every registered dispatcher instead.
-        static SECOND_DISPATCHER: std::sync::OnceLock<tracing::Dispatch> =
-            std::sync::OnceLock::new();
-        SECOND_DISPATCHER
-            .get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
-        let capture = Self::default();
-        let writer = capture.clone();
-        let guard = tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_writer(move || writer.clone())
-                .with_ansi(false)
-                .with_max_level(level)
-                .finish(),
-        );
-        (capture, guard)
-    }
-
-    /// Everything that was captured so far.
-    pub(crate) fn text(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().expect("log buffer")).into_owned()
-    }
-}
-
-#[cfg(feature = "multihop")]
-impl std::io::Write for LogCapture {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("log buffer").extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 /// Run `body` on a fresh current-thread runtime, drop the runtime as
 /// returning from `main` does, and return every ERROR logged meanwhile. That
 /// drop is where iroh logs `Endpoint dropped without calling` for an endpoint
@@ -141,107 +92,6 @@ pub(crate) fn errors_through_runtime_drop(body: impl Future<Output = ()>) -> Str
     runtime.block_on(body);
     drop(runtime);
     logs.text()
-}
-
-/// A real endpoint with a `WebRTC` handle, a gossip sender and everything a [`HandlerCtx`] borrows,
-/// for a test that goes through the code that offers a session. The peer `bob` is a lane peer: it
-/// has a relay address and no IP, so no frame can be sent to it before its session.
-///
-/// [`HandlerCtx`]: crate::daemon::handler_ctx::HandlerCtx
-#[cfg(feature = "host")]
-pub(crate) struct LaneNode {
-    pub(crate) endpoint: iroh::Endpoint,
-    pub(crate) handle: habilis_network_iroh_webrtc_transport::WebRtcHandle,
-    pub(crate) bob: EndpointId,
-    pub(crate) gossip: iroh_gossip::net::Gossip,
-    pub(crate) sender: crate::transport::MeshSender,
-    pub(crate) mesh: crate::protocol::MeshId,
-    pub(crate) identity: Identity,
-    pub(crate) our_pubkey: AuthorKey,
-    pub(crate) author: Nickname,
-    pub(crate) sink: event::SilentSink,
-}
-
-#[cfg(feature = "host")]
-impl LaneNode {
-    pub(crate) async fn start() -> Self {
-        use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
-        use iroh::endpoint::presets;
-
-        let key = SecretKey::generate();
-        let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
-        let endpoint = iroh::Endpoint::builder(presets::Minimal)
-            .secret_key(key)
-            .relay_mode(iroh::RelayMode::Disabled)
-            .clear_address_lookup()
-            .add_custom_transport(handle.transport())
-            .bind()
-            .await
-            .expect("bind a loopback endpoint");
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
-        let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
-            .await
-            .expect("subscribe to a peerless topic");
-        let (gossip_sender, _receiver) = topic.split();
-        let identity = Identity::generate();
-        Self {
-            endpoint,
-            handle,
-            bob: endpoint_id(77),
-            gossip,
-            sender: crate::transport::MeshSender::new(gossip_sender),
-            mesh: crate::protocol::MeshId::from("test"),
-            our_pubkey: identity.author_key(),
-            identity,
-            author: nick("alice"),
-            sink: event::SilentSink,
-        }
-    }
-
-    /// Stops the gossip actor: a request to the sender returns an error from here on.
-    pub(crate) async fn stop_gossip(&self) {
-        let _ = self.gossip.shutdown().await;
-    }
-
-    pub(crate) fn ctx(&self) -> handler_ctx::HandlerCtx<'_> {
-        handler_ctx::HandlerCtx {
-            sender: &self.sender,
-            endpoint: &self.endpoint,
-            mesh: &self.mesh,
-            author: &self.author,
-            identity: &self.identity,
-            our_pubkey: self.our_pubkey,
-            max_peers: 16,
-            rendezvous_id: endpoint_id(9),
-            external_msg_tx: None,
-            sink: &self.sink,
-        }
-    }
-
-    /// A state that has this node's `WebRTC` handle and knows `bob` by a relay address.
-    pub(crate) fn state(&self) -> EventLoopState {
-        let mut state = fresh_state();
-        state.webrtc = Some(self.handle.clone());
-        state.local_udp_transport = UdpTransport::Absent;
-        state.unicast_pool = crate::transport::UnicastPool::new(self.endpoint.clone(), false);
-        state.peer_endpoints.insert(
-            nick("bob"),
-            iroh::EndpointAddr::new(self.bob)
-                .with_relay_url("https://relay.invalid".parse().expect("relay url")),
-        );
-        state
-    }
-
-    pub(crate) fn frame_to_bob(&self) -> message::Verified {
-        crate::protocol::Message::new_pong(
-            &self.mesh,
-            &self.author,
-            nick("bob"),
-            &crate::protocol::MessageId::random(),
-        )
-        .sign(&self.identity)
-    }
 }
 
 /// A capture must see an event even when a thread with no subscriber of its own hit the same
