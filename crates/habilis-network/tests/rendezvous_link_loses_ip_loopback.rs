@@ -109,6 +109,14 @@ impl Member {
             .await
             .expect("the loop answers");
     }
+
+    #[cfg(windows)]
+    async fn nudge_rendezvous(&self) {
+        self.membership
+            .request(|reply| Request::NudgeRendezvous { reply })
+            .await
+            .expect("the loop answers");
+    }
 }
 
 /// The rendezvous trace: the lines that say how the link went and what was offered.
@@ -158,6 +166,10 @@ fn the_rendezvous_link_stays_up_when_ip_is_lost() {
         let downs_before = rendezvous_lines("down");
 
         alice.block_udp(true).await;
+        // Bob holds the rendezvous link, and block_udp does not nudge it. On a Windows
+        // host with one address nothing else made it re-select (#44).
+        #[cfg(windows)]
+        bob.nudge_rendezvous().await;
         let went_down = eventually(WINDOW, || rendezvous_lines("down") > downs_before).await;
         alice.block_udp(false).await;
 
