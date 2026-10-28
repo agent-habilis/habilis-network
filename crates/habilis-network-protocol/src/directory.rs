@@ -239,7 +239,7 @@ impl Listings {
 
     /// Drop every listing whose last ad is older than `ttl`, returning
     /// the ids removed (so the caller can surface a `Lost` event each).
-    pub fn expire(&mut self, ttl: Duration, now: Instant) -> Vec<MeshId> {
+    pub fn expire(&mut self, ttl: Duration, now: Instant) -> impl Iterator<Item = MeshId> {
         let mut expired = Vec::new();
         self.entries.retain(|id, listing| {
             let alive = now.duration_since(listing.last_seen) <= ttl;
@@ -248,13 +248,12 @@ impl Listings {
             }
             alive
         });
-        expired
+        expired.into_iter()
     }
 
     /// The current listings, sorted by mesh name then id — a stable
     /// order for the picker and for `snapshot()` callers.
-    #[must_use]
-    pub fn snapshot(&self) -> Vec<Listing> {
+    pub fn snapshot(&self) -> impl Iterator<Item = Listing> {
         let mut listings: Vec<Listing> = self.entries.values().cloned().collect();
         listings.sort_by(|left, right| {
             left.name
@@ -262,7 +261,7 @@ impl Listings {
                 .cmp(right.name.as_str())
                 .then_with(|| left.mesh.as_str().cmp(right.mesh.as_str()))
         });
-        listings
+        listings.into_iter()
     }
 
     /// Look up a single listing by id (used to attach data to an event).
@@ -409,7 +408,7 @@ mod tests {
         // First sighting ⇒ Found.
         let first_event = dir.note(body.as_str(), start);
         assert!(matches!(first_event, Some(ListingChange::Found(_))));
-        let listing = &dir.snapshot()[0];
+        let listing = dir.snapshot().next().expect("one listing");
         assert_eq!(listing.name.as_str(), "demo");
         assert_eq!(listing.peers, 2);
         assert!(listing.public);
@@ -422,12 +421,14 @@ mod tests {
         .to_body();
         let second_event = dir.note(refreshed.as_str(), start + Duration::from_secs(20));
         assert!(matches!(second_event, Some(ListingChange::Updated(_))));
-        assert_eq!(dir.snapshot()[0].peers, 5);
+        assert_eq!(dir.snapshot().next().expect("one listing").peers, 5);
 
         // No fresh ad past the ttl ⇒ expired/Lost.
-        let lost = dir.expire(Duration::from_mins(1), start + Duration::from_secs(200));
+        let lost = dir
+            .expire(Duration::from_mins(1), start + Duration::from_secs(200))
+            .collect::<Vec<_>>();
         assert_eq!(lost.len(), 1);
-        assert!(dir.snapshot().is_empty());
+        assert!(dir.snapshot().next().is_none());
     }
 
     #[test]
@@ -450,10 +451,11 @@ mod tests {
         assert!(dir.note(body.as_str(), later).is_none());
         assert!(
             dir.expire(Duration::from_mins(1), start + Duration::from_secs(70))
-                .is_empty(),
+                .next()
+                .is_none(),
             "the re-ad refreshed last_seen, so the entry is still alive"
         );
-        assert_eq!(dir.snapshot().len(), 1);
+        assert_eq!(dir.snapshot().count(), 1);
     }
 
     #[test]
@@ -461,6 +463,6 @@ mod tests {
         let mut dir = Listings::new();
         assert!(dir.note("", Instant::now()).is_none());
         assert!(dir.note("hello peers", Instant::now()).is_none());
-        assert!(dir.snapshot().is_empty());
+        assert!(dir.snapshot().next().is_none());
     }
 }
