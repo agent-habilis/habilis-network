@@ -469,13 +469,19 @@ Pass: all three are green.
 ### T2. Loopback integration tests
 
 ```powershell
-cargo test -p habilis-network --test gossip_only
-cargo test -p habilis-network --test rendezvous_release_loopback
-cargo test -p habilis-network --test underlay_webrtc_loopback
+cargo test -p habilis-network --features iroh-test-utils --test gossip_only -- --include-ignored --test-threads=1
+cargo test -p habilis-network --features iroh-test-utils --test rendezvous_release_loopback
+cargo test -p habilis-network --features iroh-test-utils --test underlay_webrtc_loopback
 cargo task matrix --list
 ```
 
-Then run two cells from the list by name.
+The three files compile only with `iroh-test-utils`, and every test of `gossip_only` is `#[ignore]`. Without the feature, and without `--include-ignored` for `gossip_only`, the commands run 0 tests.
+Then run two cells from the list by name, for example the two that the gate runs (`tasks/src/gate.rs`):
+
+```powershell
+cargo test -p habilis-network --features iroh-test-utils --test send_ladder_matrix -- --include-ignored --exact udp_webrtc_multihop_ip_direct udp_webrtc_multihop_ip_webrtc_via_third --test-threads=1
+```
+
 Pass: all are green, and no test hangs past its own timeout.
 
 ### T3. FFI
@@ -494,9 +500,9 @@ Pass: the messages arrive, and the peer count is correct on both sides.
 ### T4. Runtime directory and IPC security
 
 1. Start a daemon. The runtime base appears under `%LOCALAPPDATA%`.
-2. `Get-Acl` on the base shows only the user, `SYSTEM` and `Administrators`.
+2. `Get-Acl` on the base shows no entry of its own. The base inherits the ACL of `%LOCALAPPDATA%` ([R2](#r2-runtime-base)), which is the user, `SYSTEM` and `Administrators` on a default profile. Another program can add an entry to `%LOCALAPPDATA%`, and the base then inherits it too. Pass: no entry is explicit, and every entry is inherited from `%LOCALAPPDATA%`.
 3. `[System.IO.Directory]::GetFiles("\\.\pipe\")` lists the pipe, `habilis-` and 32 hex digits. The marker `<nick>.ipc` in the mesh folder holds the same name.
-   Read the ACL of the pipe with Sysinternals `accesschk.exe -l -o \\.\pipe\habilis-*`. The user is the owner and the only entry. `Get-Acl` cannot read a pipe.
+   Read the ACL of the pipe with Sysinternals `accesschk.exe -l -o \\.\pipe\habilis-*`. The user is the owner and the only entry. `Get-Acl` cannot read a pipe. Without `accesschk`, in Windows PowerShell, a `System.IO.Pipes.NamedPipeClientStream` that is connected to the pipe reads the owner and the DACL with `GetAccessControl()`, but not the SACL or the integrity label.
 4. Create a second local user. Connect to the pipe as that user with `runas /user:<second-user>`. The connection is refused.
 
 ### T5. agent-gossip lifecycle
