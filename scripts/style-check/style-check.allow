@@ -699,7 +699,7 @@ abbrev_name|crates/habilis-network/src/gossip/app/node_app.rs|9|existing letter-
 abbrev_name|crates/habilis-network/src/gossip/merge_ctx.rs|60|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/event.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/heal.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/gossip/lan.rs|27|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/gossip/lan.rs|18|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/recv.rs|138|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lifecycle/heartbeat.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lifecycle/mod.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
@@ -829,3 +829,4 @@ abbrev_name|crates/habilis-network/src/lookup/test_relay.rs|1|existing letter-de
 abbrev_name|crates/habilis-network/src/lookup/transport_handles.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/transport_opts.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 anyhow_pub|crates/habilis-network/src/lookup/test_relay.rs|1|the test relay helper spawn_plain, behind the iroh-test-utils feature (a test helper, not library API)
+abbrev_name|crates/habilis-network/src/gossip/lan/lan_grafts.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
