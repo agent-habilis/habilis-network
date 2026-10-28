@@ -8,7 +8,7 @@ use std::fmt;
 /// [`BlobError::PasswordRequired`] and [`BlobError::PasswordNotNeeded`] are the causes a
 /// frontend acts on: it prompts for the password, or it drops the flag.
 /// [`BlobError::Internal`] holds the other causes, which no caller acts on.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 #[non_exhaustive]
 #[must_use]
 pub enum BlobError {
