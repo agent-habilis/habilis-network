@@ -1042,7 +1042,7 @@ mod tests {
 
     fn cell(hops: Vec<RouteHop>, pos: u16, source: RouteHop) -> Cell {
         Cell {
-            path: Route::new(hops).expect("legal route"),
+            path: Route::try_new(hops).expect("legal route"),
             pos,
             source,
             packet: vec![1, 2, 3],
@@ -1275,7 +1275,7 @@ mod tests {
     async fn cell_arrives(from: &RelayNode, to: &mut RelayNode) -> bool {
         from.learns(to);
         let subject = Cell {
-            path: Route::new(vec![to.hop.clone()]).expect("legal route"),
+            path: Route::try_new(vec![to.hop.clone()]).expect("legal route"),
             pos: 0,
             source: from.hop.clone(),
             packet: vec![7, 7, 7],

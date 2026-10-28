@@ -1284,7 +1284,7 @@ mod tests {
             (&second, second_id, &first, first_id),
         ] {
             let cell = Cell {
-                path: Route::new(vec![hop(to, to_id)]).expect("legal route"),
+                path: Route::try_new(vec![hop(to, to_id)]).expect("legal route"),
                 pos: 0,
                 source: hop(from, from_id),
                 packet: vec![1, 2, 3],

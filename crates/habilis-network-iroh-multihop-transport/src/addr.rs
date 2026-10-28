@@ -65,7 +65,7 @@ impl Route {
         Self(vec![hop])
     }
 
-    pub(crate) fn new(hops: Vec<RouteHop>) -> Option<Self> {
+    pub(crate) fn try_new(hops: Vec<RouteHop>) -> Option<Self> {
         if hops.is_empty() || hops.len() > MAX_ROUTE_HOPS {
             return None;
         }
@@ -125,7 +125,7 @@ impl Route {
             .cloned()
             .collect();
         hops.push(source);
-        Self::new(hops)
+        Self::try_new(hops)
     }
 }
 
@@ -150,7 +150,7 @@ impl<'de> Deserialize<'de> for Route {
         DeserializerT: Deserializer<'de>,
     {
         let hops = Vec::<RouteHop>::deserialize(deserializer)?;
-        Self::new(hops).ok_or_else(|| serde::de::Error::custom("empty multihop route"))
+        Self::try_new(hops).ok_or_else(|| serde::de::Error::custom("empty multihop route"))
     }
 }
 
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn encode_decode_roundtrips() {
-        let route = Route::new(vec![hop(1), hop(2), hop(3)]).unwrap();
+        let route = Route::try_new(vec![hop(1), hop(2), hop(3)]).unwrap();
         let addr = route.encode();
         assert_eq!(Route::decode(&addr).expect("decodes"), route);
     }
@@ -182,7 +182,7 @@ mod tests {
     #[test]
     fn a_route_encodes_to_fixed_bytes() {
         let id = |seed: u8| -> EndpointId { SecretKey::from_bytes(&[seed; 32]).public() };
-        let route = Route::new(vec![
+        let route = Route::try_new(vec![
             RouteHop {
                 app_id: AppId::new(id(1)),
                 underlay_id: UnderlayId::new(id(2)),
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn wrong_transport_id_does_not_decode() {
-        let route = Route::new(vec![hop(1)]).unwrap();
+        let route = Route::try_new(vec![hop(1)]).unwrap();
         let addr = route.encode();
         let foreign = iroh_base::CustomAddr::from_parts(0x99, addr.data());
         assert!(Route::decode(&foreign).is_none());
@@ -245,7 +245,7 @@ mod tests {
         let hops: Vec<RouteHop> = (0..=MAX_ROUTE_HOPS)
             .map(|seed| hop(u8::try_from(seed).expect("seed fits")))
             .collect();
-        assert!(Route::new(hops).is_none());
+        assert!(Route::try_new(hops).is_none());
     }
 
     #[test]
@@ -253,7 +253,7 @@ mod tests {
         let hops: Vec<RouteHop> = (0..MAX_ROUTE_HOPS)
             .map(|seed| hop(u8::try_from(seed).expect("seed fits")))
             .collect();
-        assert!(Route::new(hops).is_some());
+        assert!(Route::try_new(hops).is_some());
     }
 
     #[test]
@@ -261,7 +261,7 @@ mod tests {
         // The [X, Y, X, Y, …] ping-pong: every entry is a real node, so an
         // "am I named here?" check passes at every bounce. Acyclicity is what
         // actually stops it.
-        assert!(Route::new(vec![hop(1), hop(2), hop(1)]).is_none());
+        assert!(Route::try_new(vec![hop(1), hop(2), hop(1)]).is_none());
     }
 
     #[test]

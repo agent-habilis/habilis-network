@@ -343,7 +343,7 @@ impl Topology {
                 })
             })
             .collect::<Option<Vec<_>>>()?;
-        Route::new(hops)
+        Route::try_new(hops)
     }
 
     /// A JSON-serializable snapshot of the routing graph from `self_id`'s point

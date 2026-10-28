@@ -148,7 +148,7 @@ impl BlobServer {
         if !lookups.is_loopback() {
             wait_online(&endpoint).await;
         }
-        let store = Arc::new(Mutex::new(BlobStore::new(spool_dir)?));
+        let store = Arc::new(Mutex::new(BlobStore::try_new(spool_dir)?));
         let inflight = Arc::new(AtomicUsize::new(0));
         spawn_accept_loop(
             endpoint.clone(),

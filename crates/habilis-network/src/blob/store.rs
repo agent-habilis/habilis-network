@@ -79,7 +79,7 @@ impl BlobStore {
     ///
     /// # Errors
     /// The spool directory cannot be created.
-    pub(crate) fn new(spool_dir: PathBuf) -> Result<Self> {
+    pub(crate) fn try_new(spool_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&spool_dir).with_context(|| {
             format!("creating the blob spool dir {} failed", spool_dir.display())
         })?;
@@ -271,7 +271,7 @@ mod tests {
         let src = src_dir.join("payload.bin");
         fs::write(&src, vec![7u8; 4096]).unwrap();
 
-        let mut store = BlobStore::new(temp_dir("spool")).unwrap();
+        let mut store = BlobStore::try_new(temp_dir("spool")).unwrap();
         let hash = BlobDigest::from_bytes([1u8; HASH_LEN]);
         let registered = store
             .snapshot(
@@ -300,7 +300,7 @@ mod tests {
         let src = src_dir.join("payload.bin");
         fs::write(&src, b"same content").unwrap();
 
-        let mut store = BlobStore::new(temp_dir("spool")).unwrap();
+        let mut store = BlobStore::try_new(temp_dir("spool")).unwrap();
         let hash = BlobDigest::from_bytes([2u8; HASH_LEN]);
         let first = store
             .snapshot(
@@ -370,7 +370,7 @@ mod tests {
         let src = src_dir.join("payload.bin");
         fs::write(&src, b"shared").unwrap();
 
-        let mut store = BlobStore::new(temp_dir("spool")).unwrap();
+        let mut store = BlobStore::try_new(temp_dir("spool")).unwrap();
         let hash = BlobDigest::from_bytes([4u8; HASH_LEN]);
         let group_a = ContentId::new("blob-test-group-a");
         let group_b = ContentId::new("blob-test-group-b");
@@ -398,7 +398,7 @@ mod tests {
         let src = src_dir.join("payload.bin");
         fs::write(&src, b"twice").unwrap();
 
-        let mut store = BlobStore::new(temp_dir("spool")).unwrap();
+        let mut store = BlobStore::try_new(temp_dir("spool")).unwrap();
         let hash = BlobDigest::from_bytes([5u8; HASH_LEN]);
         let group = ContentId::new("blob-test-group");
         snapshot_as(&mut store, &src, hash, &group);
@@ -422,7 +422,7 @@ mod tests {
         let src = src_dir.join("payload.bin");
         fs::write(&src, b"x").unwrap();
 
-        let mut store = BlobStore::new(temp_dir("spool")).unwrap();
+        let mut store = BlobStore::try_new(temp_dir("spool")).unwrap();
         let (oldest, next_oldest, filler) = (
             BlobDigest::from_bytes([6u8; HASH_LEN]),
             BlobDigest::from_bytes([7u8; HASH_LEN]),
@@ -466,7 +466,7 @@ mod tests {
         let src = src_dir.join("payload.bin");
         fs::write(&src, b"bye").unwrap();
 
-        let mut store = BlobStore::new(temp_dir("spool")).unwrap();
+        let mut store = BlobStore::try_new(temp_dir("spool")).unwrap();
         let hash = BlobDigest::from_bytes([3u8; HASH_LEN]);
         let task = ContentId::new("blob-test-content");
         store

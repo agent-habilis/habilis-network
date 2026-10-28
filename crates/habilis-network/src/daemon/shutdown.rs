@@ -208,7 +208,7 @@ pub(crate) struct Owner {
 impl Owner {
     /// # Errors
     /// See [`validate_owner_pid`].
-    pub(crate) fn new(pid: u32) -> Result<Self, OwnerPidError> {
+    pub(crate) fn try_new(pid: u32) -> Result<Self, OwnerPidError> {
         Ok(Self {
             pid,
             start: owner_start(pid)?,
@@ -364,7 +364,7 @@ mod tests {
     #[test]
     async fn owner_watch_stays_while_the_owner_lives() {
         let mut child = spawn_owner();
-        let owner = Owner::new(child.id()).expect("live owner accepted");
+        let owner = Owner::try_new(child.id()).expect("live owner accepted");
         assert!(!watch_quits(owner, Duration::from_millis(300)).await);
         child.kill().unwrap();
         child.wait().unwrap();
@@ -373,7 +373,7 @@ mod tests {
     #[test]
     async fn owner_watch_quits_when_the_owner_exits() {
         let mut child = spawn_owner();
-        let owner = Owner::new(child.id()).expect("live owner accepted");
+        let owner = Owner::try_new(child.id()).expect("live owner accepted");
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(watch_quits(owner, Duration::from_secs(2)).await);
@@ -382,7 +382,7 @@ mod tests {
     #[test]
     async fn owner_watch_quits_when_the_owner_is_an_unreaped_zombie() {
         let mut child = spawn_owner();
-        let owner = Owner::new(child.id()).expect("live owner accepted");
+        let owner = Owner::try_new(child.id()).expect("live owner accepted");
         child.kill().unwrap();
         assert!(watch_quits(owner, Duration::from_secs(2)).await);
         child.wait().unwrap();
@@ -393,7 +393,7 @@ mod tests {
     #[test]
     async fn owner_watch_quits_when_the_pid_is_reissued() {
         let mut child = spawn_owner();
-        let owner = Owner::new(child.id()).expect("live owner accepted");
+        let owner = Owner::try_new(child.id()).expect("live owner accepted");
         let reissued = Owner {
             start: owner.start + 1,
             ..owner
@@ -428,16 +428,16 @@ mod tests {
 
     #[test]
     fn owner_refuses_init_self_and_a_dead_pid() {
-        assert!(Owner::new(0).is_err());
-        assert!(Owner::new(std::process::id()).is_err(), "self is no owner");
-        let init = Owner::new(1).expect_err("init refused").to_string();
+        assert!(Owner::try_new(0).is_err());
+        assert!(Owner::try_new(std::process::id()).is_err(), "self is no owner");
+        let init = Owner::try_new(1).expect_err("init refused").to_string();
         assert!(!init.contains('\n'), "one error line: {init}");
         assert!(!init.contains("agent"), "engine vocabulary only: {init}");
         let mut child = spawn_owner();
         let pid = child.id();
         child.kill().unwrap();
         child.wait().unwrap();
-        assert!(Owner::new(pid).is_err());
+        assert!(Owner::try_new(pid).is_err());
     }
 
     #[test]

@@ -114,7 +114,7 @@ mod tests {
 
     fn cell(hops: Vec<RouteHop>, pos: u16) -> Cell {
         Cell {
-            path: Route::new(hops).expect("legal route"),
+            path: Route::try_new(hops).expect("legal route"),
             pos,
             source: hop(200),
             packet: Vec::new(),
@@ -122,7 +122,7 @@ mod tests {
     }
 
     /// A cell's wire shape, built from a raw hop vector so a test can mint the
-    /// hostile routes `Route::new` would refuse.
+    /// hostile routes `Route::try_new` would refuse.
     fn forged_bytes(hops: Vec<RouteHop>, pos: u16) -> Vec<u8> {
         postcard::to_allocvec(&(hops, pos, hop(200), Vec::<u8>::new())).expect("serializes")
     }
