@@ -206,6 +206,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - Errors in public signatures: a library crate returns a typed error from each public function. The gate is `anyhow_pub` in `scripts/style-check/style-check.ts` (see What each gate refuses). The exceptions are the `anyhow_pub` rows of `style-check.allow`, and nothing else: the webrtc bench harness (`bench.rs`, behind the `bench` feature), and the test relay helper `spawn_plain` (`lookup/mod.rs`, behind `iroh-test-utils`). Binaries, CLIs and `bin/` targets are outside the rule and keep `anyhow`.
 - `Arc`: the reviewer judges each use, and no gate checks it. Use `Arc` to share across tasks or threads, or for a trait object, and write the reason when it is not clear.
 - `From<&str>` that can panic: a type that validates its input has `new` returning a `Result`, and no `From<&str>`. `AppTag` and `CorrId` follow this, and a `compile_fail` doc test pins it.
+- `&String` in a trait impl: a method of a trait takes `&T::Address`, so an impl with `type Address = String` must take `&String`. `ptr_arg` does not fire on trait impls, and `cargo clippy -p habilis-network-netplay --tests -- -D warnings` is clean. The one such site is `Wire::send_to` in `habilis-network-netplay/tests/peers.rs`.
 
 ### Rules of the guide that do not apply
 
