@@ -224,6 +224,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - A comment says something the code does not: no lint covers it. The reviewer asks for a rename or an extraction where a comment would only say what the code does. (D7)
 - Type inference: no lint measures whether a reader can infer a type. The reviewer asks for a type on a variable when the right side does not show it. (P1)
 - Turbofish: 375 `::<` sites, of which 57 are `collect::<` and 66 are `parse::<` (`git grep`, 2026-10-27). Clippy has no lint that asks for a typed variable instead. The reviewer asks for the type on the variable, and accepts `_` where the compiler forces a turbofish. (P2)
+- Generic-return calls: 218 `.into()` and 143 `.parse()` calls. The compiler already demands a type where it cannot infer one. No lint asks for more. The reviewer checks that the target type is visible. (P4)
 
 ### Rules of the guide that do not apply
 
