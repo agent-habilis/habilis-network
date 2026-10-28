@@ -209,6 +209,14 @@ function countLongChains(raw: string): number {
   return count;
 }
 
+// The `let` bindings with no type whose value is a generic-return call that ends the statement:
+// `let x = s.parse()?;`, `let x = v.into();`. The reader sees no type in the code, so the type is named.
+function countUntypedGenericLets(raw: string): number {
+  const text = blankStrings(stripComments(raw));
+  const pattern = /\blet\s+(?:mut\s+)?\w+\s*=\s*[^;]*\.(?:parse|into|try_into)\(\)(?:\?|\.expect\([^;]*\)|\.unwrap\(\))?\s*;/g;
+  return text.match(pattern)?.length ?? 0;
+}
+
 function countAnyhowPub(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   const bare = new Set<string>();
@@ -318,6 +326,12 @@ const RULES: Rule[] = [
     scan: countLongChains,
     glob: "crates/**/*.rs",
     why: "A statement with a chain of five or more calls is hard to read in one pass: name the middle step (P15).",
+  },
+  {
+    name: "untyped_generic_let",
+    scan: countUntypedGenericLets,
+    glob: "crates/**/*.rs",
+    why: "A let that takes its type from parse, into or try_into names the type (P4). The reader sees no type otherwise.",
   },
   {
     name: "anyhow_pub",

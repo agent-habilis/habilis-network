@@ -302,3 +302,14 @@ test("long_chain: a chain of four calls passes", () => {
 test("long_chain: the exact count is allowed", () => {
   expectExit("crates/demo/src/lib.rs", longChain.replace("count()", "take(3).count()"), 0, "long_chain|crates/demo/src/lib.rs|1|fixture");
 });
+
+// The untyped_generic_let rule (P4): a let that takes its type from parse, into or try_into needs a row.
+test("untyped_generic_let: an untyped parse with no row fails", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(s: &str) -> Result<u8, std::num::ParseIntError> {\n    let n = s.parse()?;\n    Ok(n)\n}", 1, "");
+});
+test("untyped_generic_let: a typed let passes", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(s: &str) -> Result<u8, std::num::ParseIntError> {\n    let n: u8 = s.parse()?;\n    Ok(n)\n}", 0, "");
+});
+test("untyped_generic_let: the exact count is allowed", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(s: &str) -> Result<u8, std::num::ParseIntError> {\n    let n = s.parse()?;\n    Ok(n)\n}", 0, "untyped_generic_let|crates/demo/src/lib.rs|1|fixture");
+});
