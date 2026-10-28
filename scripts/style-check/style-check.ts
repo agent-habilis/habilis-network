@@ -142,6 +142,60 @@ function countAssertsNoMessage(raw: string): number {
   return count;
 }
 
+// The index of the bracket that closes the `(` at `open`. A string literal is skipped whole, so a
+// bracket inside a message does not close the call.
+function closeCall(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    const ch = text[i] ?? "";
+    if (ch === '"') {
+      for (i++; i < text.length && text[i] !== '"'; i++) if (text[i] === "\\") i++;
+    } else if ("([{".includes(ch)) depth++;
+    else if (")]}".includes(ch) && --depth === 0) return i;
+  }
+  return text.length - 1;
+}
+
+// The top-level arguments of a macro call, trimmed. A string literal is one piece of its argument.
+function callArgs(args: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let cur = "";
+  for (let i = 0; i < args.length; i++) {
+    const ch = args[i] ?? "";
+    if (ch === '"') {
+      const start = i;
+      for (i++; i < args.length && args[i] !== '"'; i++) if (args[i] === "\\") i++;
+      cur += args.slice(start, i + 1);
+      continue;
+    }
+    if ("([{".includes(ch)) depth++;
+    else if (")]}".includes(ch)) depth--;
+    if (ch === "," && depth === 0) {
+      out.push(cur.trim());
+      cur = "";
+    } else cur += ch;
+  }
+  if (cur.trim() !== "") out.push(cur.trim());
+  return out;
+}
+
+// The asserts whose message only repeats the condition: `assert!(x, "x")`. Letters and digits are
+// compared, so spacing and case do not hide a copy.
+function countAssertsRepeatingCondition(raw: string): number {
+  const text = stripComments(raw);
+  const pattern = /\bassert!\s*\(/g;
+  const key = (s: string) => s.replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+  let count = 0;
+  for (let m = pattern.exec(text); m; m = pattern.exec(text)) {
+    const open = m.index + m[0].length - 1;
+    const args = callArgs(text.slice(open + 1, closeCall(text, open)));
+    const message = args[1]?.match(/^"(.*)"$/s)?.[1];
+    if (args.length === 2 && message !== undefined && key(message) === key(args[0] ?? "")) count++;
+  }
+  return count;
+}
+
 function countAnyhowPub(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   const bare = new Set<string>();
@@ -239,6 +293,12 @@ const RULES: Rule[] = [
     scan: countAssertsNoMessage,
     glob: "crates/**/*.rs",
     why: "An assert names what it checks: a message that adds the value, or the reason, so a failure reads without the source (P13).",
+  },
+  {
+    name: "assert_repeats_condition",
+    scan: countAssertsRepeatingCondition,
+    glob: "crates/**/*.rs",
+    why: "An assert message says why, not what: a message that only repeats the condition adds nothing (P14).",
   },
   {
     name: "anyhow_pub",

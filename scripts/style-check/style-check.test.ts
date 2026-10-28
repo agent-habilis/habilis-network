@@ -276,3 +276,17 @@ test("assert_no_message: a debug_assert! is not an assert! here", () => {
 test("assert_no_message: the exact count is allowed", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(x: bool) {\n    assert!(x);\n    assert!(!x);\n}", 0, "assert_no_message|crates/demo/src/lib.rs|2|fixture");
 });
+
+// The assert_repeats_condition rule (P14): a message that only repeats the condition fails.
+test("assert_repeats_condition: a message that repeats the condition fails", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(x: bool) {\n    assert!(x, \"x\");\n}", 1, "");
+});
+test("assert_repeats_condition: spacing and case do not hide a repeat", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(a: u8) {\n    assert!(a == 1, \"A  ==  1\");\n}", 1, "");
+});
+test("assert_repeats_condition: a message that says why passes", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(a: u8) {\n    assert!(a == 1, \"the frame count is one (got {a})\");\n}", 0, "");
+});
+test("assert_repeats_condition: a bracket inside a message does not end the call", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(a: u8) {\n    assert!(a == 1, \"got )\"); assert!(a == 1, \"a == 1\");\n}", 1, "");
+});
