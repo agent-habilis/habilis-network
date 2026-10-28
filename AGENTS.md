@@ -205,6 +205,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - `clippy::doc_markdown` (in `pedantic`) refuses an identifier in a doc comment that has no backticks. `clippy.toml` extends its list of domain terms. It does not check the rest of the Markdown, so the reviewer does. (D11)
 - `clippy::new_without_default` (default group, not silenced) refuses a `pub fn new() -> Self` with no `Default` impl. A probe with `-D clippy::new_without_default` fails on the bare type and passes once `impl Default` is added (2026-10-28). A `Default` for a type with public fields is still the reviewer's call. (R17)
 - A map key carries `Hash` and `Eq`, and a `BTreeMap` key carries `Ord`: rustc refuses an insert without them. A probe `HashMap` insert of a type with only `PartialEq` fails with exit 1, and the same type with `Eq, Hash` passes (2026-10-28). Every map key of the crates derives both (`git grep` of 17 key types). (R20)
+- A type with a float field cannot derive `Ord` or `Eq`: rustc refuses it. A probe with `Ord` derived on `f64` fails with exit 1, and the same type with `PartialOrd` only passes (2026-10-28). Whether a type with a total order should derive `Ord` is for the reviewer. (R19)
 
 ### Rules we decline, or leave to the reviewer
 
