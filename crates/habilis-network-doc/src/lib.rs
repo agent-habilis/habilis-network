@@ -359,8 +359,7 @@ impl MeshDoc {
     /// causal frontier first, capped at `max`. Undecodable heads are ignored (we
     /// then over-serve, never under-serve). The genesis change has no frame and
     /// is never sent — every replica constructs it locally.
-    #[must_use]
-    pub fn changes_since(&self, have: &[String], max: usize) -> Vec<Verified> {
+    pub fn changes_since(&self, have: &[String], max: usize) -> impl Iterator<Item = Verified> {
         self.changes_since_not_by(have, None, max)
     }
 
@@ -369,13 +368,12 @@ impl MeshDoc {
     /// key and a session key lives no longer than its document. Skipped
     /// before the cap, so the budget goes to what the peer can lack. `None`
     /// skips nothing.
-    #[must_use]
     pub fn changes_since_not_by(
         &self,
         have: &[String],
         author: Option<&AuthorKey>,
         max: usize,
-    ) -> Vec<Verified> {
+    ) -> impl Iterator<Item = Verified> {
         let have: Vec<ChangeHash> = have
             .iter()
             .filter_map(|encoded| decode_hash(encoded))
@@ -384,10 +382,9 @@ impl MeshDoc {
             .get_changes(&have)
             .into_iter()
             .filter_map(|change| self.frames.get(&change.hash()))
-            .filter(|frame| author.is_none_or(|skipped| &frame.key() != skipped))
+            .filter(move |frame| author.is_none_or(|skipped| &frame.key() != skipped))
             .take(max)
             .cloned()
-            .collect()
     }
 
     /// Whether this document holds every change in `heads`, Base58-encoded as
@@ -1585,8 +1582,8 @@ mod tests {
             !source.holds_heads(&["not-a-hash".to_owned()]),
             "a head that does not decode"
         );
-        for carrier in &source.changes_since(&joiner.heads().collect::<Vec<_>>(), 100) {
-            joiner.ingest(carrier);
+        for carrier in source.changes_since(&joiner.heads().collect::<Vec<_>>(), 100) {
+            joiner.ingest(&carrier);
         }
         assert!(
             joiner.holds_heads(&source.heads().collect::<Vec<_>>()),
@@ -1604,7 +1601,9 @@ mod tests {
         author(&mut source, &alice, &json!({"b": 2}));
 
         let mut joiner = MeshDoc::new_ungated();
-        let missing = source.changes_since(&joiner.heads().collect::<Vec<_>>(), 100);
+        let missing = source
+            .changes_since(&joiner.heads().collect::<Vec<_>>(), 100)
+            .collect::<Vec<_>>();
         assert_eq!(missing.len(), 2, "joiner lacks both changes");
         for carrier in &missing {
             joiner.ingest(carrier);
@@ -1614,7 +1613,8 @@ mod tests {
         assert!(
             source
                 .changes_since(&joiner.heads().collect::<Vec<_>>(), 100)
-                .is_empty()
+                .next()
+                .is_none()
         );
     }
 
