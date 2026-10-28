@@ -9,8 +9,6 @@ use n0_future::future::or;
 use tokio::sync::{Mutex, watch};
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
-use crate::to_js_error;
-
 /// The node, shared with every producer and reader it hands out. JS frees a
 /// handle it no longer refers to, and a page keeps its producer but not the
 /// node that made it: without these clones the node, and its endpoint, went
@@ -39,10 +37,10 @@ impl StreamNode {
     pub async fn bind(opts_json: String) -> Result<StreamNode, JsValue> {
         console_error_panic_hook::set_once();
         let opts: StreamOpts = serde_json::from_str(&opts_json)
-            .map_err(|error| to_js_error(&format!("invalid options: {error}")))?;
+            .map_err(|error| crate::to_js_error(&format!("invalid options: {error}")))?;
         let node = habilis_network_stream::StreamNode::bind(&opts)
             .await
-            .map_err(|error| to_js_error(&format!("{error:#}")))?;
+            .map_err(|error| crate::to_js_error(&format!("{error:#}")))?;
         Ok(Self::holding(node))
     }
 
@@ -53,10 +51,10 @@ impl StreamNode {
     #[wasm_bindgen(js_name = forHash)]
     pub async fn for_hash(hash: String) -> Result<StreamNode, JsValue> {
         console_error_panic_hook::set_once();
-        let hash: StreamHash = hash.parse().map_err(|error| to_js_error(&error))?;
+        let hash: StreamHash = hash.parse().map_err(|error| crate::to_js_error(&error))?;
         let node = habilis_network_stream::StreamNode::bind_for(&hash)
             .await
-            .map_err(|error| to_js_error(&format!("{error:#}")))?;
+            .map_err(|error| crate::to_js_error(&format!("{error:#}")))?;
         Ok(Self::holding(node))
     }
 
@@ -70,7 +68,7 @@ impl StreamNode {
         self.node
             .borrow()
             .clone()
-            .ok_or_else(|| to_js_error("this stream node is closed"))
+            .ok_or_else(|| crate::to_js_error("this stream node is closed"))
     }
 
     /// Open a new stream for one consumer.
@@ -94,7 +92,7 @@ impl StreamNode {
     /// # Errors
     /// `hash` does not decode, the producer cannot be reached, or it refuses.
     pub async fn open(&self, hash: String) -> Result<Reader, JsValue> {
-        let hash: StreamHash = hash.parse().map_err(|error| to_js_error(&error))?;
+        let hash: StreamHash = hash.parse().map_err(|error| crate::to_js_error(&error))?;
         let node = self.node()?;
         let reader = node.open(&hash).await;
         self.closed_meanwhile(node).await?;
@@ -129,7 +127,7 @@ impl StreamNode {
         if let Ok(node) = Rc::try_unwrap(node) {
             node.close().await;
         }
-        Err(to_js_error("this stream node is closed"))
+        Err(crate::to_js_error("this stream node is closed"))
     }
 }
 
@@ -157,7 +155,7 @@ fn js(error: &(dyn std::error::Error + 'static)) -> JsValue {
         text.push_str(&source.to_string());
         cause = source.source();
     }
-    to_js_error(&text)
+    crate::to_js_error(&text)
 }
 
 /// One stream's writing end.
@@ -254,7 +252,7 @@ impl Producer {
             },
             async {
                 reached(&self.ending, Ending::Abandoned).await;
-                Err(to_js_error("this stream was abandoned"))
+                Err(crate::to_js_error("this stream was abandoned"))
             },
         )
         .await
@@ -269,7 +267,7 @@ impl Producer {
 }
 
 fn closed() -> JsValue {
-    to_js_error("this stream is closed")
+    crate::to_js_error("this stream is closed")
 }
 
 /// One stream's reading end.
@@ -320,5 +318,5 @@ impl Reader {
 }
 
 fn reader_closed() -> JsValue {
-    to_js_error("this reader is closed")
+    crate::to_js_error("this reader is closed")
 }

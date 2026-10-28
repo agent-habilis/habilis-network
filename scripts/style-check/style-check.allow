@@ -574,7 +574,6 @@ self_convention|crates/habilis-network-protocol/src/mesh/transport.rs|1|Transpor
 self_convention|crates/habilis-network-protocol/src/topic.rs|1|TopicId::to_bytes: a Copy type, so self by value
 self_convention|crates/habilis-network-util/src/clock.rs|2|UnixSecs::as_secs and to_le_bytes: a Copy type, so self by value
 # fn_import: a top-level function imported by its bare name (O23). Each row is a count that may only go down.
-fn_import|crates/habilis-network-doc/src/lib.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-gossip-transport/src/lookup.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-gossip-transport/src/memory.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-gossip-transport/src/selector.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
@@ -589,14 +588,11 @@ fn_import|crates/habilis-network-iroh-webrtc-transport/src/lib.rs|2|kept: a top-
 fn_import|crates/habilis-network-iroh-webrtc-transport/src/native/endpoint.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-webrtc-transport/src/native/stun.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-webrtc-transport/src/selector.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-logging/src/messages.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-logging/src/sink.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/game/src/ui.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/runtime.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/tui/diff.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/tui/paint.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-protocol/src/invite/mod.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-protocol/src/message/tests.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-stream/src/hash.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-stream/src/node.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-stream/src/produce.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
@@ -610,7 +606,6 @@ fn_import|crates/habilis-network-test-tracing/tests/spawned_task.rs|1|kept: a to
 fn_import|crates/habilis-network-test-tracing/tests/sync_workers.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-test-tracing/tests/twice.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-test-tracing/tests/writer.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-wasm/src/stream.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/examples/mesh_peer_load.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/blob/mod.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/blob/produce.rs|1|kept: a top-level function imported by its bare name (O23 rollout)

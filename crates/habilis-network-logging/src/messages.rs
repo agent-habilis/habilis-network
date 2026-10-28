@@ -161,7 +161,6 @@ fn log(direction: &'static str, msg: &Message) {
 
 #[cfg(test)]
 mod tests {
-    use super::redacted_body;
     use habilis_network_protocol::{Message, MessageKind};
     use habilis_network_test_tracing::test;
 
@@ -169,7 +168,7 @@ mod tests {
     fn redacted_body_omits_raw_text() {
         let secret = "totally private chat content";
         let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), secret);
-        let redacted = redacted_body(&msg);
+        let redacted = super::redacted_body(&msg);
         assert!(
             !redacted.contains(secret),
             "redacted form must not leak the raw body: {redacted}"
@@ -180,7 +179,7 @@ mod tests {
     fn redacted_body_carries_length_and_hash_prefix() {
         let body = "hello world"; // 11 bytes
         let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), body);
-        let redacted = redacted_body(&msg);
+        let redacted = super::redacted_body(&msg);
 
         assert!(
             redacted.starts_with("<redacted 11B "),
@@ -203,7 +202,7 @@ mod tests {
     #[test]
     fn redacted_body_is_deterministic_for_the_same_message() {
         let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "same body");
-        assert_eq!(redacted_body(&msg), redacted_body(&msg));
+        assert_eq!(super::redacted_body(&msg), super::redacted_body(&msg));
     }
 
     #[test]
@@ -211,6 +210,6 @@ mod tests {
         let alpha = Message::fixture(MessageKind::app_broadcast("app_msg"), "alpha");
         let beta = Message::fixture(MessageKind::app_broadcast("app_msg"), "beta");
         // Different lengths *and* different hashes ⇒ different strings.
-        assert_ne!(redacted_body(&alpha), redacted_body(&beta));
+        assert_ne!(super::redacted_body(&alpha), super::redacted_body(&beta));
     }
 }

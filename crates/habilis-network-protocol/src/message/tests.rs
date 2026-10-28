@@ -581,7 +581,6 @@ mod prop {
         AppFrameParams, AppTag, MAX_MESSAGE_SIZE, Message, MessageBody, MessageKind, Nickname,
         VERSION,
     };
-    use super::sid;
 
     fn arb_ascii_body() -> impl Strategy<Value = String> {
         arb_vec(0x20u8..0x7Eu8, 0..200).prop_map(|bytes| String::from_utf8(bytes).unwrap())
@@ -599,7 +598,7 @@ mod prop {
             author in arb_nickname(),
         ) {
             let body = MessageBody::try_new(body).unwrap();
-            let msg = Message::new_app(&sid(), &author, AppFrameParams { tag: AppTag::try_new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
+            let msg = Message::new_app(&super::sid(), &author, AppFrameParams { tag: AppTag::try_new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
             let bytes = msg.serialize().unwrap();
             let parsed = Message::parse(&bytes).unwrap();
             prop_assert_eq!(&parsed.body, &msg.body);
@@ -612,9 +611,9 @@ mod prop {
         fn prop_presence_round_trip(is_join in any::<bool>()) {
             let test_nick = Nickname::from("test-nick");
             let msg = if is_join {
-                Message::new_joined(&sid(), &test_nick)
+                Message::new_joined(&super::sid(), &test_nick)
             } else {
-                Message::new_left(&sid(), &test_nick)
+                Message::new_left(&super::sid(), &test_nick)
             };
             let bytes = msg.serialize().unwrap();
             let parsed = Message::parse(&bytes).unwrap();
@@ -639,7 +638,7 @@ mod prop {
         ) {
             let body = MessageBody::try_new(body).unwrap();
             let expected = body.clone();
-            let msg = Message::new_app(&sid(), &author, AppFrameParams { tag: AppTag::try_new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
+            let msg = Message::new_app(&super::sid(), &author, AppFrameParams { tag: AppTag::try_new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
             let bytes = msg.serialize().unwrap();
             let parsed = Message::parse(&bytes).unwrap();
             prop_assert_eq!(&parsed.body, &expected);
@@ -650,7 +649,7 @@ mod prop {
             body in arb_ascii_body(),
         ) {
             let msg = Message::new_app(
-                &sid(),
+                &super::sid(),
                 &Nickname::from("nick-name"),
                 AppFrameParams {
                     tag: AppTag::try_new("app_msg").expect("a valid app tag"),

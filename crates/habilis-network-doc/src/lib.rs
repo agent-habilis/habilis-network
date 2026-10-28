@@ -889,7 +889,6 @@ fn put_number(
 
 #[cfg(test)]
 mod tests {
-    use super::wire::change_body;
     use super::{
         DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate, WARN_EVERY,
     };
@@ -922,7 +921,7 @@ mod tests {
             Message::new_channel_event(
                 &MeshId::from("test"),
                 who,
-                change_body(bytes, None).expect("body"),
+                super::wire::change_body(bytes, None).expect("body"),
                 Channel::State,
             )
             .with_unverified_key(key),
@@ -981,7 +980,7 @@ mod tests {
 
         let plain = r#"{"k":"change","c":"2VfUX","m":{"board":"x"}}"#;
         assert_eq!(
-            change_body(&[1, 2, 3, 4], Some(&json!({"board": "x"})))
+            super::wire::change_body(&[1, 2, 3, 4], Some(&json!({"board": "x"})))
                 .expect("compose")
                 .as_str(),
             plain
