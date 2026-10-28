@@ -7,6 +7,8 @@
 //! number. The webrtc-only pair is str0m at both ends and the only native cell
 //! that goes through the data channel at all.
 
+mod web_rtc_peer;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,7 +21,7 @@ use habilis_network_iroh_webrtc_transport::bench::{
 use habilis_network_iroh_webrtc_transport::iroh::endpoint::{Builder, Connection, Path, presets};
 use habilis_network_iroh_webrtc_transport::iroh::protocol::Router;
 use habilis_network_iroh_webrtc_transport::iroh::{
-    Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey, TransportAddr,
+    Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr,
 };
 use habilis_network_iroh_webrtc_transport::{
     IceConfig, WEBRTC_TRANSPORT_ID, WebRtcHandle, WebRtcTransport, answer_with, custom_addr,
@@ -30,33 +32,10 @@ use super::Args;
 use super::run::{Measured, Outcome, Rtt, Sample, TRANSFER_TIMEOUT};
 
 use habilis_network::net::test_relay;
+
+pub(crate) use web_rtc_peer::WebRtcPeer;
 /// A JSEP round on loopback is milliseconds; this is the stall bound.
 pub(crate) const JSEP_DEADLINE: Duration = Duration::from_secs(30);
-
-/// A native endpoint whose only transport is WebRTC.
-pub(crate) struct WebRtcPeer {
-    pub(crate) id: EndpointId,
-    pub(crate) transport: Arc<WebRtcTransport>,
-    pub(crate) endpoint: Endpoint,
-}
-
-impl WebRtcPeer {
-    pub(crate) async fn bind() -> Result<Self, String> {
-        let key = SecretKey::generate();
-        let id = key.public();
-        let transport = WebRtcTransport::new(id);
-        let endpoint = Endpoint::builder(transport.preset())
-            .secret_key(key)
-            .bind()
-            .await
-            .map_err(|error| format!("bind failed: {error:#}"))?;
-        Ok(Self {
-            id,
-            transport,
-            endpoint,
-        })
-    }
-}
 
 fn path_of(connection: &Connection) -> String {
     if on_webrtc(connection) {
