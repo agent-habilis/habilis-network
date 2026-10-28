@@ -184,6 +184,12 @@ const RULES: Rule[] = [
     why: "Mark a public fn const only if it will stay const (a const context, a newtype accessor, or a trivial accessor). A new one needs a row in style-check.allow with that reason.",
   },
   {
+    name: "manual_eq_ord",
+    pattern: /^\s*(?:unsafe\s+)?impl\b.*\b(?:Eq|Ord|PartialOrd)\s+for\b/,
+    glob: "*.rs",
+    why: "A hand-written Eq, Ord or PartialOrd must keep the law: Eq reflexive, Ord total. The compiler checks a derive, not a manual impl, so each one needs a row and a reason.",
+  },
+  {
     name: "anyhow_pub",
     scan: countAnyhowPub,
     skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/[^/]+\/src\/)/,

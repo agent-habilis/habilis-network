@@ -230,3 +230,18 @@ test("anyhow_pub: a string that holds the signature does not count", () => {
 test("anyhow_pub: a module alias of anyhow counts through its fns", () => {
   expectExit("crates/demo/src/lib.rs", "use anyhow as ah;\npub fn f() -> ah::Result<()> { Ok(()) }", 0, "anyhow_pub|crates/demo/src/lib.rs|1|fixture");
 });
+
+// The manual_eq_ord rule: a hand-written Eq, Ord or PartialOrd needs a row and a reason.
+const manualEq = "pub struct Key(u8);\nimpl Eq for Key {}";
+test("manual_eq_ord: a manual Eq impl with no row fails", () => {
+  expectExit("crates/demo/src/lib.rs", manualEq, 1, "");
+});
+test("manual_eq_ord: the exact count is allowed", () => {
+  expectExit("crates/demo/src/lib.rs", manualEq, 0, "manual_eq_ord|crates/demo/src/lib.rs|1|fixture");
+});
+test("manual_eq_ord: a derive does not count", () => {
+  expectExit("crates/demo/src/lib.rs", "#[derive(PartialEq, Eq)]\npub struct Key(u8);", 0, "");
+});
+test("manual_eq_ord: an Ord and a PartialOrd impl count separately", () => {
+  expectExit("crates/demo/src/lib.rs", "impl Ord for K {}\nimpl PartialOrd for K {}", 0, "manual_eq_ord|crates/demo/src/lib.rs|2|fixture");
+});
