@@ -226,6 +226,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - Turbofish: 375 `::<` sites, of which 57 are `collect::<` and 66 are `parse::<` (`git grep`, 2026-10-27). Clippy has no lint that asks for a typed variable instead. The reviewer asks for the type on the variable, and accepts `_` where the compiler forces a turbofish. (P2)
 - Generic-return calls: 218 `.into()` and 143 `.parse()` calls. The compiler already demands a type where it cannot infer one. No lint asks for more. The reviewer checks that the target type is visible. (P4)
 - The result of a complex iterator chain: no lint measures it. The reviewer asks for a typed variable when the chain ends in `collect`, `sum` or `parse` and the type is not clear. (P5)
+- Context strings on `assert!`: `missing_assert_message` makes one required outside test code. Whether the string helps (a logged value, misuse versus bug) is for the reviewer. (P13)
 
 ### Rules of the guide that do not apply
 
