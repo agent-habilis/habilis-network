@@ -41,15 +41,14 @@ pub_const_fn|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|1|kept: n
 pub_const_fn|crates/habilis-network-netplay/src/frame.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
 pub_const_fn|crates/habilis-network-netplay/src/handle.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
 pub_const_fn|crates/habilis-network-netplay/src/mesh/lobby.rs|8|kept: not yet classified; reviewer to confirm const stays (U21).
-pub_const_fn|crates/habilis-network-protocol/src/author_key.rs|3|kept: not yet classified; reviewer to confirm const stays (U21).
-pub_const_fn|crates/habilis-network-protocol/src/content_hash.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
-pub_const_fn|crates/habilis-network-protocol/src/crypto.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
-pub_const_fn|crates/habilis-network-protocol/src/dedup_key.rs|3|kept: not yet classified; reviewer to confirm const stays (U21).
-pub_const_fn|crates/habilis-network-protocol/src/mesh/lookup.rs|4|kept: not yet classified; reviewer to confirm const stays (U21).
-pub_const_fn|crates/habilis-network-protocol/src/mesh/transport.rs|5|kept: not yet classified; reviewer to confirm const stays (U21).
-pub_const_fn|crates/habilis-network-protocol/src/message/mod.rs|4|kept: not yet classified; reviewer to confirm const stays (U21).
-pub_const_fn|crates/habilis-network-protocol/src/message/verified.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
-pub_const_fn|crates/habilis-network-protocol/src/topic.rs|3|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-protocol/src/author_key.rs|3|kept: newtype rule (from_bytes, as_bytes, to_bytes of a 32- or 16-byte key or hash)
+pub_const_fn|crates/habilis-network-protocol/src/content_hash.rs|2|kept: newtype rule (from_bytes, as_bytes, to_bytes of a 32- or 16-byte key or hash)
+pub_const_fn|crates/habilis-network-protocol/src/crypto.rs|2|kept: newtype rule (from_bytes, as_bytes, to_bytes of a 32- or 16-byte key or hash)
+pub_const_fn|crates/habilis-network-protocol/src/dedup_key.rs|3|kept: newtype rule (from_bytes, as_bytes, to_bytes of a 32- or 16-byte key or hash)
+pub_const_fn|crates/habilis-network-protocol/src/mesh/lookup.rs|2|kept: const constructor of the lookup options (new), reviewer to confirm a const context
+pub_const_fn|crates/habilis-network-protocol/src/message/mod.rs|4|kept: trivial accessors of a signer and a constructor (key, signature, new), reviewer to confirm
+pub_const_fn|crates/habilis-network-protocol/src/message/verified.rs|2|kept: trivial accessor key of a verified message (reviewer to confirm)
+pub_const_fn|crates/habilis-network-protocol/src/topic.rs|3|kept: newtype rule (from_bytes, as_bytes, to_bytes of a 32- or 16-byte key or hash)
 pub_const_fn|crates/habilis-network-stream/src/hash.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
 pub_const_fn|crates/habilis-network-util/src/clock.rs|5|kept: 4 UnixSecs newtype accessors and constructors (newtype rule); millis_saturating is used in a const item (const context, clock.rs test ONE_SECOND).
 pub_const_fn|crates/habilis-network/src/blob/mod.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).

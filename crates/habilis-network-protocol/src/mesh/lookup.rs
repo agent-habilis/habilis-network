@@ -68,14 +68,14 @@ impl LookupOpts {
 
     /// Turn the mDNS lookup on or off.
     #[must_use]
-    pub const fn with_mdns(mut self, mdns: bool) -> Self {
+    pub fn with_mdns(mut self, mdns: bool) -> Self {
         self.mdns = mdns;
         self
     }
 
     /// Turn the DHT lookup on or off.
     #[must_use]
-    pub const fn with_dht(mut self, dht: bool) -> Self {
+    pub fn with_dht(mut self, dht: bool) -> Self {
         self.dht = dht;
         self
     }
