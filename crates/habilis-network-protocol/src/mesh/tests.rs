@@ -213,7 +213,7 @@ fn set_password_bakes_verifier_and_unlock_verifies_it() {
         Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
     let passwordless_topic = creator.topic_id();
     let passwordless_rendezvous = creator.rendezvous_id();
-    creator.set_password(&password);
+    creator.set_password(password.clone());
     assert!(creator.requires_password());
 
     // Every derivation switched onto the stretched key.
@@ -254,7 +254,7 @@ fn unlock_with_a_password_on_a_passwordless_id_is_rejected() {
 fn unlock_without_the_password_on_a_passworded_id_is_rejected() {
     let mut creator =
         Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
-    creator.set_password(&Password::new("hunter2".to_owned()));
+    creator.set_password(Password::new("hunter2".to_owned()));
     let error = creator.locked().unlock(None).unwrap_err();
     assert_eq!(error, UnlockError::PasswordRequired);
 }
@@ -317,7 +317,7 @@ fn golden_passwordless_id_and_topic_are_pinned() {
 #[test]
 fn golden_passworded_mesh_id_topic_and_rendezvous_are_pinned() {
     let mut mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
-    mesh.set_password(&Password::new("hunter2".to_owned()));
+    mesh.set_password(Password::new("hunter2".to_owned()));
     assert_eq!(
         mesh.to_string(),
         "Xts3MujFJ6LPpDwNyubQmyofWgxZkrhDTx3ohPc8iYvUxpTMyBg1yWJBJ39x2RSLzPzUV1nGDdx7YL5nX41SP"

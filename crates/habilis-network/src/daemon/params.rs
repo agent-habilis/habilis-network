@@ -432,7 +432,7 @@ mod join_password_tests {
             MeshConfig::loopback(),
         )
         .unwrap();
-        mesh.set_password(&Password::new("hunter2".to_owned()));
+        mesh.set_password(Password::new("hunter2".to_owned()));
         mesh.to_string()
     }
 

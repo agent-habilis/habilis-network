@@ -1228,7 +1228,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         (Some(password), false) => {
             tokio::task::spawn_blocking(move || {
                 let mut mesh = mesh;
-                mesh.set_password(&password);
+                mesh.set_password(password.clone());
                 (mesh, Some(password))
             })
             .await?
@@ -1236,7 +1236,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         #[cfg(not(feature = "host"))]
         (Some(password), false) => {
             let mut mesh = mesh;
-            mesh.set_password(&password);
+            mesh.set_password(password.clone());
             (mesh, Some(password))
         }
         (password, _) => (mesh, password),
