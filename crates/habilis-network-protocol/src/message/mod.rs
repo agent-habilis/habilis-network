@@ -21,10 +21,7 @@ use super::mesh::MeshId;
 #[cfg(any(test, feature = "test-fixtures"))]
 use habilis_network_util::clock::UnixSecs;
 
-use serde::Deserialize;
-
 use super::nickname::Nickname;
-use crate::newtype::string_newtype;
 
 #[cfg(any(test, feature = "test-fixtures"))]
 mod chain_ctx;
@@ -46,6 +43,8 @@ mod channel;
 pub use channel::Channel;
 mod app_tag;
 pub use app_tag::AppTag;
+mod corr_id;
+pub use corr_id::CorrId;
 mod resend;
 pub use resend::RESEND_TRAILER_LEN;
 use resend::{split_resend_trailer, wire_with_resend_nonce};
@@ -161,60 +160,6 @@ pub fn sole_addressee(kind: &MessageKind) -> Option<&Nickname> {
         | MessageKind::Meta
         | MessageKind::MetaDigest
         | MessageKind::LinkState => None,
-    }
-}
-
-string_newtype!(
-/// An opaque request/response correlation id carried on a directed
-/// [`MessageKind::App`] frame (the `corr` field). Matched by the engine's
-/// pending-call registry to pair a reply with its outstanding call; the app
-/// mints and interprets its value (the application layer uses a UUID). Kept generic so
-/// the engine correlates without knowing the payload model.
-    CorrId,
-    error = CorrIdError,
-);
-
-impl CorrId {
-    fn validate(raw: &str) -> bool {
-        !raw.is_empty() && raw.len() <= 64
-    }
-
-    /// There is no `From<&str>`: a bad literal would panic, so every caller handles the error.
-    ///
-    /// ```compile_fail
-    /// use habilis_network_protocol::CorrId;
-    /// let _ = CorrId::from("aaaa");
-    /// ```
-    ///
-    /// ```
-    /// use habilis_network_protocol::CorrId;
-    /// assert!(CorrId::try_new("aaaa").is_ok());
-    /// ```
-    ///
-    /// # Errors
-    /// # Errors
-    /// A [`CorrIdError::Invalid`] when the correlation id is empty or longer than 64
-    /// bytes.
-    pub fn try_new(raw: impl Into<String>) -> Result<Self, CorrIdError> {
-        let raw: String = raw.into();
-        if !Self::validate(&raw) {
-            return Err(CorrIdError::Invalid);
-        }
-        Ok(Self(raw))
-    }
-}
-
-impl<'de> Deserialize<'de> for CorrId {
-    fn deserialize<Decoder>(deserializer: Decoder) -> Result<Self, Decoder::Error>
-    where
-        Decoder: serde::Deserializer<'de>,
-    {
-        // The engine stays payload-agnostic (the app enforces its own UUID
-        // contract), but a length bound caps DoS at the wire boundary: the app
-        // mints a 36-char UUID, so anything empty or wildly larger is a crafted
-        // frame, not a correlation id. Mirrors [`AppTag`]'s bounded deserialize.
-        let raw = String::deserialize(deserializer)?;
-        Self::try_new(raw).map_err(serde::de::Error::custom)
     }
 }
 

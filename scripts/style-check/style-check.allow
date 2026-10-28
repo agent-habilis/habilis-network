@@ -540,7 +540,7 @@ pub_impl_into|crates/habilis-network-protocol/src/mesh/name_error.rs|1|MeshName:
 pub_impl_into|crates/habilis-network-protocol/src/message/body_error.rs|1|MessageBody::new: a validating constructor that takes a &str or a String
 pub_impl_into|crates/habilis-network-protocol/src/message/id_error.rs|1|MessageId::new: a validating constructor that takes a &str or a String
 pub_impl_into|crates/habilis-network-protocol/src/message/app_tag.rs|1|AppTag::new: a validating constructor that takes a &str or a String
-pub_impl_into|crates/habilis-network-protocol/src/message/mod.rs|1|CorrId::new: a validating constructor that takes a &str or a String
+pub_impl_into|crates/habilis-network-protocol/src/message/corr_id.rs|1|CorrId::new: a validating constructor that takes a &str or a String
 pub_impl_into|crates/habilis-network-protocol/src/nickname_error.rs|1|Nickname::new: a validating constructor that takes a &str or a String
 pub_impl_into|crates/habilis-network/src/lookup/mod.rs|1|a function that takes an address or anything that converts into one
 
