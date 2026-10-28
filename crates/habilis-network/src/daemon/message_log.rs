@@ -1,13 +1,17 @@
+mod bound;
+mod digest_window;
+mod missing_query;
+mod window_range;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::protocol::message::{Verified, sole_addressee};
 use crate::protocol::{AuthorKey, DedupKey, MessageKind, Nickname, PresenceSubtype, UnixSecs};
 
-/// Where a message sits in the log's total order: its timestamp, then its id
-/// key. Timestamps are whole seconds and a mesh puts hundreds of messages in one
-/// second, so the timestamp alone cannot say which side of a window's edge a
-/// message is on; the key breaks every tie.
-pub(crate) type Bound = (UnixSecs, DedupKey);
+pub(crate) use bound::Bound;
+pub(crate) use digest_window::DigestWindow;
+pub(crate) use missing_query::MissingQuery;
+pub(crate) use window_range::WindowRange;
 
 /// The smallest bound that sorts after `bound`.
 fn bound_after((timestamp, key): Bound) -> Bound {
@@ -17,30 +21,6 @@ fn bound_after((timestamp, key): Bound) -> Bound {
     }
 }
 
-/// One anti-entropy digest window: the inclusive `[lo, hi]` range of
-/// [`Bound`]s it covers and the compact dedup keys the sender holds
-/// in that range. The window is a contiguous slice of the log in bound order, so
-/// the ids it lists are **every** message the sender holds in the range. A
-/// receiver can then re-send only real gaps, and advertising a sub-window of a
-/// large log never makes peers perpetually re-send what the sender already has.
-pub(crate) struct DigestWindow {
-    pub lo: Bound,
-    pub hi: Bound,
-    pub ids: Vec<DedupKey>,
-    /// The window holds the first message of the log: nothing sorts before it.
-    pub from_start: bool,
-}
-
-/// Inclusive `[lo, hi]` bounds to filter by — the shape shared by a
-/// [`DigestWindow`] and a wire-decoded digest window entry (the anti-entropy
-/// caller's own type), grouped so [`MessageLog::missing_in_window`] doesn't
-/// need either concrete type by name.
-#[derive(Clone, Copy)]
-pub(crate) struct WindowRange {
-    pub lo: Bound,
-    pub hi: Bound,
-}
-
 /// A range of whole seconds: every message from second `lo` to second `hi`.
 #[cfg(test)]
 pub(crate) fn seconds(lo: UnixSecs, hi: UnixSecs) -> WindowRange {
@@ -48,18 +28,6 @@ pub(crate) fn seconds(lo: UnixSecs, hi: UnixSecs) -> WindowRange {
         lo: (lo, DedupKey::MIN),
         hi: (hi, DedupKey::MAX),
     }
-}
-
-/// One gap query against the log: the window to search, the ids the requester
-/// already advertised, the resend budget left for this round, and **who** is
-/// asking — the last because entitlement is per-peer, not global (see
-/// [`resendable_to`]).
-#[derive(Clone, Copy)]
-pub(crate) struct MissingQuery<'query> {
-    pub range: WindowRange,
-    pub have: &'query HashSet<DedupKey>,
-    pub max: usize,
-    pub requester: &'query Nickname,
 }
 
 /// A bounded buffer of the recent messages a member retains — the
