@@ -20,3 +20,26 @@ catch_unwind|crates/habilis-network-test-tracing/src/lib.rs|1|catch_panic, the h
 # feature, not library API.
 anyhow_pub|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|3|benchmark harness behind the bench feature, not library API
 anyhow_pub|crates/habilis-network/src/lookup/mod.rs|1|the test relay helper spawn_plain, behind the iroh-test-utils feature (a test helper, not library API)
+
+# glob: every glob import still to be replaced with explicit imports (tracker items G2 and G3). The rows go away with the fix.
+glob|crates/habilis-network-iroh-gossip-transport/src/budget.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network-iroh-gossip-transport/src/frame.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network-iroh-gossip-transport/src/selector.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network-iroh-multihop-transport/src/selector.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network-iroh-transport-util/src/lib.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/room.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-proto/src/lib.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network-iroh-webrtc-transport/src/registry.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network-stream-cli/src/args.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network-stream/src/hash.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network-stream/src/node.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network/src/daemon/params.rs|2|replace with explicit imports (G2, G3)
+glob|crates/habilis-network/src/membership/app.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network/src/membership/join.rs|2|replace with explicit imports (G2, G3)
+glob|crates/habilis-network/src/transport/accept.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network/src/transport/admission.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network/src/transport/ceiling.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network/src/transport/graft_backoff.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network/src/transport/redial.rs|1|replace with explicit imports (G2, G3)
+glob|crates/habilis-network/src/transport/webrtc.rs|2|replace with explicit imports (G2, G3)

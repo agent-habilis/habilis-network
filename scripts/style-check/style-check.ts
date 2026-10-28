@@ -166,6 +166,12 @@ const RULES: Rule[] = [
     why: "Name a type lifetime for what it borrows ('frame, not 'a). The guide allows one letter only on a fn.",
   },
   {
+    name: "glob",
+    pattern: /^\s*(pub(\([^)]*\))?\s+)?use\s[^;]*(::\*|\{\s*\*|,\s*\*)/,
+    glob: "*.rs",
+    why: "Import each name. No glob import: not `use super::*` in a test module, not a `pub use` facade, not a third-party prelude. Clippy exempts the first two, so only this rule stops them.",
+  },
+  {
     name: "anyhow_pub",
     scan: countAnyhowPub,
     skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/[^/]+\/src\/)/,

@@ -88,6 +88,29 @@ test("lifetime: single letter on a fn", () => {
   expectExit("src/a.rs", "fn first<'a>(x: &'a [u8]) -> &'a u8 { &x[0] }", 0);
 });
 
+// Glob imports: no form is exempt, not `use super::*` in a test module and not a `pub use` facade.
+test("glob: use super", () => {
+  expectExit("src/a.rs", "#[cfg(test)]\nmod tests {\n    use super::*;\n}", 1);
+});
+test("glob: pub use facade", () => {
+  expectExit("src/a.rs", "pub use inner::*;", 1);
+});
+test("glob: third-party prelude", () => {
+  expectExit("src/a.rs", "use wasm_bindgen::prelude::*;", 1);
+});
+test("glob: inside braces", () => {
+  expectExit("src/a.rs", "use inner::{*, Thing};", 1);
+});
+test("glob: explicit import", () => {
+  expectExit("src/a.rs", "use inner::{Thing, other::Other};", 0);
+});
+test("glob: a comment that holds a glob", () => {
+  expectExit("src/a.rs", "// use super::*;", 0);
+});
+test("glob: counted exception", () => {
+  expectExit("src/a.rs", "use super::*;", 0, "glob|src/a.rs|1|test exception");
+});
+
 // A clean file passes, and so does a string that only looks like a block doc comment.
 test("clean file", () => {
   expectExit("src/a.rs", "fn f() {}", 0);
