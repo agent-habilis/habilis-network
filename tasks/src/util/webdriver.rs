@@ -2,11 +2,18 @@
 //! driver, open a session, navigate, run a script. The e2e matrix and the
 //! benchmark both drive Safari through it.
 
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+mod driver;
+#[cfg(any(feature = "mesh", feature = "bench"))]
+mod session;
 
-use super::{Skip, reachable, wait_for};
+pub(crate) use driver::Driver;
+#[cfg(any(feature = "mesh", feature = "bench"))]
+pub(crate) use session::Session;
+
+use std::path::PathBuf;
+use std::process::Command;
+
+use super::Skip;
 
 /// Safari Technology Preview's app binary, which its own `safaridriver` drives.
 pub(crate) const SAFARI_TP: &str =
@@ -36,24 +43,10 @@ pub(crate) fn free_port() -> Result<u16, Skip> {
         })
 }
 
-/// A running driver, killed when it goes out of scope.
-#[derive(Debug)]
-pub(crate) struct Driver {
-    child: Child,
-    pub(crate) url: String,
-}
-
-impl Drop for Driver {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 /// `$CHROMEDRIVER` before `$PATH`, so a driver downloaded next to the run works
 /// without installing anything system-wide — the same courtesy the wasm-bindgen
 /// runner extends via the same variable.
-fn locate(env_var: &str, binary: &str) -> Option<PathBuf> {
+pub(super) fn locate(env_var: &str, binary: &str) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(env_var).map(PathBuf::from)
         && path.is_file()
     {
@@ -64,84 +57,6 @@ fn locate(env_var: &str, binary: &str) -> Option<PathBuf> {
         .status
         .success()
         .then(|| PathBuf::from(String::from_utf8_lossy(&found.stdout).trim().to_owned()))
-}
-
-impl Driver {
-    pub(crate) fn start(browser: &str) -> Result<Self, Skip> {
-        let port = free_port()?;
-        let mut command = match browser {
-            "chrome-151" | "chrome-ci" => {
-                // A chromedriver whose version matches the Chrome it drives. A
-                // mismatch fails session creation with a bare HTTP 404 and no
-                // hint that the version is what is wrong.
-                let driver = locate("CHROMEDRIVER", "chromedriver").ok_or_else(|| {
-                    Skip(format!(
-                        "no chromedriver for {browser} — set $CHROMEDRIVER to a matching build"
-                    ))
-                })?;
-                let mut command = Command::new(driver);
-                command.arg(format!("--port={port}"));
-                command
-            }
-            "safari" | "safari-tp" => {
-                let driver = PathBuf::from(safaridriver(browser));
-                if !driver.is_file() {
-                    return Err(Skip(format!(
-                        "safaridriver is missing at {}",
-                        driver.display()
-                    )));
-                }
-                let mut command = Command::new(driver);
-                command.args(["-p", &port.to_string()]);
-                command
-            }
-            other => return Err(Skip(format!("no driver wired up for {other}"))),
-        };
-
-        let child = command
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| Skip(format!("could not start the {browser} driver: {error}")))?;
-        let mut driver = Self {
-            child,
-            url: format!("http://127.0.0.1:{port}"),
-        };
-
-        // Give up the moment the child dies, rather than polling a port it was
-        // never going to open. Combined with the fresh port above, a `/status`
-        // that answers is now necessarily *this* driver's.
-        let status_url = format!("{}/status", driver.url);
-        let ready = wait_for(Duration::from_secs(10), Duration::from_millis(250), || {
-            if matches!(driver.child.try_wait(), Ok(Some(_))) {
-                return Some(false);
-            }
-            reachable(&status_url).then_some(true)
-        });
-        match ready {
-            Some(true) => Ok(driver),
-            Some(false) => Err(Skip(format!(
-                "the {browser} driver exited before it was ready"
-            ))),
-            None => Err(Skip(format!("the {browser} driver never became ready"))),
-        }
-    }
-
-    pub(crate) fn post(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
-        ureq::post(format!("{}{path}", self.url))
-            .config()
-            .timeout_global(Some(Duration::from_mins(1)))
-            .build()
-            .send_json(body)
-            .map_err(|error| error.to_string())?
-            .body_mut()
-            .read_json::<serde_json::Value>()
-            .map_err(|error| error.to_string())
-    }
 }
 
 /// Every browser needs its own way of being told to stop hiding local IPs
@@ -179,81 +94,9 @@ pub(crate) fn capabilities(browser: &str, binary: &str) -> serde_json::Value {
     }
 }
 
-/// A live `WebDriver` session on one browser, for a suite that drives the page
-/// itself rather than harvesting a published table. The driver dies with the
-/// session (its `Drop` kills the process), which also closes the window.
-#[cfg(any(feature = "mesh", feature = "bench"))]
-#[derive(Debug)]
-pub(crate) struct Session {
-    driver: Driver,
-    id: String,
-    version: String,
-}
-
-#[cfg(any(feature = "mesh", feature = "bench"))]
-impl Session {
-    pub(crate) fn open(browser: &str, binary: &str) -> Result<Self, Skip> {
-        let driver = Driver::start(browser)?;
-        let created = driver
-            .post("/session", &capabilities(browser, binary))
-            .map_err(|error| session_refused(browser, &error))?;
-        let id = created
-            .pointer("/value/sessionId")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                let detail = created
-                    .pointer("/value/message")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("no message");
-                session_refused(browser, detail)
-            })?
-            .to_owned();
-        let capability = |key: &str| {
-            created
-                .pointer(&format!("/value/capabilities/{key}"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("?")
-                .to_owned()
-        };
-        let version = format!(
-            "{}/{}",
-            capability("browserName"),
-            capability("browserVersion")
-        );
-        Ok(Self {
-            driver,
-            id,
-            version,
-        })
-    }
-
-    pub(crate) fn navigate(&self, url: &str) {
-        let _ = self.driver.post(
-            &format!("/session/{}/url", self.id),
-            &serde_json::json!({ "url": url }),
-        );
-    }
-
-    /// Run a script body (`return …;`) and read its value as a string.
-    pub(crate) fn execute(&self, script: &str) -> String {
-        self.driver
-            .post(
-                &format!("/session/{}/execute/sync", self.id),
-                &serde_json::json!({ "script": script, "args": [] }),
-            )
-            .ok()
-            .and_then(|reply| reply.get("value").map(super::json_to_string))
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn version(&self) -> String {
-        self.version.clone()
-    }
-}
-
 /// Each Safari app has its own driver, and its own Remote Automation toggle
 /// that only that driver sets.
-fn safaridriver(browser: &str) -> &'static str {
+pub(super) fn safaridriver(browser: &str) -> &'static str {
     if browser == "safari" {
         "/usr/bin/safaridriver"
     } else {
