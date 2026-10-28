@@ -79,10 +79,7 @@ pub mod fs;
 /// The browser backend. Main-thread capable, so a tab can seed without a Worker.
 #[cfg(target_arch = "wasm32")]
 pub mod idb_store;
-#[cfg(target_arch = "wasm32")]
-pub use idb_store as idb;
 pub mod in_memory_store;
-pub use in_memory_store as mem;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use fs::{DiskOrigin, DiskStore};

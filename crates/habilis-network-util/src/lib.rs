@@ -9,8 +9,6 @@ pub mod bounded_queue;
 // also the crate's only tokio user.
 #[cfg(feature = "async-io")]
 pub mod line_read;
-#[cfg(feature = "async-io")]
-pub use line_read as bounded_read;
 pub mod unix_secs;
 pub use unix_secs as clock;
 pub mod consts;

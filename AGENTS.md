@@ -134,7 +134,7 @@ Layer: protocol. A property of a message body.
 
 The encryption of a body. A directed frame is sealed to the x25519 public key of the addressee. On a passworded mesh, state, meta, and broadcast bodies are sealed with a `SymmetricKey` that every member holds. Encryption comes before signing, so the signature covers the ciphertext.
 
-Code: `protocol::seal`.
+Code: `protocol::seal_error`.
 
 ### blob
 

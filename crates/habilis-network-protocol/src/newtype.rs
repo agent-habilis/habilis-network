@@ -109,7 +109,7 @@ pub(crate) use string_newtype;
 mod tests {
     use crate::mesh::{MeshId, MeshName};
     use crate::message::{AppTag, CorrId, MessageBody, MessageId, ShardGroup};
-    use crate::nickname::Nickname;
+    use crate::nickname_error::Nickname;
     use habilis_network_test_tracing::test;
 
     /// Assert that a value serializes as the bare JSON string `raw`.

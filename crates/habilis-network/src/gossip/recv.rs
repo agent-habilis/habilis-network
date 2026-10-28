@@ -33,7 +33,7 @@ use crate::net::conn_path;
 use crate::daemon::event_loop;
 use crate::doc::wire;
 use crate::logging::messages;
-use crate::protocol::{message, peer_addr, seal};
+use crate::protocol::{message, peer_addr_error, seal_error};
 #[cfg(feature = "multihop")]
 use crate::transport::underlay_webrtc;
 use crate::transport::{probe, proven_endpoints, webrtc};
@@ -1359,7 +1359,7 @@ fn decrypt_directed<F: std::ops::Deref<Target = Message>>(
     message: &F,
     state: &EventLoopState,
 ) -> Option<MessageBody> {
-    match seal::unseal_from_body(&state.identity.seal_secret(), &message.body) {
+    match seal_error::unseal_from_body(&state.identity.seal_secret(), &message.body) {
         Ok(plaintext) => MessageBody::try_new(plaintext).ok(),
         Err(error) => {
             tracing::warn!(target: "habilis_network::gossip", %error, author = %message.author, "dropping a directed frame sealed to us that failed to open");
@@ -1498,7 +1498,7 @@ async fn handle_peer_info(message: &Verified, state: &mut EventLoopState, ctx: &
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(message.body.as_str()) else {
         return;
     };
-    let Ok((peer_id, peer_addr)) = peer_addr::endpoint_addr_from_json(&parsed) else {
+    let Ok((peer_id, peer_addr)) = peer_addr_error::endpoint_addr_from_json(&parsed) else {
         return;
     };
     if peer_id == ctx.endpoint.id() {
@@ -2658,7 +2658,7 @@ mod first_contact_tests {
         use crate::protocol::AuthorKey;
         use crate::protocol::identity::encode_pubkey;
         use crate::protocol::message::MessageBody;
-        use crate::protocol::peer_addr::endpoint_addr_to_json;
+        use crate::protocol::peer_addr_error::endpoint_addr_to_json;
         use crate::transport::proven_endpoints::sign;
 
         let node = Node::spawn().await;
@@ -2709,7 +2709,7 @@ mod first_contact_tests {
         use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
         use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 
-        use crate::protocol::peer_addr::endpoint_addr_to_json;
+        use crate::protocol::peer_addr_error::endpoint_addr_to_json;
 
         async fn handle_for(secret: &SecretKey) -> MultihopHandle {
             let underlay = Endpoint::builder(presets::Minimal)
@@ -2846,7 +2846,7 @@ mod first_contact_tests {
     /// A `PeerInfo` of the author `bob` that carries `addr`.
     fn peer_info(node: &Node, addr: &iroh::EndpointAddr) -> Verified {
         use crate::protocol::message::MessageBody;
-        use crate::protocol::peer_addr::endpoint_addr_to_json;
+        use crate::protocol::peer_addr_error::endpoint_addr_to_json;
 
         let body =
             MessageBody::try_new(endpoint_addr_to_json(addr).to_string()).expect("an address body");
@@ -2883,7 +2883,7 @@ mod first_contact_tests {
     #[test]
     async fn a_second_peer_info_right_after_a_deferred_dial_does_not_dial() {
         use crate::protocol::message::MessageBody;
-        use crate::protocol::peer_addr::endpoint_addr_to_json;
+        use crate::protocol::peer_addr_error::endpoint_addr_to_json;
 
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2930,7 +2930,7 @@ mod first_contact_tests {
     #[test]
     async fn a_peer_info_leaves_one_slot_free_in_a_mesh_larger_than_g_plus_one() {
         use crate::protocol::message::MessageBody;
-        use crate::protocol::peer_addr::endpoint_addr_to_json;
+        use crate::protocol::peer_addr_error::endpoint_addr_to_json;
 
         let node = Node::spawn().await;
         let ctx = node.ctx();

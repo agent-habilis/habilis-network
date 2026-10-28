@@ -24,7 +24,7 @@ pub use crate::lookup::{
 };
 #[cfg(feature = "host")]
 pub use crate::lookup::{NetworkCapability, capability_probe};
-pub use crate::protocol::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_json};
+pub use crate::protocol::peer_addr_error::{endpoint_addr_from_json, endpoint_addr_to_json};
 /// The direct-`WebRTC`-session ceiling this engine enforces, so a consumer
 /// renders the same denominator the engine checks. It used to be written out
 /// once here and again in each frontend, and the UI's copy drifted from the

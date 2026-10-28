@@ -7,7 +7,7 @@ use habilis_network_util::clock::UnixSecs;
 
 use crate::identity::{self, Identity};
 use crate::mesh::MeshId;
-use crate::nickname::Nickname;
+use crate::nickname_error::Nickname;
 use crate::{AuthorKey, ContentHash, DedupKey};
 
 use super::{

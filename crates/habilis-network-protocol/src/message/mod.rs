@@ -30,7 +30,7 @@ mod channel;
 #[cfg(test)]
 use super::mesh::MeshId;
 #[cfg(test)]
-use super::nickname::Nickname;
+use super::nickname_error::Nickname;
 pub use channel::Channel;
 mod app_tag;
 use version::VERSION;

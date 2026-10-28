@@ -12,7 +12,7 @@ use anyhow::Result;
 use serde::Serialize;
 use tokio::io::{AsyncWriteExt, BufReader};
 
-use crate::util::bounded_read::{self, LineRead};
+use crate::util::line_read::{self, LineRead};
 
 /// Client-side: send an IPC command to the running server and return the raw JSON response.
 ///
@@ -83,7 +83,7 @@ async fn round_trip<Cmd: Serialize>(stream: Stream, command: &Cmd) -> Result<Str
     write_half.shutdown().await?;
 
     let mut reader = BufReader::new(read_half);
-    match bounded_read::read_bounded_line(&mut reader, MAX_IPC_RESPONSE_BYTES).await? {
+    match line_read::read_bounded_line(&mut reader, MAX_IPC_RESPONSE_BYTES).await? {
         LineRead::Line(line) => Ok(line.trim().to_string()),
         LineRead::Eof => Ok(String::new()),
         LineRead::TooLong => anyhow::bail!("IPC response too large"),

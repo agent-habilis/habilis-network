@@ -1,7 +1,7 @@
 //! Parameters for building an app frame: its tag, its addressee, its correlation id and its body.
 
 use super::{AppTag, CorrId, MessageBody};
-use crate::nickname::Nickname;
+use crate::nickname_error::Nickname;
 
 /// Parameters for [`super::Message::new_app`] (and `habilis_network::ops::send_app`, which
 /// shares the same `App` frame shape).

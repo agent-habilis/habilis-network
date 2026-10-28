@@ -18,7 +18,7 @@ use super::InviteError;
 use crate::base58check::{self, take_array};
 use crate::crypto::{self, Password, SymmetricKey};
 use crate::mesh::{LockedMesh, Mesh};
-use crate::{identity, seal};
+use crate::{identity, seal_error};
 use habilis_network_util::clock::UnixSecs;
 use zeroize::Zeroizing;
 
@@ -112,7 +112,7 @@ pub fn mint(
     let root_field = match password {
         Some(password) => {
             let wrap_key = crypto::invite_wrap_key(password, mesh.wrap_salt());
-            seal::seal_symmetric(&wrap_key, root.as_bytes())
+            seal_error::seal_symmetric(&wrap_key, root.as_bytes())
         }
         None => root.as_bytes().to_vec(),
     };
@@ -264,7 +264,7 @@ impl InviteTicket {
         let raw = match (self.password, password) {
             (true, Some(password)) => {
                 let wrap_key = crypto::invite_wrap_key(password, mesh.wrap_salt());
-                seal::open_symmetric(&wrap_key, &self.root_field)
+                seal_error::open_symmetric(&wrap_key, &self.root_field)
                     .map_err(InviteError::with_step("wrong password or corrupt invite"))?
             }
             (true, None) => {

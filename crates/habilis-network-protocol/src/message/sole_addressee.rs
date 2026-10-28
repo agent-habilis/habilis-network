@@ -1,6 +1,6 @@
 //! The routing address of a frame: the one peer it is sent to, if any.
 
-use crate::nickname::Nickname;
+use crate::nickname_error::Nickname;
 
 use super::MessageKind;
 

@@ -1,7 +1,7 @@
 //! The input parameters of a test message.
 
 use crate::mesh::MeshId;
-use crate::nickname::Nickname;
+use crate::nickname_error::Nickname;
 
 use super::{AppTag, ChainCtx, MessageBody};
 

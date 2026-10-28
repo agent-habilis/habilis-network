@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use super::{Message, MessageBody, MessageId, MessageKind, Shard, Signer, default_ext};
 use crate::mesh::MeshId;
-use crate::nickname::Nickname;
+use crate::nickname_error::Nickname;
 use crate::{AuthorKey, ContentHash, identity};
 
 /// A [`Message`] as the wire has it, read: every field a string or a plain value, so that one

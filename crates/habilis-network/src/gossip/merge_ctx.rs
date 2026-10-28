@@ -16,7 +16,7 @@ use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
 use crate::logging::messages;
-use crate::protocol::{message, peer_addr};
+use crate::protocol::{message, peer_addr_error};
 use crate::transport::{proven_endpoints, webrtc};
 use crate::util::{clock, tuning};
 use tokio::sync::oneshot;
@@ -408,7 +408,7 @@ pub(crate) fn peer_info_json(
     proof: String,
     holds_beacon: bool,
 ) -> serde_json::Value {
-    let mut json = peer_addr::endpoint_addr_to_json(addr);
+    let mut json = peer_addr_error::endpoint_addr_to_json(addr);
     json["proof"] = serde_json::Value::String(proof);
     if holds_beacon {
         json["beacon"] = serde_json::Value::Bool(true);
@@ -517,7 +517,7 @@ mod tests {
     use crate::protocol::{MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick};
 
-    use crate::protocol::{message, peer_addr};
+    use crate::protocol::{message, peer_addr_error};
     use crate::util::clock;
     #[test]
     fn our_peer_info_says_so_while_we_hold_the_rendezvous() {
@@ -541,7 +541,7 @@ mod tests {
         let id = iroh::SecretKey::generate().public();
         let json = peer_info_json(&iroh::EndpointAddr::new(id), "proof".to_owned(), true);
 
-        let (read, _) = peer_addr::endpoint_addr_from_json(&json).expect("the address reads");
+        let (read, _) = peer_addr_error::endpoint_addr_from_json(&json).expect("the address reads");
 
         assert_eq!(read, id);
     }

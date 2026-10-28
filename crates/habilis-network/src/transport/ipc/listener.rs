@@ -16,8 +16,8 @@ use tokio::sync::mpsc;
 
 use crate::gossip::event;
 use crate::util;
-use crate::util::bounded_read::{self, LineRead};
 use crate::util::clock;
+use crate::util::line_read::{self, LineRead};
 use crate::util::tuning::{IPC_ACCEPT_BACKOFF_MAX, IPC_ACCEPT_BACKOFF_MIN, IPC_IO_TIMEOUT};
 use tokio::sync::oneshot;
 
@@ -141,7 +141,7 @@ where
     let io_deadline = IPC_IO_TIMEOUT;
     let line = match tokio::time::timeout(
         io_deadline,
-        bounded_read::read_bounded_line(&mut reader, MAX_IPC_COMMAND_BYTES),
+        line_read::read_bounded_line(&mut reader, MAX_IPC_COMMAND_BYTES),
     )
     .await
     {

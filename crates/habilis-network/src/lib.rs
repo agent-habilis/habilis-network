@@ -64,8 +64,9 @@ pub mod protocol {
         PresenceSubtype, Proof, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Seed,
         Shard, ShardGroup, Signer, SymmetricKey, TicketAuth, TicketSecret, TopicId, Transport,
         TransportPolicy, UnixSecs, UnlockError, Verified, base58check, crypto, ct_eq, directory,
-        encode_pubkey, identity, invite, iroh_base, mesh, message, nickname, peer_addr, reassembly,
-        resolve_lookups, resolver, seal, seal_to_body, sole_addressee, validate_advertise,
+        encode_pubkey, identity, invite, iroh_base, mesh, message, nickname_error, peer_addr_error,
+        reassembly, resolve_lookups, resolver, seal_error, seal_to_body, sole_addressee,
+        validate_advertise,
     };
     #[cfg(any(test, feature = "test-fixtures"))]
     pub use habilis_network_protocol::{BuildMsgParams, ChainCtx, build_msg_bytes};
@@ -105,12 +106,12 @@ pub mod util {
         ensure_mesh_runtime_dir, ensure_parent_private, ensure_runtime_base, is_under_runtime_base,
         mesh_runtime_dir, runtime_base,
     };
-    // `bounded_read` is gated on `habilis-network-util`'s `async-io`, which this crate
+    // `line_read` is gated on `habilis-network-util`'s `async-io`, which this crate
     // turns on unconditionally in its manifest — so it is always here, and a
     // `#[cfg(feature = "async-io")]` would be checking a feature *this* crate
     // does not have and silently never fire. `process` is gated on `host`,
     // which both crates do have, and this one forwards.
-    pub use habilis_network_util::bounded_read;
+    pub use habilis_network_util::line_read;
     #[cfg(feature = "host")]
     pub use habilis_network_util::process;
 

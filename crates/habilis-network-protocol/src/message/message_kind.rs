@@ -5,7 +5,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::{AppTag, CorrId, MessageId, PresenceSubtype};
-use crate::nickname::Nickname;
+use crate::nickname_error::Nickname;
 
 /// Message kind — the frame's routing discriminator. The engine owns the
 /// infrastructure kinds (presence, peer-info, digests, ping/pong, channel

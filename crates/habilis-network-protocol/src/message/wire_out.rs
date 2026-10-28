@@ -5,7 +5,7 @@ use std::fmt;
 
 use super::{Message, MessageBody, MessageId, MessageKind, Shard};
 use crate::mesh::MeshId;
-use crate::nickname::Nickname;
+use crate::nickname_error::Nickname;
 use crate::{ContentHash, identity};
 
 /// A [`Message`] as the wire has it, written. The field order is the order of the JSON text.
