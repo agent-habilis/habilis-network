@@ -5,6 +5,9 @@
 //! from disk after a bearer-secret handshake. One endpoint, per-blob capability
 //! (the secret is stored with the blob), kept for the daemon's lifetime.
 
+mod blob_server;
+mod serve_limits;
+
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,6 +23,9 @@ use tokio::io::AsyncReadExt as _;
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
+pub use blob_server::BlobServer;
+pub(crate) use serve_limits::ServeLimits;
+
 use crate::lookup::build_endpoint;
 use crate::protocol::crypto::{Password, TicketAuth, TicketSecret, ct_eq};
 use crate::protocol::mesh::LookupOpts;
@@ -33,62 +39,9 @@ use super::{
     UNKNOWN_BLOB, wait_online,
 };
 
-/// What one fetch may cost before the requester has proved anything.
-///
-/// Everything up to the bearer-secret check runs on a peer's schedule: the
-/// handshake, opening a stream, and sending the 64-byte request. A peer that
-/// connects and then stops parks a task for good, and nothing bounded how many
-/// such tasks there could be. Injectable so tests need not wait real seconds.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ServeLimits {
-    /// Deadline covering the whole pre-authentication phase.
-    pub(crate) pre_auth: Duration,
-    /// Serves in flight at once. A backstop under the deadline: the deadline
-    /// is what frees a parked task, this caps how many can park meanwhile.
-    pub(crate) max_inflight: usize,
-}
-
-impl ServeLimits {
-    pub(crate) const DEFAULT: Self = Self {
-        // Generous against a slow link, and a legitimate fetcher sends its
-        // request immediately after connecting.
-        pre_auth: Duration::from_secs(10),
-        max_inflight: 64,
-    };
-}
-
 /// Chunk size for hashing and streaming — bounded, so memory is constant
 /// regardless of blob size.
 const CHUNK: usize = 64 * 1024;
-
-/// The producer side of the blob channel. Owns the serving endpoint and the
-/// content-addressed store; both live for the daemon's process lifetime.
-pub struct BlobServer {
-    endpoint: Endpoint,
-    store: Arc<Mutex<BlobStore>>,
-    lookups: LookupOpts,
-    /// The mesh password, when the mesh is password-protected. Every minted
-    /// ticket inherits it, so a scraped ticket can't be redeemed without the
-    /// password. `None` ⇒ bare bearer-secret tickets (status quo).
-    password: Option<Password>,
-    /// `TransportPolicy::relay`. Off, a fetch whose selected path is the
-    /// relay is refused before any byte.
-    relay_transport: PayloadPath,
-    /// Serves currently in flight. The accept loop holds the counter it
-    /// actually reads; this handle exists so a test can observe that a peer
-    /// which connects and then goes quiet cannot accumulate them.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "observed only by the serve-ceiling test")
-    )]
-    inflight: Arc<AtomicUsize>,
-}
-
-impl std::fmt::Debug for BlobServer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BlobServer").finish_non_exhaustive()
-    }
-}
 
 impl BlobServer {
     /// Bind the serving endpoint (its own `BLOB_ALPN` identity, separate from
