@@ -1920,12 +1920,11 @@ impl EventLoopState {
     /// The `parents` to stamp on the next `Msg` we author: the current DAG
     /// tips, sorted (deterministic) and capped to `MAX_DAG_PARENTS` to
     /// bound message size. Usually a single head on a quiet mesh.
-    #[must_use]
-    pub fn dag_parents(&self) -> Vec<ContentHash> {
+    pub fn dag_parents(&self) -> impl Iterator<Item = ContentHash> {
         let mut heads: Vec<ContentHash> = self.dag_heads.iter().copied().collect();
         heads.sort_unstable();
         heads.truncate(MAX_DAG_PARENTS);
-        heads
+        heads.into_iter()
     }
 
     /// Fold a content `Msg` (hash `hash`, `parents`, timestamp `ts`) into the
@@ -3343,10 +3342,10 @@ mod tests {
         let mut state = fresh_state();
         // First message (no parents) becomes the sole tip.
         assert!(!state.note_dag(hash_of("h1"), &[], UnixSecs::from_secs(100)));
-        assert_eq!(state.dag_parents(), vec![hash_of("h1")]);
+        assert_eq!(state.dag_parents().collect::<Vec<_>>(), vec![hash_of("h1")]);
         // A child referencing h1 makes h1 no longer a tip; h2 is the new one.
         assert!(!state.note_dag(hash_of("h2"), &[hash_of("h1")], UnixSecs::from_secs(101)));
-        assert_eq!(state.dag_parents(), vec![hash_of("h2")]);
+        assert_eq!(state.dag_parents().collect::<Vec<_>>(), vec![hash_of("h2")]);
     }
 
     #[test]
@@ -3356,7 +3355,11 @@ mod tests {
         state.note_dag(hash_of("b"), &[], UnixSecs::from_secs(1)); // concurrent: no shared parent
         let mut both = vec![hash_of("a"), hash_of("b")];
         both.sort();
-        assert_eq!(state.dag_parents(), both, "both tips, in hash order");
+        assert_eq!(
+            state.dag_parents().collect::<Vec<_>>(),
+            both,
+            "both tips, in hash order"
+        );
     }
 
     #[test]
@@ -3382,7 +3385,7 @@ mod tests {
         let mut state = fresh_state();
         state.note_dag(hash_of("h"), &[], UnixSecs::from_secs(1));
         state.forget_hash(&hash_of("h"));
-        assert!(state.dag_parents().is_empty());
+        assert!(state.dag_parents().next().is_none());
     }
 
     /// A valid (curve-point) `EndpointId` derived deterministically from
