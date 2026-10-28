@@ -115,9 +115,9 @@ const _: () = assert!(!WORDS.is_empty(), "the word list is not empty");
 /// pair here fits).
 pub(super) fn random_pair() -> String {
     use rand::seq::IndexedRandom;
-    let mut rng = rand::rng();
-    let first = WORDS.choose(&mut rng).expect("wordlist is non-empty");
-    let second = WORDS.choose(&mut rng).expect("wordlist is non-empty");
+    let mut random = rand::rng();
+    let first = WORDS.choose(&mut random).expect("wordlist is non-empty");
+    let second = WORDS.choose(&mut random).expect("wordlist is non-empty");
     format!("{first}-{second}")
 }
 

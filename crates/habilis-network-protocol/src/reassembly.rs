@@ -112,7 +112,7 @@ impl ReassemblyStore {
             if group.total != shard.total || group.kind != shard_msg.kind {
                 return ShardIngest::Dropped;
             }
-            if group.slots.contains_key(&shard.idx) {
+            if group.slots.contains_key(&shard.index) {
                 // First-seen wins per idx. Deliberately NO liveness refresh: a
                 // resent duplicate is not progress, and refreshing on it would
                 // let an attacker keepalive a dead group forever.
@@ -151,8 +151,8 @@ impl ReassemblyStore {
         group.bytes += charge;
         group
             .slots
-            .insert(shard.idx, shard_msg.body.as_str().to_owned());
-        if shard.idx == 0 {
+            .insert(shard.index, shard_msg.body.as_str().to_owned());
+        if shard.index == 0 {
             group.header = Some(shard_msg.clone());
         }
         *self.author_bytes.entry(key.0).or_default() += charge;
@@ -275,7 +275,7 @@ impl ReassemblyStore {
             }
             group.last_repair = Some(now);
             let missing: Vec<u32> = (0..group.total)
-                .filter(|idx| !group.slots.contains_key(idx))
+                .filter(|index| !group.slots.contains_key(index))
                 .take(REASSEMBLY_REPAIR_MAX_IDXS)
                 .collect();
             tickets.push(RepairTicket {
@@ -377,7 +377,7 @@ impl ShardCache {
             .into_iter()
             .flat_map(move |cached| {
                 idxs.iter()
-                    .filter_map(move |idx| cached.frames.get(*idx as usize).cloned())
+                    .filter_map(move |index| cached.frames.get(*index as usize).cloned())
             })
     }
 }
@@ -467,7 +467,7 @@ mod tests {
                     "alice",
                     Shard {
                         group: group_a(),
-                        idx: 0,
+                        index: 0,
                         total: 2
                     }
                 ),
@@ -484,7 +484,7 @@ mod tests {
                         "mallory",
                         Shard {
                             group: group_a(),
-                            idx: 1,
+                            index: 1,
                             total: 2
                         }
                     ),
@@ -502,7 +502,7 @@ mod tests {
                 "alice",
                 Shard {
                     group: group_a(),
-                    idx: 1,
+                    index: 1,
                     total: 2,
                 },
             ),
@@ -524,7 +524,7 @@ mod tests {
                 "a",
                 Shard {
                     group: group_a(),
-                    idx: 1,
+                    index: 1,
                     total: 3,
                 },
             ),
@@ -537,7 +537,7 @@ mod tests {
                 "a",
                 Shard {
                     group: group_a(),
-                    idx: 0,
+                    index: 0,
                     total: 3,
                 },
             ),
@@ -550,7 +550,7 @@ mod tests {
                 "a",
                 Shard {
                     group: group_a(),
-                    idx: 2,
+                    index: 2,
                     total: 3,
                 },
             ),
@@ -574,7 +574,7 @@ mod tests {
                 "a",
                 Shard {
                     group: group_a(),
-                    idx: 0,
+                    index: 0,
                     total: 3,
                 },
             ),
@@ -589,7 +589,7 @@ mod tests {
                     "a",
                     Shard {
                         group: group_a(),
-                        idx: 1,
+                        index: 1,
                         total: 4
                     }
                 ),
@@ -603,7 +603,7 @@ mod tests {
             "a",
             Shard {
                 group: group_a(),
-                idx: 1,
+                index: 1,
                 total: 3,
             },
         )
@@ -629,7 +629,7 @@ mod tests {
                 "a",
                 Shard {
                     group: group_a(),
-                    idx: 0,
+                    index: 0,
                     total: 2,
                 },
             ),
@@ -643,7 +643,7 @@ mod tests {
                     "a",
                     Shard {
                         group: group_a(),
-                        idx: 0,
+                        index: 0,
                         total: 2
                     }
                 ),
@@ -658,7 +658,7 @@ mod tests {
                 "a",
                 Shard {
                     group: group_a(),
-                    idx: 1,
+                    index: 1,
                     total: 2,
                 },
             ),
@@ -685,7 +685,7 @@ mod tests {
                 "a",
                 Shard {
                     group: group_a(),
-                    idx: 0,
+                    index: 0,
                     total: 3,
                 },
             ),
@@ -701,7 +701,7 @@ mod tests {
                     "a",
                     Shard {
                         group: group_a(),
-                        idx: 1,
+                        index: 1,
                         total: 3
                     }
                 ),
@@ -733,7 +733,7 @@ mod tests {
                 "a",
                 Shard {
                     group: stale.clone(),
-                    idx: 0,
+                    index: 0,
                     total: 2,
                 },
             ),
@@ -746,7 +746,7 @@ mod tests {
                 "a",
                 Shard {
                     group: fresh.clone(),
-                    idx: 0,
+                    index: 0,
                     total: 2,
                 },
             ),
@@ -762,7 +762,7 @@ mod tests {
                     "a",
                     Shard {
                         group: newcomer.clone(),
-                        idx: 0,
+                        index: 0,
                         total: 2
                     }
                 ),
@@ -800,7 +800,7 @@ mod tests {
                     &format!("sybil-{author}"),
                     Shard {
                         group: sybil_group,
-                        idx: 0,
+                        index: 0,
                         total: 2,
                     },
                 ),
@@ -845,7 +845,7 @@ mod tests {
                     "honest",
                     Shard {
                         group: honest.clone(),
-                        idx: 0,
+                        index: 0,
                         total: 2,
                     },
                 ),
@@ -864,7 +864,7 @@ mod tests {
                     "flooder",
                     Shard {
                         group: flood,
-                        idx: 0,
+                        index: 0,
                         total: 2,
                     },
                 ),
@@ -898,7 +898,7 @@ mod tests {
                 "a",
                 Shard {
                     group: group_a(),
-                    idx: 0,
+                    index: 0,
                     total: 3,
                 },
             ),
@@ -914,7 +914,7 @@ mod tests {
                     "a",
                     Shard {
                         group: group_a(),
-                        idx: 1,
+                        index: 1,
                         total: 3
                     }
                 ),
@@ -932,7 +932,7 @@ mod tests {
                     "a",
                     Shard {
                         group: group_a(),
-                        idx: 0,
+                        index: 0,
                         total: 3
                     }
                 ),
@@ -963,7 +963,7 @@ mod tests {
         // TTL alone — feed progress right up to the lifetime ceiling.
         let total = 64u32;
         let mut at = start;
-        let mut idx = 0u32;
+        let mut index = 0u32;
         while at.duration_since(start) < REASSEMBLY_MAX_GROUP_LIFETIME {
             ingest(
                 &mut store,
@@ -972,13 +972,13 @@ mod tests {
                     "a",
                     Shard {
                         group: group_a(),
-                        idx: idx % total,
+                        index: index % total,
                         total,
                     },
                 ),
                 at,
             );
-            idx += 1;
+            index += 1;
             at += REASSEMBLY_STALE.saturating_sub(Duration::from_secs(1));
         }
         assert_eq!(store.groups.len(), 1, "the trickle kept the group alive");
@@ -1001,7 +1001,7 @@ mod tests {
                 "a",
                 Shard {
                     group: group_a(),
-                    idx: 0,
+                    index: 0,
                     total: 2,
                 },
             ),
@@ -1016,7 +1016,7 @@ mod tests {
                     "a",
                     Shard {
                         group: group_a(),
-                        idx: 1,
+                        index: 1,
                         total: 2
                     }
                 ),
@@ -1044,7 +1044,7 @@ mod tests {
                 "a",
                 Shard {
                     group: small,
-                    idx: 0,
+                    index: 0,
                     total: 2,
                 },
             ),
@@ -1057,7 +1057,7 @@ mod tests {
                 "a",
                 Shard {
                     group: big.clone(),
-                    idx: 0,
+                    index: 0,
                     total: LOGGED_SHARD_GROUP_MAX_TOTAL + 4,
                 },
             ),
@@ -1070,7 +1070,7 @@ mod tests {
                 "a",
                 Shard {
                     group: big.clone(),
-                    idx: 2,
+                    index: 2,
                     total: LOGGED_SHARD_GROUP_MAX_TOTAL + 4,
                 },
             ),
@@ -1145,7 +1145,7 @@ mod tests {
                     author,
                     Shard {
                         group,
-                        idx: round % 5,
+                        index: round % 5,
                         total: u32::MAX,
                     },
                 ),

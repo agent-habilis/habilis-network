@@ -521,15 +521,15 @@ pub struct Message {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Signer {
     key: AuthorKey,
-    sig: Signature,
+    signature: Signature,
 }
 
 impl Signer {
     /// Pair a key with the signature it made. Nothing checks it here: [`Message::verify_signature_with`]
     /// does.
     #[must_use]
-    pub(crate) const fn new(key: AuthorKey, sig: Signature) -> Self {
-        Self { key, sig }
+    pub(crate) const fn new(key: AuthorKey, signature: Signature) -> Self {
+        Self { key, signature }
     }
 
     /// The key that signed.
@@ -541,7 +541,7 @@ impl Signer {
     /// The detached signature.
     #[must_use]
     pub const fn signature(&self) -> &Signature {
-        &self.sig
+        &self.signature
     }
 }
 
@@ -562,7 +562,8 @@ struct WireIn {
     #[serde(default)]
     pubkey: String,
     #[serde(default)]
-    sig: String,
+    #[serde(rename = "sig")]
+    signature: String,
     #[serde(default)]
     seq: Option<u64>,
     #[serde(default)]
@@ -591,7 +592,8 @@ struct WireOut<'message> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pubkey: Option<HexOut<'message>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    sig: Option<HexOut<'message>>,
+    #[serde(rename = "sig")]
+    signature: Option<HexOut<'message>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     seq: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -626,7 +628,7 @@ impl Serialize for Wire<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let message = self.0;
         let signer = message.signer.as_ref();
-        let sig_bytes = signer.map(|signed| signed.sig.to_bytes());
+        let sig_bytes = signer.map(|signed| signed.signature.to_bytes());
         WireOut {
             version: &message.version,
             id: &message.id,
@@ -636,7 +638,7 @@ impl Serialize for Wire<'_> {
             timestamp: message.timestamp.as_secs(),
             body: &message.body,
             pubkey: signer.map(|signed| HexOut(signed.key.as_bytes())),
-            sig: sig_bytes.as_ref().map(|bytes| HexOut(bytes)),
+            signature: sig_bytes.as_ref().map(|bytes| HexOut(bytes)),
             seq: message.seq,
             prev: &message.prev,
             parents: &message.parents,
@@ -671,7 +673,7 @@ impl TryFrom<WireIn> for Message {
         let key = (!wire.pubkey.is_empty())
             .then(|| AuthorKey::from_hex(&wire.pubkey).ok_or("malformed pubkey"))
             .transpose()?;
-        if !wire.sig.is_empty() && !is_lower_hex(&wire.sig, 64) {
+        if !wire.signature.is_empty() && !is_lower_hex(&wire.signature, 64) {
             return Err("malformed signature");
         }
         let prev = wire
@@ -684,13 +686,14 @@ impl TryFrom<WireIn> for Message {
             .iter()
             .map(|hash| ContentHash::from_hex(hash).ok_or("malformed parent hash"))
             .collect::<Result<Vec<_>, _>>()?;
-        let signer = match (key, wire.sig.is_empty()) {
+        let signer = match (key, wire.signature.is_empty()) {
             (None, true) => None,
             (Some(_), true) => return Err("pubkey without a signature"),
             (None, false) => return Err("signature without a pubkey"),
             (Some(key), false) => {
-                let sig = identity::decode_sig(&wire.sig).map_err(|_| "malformed signature")?;
-                Some(Signer::new(key, sig))
+                let signature =
+                    identity::decode_sig(&wire.signature).map_err(|_| "malformed signature")?;
+                Some(Signer::new(key, signature))
             }
         };
         Ok(Message {
@@ -1106,8 +1109,8 @@ impl Message {
     #[must_use]
     pub fn sign(mut self, identity: &Identity) -> Verified {
         let key = identity.author_key();
-        let sig = identity.sign(&self.canonical_with_key(Some(&key)));
-        self.signer = Some(Signer::new(key, sig));
+        let signature = identity.sign(&self.canonical_with_key(Some(&key)));
+        self.signer = Some(Signer::new(key, signature));
         Verified::new(self, key)
     }
 
@@ -1202,7 +1205,7 @@ impl Message {
         let Some(public) = signed.key.public_key() else {
             return false;
         };
-        identity::verify(&public, canonical, &signed.sig)
+        identity::verify(&public, canonical, &signed.signature)
     }
 }
 

@@ -179,7 +179,7 @@ impl CustomSender for MultihopSender {
         for chunk in habilis_network_iroh_transport_util::datagrams(transmit) {
             let cell = Cell {
                 path: route.clone(),
-                pos: 0,
+                position: 0,
                 source: self.shared.self_hop,
                 packet: chunk.to_vec(),
             };

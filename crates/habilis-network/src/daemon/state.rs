@@ -848,7 +848,7 @@ pub(crate) struct PingRound {
     /// delivered here instead of only emitted as a `ping_report` event — the
     /// in-process driver has no event stream to read the report from. `None`
     /// for the CLI/IPC path, which consumes the event.
-    pub(crate) resp: Option<oneshot::Sender<Vec<(Nickname, u64)>>>,
+    pub(crate) response: Option<oneshot::Sender<Vec<(Nickname, u64)>>>,
 }
 
 impl PingRound {
@@ -857,14 +857,14 @@ impl PingRound {
         first: &Message,
         t1: TokioInstant,
         deadline: TokioInstant,
-        resp: Option<oneshot::Sender<Vec<(Nickname, u64)>>>,
+        response: Option<oneshot::Sender<Vec<(Nickname, u64)>>>,
     ) -> Self {
         Self {
             t1,
             deadline,
             probes: HashMap::from([(first.id.clone(), t1)]),
             pongs: HashMap::new(),
-            resp,
+            response,
         }
     }
 

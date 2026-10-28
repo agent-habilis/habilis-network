@@ -144,12 +144,12 @@ pub async fn broadcast_msg(sender: &MeshSender, msg: &Verified) {
 pub async fn start_ping_round(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
-    resp: Option<oneshot::Sender<Vec<(Nickname, u64)>>>,
+    response: Option<oneshot::Sender<Vec<(Nickname, u64)>>>,
 ) {
     let now = n0_future::time::Instant::now();
     let window = tuning::ping_window();
     let probe = Message::new_ping(ctx.mesh, ctx.author).sign(ctx.identity);
-    state.arm_ping_round(PingRound::new(&probe, now, now + window, resp));
+    state.arm_ping_round(PingRound::new(&probe, now, now + window, response));
     broadcast_msg(ctx.sender, &probe).await;
 }
 

@@ -75,7 +75,8 @@ pub struct Shard {
     /// The group that the shard belongs to.
     pub group: ShardGroup,
     /// The position of the shard in its group.
-    pub idx: u32,
+    #[serde(rename = "idx")]
+    pub index: u32,
     /// How many shards the group has.
     pub total: u32,
 }
@@ -88,7 +89,8 @@ impl<'de> Deserialize<'de> for Shard {
         #[derive(Deserialize)]
         struct Raw {
             group: ShardGroup,
-            idx: u32,
+            #[serde(rename = "idx")]
+            index: u32,
             total: u32,
         }
         let raw = Raw::deserialize(deserializer)?;
@@ -98,12 +100,12 @@ impl<'de> Deserialize<'de> for Shard {
         if raw.total < 2 || raw.total > MAX_SHARD_TOTAL {
             return Err(serde::de::Error::custom("shard total out of range"));
         }
-        if raw.idx >= raw.total {
+        if raw.index >= raw.total {
             return Err(serde::de::Error::custom("shard idx out of range"));
         }
         Ok(Shard {
             group: raw.group,
-            idx: raw.idx,
+            index: raw.index,
             total: raw.total,
         })
     }
@@ -173,7 +175,7 @@ mod shard_tests {
         let group = group.as_str();
         let shard: Shard =
             serde_json::from_str(&format!(r#"{{"group":"{group}","idx":1,"total":3}}"#)).unwrap();
-        assert_eq!(shard.idx, 1);
+        assert_eq!(shard.index, 1);
         assert_eq!(shard.total, 3);
     }
 }

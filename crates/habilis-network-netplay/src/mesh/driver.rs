@@ -180,11 +180,11 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
 
     async fn handle_session(
         &mut self,
-        req: Outbound,
+        request: Outbound,
         state: &mut EventLoopState,
         ctx: &HandlerCtx<'_>,
     ) -> bool {
-        match req {
+        match request {
             Outbound::Rollback { to, payload } => {
                 // Resolve and release the lock *before* awaiting: holding a
                 // `std::sync::Mutex` guard across an await is denied

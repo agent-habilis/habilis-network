@@ -88,15 +88,15 @@ fn topic_name_source(trimmed: &str) -> &str {
 /// where `scheme` is `[A-Za-z][A-Za-z0-9+.-]*`; anything else (e.g. `note:x`,
 /// or a `://` with a non-scheme prefix) is returned unchanged.
 fn strip_url_scheme(input: &str) -> &str {
-    if let Some(idx) = input.find("://") {
-        let scheme = &input[..idx];
+    if let Some(index) = input.find("://") {
+        let scheme = &input[..index];
         let mut chars = scheme.chars();
         let valid = chars
             .next()
             .is_some_and(|first| first.is_ascii_alphabetic())
             && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '.' | '-'));
         if valid {
-            return &input[idx + 3..];
+            return &input[index + 3..];
         }
     }
     input

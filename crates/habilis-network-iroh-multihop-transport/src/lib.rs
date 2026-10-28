@@ -1286,7 +1286,7 @@ mod tests {
         ] {
             let cell = Cell {
                 path: Route::try_new(vec![hop(to, to_id)]).expect("legal route"),
-                pos: 0,
+                position: 0,
                 source: hop(from, from_id),
                 packet: vec![1, 2, 3],
             };

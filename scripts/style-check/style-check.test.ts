@@ -438,7 +438,7 @@ test("accessor_name: the guide's shapes are clean", () => {
   expectExit("crates/demo/src/lib.rs", accessor("    pub fn x(&self) -> &u8 {\n        &self.v\n    }\n    pub fn x_mut(&mut self) -> &mut u8 {\n        &mut self.v\n    }\n    pub fn take_x(&mut self) -> u8 {\n        std::mem::take(&mut self.v)\n    }\n    pub fn set_x(&mut self, v: u8) {\n        self.v = v;\n    }"), 0);
 });
 test("accessor_name: a free take_ function is clean", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn take_array(bytes: &[u8], pos: &mut usize) -> u8 {\n    let _ = (bytes, pos);\n    0\n}", 0);
+  expectExit("crates/demo/src/lib.rs", "pub fn take_array(bytes: &[u8], cursor: &mut usize) -> u8 {\n    let _ = (bytes, cursor);\n    0\n}", 0);
 });
 
 // The bool_param_comment rule: a public function's bool parameter has its purpose written above it (I14).
@@ -510,4 +510,15 @@ test("fn_import: a module import is clean", () => {
 });
 test("fn_import: the exact count is allowed", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn build_mesh() {}\nuse crate::demo::build_mesh;", 0, "fn_import|crates/demo/src/lib.rs|1|fixture");
+});
+
+// The abbrev_name rule: an identifier that is a letter-deleted abbreviation counts, a string or a comment does not (N13).
+test("abbrev_name: a local named ctx counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f() -> u8 {\n    let ctx = 1;\n    ctx\n}", 1);
+});
+test("abbrev_name: the word in a string or a comment is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f() -> &'static str {\n    // ctx is a comment\n    \"ctx\"\n}", 0);
+});
+test("abbrev_name: a path such as rand::rng is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f() {\n    let _ = rand::rng();\n}", 0);
 });

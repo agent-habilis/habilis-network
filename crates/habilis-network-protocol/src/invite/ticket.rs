@@ -45,7 +45,7 @@ pub struct InviteTicket {
     /// The point after which the invite is refused, or [`UnixSecs::ZERO`] for no expiry.
     expiry: UnixSecs,
     password: bool,
-    sig: [u8; 64],
+    signature: [u8; 64],
     /// The 32-byte root in the clear, or its `seal_symmetric` blob when
     /// password-protected.
     root_field: Vec<u8>,
@@ -120,7 +120,7 @@ pub fn mint(
         mesh_hash,
         expiry,
         password: password.is_some(),
-        sig: signature.to_bytes(),
+        signature: signature.to_bytes(),
         root_field,
     };
     Ok(ticket.encode())
@@ -141,7 +141,7 @@ impl InviteTicket {
             Vec::with_capacity(8 + 1 + 64 + 2 + hash_bytes.len() + self.root_field.len());
         payload.extend_from_slice(&self.expiry.to_le_bytes());
         payload.push(if self.password { PASSWORD_BIT } else { 0 });
-        payload.extend_from_slice(&self.sig);
+        payload.extend_from_slice(&self.signature);
         payload.extend_from_slice(&hash_len.to_le_bytes());
         payload.extend_from_slice(hash_bytes);
         payload.extend_from_slice(&self.root_field);
@@ -181,40 +181,41 @@ impl InviteTicket {
             ));
         }
         let payload = &framed[2..];
-        let mut pos = 0;
+        let mut position = 0;
         let expiry = UnixSecs::from_le_bytes(
-            take_array::<8>(payload, &mut pos).ok_or(InviteError::Truncated("missing expiry"))?,
+            take_array::<8>(payload, &mut position)
+                .ok_or(InviteError::Truncated("missing expiry"))?,
         );
         let flags = *payload
-            .get(pos)
+            .get(position)
             .ok_or(InviteError::Truncated("missing flags"))?;
-        pos += 1;
+        position += 1;
         let password = flags & PASSWORD_BIT != 0;
-        let sig = take_array::<64>(payload, &mut pos)
+        let signature = take_array::<64>(payload, &mut position)
             .ok_or(InviteError::Truncated("missing signature"))?;
         let hash_len = usize::from(u16::from_le_bytes(
-            take_array::<2>(payload, &mut pos)
+            take_array::<2>(payload, &mut position)
                 .ok_or(InviteError::Truncated("missing hash length"))?,
         ));
-        let hash_end = pos
+        let hash_end = position
             .checked_add(hash_len)
             .ok_or(InviteError::Truncated("hash length overflow"))?;
         let hash_bytes = payload
-            .get(pos..hash_end)
+            .get(position..hash_end)
             .ok_or(InviteError::Truncated("truncated mesh hash"))?;
-        pos = hash_end;
+        position = hash_end;
         let mesh_hash = std::str::from_utf8(hash_bytes)
             .map_err(InviteError::with_step("invalid mesh hash utf-8"))?
             .to_owned();
         let root_field = payload
-            .get(pos..)
+            .get(position..)
             .ok_or(InviteError::Truncated("missing root"))?
             .to_vec();
         Ok(Self {
             mesh_hash,
             expiry,
             password,
-            sig,
+            signature,
             root_field,
         })
     }
@@ -239,7 +240,7 @@ impl InviteTicket {
         let root = self.unwrap_root(&locked, password)?;
         let pubkey = PublicKey::from_bytes(&issuer_pubkey)
             .map_err(InviteError::with_step("invalid issuer public key"))?;
-        let signature = Signature::from_bytes(&self.sig);
+        let signature = Signature::from_bytes(&self.signature);
         if !identity::verify(
             &pubkey,
             &signing_bytes(&self.mesh_hash, &root, self.expiry),
@@ -346,7 +347,7 @@ mod tests {
             mesh_hash: "fixed-mesh-hash".to_owned(),
             expiry: UnixSecs::from_secs(1_700_000_000),
             password: true,
-            sig: [5u8; 64],
+            signature: [5u8; 64],
             root_field: vec![6u8; 32],
         }
     }
@@ -469,7 +470,7 @@ mod tests {
     fn rejects_a_zeroed_or_garbage_signature() {
         let mesh = creator();
         let mut ticket = minted(&mesh, Some(Duration::from_hours(1)), None);
-        ticket.sig = [0u8; 64];
+        ticket.signature = [0u8; 64];
         assert!(ticket.redeem(None).is_err(), "a blank sig must be refused");
     }
 
@@ -488,7 +489,7 @@ mod tests {
             mesh_hash: hash.clone(),
             expiry,
             password: false,
-            sig: attacker
+            signature: attacker
                 .sign(&signing_bytes(&hash, &root, expiry))
                 .to_bytes(),
             root_field: root.as_bytes().to_vec(),
@@ -535,7 +536,7 @@ mod tests {
             mesh_hash: hash.clone(),
             expiry: past,
             password: false,
-            sig: issuer.sign(&signing_bytes(&hash, &root, past)).to_bytes(),
+            signature: issuer.sign(&signing_bytes(&hash, &root, past)).to_bytes(),
             root_field: root.as_bytes().to_vec(),
         };
         let error = expired.redeem(None).unwrap_err().to_string();

@@ -215,9 +215,9 @@ where
 
     let response = match serde_json::from_str::<Cmd>(line.trim()) {
         Err(error) => json_error(&format!("parse error: {error}")),
-        Ok(cmd) => {
+        Ok(command) => {
             let (resp_tx, resp_rx) = oneshot::channel();
-            if tx.send((cmd, resp_tx)).await.is_err() {
+            if tx.send((command, resp_tx)).await.is_err() {
                 json_error("server channel closed")
             } else {
                 match resp_rx.await {
@@ -307,13 +307,13 @@ impl std::error::Error for IpcError {
 /// or a failed request/response round trip.
 pub async fn send<Cmd>(
     base: &std::path::Path,
-    cmd: &Cmd,
+    command: &Cmd,
     nickname: &Nickname,
 ) -> Result<String, IpcError>
 where
     Cmd: Serialize + Addressed,
 {
-    let mesh = cmd
+    let mesh = command
         .mesh_id()
         .expect("send() is only used for mesh-addressed commands; Info uses send_to_path");
     let path = socket_path(base, mesh, nickname);
@@ -324,7 +324,9 @@ where
             nickname: nickname.clone(),
         })
     })?;
-    round_trip(stream, cmd).await.map_err(IpcError::internal)
+    round_trip(stream, command)
+        .await
+        .map_err(IpcError::internal)
 }
 
 /// Client-side: send an IPC command to a specific socket path. `doctor` uses
@@ -336,7 +338,7 @@ where
 /// daemon), or the request/response round trip fails.
 pub async fn send_to_path<Cmd: Serialize>(
     path: &std::path::Path,
-    cmd: &Cmd,
+    command: &Cmd,
 ) -> Result<String, IpcError> {
     use anyhow::Context;
     let path_str = path
@@ -348,15 +350,17 @@ pub async fn send_to_path<Cmd: Serialize>(
     let stream = Stream::connect(name)
         .await
         .map_err(|error| IpcError::internal(anyhow::anyhow!("connect {path_str}: {error}")))?;
-    round_trip(stream, cmd).await.map_err(IpcError::internal)
+    round_trip(stream, command)
+        .await
+        .map_err(IpcError::internal)
 }
 
 /// Write `cmd`, half-close, and read back the single-line JSON response.
 /// The shared body of [`send`] and [`send_to_path`].
-async fn round_trip<Cmd: Serialize>(stream: Stream, cmd: &Cmd) -> Result<String> {
+async fn round_trip<Cmd: Serialize>(stream: Stream, command: &Cmd) -> Result<String> {
     let (read_half, mut write_half) = tokio::io::split(stream);
 
-    let json = serde_json::to_string(cmd)?;
+    let json = serde_json::to_string(command)?;
     write_half.write_all(format!("{json}\n").as_bytes()).await?;
     write_half.shutdown().await?;
 
@@ -542,10 +546,10 @@ mod tests {
     /// `ipc_listen_and_send_msg` so the match arms aren't nested inside the
     /// spawned future's `if let`.
     async fn respond_once(mut rx: mpsc::Receiver<IpcMessage<TestCommand>>) {
-        let Some((cmd, resp_tx)) = rx.recv().await else {
+        let Some((command, resp_tx)) = rx.recv().await else {
             return;
         };
-        match cmd {
+        match command {
             TestCommand::Msg { body, .. } => {
                 let _ = resp_tx.send(json_ok(&format!("got: {body}")));
             }
@@ -574,11 +578,11 @@ mod tests {
         let handler = tokio::spawn(respond_once(rx));
 
         // Send a command
-        let cmd = TestCommand::Msg {
+        let command = TestCommand::Msg {
             mesh: mesh.clone(),
             body: "test message".to_owned(),
         };
-        let response = send(&test_base(), &cmd, &nickname).await.unwrap();
+        let response = send(&test_base(), &command, &nickname).await.unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["ok"], true);
         assert_eq!(parsed["id"], "got: test message");
@@ -640,8 +644,8 @@ mod tests {
         let mut idle = Stream::connect(name).await.unwrap();
 
         // A healthy command still round-trips while the idle one is parked.
-        let cmd = TestCommand::Ping { mesh: mesh.clone() };
-        let response = send(&test_base(), &cmd, &nickname).await.unwrap();
+        let command = TestCommand::Ping { mesh: mesh.clone() };
+        let response = send(&test_base(), &command, &nickname).await.unwrap();
         assert!(response.contains("healthy"), "listener stalled: {response}");
 
         // The parked connection is closed (EOF) at the deadline, with margin.

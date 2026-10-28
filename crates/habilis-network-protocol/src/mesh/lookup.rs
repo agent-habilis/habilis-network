@@ -202,11 +202,11 @@ impl LookupOpts {
     /// [`ConfigError::Invalid`] for a flag set without its enabling bit, an empty
     /// ladder, or one longer than `MAX_RELAY_LADDER`. A [`ConfigError::Source`] when a
     /// relay URL does not parse.
-    pub fn decode_from(bytes: &[u8], pos: &mut usize) -> Result<Self, ConfigError> {
+    pub fn decode_from(bytes: &[u8], position: &mut usize) -> Result<Self, ConfigError> {
         let flags = *bytes
-            .get(*pos)
+            .get(*position)
             .ok_or(ConfigError::Truncated("truncated lookup flags"))?;
-        *pos += 1;
+        *position += 1;
         let mdns = flags & 0b0001 != 0;
         let dht = flags & 0b0010 != 0;
         let relay_enabled = flags & 0b0100 != 0;
@@ -222,10 +222,10 @@ impl LookupOpts {
             RelayChoice::Pinned
         } else {
             let count = *bytes
-                .get(*pos)
+                .get(*position)
                 .ok_or(ConfigError::Truncated("truncated relay ladder count"))?
                 as usize;
-            *pos += 1;
+            *position += 1;
             if count == 0 {
                 return Err(ConfigError::Invalid(
                     "custom relay ladder is empty".to_owned(),
@@ -236,7 +236,7 @@ impl LookupOpts {
                     "relay ladder too long: {count}"
                 )));
             }
-            RelayChoice::Custom(decode_relay_ladder(bytes, pos, count)?)
+            RelayChoice::Custom(decode_relay_ladder(bytes, position, count)?)
         };
         Ok(LookupOpts {
             mdns,
@@ -249,24 +249,24 @@ impl LookupOpts {
 /// Decode `count` length-prefixed relay URLs from the cursor, advancing `pos`.
 fn decode_relay_ladder(
     bytes: &[u8],
-    pos: &mut usize,
+    position: &mut usize,
     count: usize,
 ) -> Result<Vec<RelayUrl>, ConfigError> {
     let mut ladder = Vec::with_capacity(count);
     for _ in 0..count {
-        let len = read_u16(bytes, pos)
+        let len = read_u16(bytes, position)
             .map_err(ConfigError::with_step("truncated relay URL length"))?
             as usize;
         if len > MAX_RELAY_URL_BYTES {
             return Err(ConfigError::Invalid(format!("relay URL too long: {len}")));
         }
-        let end = pos
+        let end = position
             .checked_add(len)
             .ok_or(ConfigError::Truncated("relay URL length overflow"))?;
         let raw = bytes
-            .get(*pos..end)
+            .get(*position..end)
             .ok_or(ConfigError::Truncated("truncated relay URL"))?;
-        *pos = end;
+        *position = end;
         let text =
             std::str::from_utf8(raw).map_err(ConfigError::with_step("relay URL is not UTF-8"))?;
         ladder.push(
@@ -277,14 +277,14 @@ fn decode_relay_ladder(
     Ok(ladder)
 }
 
-pub(super) fn read_u16(bytes: &[u8], pos: &mut usize) -> Result<u16, ConfigError> {
-    let end = pos
+pub(super) fn read_u16(bytes: &[u8], position: &mut usize) -> Result<u16, ConfigError> {
+    let end = position
         .checked_add(2)
         .ok_or(ConfigError::Truncated("u16 length overflow"))?;
     let slice = bytes
-        .get(*pos..end)
+        .get(*position..end)
         .ok_or(ConfigError::Truncated("truncated u16"))?;
-    *pos = end;
+    *position = end;
     Ok(u16::from_le_bytes([slice[0], slice[1]]))
 }
 
@@ -496,18 +496,18 @@ impl MeshConfig {
     /// [`ConfigError::Invalid`] for a non-canonical or unknown feature byte or trailing
     /// bytes. A [`ConfigError::Source`] when a nested field does not decode.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ConfigError> {
-        let mut pos = 0;
-        let lookups = LookupOpts::decode_from(bytes, &mut pos)?;
-        let transport_byte = *bytes.get(pos).ok_or(ConfigError::Truncated(
+        let mut position = 0;
+        let lookups = LookupOpts::decode_from(bytes, &mut position)?;
+        let transport_byte = *bytes.get(position).ok_or(ConfigError::Truncated(
             "missing transport policy byte: upgrade, this mesh id is from an older build",
         ))?;
-        pos += 1;
+        position += 1;
         let transport = TransportPolicy::from_byte(transport_byte)?;
-        let (password, issuer_pubkey) = if pos == bytes.len() {
+        let (password, issuer_pubkey) = if position == bytes.len() {
             (None, None)
         } else {
-            let features = bytes[pos];
-            pos += 1;
+            let features = bytes[position];
+            position += 1;
             if features & !KNOWN_FEATURES != 0 {
                 return Err(ConfigError::Invalid(format!(
                     "unsupported mesh feature flags {features:#04x} — upgrade to a newer build"
@@ -522,13 +522,13 @@ impl MeshConfig {
                 ));
             }
             let password = if features & FEATURE_PASSWORD != 0 {
-                let end = pos
+                let end = position
                     .checked_add(PASSWORD_VERIFIER_LEN)
                     .ok_or(ConfigError::Truncated("password verifier length overflow"))?;
                 let raw = bytes
-                    .get(pos..end)
+                    .get(position..end)
                     .ok_or(ConfigError::Truncated("truncated password verifier"))?;
-                pos = end;
+                position = end;
                 let mut verifier = [0u8; PASSWORD_VERIFIER_LEN];
                 verifier.copy_from_slice(raw);
                 Some(verifier)
@@ -536,13 +536,13 @@ impl MeshConfig {
                 None
             };
             let issuer_pubkey = if features & FEATURE_INVITE_ONLY != 0 {
-                let end = pos
+                let end = position
                     .checked_add(ISSUER_PUBKEY_LEN)
                     .ok_or(ConfigError::Truncated("issuer pubkey length overflow"))?;
                 let raw = bytes
-                    .get(pos..end)
+                    .get(position..end)
                     .ok_or(ConfigError::Truncated("truncated issuer pubkey"))?;
-                pos = end;
+                position = end;
                 let mut pubkey = [0u8; ISSUER_PUBKEY_LEN];
                 pubkey.copy_from_slice(raw);
                 Some(pubkey)
@@ -551,7 +551,7 @@ impl MeshConfig {
             };
             (password, issuer_pubkey)
         };
-        if pos != bytes.len() {
+        if position != bytes.len() {
             return Err(ConfigError::Invalid(
                 "trailing bytes in mesh config".to_owned(),
             ));

@@ -87,11 +87,11 @@ pub fn decode(encoded: &str, what: &str) -> Result<Vec<u8>, Base58Error> {
 ///
 /// The cursor half of the same wire vocabulary: every ticket body here is a
 /// sequence of fixed-width fields read in order.
-pub fn take_array<const N: usize>(bytes: &[u8], pos: &mut usize) -> Option<[u8; N]> {
-    let slice = bytes.get(*pos..pos.checked_add(N)?)?;
+pub fn take_array<const N: usize>(bytes: &[u8], position: &mut usize) -> Option<[u8; N]> {
+    let slice = bytes.get(*position..position.checked_add(N)?)?;
     let mut out = [0u8; N];
     out.copy_from_slice(slice);
-    *pos += N;
+    *position += N;
     Some(out)
 }
 
@@ -155,18 +155,18 @@ mod tests {
     #[test]
     fn take_array_walks_a_cursor() {
         let bytes = [1u8, 2, 3, 4, 5];
-        let mut pos = 0;
-        assert_eq!(take_array::<2>(&bytes, &mut pos), Some([1, 2]));
-        assert_eq!(pos, 2);
-        assert_eq!(take_array::<3>(&bytes, &mut pos), Some([3, 4, 5]));
-        assert_eq!(pos, 5);
-        assert_eq!(take_array::<1>(&bytes, &mut pos), None);
+        let mut position = 0;
+        assert_eq!(take_array::<2>(&bytes, &mut position), Some([1, 2]));
+        assert_eq!(position, 2);
+        assert_eq!(take_array::<3>(&bytes, &mut position), Some([3, 4, 5]));
+        assert_eq!(position, 5);
+        assert_eq!(take_array::<1>(&bytes, &mut position), None);
     }
 
     #[test]
     fn take_array_does_not_overflow_on_a_huge_cursor() {
         let bytes = [1u8, 2, 3];
-        let mut pos = usize::MAX;
-        assert_eq!(take_array::<4>(&bytes, &mut pos), None);
+        let mut position = usize::MAX;
+        assert_eq!(take_array::<4>(&bytes, &mut position), None);
     }
 }

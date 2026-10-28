@@ -80,8 +80,8 @@ impl Route {
     }
 
     /// The hop at `pos`, or `None` if `pos` is past the end.
-    pub(crate) fn hop_at(&self, pos: usize) -> Option<&RouteHop> {
-        self.0.get(pos)
+    pub(crate) fn hop_at(&self, position: usize) -> Option<&RouteHop> {
+        self.0.get(position)
     }
 
     /// Encode into the opaque `data` of a multihop [`CustomAddr`]. postcard is

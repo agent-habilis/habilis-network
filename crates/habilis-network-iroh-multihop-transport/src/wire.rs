@@ -31,7 +31,8 @@ pub(crate) struct Cell {
     /// route invariant — non-empty, bounded, loop-free — during deserialization.
     pub(crate) path: Route,
     /// Index into `path` of the hop that should receive this cell.
-    pub(crate) pos: u16,
+    #[serde(rename = "pos")]
+    pub(crate) position: u16,
     /// The original sender, so the destination can reverse the route to reply.
     pub(crate) source: RouteHop,
     /// The opaque QUIC packet being relayed.
@@ -42,21 +43,21 @@ impl Cell {
     /// The hop this cell is addressed to right now. The receiver must *be* it;
     /// anything else is a sender trying to use us as a reflector.
     pub(crate) fn current_hop(&self) -> Option<&RouteHop> {
-        self.path.hop_at(self.pos as usize)
+        self.path.hop_at(self.position as usize)
     }
 
     /// The next hop to forward to, or `None` when this hop is the destination.
     /// [`read_cell`] has established that `pos` is in range, so `None` can no
     /// longer also mean "`pos` ran off the end".
     pub(crate) fn next_hop(&self) -> Option<&RouteHop> {
-        self.path.hop_at(self.pos as usize + 1)
+        self.path.hop_at(self.position as usize + 1)
     }
 
     /// Advance to the successor hop. Caller must have checked [`next_hop`] first.
     pub(crate) fn advanced(&self) -> Cell {
         Cell {
             path: self.path.clone(),
-            pos: self.pos + 1,
+            position: self.position + 1,
             source: self.source,
             packet: self.packet.clone(),
         }
@@ -91,7 +92,7 @@ pub(crate) async fn read_cell(recv: &mut RecvStream) -> Result<Cell> {
     // legality is relative to it. Settling that here is what lets `next_hop()`
     // mean "I am the destination" and nothing else.
     if cell.current_hop().is_none() {
-        bail!("cell pos {} is past the end of its route", cell.pos);
+        bail!("cell pos {} is past the end of its route", cell.position);
     }
     Ok(cell)
 }
@@ -112,10 +113,10 @@ mod tests {
         }
     }
 
-    fn cell(hops: Vec<RouteHop>, pos: u16) -> Cell {
+    fn cell(hops: Vec<RouteHop>, position: u16) -> Cell {
         Cell {
             path: Route::try_new(hops).expect("legal route"),
-            pos,
+            position,
             source: hop(200),
             packet: Vec::new(),
         }
@@ -123,8 +124,8 @@ mod tests {
 
     /// A cell's wire shape, built from a raw hop vector so a test can mint the
     /// hostile routes `Route::try_new` would refuse.
-    fn forged_bytes(hops: Vec<RouteHop>, pos: u16) -> Vec<u8> {
-        postcard::to_allocvec(&(hops, pos, hop(200), Vec::<u8>::new())).expect("serializes")
+    fn forged_bytes(hops: Vec<RouteHop>, position: u16) -> Vec<u8> {
+        postcard::to_allocvec(&(hops, position, hop(200), Vec::<u8>::new())).expect("serializes")
     }
 
     #[test]

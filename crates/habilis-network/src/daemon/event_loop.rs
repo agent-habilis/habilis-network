@@ -108,12 +108,12 @@ impl std::error::Error for EventLoopError {
 /// # Errors
 /// Propagates a fatal setup/transport error that terminates the event loop.
 pub async fn run<Driver: NodeDriver>(
-    cfg: EventLoopConfig,
+    config: EventLoopConfig,
     app: Driver,
     session_rx: Option<mpsc::Receiver<Driver::Session>>,
     http_rx: Option<mpsc::Receiver<Driver::Http>>,
 ) -> Result<(), EventLoopError> {
-    run_checked(cfg, app, session_rx, http_rx)
+    run_checked(config, app, session_rx, http_rx)
         .await
         .map_err(EventLoopError::internal)
 }
@@ -123,7 +123,7 @@ pub async fn run<Driver: NodeDriver>(
     reason = "session setup + secrets + sender/receiver wiring before handing off to event_loop; each step is a single call, and splitting further would only scatter sequential setup across helpers"
 )]
 async fn run_checked<Driver: NodeDriver>(
-    cfg: EventLoopConfig,
+    config: EventLoopConfig,
     app: Driver,
     session_rx: Option<mpsc::Receiver<Driver::Session>>,
     http_rx: Option<mpsc::Receiver<Driver::Http>>,
@@ -168,7 +168,7 @@ async fn run_checked<Driver: NodeDriver>(
         per_peer_gate,
         #[cfg(feature = "host")]
         owner,
-    } = cfg;
+    } = config;
 
     // Every driver-derived fact in one place. Only the CLI exits the
     // process on quit and binds the unix socket; in-process drivers
@@ -887,25 +887,25 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
             }
             ipc_msg = recv_opt(&mut ipc_rx) => match ipc_msg {
                 None => ipc_rx = None,
-                Some((cmd, resp_tx)) => {
+                Some((command, resp_tx)) => {
                     state.idle.external += 1;
                     let ctx = parts.ctx(&sender);
-                    let req = super::app::IpcRequest {
-                        cmd,
-                        resp: resp_tx,
+                    let request = super::app::IpcRequest {
+                        command,
+                        response: resp_tx,
                         name: &mesh_name,
                     };
-                    if app.handle_ipc(req, &mut state, &ctx).await {
+                    if app.handle_ipc(request, &mut state, &ctx).await {
                         state.last_sent_at = Instant::now();
                     }
                 }
             },
             http_req = recv_opt(&mut http_rx) => match http_req {
                 None => http_rx = None,
-                Some(req) => {
+                Some(request) => {
                     state.idle.external += 1;
                     let ctx = parts.ctx(&sender);
-                    app.handle_http(req, &mut state, &ctx).await;
+                    app.handle_http(request, &mut state, &ctx).await;
                 }
             },
             event = receiver.next(), if state.gossip_open => {
@@ -1177,12 +1177,12 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 announce_departure(&mut state, &mut app, &ctx, QuitParams { name: &mesh_name, leave_label: &leave_label, exit_on_quit: false }).await;
                 break;
             }
-            req = recv_opt(&mut external_req_rx) => match req {
+            request = recv_opt(&mut external_req_rx) => match request {
                 None => external_req_rx = None,
-                Some(req) => {
+                Some(request) => {
                     state.idle.external += 1;
                     let ctx = parts.ctx(&sender);
-                    if app.handle_session(req, &mut state, &ctx).await {
+                    if app.handle_session(request, &mut state, &ctx).await {
                         state.last_sent_at = Instant::now();
                     }
                 }
@@ -1326,8 +1326,8 @@ fn finalize_ping_round(state: &mut EventLoopState, sink: &dyn NodeSink) {
     // The in-process `ping` request waits on this channel (no event stream to
     // read the report from); the CLI/IPC path leaves it unset and consumes the
     // `ping_report` event below instead.
-    if let Some(resp) = round.resp {
-        let _ = resp.send(peers.clone());
+    if let Some(response) = round.response {
+        let _ = response.send(peers.clone());
     }
     // `known` must never be less than the number that responded: a peer can
     // pong and then leave the roster before this ~10s finalize, which would

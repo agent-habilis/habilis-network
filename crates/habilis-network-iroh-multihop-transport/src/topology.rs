@@ -54,7 +54,8 @@ pub struct LinkVector {
     pub(crate) underlay: EndpointAddr,
     pub(crate) links: Vec<(AppId, LinkMetric)>,
     /// The origin's signature over every field above.
-    pub(crate) sig: Signature,
+    #[serde(rename = "sig")]
+    pub(crate) signature: Signature,
 }
 
 fn signing_bytes(
@@ -87,13 +88,13 @@ impl LinkVector {
             .into_iter()
             .map(|(id, cost)| (id, LinkMetric::new(cost)))
             .collect();
-        let sig = secret.sign(&signing_bytes(&origin, seq, &underlay, &links));
+        let signature = secret.sign(&signing_bytes(&origin, seq, &underlay, &links));
         Self {
             origin,
             seq,
             underlay,
             links,
-            sig,
+            signature,
         }
     }
 
@@ -106,7 +107,7 @@ impl LinkVector {
     /// Whether the origin signed exactly these fields.
     fn is_signed_by_origin(&self) -> bool {
         let bytes = signing_bytes(&self.origin, self.seq, &self.underlay, &self.links);
-        self.origin.get().verify(&bytes, &self.sig).is_ok()
+        self.origin.get().verify(&bytes, &self.signature).is_ok()
     }
 }
 

@@ -41,11 +41,11 @@ pub async fn read_bounded_line<R: AsyncBufRead + Unpin>(
             }
             return Ok(finish(&buf));
         }
-        if let Some(pos) = chunk.iter().position(|&byte| byte == b'\n') {
-            if !overflow && would_overflow(&mut buf, &chunk[..pos], max) {
+        if let Some(position) = chunk.iter().position(|&byte| byte == b'\n') {
+            if !overflow && would_overflow(&mut buf, &chunk[..position], max) {
                 overflow = true;
             }
-            reader.consume(pos + 1);
+            reader.consume(position + 1);
             return Ok(if overflow {
                 LineRead::TooLong
             } else {

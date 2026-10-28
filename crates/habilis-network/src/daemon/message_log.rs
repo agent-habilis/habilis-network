@@ -242,7 +242,7 @@ impl MessageLog {
             if shard.group == *group
                 && shard.total == total
                 && msg.key() == *author
-                && let Some(slot) = slots.get_mut(shard.idx as usize)
+                && let Some(slot) = slots.get_mut(shard.index as usize)
                 && slot.is_none()
             {
                 *slot = Some(msg);

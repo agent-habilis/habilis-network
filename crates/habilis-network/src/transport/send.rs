@@ -854,7 +854,7 @@ mod tests {
     #[test]
     fn directed_rpc_and_pong_also_take_unicast() {
         let (state, bob) = state_knowing_bob();
-        let req = Message::new_app(
+        let request = Message::new_app(
             &mesh(),
             &nick("alice"),
             AppFrameParams::new(
@@ -870,7 +870,7 @@ mod tests {
         .sign(&Identity::generate());
         let pong = Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random())
             .sign(&Identity::generate());
-        assert_eq!(route(&req, &state), Route::Unicast(bob));
+        assert_eq!(route(&request, &state), Route::Unicast(bob));
         assert_eq!(route(&pong, &state), Route::Unicast(bob));
     }
 

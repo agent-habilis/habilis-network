@@ -240,15 +240,15 @@ mod tests {
     fn sign_verify_round_trip() {
         let identity = Identity::generate();
         let bytes = b"canonical message bytes";
-        let sig = identity.sign(bytes);
-        assert!(verify(&identity.public(), bytes, &sig));
+        let signature = identity.sign(bytes);
+        assert!(verify(&identity.public(), bytes, &signature));
     }
 
     #[test]
     fn tampered_bytes_fail_verification() {
         let identity = Identity::generate();
-        let sig = identity.sign(b"original");
-        assert!(!verify(&identity.public(), b"tampered", &sig));
+        let signature = identity.sign(b"original");
+        assert!(!verify(&identity.public(), b"tampered", &signature));
     }
 
     #[test]
@@ -256,8 +256,8 @@ mod tests {
         let signer = Identity::generate();
         let other = Identity::generate();
         let bytes = b"hello";
-        let sig = signer.sign(bytes);
-        assert!(!verify(&other.public(), bytes, &sig));
+        let signature = signer.sign(bytes);
+        assert!(!verify(&other.public(), bytes, &signature));
     }
 
     #[test]
@@ -272,8 +272,8 @@ mod tests {
     #[test]
     fn sig_hex_round_trip() {
         let identity = Identity::generate();
-        let sig = identity.sign(b"x");
-        let hex = encode_hex(&sig.to_bytes());
+        let signature = identity.sign(b"x");
+        let hex = encode_hex(&signature.to_bytes());
         assert_eq!(hex.len(), 128);
         assert!(verify(&identity.public(), b"x", &decode_sig(&hex).unwrap()));
     }

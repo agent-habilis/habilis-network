@@ -235,19 +235,19 @@ impl StreamHash {
         if flags & !KNOWN_FLAGS != 0 {
             return Err(HashError::UnknownFlags(flags));
         }
-        let mut pos = 1;
+        let mut position = 1;
         let id = StreamId::from_bytes(
-            take_array::<ID_LEN>(payload, &mut pos)
+            take_array::<ID_LEN>(payload, &mut position)
                 .ok_or(HashError::Truncated("stream hash missing id"))?,
         );
         let secret = StreamSecret::from_bytes(
-            take_array::<SECRET_LEN>(payload, &mut pos)
+            take_array::<SECRET_LEN>(payload, &mut position)
                 .ok_or(HashError::Truncated("stream hash missing secret"))?,
         );
-        let lookups = LookupOpts::decode_from(payload, &mut pos)
+        let lookups = LookupOpts::decode_from(payload, &mut position)
             .map_err(HashError::field("decode the lookups"))?;
         let addr_json = payload
-            .get(pos..)
+            .get(position..)
             .ok_or(HashError::Truncated("stream hash missing address"))?;
         let value: serde_json::Value = serde_json::from_slice(addr_json)
             .map_err(HashError::field("invalid stream hash address"))?;

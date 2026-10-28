@@ -117,21 +117,21 @@ impl BlobTicket {
             bail!("not a blob ticket: wrong ticket kind");
         }
         let payload = &framed[2..];
-        let mut pos = 0;
+        let mut position = 0;
         let secret = TicketSecret::from_bytes(
-            take_array::<SECRET_LEN>(payload, &mut pos).context("ticket missing secret")?,
+            take_array::<SECRET_LEN>(payload, &mut position).context("ticket missing secret")?,
         );
-        let flags = *payload.get(pos).context("ticket missing flags")?;
-        pos += 1;
+        let flags = *payload.get(position).context("ticket missing flags")?;
+        position += 1;
         let password = flags & PASSWORD_BIT != 0;
         let relay_transport = PayloadPath::from(flags & RELAY_TRANSPORT_BIT != 0);
         let sha256 = BlobDigest::from_bytes(
-            take_array::<HASH_LEN>(payload, &mut pos).context("ticket missing hash")?,
+            take_array::<HASH_LEN>(payload, &mut position).context("ticket missing hash")?,
         );
-        let size_bytes = take_array::<8>(payload, &mut pos).context("ticket missing size")?;
+        let size_bytes = take_array::<8>(payload, &mut position).context("ticket missing size")?;
         let size = u64::from_le_bytes(size_bytes);
-        let lookups = LookupOpts::decode_from(payload, &mut pos)?;
-        let addr_json = payload.get(pos..).context("ticket missing address")?;
+        let lookups = LookupOpts::decode_from(payload, &mut position)?;
+        let addr_json = payload.get(position..).context("ticket missing address")?;
         let value: serde_json::Value =
             serde_json::from_slice(addr_json).context("invalid ticket address json")?;
         let (_id, addr) = endpoint_addr_from_json(&value)?;

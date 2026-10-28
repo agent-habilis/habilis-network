@@ -730,7 +730,7 @@ impl Forwarder {
     /// The hop that should have sent us this cell: our predecessor on the route,
     /// or the original sender when we are the first hop.
     fn expected_upstream(cell: &Cell) -> Option<&RouteHop> {
-        match cell.pos.checked_sub(1) {
+        match cell.position.checked_sub(1) {
             None => Some(&cell.source),
             Some(previous) => cell.path.hop_at(previous as usize),
         }
@@ -1040,10 +1040,10 @@ mod tests {
         }
     }
 
-    fn cell(hops: Vec<RouteHop>, pos: u16, source: RouteHop) -> Cell {
+    fn cell(hops: Vec<RouteHop>, position: u16, source: RouteHop) -> Cell {
         Cell {
             path: Route::try_new(hops).expect("legal route"),
-            pos,
+            position,
             source,
             packet: vec![1, 2, 3],
         }
@@ -1276,7 +1276,7 @@ mod tests {
         from.learns(to);
         let subject = Cell {
             path: Route::try_new(vec![to.hop]).expect("legal route"),
-            pos: 0,
+            position: 0,
             source: from.hop,
             packet: vec![7, 7, 7],
         };

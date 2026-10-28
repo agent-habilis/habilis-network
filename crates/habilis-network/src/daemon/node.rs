@@ -83,23 +83,23 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
     /// inbound frame, only to discover nobody is listening.
     #[must_use]
     pub fn spawn(
-        mut cfg: EventLoopConfig,
+        mut config: EventLoopConfig,
         app: Driver,
         push: Option<broadcast::Sender<Authored>>,
         handle_signals: SignalHandling,
     ) -> Self {
         let (req_tx, req_rx) = mpsc::channel::<Driver::Session>(SESSION_REQUEST_CAP);
         let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
-        cfg.driver = DriverMode::InProcess {
+        config.driver = DriverMode::InProcess {
             msg_tx: push,
             quit_rx,
             handle_signals,
         };
-        let mesh_id = cfg.mesh.clone();
-        let name = cfg.name.clone();
-        let nickname = cfg.author.clone();
+        let mesh_id = config.mesh.clone();
+        let name = config.name.clone();
+        let nickname = config.author.clone();
         #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-        let bound_ports = cfg
+        let bound_ports = config
             .endpoint
             .bound_sockets()
             .iter()
@@ -110,15 +110,15 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
             feature = "host",
             not(target_arch = "wasm32")
         ))]
-        let underlay = cfg.multihop.as_ref().map(|handle| {
+        let underlay = config.multihop.as_ref().map(|handle| {
             (
                 handle.underlay_id().get(),
                 handle.underlay_ports().collect::<Vec<_>>(),
             )
         });
         #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-        let crash_handles = (cfg.webrtc_handle(), cfg.endpoint.clone());
-        let task = n0_future::task::spawn(crate::daemon::run(cfg, app, Some(req_rx), None));
+        let crash_handles = (config.webrtc_handle(), config.endpoint.clone());
+        let task = n0_future::task::spawn(crate::daemon::run(config, app, Some(req_rx), None));
         Self {
             mesh_id,
             name,
@@ -225,9 +225,9 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
     ///
     /// # Errors
     /// Fails if the event loop has stopped (its receiver dropped).
-    pub async fn send(&self, req: Driver::Session) -> Result<(), crate::transport::SendError> {
+    pub async fn send(&self, request: Driver::Session) -> Result<(), crate::transport::SendError> {
         self.req_tx
-            .send(req)
+            .send(request)
             .await
             .map_err(|_| crate::transport::SendError::Stopped)
     }

@@ -201,7 +201,7 @@ impl StateFile {
 
         // No fsync: statusline is best-effort; kernel buffer-writeback
         // is plenty. Atomic rename still gives readers a consistent view.
-        let tmp = tmp_sibling(&self.path);
+        let temp = tmp_sibling(&self.path);
         // 0o600 at create, not chmod-after: an app's discovery fields may carry
         // a bearer token, and a create-then-chmod sequence leaves a
         // window where the token is written at the umask-default mode (often
@@ -218,15 +218,15 @@ impl StateFile {
                     .create(true)
                     .truncate(true)
                     .mode(0o600)
-                    .open(&tmp)?
+                    .open(&temp)?
             }
             #[cfg(not(unix))]
             {
-                std::fs::File::create(&tmp)?
+                std::fs::File::create(&temp)?
             }
         };
         file.write_all(&json)?;
-        std::fs::rename(&tmp, &self.path)
+        std::fs::rename(&temp, &self.path)
     }
 
     /// Delete the state file. Safe to call on a path that does not exist.
@@ -469,11 +469,15 @@ mod tests {
         state_file.write(1, true);
         state_file.write(1, true);
         drop(guard);
-        let tmp = super::tmp_sibling(&path);
-        let leftover = tmp.exists();
-        let _ = std::fs::remove_file(&tmp);
+        let temp = super::tmp_sibling(&path);
+        let leftover = temp.exists();
+        let _ = std::fs::remove_file(&temp);
         std::fs::remove_dir_all(&path).unwrap();
-        assert!(!leftover, "a failed write must not leave {}", tmp.display());
+        assert!(
+            !leftover,
+            "a failed write must not leave {}",
+            temp.display()
+        );
         let logged = logs.text();
         assert_eq!(
             logged.matches("state file write failed").count(),

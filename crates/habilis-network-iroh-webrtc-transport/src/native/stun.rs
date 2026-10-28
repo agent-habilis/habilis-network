@@ -88,11 +88,11 @@ fn parse_binding_response(
     // Attributes are TLV, each padded to a 4-byte boundary. Prefer the XORed
     // form; remember a plain MAPPED-ADDRESS in case that is all we get.
     let mut fallback = None;
-    let mut pos = 0usize;
-    while pos + 4 <= body.len() {
-        let attr_type = u16::from_be_bytes([body[pos], body[pos + 1]]);
-        let attr_len = usize::from(u16::from_be_bytes([body[pos + 2], body[pos + 3]]));
-        let value_start = pos + 4;
+    let mut position = 0usize;
+    while position + 4 <= body.len() {
+        let attr_type = u16::from_be_bytes([body[position], body[position + 1]]);
+        let attr_len = usize::from(u16::from_be_bytes([body[position + 2], body[position + 3]]));
+        let value_start = position + 4;
         let value = body
             .get(value_start..value_start + attr_len)
             .context("STUN attribute is truncated")?;
@@ -104,7 +104,7 @@ fn parse_binding_response(
             _ => {}
         }
         // Round the value length up to the next multiple of four.
-        pos = value_start + attr_len.next_multiple_of(4);
+        position = value_start + attr_len.next_multiple_of(4);
     }
     fallback.context("STUN response carried no address attribute we understand")
 }
@@ -414,19 +414,19 @@ mod tests {
 
     /// Build a Binding Success Response carrying one address attribute.
     fn response(attr_type: u16, value: &[u8], transaction_id: [u8; TRANSACTION_ID_LEN]) -> Vec<u8> {
-        let mut attr = Vec::new();
-        attr.extend_from_slice(&attr_type.to_be_bytes());
-        attr.extend_from_slice(&u16::try_from(value.len()).expect("small").to_be_bytes());
-        attr.extend_from_slice(value);
-        while attr.len() % 4 != 0 {
-            attr.push(0);
+        let mut attribute = Vec::new();
+        attribute.extend_from_slice(&attr_type.to_be_bytes());
+        attribute.extend_from_slice(&u16::try_from(value.len()).expect("small").to_be_bytes());
+        attribute.extend_from_slice(value);
+        while attribute.len() % 4 != 0 {
+            attribute.push(0);
         }
         let mut message = Vec::new();
         message.extend_from_slice(&BINDING_SUCCESS.to_be_bytes());
-        message.extend_from_slice(&u16::try_from(attr.len()).expect("small").to_be_bytes());
+        message.extend_from_slice(&u16::try_from(attribute.len()).expect("small").to_be_bytes());
         message.extend_from_slice(&MAGIC_COOKIE.to_be_bytes());
         message.extend_from_slice(&transaction_id);
-        message.extend_from_slice(&attr);
+        message.extend_from_slice(&attribute);
         message
     }
 

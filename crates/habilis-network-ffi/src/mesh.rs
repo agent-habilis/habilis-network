@@ -184,12 +184,12 @@ impl Mesh {
             .map_err(anyhow::Error::from)
     }
 
-    fn dispatch(&self, req: Request) -> Result<()> {
+    fn dispatch(&self, request: Request) -> Result<()> {
         let Some(node) = self.node.as_ref() else {
             anyhow::bail!("this mesh handle is closed");
         };
         self.runtime
-            .block_on(node.send(req))
+            .block_on(node.send(request))
             .map_err(anyhow::Error::from)
     }
 

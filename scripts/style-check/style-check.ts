@@ -321,6 +321,21 @@ function countGenericNames(raw: string): number {
   return count;
 }
 
+// The letter-deleted abbreviations of identifiers (N13). A word in a comment, a string or an attribute
+// does not count, and neither does a path such as `rand::rng`.
+const ABBREVIATIONS = new Set(["ctx", "addr", "conn", "msg", "buf", "opts", "prev", "req", "resp", "idx", "cfg", "tmp", "attr", "cmd", "ident", "rng", "pos", "sig"]);
+function countAbbrevNames(raw: string): number {
+  const text = stripTestModules(blankStrings(stripComments(raw)))
+    .split("\n")
+    .filter((line) => !/^\s*#\[/.test(line))
+    .join("\n");
+  let count = 0;
+  for (const m of text.matchAll(/(?<!::)(?<!:)\b([A-Za-z_]\w*)\b/g)) {
+    if (ABBREVIATIONS.has(m[1]!)) count++;
+  }
+  return count;
+}
+
 // A public fn that returns a Vec. The guide prefers an iterator, so a Vec needs a counted allow row with its reason.
 function countPubVecReturn(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
@@ -676,6 +691,13 @@ const RULES: Rule[] = [
     skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
     glob: "crates/**/*.rs",
     why: "A generic parameter is T, U, E, K, V, F, I, R or S, or a CamelCase word of three letters or more.",
+  },
+  {
+    name: "abbrev_name",
+    scan: countAbbrevNames,
+    skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
+    glob: "crates/**/*.rs",
+    why: "An identifier is not a letter-deleted abbreviation: write ctx as context, addr as address, and so on. A name that a crate outside our control fixes has a counted row.",
   },
 ];
 

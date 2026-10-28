@@ -125,11 +125,11 @@ pub trait NodeDriver: NodeApp {
     /// [`Self::Session`] is a trivial type takes no session requests.
     async fn handle_session(
         &mut self,
-        req: Self::Session,
+        request: Self::Session,
         state: &mut EventLoopState,
         ctx: &HandlerCtx<'_>,
     ) -> bool {
-        let _ = (req, state, ctx);
+        let _ = (request, state, ctx);
         false
     }
 
@@ -140,11 +140,11 @@ pub trait NodeDriver: NodeApp {
     /// serves no localhost binding.
     async fn handle_http(
         &mut self,
-        req: Self::Http,
+        request: Self::Http,
         state: &mut EventLoopState,
         ctx: &HandlerCtx<'_>,
     ) {
-        let _ = (req, state, ctx);
+        let _ = (request, state, ctx);
     }
 
     /// Apply one parsed IPC command (the unix-socket `msg`/`poll`/… path),
@@ -154,13 +154,13 @@ pub trait NodeDriver: NodeApp {
     /// an app whose [`Self::Ipc`] is a trivial type serves no IPC command set.
     async fn handle_ipc(
         &mut self,
-        req: IpcRequest<'_, Self::Ipc>,
+        request: IpcRequest<'_, Self::Ipc>,
         state: &mut EventLoopState,
         ctx: &HandlerCtx<'_>,
     ) -> bool {
-        let _ = (req.name, state, ctx);
-        let _ = req
-            .resp
+        let _ = (request.name, state, ctx);
+        let _ = request
+            .response
             .send("{\"error\":\"this app serves no IPC commands\"}".to_owned());
         false
     }
@@ -173,9 +173,9 @@ pub trait NodeDriver: NodeApp {
 #[non_exhaustive]
 pub struct IpcRequest<'name, Cmd> {
     /// The parsed IPC command.
-    pub cmd: Cmd,
+    pub command: Cmd,
     /// Gets the text of the answer.
-    pub resp: oneshot::Sender<String>,
+    pub response: oneshot::Sender<String>,
     /// The name of the mesh.
     pub name: &'name MeshName,
 }

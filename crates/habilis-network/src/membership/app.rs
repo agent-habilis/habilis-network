@@ -590,11 +590,11 @@ impl NodeDriver for MembershipApp {
     )]
     async fn handle_session(
         &mut self,
-        req: Request,
+        request: Request,
         state: &mut EventLoopState,
         ctx: &HandlerCtx<'_>,
     ) -> bool {
-        match req {
+        match request {
             Request::Send { to, body, reply } => {
                 let frame = app_frame(
                     ctx,
