@@ -979,7 +979,7 @@ mod tests {
     };
     use crate::addr::{Route, RouteHop};
     use crate::role::{AppId, UnderlayId};
-    use crate::test_support::relay_server;
+    use crate::test_support;
     use crate::topology::{LinkVector, Topology};
     use crate::wire::Cell;
     use habilis_network_test_tracing::{expect_warn, test};
@@ -1295,7 +1295,7 @@ mod tests {
 
     #[test]
     async fn the_relay_carries_cells_when_the_mesh_lets_it() {
-        let (url, _server) = relay_server().await;
+        let (url, _server) = test_support::relay_server().await;
         let from = relay_node(1, &url, true).await;
         let mut to = relay_node(2, &url, true).await;
         assert!(
@@ -1310,7 +1310,7 @@ mod tests {
             "habilis_network_iroh_multihop_transport::underlay",
             "multihop underlay stays on the relay: this hop is not advertised as a link",
         );
-        let (url, _server) = relay_server().await;
+        let (url, _server) = test_support::relay_server().await;
         let from = relay_node(3, &url, false).await;
         let mut to = relay_node(4, &url, true).await;
         assert!(
@@ -1329,7 +1329,7 @@ mod tests {
             "habilis_network_iroh_multihop_transport::underlay",
             "reason=\"cell arrived over the relay\"",
         );
-        let (url, _server) = relay_server().await;
+        let (url, _server) = test_support::relay_server().await;
         let from = relay_node(5, &url, true).await;
         let mut to = relay_node(6, &url, false).await;
         assert!(
@@ -1345,7 +1345,7 @@ mod tests {
             "habilis_network_iroh_multihop_transport::underlay",
             "multihop underlay stays on the relay: this hop is not advertised as a link",
         );
-        let (url, _server) = relay_server().await;
+        let (url, _server) = test_support::relay_server().await;
         let from = relay_node(7, &url, false).await;
         let mut to = relay_node(8, &url, true).await;
         assert!(!cell_arrives(&from, &mut to).await);
@@ -1841,32 +1841,33 @@ mod tests {
 
     #[test]
     fn a_path_that_no_test_blocked_is_kept() {
-        use super::unblocked;
         let paths = vec![(ip(9), true), (relay(), false)];
         assert_eq!(
-            unblocked(&paths, |_| false).cloned().collect::<Vec<_>>(),
+            super::unblocked(&paths, |_| false)
+                .cloned()
+                .collect::<Vec<_>>(),
             paths
         );
     }
 
     #[test]
     fn an_ip_path_that_a_test_blocked_for_this_node_is_blocked() {
-        use super::blocked_by_test;
-        use habilis_network_iroh_transport_util::block_ip_to;
         let local = SecretKey::from_bytes(&[141; 32]).public();
         let other = SecretKey::from_bytes(&[142; 32]).public();
-        block_ip_to(local, [9]);
-        assert!(blocked_by_test(local, &ip(9)), "the blocked port");
-        assert!(!blocked_by_test(local, &ip(10)), "another port");
-        assert!(!blocked_by_test(local, &relay()), "the relay");
-        assert!(!blocked_by_test(other, &ip(9)), "another node");
-        block_ip_to(local, []);
-        assert!(!blocked_by_test(local, &ip(9)), "an empty set clears");
+        habilis_network_iroh_transport_util::block_ip_to(local, [9]);
+        assert!(super::blocked_by_test(local, &ip(9)), "the blocked port");
+        assert!(!super::blocked_by_test(local, &ip(10)), "another port");
+        assert!(!super::blocked_by_test(local, &relay()), "the relay");
+        assert!(!super::blocked_by_test(other, &ip(9)), "another node");
+        habilis_network_iroh_transport_util::block_ip_to(local, []);
+        assert!(
+            !super::blocked_by_test(local, &ip(9)),
+            "an empty set clears"
+        );
     }
 
     #[test]
     fn a_webrtc_path_that_a_test_blocked_toward_one_remote_is_blocked() {
-        use super::blocked_by_test;
         use habilis_network_iroh_transport_util::{Rung, WEBRTC_TRANSPORT_ID, block_rung_to};
         use iroh_base::CustomAddr;
         let local = SecretKey::from_bytes(&[143; 32]).public();
@@ -1879,11 +1880,17 @@ mod tests {
             ))
         };
         block_rung_to(local, Rung::WebRtc, cut, true);
-        assert!(blocked_by_test(local, &webrtc(cut)), "the cut remote");
-        assert!(!blocked_by_test(local, &webrtc(kept)), "another remote");
-        assert!(!blocked_by_test(local, &ip(9)), "another rung");
+        assert!(
+            super::blocked_by_test(local, &webrtc(cut)),
+            "the cut remote"
+        );
+        assert!(
+            !super::blocked_by_test(local, &webrtc(kept)),
+            "another remote"
+        );
+        assert!(!super::blocked_by_test(local, &ip(9)), "another rung");
         block_rung_to(local, Rung::WebRtc, cut, false);
-        assert!(!blocked_by_test(local, &webrtc(cut)), "cleared");
+        assert!(!super::blocked_by_test(local, &webrtc(cut)), "cleared");
     }
 
     #[test]

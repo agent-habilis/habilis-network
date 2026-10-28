@@ -630,7 +630,7 @@ mod tests {
 
     use super::{AppId, HandleConfig, MultihopHandle, UnderlayId, underlay_secret};
     use crate::addr::{Route, RouteHop};
-    use crate::test_support::relay_server;
+    use crate::test_support;
     use crate::wire::Cell;
 
     use std::sync::atomic;
@@ -1254,7 +1254,7 @@ mod tests {
             "habilis_network_iroh_multihop_transport::underlay",
             "multihop underlay stays on the relay: this hop is not advertised as a link",
         );
-        let (url, _server) = relay_server().await;
+        let (url, _server) = test_support::relay_server().await;
         let (alice, bob) = (
             SecretKey::from_bytes(&[41; 32]),
             SecretKey::from_bytes(&[42; 32]),
