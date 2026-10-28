@@ -45,13 +45,13 @@ pub_const_fn|crates/habilis-network-protocol/src/mesh/lookup.rs|2|kept: const co
 pub_const_fn|crates/habilis-network-protocol/src/message/mod.rs|4|kept: trivial accessors of a signer and a constructor (key, signature, new), reviewer to confirm
 pub_const_fn|crates/habilis-network-protocol/src/message/verified.rs|2|kept: trivial accessor key of a verified message (reviewer to confirm)
 pub_const_fn|crates/habilis-network-protocol/src/topic.rs|3|kept: newtype rule (from_bytes, as_bytes, to_bytes of a 32- or 16-byte key or hash)
-pub_const_fn|crates/habilis-network-stream/src/hash.rs|2|kept: newtype rule (StreamId from_bytes and as_bytes)
+pub_const_fn|crates/habilis-network-stream/src/hash/stream_id.rs|2|kept: newtype rule (StreamId from_bytes and as_bytes)
 pub_const_fn|crates/habilis-network-util/src/unix_secs.rs|5|kept: 4 UnixSecs newtype accessors and constructors (newtype rule); millis_saturating is used in a const item (const context, clock.rs test ONE_SECOND).
 pub_const_fn|crates/habilis-network/src/blob/mod.rs|2|kept: newtype rule (BlobDigest from_bytes and as_bytes)
 pub_const_fn|crates/habilis-network/src/gossip/app.rs|7|kept: flag set of a gossip message (union, with_if, loggable, beat, valid, chained, sealed): bit-flag logic
 
 # A hand-written Eq, Ord or PartialOrd: the compiler checks a derive, not a manual impl.
-manual_eq_ord|crates/habilis-network-stream/src/hash.rs|1|Eq marker for StreamHash: a 32-byte hash compared bytewise, so equality is reflexive
+manual_eq_ord|crates/habilis-network-stream/src/hash/stream_hash.rs|1|Eq marker for StreamHash: a 32-byte hash compared bytewise, so equality is reflexive
 manual_eq_ord|crates/habilis-network-iroh-multihop-transport/src/graph.rs|3|HeapEntry: Eq, Ord and PartialOrd of one cost key for the route heap; the cost is a u32, a total order
 
 # assert_no_message: an assert with no message (P13). Each row is a count that may only go down.
@@ -144,7 +144,7 @@ assert_no_message|crates/habilis-network-protocol/src/seal.rs|4|kept: assert wit
 assert_no_message|crates/habilis-network-stream-cli/src/args.rs|8|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-stream-cli/src/main.rs|2|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-stream-cli/tests/binary.rs|1|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-stream/src/hash.rs|11|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network-stream/src/hash/mod.rs|11|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-stream/src/node.rs|2|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-stream/tests/stream.rs|9|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-test-tracing/tests/capturing.rs|1|kept: assert without a message, to be given one (P13 rollout)
@@ -276,7 +276,7 @@ long_chain|crates/habilis-network-protocol/src/wordlist.rs|1|kept: statements wi
 long_chain|crates/habilis-network-stream-cli/src/args.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream-cli/src/main.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream-cli/tests/binary.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-stream/src/hash.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-stream/src/hash/stream_hash.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream/src/node.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream/src/produce.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream/tests/stream.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -396,7 +396,7 @@ turbofish_collect_parse|crates/habilis-network-protocol/src/message/mod.rs|1|kep
 turbofish_collect_parse|crates/habilis-network-protocol/src/peer_addr.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-protocol/src/reassembly.rs|7|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-protocol/src/resolver/mod.rs|6|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network-stream/src/hash.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
+turbofish_collect_parse|crates/habilis-network-stream/src/hash/mod.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-stream/src/node.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-util/src/bounded_queue.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network/examples/mesh_peer.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
@@ -578,7 +578,7 @@ fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rus
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/tui/diff.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/tui/paint.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-protocol/src/invite/mod.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-stream/src/hash.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
+fn_import|crates/habilis-network-stream/src/hash/stream_id.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-stream/src/node.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-stream/src/produce.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/examples/mesh_peer_load.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
@@ -671,7 +671,7 @@ abbrev_name|crates/habilis-network-protocol/src/reassembly.rs|1|existing letter-
 abbrev_name|crates/habilis-network-protocol/src/seal.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream-cli/src/args.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream-cli/src/main.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream/src/hash.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-stream/src/hash/stream_hash.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream/src/node.rs|23|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream/src/produce.rs|15|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream/src/read/reader.rs|5|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
@@ -727,3 +727,4 @@ long_chain|crates/habilis-network-chunks/src/fs/disk_origin.rs|1|kept: statement
 turbofish_collect_parse|crates/habilis-network-chunks/src/fs/disk_store.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 untyped_long_chain_let|crates/habilis-network-chunks/src/fs/disk_origin.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-chunks/src/fs/disk_store.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+long_chain|crates/habilis-network-stream/src/hash/mod.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
