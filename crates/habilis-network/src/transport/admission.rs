@@ -1186,9 +1186,11 @@ mod tests {
 
     use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
 
+    #[cfg(feature = "iroh-test-utils")]
+    use super::ConnectionHook;
     use super::{
-        Arc, Connection, ConnectionHook, Duration, EndpointId, Instant, Mutex, Refusal,
-        RefusalBackoff, Sessions, SignalAdmission, gossip_view, tuning,
+        Arc, Connection, Duration, EndpointId, Instant, Mutex, Refusal, RefusalBackoff, Sessions,
+        SignalAdmission, gossip_view, tuning,
     };
     #[cfg(feature = "iroh-test-utils")]
     use crate::lookup::test_relay;
