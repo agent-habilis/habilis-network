@@ -15,7 +15,7 @@ use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle;
-use crate::lifecycle::membership::MembershipUpdate;
+use crate::lifecycle::membership_update::MembershipUpdate;
 use crate::lookup::add_peer_addr;
 use crate::protocol::message::{Authored, MessageBody, Proof, Verified, WireFrame};
 use crate::protocol::{Channel, ContentHash, Message, MessageKind, Nickname, PresenceSubtype};
@@ -1758,7 +1758,7 @@ mod arms_reclaim_tests {
 #[cfg(test)]
 mod is_loggable_tests {
     use super::{is_loggable, retained_after_lifecycle};
-    use crate::lifecycle::membership::MembershipUpdate;
+    use crate::lifecycle::membership_update::MembershipUpdate;
     use crate::protocol::{MessageKind, PresenceSubtype};
     use habilis_network_test_tracing::test;
 
@@ -3229,7 +3229,7 @@ mod left_tests {
     use crate::daemon::state::EventLoopState;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
-    use crate::lifecycle::membership::MembershipUpdate;
+    use crate::lifecycle::membership_update::MembershipUpdate;
     use crate::lifecycle::{PresenceEvent, handle_presence};
     use crate::lookup::{TransportOpts, build_peer_multihop};
     use crate::protocol::identity::Identity;

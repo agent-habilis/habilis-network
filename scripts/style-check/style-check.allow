@@ -180,7 +180,7 @@ assert_no_message|crates/habilis-network/src/gossip/lan.rs|18|kept: assert witho
 assert_no_message|crates/habilis-network/src/gossip/recv.rs|40|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/gossip/split.rs|3|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/lifecycle/heartbeat.rs|17|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network/src/lifecycle/membership.rs|16|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network/src/lifecycle/membership_update.rs|16|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/lifecycle/mod.rs|1|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/lookup/relay.rs|19|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/membership/membership_app.rs|7|kept: assert without a message, to be given one (P13 rollout)

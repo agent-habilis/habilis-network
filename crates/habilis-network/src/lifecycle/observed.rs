@@ -5,7 +5,7 @@ use crate::protocol::identity::Identity;
 use crate::protocol::message::Verified;
 use crate::protocol::{MeshId, Message, MessageKind};
 
-use super::membership;
+use super::membership_update;
 
 use crate::util::clock::Instant;
 
@@ -15,7 +15,7 @@ use crate::util::clock::Instant;
 /// gate and the presence/msg dispatch.
 pub(crate) struct Observed {
     pub surfaceable: bool,
-    pub update: membership::MembershipUpdate,
+    pub update: membership_update::MembershipUpdate,
 }
 
 /// Heartbeat + membership + surfacing + join-horizon for one received
@@ -27,7 +27,7 @@ pub(crate) fn observe(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
 ) -> Observed {
-    let update = membership::compute_for(message, state);
+    let update = membership_update::compute_for(message, state);
     // Implicit heartbeat: any received message updates last_seen. Not a stale one: a copy of a
     // departed key's frame says nothing about whoever holds the nickname now.
     if !update.stale {
@@ -40,7 +40,7 @@ pub(crate) fn observe(
             }
         }
     }
-    membership::apply(&update, &message.author, state);
+    membership_update::apply(&update, &message.author, state);
 
     // Join horizon: the node still relays/logs everything (anti-entropy
     // keeps the mesh's set uniform), but a message stamped before we

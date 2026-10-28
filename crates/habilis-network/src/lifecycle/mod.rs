@@ -9,7 +9,7 @@
 
 pub(crate) mod heartbeat;
 mod logs;
-pub(crate) mod membership;
+pub(crate) mod membership_update;
 mod observed;
 mod presence_event;
 pub(crate) use logs::{log_leaving, log_ready};
@@ -65,7 +65,7 @@ mod departed_tests {
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::{MeshSender, PayloadPath};
 
-    use super::{PresenceEvent, handle_presence, membership, observe};
+    use super::{PresenceEvent, handle_presence, membership_update, observe};
 
     struct Inert;
 
@@ -133,7 +133,7 @@ mod departed_tests {
 
         // The first run leaves.
         state.peers.insert(who.clone());
-        let update = membership::compute_for(&left, &state);
+        let update = membership_update::compute_for(&left, &state);
         handle_presence(
             PresenceEvent {
                 message: &left,
@@ -151,7 +151,7 @@ mod departed_tests {
         // A second run takes the nickname, then a copy of the first run's goodbye lands.
         state.peers.insert(who.clone());
         state.surfaced.insert(who.clone());
-        let replay = membership::compute_for(&left, &state);
+        let replay = membership_update::compute_for(&left, &state);
         handle_presence(
             PresenceEvent {
                 message: &left,
@@ -218,7 +218,7 @@ mod departed_tests {
         state.message_log.push(chat.clone());
 
         let left = Message::new_left(&mesh, &who).sign(&departed);
-        let update = membership::compute_for(&left, &state);
+        let update = membership_update::compute_for(&left, &state);
         let mut app = Inert;
         handle_presence(
             PresenceEvent {

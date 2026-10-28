@@ -5,19 +5,19 @@ use crate::gossip::event::NodeEvent;
 use crate::protocol::message::Verified;
 use crate::protocol::{Message, PresenceSubtype};
 
-use super::membership;
+use super::membership_update;
 
 use crate::gossip;
 use crate::util::clock::Instant;
 
-/// A received `Presence` frame plus the roster delta [`membership::observe`]
+/// A received `Presence` frame plus the roster delta [`membership_update::observe`]
 /// already computed for it, passed to [`handle_presence`]. Constructed by
 /// [`crate::gossip::recv::ingest`], across the `gossip`/`lifecycle` module
 /// boundary — hence `pub(crate)` rather than module-private.
 pub(crate) struct PresenceEvent<'message> {
     pub(crate) message: &'message Verified,
     pub(crate) subtype: PresenceSubtype,
-    pub(crate) update: &'message membership::MembershipUpdate,
+    pub(crate) update: &'message membership_update::MembershipUpdate,
     pub(crate) surfaceable: bool,
 }
 

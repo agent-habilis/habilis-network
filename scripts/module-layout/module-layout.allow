@@ -14,7 +14,6 @@ crates/habilis-network/src/gossip/app.rs|1|rename pending: public type(s) AppCla
 crates/habilis-network/src/gossip/broadcast.rs|1|rename pending: public type(s) MergeCtx, StateMergeParams
 crates/habilis-network/src/gossip/lan.rs|1|rename pending: public type(s) LanGrafts
 crates/habilis-network/src/gossip/split.rs|1|rename pending: public type(s) TopicItem, Route, MeshReceiver
-crates/habilis-network/src/lifecycle/membership.rs|1|rename pending: public type(s) MembershipUpdate
 crates/habilis-network/src/lookup/capability.rs|1|rename pending: public type(s) NetworkCapability
 crates/habilis-network/src/lookup/error.rs|1|rename pending: public type(s) EndpointError
 crates/habilis-network/src/lookup/relay.rs|1|rename pending: public type(s) StoppableTask, RungRefresh
