@@ -197,6 +197,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - `clippy::missing_panics_doc` (in `pedantic`, not silenced) refuses a public function that can panic and has no `# Panics` section. A probe fn with `expect` fails with "docs for function which may panic missing `# Panics` section" (2026-10-27).
 - `clippy::missing_assert_message` is on by name in `[workspace.lints]`: an `assert!` outside test code needs a message. A probe `assert!(flag)` fails with "assert without any message" (2026-10-27). Clippy does not look at test code, so about 570 message-less `assert!` calls in tests stay.
 - No `for` loop header holds a combinator chain: a `git grep` for `for … in … .iter()/.into_iter()/.chars()/.lines()/.split() .method(` finds 0 lines (2026-10-27). The reviewer keeps it that way. (P16)
+- Every `unsafe fn` has a `# Safety` section: the 4 in `habilis-network-ffi/src/ffi.rs` each carry one. `unsafe_code` is denied everywhere else, and 6 `expect(unsafe_code)` sites remain. (D4)
 
 ### Rules we decline, or leave to the reviewer
 
