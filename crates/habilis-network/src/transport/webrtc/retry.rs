@@ -1,7 +1,7 @@
 //! The retry tick: re-attempts the sessions a peer still lacks.
 
 use super::{lane_needs, negotiate_session, session_policy};
-use crate::daemon::ctx::HandlerCtx;
+use crate::daemon::handler_ctx::HandlerCtx;
 
 use iroh::{EndpointAddr, EndpointId};
 

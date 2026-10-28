@@ -53,7 +53,7 @@ mod departed_tests {
     use habilis_network_test_tracing::test;
     use iroh_gossip::net::Gossip;
 
-    use crate::daemon::ctx::HandlerCtx;
+    use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::EventLoopState;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;

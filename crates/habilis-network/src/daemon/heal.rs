@@ -12,8 +12,8 @@ use iroh::RelayUrl;
 use iroh_gossip::api::{GossipReceiver, GossipSender};
 use tokio::sync::watch;
 
-use super::ctx::HandlerCtx;
 use super::event_loop::{CtxParts, TickGap};
+use super::handler_ctx::HandlerCtx;
 use super::setup;
 use super::state::EventLoopState;
 use crate::gossip::app::NodeApp;

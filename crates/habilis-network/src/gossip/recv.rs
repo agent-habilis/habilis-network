@@ -11,7 +11,7 @@ use std::ops::ControlFlow;
 use bytes::Bytes;
 use iroh_gossip::api::{ApiError, Event};
 
-use crate::daemon::ctx::HandlerCtx;
+use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle;
@@ -1967,7 +1967,7 @@ mod evicted_orphan_tests {
     use serde_json::json;
 
     use super::ingest;
-    use crate::daemon::ctx::HandlerCtx;
+    use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::EventLoopState;
     use crate::doc::Ingested;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
@@ -2138,7 +2138,7 @@ mod first_contact_tests {
     use iroh_gossip::net::Gossip;
 
     use super::{handle_gossip_event, ingest};
-    use crate::daemon::ctx::HandlerCtx;
+    use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::EventLoopState;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
@@ -3225,7 +3225,7 @@ mod left_tests {
     use iroh::EndpointAddr;
     use iroh_gossip::net::Gossip;
 
-    use crate::daemon::ctx::HandlerCtx;
+    use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::EventLoopState;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;

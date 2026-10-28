@@ -15,7 +15,7 @@ use crate::protocol::{AuthorKey, Nickname};
 use crate::util::clock::Instant;
 
 #[cfg(feature = "host")]
-use crate::daemon::ctx;
+use crate::daemon::handler_ctx;
 #[cfg(feature = "host")]
 use crate::gossip::event;
 #[cfg(feature = "host")]
@@ -147,7 +147,7 @@ pub(crate) fn errors_through_runtime_drop(body: impl Future<Output = ()>) -> Str
 /// for a test that goes through the code that offers a session. The peer `bob` is a lane peer: it
 /// has a relay address and no IP, so no frame can be sent to it before its session.
 ///
-/// [`HandlerCtx`]: crate::daemon::ctx::HandlerCtx
+/// [`HandlerCtx`]: crate::daemon::handler_ctx::HandlerCtx
 #[cfg(feature = "host")]
 pub(crate) struct LaneNode {
     pub(crate) endpoint: iroh::Endpoint,
@@ -204,8 +204,8 @@ impl LaneNode {
         let _ = self.gossip.shutdown().await;
     }
 
-    pub(crate) fn ctx(&self) -> ctx::HandlerCtx<'_> {
-        ctx::HandlerCtx {
+    pub(crate) fn ctx(&self) -> handler_ctx::HandlerCtx<'_> {
+        handler_ctx::HandlerCtx {
             sender: &self.sender,
             endpoint: &self.endpoint,
             mesh: &self.mesh,

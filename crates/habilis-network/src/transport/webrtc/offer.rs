@@ -1,7 +1,7 @@
 //! The offer round: sends one offer and waits for its answer.
 
 use super::{dial_signal, nudge_acceptor};
-use crate::daemon::ctx::HandlerCtx;
+use crate::daemon::handler_ctx::HandlerCtx;
 use crate::transport::admission::AdmissionGuard;
 
 use habilis_network_iroh_webrtc_transport::WebRtcHandle;

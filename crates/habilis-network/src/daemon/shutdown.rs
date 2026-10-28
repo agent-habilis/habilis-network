@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use crate::{gossip, lifecycle};
 
 use super::app::NodeDriver;
-use super::ctx::HandlerCtx;
+use super::handler_ctx::HandlerCtx;
 use super::state::EventLoopState;
 use crate::gossip::event::NodeEvent;
 use crate::protocol::{MeshName, Message};

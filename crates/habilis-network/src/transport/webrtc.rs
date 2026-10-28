@@ -87,7 +87,7 @@ mod tests {
         UdpTransport, WebRtcSignalAcceptor, dial_signal, lane_needs, negotiate_session, rendezvous,
         retry, session_policy, web_rtc_signal_acceptor,
     };
-    use crate::daemon::ctx;
+    use crate::daemon::handler_ctx;
     use crate::lookup::EndpointError;
     use crate::transport::admission::SignalAdmission;
     use crate::transport::probe::PathKind;
@@ -1737,7 +1737,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = ctx::HandlerCtx {
+        let ctx = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -1845,7 +1845,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = ctx::HandlerCtx {
+        let ctx = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -1958,7 +1958,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = ctx::HandlerCtx {
+        let ctx = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -2039,7 +2039,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = ctx::HandlerCtx {
+        let ctx = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -2118,7 +2118,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = ctx::HandlerCtx {
+        let ctx = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -2199,7 +2199,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = ctx::HandlerCtx {
+        let ctx = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -2302,7 +2302,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = ctx::HandlerCtx {
+        let ctx = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -2383,7 +2383,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = ctx::HandlerCtx {
+        let ctx = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -2451,7 +2451,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = ctx::HandlerCtx {
+        let ctx = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,

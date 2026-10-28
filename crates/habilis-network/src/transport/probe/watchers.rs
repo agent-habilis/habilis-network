@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use futures_util::StreamExt as _;
 use iroh::EndpointId;
 
-use crate::daemon::ctx::HandlerCtx;
+use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState};
 use crate::transport::webrtc;
 use crate::util::clock::Instant;

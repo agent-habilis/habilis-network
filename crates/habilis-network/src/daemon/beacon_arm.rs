@@ -11,7 +11,7 @@ use std::time::Duration;
 use iroh::{Endpoint, EndpointId};
 
 use super::config::CoHostPolicy;
-use super::ctx::HandlerCtx;
+use super::handler_ctx::HandlerCtx;
 use super::state::EventLoopState;
 use crate::beacon;
 use crate::gossip::event::NodeEvent;
@@ -894,7 +894,7 @@ mod tests {
         use iroh_gossip::net::Gossip;
 
         use super::{CohostArm, maybe_cohost};
-        use crate::daemon::ctx::HandlerCtx;
+        use crate::daemon::handler_ctx::HandlerCtx;
         use crate::gossip::event::SilentSink;
         use crate::protocol::MeshId;
         use crate::protocol::identity::Identity;
@@ -990,7 +990,7 @@ mod tests {
         use iroh_gossip::net::Gossip;
 
         use super::{CohostArm, maybe_cohost};
-        use crate::daemon::ctx::HandlerCtx;
+        use crate::daemon::handler_ctx::HandlerCtx;
         use crate::gossip::event::SilentSink;
         use crate::protocol::MeshId;
         use crate::protocol::identity::Identity;
@@ -1158,7 +1158,7 @@ mod tests {
         use iroh_gossip::net::Gossip;
 
         use super::{CohostArm, maybe_cohost};
-        use crate::daemon::ctx::HandlerCtx;
+        use crate::daemon::handler_ctx::HandlerCtx;
         use crate::gossip::event::CountingSink;
         use crate::protocol::MeshId;
         use crate::protocol::identity::Identity;
@@ -1399,7 +1399,7 @@ mod tests {
             use iroh_gossip::net::Gossip;
 
             use super::{CohostArm, maybe_cohost};
-            use crate::daemon::ctx::HandlerCtx;
+            use crate::daemon::handler_ctx::HandlerCtx;
             use crate::gossip::event::SilentSink;
             use crate::protocol::MeshId;
             use crate::protocol::identity::Identity;
@@ -1673,7 +1673,7 @@ mod tests {
         use iroh_gossip::net::Gossip;
 
         use super::{CohostArm, maybe_cohost};
-        use crate::daemon::ctx::HandlerCtx;
+        use crate::daemon::handler_ctx::HandlerCtx;
         use crate::gossip::event::SilentSink;
         use crate::protocol::MeshId;
         use crate::protocol::identity::Identity;
@@ -1778,7 +1778,7 @@ mod tests {
         use iroh_gossip::net::Gossip;
 
         use super::note_rival_holds;
-        use crate::daemon::ctx::HandlerCtx;
+        use crate::daemon::handler_ctx::HandlerCtx;
         use crate::gossip::event::SilentSink;
         use crate::protocol::MeshId;
         use crate::protocol::identity::Identity;

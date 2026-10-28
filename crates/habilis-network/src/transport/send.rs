@@ -37,7 +37,7 @@ mod tests {
     use crate::protocol::message::{AppFrameParams, Verified, WireFrame};
     use crate::protocol::{AppTag, CorrId, Identity, MeshId, Message, MessageBody, MessageId};
 
-    use crate::daemon::ctx;
+    use crate::daemon::handler_ctx;
     use crate::daemon::state::DirectState;
     use crate::gossip::{antientropy, event};
     use crate::protocol::identity;
@@ -672,8 +672,8 @@ mod tests {
     }
 
     impl Net {
-        fn ctx(&self) -> ctx::HandlerCtx<'_> {
-            ctx::HandlerCtx {
+        fn ctx(&self) -> handler_ctx::HandlerCtx<'_> {
+            handler_ctx::HandlerCtx {
                 sender: &self.sender,
                 endpoint: &self.endpoint,
                 mesh: &self.mesh,

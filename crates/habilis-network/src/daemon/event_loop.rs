@@ -45,7 +45,7 @@ use super::beacon_arm::{
     shed_rival_beacon_if_due, verdict_after_known_holders,
 };
 use super::config::{CoHostPolicy, DriverMode, EventLoopConfig};
-use super::ctx::HandlerCtx;
+use super::handler_ctx::HandlerCtx;
 use super::heal::{GossipLink, ResubscribeEnv, apply_rung_change, resubscribe_tick, run_heal};
 use super::node::SignalHandling;
 #[cfg(feature = "host")]

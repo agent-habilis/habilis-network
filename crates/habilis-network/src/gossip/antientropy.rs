@@ -25,7 +25,7 @@ use std::hash::{Hash as _, Hasher as _};
 use crate::transport::{MeshSender, Resend};
 use serde::{Deserialize, Serialize};
 
-use crate::daemon::ctx::HandlerCtx;
+use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::message_log::{DigestWindow, MissingQuery, WindowRange};
 use crate::daemon::state::EventLoopState;
 use crate::protocol::message::{Verified, WireFrame};

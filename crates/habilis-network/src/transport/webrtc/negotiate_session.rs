@@ -2,7 +2,7 @@
 
 use super::offer::Offer;
 use super::{nudge_acceptor, offer, retry, session_policy};
-use crate::daemon::ctx::HandlerCtx;
+use crate::daemon::handler_ctx::HandlerCtx;
 
 use iroh::{EndpointAddr, EndpointId};
 

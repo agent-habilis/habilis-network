@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use iroh::{EndpointAddr, EndpointId};
 
-use crate::daemon::ctx::HandlerCtx;
+use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::lookup::LanEvent;
 use crate::util::clock::Instant;

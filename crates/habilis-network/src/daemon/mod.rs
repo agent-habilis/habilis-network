@@ -22,7 +22,7 @@
 // browser runs the same event loop as the CLI; it just has fewer inputs to it.
 pub(crate) mod app;
 pub(crate) mod config;
-pub(crate) mod ctx;
+pub(crate) mod handler_ctx;
 pub(crate) mod node;
 // In-memory accounting stores owned by `EventLoopState`. `pub(crate)` so
 // the gossip anti-entropy layer (and its tests) can name `MessageLog` /
