@@ -45,7 +45,7 @@ pub use habilis_network_iroh_transport_util::{
 /// is the second caller.
 pub mod direct {
     pub use crate::lookup::build_peer_webrtc;
-    pub use crate::transport::path::{
+    pub use crate::transport::payload_path::{
         PROBE_DEADLINE, PayloadPath, refuse_unless_direct, wait_direct,
     };
     pub use crate::transport::webrtc::{

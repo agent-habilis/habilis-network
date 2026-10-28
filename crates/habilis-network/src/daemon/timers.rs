@@ -12,7 +12,7 @@ use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::util::clock::{Instant, millis_saturating};
 use crate::util::{resident_memory, tuning};
 
-use crate::transport::path;
+use crate::transport::payload_path;
 use crate::util::clock;
 /// The warn-only resident-memory leak check, run on the slow (1-minute)
 /// housekeeping tick (see `run`'s `intervals.prune`). Kept on this tick now
@@ -147,7 +147,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         idle_resent = idle.resent,
         idle_resend_dropped = idle.resend_dropped,
         // A total since the process started, unlike the idle fields above, which are per interval.
-        gossip_recursion_closes_total = path::gossip_recursion_closes(),
+        gossip_recursion_closes_total = payload_path::gossip_recursion_closes(),
         "mesh census"
     );
 

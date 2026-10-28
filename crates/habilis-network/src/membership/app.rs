@@ -24,7 +24,7 @@ use crate::daemon::event_loop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::daemon::state::DirectState;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-use crate::transport::path;
+use crate::transport::payload_path;
 #[cfg(all(
     feature = "iroh-test-utils",
     not(target_arch = "wasm32"),
@@ -799,7 +799,7 @@ impl NodeDriver for MembershipApp {
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::CloseLink { peer, reply } => {
                 let result = known_peer(state, &peer).map(|addr| {
-                    path::close_gossip_links_to(addr.id);
+                    payload_path::close_gossip_links_to(addr.id);
                 });
                 let _ = reply.send(result);
                 false
@@ -832,7 +832,7 @@ impl NodeDriver for MembershipApp {
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::GossipRecursionCloses { reply } => {
-                let _ = reply.send(path::gossip_recursion_closes());
+                let _ = reply.send(payload_path::gossip_recursion_closes());
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -854,7 +854,7 @@ impl NodeDriver for MembershipApp {
                 n0_future::task::spawn(async move {
                     let rung = match id {
                         Some(id) => pool.warm_or_dial(id).await.ok().and_then(|conn| {
-                            let rung = path::selected_rung(&conn);
+                            let rung = payload_path::selected_rung(&conn);
                             // The same stable id twice is one connection read twice: a test that
                             // waits for a rung can see whether the connection it reads is the one
                             // that climbed.

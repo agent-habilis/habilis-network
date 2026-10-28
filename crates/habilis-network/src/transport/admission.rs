@@ -1134,9 +1134,9 @@ impl EndpointHooks for ConnectionHook {
         // both ends close it, whatever the mesh policy says, and before the relay watch, which is
         // policy-gated.
         if conn.alpn() == iroh_gossip::net::GOSSIP_ALPN {
-            super::path::watch_gossip_recursion(conn, self.admission.clone());
+            super::payload_path::watch_gossip_recursion(conn, self.admission.clone());
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-            super::path::track_gossip_conn(conn);
+            super::payload_path::track_gossip_conn(conn);
         }
         // The accept side watches the gossip connections it holds
         // (`DirectOnlyGossip::accept`). iroh-gossip dials its own, so the
@@ -1194,7 +1194,7 @@ mod tests {
     };
     #[cfg(feature = "iroh-test-utils")]
     use crate::lookup::test_relay;
-    use crate::transport::path;
+    use crate::transport::payload_path;
     use iroh::endpoint::presets;
     #[cfg(feature = "iroh-test-utils")]
     use tokio::sync::mpsc;
@@ -2254,7 +2254,7 @@ mod tests {
                 Report(Arc::new(Mutex::new(Some(tx)))),
             )
             .spawn();
-        let before = path::gossip_recursion_closes();
+        let before = payload_path::gossip_recursion_closes();
 
         let connection = alice
             .connect(
@@ -2271,7 +2271,7 @@ mod tests {
             .await
             .expect("the accepted end was not closed")
             .expect("the probe reported");
-        let code = u64::from(path::GOSSIP_RECURSION_REFUSED_CODE);
+        let code = u64::from(payload_path::GOSSIP_RECURSION_REFUSED_CODE);
         assert!(
             matches!(at_alice, ConnectionError::LocallyClosed),
             "the dialer closed itself: {at_alice:?}"
@@ -2281,7 +2281,7 @@ mod tests {
             "the accepted end reads the code: {at_bob:?}"
         );
         assert!(
-            path::gossip_recursion_closes() > before,
+            payload_path::gossip_recursion_closes() > before,
             "the close is counted"
         );
         assert_eq!(

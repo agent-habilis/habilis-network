@@ -17,7 +17,7 @@ use crate::util::consts::MAX_MESSAGE_SIZE;
 
 use crate::logging::messages;
 use crate::protocol::{message, peer_addr};
-use crate::transport::{endpoint_proof, webrtc};
+use crate::transport::{proven_endpoints, webrtc};
 use crate::util::{clock, tuning};
 use tokio::sync::oneshot;
 /// Build → sign → deliver one outbound `App` frame — the payload-generic
@@ -438,7 +438,7 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &Handle
     let proof = state
         .peer_info_proof
         .get_or_insert_with(|| {
-            endpoint_proof::sign(
+            proven_endpoints::sign(
                 ctx.endpoint.secret_key(),
                 ctx.mesh,
                 &state.identity.author_key(),

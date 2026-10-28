@@ -36,7 +36,7 @@ use crate::protocol::{crypto, message};
 use crate::transport::redial;
 #[cfg(feature = "multihop")]
 use crate::transport::underlay_webrtc;
-use crate::transport::{endpoint_proof, graft_backoff, probe};
+use crate::transport::{graft_backoff, probe, proven_endpoints};
 use crate::util::tuning;
 use iroh::address_lookup::memory;
 use tokio::sync::{mpsc, oneshot};
@@ -295,7 +295,7 @@ pub struct EventLoopState {
     /// The endpoint each signing key proved in its `PeerInfo`: the only
     /// point-to-point target an anti-entropy answer may take, since a
     /// nickname is a label any signer can claim.
-    pub(crate) proven_endpoints: endpoint_proof::ProvenEndpoints,
+    pub(crate) proven_endpoints: proven_endpoints::ProvenEndpoints,
     /// Our own `PeerInfo` proof, made once: it is the same for the session.
     pub(crate) peer_info_proof: Option<String>,
     /// Per-endpoint re-link throttle: caps re-dialing + re-flooding a peer
@@ -970,7 +970,7 @@ impl EventLoopState {
             path_kinds: HashMap::new(),
             route_dialed: HashMap::new(),
             known_endpoints: BoundedFifoSet::new(KNOWN_ENDPOINTS_CAP),
-            proven_endpoints: endpoint_proof::ProvenEndpoints::new(KNOWN_ENDPOINTS_CAP),
+            proven_endpoints: proven_endpoints::ProvenEndpoints::new(KNOWN_ENDPOINTS_CAP),
             peer_info_proof: None,
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo_flooded_at: None,
@@ -2254,7 +2254,7 @@ impl EventLoopState {
     }
 
     /// Tests only: forget the proof that `peer` signs for its endpoint (the `PeerInfo` proof of
-    /// `transport::endpoint_proof`). A state digest of an asker whose endpoint is not proven is
+    /// `transport::proven_endpoints`). A state digest of an asker whose endpoint is not proven is
     /// answered on gossip, as it is for a late joiner before its `PeerInfo` arrives.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub fn forget_endpoint_proof(&mut self, peer: &Nickname) {

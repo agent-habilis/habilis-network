@@ -18,7 +18,7 @@ use futures_util::StreamExt as _;
 use iroh::EndpointId;
 use iroh::endpoint::Connection;
 
-use super::path::{PROBE_DEADLINE, wait_direct};
+use super::payload_path::{PROBE_DEADLINE, wait_direct};
 use super::webrtc::needs_webrtc_lane;
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState};

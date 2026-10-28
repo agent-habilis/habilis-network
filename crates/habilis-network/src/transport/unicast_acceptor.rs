@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use crate::util::consts::MAX_MESSAGE_SIZE;
 use crate::util::tuning::DIRECT_IDLE_BACKSTOP;
 
-use super::path::{PROBE_DEADLINE, refuse_unless_direct};
+use super::payload_path::{PROBE_DEADLINE, refuse_unless_direct};
 use super::webrtc::close_code::{IDLE, UNICAST_RELAY_REFUSED};
 use super::{LOG_TARGET, PayloadPath};
 

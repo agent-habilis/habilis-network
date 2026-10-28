@@ -15,7 +15,7 @@ use iroh_gossip::net::Gossip;
 use n0_future::time::Instant;
 
 use super::PayloadPath;
-use super::path::{
+use super::payload_path::{
     GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, refuse_unless_direct, selected_is_direct,
 };
 

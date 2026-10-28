@@ -1269,7 +1269,7 @@ pub(crate) fn negotiate_rendezvous_session(
 
 /// Offer a `WebRTC` session to the rendezvous while its gossip link is up on the relay.
 ///
-/// The relay policy closes that link after [`PROBE_DEADLINE`](super::path::PROBE_DEADLINE), and
+/// The relay policy closes that link after [`PROBE_DEADLINE`](super::payload_path::PROBE_DEADLINE), and
 /// the offer of [`negotiate_rendezvous_session`] comes only after the close. This one comes at
 /// the edge, so a session that attaches inside the deadline gives the link a direct path and the
 /// link stays. No fallback grace: IP is lost, not unknown. A session that is held is left alone,
@@ -2256,7 +2256,7 @@ mod tests {
         .await
         .expect("a bare-id dial must not hang")
         .expect("a bare-id dial must resolve through the registered custom address");
-        let direct = super::super::path::selected_is_direct(&conn);
+        let direct = super::super::payload_path::selected_is_direct(&conn);
         conn.close(0u32.into(), b"done");
         assert!(direct, "the connection's selected path must be the session");
 
@@ -2305,7 +2305,7 @@ mod tests {
         .await
         .expect("an answerer's bare-id dial must not hang")
         .expect("an answerer's bare-id dial must resolve through the registered custom address");
-        let direct = super::super::path::selected_is_direct(&conn);
+        let direct = super::super::payload_path::selected_is_direct(&conn);
         conn.close(0u32.into(), b"done");
         assert!(direct, "the connection's selected path must be the session");
 
@@ -2549,7 +2549,8 @@ mod tests {
         struct Hold(mpsc::Sender<bool>);
         impl ProtocolHandler for Hold {
             async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                let direct = super::super::path::wait_direct(&conn, Duration::from_secs(12)).await;
+                let direct =
+                    super::super::payload_path::wait_direct(&conn, Duration::from_secs(12)).await;
                 let _ = self.0.send(direct).await;
                 conn.closed().await;
                 Ok(())
@@ -2721,7 +2722,7 @@ mod tests {
         .await
         .expect("a bare-id dial must not hang")
         .expect("a bare-id dial must connect");
-        let direct = super::super::path::wait_direct(&conn, Duration::from_secs(10)).await;
+        let direct = super::super::payload_path::wait_direct(&conn, Duration::from_secs(10)).await;
         conn.close(0u32.into(), b"done");
         held.close(0u32.into(), b"done");
         assert!(

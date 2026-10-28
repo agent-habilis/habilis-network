@@ -36,7 +36,7 @@ use crate::logging::messages;
 use crate::protocol::{message, peer_addr, seal};
 #[cfg(feature = "multihop")]
 use crate::transport::underlay_webrtc;
-use crate::transport::{endpoint_proof, probe, webrtc};
+use crate::transport::{probe, proven_endpoints, webrtc};
 use tokio::sync::mpsc;
 /// Dispatch a single item from the gossip receiver stream:
 /// `Received` → `ingest`; `NeighborUp` →
@@ -1524,7 +1524,7 @@ async fn handle_peer_info(message: &Verified, state: &mut EventLoopState, ctx: &
     let signer = message.key();
     if let Some(proof) = parsed["proof"].as_str()
         && state.proven_endpoints.get(&signer) != Some(peer_id)
-        && endpoint_proof::verifies(peer_id, ctx.mesh, &signer, proof)
+        && proven_endpoints::verifies(peer_id, ctx.mesh, &signer, proof)
     {
         state
             .proven_endpoints
@@ -2659,7 +2659,7 @@ mod first_contact_tests {
         use crate::protocol::identity::encode_pubkey;
         use crate::protocol::message::MessageBody;
         use crate::protocol::peer_addr::endpoint_addr_to_json;
-        use crate::transport::endpoint_proof::sign;
+        use crate::transport::proven_endpoints::sign;
 
         let node = Node::spawn().await;
         let ctx = node.ctx();

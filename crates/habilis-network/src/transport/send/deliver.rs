@@ -8,9 +8,10 @@ use super::route::Route;
 use crate::daemon::state::EventLoopState;
 use crate::protocol::Nickname;
 use crate::protocol::message::{Verified, WireFrame, sole_addressee};
-use crate::transport::MeshSender;
 use crate::transport::outbox::Resend;
 use crate::transport::pool::{COOLDOWN_REFUSED, UnicastPool, WarmSend};
+use crate::transport::probe::PathKind;
+use crate::transport::{MeshSender, webrtc};
 
 use crate::util::clock;
 
@@ -152,13 +153,10 @@ pub(crate) fn note_held(state: &mut EventLoopState, error: &SendError) {
         .peer_endpoints
         .values()
         .find(|addr| addr.id == *eid)
-        .is_some_and(|addr| {
-            crate::transport::webrtc::pair_needs_lane(addr, state.local_udp_transport)
-        });
+        .is_some_and(|addr| webrtc::pair_needs_lane(addr, state.local_udp_transport));
     // A pair that lost its direct path reads as the relay: if its offer failed, nobody would
     // offer again, so the parked frame asks.
-    let reads_as_relay =
-        state.pair_path_kind(*eid) == Some(crate::transport::probe::PathKind::Relay);
+    let reads_as_relay = state.pair_path_kind(*eid) == Some(PathKind::Relay);
     if needs_lane || reads_as_relay {
         state.want_lane_session(*eid, clock::Instant::now());
     }

@@ -2,7 +2,7 @@
 
 use crate::transport::PendingSend;
 
-/// What [`deliver`] did with a frame.
+/// What `deliver` did with a frame.
 #[derive(Debug)]
 #[must_use = "a dropped Pending handle loses the verdict of the send"]
 #[non_exhaustive]

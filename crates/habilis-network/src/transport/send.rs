@@ -41,7 +41,7 @@ mod tests {
     use crate::daemon::state::DirectState;
     use crate::gossip::{antientropy, event};
     use crate::protocol::identity;
-    use crate::transport::path;
+    use crate::transport::payload_path;
     use crate::util::{clock, tuning};
     use iroh::endpoint::presets;
     use tokio::sync::oneshot;
@@ -424,7 +424,7 @@ mod tests {
             .await
             .expect("warm the pool");
         assert!(
-            path::wait_direct(&conn, std::time::Duration::from_secs(5)).await,
+            payload_path::wait_direct(&conn, std::time::Duration::from_secs(5)).await,
             "loopback selects a direct path"
         );
         let msg = directed_msg();
@@ -1161,7 +1161,7 @@ mod tests {
             .await
             .expect("warm the pool");
         assert!(
-            path::wait_direct(&conn, std::time::Duration::from_secs(5)).await,
+            payload_path::wait_direct(&conn, std::time::Duration::from_secs(5)).await,
             "loopback selects a direct path"
         );
         // Two batches of signed frames, each frame with its own id, so the reader sees four distinct

@@ -6,6 +6,8 @@ use super::timeouts::{
     BUSY_AFTER_FINISH, COOLDOWN_REFUSED, DIAL_FAILURE_COOLDOWN, DIAL_TIMEOUT, PATH_SELECT_TIMEOUT,
 };
 use super::warm_send::WarmSend;
+use crate::transport::admission::{BusyGuard, SignalAdmission};
+use crate::transport::payload_path;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,9 +21,9 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 use n0_future::time::Instant as PoolInstant;
 use tokio::sync::{Mutex, watch};
 
-use crate::transport::path::wait_direct;
 use crate::transport::webrtc::close_code::IDLE;
 use crate::transport::{LOG_TARGET, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
+use payload_path::wait_direct;
 
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
@@ -106,8 +108,7 @@ pub(in crate::transport::pool) struct PoolInner {
     pub(in crate::transport::pool) relay_transport: bool,
     /// The table whose ceiling the connections of this pool count against. Set once the
     /// table exists, which is after the pool.
-    pub(in crate::transport::pool) admission:
-        std::sync::OnceLock<crate::transport::admission::SignalAdmission>,
+    pub(in crate::transport::pool) admission: std::sync::OnceLock<SignalAdmission>,
 }
 
 /// What the dialer of a peer publishes to the callers that wait on its dial: nothing while the dial
@@ -155,7 +156,7 @@ impl UnicastPool {
 
     /// Report the sends of this pool to `admission`, so that a connection with a send in
     /// flight is never evicted at the ceiling and a used one is not the least recently used.
-    pub(crate) fn set_admission(&self, admission: crate::transport::admission::SignalAdmission) {
+    pub(crate) fn set_admission(&self, admission: SignalAdmission) {
         let _ = self.inner.admission.set(admission);
     }
 
@@ -227,7 +228,7 @@ impl UnicastPool {
     /// answer for a pair that linked through the rendezvous.
     pub(crate) async fn udp_won(&self, eid: EndpointId) -> bool {
         let won = match self.probe_connection(eid).await {
-            Ok(conn) => crate::transport::path::wait_ip(&conn, PATH_SELECT_TIMEOUT).await,
+            Ok(conn) => payload_path::wait_ip(&conn, PATH_SELECT_TIMEOUT).await,
             Err(_) => false,
         };
         self.probe_done(eid).await;
@@ -275,8 +276,7 @@ impl UnicastPool {
     pub(crate) fn selected_is_ip(&self, eid: EndpointId) -> bool {
         self.inner.conns.try_lock().is_ok_and(|conns| {
             conns.get(&eid).is_some_and(|pooled| {
-                pooled.conn.close_reason().is_none()
-                    && crate::transport::path::selected_is_ip(&pooled.conn)
+                pooled.conn.close_reason().is_none() && payload_path::selected_is_ip(&pooled.conn)
             })
         })
     }
@@ -745,11 +745,7 @@ async fn dial(endpoint: &Endpoint, addr: EndpointAddr) -> Result<Connection> {
 /// after it is dropped because the connection stays pooled, so the sender does not
 /// await `stopped()` (which would block the event loop on the inline
 /// unicast-only path). Only the busy mark waits for it, in a task of its own.
-async fn send_one(
-    conn: &Connection,
-    bytes: &[u8],
-    busy: Option<crate::transport::admission::BusyGuard>,
-) -> Result<()> {
+async fn send_one(conn: &Connection, bytes: &[u8], busy: Option<BusyGuard>) -> Result<()> {
     let mut stream = conn.open_uni().await?;
     stream.write_all(bytes).await?;
     stream.finish()?;

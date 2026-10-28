@@ -1449,7 +1449,7 @@ mod tests {
     use std::collections::HashSet;
 
     #[cfg(feature = "host")]
-    use crate::transport::path;
+    use crate::transport::payload_path;
     use crate::transport::webrtc;
     use iroh::address_lookup::memory;
     #[cfg(feature = "host")]
@@ -2075,7 +2075,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(
-            path::selected_is_ip(&connection),
+            payload_path::selected_is_ip(&connection),
             "IP is above gossip: the ladder of the gossip handle is the selector"
         );
         router.shutdown().await.expect("shutdown");

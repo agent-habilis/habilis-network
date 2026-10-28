@@ -23,19 +23,17 @@ use tokio::sync::oneshot;
 mod admission;
 pub(crate) mod ceiling;
 mod direct_only_gossip;
-pub(crate) mod proven_endpoints;
-mod unicast_acceptor;
-pub(crate) use proven_endpoints as endpoint_proof;
 pub(crate) mod graft_backoff;
 #[cfg(feature = "host")]
 pub(crate) mod ipc;
 pub(crate) mod outbox;
 pub(crate) mod payload_path;
-pub(crate) use payload_path as path;
 mod pool;
 pub(crate) mod probe;
+pub(crate) mod proven_endpoints;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub(crate) mod redial;
+mod unicast_acceptor;
 // The JSEP exchange that fills `lookup::TransportHandles::webrtc`. Portable:
 // a browser peer negotiates with a CLI peer over the same envelope, and only
 // the backend behind it differs.
