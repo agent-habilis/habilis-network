@@ -8,7 +8,6 @@ crates/habilis-network-iroh-webrtc-transport/src/web/jsep.rs|1|rename pending: p
 crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|1|rename pending: public type(s) InboundPacket, SessionCounters, SessionCounts, DataChannelCounters, SelectedPairStats, BrowserSessionGuard, BrowserHubTransport, BrowserRtcTransport
 crates/habilis-network/src/blob/produce.rs|1|rename pending: public type(s) ServeLimits, BlobServer
 crates/habilis-network/src/blob/store.rs|1|rename pending: public type(s) BlobEntry, NewSecret, Registered, ContentMeta, BlobStore
-crates/habilis-network/src/blob/ticket.rs|1|rename pending: public type(s) BlobTicket
 crates/habilis-network/src/gossip/lan.rs|1|rename pending: public type(s) LanGrafts
 crates/habilis-network/src/gossip/split.rs|1|rename pending: public type(s) TopicItem, Route, MeshReceiver
 crates/habilis-network/src/lookup/capability.rs|1|rename pending: public type(s) NetworkCapability
