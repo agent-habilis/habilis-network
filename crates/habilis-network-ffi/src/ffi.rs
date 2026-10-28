@@ -818,18 +818,13 @@ pub unsafe extern "C" fn habilis_network_streams_bind(
         let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
             return std::ptr::null_mut();
         };
+        let relay_urls: Vec<String> = relay_urls
+            .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
+            .unwrap_or_default();
         let parsed = habilis_network_stream::StreamOpts::default()
             .with_lookup(lookup)
             .with_transport(transport)
-            .with_relay_urls(
-                relay_urls
-                    .map(|urls| {
-                        urls.split(',')
-                            .map(|url| url.trim().to_owned())
-                            .collect::<Vec<String>>()
-                    })
-                    .unwrap_or_default(),
-            );
+            .with_relay_urls(relay_urls);
         boxed(Streams::bind(&parsed).map(|streams| HabilisNetworkStreams { streams }))
     })
 }
