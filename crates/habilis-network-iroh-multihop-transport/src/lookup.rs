@@ -86,7 +86,7 @@ impl RouteChooser {
             src: self.self_id,
             dst,
         };
-        let shortest = topology.route_to(leg, 1).into_iter().next();
+        let shortest = topology.route_to(leg, 1).next();
         let first_is_refused = shortest
             .as_ref()
             .and_then(|route| route.hops().first())

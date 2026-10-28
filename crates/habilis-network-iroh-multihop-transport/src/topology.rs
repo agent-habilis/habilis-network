@@ -306,13 +306,11 @@ impl Topology {
     /// if any hop hasn't advertised its underlay address yet (we can't dial a hop
     /// we can't reach), so the returned list may be shorter than `max_paths` or
     /// empty.
-    #[must_use]
-    pub fn route_to(&self, leg: Leg, max_paths: usize) -> Vec<Route> {
+    pub fn route_to(&self, leg: Leg, max_paths: usize) -> impl Iterator<Item = Route> + use<'_> {
         self.graph()
             .disjoint_paths(leg, max_paths)
-            .iter()
-            .filter_map(|path| self.route_of(path))
-            .collect()
+            .into_iter()
+            .filter_map(|path| self.route_of(&path))
     }
 
     /// The shortest [`Route`] from `src` to `dst` that does not start with a hop in
@@ -523,7 +521,10 @@ mod tests {
             "no edge of the crashed peer is left"
         );
         assert!(
-            store.route_to(Leg { src: na, dst: nb }, 1).is_empty(),
+            store
+                .route_to(Leg { src: na, dst: nb }, 1)
+                .collect::<Vec<_>>()
+                .is_empty(),
             "its underlay is gone too"
         );
     }
@@ -642,7 +643,10 @@ mod tests {
         ingest(&mut store, vector(na, 1, &[(nb, 1)]));
         ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
         ingest(&mut store, vector(nc, 1, &[]));
-        let before = store.route_to(Leg { src: na, dst: nc }, 1)[0].encode();
+        let before = store
+            .route_to(Leg { src: na, dst: nc }, 1)
+            .collect::<Vec<_>>()[0]
+            .encode();
 
         let relay: iroh::RelayUrl = "http://127.0.0.1:1/".parse().expect("a relay url");
         let moved = EndpointAddr::new(nc.get())
@@ -652,7 +656,10 @@ mod tests {
             &mut store,
             LinkVector::signed(&secret_of(nc), 2, moved, Vec::new())
         ));
-        let after = store.route_to(Leg { src: na, dst: nc }, 1)[0].encode();
+        let after = store
+            .route_to(Leg { src: na, dst: nc }, 1)
+            .collect::<Vec<_>>()[0]
+            .encode();
         assert_eq!(before, after, "the same route, the same bytes");
     }
 
@@ -664,7 +671,9 @@ mod tests {
         ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
         ingest(&mut store, vector(nc, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nd, 1, &[]));
-        let routes = store.route_to(Leg { src: na, dst: nd }, 3);
+        let routes = store
+            .route_to(Leg { src: na, dst: nd }, 3)
+            .collect::<Vec<_>>();
         assert_eq!(routes.len(), 1);
         assert_eq!(
             routes[0]
@@ -715,7 +724,10 @@ mod tests {
         ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
         // nc never advertised its own vector, so its underlay addr is unknown.
         assert!(
-            store.route_to(Leg { src: na, dst: nc }, 3).is_empty(),
+            store
+                .route_to(Leg { src: na, dst: nc }, 3)
+                .collect::<Vec<_>>()
+                .is_empty(),
             "missing hop underlay ⇒ no usable route"
         );
     }
@@ -728,7 +740,9 @@ mod tests {
         ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
         ingest(&mut store, vector(nc, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nd, 1, &[]));
-        let routes = store.route_to(Leg { src: na, dst: nd }, 3);
+        let routes = store
+            .route_to(Leg { src: na, dst: nd }, 3)
+            .collect::<Vec<_>>();
         assert_eq!(
             routes.len(),
             1,
@@ -752,7 +766,9 @@ mod tests {
         ingest(&mut store, vector(nb, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nc, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nd, 1, &[]));
-        let routes = store.route_to(Leg { src: na, dst: nd }, 3);
+        let routes = store
+            .route_to(Leg { src: na, dst: nd }, 3)
+            .collect::<Vec<_>>();
         assert_eq!(routes.len(), 2, "both diamond arms");
         assert_ne!(routes[0].hops()[0].app_id, routes[1].hops()[0].app_id);
     }
@@ -769,6 +785,7 @@ mod tests {
     fn best_route(store: &Topology, src: AppId, dst: AppId) -> Option<Vec<AppId>> {
         store
             .route_to(Leg { src, dst }, 1)
+            .collect::<Vec<_>>()
             .first()
             .map(|route| route.hops().iter().map(|hop| hop.app_id).collect())
     }
@@ -803,7 +820,7 @@ mod tests {
         let (store, [src, n1, n2, dst, tab]) = native_and_browser_routes(BROWSER_COST);
         assert_eq!(best_route(&store, src, dst), Some(vec![n1, n2, dst]));
         assert_eq!(best_cost(&store, src, dst), Some(3 * NATIVE_COST));
-        let both = store.route_to(Leg { src, dst }, 2);
+        let both = store.route_to(Leg { src, dst }, 2).collect::<Vec<_>>();
         assert_eq!(both.len(), 2, "the browser route is still a route");
         assert_eq!(both[1].hops()[0].app_id, tab);
 
