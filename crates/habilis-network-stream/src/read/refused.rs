@@ -1,18 +1,12 @@
-//! The consumer's side: the [`Reader`], and what a refusal looks like.
+//! What a producer's refusal looks like to the consumer.
 
 use std::fmt;
 
-use bytes::Bytes;
-use habilis_network::iroh::endpoint::{Connection, ConnectionError, RecvStream};
+use habilis_network::iroh::endpoint::{Connection, ConnectionError};
 
 use crate::code;
-use crate::error::StreamError;
-
-/// The largest chunk one `read` hands back.
-const CHUNK: usize = 64 * 1024;
-
 /// Why a producer would not, or no longer will, give this consumer its stream.
-/// Reached as [`StreamError::Refused`], so a caller can tell a refusal from a
+/// Reached as [`crate::error::StreamError::Refused`], so a caller can tell a refusal from a
 /// lost link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -58,39 +52,5 @@ pub(crate) fn refusal(conn: &Connection) -> Option<Refused> {
         code::RELAY_REFUSED => Some(Refused::RelayRefused),
         code::ABANDONED => Some(Refused::Abandoned),
         _ => None,
-    }
-}
-
-/// One stream's reading end.
-#[derive(Debug)]
-pub struct Reader {
-    conn: Connection,
-    recv: RecvStream,
-}
-
-impl Reader {
-    pub(crate) fn new(conn: Connection, recv: RecvStream) -> Self {
-        Self { conn, recv }
-    }
-
-    /// The next bytes, in order; `None` once the producer closed the stream.
-    ///
-    /// # Errors
-    /// # Errors
-    /// [`StreamError::Refused`] when the producer refused or abandoned the stream,
-    /// or [`StreamError::Lost`] when the link was lost.
-    pub async fn read(&mut self) -> Result<Option<Bytes>, StreamError> {
-        match self.recv.read_chunk(CHUNK).await {
-            Ok(chunk) => {
-                if chunk.is_none() {
-                    self.conn.close(code::DONE.into(), b"done");
-                }
-                Ok(chunk)
-            }
-            Err(error) => Err(match refusal(&self.conn) {
-                Some(refused) => StreamError::Refused(refused),
-                None => StreamError::Lost(error.into()),
-            }),
-        }
     }
 }

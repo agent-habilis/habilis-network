@@ -674,7 +674,8 @@ abbrev_name|crates/habilis-network-stream-cli/src/main.rs|4|existing letter-dele
 abbrev_name|crates/habilis-network-stream/src/hash.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream/src/node.rs|23|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream/src/produce.rs|15|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream/src/read.rs|7|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-stream/src/read/reader.rs|5|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-stream/src/read/refused.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-test-tracing-macros/src/lib.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-util/src/line_read.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-wasm/src/mesh_peer.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
