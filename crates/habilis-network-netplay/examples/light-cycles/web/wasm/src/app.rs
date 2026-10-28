@@ -255,7 +255,7 @@ impl Game {
         // would otherwise show "players ready" for a match that can never
         // start.
         self.blocked = lobby.blocker().map(|reason| reason.to_string());
-        let present: BTreeMap<AuthorKey, Nickname> = lobby.present().into_iter().collect();
+        let present: BTreeMap<AuthorKey, Nickname> = lobby.present().collect();
         for (pubkey, nick) in &present {
             if !self.known.contains_key(pubkey) {
                 self.pending_events.push(GameEvent::Joined {
