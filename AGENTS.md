@@ -202,6 +202,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - Every `unsafe fn` has a `# Safety` section: the 4 in `habilis-network-ffi/src/ffi.rs` each carry one. `unsafe_code` is denied everywhere else, and 6 `expect(unsafe_code)` sites remain. (D4)
 - The docs follow the rustdoc rules: the `Doc links` step of `ci.yml` runs `cargo doc --workspace --no-deps --all-features` with `RUSTDOCFLAGS=-D rustdoc::broken_intra_doc_links`. (D10)
 - `clippy::doc_markdown` (in `pedantic`) refuses an identifier in a doc comment that has no backticks. `clippy.toml` extends its list of domain terms. It does not check the rest of the Markdown, so the reviewer does. (D11)
+- `clippy::new_without_default` (default group, not silenced) refuses a `pub fn new() -> Self` with no `Default` impl. A probe with `-D clippy::new_without_default` fails on the bare type and passes once `impl Default` is added (2026-10-28). A `Default` for a type with public fields is still the reviewer's call. (R17)
 
 ### Rules we decline, or leave to the reviewer
 
