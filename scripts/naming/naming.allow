@@ -2,11 +2,11 @@
 # Used by scripts/naming/naming.ts. Each file breaks one naming rule. Keep each count exact.
 
 ctor_name|crates/habilis-network-doc/src/mesh_doc.rs|1|no plain new beside new_gated,new_span,new_ungated (N10), to add new() or rename
-ctor_name|crates/habilis-network-protocol/src/mesh/id.rs|1|no plain new beside new_accepts_well_formed_id,new_rejects_a_mistyped_hash,new_rejects_invalid_base58_chars,new_rejects_too_short (N10), to add new() or rename
+ctor_name|crates/habilis-network-protocol/src/mesh/mesh_id_error.rs|1|no plain new beside new_accepts_well_formed_id,new_rejects_a_mistyped_hash,new_rejects_invalid_base58_chars,new_rejects_too_short (N10), to add new() or rename
 ctor_name|crates/habilis-network-protocol/src/mesh/tests.rs|1|no plain new beside new_and_from_topic_refuse_a_config_that_names_a_secret (N10), to add new() or rename
-ctor_name|crates/habilis-network-protocol/src/message/body.rs|1|no plain new beside new_accepts_ascii,new_accepts_newline_and_tab,new_accepts_unicode,new_rejects_control_chars (N10), to add new() or rename
-ctor_name|crates/habilis-network-protocol/src/message/id.rs|1|no plain new beside new_accepts_uuid_v4,new_rejects_garbage (N10), to add new() or rename
-ctor_name|crates/habilis-network-protocol/src/nickname.rs|1|no plain new beside new_accepts_valid_nicknames,new_rejects_empty_and_overlong,new_rejects_unsafe_chars (N10), to add new() or rename
+ctor_name|crates/habilis-network-protocol/src/message/body_error.rs|1|no plain new beside new_accepts_ascii,new_accepts_newline_and_tab,new_accepts_unicode,new_rejects_control_chars (N10), to add new() or rename
+ctor_name|crates/habilis-network-protocol/src/message/id_error.rs|1|no plain new beside new_accepts_uuid_v4,new_rejects_garbage (N10), to add new() or rename
+ctor_name|crates/habilis-network-protocol/src/nickname_error.rs|1|no plain new beside new_accepts_valid_nicknames,new_rejects_empty_and_overlong,new_rejects_unsafe_chars (N10), to add new() or rename
 ctor_name|crates/habilis-network-test-tracing/src/guard.rs|1|no plain new beside new_guard (N10), to add new() or rename
 ctor_name|crates/habilis-network/src/lookup/mod.rs|1|no plain new beside new_gossip_handle,new_webrtc_handle (N10), to add new() or rename
 from_name|crates/habilis-network-chunks/src/chunk_hash.rs|1|no impl From in this file beside from_bits,from_bytes,from_hex,from_leaves (N12), to add the From impl or rename
@@ -23,10 +23,10 @@ from_name|crates/habilis-network-protocol/src/dedup_key.rs|1|no impl From in thi
 from_name|crates/habilis-network-protocol/src/identity.rs|1|no impl From in this file beside from_hex (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/mesh/lookup.rs|1|no impl From in this file beside from_bytes,from_flag,from_lookups,from_str (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/mesh/mod.rs|1|no impl From in this file beside from_str,from_topic (N12), to add the From impl or rename
-from_name|crates/habilis-network-protocol/src/mesh/name.rs|1|no impl From in this file beside from_topic_string,from_topic_string_passthrough_and_case_preserving (N12), to add the From impl or rename
+from_name|crates/habilis-network-protocol/src/mesh/name_error.rs|1|no impl From in this file beside from_topic_string,from_topic_string_passthrough_and_case_preserving (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/mesh/tests.rs|1|no impl From in this file beside from_topic_differs_by_string,from_topic_is_deterministic,from_topic_name_is_the_sanitized_string,from_topic_round_trips_through_from_str (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/mesh/transport.rs|1|no impl From in this file beside from_byte,from_str,from_transports (N12), to add the From impl or rename
-from_name|crates/habilis-network-protocol/src/message/id.rs|1|no impl From in this file beside from_str_works_for_clap (N12), to add the From impl or rename
+from_name|crates/habilis-network-protocol/src/message/id_error.rs|1|no impl From in this file beside from_str_works_for_clap (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/message/shard.rs|1|no impl From in this file beside from_uuid_str (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/newtype.rs|1|no impl From in this file beside from_str (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/resolver/mod.rs|1|no impl From in this file beside from_str (N12), to add the From impl or rename

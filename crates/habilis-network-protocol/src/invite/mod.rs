@@ -6,8 +6,11 @@
 //! root, but not a *valid* (creator-signed) invite. See [`crate::mesh`]
 //! for the invite-only mesh itself.
 
-mod error;
-mod ticket;
+mod invite_error;
+
+use invite_error as error;
+mod invite_ticket;
+use invite_ticket as ticket;
 
 // `InviteTicket` rides the **public** `JoinTarget::Invite`, so it must be at
 // least as public as that enum (re-exported at the crate root in `lib.rs`); its

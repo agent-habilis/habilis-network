@@ -9,14 +9,16 @@
 //! churning every one of them.
 
 mod author_key;
-pub mod base58check;
+pub mod base58_error;
+pub use base58_error as base58check;
 mod content_hash;
 pub mod crypto;
 mod dedup_key;
 pub mod directory;
 mod ident;
 mod newtype;
-mod topic;
+mod topic_id;
+use topic_id as topic;
 
 pub mod identity;
 /// Creator-minted invites to an invite-only mesh. Lives here rather than in
@@ -26,12 +28,15 @@ pub mod invite;
 pub mod mesh;
 pub mod message;
 /// Nicknames: display labels for members. A nickname is not an identity.
-pub mod nickname;
-pub mod peer_addr;
+pub mod nickname_error;
+pub use nickname_error as nickname;
+pub mod peer_addr_error;
+pub use peer_addr_error as peer_addr;
 pub mod reassembly;
 /// A join token: a literal mesh id, or a creator-minted invite ticket.
 pub mod resolver;
-pub mod seal;
+pub mod seal_error;
+pub use seal_error as seal;
 mod wordlist;
 
 /// The forked `iroh-base` this crate's types are built on, re-exported whole.

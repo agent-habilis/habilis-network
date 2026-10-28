@@ -19,12 +19,16 @@ use super::nickname::Nickname;
 use super::{AuthorKey, ContentHash, DedupKey};
 use crate::newtype::string_newtype;
 
-mod body;
+mod body_error;
+
+use body_error as body;
 mod error;
-mod id;
+mod id_error;
+use id_error as id;
 mod shard;
 mod verified;
-mod wire;
+mod wire_frame;
+use wire_frame as wire;
 
 pub use verified::{Authored, Proof, Verified};
 pub use wire::WireFrame;

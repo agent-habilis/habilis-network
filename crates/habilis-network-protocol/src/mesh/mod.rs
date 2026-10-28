@@ -22,10 +22,14 @@ use zeroize::Zeroizing;
 use super::crypto::{self, Keying, Seed, SymmetricKey};
 use crate::base58check;
 
-mod error;
-mod id;
+mod config_error;
+
+use config_error as error;
+mod mesh_id_error;
+use mesh_id_error as id;
 mod lookup;
-mod name;
+mod name_error;
+use name_error as name;
 mod transport;
 
 pub use error::ConfigError;
