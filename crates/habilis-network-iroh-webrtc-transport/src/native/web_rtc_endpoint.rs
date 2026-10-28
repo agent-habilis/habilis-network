@@ -7,8 +7,8 @@ use iroh_base::CustomAddr;
 use n0_watcher::Watchable;
 use tokio::sync::mpsc;
 
-use super::sender::WebRtcSender;
 use super::session::{InboundPacket, SessionRegistry};
+use super::web_rtc_sender::WebRtcSender;
 
 pub(crate) struct WebRtcEndpoint {
     local_addr: CustomAddr,

@@ -118,9 +118,9 @@ pub use iroh_base;
 pub mod bench;
 
 #[cfg(any(feature = "native", feature = "web"))]
-mod attach;
+mod attach_error;
 #[cfg(any(feature = "native", feature = "web"))]
-pub use attach::AttachError;
+pub use attach_error::AttachError;
 
 #[cfg(feature = "native")]
 mod native;

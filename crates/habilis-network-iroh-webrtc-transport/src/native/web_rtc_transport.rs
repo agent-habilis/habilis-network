@@ -11,9 +11,9 @@ use n0_watcher::Watchable;
 use tokio::sync::mpsc;
 
 use super::driver::{NegotiatedSession, drive_session};
-use super::endpoint::WebRtcEndpoint;
 use super::session::{InboundPacket, SessionHandle, SessionRegistry};
-use crate::attach::AttachError;
+use super::web_rtc_endpoint::WebRtcEndpoint;
+use crate::attach_error::AttachError;
 use crate::{IN_QUEUE, OUT_QUEUE, custom_addr};
 
 /// Factory for the `WebRTC` datagram lane of one iroh endpoint.

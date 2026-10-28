@@ -5,14 +5,14 @@
 //! root, not here.
 
 mod driver;
-mod endpoint;
 mod jsep;
-mod sender;
 mod session;
 pub mod stun;
-mod transport;
+mod web_rtc_endpoint;
+mod web_rtc_sender;
+mod web_rtc_transport;
 
 pub use driver::NegotiatedSession;
 pub use jsep::{JsepError, PendingAnswer, PendingOffer, answer, answer_with, offer, offer_with};
 pub use stun::IceConfig;
-pub use transport::WebRtcTransport;
+pub use web_rtc_transport::WebRtcTransport;

@@ -25,7 +25,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{MessageEvent, RtcDataChannel, RtcPeerConnection, RtcPeerConnectionState};
 
 use super::jsep::{now_ms, sleep_ms};
-use crate::attach::AttachError;
+use crate::attach_error::AttachError;
 use crate::liveness::{ConnectionPhase, DISCONNECT_GRACE_MS, Verdict, judge_state};
 use crate::registry::Registry;
 use crate::{IN_QUEUE, OUT_QUEUE, custom_addr};
