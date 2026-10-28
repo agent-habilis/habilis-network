@@ -111,7 +111,7 @@ impl JoinParams {
 /// The topic intent: a mesh derived deterministically from a shared string,
 /// always public. Name + config are derived, not supplied — the string alone
 /// determines the mesh.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct TopicParams {
     /// The shared string that fixes the mesh. Every peer that passes the same string meets in the same mesh.
