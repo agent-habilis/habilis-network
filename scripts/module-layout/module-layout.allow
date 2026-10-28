@@ -7,9 +7,6 @@ crates/habilis-network-iroh-multihop-transport/src/underlay.rs|1|rename pending:
 crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|1|rename pending: public type(s) InboundPacket, SessionCounters, SessionCounts, DataChannelCounters, SelectedPairStats, BrowserSessionGuard, BrowserHubTransport, BrowserRtcTransport
 crates/habilis-network/src/gossip/lan.rs|1|rename pending: public type(s) LanGrafts
 crates/habilis-network/src/gossip/split.rs|1|rename pending: public type(s) TopicItem, Route, MeshReceiver
-crates/habilis-network/src/lookup/capability.rs|1|rename pending: public type(s) NetworkCapability
-crates/habilis-network/src/lookup/error.rs|1|rename pending: public type(s) EndpointError
-crates/habilis-network/src/lookup/relay.rs|1|rename pending: public type(s) StoppableTask, RungRefresh
 tasks/src/bench/native.rs|1|rename pending: public type(s) WebRtcPeer
 tasks/src/bench/run.rs|1|rename pending: public type(s) Sample, Rtt, Measured, Outcome
 tasks/src/bench/serve.rs|1|rename pending: public type(s) Static

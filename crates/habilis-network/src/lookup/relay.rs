@@ -12,19 +12,24 @@
 //! over together. The public analog of the private loopback-port ladder
 //! (`beacon::RendezvousParams::bind_ports`).
 
+mod rung_refresh;
+mod stoppable_task;
+
 use std::future::Future;
 use std::sync::LazyLock;
 use std::time::Duration;
 
 use iroh::endpoint::{default_relay_mode, presets};
 use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl};
-use n0_future::task::JoinHandle;
 use tokio::sync::watch;
+
+pub(crate) use rung_refresh::RungRefresh;
+pub(crate) use stoppable_task::StoppableTask;
 
 use crate::protocol::mesh::RelayChoice;
 use crate::util::tuning::{
     RELAY_LIVENESS_FAILS_TO_EVICT, RELAY_LIVENESS_INTERVAL, RELAY_REPROBE_BACKOFF_MAX,
-    RELAY_REPROBE_BACKOFF_MIN, RELAY_RUNG_PROBE, RENDEZVOUS_CLOSE,
+    RELAY_REPROBE_BACKOFF_MIN, RELAY_RUNG_PROBE,
 };
 
 /// The default relay **ladder** — n0's prod relay set, in fixed
@@ -254,59 +259,6 @@ async fn stopped(stop: Option<watch::Receiver<()>>) {
 /// Whether `stop`'s sender is gone.
 fn is_stopped(stop: &watch::Receiver<()>) -> bool {
     stop.has_changed().is_err()
-}
-
-/// A task that walks the relay ladder, held so its owner can stop it and wait
-/// for it on the way out. It is never aborted: the walk probes each rung on an
-/// endpoint of its own, and an abort mid-walk drops that endpoint open.
-/// Dropped without [`Self::stop_and_wait`], the task still stops and closes
-/// its endpoint on its own, as long as the runtime lives.
-pub(crate) struct StoppableTask {
-    task: JoinHandle<()>,
-    /// Dropped to tell the task to stop.
-    stop: watch::Sender<()>,
-}
-
-impl StoppableTask {
-    /// Spawn `run`, which must return promptly once its receiver reports the
-    /// sender gone (see [`select_bootstrap_rung`]).
-    pub(crate) fn spawn<Fut>(run: impl FnOnce(watch::Receiver<()>) -> Fut) -> Self
-    where
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        let (stop, stopped) = watch::channel(());
-        Self {
-            task: n0_future::task::spawn(run(stopped)),
-            stop,
-        }
-    }
-
-    /// Stop the task and wait for it, bounded by `RENDEZVOUS_CLOSE` like
-    /// the other closes on the way out.
-    pub(crate) async fn stop_and_wait(self) {
-        let Self { task, stop } = self;
-        drop(stop);
-        if n0_future::time::timeout(RENDEZVOUS_CLOSE, task)
-            .await
-            .is_err()
-        {
-            tracing::debug!(target: "habilis_network::lookup", "relay ladder walk did not stop in time; abandoning it");
-        }
-    }
-}
-
-/// The outcome of comparing a freshly-selected rung against the current
-/// one — applied by the event loop's rung-update arm when the beacon's
-/// self-monitor publishes a new rung.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RungRefresh {
-    /// Keep the current rung (still the first reachable, or we must not
-    /// act — not the beacon, or relay disabled).
-    NoChange,
-    /// Re-home the beacon onto this rung (the current one died, or an
-    /// earlier preferred one recovered). `None` ⇒ no rung reachable;
-    /// drop to mDNS/DHT.
-    Rehome(Option<RelayUrl>),
 }
 
 /// Compare the freshly-selected rung against the one we are homed on.
