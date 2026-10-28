@@ -1070,7 +1070,7 @@ pub struct UnknownPeer(pub String);
 impl UnknownPeer {
     /// The peer that was not found.
     #[must_use]
-    pub const fn new(peer: String) -> Self {
+    pub fn new(peer: String) -> Self {
         Self(peer)
     }
 }

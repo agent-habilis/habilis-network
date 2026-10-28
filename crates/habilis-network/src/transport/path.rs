@@ -161,7 +161,7 @@ pub enum PayloadPath {
 impl PayloadPath {
     /// The flag form that the wire and the handle config still carry.
     #[must_use]
-    pub const fn relay_allowed(self) -> bool {
+    pub fn relay_allowed(self) -> bool {
         matches!(self, Self::RelayAllowed)
     }
 }

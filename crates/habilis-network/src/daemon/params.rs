@@ -48,7 +48,7 @@ impl CreateParams {
     /// The name, nickname, config and advertisement of a new mesh. Set the password and the
     /// invite-only flag with their `with_` methods.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         name: MeshName,
         nickname: Option<Nickname>,
         config: MeshConfig,
@@ -99,11 +99,7 @@ pub struct JoinParams {
 impl JoinParams {
     /// The join target, the nickname and the password: every field a join sets.
     #[must_use]
-    pub const fn new(
-        target: JoinTarget,
-        nickname: Option<Nickname>,
-        password: Option<Password>,
-    ) -> Self {
+    pub fn new(target: JoinTarget, nickname: Option<Nickname>, password: Option<Password>) -> Self {
         Self {
             target,
             nickname,

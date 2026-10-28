@@ -187,7 +187,7 @@ pub struct MergeCtx<'mesh> {
 impl<'mesh> MergeCtx<'mesh> {
     /// The four refs of a state write, in the order of the struct.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         mesh: &'mesh MeshId,
         author: &'mesh Nickname,
         sender: &'mesh MeshSender,

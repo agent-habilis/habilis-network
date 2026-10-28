@@ -998,7 +998,7 @@ pub struct NudgeAcceptor;
 impl NudgeAcceptor {
     /// The acceptor of the nudge ALPN.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self
     }
 }

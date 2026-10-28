@@ -33,7 +33,6 @@ pub_const_fn|crates/habilis-network-chunks/src/lib.rs|8|kept: ChunkHash and Root
 pub_const_fn|crates/habilis-network-ffi/src/ffi.rs|3|kept: C-edge empty values (empty), used by the FFI structs (reviewer to confirm const context)
 pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/metric.rs|2|kept: newtype rule (LinkMetric new and get)
 pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/role.rs|4|kept: newtype rule (AppId and UnderlayId new and get)
-pub_const_fn|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|1|kept: bench helper constructor (reviewer to confirm const context)
 pub_const_fn|crates/habilis-network-netplay/src/frame.rs|2|kept: newtype rule (Frame new and get)
 pub_const_fn|crates/habilis-network-netplay/src/handle.rs|2|kept: newtype rule (PlayerHandle new and index)
 pub_const_fn|crates/habilis-network-netplay/src/mesh/lobby.rs|8|kept: newtype rule (Epoch, SessionId, Tick, TickSpan new, get, next, since)
@@ -48,12 +47,7 @@ pub_const_fn|crates/habilis-network-protocol/src/topic.rs|3|kept: newtype rule (
 pub_const_fn|crates/habilis-network-stream/src/hash.rs|2|kept: newtype rule (StreamId from_bytes and as_bytes)
 pub_const_fn|crates/habilis-network-util/src/clock.rs|5|kept: 4 UnixSecs newtype accessors and constructors (newtype rule); millis_saturating is used in a const item (const context, clock.rs test ONE_SECOND).
 pub_const_fn|crates/habilis-network/src/blob/mod.rs|2|kept: newtype rule (BlobDigest from_bytes and as_bytes)
-pub_const_fn|crates/habilis-network/src/daemon/params.rs|2|kept: const constructors of the daemon parameters (reviewer to confirm const context)
 pub_const_fn|crates/habilis-network/src/gossip/app.rs|7|kept: flag set of a gossip message (union, with_if, loggable, beat, valid, chained, sealed): bit-flag logic
-pub_const_fn|crates/habilis-network/src/gossip/broadcast.rs|1|kept: constructor (reviewer to confirm const context)
-pub_const_fn|crates/habilis-network/src/membership/app.rs|1|kept: constructor (reviewer to confirm const context)
-pub_const_fn|crates/habilis-network/src/transport/path.rs|1|kept: trivial predicate relay_allowed (reviewer to confirm)
-pub_const_fn|crates/habilis-network/src/transport/webrtc.rs|1|kept: constructor (reviewer to confirm const context)
 
 # A hand-written Eq, Ord or PartialOrd: the compiler checks a derive, not a manual impl.
 manual_eq_ord|crates/habilis-network-stream/src/hash.rs|1|Eq marker for StreamHash: a 32-byte hash compared bytewise, so equality is reflexive
