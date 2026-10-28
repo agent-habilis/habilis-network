@@ -79,6 +79,12 @@ jobs:
           bun test scripts/module-layout/module-layout.test.ts
           bun scripts/module-layout/module-layout.ts
 
+      # Naming proxies of the Rust style guide (N10, N12). Counted rows in scripts/naming/naming.allow.
+      - name: Naming
+        run: |
+          bun test scripts/naming/naming.test.ts
+          bun scripts/naming/naming.ts
+
       # `blob` is off by default (only agent-gossip enables it), so the line
       # above never lints `src/blob/` — ~1,300 lines including its own ALPN
       # server. `--all-features` below only *checks* it.
