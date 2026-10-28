@@ -245,3 +245,11 @@ test("manual_eq_ord: a derive does not count", () => {
 test("manual_eq_ord: an Ord and a PartialOrd impl count separately", () => {
   expectExit("crates/demo/src/lib.rs", "impl Ord for K {}\nimpl PartialOrd for K {}", 0, "manual_eq_ord|crates/demo/src/lib.rs|2|fixture");
 });
+
+// The manual_hash rule: a hand-written Hash must agree with Eq, so it needs a row and a reason.
+test("manual_hash: a manual Hash impl with no row fails", () => {
+  expectExit("crates/demo/src/lib.rs", "pub struct Key(u8);\nimpl std::hash::Hash for Key {\n    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {\n        self.0.hash(state);\n    }\n}", 1, "");
+});
+test("manual_hash: a derive does not count", () => {
+  expectExit("crates/demo/src/lib.rs", "#[derive(Hash)]\npub struct Key(u8);", 0, "");
+});

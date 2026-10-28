@@ -190,6 +190,12 @@ const RULES: Rule[] = [
     why: "A hand-written Eq, Ord or PartialOrd must keep the law: Eq reflexive, Ord total. The compiler checks a derive, not a manual impl, so each one needs a row and a reason.",
   },
   {
+    name: "manual_hash",
+    pattern: /^\s*(?:unsafe\s+)?impl\b.*\bHash\s+for\b/,
+    glob: "*.rs",
+    why: "A hand-written Hash must agree with Eq: equal values hash alike. The compiler does not check that for a manual impl, so each one needs a row and a reason.",
+  },
+  {
     name: "anyhow_pub",
     scan: countAnyhowPub,
     skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/[^/]+\/src\/)/,
