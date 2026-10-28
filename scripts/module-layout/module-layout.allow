@@ -127,7 +127,6 @@ tasks/src/util/webdriver.rs|1|rename pending: public type(s) Driver, Session
 crates/habilis-network-doc/src/lib.rs|1|defines items; to move into leaf files (O11)
 crates/habilis-network-iroh-transport-util/src/lib.rs|1|defines items; to move into leaf files (O11)
 crates/habilis-network-iroh-webrtc-transport/src/lib.rs|1|defines items; to move into leaf files (O11)
-crates/habilis-network-logging/src/lib.rs|1|defines items; to move into leaf files (O11)
 crates/habilis-network-protocol/src/mesh/mod.rs|1|defines items; to move into leaf files (O11)
 crates/habilis-network-protocol/src/message/mod.rs|1|defines items; to move into leaf files (O11)
 crates/habilis-network-protocol/src/resolver/mod.rs|1|defines items; to move into leaf files (O11)
