@@ -40,8 +40,8 @@ function snake(camel: string): string {
 function leafHit(file: string, src: string): string | undefined {
   const base = path.basename(file, ".rs");
   if (ROOT_FILE.test(file) || CHILD_MOD.test(src)) return undefined;
-  const body = src.split(/^#\[cfg\(test\)\]/m)[0];
-  const types = [...body.matchAll(PUB_TYPE)].map((m) => m[1]!);
+  const body = src.split(/^#\[cfg\(test\)\]/m)[0] ?? "";
+  const types = [...body.matchAll(PUB_TYPE)].map((m) => m[1] ?? "");
   if (types.length === 0) return undefined;
   if (types.some((name) => snake(name) === base)) return undefined;
   return types.join(", ");
