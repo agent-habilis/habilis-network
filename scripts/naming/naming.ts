@@ -3,6 +3,7 @@
 // proxy. A file that breaks a rule needs a counted row in `naming.allow` with its reason, and the
 // row is exact: the check fails on a new hit, on a count that differs, and on a stale row.
 //   ctor_name: a file with `fn new_<x>` and no plain `fn new` (N10: `new` or `new_with_foo`).
+//   from_name: a file with `fn from_<x>` and no `impl From<` (N12: `from_foo` pairs with a From).
 // `naming.test.ts` plants one file of each kind.
 
 import { spawnSync } from "node:child_process";
@@ -15,6 +16,12 @@ const allowFile = process.env.NAMING_ALLOW || "scripts/naming/naming.allow";
 
 const rules: Record<string, (src: string) => boolean> = {
   ctor_name: (src) => /\bfn new_\w+\s*[(<]/.test(src) && !/\bfn new\s*[(<]/.test(src),
+  from_name: (src) => /\bfn from_\w+\s*[(<]/.test(src) && !/impl(<[^>]*>)? From</.test(src),
+};
+
+const HINT: Record<string, string> = {
+  ctor_name: "a constructor named new_<x> needs a plain new in the same file",
+  from_name: "a fn named from_<x> needs an impl From in the same file",
 };
 
 // The Rust files git knows, tracked or not yet, minus what .gitignore hides.
@@ -57,7 +64,7 @@ function main(): number {
     const expected = allowed.get(key);
     const [rule, file] = key.split("|");
     if (expected === undefined) {
-      problems.push(`naming: [${rule}] ${file}: a constructor named new_<x> needs a plain new in the same file. Fix it, or add a row to ${allowFile} with the reason.`);
+      problems.push(`naming: [${rule}] ${file}: ${HINT[rule ?? ""] ?? ""}. Fix it, or add a row to ${allowFile} with the reason.`);
     } else if (expected !== count) {
       problems.push(`naming: [${rule}] ${file}: ${count} hit found, ${expected} allowed. Set the count in ${allowFile}.`);
     }

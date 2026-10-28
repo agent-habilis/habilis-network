@@ -61,3 +61,15 @@ test("a row for a file that is clean now is stale", () => {
 test("a row for an unknown rule is refused", () => {
   expectExit({ [file]: "fn f() {}" }, 1, `no_such_rule|${file}|1|a fixture`);
 });
+
+test("a from_<x> fn with no impl From is refused", () => {
+  expectExit({ [file]: "impl A {\n    pub fn from_bytes(b: u8) -> Self { A(b) }\n}" }, 1);
+});
+
+test("a from_<x> fn beside an impl From is clean", () => {
+  expectExit({ [file]: "impl From<u8> for A {\n    fn from(b: u8) -> Self { A(b) }\n}\nimpl A {\n    pub fn from_bytes(b: u8) -> Self { A(b) }\n}" }, 0);
+});
+
+test("a counted from_<x> fn passes", () => {
+  expectExit({ [file]: "impl A {\n    pub fn from_bytes(b: u8) -> Self { A(b) }\n}" }, 0, `from_name|${file}|1|a fixture`);
+});
