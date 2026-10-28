@@ -25,22 +25,16 @@ mod step;
 mod watchers;
 pub(crate) use direct_outcome::DirectOutcome;
 pub(crate) use graft_request::graft_request;
-pub(crate) use grafts::{
-    ensure_direct, on_outcome, request_graft, retry_direct,
-};
-pub(crate) use kinds::{
-    allow_for, any_not_ip, best_kind, pair_kind, selected_kind,
-};
+pub(crate) use grafts::{ensure_direct, on_outcome, request_graft, retry_direct};
+pub(crate) use kinds::{allow_for, any_not_ip, best_kind, pair_kind, selected_kind};
 pub(crate) use lanes::{lane_pick, plan_lane_offers, top_up_lane_offers};
 pub(crate) use nudge_addrs::NudgeAddrs;
 pub(crate) use path_action::path_action;
 pub(crate) use path_change::PathChange;
 pub(crate) use path_kind::PathKind;
-pub(crate) use regraft::{
-    refill_isolated, regraft_due,
-};
+pub(crate) use regraft::{refill_isolated, regraft_due};
 pub(crate) use step::step;
 pub(crate) use watchers::{
-    ensure_watchers, mark_proven, nudge_climbing_pairs, nudge_known,
-    nudge_webrtc_riders, on_path_change, prove_routed_pairs,
+    ensure_watchers, mark_proven, nudge_climbing_pairs, nudge_known, nudge_webrtc_riders,
+    on_path_change, prove_routed_pairs,
 };
