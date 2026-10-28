@@ -9,7 +9,7 @@
 //! call per queue: the receivers are behind async mutexes, so a second
 //! concurrent `nextMsg()` waits rather than panics.
 
-mod stream;
+mod stream_node;
 
 mod mesh_peer;
 

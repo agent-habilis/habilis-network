@@ -16,4 +16,4 @@
 
 pub mod ffi;
 pub(crate) mod mesh;
-pub(crate) mod stream;
+pub(crate) mod streams;

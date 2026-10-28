@@ -2,7 +2,6 @@
 # Used by scripts/module-layout/module-layout.ts. Each leaf file that is named for none of its public types has one row. A row goes when the file is renamed or split.
 
 crates/habilis-network-ffi/src/ffi.rs|1|rename pending: public type(s) HabilisNetworkOpts, HabilisNetworkMsg, HabilisNetworkMesh, HabilisNetworkStreamOpts, HabilisNetworkStreams, HabilisNetworkProducer, HabilisNetworkReader
-crates/habilis-network-ffi/src/stream.rs|1|rename pending: public type(s) Streams, Writer, Read, ReadEnd
 crates/habilis-network-iroh-gossip-transport/src/lookup.rs|1|rename pending: public type(s) GossipLookup
 crates/habilis-network-iroh-gossip-transport/src/memory.rs|1|rename pending: public type(s) Hub
 crates/habilis-network-iroh-gossip-transport/src/selector.rs|1|rename pending: public type(s) GossipLadder
@@ -28,7 +27,6 @@ crates/habilis-network-protocol/src/crypto.rs|1|rename pending: public type(s) S
 crates/habilis-network-protocol/src/directory.rs|1|rename pending: public type(s) Ad, Listing, ListingChange, Listings
 crates/habilis-network-protocol/src/message/error.rs|1|rename pending: public type(s) MessageError, AppTagError, CorrIdError
 crates/habilis-network-protocol/src/reassembly.rs|1|rename pending: public type(s) ShardIngest, ReassemblyStore, RepairTicket, ShardCache
-crates/habilis-network-wasm/src/stream.rs|1|rename pending: public type(s) StreamNode, Producer, Reader
 crates/habilis-network/src/blob/error.rs|1|rename pending: public type(s) BlobError
 crates/habilis-network/src/blob/produce.rs|1|rename pending: public type(s) ServeLimits, BlobServer
 crates/habilis-network/src/blob/store.rs|1|rename pending: public type(s) BlobEntry, NewSecret, Registered, ContentMeta, BlobStore

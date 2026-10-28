@@ -19,7 +19,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::mesh::{Inbound, MAX_MSG, Mesh, Opts};
-use crate::stream::{Read, ReadEnd, Streams, Writer};
+use crate::streams::{Read, ReadEnd, Streams, Writer};
 
 /// Capacity of [`HabilisNetworkMsg::nick`], including the NUL. A minted nickname is two
 /// short words; a longer chosen one is truncated to 63 bytes.
