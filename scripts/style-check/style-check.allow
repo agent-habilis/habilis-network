@@ -83,7 +83,7 @@ assert_no_message|crates/habilis-network-iroh-webrtc-transport/examples/chat-web
 assert_no_message|crates/habilis-network-iroh-webrtc-transport/examples/session_cost.rs|15|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|2|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-webrtc-transport/src/ice_uri.rs|1|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-iroh-webrtc-transport/src/lib.rs|6|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network-iroh-webrtc-transport/src/drop_policy.rs|6|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-webrtc-transport/src/liveness.rs|8|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-webrtc-transport/src/native/session.rs|1|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-webrtc-transport/src/native/stun.rs|18|kept: assert without a message, to be given one (P13 rollout)
@@ -533,7 +533,7 @@ pub_vec_return|crates/habilis-network-wasm/src/stream.rs|1|read: the owned bytes
 pub_vec_param|crates/habilis-network-chunks/src/chunk_map.rs|1|from_leaves: checks the length, then keeps the leaves in the tree
 pub_vec_param|crates/habilis-network-iroh-multihop-transport/src/lib.rs|2|with_protocols: keeps the owned protocol handlers in the config; link_vector: sorts and filters the links in place
 pub_vec_param|crates/habilis-network-iroh-multihop-transport/src/topology.rs|1|signed: keeps the links in the signed link vector
-pub_vec_param|crates/habilis-network-iroh-webrtc-transport/src/lib.rs|1|attach_parts: keeps the owned JavaScript callbacks of the session
+pub_vec_param|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_handle.rs|1|attach_parts: keeps the owned JavaScript callbacks of the session
 pub_vec_param|crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|1|attach: takes the owned JavaScript callbacks, which it mutates
 pub_vec_param|crates/habilis-network-netplay/src/session.rs|1|new: keeps the owned player list of the session
 pub_vec_param|crates/habilis-network-protocol/src/reassembly.rs|1|insert: keeps the owned frames of the shard group in the cache
@@ -573,7 +573,8 @@ self_convention|crates/habilis-network-util/src/clock.rs|2|UnixSecs::as_secs and
 fn_import|crates/habilis-network-iroh-gossip-transport/src/sink.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/host.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-iroh-webrtc-transport/src/lib.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
+fn_import|crates/habilis-network-iroh-webrtc-transport/src/lib.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
+fn_import|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_handle.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-webrtc-transport/src/selector.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/game/src/ui.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/runtime.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
