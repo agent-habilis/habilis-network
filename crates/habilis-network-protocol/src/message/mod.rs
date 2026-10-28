@@ -8,7 +8,9 @@
 
 use std::fmt;
 
+#[cfg(any(test, feature = "test-fixtures"))]
 use iroh_base::Signature;
+
 use serde::{Deserialize, Serialize};
 
 use habilis_network_util::clock::UnixSecs;
@@ -19,6 +21,8 @@ use super::nickname::Nickname;
 use super::{AuthorKey, ContentHash, DedupKey};
 use crate::newtype::string_newtype;
 
+mod signer;
+pub use signer::Signer;
 mod body_error;
 
 use body_error as body;
@@ -518,35 +522,6 @@ pub struct Message {
     pub shard: Option<Shard>,
     /// Extension escape hatch. Add experimental fields here; stable fields get promoted to top-level.
     pub ext: serde_json::Value,
-}
-
-/// The key that signed a message and its signature. The two are one value, so a message cannot
-/// carry a key with no signature, or a signature with no key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Signer {
-    key: AuthorKey,
-    signature: Signature,
-}
-
-impl Signer {
-    /// Pair a key with the signature it made. Nothing checks it here: [`Message::verify_signature_with`]
-    /// does.
-    #[must_use]
-    pub(crate) const fn new(key: AuthorKey, signature: Signature) -> Self {
-        Self { key, signature }
-    }
-
-    /// The key that signed.
-    #[must_use]
-    pub const fn key(&self) -> AuthorKey {
-        self.key
-    }
-
-    /// The detached signature.
-    #[must_use]
-    pub const fn signature(&self) -> &Signature {
-        &self.signature
-    }
 }
 
 /// A [`Message`] as the wire has it, read: every field a string or a plain value, so that one
