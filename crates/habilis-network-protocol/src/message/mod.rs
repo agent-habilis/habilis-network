@@ -7,19 +7,9 @@
 //!   (de)serialization.
 
 #[cfg(any(test, feature = "test-fixtures"))]
-use iroh_base::Signature;
-
-#[cfg(any(test, feature = "test-fixtures"))]
-use super::AuthorKey;
-#[cfg(any(test, feature = "test-fixtures"))]
 #[cfg(test)]
 use super::identity;
 #[cfg(any(test, feature = "test-fixtures"))]
-#[cfg(any(test, feature = "test-fixtures"))]
-use super::mesh::MeshId;
-#[cfg(any(test, feature = "test-fixtures"))]
-use habilis_network_util::clock::UnixSecs;
-
 #[cfg(any(test, feature = "test-fixtures"))]
 mod chain_ctx;
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -37,6 +27,8 @@ pub use message::Message;
 mod message_kind;
 pub use message_kind::MessageKind;
 mod channel;
+#[cfg(test)]
+use super::mesh::MeshId;
 #[cfg(test)]
 use super::nickname::Nickname;
 pub use channel::Channel;
@@ -148,37 +140,6 @@ pub(super) fn default_ext() -> serde_json::Value {
 
 pub(super) fn empty_body() -> MessageBody {
     MessageBody::try_new("").expect("empty string is always a valid MessageBody")
-}
-
-#[cfg(any(test, feature = "test-fixtures"))]
-impl Message {
-    /// This message claiming `key` as its author, with a signature that does not verify: for a
-    /// test that needs a message with an author key and never checks the signature.
-    #[must_use]
-    pub fn with_unverified_key(mut self, key: AuthorKey) -> Self {
-        self.signer = Some(Signer::new(key, Signature::from_bytes(&[0u8; 64])));
-        self
-    }
-
-    /// A fixed test message of `kind` with `body`, from `alice-bot` on mesh `test`.
-    #[must_use]
-    pub fn fixture(kind: MessageKind, body: &str) -> Self {
-        Message {
-            version: VERSION.to_string(),
-            id: "00000000-0000-0000-0000-000000000001".into(),
-            kind,
-            mesh: MeshId::from("test"),
-            author: "alice-bot".into(),
-            timestamp: UnixSecs::from_secs(1_700_000_000),
-            body: body.into(),
-            signer: None,
-            seq: None,
-            prev: None,
-            parents: Vec::new(),
-            shard: None,
-            ext: serde_json::json!({}),
-        }
-    }
 }
 
 #[cfg(test)]
