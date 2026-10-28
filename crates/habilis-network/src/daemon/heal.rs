@@ -4,29 +4,35 @@
 //! Split out of `event_loop` for the same reason as `cohost_arm` — this is
 //! recovery, not the loop, and it reads better without the tick arms around it.
 
+mod gossip_link;
+mod resubscribe;
+mod resubscribe_env;
+
 use std::time::Duration;
 
 use anyhow::Result;
 
 use iroh::RelayUrl;
-use iroh_gossip::api::{GossipReceiver, GossipSender};
 use tokio::sync::watch;
 
-use super::event_loop::ctx_parts::CtxParts;
 use super::event_loop::tick_gap::TickGap;
 use super::handler_ctx::HandlerCtx;
 use super::setup;
 use super::state::EventLoopState;
 use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
-use crate::gossip::split::MeshReceiver;
-use crate::transport::MeshSender;
 use crate::util::clock::{Instant, millis_saturating};
 use crate::util::tuning::{RESUBSCRIBE_MAX_ATTEMPTS, heal_stall_threshold};
 use crate::{beacon, gossip, lookup};
 
 use crate::transport::webrtc;
 use crate::util::tuning;
+
+use resubscribe::Resubscribe;
+
+pub(super) use gossip_link::GossipLink;
+pub(super) use resubscribe_env::ResubscribeEnv;
+
 /// Monotonic `gap` past `stall_threshold`: the process was throttled
 /// (but not fully frozen) between heal ticks (macOS App Nap / timer
 /// coalescing) long enough that the mesh died of idle timeout.
@@ -151,30 +157,6 @@ pub(super) async fn run_heal(
     if state.starvation_due(Instant::now(), tuning::starvation_threshold()) {
         gossip::heal::recover_from_starvation(state, ctx).await;
     }
-}
-/// Outcome of one resubscribe attempt (the heal arm drives one per
-/// tick while the gossip stream is down).
-pub(super) enum Resubscribe {
-    Restored(GossipSender, MeshReceiver<GossipReceiver>),
-    Pending,
-    Fatal,
-}
-/// The resubscribe attempt's read-only environment: the gossip frontend to
-/// re-subscribe through, the rendezvous params to bootstrap from, the shared
-/// ctx-building parts (for its `sink` and to rebuild a [`HandlerCtx`] once the
-/// sender is swapped).
-pub(super) struct ResubscribeEnv<'node> {
-    pub(super) gossip: &'node iroh_gossip::net::Gossip,
-    pub(super) params: &'node beacon::RendezvousParams,
-    pub(super) parts: &'node CtxParts<'node>,
-}
-/// The live gossip link a resubscribe mutates: the sender/receiver pair
-/// swapped in on success, and the consecutive-failure counter it resets or
-/// increments.
-pub(super) struct GossipLink<'link> {
-    pub(super) sender: &'link mut MeshSender,
-    pub(super) receiver: &'link mut MeshReceiver<GossipReceiver>,
-    pub(super) attempts: &'link mut u32,
 }
 /// One heal-tick turn while the gossip stream is down: attempt the
 /// resubscribe and, on success, swap in the fresh sender/receiver,

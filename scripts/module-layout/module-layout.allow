@@ -12,7 +12,6 @@ crates/habilis-network/src/blob/produce.rs|1|rename pending: public type(s) Serv
 crates/habilis-network/src/blob/store.rs|1|rename pending: public type(s) BlobEntry, NewSecret, Registered, ContentMeta, BlobStore
 crates/habilis-network/src/blob/ticket.rs|1|rename pending: public type(s) BlobTicket
 crates/habilis-network/src/daemon/app.rs|1|rename pending: public type(s) NodeDriver, IpcRequest
-crates/habilis-network/src/daemon/heal.rs|1|rename pending: public type(s) Resubscribe, ResubscribeEnv, GossipLink
 crates/habilis-network/src/daemon/message_log.rs|1|rename pending: public type(s) Bound, DigestWindow, WindowRange
 crates/habilis-network/src/daemon/params.rs|1|rename pending: public type(s) CreateParams, JoinParams, TopicParams, Resolved
 crates/habilis-network/src/daemon/setup.rs|1|rename pending: public type(s) SetupKind, InjectedEndpoint, SetupParams
