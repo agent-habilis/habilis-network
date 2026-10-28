@@ -8,11 +8,13 @@ pub mod bounded_queue;
 // unix socket / named pipe, which a browser has no equivalent of. `async-io` is
 // also the crate's only tokio user.
 #[cfg(feature = "async-io")]
-pub mod bounded_read;
-pub mod clock;
+pub mod line_read;
+pub use line_read as bounded_read;
+pub mod unix_secs;
+pub use unix_secs as clock;
 pub mod consts;
 pub mod cooldown;
-pub mod logs;
+pub mod log_config;
 /// Process helpers for the daemon: the parent-process walk that the orphan watch uses.
 #[cfg(feature = "host")]
 pub mod process;

@@ -65,9 +65,6 @@ crates/habilis-network-stream/src/hash.rs|1|rename pending: public type(s) Strea
 crates/habilis-network-stream/src/node.rs|1|rename pending: public type(s) StreamOpts, StreamNode
 crates/habilis-network-stream/src/produce.rs|1|rename pending: public type(s) Registry, StreamAcceptor, Producer
 crates/habilis-network-stream/src/read.rs|1|rename pending: public type(s) Refused, Reader
-crates/habilis-network-util/src/bounded_read.rs|1|rename pending: public type(s) LineRead
-crates/habilis-network-util/src/clock.rs|1|rename pending: public type(s) UnixSecs
-crates/habilis-network-util/src/logs.rs|1|rename pending: public type(s) LogConfig
 crates/habilis-network-wasm/src/stream.rs|1|rename pending: public type(s) StreamNode, Producer, Reader
 crates/habilis-network/src/blob/error.rs|1|rename pending: public type(s) BlobError
 crates/habilis-network/src/blob/produce.rs|1|rename pending: public type(s) ServeLimits, BlobServer

@@ -31,6 +31,6 @@ from_name|crates/habilis-network-protocol/src/message/shard.rs|1|no impl From in
 from_name|crates/habilis-network-protocol/src/newtype.rs|1|no impl From in this file beside from_str (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/resolver/mod.rs|1|no impl From in this file beside from_str (N12), to add the From impl or rename
 from_name|crates/habilis-network-stream/src/hash.rs|1|no impl From in this file beside from_bytes,from_str,from_zeroizing,from_zeroizing_keeps_the_bytes (N12), to add the From impl or rename
-from_name|crates/habilis-network-util/src/clock.rs|1|no impl From in this file beside from_le_bytes,from_secs (N12), to add the From impl or rename
+from_name|crates/habilis-network-util/src/unix_secs.rs|1|no impl From in this file beside from_le_bytes,from_secs (N12), to add the From impl or rename
 from_name|crates/habilis-network/src/blob/mod.rs|1|no impl From in this file beside from_bytes (N12), to add the From impl or rename
 from_name|crates/habilis-network/src/daemon/state.rs|1|no impl From in this file beside from_summary (N12), to add the From impl or rename

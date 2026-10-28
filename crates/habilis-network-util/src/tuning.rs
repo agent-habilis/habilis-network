@@ -949,7 +949,7 @@ pub const PROBE_HOLD: Duration = Duration::from_secs(15);
 
 /// Max bytes a per-member log file grows before rotating to `<file>.1`
 /// (active + one backup ⇒ bounded at `2 ×` this). The `--log-max-bytes` flag
-/// overrides; `0` disables rotation. Resolved by [`crate::logs::log_max_bytes`].
+/// overrides; `0` disables rotation. Resolved by [`crate::log_config::log_max_bytes`].
 ///
 /// `host`-only with the file sink: a browser has no log file to rotate.
 #[cfg(feature = "host")]

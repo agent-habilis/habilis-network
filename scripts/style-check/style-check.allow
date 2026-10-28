@@ -25,7 +25,7 @@ anyhow_pub|crates/habilis-network/src/lookup/mod.rs|1|the test relay helper spaw
 
 # operator: an overload that has a math or logic meaning (U22). Each line names the meaning.
 operator|crates/habilis-network-netplay/src/frame.rs|4|Frame: a frame plus or minus a number of frames, and the gap between two frames.
-operator|crates/habilis-network-util/src/clock.rs|2|UnixSecs plus or minus a Duration: a point in time moved by a span.
+operator|crates/habilis-network-util/src/unix_secs.rs|2|UnixSecs plus or minus a Duration: a point in time moved by a span.
 operator|crates/habilis-network/src/gossip/app.rs|1|AppClass bit flags: BitOr joins two sets of flags.
 
 # pub_const_fn: a public const fn (U21). Each row is a count that may only go down.
@@ -46,7 +46,7 @@ pub_const_fn|crates/habilis-network-protocol/src/message/mod.rs|4|kept: trivial 
 pub_const_fn|crates/habilis-network-protocol/src/message/verified.rs|2|kept: trivial accessor key of a verified message (reviewer to confirm)
 pub_const_fn|crates/habilis-network-protocol/src/topic.rs|3|kept: newtype rule (from_bytes, as_bytes, to_bytes of a 32- or 16-byte key or hash)
 pub_const_fn|crates/habilis-network-stream/src/hash.rs|2|kept: newtype rule (StreamId from_bytes and as_bytes)
-pub_const_fn|crates/habilis-network-util/src/clock.rs|5|kept: 4 UnixSecs newtype accessors and constructors (newtype rule); millis_saturating is used in a const item (const context, clock.rs test ONE_SECOND).
+pub_const_fn|crates/habilis-network-util/src/unix_secs.rs|5|kept: 4 UnixSecs newtype accessors and constructors (newtype rule); millis_saturating is used in a const item (const context, clock.rs test ONE_SECOND).
 pub_const_fn|crates/habilis-network/src/blob/mod.rs|2|kept: newtype rule (BlobDigest from_bytes and as_bytes)
 pub_const_fn|crates/habilis-network/src/gossip/app.rs|7|kept: flag set of a gossip message (union, with_if, loggable, beat, valid, chained, sealed): bit-flag logic
 
@@ -153,11 +153,11 @@ assert_no_message|crates/habilis-network-test-tracing/tests/saw_warn.rs|8|kept: 
 assert_no_message|crates/habilis-network-test-tracing/tests/writer.rs|1|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-util/src/bounded_fifo_set.rs|12|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-util/src/bounded_queue.rs|5|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-util/src/bounded_read.rs|5|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-util/src/clock.rs|30|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network-util/src/line_read.rs|5|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network-util/src/unix_secs.rs|30|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-util/src/cooldown.rs|6|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-util/src/lib.rs|8|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-util/src/logs.rs|2|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network-util/src/log_config.rs|2|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-util/src/process.rs|10|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/beacon/mod.rs|19|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/blob/mod.rs|11|kept: assert without a message, to be given one (P13 rollout)
@@ -285,7 +285,7 @@ long_chain|crates/habilis-network-test-tracing/src/guard.rs|3|kept: statements w
 long_chain|crates/habilis-network-test-tracing/tests/atexit.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-test-tracing/tests/late.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-test-tracing/tests/twice.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-util/src/clock.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-util/src/unix_secs.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-util/src/process.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-wasm/src/mesh_peer.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-wasm/src/tracing_console.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -568,7 +568,7 @@ self_convention|crates/habilis-network-protocol/src/dedup_key.rs|1|DedupKey::to_
 self_convention|crates/habilis-network-protocol/src/mesh/lookup.rs|1|Lookup::as_str: a Copy enum, so self by value
 self_convention|crates/habilis-network-protocol/src/mesh/transport.rs|1|Transport::as_str: a Copy enum, so self by value
 self_convention|crates/habilis-network-protocol/src/topic.rs|1|TopicId::to_bytes: a Copy type, so self by value
-self_convention|crates/habilis-network-util/src/clock.rs|2|UnixSecs::as_secs and to_le_bytes: a Copy type, so self by value
+self_convention|crates/habilis-network-util/src/unix_secs.rs|2|UnixSecs::as_secs and to_le_bytes: a Copy type, so self by value
 # fn_import: a top-level function imported by its bare name (O23). Each row is a count that may only go down.
 fn_import|crates/habilis-network-iroh-gossip-transport/src/sink.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
@@ -679,7 +679,7 @@ abbrev_name|crates/habilis-network-stream/src/node.rs|23|existing letter-deleted
 abbrev_name|crates/habilis-network-stream/src/produce.rs|15|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream/src/read.rs|7|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-test-tracing-macros/src/lib.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-util/src/bounded_read.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-util/src/line_read.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-wasm/src/mesh_peer.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-wasm/src/stream.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-wasm/src/tracing_console.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count

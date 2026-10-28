@@ -11,7 +11,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use habilis_network_util::logs;
+use habilis_network_util::log_config;
 
 use habilis_network_protocol::{MeshId, Nickname};
 
@@ -119,7 +119,7 @@ pub fn install() -> LogSink {
 /// `Attached`/`Stderr` is a no-op.
 pub fn attach(mesh: &MeshId, nickname: &Nickname) {
     let Some(sink) = SINK.get() else { return };
-    sink.open(logs::log_file_path(mesh.as_str(), nickname.as_str()));
+    sink.open(log_config::log_file_path(mesh.as_str(), nickname.as_str()));
 }
 
 impl LogSink {
@@ -134,7 +134,7 @@ impl LogSink {
         // symlink. A `--log-dir` override outside the base is not gated. (The log
         // is 0600, but a hijacked dir could still swap the file for an
         // attacker-owned one under create-truncate.)
-        let base = logs::configured_base();
+        let base = log_config::configured_base();
         let opened =
             habilis_network_util::ensure_parent_private(base.as_deref(), &path).and_then(|()| {
                 use std::os::unix::fs::OpenOptionsExt as _;
@@ -157,7 +157,7 @@ impl LogSink {
                     file,
                     path,
                     written,
-                    max: logs::log_max_bytes(),
+                    max: log_config::log_max_bytes(),
                 };
             }
             Err(error) => {
