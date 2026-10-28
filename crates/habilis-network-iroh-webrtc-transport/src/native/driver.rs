@@ -12,7 +12,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use super::inbound_packet::InboundPacket;
-use super::jsep::JsepError;
+use super::jsep_error::JsepError;
 use super::session_registry::SessionRegistry;
 
 /// Consecutive receive errors a live session tolerates before giving up. Sized
