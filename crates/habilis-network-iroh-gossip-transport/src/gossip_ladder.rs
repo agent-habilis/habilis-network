@@ -60,7 +60,7 @@ mod tests {
     use iroh::protocol::{AcceptError, ProtocolHandler, Router};
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
 
-    use crate::memory::Hub;
+    use crate::hub::Hub;
     use crate::{GossipHandle, gossip_addr};
 
     const ALPN: &[u8] = b"habilis-network-gossip/test-selector/0";

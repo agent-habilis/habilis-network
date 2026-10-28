@@ -346,7 +346,7 @@ mod tests {
         Ordering, Poll, RecvInfo, gossip_addr, io,
     };
     use crate::frame::Frame;
-    use crate::memory::Hub;
+    use crate::hub::Hub;
     use crate::shared::{INBOUND_CAP, locked};
     use crate::{GOSSIP_TRANSPORT_ID, frame};
 

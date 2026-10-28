@@ -1111,7 +1111,7 @@ mod tests {
     /// is off, which is its default.
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_gossip_connection_on_the_gossip_path_is_closed_by_the_hook() {
-        use habilis_network_iroh_gossip_transport::memory::Hub;
+        use habilis_network_iroh_gossip_transport::hub::Hub;
         use habilis_network_iroh_gossip_transport::{GossipHandle, gossip_addr};
         use iroh::endpoint::ConnectionError;
         use iroh::protocol::{AcceptError, ProtocolHandler, Router};
@@ -1233,7 +1233,7 @@ mod tests {
     /// reported to its own table, which keeps the gossip handle.
     async fn ip_and_gossip_node(
         seed: u8,
-        hub: &habilis_network_iroh_gossip_transport::memory::Hub,
+        hub: &habilis_network_iroh_gossip_transport::hub::Hub,
         with_ip: bool,
     ) -> (
         iroh::Endpoint,
@@ -1286,7 +1286,7 @@ mod tests {
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_on_ip_is_blocked_for_gossip_at_both_ends() {
         use habilis_network_iroh_gossip_transport::gossip_addr;
-        use habilis_network_iroh_gossip_transport::memory::Hub;
+        use habilis_network_iroh_gossip_transport::hub::Hub;
         use iroh::{EndpointAddr, TransportAddr};
 
         let hub = Hub::new();
@@ -1336,7 +1336,7 @@ mod tests {
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_on_gossip_is_allowed_and_a_gone_peer_is_forgotten() {
         use habilis_network_iroh_gossip_transport::gossip_addr;
-        use habilis_network_iroh_gossip_transport::memory::Hub;
+        use habilis_network_iroh_gossip_transport::hub::Hub;
         use iroh::{EndpointAddr, TransportAddr};
 
         let hub = Hub::new();
@@ -1373,7 +1373,7 @@ mod tests {
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_with_a_session_is_blocked_for_gossip_without_a_connection() {
         use habilis_network_iroh_gossip_transport::gossip_addr;
-        use habilis_network_iroh_gossip_transport::memory::Hub;
+        use habilis_network_iroh_gossip_transport::hub::Hub;
         use iroh::{EndpointAddr, TransportAddr};
 
         let hub = Hub::new();
@@ -1411,7 +1411,7 @@ mod tests {
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_with_a_session_and_a_connection_on_the_gossip_rung_is_allowed_for_gossip() {
         use habilis_network_iroh_gossip_transport::gossip_addr;
-        use habilis_network_iroh_gossip_transport::memory::Hub;
+        use habilis_network_iroh_gossip_transport::hub::Hub;
         use iroh::{EndpointAddr, TransportAddr};
 
         let hub = Hub::new();

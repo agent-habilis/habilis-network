@@ -14,7 +14,7 @@ mod gossip_handle;
 mod gossip_ladder;
 mod gossip_lookup;
 mod gossip_sink;
-pub mod memory;
+pub mod hub;
 mod receive_loop;
 mod recursion;
 mod shared;

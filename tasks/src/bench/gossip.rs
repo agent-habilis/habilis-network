@@ -10,9 +10,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use habilis_network_iroh_gossip_transport::hub::Hub;
 use habilis_network_iroh_gossip_transport::iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use habilis_network_iroh_gossip_transport::iroh_gossip::proto::TopicId;
-use habilis_network_iroh_gossip_transport::memory::Hub;
 use habilis_network_iroh_gossip_transport::{
     GOSSIP_TRANSPORT_ID, GossipHandle, ReceiveLoop, Stats, gossip_addr, spawn_receive_loop,
 };

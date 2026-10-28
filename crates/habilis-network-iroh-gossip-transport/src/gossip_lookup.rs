@@ -48,7 +48,7 @@ mod tests {
     use n0_future::StreamExt;
 
     use crate::GossipHandle;
-    use crate::memory::Hub;
+    use crate::hub::Hub;
 
     fn id(seed: u8) -> iroh::EndpointId {
         SecretKey::from_bytes(&[seed; 32]).public()

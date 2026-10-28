@@ -69,7 +69,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::{selected_is_gossip, watch_recursion};
-    use crate::memory::Hub;
+    use crate::hub::Hub;
     use crate::{GossipHandle, gossip_addr};
 
     const ALPN: &[u8] = b"habilis-network-gossip/test-recursion/0";
