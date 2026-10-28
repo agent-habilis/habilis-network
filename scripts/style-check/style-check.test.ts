@@ -253,3 +253,26 @@ test("manual_hash: a manual Hash impl with no row fails", () => {
 test("manual_hash: a derive does not count", () => {
   expectExit("crates/demo/src/lib.rs", "#[derive(Hash)]\npub struct Key(u8);", 0, "");
 });
+
+// The assert_no_message rule (P13): an assert with a condition or values and no message needs a row.
+test("assert_no_message: an assert! with no message fails with no row", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(x: bool) {\n    assert!(x);\n}", 1, "");
+});
+test("assert_no_message: an assert! with a message passes", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(x: bool) {\n    assert!(x, \"the flag is set\");\n}", 0, "");
+});
+test("assert_no_message: an assert_eq! with two values and no message fails", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(a: u8) {\n    assert_eq!(a, 1);\n}", 1, "");
+});
+test("assert_no_message: an assert_eq! with a message passes, across lines", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(a: u8) {\n    assert_eq!(\n        a,\n        1,\n        \"a is {a}\"\n    );\n}", 0, "");
+});
+test("assert_no_message: a trailing comma adds no message", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(x: bool) {\n    assert!(x,);\n}", 1, "");
+});
+test("assert_no_message: a debug_assert! is not an assert! here", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(x: bool) {\n    debug_assert!(x);\n}", 0, "");
+});
+test("assert_no_message: the exact count is allowed", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(x: bool) {\n    assert!(x);\n    assert!(!x);\n}", 0, "assert_no_message|crates/demo/src/lib.rs|2|fixture");
+});

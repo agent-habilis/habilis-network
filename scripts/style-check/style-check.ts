@@ -103,6 +103,45 @@ function isBareOneArg(ret: string, name: string): boolean {
   return false;
 }
 
+// The closing bracket of the `(` at `open`, skipping nested brackets. Strings are blanked first.
+function closeParen(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    const ch = text[i] ?? "";
+    if ("([{".includes(ch)) depth++;
+    else if (")]}".includes(ch) && --depth === 0) return i;
+  }
+  return text.length - 1;
+}
+
+// The number of arguments of a macro call, from the text between its brackets. A trailing comma adds none.
+function argCount(args: string): number {
+  let depth = 0;
+  let commas = 0;
+  for (const ch of args) {
+    if ("([{".includes(ch)) depth++;
+    else if (")]}".includes(ch)) depth--;
+    else if (ch === "," && depth === 0) commas++;
+  }
+  const last = args.slice(args.lastIndexOf(",") + 1).trim();
+  if (args.trim() === "") return 0;
+  return last === "" ? commas : commas + 1;
+}
+
+// The asserts with no message: assert! needs a condition and a message, assert_eq! and assert_ne! need
+// two values and a message. A macro with a message already counts as one argument more.
+function countAssertsNoMessage(raw: string): number {
+  const text = blankStrings(stripComments(raw));
+  const pattern = /\bassert(_eq|_ne)?!\s*\(/g;
+  let count = 0;
+  for (let m = pattern.exec(text); m; m = pattern.exec(text)) {
+    const open = m.index + m[0].length - 1;
+    const args = text.slice(open + 1, closeParen(text, open));
+    if (argCount(args) < (m[1] ? 3 : 2)) count++;
+  }
+  return count;
+}
+
 function countAnyhowPub(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   const bare = new Set<string>();
@@ -194,6 +233,12 @@ const RULES: Rule[] = [
     pattern: /^\s*(?:unsafe\s+)?impl\b.*\bHash\s+for\b/,
     glob: "*.rs",
     why: "A hand-written Hash must agree with Eq: equal values hash alike. The compiler does not check that for a manual impl, so each one needs a row and a reason.",
+  },
+  {
+    name: "assert_no_message",
+    scan: countAssertsNoMessage,
+    glob: "crates/**/*.rs",
+    why: "An assert names what it checks: a message that adds the value, or the reason, so a failure reads without the source (P13).",
   },
   {
     name: "anyhow_pub",
