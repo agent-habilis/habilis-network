@@ -565,8 +565,8 @@ impl MeshDoc {
 
     /// The dedup keys of the orphan frames dropped since the last call, for the
     /// receive path to forget.
-    pub fn take_dropped(&mut self) -> Vec<DedupKey> {
-        std::mem::take(&mut self.dropped)
+    pub fn take_dropped(&mut self) -> impl Iterator<Item = DedupKey> + use<> {
+        std::mem::take(&mut self.dropped).into_iter()
     }
 
     /// How many orphans this author key has buffered. Scanned rather than counted
@@ -1325,7 +1325,7 @@ mod tests {
         }
         let refused = refused.expect("the global cap must refuse a newcomer");
         assert!(
-            sink.take_dropped().contains(&refused.dedup_key()),
+            sink.take_dropped().any(|key| key == refused.dedup_key()),
             "the refused orphan's dedup key must be handed back"
         );
     }
@@ -1456,7 +1456,7 @@ mod tests {
         let chain = keyed_chain(300);
         let tail: Vec<usize> = (100..300).collect();
         let mut sink = deliver(&chain, &tail, 100);
-        let dropped: HashSet<DedupKey> = sink.take_dropped().into_iter().collect();
+        let dropped: HashSet<DedupKey> = sink.take_dropped().collect();
         let let_go: HashSet<DedupKey> = chain[100 + DOC_PENDING_AUTHOR_MAX..]
             .iter()
             .map(|frame| frame.dedup_key())
@@ -1485,7 +1485,10 @@ mod tests {
             assert!(matches!(sink.ingest(frame), Ingested::Buffered));
         }
         assert!(matches!(sink.ingest(&rival), Ingested::Ignored));
-        assert_eq!(sink.take_dropped(), vec![rival.dedup_key()]);
+        assert_eq!(
+            sink.take_dropped().collect::<Vec<_>>(),
+            vec![rival.dedup_key()]
+        );
     }
 
     /// automerge takes one change per `(actor, seq)`. A frame whose signer does
