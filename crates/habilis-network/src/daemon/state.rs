@@ -1,3 +1,14 @@
+mod direct_counts;
+mod direct_state;
+#[cfg(feature = "multihop")]
+mod parked_link_states;
+mod reach;
+mod rival_flag;
+mod roster_entry;
+mod roster_snapshot;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+mod test_drop;
+
 use crate::transport::UdpTransport;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -7,7 +18,6 @@ use std::time::Duration;
 use n0_future::time::Instant as TokioInstant;
 
 use iroh::{EndpointAddr, EndpointId};
-use serde::Serialize;
 
 use super::message_log::MessageLog;
 #[cfg(feature = "host")]
@@ -40,6 +50,17 @@ use crate::transport::{graft_backoff, probe, proven_endpoints};
 use crate::util::tuning;
 use iroh::address_lookup::memory;
 use tokio::sync::{mpsc, oneshot};
+
+pub(crate) use direct_counts::DirectCounts;
+pub(crate) use direct_state::DirectState;
+#[cfg(feature = "multihop")]
+pub(crate) use parked_link_states::ParkedLinkStates;
+pub use reach::Reach;
+pub(crate) use rival_flag::RivalFlag;
+pub use roster_entry::RosterEntry;
+pub use roster_snapshot::RosterSnapshot;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub use test_drop::TestDrop;
 /// How long after it let go of the rendezvous a node wants it again. Every node waits the same
 /// period, plus a share of up to half of it that the id of the node fixes: the pubkey bytes are
 /// uniform, so n members do not come back together.
@@ -56,169 +77,10 @@ fn rendezvous_return_after(local: EndpointId) -> Duration {
 /// author per window says it without filling the log.
 const UNREADABLE_DIGEST_LOG_WINDOW: Duration = Duration::from_mins(10);
 
-/// How we currently reach a peer: `Direct` when we hold a live gossip
-/// link to its self-advertised endpoint, else `Gossip` (relayed). Derived
-/// from `linked_endpoints` without surfacing the node id — see
-/// `peer_endpoints`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-#[non_exhaustive]
-pub enum Reach {
-    /// A direct path.
-    Direct,
-    /// No direct link: the peer is heard over the gossip topic, through other members or the relay.
-    Gossip,
-}
-
-/// Tests only: which inbound frame the drop hook takes.
-#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum TestDrop {
-    /// The app frame whose body is this text.
-    AppBody(String),
-    /// A shared-state change.
-    StateChange,
-}
-
 /// The most link vectors that wait for the binding of their author: one per author, and a mesh
 /// holds fewer members than this. A flood of authors that never bind cannot grow the park.
 #[cfg(feature = "multihop")]
 const MAX_PARKED_LINK_STATES: usize = 256;
-
-/// Link vectors that arrived before the roster bound an endpoint to their author, one per
-/// author: a newer one replaces the older. The binding comes with the `PeerInfo` of the author,
-/// which can arrive a few milliseconds after its first vector, now that vectors go out when a link
-/// comes up. A vector that is dropped there is waited for until the next tick, 15 s on, and the
-/// session that it makes possible comes too late for the route that it carries.
-#[cfg(feature = "multihop")]
-#[derive(Debug)]
-pub(crate) struct ParkedLinkStates {
-    by_author: HashMap<Nickname, habilis_network_iroh_multihop_transport::LinkVector>,
-    cap: usize,
-}
-
-#[cfg(feature = "multihop")]
-impl ParkedLinkStates {
-    pub(crate) fn new(cap: usize) -> Self {
-        Self {
-            by_author: HashMap::new(),
-            cap,
-        }
-    }
-
-    /// Park `vector` for `author`, in place of the one that waited. Whether it was kept: the
-    /// vector of an author that does not wait yet is refused at the cap.
-    pub(crate) fn park(
-        &mut self,
-        author: Nickname,
-        vector: habilis_network_iroh_multihop_transport::LinkVector,
-    ) -> bool {
-        if !self.by_author.contains_key(&author) && self.by_author.len() >= self.cap {
-            return false;
-        }
-        self.by_author.insert(author, vector);
-        true
-    }
-
-    /// The vector that waits for `author`, if any.
-    pub(crate) fn take(
-        &mut self,
-        author: &Nickname,
-    ) -> Option<habilis_network_iroh_multihop_transport::LinkVector> {
-        self.by_author.remove(author)
-    }
-}
-
-#[cfg(feature = "multihop")]
-impl Default for ParkedLinkStates {
-    fn default() -> Self {
-        Self::new(MAX_PARKED_LINK_STATES)
-    }
-}
-
-/// One peer in a [`RosterSnapshot`]. `last_seen_secs_ago` is
-/// `None` until the peer's first heartbeat is timed; `quiet` marks a
-/// peer heartbeat-evicted past `ALIVE_TIMEOUT` (still returnable);
-/// `reach` is `direct` only while we hold a live link to it; `transport`
-/// is the lane a directed frame to this peer would take right now (the
-/// live `crate::transport` send decision — distinct from `reach`, which
-/// is a gossip-overlay link fact). Serialized directly into the
-/// consumer's roster surfaces.
-#[derive(Debug, Clone, Serialize)]
-#[non_exhaustive]
-pub struct RosterEntry {
-    /// The nickname of the member.
-    pub nickname: Nickname,
-    /// Seconds since the member was last heard from.
-    pub last_seen_secs_ago: Option<u64>,
-    /// Whether the member has been silent past the alive timeout.
-    pub quiet: bool,
-    /// How the member is reached.
-    pub reach: Reach,
-    /// The transport that carries the member's traffic.
-    pub transport: crate::transport::Lane,
-}
-
-/// Live peer roster: every known peer (active + quiet) sorted
-/// most-recently-seen first, plus `count == peers.len() + 1` (the
-/// `+1` is self — same definition as the statusline `peer_count`).
-#[derive(Debug, Clone, Serialize)]
-#[non_exhaustive]
-pub struct RosterSnapshot {
-    /// The members of the roster.
-    pub peers: Vec<RosterEntry>,
-    /// How many members there are.
-    pub count: usize,
-}
-
-/// What a linked peer's selected data path is, as last observed. A link
-/// starts on the relay and migrates to a direct path once iroh punches one,
-/// so a value taken at `NeighborUp` is a first reading, refreshed by the
-/// census.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DirectState {
-    /// A probe (or a `WebRTC` negotiation) is in flight; the peer is held off
-    /// the overlay until it reports.
-    Pending,
-    /// A hole-punched IP path or a custom transport (`WebRTC`, multihop).
-    Direct,
-    /// The relay is the only active path.
-    RelayOnly,
-}
-
-impl DirectState {
-    /// From a `conn_path` reading; `None` when the reading proves nothing.
-    /// `Mixed` is such a reading: iroh keeps the relay path open beside a
-    /// punched one, and `conn_path` cannot tell which is selected, so a mixed
-    /// link is neither proven direct nor known relay-only.
-    pub(crate) fn from_summary(summary: crate::gossip::PathSummary) -> Option<Self> {
-        use crate::gossip::PathSummary;
-        match summary {
-            PathSummary::Direct => Some(Self::Direct),
-            PathSummary::Relay => Some(Self::RelayOnly),
-            PathSummary::Mixed | PathSummary::Unknown => None,
-        }
-    }
-}
-
-/// What a member's `PeerInfo` says about the rendezvous, and whether we believe the sender. One
-/// struct for the pair, because both are a `bool` and a swap compiles and flips the answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RivalFlag {
-    /// The signer proved the endpoint it sent from.
-    pub(crate) proven: bool,
-    /// The `PeerInfo` carries the beacon flag: the member holds the rendezvous.
-    pub(crate) held: bool,
-}
-
-/// Link counts by [`DirectState`], for the census line.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DirectCounts {
-    pub(crate) direct: usize,
-    pub(crate) relay_only: usize,
-    pub(crate) pending: usize,
-}
 
 /// All mutable state owned by the event loop.
 ///
