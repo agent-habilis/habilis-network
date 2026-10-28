@@ -16,14 +16,17 @@ use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::{Closure, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    RtcConfiguration, RtcDataChannel, RtcDataChannelEvent, RtcIceConnectionState,
-    RtcIceGatheringState, RtcPeerConnection, RtcPeerConnectionState, RtcSdpType,
-    RtcSessionDescriptionInit,
+    RtcDataChannel, RtcDataChannelEvent, RtcIceConnectionState, RtcIceGatheringState,
+    RtcPeerConnection, RtcPeerConnectionState, RtcSdpType, RtcSessionDescriptionInit,
 };
 
-use crate::{DATA_CHANNEL_LABEL, SignalEnvelope, accept_ice_uri};
+use crate::{DATA_CHANNEL_LABEL, SignalEnvelope};
 
-use super::transport::BrowserHubTransport;
+use super::ice_servers::IceServers;
+use super::open_peer_connection::OpenPeerConnection;
+use super::pending_answer::PendingAnswer;
+use super::pending_offer::PendingOffer;
+use super::pre_attach_backlog::PreAttachBacklog;
 use iroh_base::EndpointId;
 
 /// How long to wait for the data channel after the answer is applied.
@@ -31,7 +34,7 @@ const CHANNEL_OPEN_DEADLINE_MS: f64 = 60_000.0;
 /// The same deadline for `sleep_ms`, which takes the browser's own `i32`
 /// milliseconds. Written out rather than cast so the two cannot drift and no
 /// truncation is implied.
-const CHANNEL_OPEN_DEADLINE_MS_I32: i32 = 60_000;
+pub(super) const CHANNEL_OPEN_DEADLINE_MS_I32: i32 = 60_000;
 /// How long to let gathering run before settling for the candidates in hand.
 /// This is the ceiling for the no-candidate case only: with a usable set in
 /// hand, [`wait_ice_complete`] exits after [`ICE_QUIET_MS`] instead. Chromium
@@ -46,67 +49,6 @@ const ICE_GATHERING_DEADLINE_MS: f64 = 10_000.0;
 const ICE_QUIET_MS: f64 = 400.0;
 const POLL_MS: i32 = 50;
 
-/// One `RTCIceServer` entry.
-///
-/// No `username`/`credential`: those exist only for TURN, which this crate
-/// refuses (see [`crate::accept_ice_uri`]). Dropping the fields means a
-/// credentialed server cannot be expressed, let alone configured.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct IceServer {
-    /// The STUN and TURN URLs of the server.
-    pub urls: Vec<String>,
-}
-
-/// ICE servers for the browser's own agent.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct IceServers(pub Vec<IceServer>);
-
-impl Default for IceServers {
-    fn default() -> Self {
-        // See [`DEFAULT_STUN_HOSTS`](crate::DEFAULT_STUN_HOSTS) for why these
-        // two and no others; the browser wants each as a `stun:` URI.
-        Self(vec![IceServer {
-            urls: crate::DEFAULT_STUN_HOSTS
-                .iter()
-                .map(|host| format!("stun:{host}"))
-                .collect(),
-        }])
-    }
-}
-
-impl IceServers {
-    /// No STUN or TURN server, so only host addresses are used.
-    #[must_use]
-    pub fn host_only() -> Self {
-        Self(Vec::new())
-    }
-
-    fn to_configuration(&self) -> RtcConfiguration {
-        let config = RtcConfiguration::new();
-        let servers = js_sys::Array::new();
-        for server in &self.0 {
-            let entry = js_sys::Object::new();
-            let urls = js_sys::Array::new();
-            // The enforcement point: anything `accept_ice_uri` refuses never
-            // reaches the browser. TURN cannot be configured here even by
-            // mistake, and a query string Safari would throw on is stripped
-            // before it can take down the whole peer connection.
-            for url in server.urls.iter().filter_map(|url| accept_ice_uri(url)) {
-                urls.push(&JsValue::from_str(&url));
-            }
-            if urls.length() == 0 {
-                continue;
-            }
-            let _ = js_sys::Reflect::set(&entry, &JsValue::from_str("urls"), &urls);
-            servers.push(&entry);
-        }
-        config.set_ice_servers(&servers);
-        config
-    }
-}
-
 /// Build an `RTCPeerConnection`, degrading rather than failing when the browser
 /// refuses a server entry.
 ///
@@ -118,7 +60,7 @@ impl IceServers {
 /// Also reports whether the connection ended up with STUN servers, because
 /// the gathering wait must not hold out for a srflx candidate that can never
 /// arrive — neither on the `host_only()` config nor on this degraded retry.
-fn new_peer_connection(ice: &IceServers) -> Result<(RtcPeerConnection, bool), JsValue> {
+fn create_peer_connection(ice: &IceServers) -> Result<(RtcPeerConnection, bool), JsValue> {
     match RtcPeerConnection::new_with_configuration(&ice.to_configuration()) {
         Ok(peer_connection) => Ok((peer_connection, !ice.0.is_empty())),
         Err(error) => {
@@ -133,151 +75,6 @@ fn new_peer_connection(ice: &IceServers) -> Result<(RtcPeerConnection, bool), Js
     }
 }
 
-/// A negotiated browser session attached into a [`BrowserHubTransport`].
-#[non_exhaustive]
-pub struct BrowserSession {
-    /// The endpoint id of the peer.
-    pub remote: EndpointId,
-}
-
-impl std::fmt::Debug for BrowserSession {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("BrowserSession")
-            .field("remote", &self.remote)
-            .finish()
-    }
-}
-
-/// An `RTCPeerConnection` that closes itself unless it is released.
-///
-/// Every early return on the way to a session used to drop an open peer
-/// connection without closing it, leaving a live ICE agent — and, when the
-/// public TURN fallback is in play, a live TURN allocation — for as long as the
-/// tab lives. Failures here are routine by design (ICE fails, a peer vanishes
-/// mid-handshake, the offerer never opens its channel), so "routine" was
-/// leaking.
-///
-/// The newtype goes on the *field* rather than the outer struct because `Drop`
-/// and destructuring `let Self { .. } = self` cannot coexist.
-struct OpenPeerConnection {
-    inner: RtcPeerConnection,
-    armed: bool,
-}
-
-impl OpenPeerConnection {
-    fn new(inner: RtcPeerConnection) -> Self {
-        Self { inner, armed: true }
-    }
-
-    /// Hand the connection to whoever owns its lifetime from here — in
-    /// practice the hub, whose session keepalive closes it on drop.
-    fn release(mut self) -> RtcPeerConnection {
-        self.armed = false;
-        self.inner.clone()
-    }
-}
-
-impl std::ops::Deref for OpenPeerConnection {
-    type Target = RtcPeerConnection;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl Drop for OpenPeerConnection {
-    fn drop(&mut self) {
-        if self.armed {
-            self.inner.close();
-        }
-    }
-}
-
-impl std::fmt::Debug for OpenPeerConnection {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("OpenPeerConnection")
-            .field("armed", &self.armed)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Offerer state between producing the offer and applying the answer.
-pub struct PendingOffer {
-    peer_connection: OpenPeerConnection,
-    data_channel: RtcDataChannel,
-    callbacks: Vec<JsValue>,
-}
-
-impl std::fmt::Debug for PendingOffer {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PendingOffer")
-            .finish_non_exhaustive()
-    }
-}
-
-/// Answerer state between sending the answer and the channel opening.
-pub struct PendingAnswer {
-    peer_connection: OpenPeerConnection,
-    /// Filled by `ondatachannel` when the remote opens the channel.
-    channel_rx: oneshot::Receiver<RtcDataChannel>,
-    /// Datagrams that arrived before the hub's handler was installed, in
-    /// arrival order — see the buffering handler in [`answer`].
-    backlog: std::rc::Rc<std::cell::RefCell<PreAttachBacklog>>,
-    callbacks: Vec<JsValue>,
-}
-
-/// The answerer's pre-attach buffer — see the buffering handler in [`answer`].
-///
-/// Bounded at [`IN_QUEUE`](crate::IN_QUEUE), the inbound queue's
-/// own capacity: at handoff the whole buffer is `try_send`-delivered into a
-/// queue of exactly that many slots, so anything held past it could never be
-/// delivered — an unbounded buffer only grew browser memory for as long as
-/// the signal round dawdled, and the excess was dropped at attach anyway.
-/// When full, new datagrams are refused rather than old ones evicted: the
-/// QUIC Initial and handshake flights arrive first, and losing those costs
-/// the connection where losing a later datagram costs a retransmit.
-pub(crate) struct PreAttachBacklog {
-    datagrams: Vec<Vec<u8>>,
-    dropped: usize,
-}
-
-impl PreAttachBacklog {
-    pub(crate) fn new() -> Self {
-        Self {
-            datagrams: Vec::new(),
-            dropped: 0,
-        }
-    }
-
-    pub(crate) fn push(&mut self, bytes: Vec<u8>) {
-        if self.datagrams.len() >= crate::IN_QUEUE {
-            self.dropped += 1;
-            return;
-        }
-        self.datagrams.push(bytes);
-    }
-
-    /// Take everything held, plus how many datagrams were refused over the
-    /// cap. The buffer is empty afterwards, so it cannot deliver twice.
-    pub(crate) fn take(&mut self) -> (Vec<Vec<u8>>, usize) {
-        (
-            std::mem::take(&mut self.datagrams),
-            std::mem::take(&mut self.dropped),
-        )
-    }
-}
-
-impl std::fmt::Debug for PendingAnswer {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PendingAnswer")
-            .finish_non_exhaustive()
-    }
-}
-
 /// Start a negotiation as the offerer.
 ///
 /// # Errors
@@ -287,7 +84,7 @@ pub async fn offer(
     local: EndpointId,
     ice: &IceServers,
 ) -> Result<(PendingOffer, SignalEnvelope), JsValue> {
-    let (peer_connection, expects_srflx) = new_peer_connection(ice)?;
+    let (peer_connection, expects_srflx) = create_peer_connection(ice)?;
     let peer_connection = OpenPeerConnection::new(peer_connection);
     // Unreliable + unordered: the channel carries QUIC datagrams, and QUIC
     // already owns loss recovery and congestion control. Reliable ordered
@@ -328,55 +125,6 @@ pub async fn offer(
     ))
 }
 
-impl PendingOffer {
-    /// Apply the remote answer, wait for the channel, attach into `hub`.
-    ///
-    /// # Errors
-    /// A non-answer envelope, a bad SDP, the channel never opening, or attach.
-    pub async fn complete(
-        self,
-        hub: &BrowserHubTransport,
-        answer: &SignalEnvelope,
-    ) -> Result<BrowserSession, JsValue> {
-        let Self {
-            peer_connection,
-            data_channel,
-            callbacks,
-        } = self;
-
-        let remote = answer
-            .claimed_endpoint()
-            .map_err(|error| any_err("answer endpoint id", error))?;
-        let SignalEnvelope::Answer { sdp, .. } = answer else {
-            return Err(JsValue::from_str("expected an answer envelope"));
-        };
-
-        let answer_init = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
-        answer_init.set_sdp(sdp);
-        JsFuture::from(peer_connection.set_remote_description(&answer_init))
-            .await
-            .map_err(|error| js_err("setRemoteDescription", &error))?;
-
-        // Attach before Open so inbound QUIC Initials are not lost between
-        // the channel opening and the onmessage handler being installed.
-        //
-        // The guard is what makes that early attach safe. If the channel never
-        // opens — ICE failed, or the deadline passed while it was still
-        // Connecting — dropping the guard on the way out removes the session
-        // and closes the handles. Without it the entry stayed forever, because
-        // a channel that never opened never fires `onclose` either: it counted
-        // toward the direct-peer total, answered `has_session` so the pair was
-        // never retried, and told QUIC it was a valid send address.
-        let pc = peer_connection.release();
-        let guard = hub
-            .attach(remote, pc.clone(), data_channel.clone(), callbacks)
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
-        wait_channel_open(&data_channel, &pc).await?;
-        guard.commit();
-        Ok(BrowserSession { remote })
-    }
-}
-
 /// Answer a remote offer.
 ///
 /// # Errors
@@ -391,7 +139,7 @@ pub async fn answer(
         return Err(JsValue::from_str("expected an offer envelope"));
     };
 
-    let (peer_connection, expects_srflx) = new_peer_connection(ice)?;
+    let (peer_connection, expects_srflx) = create_peer_connection(ice)?;
     let peer_connection = OpenPeerConnection::new(peer_connection);
 
     let (channel_tx, channel_rx) = oneshot::channel::<RtcDataChannel>();
@@ -472,75 +220,6 @@ pub async fn answer(
     ))
 }
 
-impl PendingAnswer {
-    /// Wait for the offerer's data channel, then attach into `hub`.
-    ///
-    /// `remote` is the authenticated peer id (prefer `connection.remote_id()`
-    /// over the envelope claim).
-    ///
-    /// # Errors
-    /// The channel never arrives or attach fails.
-    pub async fn complete(
-        self,
-        hub: &BrowserHubTransport,
-        remote: EndpointId,
-    ) -> Result<BrowserSession, JsValue> {
-        let Self {
-            peer_connection,
-            channel_rx,
-            backlog,
-            callbacks,
-        } = self;
-
-        let data_channel = match futures::future::select(
-            channel_rx,
-            Box::pin(async {
-                sleep_ms(CHANNEL_OPEN_DEADLINE_MS_I32).await;
-            }),
-        )
-        .await
-        {
-            futures::future::Either::Left((Ok(channel), _)) => channel,
-            futures::future::Either::Left((Err(_), _)) => {
-                return Err(JsValue::from_str("data channel sender dropped"));
-            }
-            futures::future::Either::Right(((), _)) => {
-                return Err(JsValue::from_str("timed out waiting for ondatachannel"));
-            }
-        };
-
-        // Attach before Open — same race as the offerer path: the peer may
-        // dial the mount ALPN the instant its channel is open. Same guard, for
-        // the same reason; see `PendingOffer::complete`. `attach` installs the
-        // hub's own `onmessage`, replacing the buffering one.
-        let pc = peer_connection.release();
-        let guard = hub
-            .attach(remote, pc.clone(), data_channel.clone(), callbacks)
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
-        // Hand over what arrived before that handler existed, in arrival order
-        // and before anything the hub receives itself — the channel is
-        // unordered, so this is not a sequencing promise, only a refusal to
-        // reorder what we already hold. Taken (not cloned) so the buffer cannot
-        // be delivered twice if this is ever called again.
-        let (early, over_cap) = backlog.borrow_mut().take();
-        if over_cap > 0 {
-            web_sys::console::warn_1(&JsValue::from_str(&format!(
-                "[habilis-network webrtc] pre-attach backlog refused {over_cap} datagram(s) over its cap for {remote}"
-            )));
-        }
-        if !early.is_empty() {
-            web_sys::console::log_1(&JsValue::from_str(&format!(
-                "[habilis-network webrtc] delivered {} datagram(s) buffered before attach for {remote}",
-                early.len()
-            )));
-            hub.inject_inbound(remote, early);
-        }
-        wait_channel_open(&data_channel, &pc).await?;
-        guard.commit();
-        Ok(BrowserSession { remote })
-    }
-}
-
 /// Log local/remote SDP snippets when a dial fails after envelopes were swapped.
 pub fn log_signal_sdps(role: &str, local: &SignalEnvelope, remote: &SignalEnvelope) {
     let local_sdp = envelope_sdp(local).unwrap_or("");
@@ -568,11 +247,11 @@ fn envelope_sdp(envelope: &SignalEnvelope) -> Option<&str> {
     }
 }
 
-fn js_err(context: &str, error: &JsValue) -> JsValue {
+pub(super) fn js_err(context: &str, error: &JsValue) -> JsValue {
     JsValue::from_str(&format!("{context}: {error:?}"))
 }
 
-fn any_err(context: &str, error: impl std::fmt::Display) -> JsValue {
+pub(super) fn any_err(context: &str, error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&format!("{context}: {error}"))
 }
 
@@ -725,7 +404,7 @@ fn channel_state_label(state: web_sys::RtcDataChannelState) -> &'static str {
     }
 }
 
-async fn wait_channel_open(
+pub(super) async fn wait_channel_open(
     data_channel: &RtcDataChannel,
     peer_connection: &RtcPeerConnection,
 ) -> Result<(), JsValue> {
