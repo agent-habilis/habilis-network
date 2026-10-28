@@ -231,6 +231,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - Long or complex iterator chains: no lint measures length. `.for_each(` has 0 calls (2026-10-27). The reviewer asks for a `for` loop or a named step when a chain stops being short. (P15)
 - Macros (M3): no gate. The reviewer checks each new `macro_rules!`, and `AGENTS.md` allows only `string_newtype!` for a newtype. Eight `macro_rules!` sites on 2026-10-28, all in `git grep "macro_rules!"`: `digest_newtype` (chunks), `for_each_case` and two `run` (chunks conformance), `warn_refusal` (doc), `string_newtype` and `check` (protocol), `cells` (network send ladder matrix test).
 - Macro order for an API (M1): no gate. The one proc macro, `habilis-network-test-tracing-macros`, is a test attribute (`use habilis_network_test_tracing::test;`) and not a public API. Regular Rust and `macro_rules!` come first for every API. Checked 2026-10-28.
+- Cost of a macro (M2): no gate. The reviewer weighs IDE and search support against the code it saves. The proc macro sits on the test path only, so its cost stays in test modules. Checked 2026-10-28.
 
 ### Rules of the guide that do not apply
 
