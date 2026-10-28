@@ -595,7 +595,7 @@ async fn apply(cut: Cut, alice: &Member, bob: &Member, carol: &Member) {
         (
             from.membership.node.underlay_id(),
             to.membership.node.underlay_id(),
-            to.membership.node.underlay_ports().to_vec(),
+            to.membership.node.underlay_ports().collect::<Vec<_>>(),
         )
     });
     match cut {

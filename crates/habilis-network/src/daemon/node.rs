@@ -110,10 +110,12 @@ impl<A: NodeDriver + 'static> Node<A> {
             feature = "host",
             not(target_arch = "wasm32")
         ))]
-        let underlay = cfg
-            .multihop
-            .as_ref()
-            .map(|handle| (handle.underlay_id().get(), handle.underlay_ports()));
+        let underlay = cfg.multihop.as_ref().map(|handle| {
+            (
+                handle.underlay_id().get(),
+                handle.underlay_ports().collect::<Vec<_>>(),
+            )
+        });
         #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
         let crash_handles = (cfg.webrtc_handle(), cfg.endpoint.clone());
         let task = n0_future::task::spawn(crate::daemon::run(cfg, app, Some(req_rx), None));

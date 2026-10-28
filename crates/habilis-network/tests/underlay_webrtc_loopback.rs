@@ -138,7 +138,7 @@ impl Member {
     }
 
     fn underlay_ports(&self) -> Vec<u16> {
-        self.membership.node.underlay_ports().to_vec()
+        self.membership.node.underlay_ports().collect::<Vec<_>>()
     }
 
     /// Whether this member's multihop topology has a route to `peer` now.
@@ -318,7 +318,7 @@ async fn cut_application_ip_from_alice(alice: &Member, bob: &Member, carol: &Mem
 /// IP: alice to bob, and with `with_carol` alice to carol too, on the underlay of
 /// each member. Carol and bob keep it to each other.
 fn cut_underlay_ip_from_alice(alice: &Member, bob: &Member, carol: &Member, with_carol: bool) {
-    let mut from_alice = bob.underlay_ports();
+    let mut from_alice = bob.underlay_ports().collect::<Vec<_>>();
     if with_carol {
         from_alice.extend(carol.underlay_ports());
         habilis_network_iroh_webrtc_transport::block_ip_to(

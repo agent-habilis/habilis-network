@@ -473,14 +473,12 @@ impl MultihopHandle {
     /// The ports this node's underlay endpoint is bound on, for a test that
     /// blocks IP between underlays. Not in a browser, which binds no socket.
     #[cfg(not(target_arch = "wasm32"))]
-    #[must_use]
-    pub fn underlay_ports(&self) -> Vec<u16> {
+    pub fn underlay_ports(&self) -> impl Iterator<Item = u16> {
         self.inner
             .underlay
             .bound_sockets()
-            .iter()
-            .map(std::net::SocketAddr::port)
-            .collect()
+            .into_iter()
+            .map(|socket| socket.port())
     }
 
     /// The underlay address that `origin` advertised in its newest link-vector,

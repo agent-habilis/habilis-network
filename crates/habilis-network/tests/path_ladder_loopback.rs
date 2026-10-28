@@ -351,7 +351,7 @@ async fn cut_ip_between(first: &Member, second: &Member) {
         let underlay = from.membership.node.underlay_id().expect("multihop is on");
         habilis_network_iroh_webrtc_transport::block_ip_to(
             underlay,
-            to.membership.node.underlay_ports().iter().copied(),
+            to.membership.node.underlay_ports(),
         );
     }
 }
