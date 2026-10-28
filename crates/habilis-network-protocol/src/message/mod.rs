@@ -21,8 +21,6 @@ use super::mesh::MeshId;
 #[cfg(any(test, feature = "test-fixtures"))]
 use habilis_network_util::clock::UnixSecs;
 
-use super::nickname::Nickname;
-
 #[cfg(any(test, feature = "test-fixtures"))]
 mod chain_ctx;
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -40,11 +38,15 @@ pub use message::Message;
 mod message_kind;
 pub use message_kind::MessageKind;
 mod channel;
+#[cfg(test)]
+use super::nickname::Nickname;
 pub use channel::Channel;
 mod app_tag;
 pub use app_tag::AppTag;
 mod corr_id;
 pub use corr_id::CorrId;
+mod sole_addressee;
+pub use sole_addressee::sole_addressee;
 mod resend;
 pub use resend::RESEND_TRAILER_LEN;
 use resend::{split_resend_trailer, wire_with_resend_nonce};
@@ -136,32 +138,6 @@ pub(crate) use habilis_network_util::consts::MAX_MESSAGE_SIZE;
 /// - `3.0` — the application-payload migration.
 /// - `2.0` — RFC 6902 → RFC 7386 shared state.
 pub(crate) const VERSION: &str = "12.0";
-
-/// The single addressee of a directed frame — the routing mirror of
-/// `gossip::recv::addressed_to_us`. `Some(nick)` for a frame that targets
-/// exactly one peer (`Pong`, an application's directed push legs, its RPC
-/// request/response); `None` for a broadcast or infrastructure kind. The
-/// `habilis-network`'s transport layer send router uses this to decide point-to-point vs gossip.
-///
-/// Deliberately **separate** from `addressed_to_us`: that answers a *surfacing*
-/// question and treats `Pong` as broadcast-visible, whereas routing wants the
-/// `Pong`'s addressee too. Merging them would change the surface/relay filter.
-#[must_use]
-pub fn sole_addressee(kind: &MessageKind) -> Option<&Nickname> {
-    match kind {
-        MessageKind::Pong { to, .. } => Some(to),
-        MessageKind::App { to, .. } => to.as_ref(),
-        MessageKind::Presence { .. }
-        | MessageKind::PeerInfo
-        | MessageKind::Digest
-        | MessageKind::Ping
-        | MessageKind::State
-        | MessageKind::StateDigest
-        | MessageKind::Meta
-        | MessageKind::MetaDigest
-        | MessageKind::LinkState => None,
-    }
-}
 
 pub(super) fn default_ext() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
