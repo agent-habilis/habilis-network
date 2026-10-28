@@ -1,3 +1,8 @@
+mod idle_counters;
+mod mesh_secrets;
+mod ping_round;
+mod state_init;
+
 mod direct_counts;
 mod direct_state;
 #[cfg(feature = "multihop")]
@@ -15,8 +20,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use n0_future::time::Instant as TokioInstant;
-
 use iroh::{EndpointAddr, EndpointId};
 
 use super::message_log::MessageLog;
@@ -26,8 +29,7 @@ use crate::protocol::identity::Identity;
 use crate::protocol::mesh::Mesh;
 use crate::protocol::message::{Authored, Verified, WireFrame};
 use crate::protocol::{
-    AuthorKey, ContentHash, DedupKey, Message, MessageId, Nickname, ShardGroup, SymmetricKey,
-    UnixSecs,
+    AuthorKey, ContentHash, DedupKey, Nickname, ShardGroup, SymmetricKey, UnixSecs,
 };
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
@@ -50,6 +52,11 @@ use crate::transport::{graft_backoff, probe, proven_endpoints};
 use crate::util::tuning;
 use iroh::address_lookup::memory;
 use tokio::sync::{mpsc, oneshot};
+
+pub(crate) use idle_counters::IdleCounters;
+pub(crate) use mesh_secrets::MeshSecrets;
+pub(crate) use ping_round::PingRound;
+pub(crate) use state_init::StateInit;
 
 pub(crate) use direct_counts::DirectCounts;
 pub(crate) use direct_state::DirectState;
@@ -640,151 +647,6 @@ pub struct EventLoopState {
     pub(crate) broadcast_key: Option<SymmetricKey>,
     /// Where the event loop's wakeups went since the last census.
     pub(crate) idle: IdleCounters,
-}
-
-/// Wakeup attribution for the idle-cost work: one counter per `select!` arm,
-/// reported as a delta on each `mesh census` line and reset there.
-///
-/// Plain `u64`, not atomics — the event loop owns `&mut EventLoopState`, so a
-/// bump is an increment with no synchronization. That matters more than it
-/// looks: the arms being measured fire up to 150×/min, and the cheapest thing
-/// that could observe them (a `debug!` per tick) costs a write per wakeup and
-/// would price its own instrumentation into the measurement.
-///
-/// Counting arms rather than timers is deliberate. It splits timer work from
-/// inbound traffic, which is the split that says whether an idle daemon is
-/// paying for its own housekeeping or for the peers talking to it.
-#[derive(Clone, Copy, Default, Debug)]
-pub(crate) struct IdleCounters {
-    /// Every loop iteration, whichever arm won. The denominator for the rest.
-    pub wakeups: u64,
-    pub prune: u64,
-    pub alive: u64,
-    pub sweep: u64,
-    pub heal: u64,
-    pub reclaim: u64,
-    pub antientropy: u64,
-    pub state_refresh: u64,
-    pub linkstate: u64,
-    /// Arms driven by something other than a maintenance timer — inbound
-    /// gossip/unicast, IPC, HTTP, deadlines. Summed rather than split per arm:
-    /// on an idle daemon this should read 0, and a non-zero value means the
-    /// run was not idle, which is the only bit worth reporting.
-    pub external: u64,
-    /// Signed frames put on the wire by a maintenance tick. The direct cost
-    /// driver behind `user` CPU: each one is an Ed25519 signature plus a
-    /// serialization.
-    pub broadcasts: u64,
-    /// Messages a digest answer put in the resend outbox.
-    pub resent: u64,
-    /// Messages a digest answer could not put there because it was full: the
-    /// next digest asks for them again.
-    pub resend_dropped: u64,
-}
-
-impl IdleCounters {
-    /// Read the counters and zero them, so each census line carries the
-    /// interval's own work rather than a running total a reader has to
-    /// difference (and that a rotated log would corrupt).
-    pub(crate) fn take(&mut self) -> Self {
-        std::mem::take(self)
-    }
-}
-
-/// An in-flight RTT round. [`start_ping_round`](crate::ops::start_ping_round), which a driver
-/// calls, arms it and sends the first probe at `t1`; the event loop sends the second, a fresh
-/// ping, at the middle of the window, so that a probe lost on the way (the peer was not linked
-/// yet, a dropped frame) is made up for. A pong names the probe it answers, so its RTT is read
-/// from that probe's send, and a pong that names no probe of this round is dropped. A peer's
-/// first pong is the one kept. The price is one more broadcast per round and one more pong per
-/// peer. The round is emitted and cleared at `deadline`.
-#[derive(Debug)]
-pub(crate) struct PingRound {
-    pub(crate) t1: TokioInstant,
-    pub(crate) deadline: TokioInstant,
-    /// The probes of the round, by message id, with the instant each left.
-    pub(crate) probes: HashMap<MessageId, TokioInstant>,
-    /// The RTT of the first pong of each peer.
-    pub(crate) pongs: HashMap<Nickname, Duration>,
-    /// When set (the in-process `ping` request), the finalized RTT rows are
-    /// delivered here instead of only emitted as a `ping_report` event — the
-    /// in-process driver has no event stream to read the report from. `None`
-    /// for the CLI/IPC path, which consumes the event.
-    pub(crate) response: Option<oneshot::Sender<Vec<(Nickname, u64)>>>,
-}
-
-impl PingRound {
-    /// A round whose first probe is `first`, sent at `t1`.
-    pub(crate) fn new(
-        first: &Message,
-        t1: TokioInstant,
-        deadline: TokioInstant,
-        response: Option<oneshot::Sender<Vec<(Nickname, u64)>>>,
-    ) -> Self {
-        Self {
-            t1,
-            deadline,
-            probes: HashMap::from([(first.id.clone(), t1)]),
-            pongs: HashMap::new(),
-            response,
-        }
-    }
-
-    /// When the second probe is due: the middle of the window, once.
-    pub(crate) fn second_probe_at(&self) -> Option<TokioInstant> {
-        (self.probes.len() < 2).then(|| self.t1 + self.deadline.duration_since(self.t1) / 2)
-    }
-
-    /// Record the pong of `peer` that answers `probe`, arriving at `arrival`: the RTT is read from
-    /// that probe's send, and the first pong of a peer is kept. `false` when `probe` is no probe
-    /// of this round.
-    pub(crate) fn record_pong(
-        &mut self,
-        peer: Nickname,
-        probe: &MessageId,
-        arrival: TokioInstant,
-    ) -> bool {
-        let Some(sent) = self.probes.get(probe) else {
-            return false;
-        };
-        let rtt = arrival.duration_since(*sent);
-        self.pongs.entry(peer).or_insert(rtt);
-        true
-    }
-}
-
-/// The mesh's secret material, grouped so [`EventLoopState::new`] can take
-/// both by value (the stretched key must be owned here so it drops/zeroizes
-/// once the per-channel keys are derived) without blowing its argument budget.
-#[derive(Default)]
-pub(crate) struct MeshSecrets {
-    pub password: Option<crypto::Password>,
-    pub key: Option<SymmetricKey>,
-}
-
-/// Everything [`EventLoopState::new`] needs beyond the clock, grouped for the
-/// same reason [`MeshSecrets`] is: the argument budget. `now` stays separate
-/// because tests pin it to a deterministic instant.
-pub(crate) struct StateInit {
-    #[cfg(feature = "host")]
-    pub(crate) state_file: Option<StateFile>,
-    pub(crate) identity: Arc<Identity>,
-    pub secrets: MeshSecrets,
-    /// The `meta` channel's per-peer write gate; `None` leaves it free-form.
-    pub per_peer_gate: Option<crate::doc::SelfWriteGate>,
-    /// The negotiation-slot table the Router's signal acceptor was built with.
-    ///
-    /// Taken at construction rather than assigned afterwards, because the cap
-    /// only means anything if the dialing and answering sides count against the
-    /// *same* table. Defaulting it here and overwriting it later left a second
-    /// ceiling briefly existing and enforcing nothing.
-    pub(crate) webrtc_admission: crate::transport::SignalAdmission,
-    /// The address book of the member endpoint, made by `lookup::address_book` where the
-    /// endpoint was built.
-    pub(crate) address_book: memory::MemoryLookup,
-    /// How far ICE may reach, derived from the mesh's own lookups so it cannot
-    /// disagree with them.
-    pub(crate) webrtc_ice: crate::transport::IceProfile,
 }
 
 impl EventLoopState {
@@ -2141,14 +2003,14 @@ const _: fn(&EventLoopState) -> Option<&habilis_network_iroh_multihop_transport:
 mod tests {
     use super::{
         DirectCounts, DirectState, Duration, EndpointId, EventLoopState, Instant,
-        KNOWN_ENDPOINTS_CAP, Message, PingRound, QUIET_CAP, RELINK_COOLDOWN, Reach, RivalFlag,
-        TokioInstant,
+        KNOWN_ENDPOINTS_CAP, PingRound, QUIET_CAP, RELINK_COOLDOWN, Reach, RivalFlag,
     };
     use crate::protocol::{
-        AppFrameParams, AuthorKey, ContentHash, MeshId, MessageBody, MessageId, UnixSecs,
+        AppFrameParams, AuthorKey, ContentHash, MeshId, Message, MessageBody, MessageId, UnixSecs,
     };
     use crate::testing::{author_of, endpoint_id, fresh_state, fresh_state_with_book, nick};
     use habilis_network_test_tracing::test;
+    use n0_future::time::Instant as TokioInstant;
 
     use crate::protocol::message;
     use crate::transport::probe::PathKind;
