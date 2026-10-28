@@ -178,8 +178,8 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
     }
 
     /// Take everything that has happened since the last call.
-    pub fn drain_events(&mut self) -> Vec<Event<T::Address>> {
-        std::mem::take(&mut self.events)
+    pub fn drain_events(&mut self) -> impl Iterator<Item = Event<T::Address>> {
+        std::mem::take(&mut self.events).into_iter()
     }
 
     /// Drain the transport, apply what arrived, and send what is due.

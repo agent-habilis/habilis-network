@@ -251,7 +251,7 @@ fn two_peers_play_a_match_over_a_loopback_mesh() {
                     player
                         .lobby
                         .as_ref()
-                        .is_some_and(|lobby| lobby.present().len() >= 2)
+                        .is_some_and(|lobby| lobby.present().count() >= 2)
                 })
             })
             .await;

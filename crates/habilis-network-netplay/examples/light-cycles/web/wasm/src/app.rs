@@ -204,7 +204,10 @@ impl Game {
                 .local_pubkey()
                 .map(|key| key.to_string())
                 .unwrap_or_default(),
-            present: self.lobby.as_ref().map_or(1, |lobby| lobby.present().len()),
+            present: self
+                .lobby
+                .as_ref()
+                .map_or(1, |lobby| lobby.present().count()),
             waiting: self.session.is_none(),
             desynced: self.desynced,
             blocked: self.blocked.clone(),
@@ -361,7 +364,7 @@ impl Game {
             None => self.session.is_none(),
             Some(since) => self.ticks.saturating_sub(since) >= REMATCH_GRACE_TICKS,
         };
-        let present = lobby.present();
+        let present = lobby.present().collect::<Vec<_>>();
         let lowest = present
             .first()
             .is_some_and(|(pubkey, _)| self.transport.local_pubkey() == Some(*pubkey));

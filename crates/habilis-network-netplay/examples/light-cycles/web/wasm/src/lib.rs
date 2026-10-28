@@ -275,7 +275,7 @@ impl LightCyclesPeer {
     /// # Errors
     /// The event list fails to serialize — not expected in practice.
     pub fn drain_events(&self) -> Result<String, JsValue> {
-        let events = self.game.borrow_mut().drain_events();
+        let events = self.game.borrow_mut().drain_events().collect::<Vec<_>>();
         serde_json::to_string(&events).map_err(to_js_error)
     }
 

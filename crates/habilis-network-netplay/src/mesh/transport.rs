@@ -106,13 +106,13 @@ impl<T: Config> MeshTransport<T> {
 
     /// Take every lobby packet received since the last call, as
     /// `(sender public key, raw JSON)`.
-    #[must_use]
-    pub fn drain_lobby(&self) -> Vec<(AuthorKey, String)> {
+    pub fn drain_lobby(&self) -> impl Iterator<Item = (AuthorKey, String)> {
         self.mailboxes
             .lobby
             .lock()
             .map(|mut lobby| std::mem::take(&mut *lobby))
             .unwrap_or_default()
+            .into_iter()
     }
 
     /// This peer's own public key, once the node's event loop has started.
@@ -140,9 +140,9 @@ impl<T: Config> MeshTransport<T> {
     }
 
     /// Every peer we can address, as `(public key, nickname)`.
-    #[must_use]
-    pub fn known_peers(&self) -> Vec<(AuthorKey, Nickname)> {
-        self.mailboxes
+    pub fn known_peers(&self) -> impl Iterator<Item = (AuthorKey, Nickname)> {
+        let peers: Vec<(AuthorKey, Nickname)> = self
+            .mailboxes
             .directory
             .lock()
             .map(|directory| {
@@ -151,7 +151,8 @@ impl<T: Config> MeshTransport<T> {
                     .map(|(pubkey, nickname)| (*pubkey, nickname.clone()))
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        peers.into_iter()
     }
 }
 
