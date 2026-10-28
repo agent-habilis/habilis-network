@@ -215,6 +215,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - Returning `Vec<T>` from a public function: the reviewer checks it. A scan of 2026-10-27 (`git grep -nE "pub (async )?fn [a-z_0-9]+.*-> Vec<"`) finds 31 such functions. Most return an owned collection that the caller keeps (`heads`, `snapshot`, `to_bytes`, `canonical_bytes`), which the guide allows.
 - `as_`, `to_`, `into_` names: `clippy::wrong_self_convention` is on by default and nothing in the repository silences it (`git grep wrong_self_convention` finds no line on 2026-10-27).
 - `&String` in a trait impl: a method of a trait takes `&T::Address`, so an impl with `type Address = String` must take `&String`. `ptr_arg` does not fire on trait impls, and `cargo clippy -p habilis-network-netplay --tests -- -D warnings` is clean. The one such site is `Wire::send_to` in `habilis-network-netplay/tests/peers.rs`.
+- `.clone()`: 1,094 calls (`git grep`, 2026-10-27). No lint tells a needed copy from a lazy one: `redundant_clone` is in `nursery`, and `implicit_clone` and `clone_on_copy` catch the easy cases only. The reviewer asks for a borrow where one is clear. (B3)
 
 ### Rules of the guide that do not apply
 
