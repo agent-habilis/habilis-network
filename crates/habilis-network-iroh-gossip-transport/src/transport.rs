@@ -441,7 +441,10 @@ mod tests {
     use iroh::protocol::{AcceptError, ProtocolHandler, Router};
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
 
-    use super::*;
+    use super::{
+        Arc, Bytes, Context, CustomTransport, Delivery, EndpointId, Frame, FrameSink, GossipHandle,
+        INBOUND_CAP, Mutex, Ordering, Poll, RecvInfo, gossip_addr, io, locked,
+    };
     use crate::memory::Hub;
     use crate::{GOSSIP_TRANSPORT_ID, frame};
 

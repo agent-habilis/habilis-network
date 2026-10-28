@@ -52,8 +52,7 @@ mod tests {
     use habilis_network_test_tracing::test;
     use std::time::Duration;
 
-    use super::*;
-
+    use super::{Budget, Instant};
     #[test]
     fn a_budget_admits_one_second_of_burst_and_then_refuses() {
         let t0 = Instant::now();

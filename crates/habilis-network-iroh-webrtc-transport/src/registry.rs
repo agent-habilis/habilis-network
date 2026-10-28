@@ -276,8 +276,7 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use super::*;
-
+    use super::{EndpointId, Registry};
     fn peer(byte: u8) -> EndpointId {
         iroh_base::SecretKey::from_bytes(&[byte; 32]).public()
     }

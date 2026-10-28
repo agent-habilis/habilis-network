@@ -300,8 +300,7 @@ mod tests {
     use habilis_network::runtime::refuse_in_browser;
     use habilis_network_test_tracing::test;
 
-    use super::*;
-
+    use super::{Lookup, MeshConfig, StreamNode, StreamOpts, Transport, TransportOpts};
     // A stream is one direct lane: a list that names `multihop` is refused
     // before anything binds.
     #[test]

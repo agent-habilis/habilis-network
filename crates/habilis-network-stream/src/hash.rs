@@ -288,8 +288,10 @@ mod tests {
     use habilis_network::iroh::{EndpointAddr, SecretKey, TransportAddr};
     use habilis_network_test_tracing::test;
 
-    use super::*;
-
+    use super::{
+        ID_LEN, KIND, LookupOpts, SECRET_LEN, StreamHash, StreamId, StreamSecret, TransportPolicy,
+        VERSION, Zeroizing, base58check,
+    };
     fn sample(transport: TransportPolicy) -> StreamHash {
         let id = SecretKey::from_bytes(&[7; 32]).public();
         StreamHash {

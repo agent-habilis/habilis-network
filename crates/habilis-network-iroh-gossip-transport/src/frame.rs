@@ -144,8 +144,10 @@ mod tests {
     use habilis_network_test_tracing::test;
     use iroh_base::SecretKey;
 
-    use super::*;
-
+    use super::{
+        DecodeError, EncodeError, EndpointId, FRAME_KIND, FRAME_VERSION, Frame, HEADER_LEN,
+        MAX_DATAGRAM_LEN, MAX_FRAME_LEN, decode,
+    };
     fn id(seed: u8) -> EndpointId {
         SecretKey::from_bytes(&[seed; 32]).public()
     }

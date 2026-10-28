@@ -56,7 +56,7 @@ impl Args {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Args, Lookup, Parser, Transport};
     use habilis_network_test_tracing::test;
 
     fn parse(args: &[&str]) -> Args {

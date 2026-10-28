@@ -398,7 +398,11 @@ pub fn split_segments(contents: &[u8], segment_size: Option<usize>) -> impl Iter
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        Addr, GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID, block_ip_to,
+        block_rung, block_rung_to, custom_rung, expected_rung, is_blocked, is_blocked_to,
+        remote_id_of, split_segments,
+    };
     use habilis_network_test_tracing::test;
 
     #[test]
