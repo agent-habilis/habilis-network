@@ -1174,7 +1174,10 @@ fn route_diag(state: &EventLoopState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        AppFrameParams, AppTag, ENVELOPE_RESERVE, ESCAPED_BUDGET, MAX_MESSAGE_SIZE, MAX_MSG,
+        MSG_TAG, MembershipApp, MessageBody, Nickname, mpsc, msg_body, msg_fits,
+    };
     use crate::protocol::{Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
     use crate::runtime::derive_topic_mesh_config;
     use habilis_network_test_tracing::test;

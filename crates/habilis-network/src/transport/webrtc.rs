@@ -128,7 +128,10 @@ pub(crate) mod close_code {
 
     #[cfg(test)]
     mod tests {
-        use super::*;
+        use super::{
+            CAP_REFUSED, EVICTED, GOSSIP_ON_GOSSIP_PATH, GOSSIP_RELAY_REFUSED, IDLE,
+            NOT_A_NEIGHBOR, SIGNAL_ABORTED, SIGNAL_FAILED, UNICAST_RELAY_REFUSED,
+        };
         use habilis_network_test_tracing::test;
         use std::collections::HashSet;
 
@@ -1704,7 +1707,16 @@ mod tests {
     use iroh::protocol::Router;
     use iroh::{RelayMode, SecretKey};
 
-    use super::*;
+    use super::{
+        AcceptError, Connection, Endpoint, EndpointAddr, EndpointError, EndpointId, IceProfile,
+        MAX_DIRECT_PEERS, MAX_ENVELOPE_BYTES, MESH_WEBRTC_SIGNAL_ALPN, MemoryLookup, NUDGE_ALPN,
+        NudgeAcceptor, ProtocolHandler, SignalAdmission, SignalDeadlines, UdpTransport,
+        WebRtcHandle, WebRtcSignalAcceptor, ctx, detach_idle_sessions_at,
+        detach_sessions_under_udp, dial_signal_with, held_back, local_needs_webrtc_lane,
+        needs_webrtc_lane, negotiate_session, nudge, offers_off_tick, pair_needs_lane,
+        proof_is_stale, reads_below_a_session, register_session_addr, rendezvous_dial_target,
+        rendezvous_graftable, retry_sessions, waits_for_the_offer, wants_session,
+    };
     use crate::transport::probe::PathKind;
 
     use crate::daemon::state;

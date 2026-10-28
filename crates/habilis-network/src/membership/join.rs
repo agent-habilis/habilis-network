@@ -369,8 +369,7 @@ mod tests {
     use crate::runtime::derive_topic_mesh_with;
     use habilis_network_test_tracing::test;
 
-    use super::*;
-
+    use super::{Lookup, MeshConfig, Opts, SetupKind, Transport, resolve_kind};
     fn opts() -> Opts {
         Opts::default()
     }
@@ -690,7 +689,7 @@ mod tests {
 
 #[cfg(test)]
 mod resolve_tests {
-    use super::*;
+    use super::{Opts, Resolved, SetupKind, resolve_kind};
     use crate::runtime::TopicParams;
     use habilis_network_test_tracing::test;
 

@@ -325,7 +325,10 @@ impl TopicParams {
 
 #[cfg(test)]
 mod topic_derivation_tests {
-    use super::*;
+    use super::{
+        LookupOpts, MeshConfig, TransportPolicy, derive_topic_mesh, derive_topic_mesh_config,
+        derive_topic_mesh_with,
+    };
     use habilis_network_test_tracing::test;
 
     /// The no-argument form must stay exactly what it always was, because the
@@ -417,7 +420,7 @@ mod topic_derivation_tests {
 
 #[cfg(test)]
 mod join_password_tests {
-    use super::*;
+    use super::{JoinParams, Password, SetupError};
     use crate::protocol::Seed;
     use crate::protocol::mesh::{Mesh, MeshConfig, MeshName};
 

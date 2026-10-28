@@ -124,7 +124,7 @@ mod tests {
     use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
-    use super::*;
+    use super::{Duration, EndpointId, GRAFT_BACKOFF_MAX, GraftBackoff, Instant};
     use crate::testing::endpoint_id;
 
     fn at(start: Instant, secs: u64) -> Instant {

@@ -131,8 +131,7 @@ mod tests {
     use iroh::protocol::Router;
 
     use super::super::UNICAST_ALPN;
-    use super::*;
-
+    use super::{Bytes, DIRECT_IDLE_BACKSTOP, IDLE, PayloadPath, UnicastAcceptor, mpsc};
     use iroh::endpoint::presets;
     /// A server accepting unicast with the given idle timeout, and a client
     /// connected to it.

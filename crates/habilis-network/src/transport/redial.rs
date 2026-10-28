@@ -63,7 +63,7 @@ pub(crate) struct Redials {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Duration, Instant, Track};
     use crate::testing::endpoint_id;
     use habilis_network_test_tracing::test;
 
