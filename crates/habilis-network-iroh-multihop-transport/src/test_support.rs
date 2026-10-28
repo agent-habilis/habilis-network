@@ -13,6 +13,6 @@ pub(crate) async fn relay_server() -> (iroh::RelayUrl, iroh_relay::server::Serve
         .await
         .expect("spawn the relay");
     let addr = server.http_addr().expect("relay http address");
-    let url = format!("http://{addr}/").parse().expect("relay url");
+    let url: iroh::RelayUrl = format!("http://{addr}/").parse().expect("relay url");
     (url, server)
 }

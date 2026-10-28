@@ -1974,10 +1974,10 @@ mod tests {
         state.webrtc = Some(handle);
         state.local_udp_transport = UdpTransport::Present;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+        let relay_url: iroh::RelayUrl = "https://relay.invalid".parse().expect("relay url");
         state.peer_endpoints.insert(
             crate::testing::nick("bob"),
-            EndpointAddr::new(server.id())
-                .with_relay_url("https://relay.invalid".parse().expect("relay url")),
+            EndpointAddr::new(server.id()).with_relay_url(relay_url),
         );
 
         retry::retry_sessions(&mut state, &ctx);

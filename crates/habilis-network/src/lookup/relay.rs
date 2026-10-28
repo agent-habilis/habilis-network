@@ -532,7 +532,8 @@ mod tests {
             "Pinned ⇒ the full n0 prod ladder"
         );
         assert!(relay_ladder(&RelayChoice::Disabled).next().is_none());
-        let custom = vec!["https://a.example./".parse::<RelayUrl>().unwrap()];
+        let url: RelayUrl = "https://a.example./".parse().unwrap();
+        let custom = vec![url];
         assert_eq!(
             relay_ladder(&RelayChoice::Custom(custom.clone())).collect::<Vec<_>>(),
             custom
@@ -612,10 +613,7 @@ mod tests {
     // down, and we assert which rung wins and how many were probed.
 
     fn rungs(hosts: &[&str]) -> Vec<RelayUrl> {
-        hosts
-            .iter()
-            .map(|host| format!("https://{host}.example./").parse().unwrap())
-            .collect()
+        hosts.iter().map(|host| rung(host)).collect()
     }
 
     fn short_host(url: &RelayUrl) -> String {
