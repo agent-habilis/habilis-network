@@ -1,19 +1,12 @@
 //! The wire form of a message as it is read: every field a string or a plain value.
 
-use serde::Deserialize;
 use habilis_network_util::clock::UnixSecs;
+use serde::Deserialize;
 
 use super::{Message, MessageBody, MessageId, MessageKind, Shard, Signer, default_ext};
-use crate::identity;
 use crate::mesh::MeshId;
 use crate::nickname::Nickname;
-use crate::{AuthorKey, ContentHash};
-
-
-
-
-
-
+use crate::{AuthorKey, ContentHash, identity};
 
 /// A [`Message`] as the wire has it, read: every field a string or a plain value, so that one
 /// place ([`Message::try_from`]) decides what a well-formed message is.
