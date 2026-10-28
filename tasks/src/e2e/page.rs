@@ -3,7 +3,8 @@
 
 use std::time::Duration;
 
-use crate::util::page::{Evaluate, call_page_within};
+use crate::util::evaluate::Evaluate;
+use crate::util::page::call_page_within;
 use crate::util::{cdp, webdriver};
 
 /// How long a page call may take to settle before it is reported as never

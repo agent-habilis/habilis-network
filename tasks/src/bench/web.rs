@@ -14,7 +14,9 @@ use habilis_network_iroh_webrtc_transport::bench::{BENCH_ALPN, Bench};
 use habilis_network_iroh_webrtc_transport::iroh::protocol::Router;
 use habilis_network_iroh_webrtc_transport::{IceConfig, SignalEnvelope, answer_with};
 
-use crate::util::page::{Evaluate, await_call, call_page_within, start_call, wait_ready};
+use crate::util::evaluate::Evaluate;
+use crate::util::page::{call_page_within, wait_ready};
+use crate::util::started::{await_call, start_call};
 use crate::util::webdriver::{self, SAFARI_TP};
 use crate::util::{Skip, cdp, output};
 

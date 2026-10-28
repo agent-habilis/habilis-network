@@ -45,7 +45,6 @@ tasks/src/bench/web.rs|1|rename pending: public type(s) Engine, Browser
 tasks/src/e2e/mesh.rs|1|rename pending: public type(s) Native, BunServer
 tasks/src/gate.rs|1|rename pending: public type(s) Kind, Scope, Step
 tasks/src/util/cdp.rs|1|rename pending: public type(s) Browser
-tasks/src/util/page.rs|1|rename pending: public type(s) Evaluate, Started
 tasks/src/util/webdriver.rs|1|rename pending: public type(s) Driver, Session
 
 # O11: a mod.rs or lib.rs that defines items. Each row goes when the items move to leaf files.
