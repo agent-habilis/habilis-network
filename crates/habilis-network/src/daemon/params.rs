@@ -64,7 +64,7 @@ impl CreateParams {
         }
     }
 
-    /// Set the password.
+    /// The password that unlocks the mesh, when the mesh has one.
     #[must_use]
     pub fn with_password(mut self, password: Option<Password>) -> Self {
         self.password = password;

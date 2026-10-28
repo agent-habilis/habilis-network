@@ -186,7 +186,7 @@ impl HandleConfig {
         self
     }
 
-    /// Set the cost of a link.
+    /// Replaces the cost advertised for each link, instead of `DEFAULT_LINK_COST`.
     #[must_use]
     pub const fn with_link_cost(mut self, link_cost: u32) -> Self {
         self.link_cost = link_cost;

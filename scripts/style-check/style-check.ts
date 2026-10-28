@@ -343,6 +343,38 @@ function countCrateWithoutExample(file: string): number {
   return (proc.stdout ?? "").trim() === "" ? 1 : 0;
 }
 
+// The doc comments that only restate the name of their item: every word of the comment is a word of
+// the identifier or a stopword, as in `/// Returns the foo.` on `fn foo`. A comment that adds a word
+// about the value, the error or the reason is not counted (D7).
+const RESTATE_STOP = new Set(["the", "a", "an", "of", "to", "for", "returns", "return", "get", "gets", "set", "sets", "new", "creates", "create"]);
+function identWords(name: string): string[] {
+  return name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[_\s]+/).map((w) => w.toLowerCase()).filter(Boolean);
+}
+function countRestatingDocs(text: string): number {
+  const lines = text.split("\n");
+  let count = 0;
+  let doc: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("///")) {
+      doc.push(trimmed.slice(3));
+      continue;
+    }
+    if (trimmed.startsWith("#[") || trimmed === "") {
+      if (trimmed === "") doc = [];
+      continue;
+    }
+    const item = trimmed.match(/^(?:pub(?:\([^)]*\))?\s+)?(?:const\s+|async\s+|unsafe\s+)*(?:fn|struct|enum|trait|type|const|static)\s+(\w+)/);
+    if (item && doc.length > 0) {
+      const words = doc.join(" ").toLowerCase().match(/[a-z0-9]+/g) ?? [];
+      const own = new Set([...identWords(item[1] ?? ""), ...RESTATE_STOP]);
+      if (words.length > 0 && words.every((w) => own.has(w))) count++;
+    }
+    doc = [];
+  }
+  return count;
+}
+
 function countAnyhowPub(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   const bare = new Set<string>();
@@ -497,6 +529,12 @@ const RULES: Rule[] = [
     scanFile: countCrateWithoutExample,
     glob: "crates/*/src/lib.rs",
     why: "Every library crate shows how it works: a doc example (a fenced code block in a /// or //! comment) somewhere in its source. A crate without one needs a row with the reason (D2).",
+  },
+  {
+    name: "restating_doc",
+    scan: countRestatingDocs,
+    glob: "crates/**/*.rs",
+    why: "A doc comment that only restates the item name adds nothing (D7). Say what the name does not say.",
   },
   {
     name: "anyhow_pub",

@@ -454,3 +454,15 @@ test("bool_param_comment: a comment above the bool is clean", () => {
 test("bool_param_comment: a private fn is clean", () => {
   expectExit("crates/demo/src/lib.rs", "fn f(on: bool) {\n    let _ = on;\n}", 0);
 });
+
+
+// The restating_doc rule (D7): a doc comment that only names its item again fails.
+test("restating_doc: a doc that restates the name fails with no row", () => {
+  expectExit("crates/demo/src/lib.rs", "/// Returns the foo.\npub fn foo() {}", 1, "");
+});
+test("restating_doc: a doc that says more than the name passes", () => {
+  expectExit("crates/demo/src/lib.rs", "/// The size of the window, in bytes.\npub fn foo() {}", 0, "");
+});
+test("restating_doc: a doc with an attribute between it and the item still counts", () => {
+  expectExit("crates/demo/src/lib.rs", "/// Sets the foo.\n#[must_use]\npub fn foo() {}", 1, "");
+});

@@ -65,7 +65,7 @@ impl StreamOpts {
         self
     }
 
-    /// Set the relay URLs.
+    /// The relay URLs to dial, in the order given.
     #[must_use]
     pub fn with_relay_urls(mut self, relay_urls: impl IntoIterator<Item = String>) -> Self {
         self.relay_urls = relay_urls.into_iter().collect();

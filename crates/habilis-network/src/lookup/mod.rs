@@ -215,7 +215,7 @@ impl TransportOpts {
         self
     }
 
-    /// Set the relay.
+    /// The relay to dial for the lookup, instead of the one the mesh names.
     #[must_use]
     pub fn with_relay(
         mut self,
