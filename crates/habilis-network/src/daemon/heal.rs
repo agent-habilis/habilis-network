@@ -12,7 +12,8 @@ use iroh::RelayUrl;
 use iroh_gossip::api::{GossipReceiver, GossipSender};
 use tokio::sync::watch;
 
-use super::event_loop::{CtxParts, TickGap};
+use super::event_loop::ctx_parts::CtxParts;
+use super::event_loop::tick_gap::TickGap;
 use super::handler_ctx::HandlerCtx;
 use super::setup;
 use super::state::EventLoopState;
@@ -203,7 +204,7 @@ pub(super) async fn resubscribe_tick(
             // The dead subscription's link view is void; the fresh one
             // emits its own NeighborUps (and re-arms the probe gate).
             state.rendezvous_linked = false;
-            let ctx = env.parts.ctx(link.sender);
+            let ctx = env.parts.handler_ctx(link.sender);
             gossip::drain_queued(&mut dead_receiver, state, app, &ctx).await;
             // Nothing in the normal path: the guard for a splitter that ended early.
             if let Some(mut topic_receiver) = dead_receiver.into_dead() {
@@ -350,7 +351,7 @@ mod tests {
     #[test]
     async fn a_fatal_resubscribe_leaves_the_exit_to_the_loop() {
         use super::{GossipLink, ResubscribeEnv, resubscribe_tick};
-        use crate::daemon::event_loop::CtxParts;
+        use crate::daemon::event_loop::ctx_parts::CtxParts;
         use crate::testing::LaneNode;
         use crate::util::tuning::RESUBSCRIBE_MAX_ATTEMPTS;
 

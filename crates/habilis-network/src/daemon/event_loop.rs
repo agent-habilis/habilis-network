@@ -8,13 +8,19 @@
 //! the daemon-internal plumbing (`config`/`ctx`/`ipc`/`state`/`timers`/
 //! `setup`) are siblings under `super`.
 
+pub(super) mod ctx_parts;
+mod event_loop_error;
+pub(super) mod tick_gap;
+
+#[cfg(feature = "multihop")]
+use iroh::EndpointId;
 #[cfg(feature = "multihop")]
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use iroh::{Endpoint, EndpointId, RelayUrl, Watcher as _};
+use iroh::{Endpoint, RelayUrl, Watcher as _};
 use iroh_gossip::api::GossipReceiver;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -23,7 +29,7 @@ use crate::daemon::state_file::StateFile;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::mesh::MeshName;
 use crate::protocol::message::{Authored, Verified};
-use crate::protocol::{AuthorKey, MeshId, Nickname, UnixSecs};
+use crate::protocol::{MeshId, Nickname, UnixSecs};
 use crate::transport::{IpcMessage, MeshSender};
 use crate::util::clock::{Instant, millis_saturating};
 // The timer-driver clock, distinct from `clock::Instant` off wasm32 (there it is
@@ -53,50 +59,18 @@ use super::shutdown::spawn_quit_signal_tasks;
 use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure, never_quit};
 use super::state::{EventLoopState, MeshSecrets};
 use super::timers;
+use ctx_parts::CtxParts;
+pub use event_loop_error::EventLoopError;
+use tick_gap::TickGap;
 
 use crate::daemon::state;
-use crate::protocol::{identity, message};
+use crate::protocol::message;
 #[cfg(feature = "host")]
 use crate::transport::ipc;
 #[cfg(feature = "multihop")]
 use crate::transport::underlay_webrtc;
 use crate::transport::{outbox, probe, webrtc};
 use crate::util::version;
-/// Why the event loop of a mesh stopped with an error.
-///
-/// [`EventLoopError::Internal`] holds the causes that no caller acts on: the loop ended
-/// on a failure of one of its tasks or of its endpoint. It keeps their text and chain.
-#[derive(Debug)]
-#[non_exhaustive]
-#[must_use]
-pub enum EventLoopError {
-    /// A cause no caller acts on. It keeps its text and its chain.
-    Internal(Box<dyn std::error::Error + Send + Sync>),
-}
-
-impl EventLoopError {
-    /// Wraps a cause no caller acts on, keeping its text and its chain.
-    fn internal(error: anyhow::Error) -> Self {
-        Self::Internal(error.into())
-    }
-}
-
-impl std::fmt::Display for EventLoopError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Internal(error) => std::fmt::Display::fmt(error.as_ref(), formatter),
-        }
-    }
-}
-
-impl std::error::Error for EventLoopError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Internal(error) => error.source(),
-        }
-    }
-}
-
 /// Never returns normally — exits the process on ctrl-c / SIGTERM.
 ///
 /// The engine loop is generic over the application: `app` implements
@@ -811,7 +785,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
     // Our own author key, computed once for the per-message self-echo compare.
     let our_pubkey = identity.author_key();
     // Everything a HandlerCtx needs *except* the sender. The ctx itself
-    // is built per-arm (`parts.ctx(&sender)`) rather than once out here:
+    // is built per-arm (`parts.handler_ctx(&sender)`) rather than once out here:
     // a loop-lifetime ctx would borrow `sender` forever, and the
     // resubscribe path must replace `sender`/`receiver` when the gossip
     // stream ends.
@@ -833,7 +807,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
     let mut resubscribe_attempts: u32 = 0;
 
     {
-        let ctx = parts.ctx(&sender);
+        let ctx = parts.handler_ctx(&sender);
         app.on_startup(&mut state, &ctx).await;
         webrtc::rendezvous::offer_rendezvous_off_tick(&mut state, &ctx);
     }
@@ -866,7 +840,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         // remember to send it again.
         if state.hosts_rendezvous != state.beacon_flag_flooded {
             state.beacon_flag_flooded = state.hosts_rendezvous;
-            let ctx = parts.ctx(&sender);
+            let ctx = parts.handler_ctx(&sender);
             gossip::broadcast_peer_info(&mut state, &ctx).await;
         }
         tokio::select! {
@@ -876,7 +850,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
             }
             () = sleep_until_opt(state.ping_round.as_ref().and_then(|round| round.second_probe_at())) => {
                 state.idle.external += 1;
-                let ctx = parts.ctx(&sender);
+                let ctx = parts.handler_ctx(&sender);
                 gossip::send_second_probe(&mut state, &ctx).await;
             }
             () = sleep_until_opt(app.earliest_poll_deadline()) => {
@@ -891,7 +865,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 None => ipc_rx = None,
                 Some((command, resp_tx)) => {
                     state.idle.external += 1;
-                    let ctx = parts.ctx(&sender);
+                    let ctx = parts.handler_ctx(&sender);
                     let request = super::app::IpcRequest {
                         command,
                         response: resp_tx,
@@ -906,29 +880,29 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 None => http_rx = None,
                 Some(request) => {
                     state.idle.external += 1;
-                    let ctx = parts.ctx(&sender);
+                    let ctx = parts.handler_ctx(&sender);
                     app.handle_http(request, &mut state, &ctx).await;
                 }
             },
             event = receiver.next(), if state.gossip_open => {
                 state.idle.external += 1;
-                let ctx = parts.ctx(&sender);
+                let ctx = parts.handler_ctx(&sender);
                 gossip::handle_gossip_event(event, &mut state, &mut app, &ctx).await;
             }
             Some(outcome) = direct_rx.recv() => {
                 state.idle.external += 1;
-                let ctx = parts.ctx(&sender);
+                let ctx = parts.handler_ctx(&sender);
                 probe::on_outcome(outcome, &mut state, &ctx).await;
                 probe::ensure_watchers(&mut state, ctx.endpoint.id(), ctx.rendezvous_id);
             }
             Some((msg, bytes)) = flush_failed_rx.recv() => {
                 state.idle.external += 1;
-                let ctx = parts.ctx(&sender);
+                let ctx = parts.handler_ctx(&sender);
                 gossip::requeue_failed(&mut state, &ctx, msg, bytes);
             }
             () = slot_freed.notified() => {
                 state.idle.external += 1;
-                let ctx = parts.ctx(&sender);
+                let ctx = parts.handler_ctx(&sender);
                 probe::top_up_lane_offers(&mut state, &ctx).await;
             }
             // A round of the multihop underlay ended, offered or answered: an offer that its
@@ -940,7 +914,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 #[cfg(feature = "multihop")]
                 {
                     underlay_webrtc::tick_now(&state);
-                    let ctx = parts.ctx(&sender);
+                    let ctx = parts.handler_ctx(&sender);
                     linkstate_now(&mut state, &ctx).await;
                 }
             }
@@ -949,28 +923,28 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
             // waiting for the stuck deadline and a link-state tick would cost 20 s or more.
             () = route_wake.notified() => {
                 state.idle.external += 1;
-                let ctx = parts.ctx(&sender);
+                let ctx = parts.handler_ctx(&sender);
                 route_wake_arm(&mut state, &ctx);
             }
             lan_event = recv_opt(&mut lan_contacts) => match lan_event {
                 None => lan_contacts = None,
                 Some(event) => {
                     state.idle.external += 1;
-                    let ctx = parts.ctx(&sender);
+                    let ctx = parts.handler_ctx(&sender);
                     gossip::lan::on_lan_event(event, &mut state, &ctx).await;
                 }
             },
             Some(address) = address_changes.next() => {
                 state.idle.external += 1;
                 if state.address_flood_due(&address) {
-                    let ctx = parts.ctx(&sender);
+                    let ctx = parts.handler_ctx(&sender);
                     gossip::broadcast_peer_info(&mut state, &ctx).await;
                     state.last_sent_at = Instant::now();
                 }
             }
             Some(change) = path_rx.recv() => {
                 state.idle.external += 1;
-                let ctx = parts.ctx(&sender);
+                let ctx = parts.handler_ctx(&sender);
                 if Some(change.peer) == state.rendezvous_id {
                     webrtc::rendezvous::offer_rendezvous_on_path_loss(&mut state, &ctx);
                 } else {
@@ -981,7 +955,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
             frame = recv_opt(&mut unicast_rx) => match frame {
                 Some(bytes) => {
                     state.idle.external += 1;
-                    gossip::ingest(bytes, &mut state, &mut app, &parts.ctx(&sender)).await;
+                    gossip::ingest(bytes, &mut state, &mut app, &parts.handler_ctx(&sender)).await;
                 }
                 None => unicast_rx = None,
             },
@@ -991,7 +965,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
             }
             _ = intervals.alive.tick() => {
                 state.idle.alive += 1;
-                let ctx = parts.ctx(&sender);
+                let ctx = parts.handler_ctx(&sender);
                 alive_arm(&mut anchors, &mut state, &ctx).await;
                 // Retry WebRTC negotiation for any peer we still have no
                 // session with. Without this a pair gets exactly one attempt
@@ -1017,7 +991,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
             _ = intervals.sweep.tick() => {
                 state.idle.sweep += 1;
                 sweep_arm(&mut anchors, &mut state, sink.as_ref());
-                let ctx = parts.ctx(&sender);
+                let ctx = parts.handler_ctx(&sender);
                 probe::prove_routed_pairs(&mut state, &ctx).await;
                 app.on_tick(&mut state, &ctx).await;
             }
@@ -1025,7 +999,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 state.idle.heal += 1;
                 let (mono_gap, wall_gap) = timers::note_tick_gap("heal", &mut anchors.heal, &mut anchors.heal_wall, heal_interval());
                 if state.gossip_open {
-                    let ctx = parts.ctx(&sender);
+                    let ctx = parts.handler_ctx(&sender);
                     run_heal(TickGap { mono: mono_gap, wall: wall_gap }, &mut state, &ctx, &rendezvous_params).await;
                     maybe_cohost(&mut state, &ctx, &CohostArm { policy: cohost, params: &rendezvous_params, started }, &mut rendezvous, &mut rival_probe).await;
                 } else {
@@ -1048,7 +1022,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                         }
                         return Err(error);
                     }
-                    let ctx = parts.ctx(&sender);
+                    let ctx = parts.handler_ctx(&sender);
                     maybe_cohost(&mut state, &ctx, &CohostArm { policy: cohost, params: &rendezvous_params, started }, &mut rendezvous, &mut rival_probe).await;
                 }
             }
@@ -1093,13 +1067,13 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                         schedule_rival_recheck(&mut state, cohost, &rendezvous_params, &endpoint);
                         // The new rendezvous never dials us; the reclaim tick re-grafts it.
                         state.arm_reclaim(Instant::now());
-                        offer_to_the_new_holder(&mut state, &parts.ctx(&sender));
+                        offer_to_the_new_holder(&mut state, &parts.handler_ctx(&sender));
                     } else if found_rival {
                         // A rival holds the identity: this arbitration epoch is
                         // settled, so a later claim (the rival died) starts the
                         // re-check backoff from its brisk base again.
                         state.rival_recheck_rounds = 0;
-                        note_rival_holds(&mut state, &parts.ctx(&sender));
+                        note_rival_holds(&mut state, &parts.handler_ctx(&sender));
                     }
                 }
             }
@@ -1108,7 +1082,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
             Some(report) = rung_reports.recv() => {
                 state.idle.external += 1;
                 state.rungs.note(report, Instant::now());
-                let ctx = parts.ctx(&sender);
+                let ctx = parts.handler_ctx(&sender);
                 let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
                 maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
                 maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
@@ -1132,13 +1106,13 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 // the re-probe starts now. The reclaim tick below stays as the net.
                 state.beacon_closing = None;
                 state.idle.reclaim += 1;
-                let ctx = parts.ctx(&sender);
+                let ctx = parts.handler_ctx(&sender);
                 let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
                 maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
             }
             _ = intervals.reclaim.tick() => {
                 state.idle.reclaim += 1;
-                let ctx = parts.ctx(&sender);
+                let ctx = parts.handler_ctx(&sender);
                 let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
                 // The rival re-check shed rides this ticker, NOT the heal tick:
                 // simultaneous joiners' heal tickers align, and a shed deadline
@@ -1159,7 +1133,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
             }
             _ = intervals.antientropy.tick() => {
                 state.idle.antientropy += 1;
-                let ctx = parts.ctx(&sender);
+                let ctx = parts.handler_ctx(&sender);
                 antientropy_arm(&mut anchors, &mut state, &ctx).await;
             }
             // Counted before the census reads them, so the tick that reports an
@@ -1170,12 +1144,12 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
             }
             _ = intervals.linkstate.tick() => {
                 state.idle.linkstate += 1;
-                let ctx = parts.ctx(&sender);
+                let ctx = parts.handler_ctx(&sender);
                 linkstate_arm(&mut state, &ctx).await;
             }
             _ = recv_opt(&mut external_quit_rx) => {
                 // External quit is always in-process (MCP): never hard-exit (`false`).
-                let ctx = parts.ctx(&sender);
+                let ctx = parts.handler_ctx(&sender);
                 announce_departure(&mut state, &mut app, &ctx, QuitParams { name: &mesh_name, leave_label: &leave_label, exit_on_quit: false }).await;
                 break;
             }
@@ -1183,14 +1157,14 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 None => external_req_rx = None,
                 Some(request) => {
                     state.idle.external += 1;
-                    let ctx = parts.ctx(&sender);
+                    let ctx = parts.handler_ctx(&sender);
                     if app.handle_session(request, &mut state, &ctx).await {
                         state.last_sent_at = Instant::now();
                     }
                 }
             },
             _ = quit_rx.recv() => {
-                let ctx = parts.ctx(&sender);
+                let ctx = parts.handler_ctx(&sender);
                 exit_after_release = announce_departure(&mut state, &mut app, &ctx, QuitParams { name: &mesh_name, leave_label: &leave_label, exit_on_quit }).await;
                 break;
             }
@@ -1338,15 +1312,6 @@ fn finalize_ping_round(state: &mut EventLoopState, sink: &dyn NodeSink) {
     sink.emit(NodeEvent::PingReport { peers, known });
 }
 
-/// A tick's elapsed-time gap on both clocks: monotonic (throttle-blind) and
-/// wall (the only one a macOS suspend shows up on) — see [`is_resume`] /
-/// [`is_wall_resume`].
-#[derive(Clone, Copy)]
-pub(super) struct TickGap {
-    pub(super) mono: Duration,
-    pub(super) wall: Duration,
-}
-
 /// Per-timer gap anchors; the heal gap also drives the resume-edge hard
 /// re-bootstrap. Each timer carries a monotonic anchor AND a wall-clock
 /// anchor: on macOS the monotonic clock pauses in lockstep with a
@@ -1376,42 +1341,6 @@ impl TickAnchors {
             sweep_wall: wall,
             heal_wall: wall,
             antientropy_wall: wall,
-        }
-    }
-}
-
-/// Everything a [`HandlerCtx`] needs except the gossip sender. The loop
-/// holds one of these and builds the ctx per-arm (`parts.ctx(&sender)`):
-/// a loop-lifetime ctx would borrow `sender` forever, and the
-/// resubscribe path must be able to replace it.
-pub(super) struct CtxParts<'node> {
-    pub(super) endpoint: &'node Endpoint,
-    pub(super) mesh: &'node MeshId,
-    pub(super) author: &'node Nickname,
-    pub(super) identity: &'node identity::Identity,
-    pub(super) our_pubkey: AuthorKey,
-    pub(super) max_peers: usize,
-    pub(super) rendezvous_id: EndpointId,
-    pub(super) external_msg_tx: Option<&'node broadcast::Sender<Authored>>,
-    pub(super) sink: &'node dyn NodeSink,
-}
-
-impl<'node> CtxParts<'node> {
-    pub(super) fn ctx<'ctx>(&'ctx self, sender: &'ctx MeshSender) -> HandlerCtx<'ctx>
-    where
-        'node: 'ctx,
-    {
-        HandlerCtx {
-            sender,
-            endpoint: self.endpoint,
-            mesh: self.mesh,
-            author: self.author,
-            identity: self.identity,
-            our_pubkey: self.our_pubkey,
-            max_peers: self.max_peers,
-            rendezvous_id: self.rendezvous_id,
-            external_msg_tx: self.external_msg_tx,
-            sink: self.sink,
         }
     }
 }
