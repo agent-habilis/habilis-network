@@ -338,7 +338,7 @@ test("dyn_param: a dyn return is not a parameter", () => {
 });
 
 // The untyped_long_chain_let rule (P5): an untyped let of a five-call chain needs a row.
-const untypedChain = "pub fn f(v: Vec<u8>) -> usize {\n    let n = v.iter().map(|x| x + 1).filter(|x| *x > 1).take(3).count();\n    n\n}";
+const untypedChain = "fn f(v: &[u8]) -> usize {\n    let n = v.iter().map(|x| x + 1).filter(|x| *x > 1).take(3).count();\n    n\n}";
 test("untyped_long_chain_let: an untyped let of five calls fails with no row", () => {
   expectExit("crates/demo/src/lib.rs", untypedChain, 1, "");
 });
