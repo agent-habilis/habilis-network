@@ -6,7 +6,6 @@ use std::sync::Arc;
 use iroh::EndpointId;
 use iroh::endpoint::Connection;
 
-
 use super::Sessions;
 
 /// What an eviction ends: the connections, closed with the `EVICTED` code, and the sessions.

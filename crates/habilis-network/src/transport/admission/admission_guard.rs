@@ -1,8 +1,6 @@
 //! The guard that holds an admitted connection.
 
-
 use iroh::EndpointId;
-
 
 use super::SignalAdmission;
 

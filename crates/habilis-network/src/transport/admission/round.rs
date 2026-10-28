@@ -1,9 +1,6 @@
 //! One admission round.
 
-
 use n0_future::task::AbortHandle;
-
-
 
 /// A signalling round holding a peer's negotiation slot.
 #[derive(Debug)]

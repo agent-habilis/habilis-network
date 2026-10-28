@@ -8,7 +8,6 @@ use iroh::EndpointId;
 use crate::util::clock::Instant;
 use crate::util::tuning;
 
-
 /// How long to leave a peer alone after it answered "at my cap", and how that
 /// grows.
 ///

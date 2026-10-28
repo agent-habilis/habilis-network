@@ -1,10 +1,7 @@
 //! The sessions the admission counts against the cap.
 
-
 use habilis_network_iroh_webrtc_transport::WebRtcHandle;
 use iroh::EndpointId;
-
-
 
 /// What the table needs from a `WebRTC` hub. A trait so a test can stand in
 /// for sessions, which cannot be negotiated inside a unit test.

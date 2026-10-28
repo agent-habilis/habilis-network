@@ -5,7 +5,6 @@ use std::sync::atomic::Ordering;
 
 use iroh::endpoint::{AfterHandshakeOutcome, Connection, EndpointHooks};
 
-
 use super::SignalAdmission;
 
 /// Reports every connection of the endpoint it is installed on, in or out and

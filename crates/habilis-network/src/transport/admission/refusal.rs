@@ -1,9 +1,5 @@
 //! Why an inbound connection is refused.
 
-
-
-
-
 /// Why a negotiation was not admitted. Diagnostic — every arm means "not now".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Refusal {

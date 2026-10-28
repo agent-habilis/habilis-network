@@ -1,6 +1,5 @@
 //! The guard that holds a busy slot.
 
-
 use iroh::EndpointId;
 
 use crate::util::clock::Instant;

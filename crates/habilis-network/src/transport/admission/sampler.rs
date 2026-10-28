@@ -4,8 +4,6 @@ use crate::transport::probe;
 use std::sync::{Mutex, Weak};
 use std::time::Duration;
 
-
-
 use super::Inner;
 
 /// Pure: what the table tells the gossip transport about a peer whose live connections read as

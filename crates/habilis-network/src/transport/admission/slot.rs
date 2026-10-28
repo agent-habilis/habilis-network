@@ -1,8 +1,6 @@
 //! One slot of the admission table.
 
-
 use iroh::endpoint::WeakConnectionHandle;
-
 
 use super::Round;
 
