@@ -112,31 +112,30 @@ mod tests {
     use crate::nickname::Nickname;
     use habilis_network_test_tracing::test;
 
-    /// The macro must not have changed the wire form of any of the eight. All
-    /// are `#[serde(transparent)]`, so each serializes as a bare JSON string
+    /// Assert that a value serializes as the bare JSON string `raw`.
+    fn assert_transparent<T: serde::Serialize>(value: &T, raw: &str) {
+        let json = serde_json::to_string(value).expect("serialize");
+        assert_eq!(json, format!("{raw:?}"), "not transparent");
+    }
+
+    /// The wire form of each newtype must not change. All are
+    /// `#[serde(transparent)]`, so each serializes as a bare JSON string
     /// and round-trips through its own validating `Deserialize`.
     #[test]
     fn every_newtype_is_transparent_on_the_wire() {
-        macro_rules! check {
-            ($value:expr, $raw:expr) => {{
-                let json = serde_json::to_string(&$value).expect("serialize");
-                assert_eq!(json, format!("{:?}", $raw), "not transparent");
-            }};
-        }
-
         let uuid = "b3f1c2d4-5e6a-4b8c-9d0e-1f2a3b4c5d6e";
-        check!(
-            Nickname::try_new("lotus-anvil").expect("nick"),
-            "lotus-anvil"
+        assert_transparent(
+            &Nickname::try_new("lotus-anvil").expect("nick"),
+            "lotus-anvil",
         );
-        check!(MessageId::try_new(uuid).expect("id"), uuid);
-        check!(MessageBody::try_new("hello").expect("body"), "hello");
-        check!(AppTag::try_new("app_msg").expect("tag"), "app_msg");
-        check!(CorrId::try_new("corr-1").expect("corr"), "corr-1");
-        check!(ShardGroup::from_uuid_str(uuid).expect("group"), uuid);
-        check!(
-            MeshName::try_new("kernel-parch").expect("name"),
-            "kernel-parch"
+        assert_transparent(&MessageId::try_new(uuid).expect("id"), uuid);
+        assert_transparent(&MessageBody::try_new("hello").expect("body"), "hello");
+        assert_transparent(&AppTag::try_new("app_msg").expect("tag"), "app_msg");
+        assert_transparent(&CorrId::try_new("corr-1").expect("corr"), "corr-1");
+        assert_transparent(&ShardGroup::from_uuid_str(uuid).expect("group"), uuid);
+        assert_transparent(
+            &MeshName::try_new("kernel-parch").expect("name"),
+            "kernel-parch",
         );
     }
 
