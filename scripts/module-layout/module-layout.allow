@@ -7,7 +7,6 @@ crates/habilis-network-iroh-multihop-transport/src/underlay.rs|1|rename pending:
 crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|1|rename pending: public type(s) InboundPacket, SessionCounters, SessionCounts, DataChannelCounters, SelectedPairStats, BrowserSessionGuard, BrowserHubTransport, BrowserRtcTransport
 crates/habilis-network/src/gossip/lan.rs|1|rename pending: public type(s) LanGrafts
 crates/habilis-network/src/gossip/split.rs|1|rename pending: public type(s) TopicItem, Route, MeshReceiver
-tasks/src/gate.rs|1|rename pending: public type(s) Kind, Scope, Step
 tasks/src/util/cdp.rs|1|rename pending: public type(s) Browser
 
 # O11: a mod.rs or lib.rs that defines items. Each row goes when the items move to leaf files.

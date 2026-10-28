@@ -12,77 +12,13 @@
 //! run can never quietly diverge from the full run — there is only one
 //! description of what a crate needs.
 
-/// What a step runs, and how the result is judged.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Kind {
-    Lint,
-    Check,
-    Test,
-    /// The same two, against `wasm32-unknown-unknown`. Separate kinds rather
-    /// than a flag on the host ones because the wasm rows are not the host rows
-    /// with a target bolted on: five crates reach that target, each with its
-    /// own feature position, and the check list carries one row the clippy list
-    /// does not.
-    WasmCheck,
-    WasmClippy,
-}
+pub(crate) use kind::Kind;
+pub(crate) use scope::Scope;
+pub(crate) use step::Step;
 
-impl Kind {
-    fn subcommand(self) -> &'static str {
-        match self {
-            Self::Lint | Self::WasmClippy => "clippy",
-            Self::Check | Self::WasmCheck => "check",
-            Self::Test => "test",
-        }
-    }
-
-    /// The participle that heads the status line, matching cargo's own.
-    pub(crate) fn verb(self) -> &'static str {
-        match self {
-            Self::Lint | Self::WasmClippy => "Linting",
-            Self::Check | Self::WasmCheck => "Checking",
-            Self::Test => "Testing",
-        }
-    }
-
-    /// How to name this group of rows when reporting that it had none.
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Lint => "clippy",
-            Self::Check => "check",
-            Self::Test => "test",
-            Self::WasmCheck => "wasm check",
-            Self::WasmClippy => "wasm clippy",
-        }
-    }
-
-    fn is_wasm(self) -> bool {
-        matches!(self, Self::WasmCheck | Self::WasmClippy)
-    }
-
-    /// Clippy is only a gate if its findings fail the build.
-    fn denies_warnings(self) -> bool {
-        matches!(self, Self::Lint | Self::WasmClippy)
-    }
-}
-
-/// Which packages a step covers.
-#[derive(Clone, Copy)]
-pub(crate) enum Scope {
-    /// The whole workspace. Narrowed to the `-p` names when the task is scoped.
-    Workspace,
-    /// One crate, because the row exists for something only that crate has —
-    /// a non-default feature, or a target nothing else reaches. Dropped when
-    /// the task is scoped to anything else.
-    Crate(&'static str),
-}
-
-pub(crate) struct Step {
-    pub(crate) kind: Kind,
-    pub(crate) scope: Scope,
-    /// Everything after the package selection.
-    pub(crate) args: &'static [&'static str],
-}
+mod kind;
+mod scope;
+mod step;
 
 /// `.github/workflows/ci.yml`, transcribed. Keep the two in step: if they
 /// disagree, this file is the one that is wrong, because CI is what gates the
@@ -386,61 +322,6 @@ pub(crate) fn select(kind: Kind, packages: &[String]) -> Vec<&'static Step> {
             Scope::Crate(name) => packages.is_empty() || packages.iter().any(|want| want == name),
         })
         .collect()
-}
-
-impl Step {
-    /// The full argument list, ready to hand to cargo.
-    pub(crate) fn command(&self, packages: &[String]) -> Vec<String> {
-        let mut argv = vec![self.kind.subcommand().to_owned()];
-
-        if self.kind.is_wasm() {
-            argv.push("--target".to_owned());
-            argv.push("wasm32-unknown-unknown".to_owned());
-        }
-
-        match self.scope {
-            // A scoped run replaces the whole workspace with the named crates;
-            // an unscoped one keeps `--workspace`.
-            Scope::Workspace if packages.is_empty() => argv.push("--workspace".to_owned()),
-            Scope::Workspace => argv.extend(
-                packages
-                    .iter()
-                    .flat_map(|name| ["-p".to_owned(), name.clone()]),
-            ),
-            Scope::Crate(name) => {
-                argv.push("-p".to_owned());
-                argv.push(name.to_owned());
-            }
-        }
-
-        argv.extend(self.args.iter().map(|&arg| arg.to_owned()));
-
-        if self.kind.denies_warnings() {
-            argv.push("--".to_owned());
-            argv.push("-D".to_owned());
-            argv.push("warnings".to_owned());
-        }
-        // `clippy.toml` lists the Tokio calls that panic in a browser, and the lint is off in
-        // the workspace: a wasm32 row turns it on for every crate it compiles.
-        if self.kind == Kind::WasmClippy {
-            argv.push("-D".to_owned());
-            argv.push("clippy::disallowed_methods".to_owned());
-        }
-
-        argv
-    }
-
-    /// The status line: the participle cargo would use, then the part of the
-    /// invocation that says which slice of the workspace this row is.
-    pub(crate) fn describe(&self, packages: &[String]) -> (&'static str, String) {
-        let subject = self
-            .command(packages)
-            .into_iter()
-            .skip(1)
-            .collect::<Vec<_>>()
-            .join(" ");
-        (self.kind.verb(), subject)
-    }
 }
 
 #[cfg(test)]
