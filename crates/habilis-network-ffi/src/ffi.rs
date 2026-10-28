@@ -12,6 +12,14 @@
     reason = "this module *is* the C ABI: raw pointers from the foreign caller, and a boxed handle it owns"
 )]
 
+mod habilis_network_mesh;
+mod habilis_network_msg;
+mod habilis_network_opts;
+mod habilis_network_producer;
+mod habilis_network_reader;
+mod habilis_network_stream_opts;
+mod habilis_network_streams;
+
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_int, c_long};
 use std::panic::AssertUnwindSafe;
@@ -19,7 +27,15 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::mesh::{Inbound, MAX_MSG, Mesh, Opts};
-use crate::streams::{Read, ReadEnd, Streams, Writer};
+use crate::streams::{Read, Streams};
+
+pub use habilis_network_mesh::HabilisNetworkMesh;
+pub use habilis_network_msg::HabilisNetworkMsg;
+pub use habilis_network_opts::HabilisNetworkOpts;
+pub use habilis_network_producer::HabilisNetworkProducer;
+pub use habilis_network_reader::HabilisNetworkReader;
+pub use habilis_network_stream_opts::HabilisNetworkStreamOpts;
+pub use habilis_network_streams::HabilisNetworkStreams;
 
 /// Capacity of [`HabilisNetworkMsg::nick`], including the NUL. A minted nickname is two
 /// short words; a longer chosen one is truncated to 63 bytes.
@@ -30,178 +46,6 @@ thread_local! {
     /// `CString` so [`habilis_network_last_error`] can hand out a borrowed pointer; valid
     /// until this thread's next `mesh_*` call.
     static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
-}
-
-/// The mesh selectors, mirroring `habilis_network_opts` in the header. String fields are
-/// NUL-terminated C strings or NULL; `max_peers == 0` and `max_direct == 0` take
-/// the engine defaults (G is 32, C is 64).
-#[repr(C)]
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct HabilisNetworkOpts {
-    /// The mesh id to join, NUL-terminated, or NULL. Set at most one of `mesh` and `topic`.
-    pub mesh: *const c_char,
-    /// A shared string to derive a public mesh from, NUL-terminated, or NULL.
-    pub topic: *const c_char,
-    /// The nickname, as a NUL-terminated string.
-    pub nick: *const c_char,
-    /// The mesh name on create, NUL-terminated. NULL falls back to `habilis-network`.
-    pub name: *const c_char,
-    /// Comma-separated lookups, any of `mdns`, `dht`, `relay`; NULL ⇒ none
-    /// (a loopback mesh on create).
-    pub lookup: *const c_char,
-    /// Comma-separated transports, any of `udp`, `webrtc`, `multihop`, `gossip`, `relay`;
-    /// NULL ⇒ `udp,webrtc,multihop,gossip`, so all data stays peer to peer.
-    pub transport: *const c_char,
-    /// Comma-separated custom relay ladder; NULL ⇒ the default ladder.
-    pub relay_urls: *const c_char,
-    /// G: the gossip active-view cap.
-    pub max_peers: usize,
-    /// C: the ceiling of direct connections, `WebRTC` sessions and unicast connections together.
-    pub max_direct: usize,
-}
-
-impl HabilisNetworkOpts {
-    /// Every pointer NULL and every number zero, which takes the engine defaults.
-    #[must_use]
-    pub fn empty() -> Self {
-        Self {
-            mesh: std::ptr::null(),
-            topic: std::ptr::null(),
-            nick: std::ptr::null(),
-            name: std::ptr::null(),
-            lookup: std::ptr::null(),
-            transport: std::ptr::null(),
-            relay_urls: std::ptr::null(),
-            max_peers: 0,
-            max_direct: 0,
-        }
-    }
-}
-
-/// The layout `packages/habilis-network-ffi/src/dlopen/opts-struct.ts` hand-encodes,
-/// pinned here so the two sides are coupled by a compile error rather than by
-/// copied comments. `bun:ffi` and Deno's FFI cannot marshal a struct, so that
-/// file writes these exact offsets into a byte buffer; koffi (Node) names the
-/// fields instead and does not depend on this block.
-///
-/// Adding or reordering a field breaks a linked C consumer silently — it keeps
-/// passing the old layout — so a failure here is the signal to bump
-/// `OPTS_BYTES` in that file, its offset constants, and the CHANGELOG entry
-/// together. 64-bit little-endian, the same scope the TypeScript claims.
-const _: () = {
-    use std::mem::{align_of, offset_of, size_of};
-
-    assert!(
-        size_of::<HabilisNetworkOpts>() == 72,
-        "opts-struct.ts OPTS_BYTES"
-    );
-    assert!(
-        align_of::<HabilisNetworkOpts>() == 8,
-        "HabilisNetworkOpts has the alignment the C header declares, 8"
-    );
-    assert!(
-        offset_of!(HabilisNetworkOpts, mesh) == 0,
-        "mesh is at offset 0 of HabilisNetworkOpts"
-    );
-    assert!(
-        offset_of!(HabilisNetworkOpts, topic) == 8,
-        "topic is at offset 8 of HabilisNetworkOpts"
-    );
-    assert!(
-        offset_of!(HabilisNetworkOpts, nick) == 16,
-        "nick is at offset 16 of HabilisNetworkOpts"
-    );
-    assert!(
-        offset_of!(HabilisNetworkOpts, name) == 24,
-        "name is at offset 24 of HabilisNetworkOpts"
-    );
-    assert!(
-        offset_of!(HabilisNetworkOpts, lookup) == 32,
-        "lookup is at offset 32 of HabilisNetworkOpts"
-    );
-    assert!(
-        offset_of!(HabilisNetworkOpts, transport) == 40,
-        "transport is at offset 40 of HabilisNetworkOpts"
-    );
-    assert!(
-        offset_of!(HabilisNetworkOpts, relay_urls) == 48,
-        "relay_urls is at offset 48 of HabilisNetworkOpts"
-    );
-    assert!(
-        offset_of!(HabilisNetworkOpts, max_peers) == 56,
-        "max_peers is at offset 56 of HabilisNetworkOpts"
-    );
-    assert!(
-        offset_of!(HabilisNetworkOpts, max_direct) == 64,
-        "max_direct is at offset 64 of HabilisNetworkOpts"
-    );
-};
-
-/// One received message's metadata, mirroring `habilis_network_msg` in the header. The
-/// text itself lands in the caller's own buffer, NUL-terminated; `len` says how
-/// many bytes it has, excluding the NUL.
-#[repr(C)]
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct HabilisNetworkMsg {
-    /// The nickname of the sender, NUL-terminated.
-    pub nick: [c_char; NICK_CAP],
-    /// Non-zero when the message was directed to us.
-    pub directed: c_int,
-    /// The length of the body, in bytes.
-    pub len: usize,
-}
-
-impl HabilisNetworkMsg {
-    /// No nickname, no directed flag and no text.
-    #[must_use]
-    pub fn empty() -> Self {
-        Self {
-            nick: [0; NICK_CAP],
-            directed: 0,
-            len: 0,
-        }
-    }
-}
-
-/// The layout `packages/habilis-network-ffi/src/msg.ts` hand-decodes, pinned like
-/// `HabilisNetworkOpts` above.
-const _: () = {
-    use std::mem::{align_of, offset_of, size_of};
-
-    assert!(size_of::<HabilisNetworkMsg>() == 80, "msg.ts MSG_BYTES");
-    assert!(
-        align_of::<HabilisNetworkMsg>() == 8,
-        "HabilisNetworkMsg has the alignment the C header declares, 8"
-    );
-    assert!(
-        offset_of!(HabilisNetworkMsg, nick) == 0,
-        "nick is at offset 0 of HabilisNetworkMsg"
-    );
-    assert!(
-        offset_of!(HabilisNetworkMsg, directed) == 64,
-        "directed is at offset 64 of HabilisNetworkMsg"
-    );
-    assert!(
-        offset_of!(HabilisNetworkMsg, len) == 72,
-        "len is at offset 72 of HabilisNetworkMsg"
-    );
-};
-
-/// The opaque handle behind `habilis_network_mesh *`. Holds the `Mesh` plus
-/// NUL-terminated copies of the identity strings, so [`habilis_network_mesh_id`] /
-/// [`habilis_network_mesh_nickname`] can hand out pointers that stay valid for the
-/// handle's lifetime.
-#[expect(
-    missing_debug_implementations,
-    reason = "wraps Mesh, which owns a tokio Runtime and so has no Debug impl"
-)]
-pub struct HabilisNetworkMesh {
-    mesh: Mesh,
-    id: CString,
-    nick: CString,
-    name: CString,
 }
 
 fn set_error(message: &str) {
@@ -698,89 +542,6 @@ pub unsafe extern "C" fn habilis_network_mesh_close(handle: *mut HabilisNetworkM
         let mut owned = unsafe { Box::from_raw(handle) };
         report(owned.mesh.close())
     })
-}
-
-/// How a stream node reaches peers, mirroring `habilis_network_stream_opts` in the
-/// header: the same three lists `habilis_network_opts` carries, without the mesh
-/// selectors a stream has no use for.
-#[repr(C)]
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct HabilisNetworkStreamOpts {
-    /// The lookups, as a NUL-terminated string.
-    pub lookup: *const c_char,
-    /// The transports, as a NUL-terminated string.
-    pub transport: *const c_char,
-    /// The relay URLs, as a NUL-terminated string.
-    pub relay_urls: *const c_char,
-}
-
-impl HabilisNetworkStreamOpts {
-    /// Every pointer NULL, which takes the engine defaults.
-    #[must_use]
-    pub fn empty() -> Self {
-        Self {
-            lookup: std::ptr::null(),
-            transport: std::ptr::null(),
-            relay_urls: std::ptr::null(),
-        }
-    }
-}
-
-/// Pinned like `HabilisNetworkOpts`: a reordered field would silently misread a
-/// caller's struct.
-const _: () = {
-    use std::mem::{align_of, offset_of, size_of};
-
-    assert!(
-        size_of::<HabilisNetworkStreamOpts>() == 24,
-        "HabilisNetworkStreamOpts has the size the C header declares, 24"
-    );
-    assert!(
-        align_of::<HabilisNetworkStreamOpts>() == 8,
-        "HabilisNetworkStreamOpts has the alignment the C header declares, 8"
-    );
-    assert!(
-        offset_of!(HabilisNetworkStreamOpts, lookup) == 0,
-        "lookup is at offset 0 of HabilisNetworkStreamOpts"
-    );
-    assert!(
-        offset_of!(HabilisNetworkStreamOpts, transport) == 8,
-        "transport is at offset 8 of HabilisNetworkStreamOpts"
-    );
-    assert!(
-        offset_of!(HabilisNetworkStreamOpts, relay_urls) == 16,
-        "relay_urls is at offset 16 of HabilisNetworkStreamOpts"
-    );
-};
-
-/// The opaque handle behind `habilis_network_streams *`.
-#[expect(
-    missing_debug_implementations,
-    reason = "wraps Streams, which owns a tokio Runtime and so has no Debug impl"
-)]
-pub struct HabilisNetworkStreams {
-    streams: Streams,
-}
-
-/// The opaque handle behind `habilis_network_producer *`, with a NUL-terminated copy of
-/// the hash so [`habilis_network_stream_hash`] can lend it out.
-#[expect(
-    missing_debug_implementations,
-    reason = "wraps Writer, which holds a tokio Runtime and so has no Debug impl"
-)]
-pub struct HabilisNetworkProducer {
-    writer: Writer,
-    hash: CString,
-}
-
-/// The opaque handle behind `habilis_network_reader *`.
-#[expect(
-    missing_debug_implementations,
-    reason = "wraps ReadEnd, which holds a tokio Runtime and so has no Debug impl"
-)]
-pub struct HabilisNetworkReader {
-    reader: ReadEnd,
 }
 
 fn timeout_of(timeout_ms: c_int) -> Duration {
