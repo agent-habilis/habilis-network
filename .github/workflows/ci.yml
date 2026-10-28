@@ -61,6 +61,12 @@ jobs:
           bun test scripts/script-language/script-language.test.ts
           bun scripts/script-language/script-language.ts
 
+      # No macro_rules! or proc macro beyond the counted rows of scripts/macro-rules/macro-rules.allow.
+      - name: Macro rules
+        run: |
+          bun test scripts/macro-rules/macro-rules.test.ts
+          bun scripts/macro-rules/macro-rules.ts
+
       # `blob` is off by default (only agent-gossip enables it), so the line
       # above never lints `src/blob/` — ~1,300 lines including its own ALPN
       # server. `--all-features` below only *checks* it.

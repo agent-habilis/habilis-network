@@ -233,6 +233,10 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - Macros (M3): no gate. The reviewer checks each new `macro_rules!`, and `AGENTS.md` allows only `string_newtype!` for a newtype. Eight `macro_rules!` sites on 2026-10-28, all in `git grep "macro_rules!"`: `digest_newtype` (chunks), `for_each_case` and two `run` (chunks conformance), `warn_refusal` (doc), `string_newtype` and `check` (protocol), `cells` (network send ladder matrix test).
 - Macro order for an API (M1): no gate. The one proc macro, `habilis-network-test-tracing-macros`, is a test attribute (`use habilis_network_test_tracing::test;`) and not a public API. Regular Rust and `macro_rules!` come first for every API. Checked 2026-10-28.
 - Cost of a macro (M2): no gate. The reviewer weighs IDE and search support against the code it saves. The proc macro sits on the test path only, so its cost stays in test modules. Checked 2026-10-28.
+- `From<&str>` that can panic: a type that validates its input has `new` returning a `Result`, and no `From<&str>`. `AppTag` and `CorrId` follow this, and a `compile_fail` doc test pins it.
+- Macros (M3): `scripts/macro-rules/macro-rules.ts` refuses a `macro_rules!` or a proc macro that `scripts/macro-rules/macro-rules.allow` does not name, and a count that differs from its row. The rows are `string_newtype!` (AGENTS.md allows it for a newtype), `for_each_case` and two `run` callbacks (one `#[test]` per case per backend), `cells!` (one `#[test]` per matrix cell), and the test-only proc macro `habilis-network-test-tracing-macros` (the `test` attribute that fails a test on a WARN or ERROR).
+- Macro order for an API (M1): a fn, a generic or a trait comes before a macro. The gate above holds the count, and no row is an API.
+- Cost of a macro (M2): each row states its reason, so the cost of a macro is read in review. The proc macro sits on the test path only.
 
 ### Rules of the guide that do not apply
 
