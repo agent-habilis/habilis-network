@@ -228,6 +228,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - The result of a complex iterator chain: no lint measures it. The reviewer asks for a typed variable when the chain ends in `collect`, `sum` or `parse` and the type is not clear. (P5)
 - Context strings on `assert!`: `missing_assert_message` makes one required outside test code. Whether the string helps (a logged value, misuse versus bug) is for the reviewer. (P13)
 - An assertion message that only repeats the condition: no lint covers it. The reviewer asks for a message that adds the value or the reason. (P14)
+- Long or complex iterator chains: no lint measures length. `.for_each(` has 0 calls (2026-10-27). The reviewer asks for a `for` loop or a named step when a chain stops being short. (P15)
 
 ### Rules of the guide that do not apply
 
