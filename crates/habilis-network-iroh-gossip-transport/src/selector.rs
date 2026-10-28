@@ -46,13 +46,12 @@ mod tests {
     use habilis_network_iroh_transport_util::Rung;
     use habilis_network_test_tracing::test;
 
-    use super::custom_rung;
     /// The ladder names this crate's transport by the id that the transport uses. The id is
     /// written twice, here and in the util crate, which is below this one; this is the guard
     /// that they stay equal.
     #[test]
     fn the_ladder_knows_the_gossip_transport_id_of_this_crate() {
-        assert_eq!(custom_rung(crate::GOSSIP_TRANSPORT_ID), Rung::Gossip);
+        assert_eq!(super::custom_rung(crate::GOSSIP_TRANSPORT_ID), Rung::Gossip);
     }
 
     use std::time::Duration;

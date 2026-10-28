@@ -10,7 +10,6 @@ use iroh::{EndpointId, TransportAddr};
 use n0_future::boxed::BoxStream;
 use n0_future::stream;
 
-use crate::gossip_addr;
 use crate::transport::Shared;
 
 /// Provenance tag that iroh attaches to the items this lookup produces.
@@ -34,7 +33,7 @@ impl AddressLookup for GossipLookup {
         }
         let info = EndpointInfo::from_parts(
             endpoint_id,
-            EndpointData::from_iter([TransportAddr::Custom(gossip_addr(endpoint_id))]),
+            EndpointData::from_iter([TransportAddr::Custom(crate::gossip_addr(endpoint_id))]),
         );
         Some(Box::pin(stream::once(Ok(Item::new(
             info, PROVENANCE, None,
@@ -48,8 +47,8 @@ mod tests {
     use iroh::{SecretKey, TransportAddr};
     use n0_future::StreamExt;
 
+    use crate::GossipHandle;
     use crate::memory::Hub;
-    use crate::{GossipHandle, gossip_addr};
 
     fn id(seed: u8) -> iroh::EndpointId {
         SecretKey::from_bytes(&[seed; 32]).public()
@@ -72,7 +71,7 @@ mod tests {
 
         assert_eq!(
             answer(&handle, id(2)).await,
-            Some(vec![TransportAddr::Custom(gossip_addr(id(2)))])
+            Some(vec![TransportAddr::Custom(crate::gossip_addr(id(2)))])
         );
     }
 

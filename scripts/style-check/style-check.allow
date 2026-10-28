@@ -570,9 +570,6 @@ self_convention|crates/habilis-network-protocol/src/mesh/transport.rs|1|Transpor
 self_convention|crates/habilis-network-protocol/src/topic.rs|1|TopicId::to_bytes: a Copy type, so self by value
 self_convention|crates/habilis-network-util/src/clock.rs|2|UnixSecs::as_secs and to_le_bytes: a Copy type, so self by value
 # fn_import: a top-level function imported by its bare name (O23). Each row is a count that may only go down.
-fn_import|crates/habilis-network-iroh-gossip-transport/src/lookup.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-iroh-gossip-transport/src/memory.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-iroh-gossip-transport/src/selector.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-gossip-transport/src/sink.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/host.rs|1|kept: a top-level function imported by its bare name (O23 rollout)

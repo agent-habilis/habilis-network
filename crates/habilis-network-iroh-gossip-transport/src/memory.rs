@@ -6,8 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 
-use crate::transport::locked;
-use crate::{FrameSink, GossipHandle};
+use crate::{FrameSink, GossipHandle, transport};
 
 /// The members that share one flood.
 #[derive(Debug, Default, Clone)]
@@ -31,7 +30,7 @@ impl Hub {
 
     /// Add `handle` to the flood and attach a sink to it.
     pub fn join(&self, handle: &GossipHandle) {
-        locked(&self.inner).members.push(handle.clone());
+        transport::locked(&self.inner).members.push(handle.clone());
         handle.attach(Arc::new(MemorySink {
             hub: self.clone(),
             from: handle.clone(),
@@ -40,14 +39,14 @@ impl Hub {
 
     /// Every frame sent so far.
     pub fn sent(&self) -> impl Iterator<Item = Bytes> {
-        let sent = locked(&self.inner).sent.clone();
+        let sent = transport::locked(&self.inner).sent.clone();
         sent.into_iter()
     }
 
     /// Deliver `frame` to every member as if `from` had sent it.
     pub fn flood(&self, from: &GossipHandle, frame: &Bytes) {
         let members: Vec<GossipHandle> = {
-            let mut inner = locked(&self.inner);
+            let mut inner = transport::locked(&self.inner);
             inner.sent.push(frame.clone());
             inner.members.clone()
         };
