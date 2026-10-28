@@ -21,7 +21,7 @@ use iroh_base::CustomAddr;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::MULTIHOP_TRANSPORT_ID;
-use crate::role::{AppId, UnderlayId};
+use crate::app_id::{AppId, UnderlayId};
 
 /// Longest route this transport will build or relay. Routes come from Dijkstra
 /// over the link-state graph and multihop is a last-resort path, so real ones
@@ -157,7 +157,7 @@ impl<'de> Deserialize<'de> for Route {
 #[cfg(test)]
 mod tests {
     use super::{MAX_ROUTE_HOPS, Route, RouteHop};
-    use crate::role::{AppId, UnderlayId};
+    use crate::app_id::{AppId, UnderlayId};
     use habilis_network_test_tracing::test;
     use iroh::{EndpointId, SecretKey};
     use std::fmt::Write as _;

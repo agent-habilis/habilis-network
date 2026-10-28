@@ -32,8 +32,8 @@ operator|crates/habilis-network/src/gossip/app.rs|1|AppClass bit flags: BitOr jo
 pub_const_fn|crates/habilis-network-chunks/src/chunk_hash.rs|4|kept: ChunkHash and Root newtype accessors and constructors (from_bytes, as_bytes), plus trivial accessors (root, size, len, is_empty)
 pub_const_fn|crates/habilis-network-chunks/src/chunk_map.rs|2|kept: ChunkHash and Root newtype accessors and constructors (from_bytes, as_bytes), plus trivial accessors (root, size, len, is_empty)
 pub_const_fn|crates/habilis-network-chunks/src/coverage.rs|2|kept: ChunkHash and Root newtype accessors and constructors (from_bytes, as_bytes), plus trivial accessors (root, size, len, is_empty)
-pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/metric.rs|2|kept: newtype rule (LinkMetric new and get)
-pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/role.rs|4|kept: newtype rule (AppId and UnderlayId new and get)
+pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/link_metric.rs|2|kept: newtype rule (LinkMetric new and get)
+pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/app_id.rs|4|kept: newtype rule (AppId and UnderlayId new and get)
 pub_const_fn|crates/habilis-network-netplay/src/frame.rs|2|kept: newtype rule (Frame new and get)
 pub_const_fn|crates/habilis-network-netplay/src/handle.rs|2|kept: newtype rule (PlayerHandle new and index)
 pub_const_fn|crates/habilis-network-netplay/src/mesh/lobby.rs|8|kept: newtype rule (Epoch, SessionId, Tick, TickSpan new, get, next, since)
@@ -67,14 +67,14 @@ assert_no_message|crates/habilis-network-iroh-gossip-transport/src/recursion.rs|
 assert_no_message|crates/habilis-network-iroh-gossip-transport/src/selector.rs|4|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-gossip-transport/src/sink.rs|4|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-gossip-transport/src/transport.rs|30|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-iroh-multihop-transport/src/addr.rs|12|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network-iroh-multihop-transport/src/route.rs|12|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-multihop-transport/src/graph.rs|13|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-multihop-transport/src/lib.rs|20|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-iroh-multihop-transport/src/role.rs|4|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-iroh-multihop-transport/src/selector.rs|6|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network-iroh-multihop-transport/src/app_id.rs|4|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network-iroh-multihop-transport/src/multihop_ladder.rs|6|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-multihop-transport/src/topology.rs|43|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-multihop-transport/src/underlay.rs|27|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-iroh-multihop-transport/src/wire.rs|6|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network-iroh-multihop-transport/src/cell.rs|6|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-multihop-transport/tests/e2e.rs|2|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-transport-util/src/lib.rs|27|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/room.rs|10|kept: assert without a message, to be given one (P13 rollout)
@@ -215,13 +215,13 @@ long_chain|crates/habilis-network-iroh-gossip-transport/src/recursion.rs|3|kept:
 long_chain|crates/habilis-network-iroh-gossip-transport/src/selector.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-gossip-transport/src/sink.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-gossip-transport/src/transport.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-iroh-multihop-transport/src/addr.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-iroh-multihop-transport/src/route.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-multihop-transport/src/graph.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-multihop-transport/src/lib.rs|5|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-iroh-multihop-transport/src/lookup.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-iroh-multihop-transport/src/multihop_lookup.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-multihop-transport/src/preset.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-multihop-transport/src/topology.rs|5|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-iroh-multihop-transport/src/transport.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-iroh-multihop-transport/src/multihop_transport.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-multihop-transport/src/underlay.rs|6|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-multihop-transport/tests/e2e.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-transport-util/src/rung.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -367,7 +367,7 @@ turbofish_collect_parse|crates/habilis-network-iroh-gossip-transport/src/recursi
 turbofish_collect_parse|crates/habilis-network-iroh-gossip-transport/src/selector.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-iroh-gossip-transport/src/sink.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network-iroh-multihop-transport/src/addr.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
+turbofish_collect_parse|crates/habilis-network-iroh-multihop-transport/src/route.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-iroh-multihop-transport/src/lib.rs|3|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-iroh-multihop-transport/src/topology.rs|12|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-iroh-multihop-transport/src/underlay.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
@@ -437,9 +437,9 @@ untyped_long_chain_let|crates/habilis-network-iroh-gossip-transport/src/selector
 untyped_long_chain_let|crates/habilis-network-iroh-gossip-transport/src/sink.rs|4|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-gossip-transport/src/transport.rs|3|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-multihop-transport/src/lib.rs|4|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-iroh-multihop-transport/src/lookup.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+untyped_long_chain_let|crates/habilis-network-iroh-multihop-transport/src/multihop_lookup.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-multihop-transport/src/topology.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-iroh-multihop-transport/src/transport.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+untyped_long_chain_let|crates/habilis-network-iroh-multihop-transport/src/multihop_transport.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-multihop-transport/src/underlay.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-multihop-transport/tests/e2e.rs|3|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-transport-util/src/rung.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
@@ -626,14 +626,14 @@ abbrev_name|crates/habilis-network-iroh-gossip-transport/src/lib.rs|2|existing l
 abbrev_name|crates/habilis-network-iroh-gossip-transport/src/recursion.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-gossip-transport/src/selector.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-gossip-transport/src/transport.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-multihop-transport/src/addr.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-iroh-multihop-transport/src/route.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-multihop-transport/src/graph.rs|7|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-multihop-transport/src/lib.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-multihop-transport/src/selector.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-iroh-multihop-transport/src/lib.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-iroh-multihop-transport/src/multihop_ladder.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-multihop-transport/src/test_support.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-multihop-transport/src/transport.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-iroh-multihop-transport/src/multihop_transport.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-multihop-transport/src/underlay.rs|15|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-multihop-transport/src/wire.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-iroh-multihop-transport/src/cell.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-transport-util/src/rung.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/addr.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count

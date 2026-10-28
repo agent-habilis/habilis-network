@@ -44,20 +44,20 @@
 //! ```
 
 use tokio::sync::mpsc;
-mod addr;
-mod error;
+mod app_id;
+mod cell;
 mod graph;
-mod lookup;
-mod metric;
+mod handle_error;
+mod link_metric;
+mod multihop_ladder;
+mod multihop_lookup;
+mod multihop_transport;
 mod preset;
-mod role;
-mod selector;
+mod route;
 #[cfg(test)]
 mod test_support;
 mod topology;
-mod transport;
 mod underlay;
-mod wire;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -67,9 +67,9 @@ use iroh::endpoint::transports::{CustomTransport, PathSelector};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 use n0_future::time::{Duration, Instant};
 
-pub use addr::{Route, RouteHop};
-pub use error::HandleError;
 pub use graph::Leg;
+pub use handle_error::HandleError;
+pub use route::{Route, RouteHop};
 
 /// What the data path of a node counted: a test reads them to tell where cells go.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -84,14 +84,14 @@ pub struct MultihopCounters {
     /// Cells that ended here and went into the inbox of the local transport.
     pub delivered: u64,
 }
-pub use metric::LinkMetric;
-pub use role::{AppId, UnderlayId};
+pub use app_id::{AppId, UnderlayId};
+pub use link_metric::LinkMetric;
 pub use topology::{LinkVector, Topology, TopologyEdge, TopologyView};
 
-use crate::addr::Route as RouteInner;
-use crate::lookup::{MultihopLookup, RouteChooser};
-use crate::selector::MultihopLadder;
-use crate::transport::{MultihopTransport, Shared};
+use crate::multihop_ladder::MultihopLadder;
+use crate::multihop_lookup::{MultihopLookup, RouteChooser};
+use crate::multihop_transport::{MultihopTransport, Shared};
+use crate::route::Route as RouteInner;
 use crate::underlay::{ForwardAcceptor, Forwarder};
 
 /// Transport-type id for the multihop transport, tagging every multihop
@@ -629,9 +629,9 @@ mod tests {
     use iroh::{Endpoint, RelayMode, SecretKey};
 
     use super::{AppId, HandleConfig, MultihopHandle, UnderlayId, underlay_secret};
-    use crate::addr::{Route, RouteHop};
+    use crate::cell::Cell;
+    use crate::route::{Route, RouteHop};
     use crate::test_support;
-    use crate::wire::Cell;
 
     use std::sync::atomic;
     use std::sync::atomic::Ordering;
@@ -1053,7 +1053,7 @@ mod tests {
     fn a_route_through_a_browser_costs_more_than_any_native_route() {
         let native = u64::from(HandleConfig::default().link_cost);
         let browser = u64::from(HandleConfig::for_browser().link_cost);
-        let longest_native = native * u64::try_from(crate::addr::MAX_ROUTE_HOPS).expect("small");
+        let longest_native = native * u64::try_from(crate::route::MAX_ROUTE_HOPS).expect("small");
         assert!(
             native + browser > longest_native,
             "one browser hop ({native} + {browser}) must cost more than the longest native route ({longest_native})"
@@ -1203,7 +1203,9 @@ mod tests {
             HandleConfig::default()
         );
         // It stays finite: the graph drops a link of infinite cost, and with it the browser as a hop.
-        assert!(crate::metric::LinkMetric::new(HandleConfig::for_browser().link_cost).is_usable());
+        assert!(
+            crate::link_metric::LinkMetric::new(HandleConfig::for_browser().link_cost).is_usable()
+        );
     }
 
     #[test]

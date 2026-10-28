@@ -9,8 +9,8 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use crate::metric::LinkMetric;
-use crate::role::AppId;
+use crate::app_id::AppId;
+use crate::link_metric::LinkMetric;
 
 /// A directed, metric-weighted view of the link-state graph: for each node, its
 /// outbound links `(neighbour, cost)`. Nodes are keyed by their stable `AppId`.
@@ -260,7 +260,7 @@ mod tests {
     use habilis_network_test_tracing::test;
     use iroh::SecretKey;
 
-    use crate::role::AppId;
+    use crate::app_id::AppId;
 
     use super::{Graph, Leg, Link, LinkMetric};
 

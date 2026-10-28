@@ -14,10 +14,10 @@ use iroh_base::Signature;
 use n0_future::time::{Duration, Instant, SystemTime};
 use serde::{Deserialize, Serialize};
 
-use crate::addr::{Route, RouteHop};
+use crate::app_id::{AppId, UnderlayId};
 use crate::graph::{Graph, Leg, Link};
-use crate::metric::LinkMetric;
-use crate::role::{AppId, UnderlayId};
+use crate::link_metric::LinkMetric;
+use crate::route::{Route, RouteHop};
 
 /// How long a vector stays without a newer one, unless the handle says otherwise.
 pub(crate) const DEFAULT_VECTOR_MAX_AGE: Duration = Duration::from_secs(45);
@@ -414,7 +414,7 @@ mod tests {
     use n0_future::time::{Duration, Instant};
 
     use super::{Leg, LinkVector, Topology};
-    use crate::role::{AppId, UnderlayId};
+    use crate::app_id::{AppId, UnderlayId};
     use iroh::{EndpointAddr, SecretKey};
 
     fn eid(seed: u8) -> AppId {
@@ -470,7 +470,9 @@ mod tests {
         let (na, nb, nc) = (eid(1), eid(2), eid(3));
         let mut store = Topology::default();
         let mut tampered = vector(na, 1, &[(nb, 10)]);
-        tampered.links.push((nc, crate::metric::LinkMetric::new(1)));
+        tampered
+            .links
+            .push((nc, crate::link_metric::LinkMetric::new(1)));
         assert!(!ingest(&mut store, tampered));
         let mut moved = vector(na, 1, &[(nb, 10)]);
         moved.underlay = EndpointAddr::new(nc.get());
@@ -903,10 +905,10 @@ mod tests {
         let [tab, dst] = [1, 2].map(eid);
         let mut store = Topology::default();
         let mut cheaper = vector(tab, 1, &[(dst, BROWSER_COST)]);
-        cheaper.links[0].1 = crate::metric::LinkMetric::new(NATIVE_COST);
+        cheaper.links[0].1 = crate::link_metric::LinkMetric::new(NATIVE_COST);
         assert!(!ingest(&mut store, cheaper), "a lowered cost");
         let mut dearer = vector(tab, 1, &[(dst, NATIVE_COST)]);
-        dearer.links[0].1 = crate::metric::LinkMetric::new(BROWSER_COST);
+        dearer.links[0].1 = crate::link_metric::LinkMetric::new(BROWSER_COST);
         assert!(!ingest(&mut store, dearer), "a raised cost");
         assert!(ingest(&mut store, vector(tab, 1, &[(dst, BROWSER_COST)])));
     }

@@ -18,9 +18,9 @@ use iroh::endpoint::transports::{
 use iroh_base::CustomAddr;
 use tokio::sync::mpsc;
 
-use crate::addr::{Route, RouteHop};
+use crate::cell::Cell;
+use crate::route::{Route, RouteHop};
 use crate::underlay::{Delivered, Forwarder};
-use crate::wire::Cell;
 
 /// State shared by the transport, its endpoint, and its senders.
 #[derive(Debug)]

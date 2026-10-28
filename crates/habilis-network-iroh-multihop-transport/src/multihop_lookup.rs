@@ -15,9 +15,9 @@ use iroh::{EndpointId, TransportAddr};
 use n0_future::boxed::BoxStream;
 use n0_future::stream;
 
-use crate::addr::Route;
+use crate::app_id::AppId;
 use crate::graph::Leg;
-use crate::role::AppId;
+use crate::route::Route;
 use crate::topology::Topology;
 use crate::underlay::Forwarder;
 

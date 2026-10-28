@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use iroh::endpoint::{RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
 
-use crate::addr::{Route, RouteHop};
+use crate::route::{Route, RouteHop};
 
 /// A cell exceeding this many bytes is refused — a corrupt/hostile length prefix
 /// must never drive an unbounded allocation. A QUIC datagram is a few kilobytes
@@ -100,8 +100,8 @@ pub(crate) async fn read_cell(recv: &mut RecvStream) -> Result<Cell> {
 #[cfg(test)]
 mod tests {
     use super::Cell;
-    use crate::addr::{MAX_ROUTE_HOPS, Route, RouteHop};
-    use crate::role::{AppId, UnderlayId};
+    use crate::app_id::{AppId, UnderlayId};
+    use crate::route::{MAX_ROUTE_HOPS, Route, RouteHop};
     use habilis_network_test_tracing::test;
     use iroh::{EndpointId, SecretKey};
 

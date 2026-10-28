@@ -30,10 +30,10 @@ use n0_future::time::{Duration, Instant, MissedTickBehavior};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
-use crate::addr::{Route, RouteHop};
-use crate::role::{AppId, UnderlayId};
+use crate::app_id::{AppId, UnderlayId};
+use crate::cell::{Cell, read_cell, write_cell};
+use crate::route::{Route, RouteHop};
 use crate::topology::Topology;
-use crate::wire::{Cell, read_cell, write_cell};
 
 /// ALPN for the multihop underlay's hop-to-hop forwarding protocol.
 pub(crate) const FORWARD_ALPN: &[u8] = b"iroh-multihop/forward/1";
@@ -977,11 +977,11 @@ mod tests {
         Arc, AtomicUsize, Delivered, Duration, Forwarder, MAX_WRITERS, Ordering, RwLock,
         TransportAddr, UNRESOLVED_SEEN_CAP,
     };
-    use crate::addr::{Route, RouteHop};
-    use crate::role::{AppId, UnderlayId};
+    use crate::app_id::{AppId, UnderlayId};
+    use crate::cell::Cell;
+    use crate::route::{Route, RouteHop};
     use crate::test_support;
     use crate::topology::{LinkVector, Topology};
-    use crate::wire::Cell;
     use habilis_network_test_tracing::{expect_warn, test};
     use iroh::endpoint::presets;
     use iroh::endpoint::transports::{PathSelection, PathSelectionContext, PathSelector};

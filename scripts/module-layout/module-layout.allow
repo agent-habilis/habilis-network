@@ -8,15 +8,7 @@ crates/habilis-network-iroh-gossip-transport/src/memory.rs|1|rename pending: pub
 crates/habilis-network-iroh-gossip-transport/src/selector.rs|1|rename pending: public type(s) GossipLadder
 crates/habilis-network-iroh-gossip-transport/src/sink.rs|1|rename pending: public type(s) GossipSink, ReceiveLoop
 crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|rename pending: public type(s) FrameSink, Delivery, Shared, GossipHandle
-crates/habilis-network-iroh-multihop-transport/src/addr.rs|1|rename pending: public type(s) RouteHop, Route
-crates/habilis-network-iroh-multihop-transport/src/error.rs|1|rename pending: public type(s) HandleError
-crates/habilis-network-iroh-multihop-transport/src/lookup.rs|1|rename pending: public type(s) MultihopLookup, Chosen, RouteChooser
-crates/habilis-network-iroh-multihop-transport/src/metric.rs|1|rename pending: public type(s) LinkMetric
-crates/habilis-network-iroh-multihop-transport/src/role.rs|1|rename pending: public type(s) AppId, UnderlayId
-crates/habilis-network-iroh-multihop-transport/src/selector.rs|1|rename pending: public type(s) MultihopLadder
-crates/habilis-network-iroh-multihop-transport/src/transport.rs|1|rename pending: public type(s) Shared, MultihopTransport
 crates/habilis-network-iroh-multihop-transport/src/underlay.rs|1|rename pending: public type(s) Delivered, Forwarder, ForwardAcceptor
-crates/habilis-network-iroh-multihop-transport/src/wire.rs|1|rename pending: public type(s) Cell
 crates/habilis-network-iroh-webrtc-transport/src/attach.rs|1|rename pending: public type(s) AttachError
 crates/habilis-network-iroh-webrtc-transport/src/liveness.rs|1|rename pending: public type(s) ConnectionPhase, Verdict
 crates/habilis-network-iroh-webrtc-transport/src/native/driver.rs|1|rename pending: public type(s) NegotiatedSession, ChannelReadyTarget
