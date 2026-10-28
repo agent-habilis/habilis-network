@@ -57,10 +57,13 @@ pub(crate) fn next_fill(
         .filter(|addr| !state.relink_on_cooldown(addr.id, now))
         .filter(|addr| !state.graft_blocked(addr.id, now))
         .collect();
-    free.sort_unstable_by_key(|addr| (webrtc::needs_webrtc_lane(addr), addr.id));
+    free.sort_unstable_by_key(|addr| (webrtc::lane_needs::needs_webrtc_lane(addr), addr.id));
     let first_group = free.first().map_or(0, |first| {
         free.iter()
-            .take_while(|addr| webrtc::needs_webrtc_lane(addr) == webrtc::needs_webrtc_lane(first))
+            .take_while(|addr| {
+                webrtc::lane_needs::needs_webrtc_lane(addr)
+                    == webrtc::lane_needs::needs_webrtc_lane(first)
+            })
             .count()
     });
     free.get(pick.checked_rem(first_group)?)
@@ -160,7 +163,7 @@ pub(crate) fn retry_candidates_at(
         .filter(|addr| distrust_links || !state.linked_endpoints.contains(&addr.id))
         .filter(|addr| {
             state.direct.get(&addr.id) != Some(&DirectState::Pending)
-                || (webrtc::needs_webrtc_lane(addr)
+                || (webrtc::lane_needs::needs_webrtc_lane(addr)
                     && state
                         .webrtc
                         .as_ref()

@@ -517,7 +517,7 @@ pub struct EventLoopState {
     pub(crate) probe_backoff: super::probe_backoff::ProbeBackoff,
     /// Whether grafting the rendezvous must wait for an attached `WebRTC`
     /// session — true for a webrtc-shaped node on a lookup-only mesh; see
-    /// `transport::webrtc::rendezvous_graftable`.
+    /// `transport::webrtc::rendezvous::rendezvous_graftable`.
     pub(crate) rendezvous_graft_needs_session: bool,
     /// Whether this node runs IP transports (`TransportOpts::ip`, and never
     /// on wasm). The local half of every `WebRTC` lane decision — read from

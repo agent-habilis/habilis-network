@@ -1085,7 +1085,7 @@ pub(crate) async fn build_peer_multihop_with(
             )),
         ));
         // A session that attached is used only after a connect that completes, and
-        // the nudge is that connect: see `webrtc::nudge_session`.
+        // the nudge is that connect: see `webrtc::nudge_acceptor::nudge_session`.
         protocols.push((webrtc::NUDGE_ALPN.to_vec(), Box::new(webrtc::NudgeAcceptor)));
         underlay_webrtc = Some(underlay_webrtc::UnderlayWebRtc {
             handle,

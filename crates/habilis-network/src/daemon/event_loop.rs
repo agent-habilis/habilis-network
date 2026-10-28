@@ -267,8 +267,10 @@ async fn run_checked<Driver: NodeDriver>(
     // Before the first write, so the initial advertisement carries a real count.
     state.live_count = live_count;
     state.relay_transport = relay_transport;
-    state.rendezvous_graft_needs_session =
-        webrtc::node_graft_needs_session(relay_transport.relay_allowed(), local_udp_transport);
+    state.rendezvous_graft_needs_session = webrtc::session_policy::node_graft_needs_session(
+        relay_transport.relay_allowed(),
+        local_udp_transport,
+    );
     state.local_udp_transport = local_udp_transport;
     // Direct-path probes report here; the loop grafts on the verdict.
     let (direct_tx, direct_rx) = mpsc::unbounded_channel();
@@ -833,7 +835,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
     {
         let ctx = parts.ctx(&sender);
         app.on_startup(&mut state, &ctx).await;
-        webrtc::offer_rendezvous_off_tick(&mut state, &ctx);
+        webrtc::rendezvous::offer_rendezvous_off_tick(&mut state, &ctx);
     }
 
     // Our own address changes (the home relay arrives after the arrival flood, an
@@ -970,7 +972,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 state.idle.external += 1;
                 let ctx = parts.ctx(&sender);
                 if Some(change.peer) == state.rendezvous_id {
-                    webrtc::offer_rendezvous_on_path_loss(&mut state, &ctx);
+                    webrtc::rendezvous::offer_rendezvous_on_path_loss(&mut state, &ctx);
                 } else {
                     probe::on_path_change(change, &mut state, &ctx).await;
                 }
@@ -998,7 +1000,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 // lost to a transient (the peer not yet reachable, an ICE
                 // hiccup) is never retried, and the pair stays relay-only for
                 // the life of the link. Observed exactly that, CLI↔browser.
-                webrtc::retry_sessions(&mut state, &ctx);
+                webrtc::retry::retry_sessions(&mut state, &ctx);
                 // The same for the sessions of the multihop underlay, which open
                 // only to a neighbor that has no IP path to us.
                 #[cfg(feature = "multihop")]
@@ -1152,7 +1154,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 }
                 probe::regraft_due(&mut state, &ctx).await;
                 probe::refill_isolated(&mut state, &ctx).await;
-                webrtc::detach_sessions_under_udp(&mut state, &ctx).await;
+                webrtc::session_policy::detach_sessions_under_udp(&mut state, &ctx).await;
                 gossip::antientropy::resume_fast_rounds(&mut state, &ctx).await;
             }
             _ = intervals.antientropy.tick() => {

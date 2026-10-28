@@ -709,7 +709,7 @@ impl NodeDriver for MembershipApp {
                     let endpoint = ctx.endpoint.clone();
                     let peer = addr.id;
                     n0_future::task::spawn(async move {
-                        webrtc::nudge(&endpoint, peer).await;
+                        webrtc::nudge_acceptor::nudge(&endpoint, peer).await;
                     });
                 }
                 let _ = reply.send(());
@@ -733,7 +733,7 @@ impl NodeDriver for MembershipApp {
                     let endpoint = ctx.endpoint.clone();
                     let peer = addr.id;
                     n0_future::task::spawn(async move {
-                        webrtc::nudge(&endpoint, peer).await;
+                        webrtc::nudge_acceptor::nudge(&endpoint, peer).await;
                     });
                 }
                 let _ = reply.send(());
@@ -756,7 +756,7 @@ impl NodeDriver for MembershipApp {
                     );
                     let endpoint = ctx.endpoint.clone();
                     n0_future::task::spawn(async move {
-                        webrtc::nudge(&endpoint, remote).await;
+                        webrtc::nudge_acceptor::nudge(&endpoint, remote).await;
                     });
                 });
                 let _ = reply.send(result);
@@ -791,7 +791,7 @@ impl NodeDriver for MembershipApp {
             Request::OfferSession { peer, reply } => {
                 let result = known_peer(state, &peer).cloned().map(|addr| {
                     state.direct.insert(addr.id, DirectState::RelayOnly);
-                    webrtc::negotiate_session(state, ctx, addr.id, addr);
+                    webrtc::negotiate_session::negotiate_session(state, ctx, addr.id, addr);
                 });
                 let _ = reply.send(result);
                 false
@@ -1031,7 +1031,7 @@ impl NodeDriver for MembershipApp {
                     let endpoint = ctx.endpoint.clone();
                     let peer = addr.id;
                     n0_future::task::spawn(async move {
-                        webrtc::nudge(&endpoint, peer).await;
+                        webrtc::nudge_acceptor::nudge(&endpoint, peer).await;
                     });
                 }
                 let _ = reply.send(());

@@ -232,7 +232,7 @@ fn note_no_rung_free(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, ports: us
 /// this member that was started while nobody held the rendezvous was ended by
 /// [`schedule_rival_recheck`].
 pub(super) fn offer_to_the_new_holder(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    webrtc::offer_rendezvous_off_tick(state, ctx);
+    webrtc::rendezvous::offer_rendezvous_off_tick(state, ctx);
 }
 
 /// A probe found a holder of the rendezvous that is not us ("staying peer"): the holder changed for
@@ -305,7 +305,7 @@ pub(super) async fn maybe_reclaim(
             beacon::Held::Idle => {}
         }
         if regrafts_rendezvous(state.rendezvous_linked, state.rendezvous_wanted())
-            && webrtc::rendezvous_graftable(state)
+            && webrtc::rendezvous::rendezvous_graftable(state)
         {
             tracing::info!(
                 target: "habilis_network::gossip",

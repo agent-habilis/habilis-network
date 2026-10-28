@@ -18,8 +18,9 @@ pub(crate) fn plan_lane_offers(
     pick: usize,
 ) -> Vec<iroh::EndpointAddr> {
     let budget = tuning::LANE_OFFERS_IN_FLIGHT.saturating_sub(in_flight);
-    let (mut browsers, mut natives): (Vec<_>, Vec<_>) =
-        lane.into_iter().partition(webrtc::needs_webrtc_lane);
+    let (mut browsers, mut natives): (Vec<_>, Vec<_>) = lane
+        .into_iter()
+        .partition(webrtc::lane_needs::needs_webrtc_lane);
     let mut ordered = Vec::new();
     for group in [&mut natives, &mut browsers] {
         group.sort_unstable_by_key(|addr| addr.id);
@@ -43,7 +44,8 @@ pub(crate) fn is_lane_offer(
     ctx: &HandlerCtx<'_>,
     addr: &iroh::EndpointAddr,
 ) -> bool {
-    (webrtc::needs_webrtc_lane(addr) || webrtc::needs_webrtc_lane(&ctx.endpoint.addr()))
+    (webrtc::lane_needs::needs_webrtc_lane(addr)
+        || webrtc::lane_needs::needs_webrtc_lane(&ctx.endpoint.addr()))
         && !state
             .webrtc
             .as_ref()

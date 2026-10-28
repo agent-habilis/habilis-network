@@ -37,7 +37,6 @@ crates/habilis-network/src/membership/app.rs|1|rename pending: public type(s) In
 crates/habilis-network/src/membership/event.rs|1|rename pending: public type(s) MembershipEvent
 crates/habilis-network/src/membership/join.rs|1|rename pending: public type(s) Opts, Membership
 crates/habilis-network/src/testing.rs|1|rename pending: public type(s) LogCapture, LaneNode
-crates/habilis-network/src/transport/webrtc.rs|1|rename pending: public type(s) SignalDeadlines, IceProfile, WebRtcSignalAcceptor, UdpTransport, NudgeAcceptor
 tasks/src/bench/native.rs|1|rename pending: public type(s) WebRtcPeer
 tasks/src/bench/run.rs|1|rename pending: public type(s) Sample, Rtt, Measured, Outcome
 tasks/src/bench/serve.rs|1|rename pending: public type(s) Static
@@ -48,3 +47,5 @@ tasks/src/util/cdp.rs|1|rename pending: public type(s) Browser
 # O11: a mod.rs or lib.rs that defines items. Each row goes when the items move to leaf files.
 crates/habilis-network/src/beacon/mod.rs|1|defines items; to move into leaf files (O11)
 crates/habilis-network/src/lookup/mod.rs|1|defines items; to move into leaf files (O11)
+crates/habilis-network/src/transport/webrtc/backend_native.rs|1|the native backend's own Offer and Answer, one per JSEP target; the file is the backend, not a type
+crates/habilis-network/src/transport/webrtc/backend_web.rs|1|the browser backend's own Offer and Answer, one per JSEP target; the file is the backend, not a type

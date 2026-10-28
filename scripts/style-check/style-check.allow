@@ -199,7 +199,8 @@ assert_no_message|crates/habilis-network/src/transport/pool.rs|11|kept: assert w
 assert_no_message|crates/habilis-network/src/transport/redial.rs|4|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/transport/send.rs|31|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/transport/underlay_webrtc.rs|14|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network/src/transport/webrtc.rs|27|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network/src/transport/webrtc.rs|26|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network/src/transport/webrtc/close_code.rs|1|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/tests/send_ladder_matrix.rs|3|kept: assert without a message, to be given one (P13 rollout)
 
 # long_chain: a statement with five or more chained calls (P15). Each row is a count that may only go down.
@@ -328,7 +329,8 @@ long_chain|crates/habilis-network/src/transport/send.rs|4|kept: statements with 
 long_chain|crates/habilis-network/src/transport/underlay_webrtc.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/transport/underlay_webrtc/plan.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/transport/underlay_webrtc/tick.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/src/transport/webrtc.rs|15|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network/src/transport/webrtc.rs|14|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network/src/transport/webrtc/session_policy.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/tests/active_view_fill_loopback.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/tests/d11_gate_loopback.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/tests/directed_send_off_loop_loopback.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -737,7 +739,16 @@ abbrev_name|crates/habilis-network/src/transport/send/route.rs|2|existing letter
 
 abbrev_name|crates/habilis-network/src/transport/underlay_webrtc/plan.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/underlay_webrtc/tick.rs|16|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/transport/webrtc.rs|211|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/webrtc.rs|99|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/webrtc/dial_signal.rs|6|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/webrtc/lane_needs.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/webrtc/negotiate_session.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/webrtc/nudge_acceptor.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/webrtc/offer.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/webrtc/rendezvous.rs|12|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/webrtc/retry.rs|30|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/webrtc/session_policy.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/webrtc/web_rtc_signal_acceptor.rs|21|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network-chunks/src/fs/disk_store.rs|2|kept: statements with a chain of five or more calls, moved with fs.rs (P15 rollout)
 long_chain|crates/habilis-network-chunks/src/fs/disk_origin.rs|1|kept: statements with a chain of five or more calls, moved with fs.rs (P15 rollout)
 turbofish_collect_parse|crates/habilis-network-chunks/src/fs/disk_store.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)

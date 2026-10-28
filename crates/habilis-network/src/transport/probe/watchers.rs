@@ -53,7 +53,9 @@ pub(crate) fn ensure_watchers(
         .values()
         // The rendezvous serves no unicast, so it has no pooled connection
         // to watch; `retry_candidates` skips it for the same reason.
-        .filter(|addr| addr.id != rendezvous && !webrtc::needs_webrtc_lane(addr) && local < addr.id)
+        .filter(|addr| {
+            addr.id != rendezvous && !webrtc::lane_needs::needs_webrtc_lane(addr) && local < addr.id
+        })
         .map(|addr| addr.id)
         .collect();
     for peer in peers {
@@ -132,7 +134,7 @@ pub(crate) fn nudge_webrtc_riders(state: &mut EventLoopState, ctx: &HandlerCtx<'
     for peer in webrtc_riders(state) {
         let endpoint = ctx.endpoint.clone();
         n0_future::task::spawn(async move {
-            webrtc::nudge(&endpoint, peer).await;
+            webrtc::nudge_acceptor::nudge(&endpoint, peer).await;
         });
     }
     nudge_climbing_pairs(state, ctx, false);
@@ -191,7 +193,7 @@ pub(crate) fn nudge_climbing_pairs(
         );
         let endpoint = ctx.endpoint.clone();
         n0_future::task::spawn(async move {
-            webrtc::nudge_with(&endpoint, peer, &addrs).await;
+            webrtc::nudge_acceptor::nudge_with(&endpoint, peer, &addrs).await;
         });
     }
 }
@@ -309,7 +311,7 @@ pub(crate) async fn on_path_change(
                 // selected.
                 let endpoint = ctx.endpoint.clone();
                 n0_future::task::spawn(async move {
-                    webrtc::nudge_with(&endpoint, peer, &addrs).await;
+                    webrtc::nudge_acceptor::nudge_with(&endpoint, peer, &addrs).await;
                 });
             }
             if !has_session
@@ -319,7 +321,7 @@ pub(crate) async fn on_path_change(
                     .find(|addr| addr.id == peer)
                     .cloned()
             {
-                webrtc::negotiate_session(state, ctx, peer, addr);
+                webrtc::negotiate_session::negotiate_session(state, ctx, peer, addr);
             }
         }
     }
@@ -398,7 +400,7 @@ pub(crate) async fn prove_routed_pairs(state: &mut EventLoopState, ctx: &Handler
                 .find(|addr| addr.id == peer)
                 .cloned()
         {
-            webrtc::negotiate_session(state, ctx, peer, addr);
+            webrtc::negotiate_session::negotiate_session(state, ctx, peer, addr);
         }
     }
     if flush {

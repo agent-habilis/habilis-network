@@ -25,7 +25,7 @@
 //! The same table says when a session is idle: no round is in flight, no gossip connection holds
 //! the peer, and the last use of the peer in the ledger is a window ago. [`SignalAdmission::idle_sessions`]
 //! hands back such peers, and the retry pass detaches their sessions
-//! (`webrtc::detach_idle_sessions_at`), so a session goes a window after its last use. A gossip
+//! (`webrtc::retry::detach_idle_sessions_at`), so a session goes a window after its last use. A gossip
 //! neighbor always has its gossip connection, so it never idles out.
 //!
 //! # What a single table buys

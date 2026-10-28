@@ -65,7 +65,7 @@ pub(super) async fn run_heal(
     state.pay_periodic_return(Instant::now(), ctx.endpoint.id());
     // A browser-shaped peer's rendezvous link can only ever be admitted on
     // a data channel; keep offering one while the link is down.
-    webrtc::negotiate_rendezvous_session(state, ctx);
+    webrtc::rendezvous::negotiate_rendezvous_session(state, ctx);
     // A node that came back to a mesh whose links are all up gets no link
     // event to release on, so the heal tick checks too.
     gossip::heal::release_rendezvous_if_due(state, ctx).await;
@@ -100,7 +100,7 @@ pub(super) async fn run_heal(
         // so a rung that died during the freeze self-corrects — no inline
         // ladder walk on the event loop here.
         setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
-        if webrtc::rendezvous_graftable(state) {
+        if webrtc::rendezvous::rendezvous_graftable(state) {
             gossip::heal::tick_heal_hard(ctx.endpoint, params.id, ctx.sender).await;
         }
     } else if state.rendezvous_linked {
@@ -121,7 +121,7 @@ pub(super) async fn run_heal(
             target: "habilis_network::gossip",
             "heal tick: rendezvous released; idle"
         );
-    } else if webrtc::rendezvous_graftable(state) {
+    } else if webrtc::rendezvous::rendezvous_graftable(state) {
         gossip::heal::tick_heal(params.id, ctx.sender).await;
     } else {
         // The JSEP offer fired at the top of this tick; the graft waits for

@@ -1160,7 +1160,7 @@ fn build_overlay(
             .then(|| (webrtc.clone(), admission.clone(), ice)),
         build.take_protocols(),
         build.relay_transport.relay_allowed(),
-        webrtc::local_needs_webrtc_lane(UdpTransport::from(build.transports.udp)),
+        webrtc::lane_needs::local_needs_webrtc_lane(UdpTransport::from(build.transports.udp)),
     );
     (gossip, router, admission, address_book, ice)
 }
@@ -1366,9 +1366,9 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     // See `EventLoopConfig::cohost`.
     // A webrtc-shaped lookup-only node must not bootstrap-dial the
     // rendezvous yet: the graft waits for its session (see
-    // `transport::webrtc::rendezvous_graftable`); the heal tick grafts once
+    // `transport::webrtc::rendezvous::rendezvous_graftable`); the heal tick grafts once
     // it is attached.
-    let needs_session = webrtc::node_graft_needs_session(
+    let needs_session = webrtc::session_policy::node_graft_needs_session(
         build.relay_transport.relay_allowed(),
         UdpTransport::from(build.transports.udp),
     );

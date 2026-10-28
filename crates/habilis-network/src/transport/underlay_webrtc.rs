@@ -398,7 +398,7 @@ mod tests {
         let handle = crate::lookup::new_webrtc_handle(client.id());
         let book = crate::lookup::address_book(&client);
 
-        let error = webrtc::dial_signal(
+        let error = webrtc::dial_signal::dial_signal(
             &client,
             &book,
             server.addr(),
@@ -420,7 +420,7 @@ mod tests {
         allowed.replace([client.id()].into_iter().collect());
         if let Ok(Err(late_error)) = tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            webrtc::dial_signal(
+            webrtc::dial_signal::dial_signal(
                 &client,
                 &book,
                 server.addr(),

@@ -504,7 +504,7 @@ fn offer_for_parked(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, frame: &Ve
         return;
     };
     if state.lane_session_wanted(addr.id, clock::Instant::now()) {
-        webrtc::negotiate_session(state, ctx, addr.id, addr);
+        webrtc::negotiate_session::negotiate_session(state, ctx, addr.id, addr);
     }
 }
 

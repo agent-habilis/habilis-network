@@ -177,7 +177,7 @@ pub(crate) async fn handle_gossip_event(
                 let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
                 state.plan_regraft_on_link_loss(node_id, Instant::now(), spread);
                 if let Some(addr) = state.relay_race_on_link_loss(node_id, Instant::now()) {
-                    webrtc::negotiate_session(state, ctx, node_id, addr);
+                    webrtc::negotiate_session::negotiate_session(state, ctx, node_id, addr);
                 }
             }
             if arms_reclaim(
@@ -268,7 +268,7 @@ fn rendezvous_neighbor_down(
     // Re-offer now rather than on the next heal tick: every
     // saved interval halves the relink cycle a beacon shed costs
     // a webrtc-shaped peer.
-    webrtc::offer_rendezvous_off_tick(state, ctx);
+    webrtc::rendezvous::offer_rendezvous_off_tick(state, ctx);
 }
 
 /// Whether a `NeighborDown` should arm the fast reclaim burst — the
@@ -1626,7 +1626,7 @@ async fn handle_peer_info(message: &Verified, state: &mut EventLoopState, ctx: &
     // Negotiate a direct WebRTC session alongside the graft, never in front of
     // it. Blocking the graft on the session deadlocks mesh formation — see the
     // note on `negotiate_session`.
-    webrtc::negotiate_session(state, ctx, peer_id, peer_addr.clone());
+    webrtc::negotiate_session::negotiate_session(state, ctx, peer_id, peer_addr.clone());
     // No `rendezvous_wanted` gate on this graft: `peer_id` is never the
     // rendezvous here, which returned above.
     if !defer_first_dial
@@ -2632,7 +2632,7 @@ mod first_contact_tests {
         }
         feed(Event::NeighborDown(ctx.rendezvous_id), &mut state, &ctx).await;
         assert!(!state.rendezvous_wanted(), "an island of its own, content");
-        assert!(!webrtc::rendezvous_graftable(&state));
+        assert!(!webrtc::rendezvous::rendezvous_graftable(&state));
 
         let silent = clock::Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
@@ -2644,7 +2644,7 @@ mod first_contact_tests {
 
         assert!(state.rendezvous_wanted(), "the sweep owes one return");
         assert!(
-            webrtc::rendezvous_graftable(&state),
+            webrtc::rendezvous::rendezvous_graftable(&state),
             "so the heal tick may graft it"
         );
         node.endpoint.close().await;
@@ -3092,7 +3092,7 @@ mod first_contact_tests {
         .await;
 
         assert!(
-            webrtc::rendezvous_graftable(&state),
+            webrtc::rendezvous::rendezvous_graftable(&state),
             "the rendezvous loss held the timer graft"
         );
         node.endpoint.close().await;
@@ -3112,10 +3112,10 @@ mod first_contact_tests {
         state.local_udp_transport = UdpTransport::Present;
         state.rendezvous_answers_jsep = false;
 
-        webrtc::negotiate_rendezvous_session(&mut state, &ctx);
+        webrtc::rendezvous::negotiate_rendezvous_session(&mut state, &ctx);
 
         assert!(
-            webrtc::rendezvous_graftable(&state),
+            webrtc::rendezvous::rendezvous_graftable(&state),
             "the heal tick held the timer graft on a private mesh"
         );
         node.endpoint.close().await;

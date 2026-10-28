@@ -114,7 +114,11 @@ pub(crate) fn tick(state: &state::EventLoopState, underlay: &UnderlayWebRtc) {
         let epoch = guard.epoch();
         let task = n0_future::task::spawn(async move {
             let _guard = guard;
-            match Box::pin(webrtc::dial_signal(&endpoint, &book, addr, &handle, ice)).await {
+            match Box::pin(webrtc::dial_signal::dial_signal(
+                &endpoint, &book, addr, &handle, ice,
+            ))
+            .await
+            {
                 Ok(()) => {
                     admission.note_success(peer);
                     // The acceptor of the other side nudges when it takes the
@@ -122,7 +126,7 @@ pub(crate) fn tick(state: &state::EventLoopState, underlay: &UnderlayWebRtc) {
                     // was dialed before the session learns the address of the
                     // session only from a dial that names it, and iroh does not
                     // ask the lookup again for a remote it already knows.
-                    webrtc::nudge_session(&endpoint, peer).await;
+                    webrtc::nudge_acceptor::nudge_session(&endpoint, peer).await;
                 }
                 Err(error) => {
                     if matches!(error, crate::lookup::EndpointError::CapRefused { .. }) {

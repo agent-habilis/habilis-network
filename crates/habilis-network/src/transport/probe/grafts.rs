@@ -34,8 +34,8 @@ pub(crate) fn ensure_direct(
     if state.relay_transport.relay_allowed() {
         return true;
     }
-    let needs_webrtc =
-        webrtc::needs_webrtc_lane(peer_addr) || webrtc::needs_webrtc_lane(&ctx.endpoint.addr());
+    let needs_webrtc = webrtc::lane_needs::needs_webrtc_lane(peer_addr)
+        || webrtc::lane_needs::needs_webrtc_lane(&ctx.endpoint.addr());
     let has_session = state
         .webrtc
         .as_ref()
@@ -57,7 +57,7 @@ pub(crate) fn ensure_direct(
         state.direct.entry(peer).or_insert(DirectState::Pending);
         if needs_webrtc {
             state.want_lane_session(peer, Instant::now());
-            webrtc::negotiate_session(state, ctx, peer, peer_addr.clone());
+            webrtc::negotiate_session::negotiate_session(state, ctx, peer, peer_addr.clone());
         }
         return false;
     }
