@@ -289,7 +289,7 @@ long_chain|crates/habilis-network-wasm/src/tracing_console.rs|1|kept: statements
 long_chain|crates/habilis-network-wasm/src/stream_node.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/examples/mesh_peer.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/examples/mesh_peer_load.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/src/beacon/mod.rs|7|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network/src/beacon/mod.rs|6|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/blob/mod.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/daemon/beacon_arm.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/daemon/ctx.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -480,7 +480,7 @@ untyped_long_chain_let|crates/habilis-network-test-tracing/tests/twice.rs|1|kept
 untyped_long_chain_let|crates/habilis-network-wasm/src/tracing_console.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/examples/mesh_peer.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/examples/mesh_peer_load.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/src/beacon/mod.rs|4|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+untyped_long_chain_let|crates/habilis-network/src/beacon/mod.rs|3|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/daemon/event_loop.rs|4|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/daemon/heal.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/daemon/message_log.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
@@ -786,3 +786,5 @@ pub_const_fn|crates/habilis-network-protocol/src/message/app_frame_params.rs|1|k
 abbrev_name|crates/habilis-network/src/beacon/rival_probe.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 trait_import_scope|crates/habilis-network/src/beacon/rival_probe.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
 fn_import|crates/habilis-network/src/transport/ipc.rs|1|fn re-exported at its public path: the IPC client and JSON reply functions (O11)
+long_chain|crates/habilis-network/src/beacon/rung_watch.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+untyped_long_chain_let|crates/habilis-network/src/beacon/rung_watch.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
