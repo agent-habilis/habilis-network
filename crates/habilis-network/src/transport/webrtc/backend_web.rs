@@ -3,22 +3,9 @@
 use super::ice_profile::IceProfile;
 
 use anyhow::{Context, Result};
-use habilis_network_iroh_webrtc_transport::{MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle};
-use iroh::address_lookup::memory::MemoryLookup;
-use iroh::endpoint::Connection;
-use iroh::protocol::{AcceptError, ProtocolHandler};
-use iroh::{Endpoint, EndpointAddr, EndpointId};
+use habilis_network_iroh_webrtc_transport::{SignalEnvelope, WebRtcHandle};
+use iroh::EndpointId;
 
-use crate::transport::LOG_TARGET;
-use crate::transport::admission::{Refusal, SignalAdmission};
-
-use crate::daemon::state;
-use crate::daemon::state::DirectState;
-use crate::lookup::EndpointError;
-use crate::transport::probe;
-use crate::util::{clock, tuning};
-
-use crate::transport::{Context, EndpointId, IceProfile, Result, SignalEnvelope, WebRtcHandle};
 use habilis_network_iroh_webrtc_transport::{
     BrowserPendingAnswer, BrowserPendingOffer, IceServers, browser_answer, browser_offer,
 };

@@ -16,6 +16,7 @@ use crate::transport::admission::{Refusal, SignalAdmission};
 
 use crate::lookup::EndpointError;
 
+#[cfg(any(feature = "multihop", test))]
 use super::close_code;
 use super::close_code::{CAP_REFUSED, EVICTED, SIGNAL_ABORTED, SIGNAL_FAILED};
 

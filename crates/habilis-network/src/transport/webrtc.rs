@@ -79,11 +79,13 @@ mod tests {
     use iroh::protocol::Router;
     use iroh::{RelayMode, SecretKey};
 
+    #[cfg(feature = "iroh-test-utils")]
+    use super::nudge_acceptor;
     use super::signal_deadlines::SignalDeadlines;
     use super::{
         IceProfile, MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN, NudgeAcceptor,
-        UdpTransport, WebRtcSignalAcceptor, dial_signal, lane_needs, negotiate_session,
-        nudge_acceptor, rendezvous, retry, session_policy, web_rtc_signal_acceptor,
+        UdpTransport, WebRtcSignalAcceptor, dial_signal, lane_needs, negotiate_session, rendezvous,
+        retry, session_policy, web_rtc_signal_acceptor,
     };
     use crate::daemon::ctx;
     use crate::lookup::EndpointError;
