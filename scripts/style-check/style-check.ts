@@ -178,6 +178,12 @@ const RULES: Rule[] = [
     why: "An operator overload has a math or logic meaning only (a frame advances by frames, a flag set joins flags). Any other use needs a line in style-check.allow with a reason.",
   },
   {
+    name: "pub_const_fn",
+    pattern: /^\s*pub(\([^)]*\))?\s+const\s+fn\b/,
+    glob: "crates/**/*.rs",
+    why: "Mark a public fn const only if it will stay const (a const context, a newtype accessor, or a trivial accessor). A new one needs a row in style-check.allow with that reason.",
+  },
+  {
     name: "anyhow_pub",
     scan: countAnyhowPub,
     skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/[^/]+\/src\/)/,

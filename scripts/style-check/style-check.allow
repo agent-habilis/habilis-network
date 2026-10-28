@@ -29,3 +29,33 @@ glob|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-prot
 operator|crates/habilis-network-netplay/src/frame.rs|4|Frame: a frame plus or minus a number of frames, and the gap between two frames.
 operator|crates/habilis-network-util/src/clock.rs|2|UnixSecs plus or minus a Duration: a point in time moved by a span.
 operator|crates/habilis-network/src/gossip/app.rs|1|AppClass bit flags: BitOr joins two sets of flags.
+
+# pub_const_fn: a public const fn (U21). Each row is a count that may only go down.
+pub_const_fn|crates/habilis-network-chunks/src/fs.rs|1|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-chunks/src/lib.rs|8|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-ffi/src/ffi.rs|3|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/lib.rs|4|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/metric.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/role.rs|4|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|1|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-netplay/src/frame.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-netplay/src/handle.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-netplay/src/mesh/lobby.rs|8|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-protocol/src/author_key.rs|3|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-protocol/src/content_hash.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-protocol/src/crypto.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-protocol/src/dedup_key.rs|3|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-protocol/src/mesh/lookup.rs|4|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-protocol/src/mesh/transport.rs|5|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-protocol/src/message/mod.rs|4|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-protocol/src/message/verified.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-protocol/src/topic.rs|3|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-stream/src/hash.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-util/src/clock.rs|5|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network/src/blob/mod.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network/src/daemon/params.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network/src/gossip/app.rs|7|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network/src/gossip/broadcast.rs|1|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network/src/membership/app.rs|1|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network/src/transport/path.rs|1|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network/src/transport/webrtc.rs|1|kept: not yet classified; reviewer to confirm const stays (U21).
