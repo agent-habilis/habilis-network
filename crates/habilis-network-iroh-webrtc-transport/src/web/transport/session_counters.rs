@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicU64;
 /// same absence of evidence.
 ///
 /// These are that evidence. Read them through
-/// [`BrowserHubTransport::session_counters`]; a consumer deciding whether to
+/// [`BrowserHubTransport::session_counters`](super::BrowserHubTransport::session_counters); a consumer deciding whether to
 /// demote a peer to the relay can then say *why* rather than inferring it from
 /// a transfer that did not finish.
 #[derive(Debug, Default)]

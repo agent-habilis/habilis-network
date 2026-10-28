@@ -1,4 +1,4 @@
-/// A snapshot of [`SessionCounters`], since the counters themselves are not
+/// A snapshot of [`SessionCounters`](super::SessionCounters), since the counters themselves are not
 /// `Clone` and reading four atomics separately would not be one moment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

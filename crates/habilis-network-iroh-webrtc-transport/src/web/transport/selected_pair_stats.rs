@@ -1,5 +1,5 @@
 /// What crossed the selected ICE candidate pair, for the same reason
-/// [`DataChannelCounters`] is named: the byte counters share one type, so a
+/// [`DataChannelCounters`](super::DataChannelCounters) is named: the byte counters share one type, so a
 /// swapped pair would compile silently.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
