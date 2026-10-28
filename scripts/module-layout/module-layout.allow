@@ -5,7 +5,6 @@ crates/habilis-network-chunks/src/error.rs|1|rename pending: public type(s) Chun
 crates/habilis-network-chunks/src/fs.rs|1|rename pending: public type(s) DiskStore, DiskOrigin
 crates/habilis-network-chunks/src/idb.rs|1|rename pending: public type(s) IdbStore
 crates/habilis-network-chunks/src/mem.rs|1|rename pending: public type(s) InMemoryStore
-crates/habilis-network-doc/src/error.rs|1|rename pending: public type(s) DocError
 crates/habilis-network-ffi/src/ffi.rs|1|rename pending: public type(s) HabilisNetworkOpts, HabilisNetworkMsg, HabilisNetworkMesh, HabilisNetworkStreamOpts, HabilisNetworkStreams, HabilisNetworkProducer, HabilisNetworkReader
 crates/habilis-network-ffi/src/stream.rs|1|rename pending: public type(s) Streams, Writer, Read, ReadEnd
 crates/habilis-network-iroh-gossip-transport/src/lookup.rs|1|rename pending: public type(s) GossipLookup

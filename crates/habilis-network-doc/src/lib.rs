@@ -35,9 +35,9 @@
 
 pub mod wire;
 
-mod error;
+mod doc_error;
 
-pub use error::DocError;
+pub use doc_error::DocError;
 
 mod mesh_doc;
 
