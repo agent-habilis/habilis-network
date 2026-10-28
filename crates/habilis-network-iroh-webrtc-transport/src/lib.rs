@@ -75,17 +75,17 @@ mod registry;
     expect(dead_code, reason = "the browser hub's watchdog; its tests still run")
 )]
 mod connection_phase;
-#[cfg(any(feature = "native", feature = "web"))]
-mod selector;
 #[cfg_attr(
     all(not(feature = "web"), not(test)),
     expect(dead_code, reason = "the browser hub's watchdog; its tests still run")
 )]
 mod verdict;
+#[cfg(any(feature = "native", feature = "web"))]
+mod web_rtc_preferred;
 #[cfg(feature = "test-hooks")]
 pub use habilis_network_iroh_transport_util::{Rung, expected_rung};
 #[cfg(feature = "test-hooks")]
-pub use selector::{block_ip_paths, block_ip_to, block_rung, block_rung_to};
+pub use web_rtc_preferred::{block_ip_paths, block_ip_to, block_rung, block_rung_to};
 mod signal_envelope;
 mod signal_error;
 

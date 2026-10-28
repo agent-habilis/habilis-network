@@ -88,7 +88,7 @@ assert_no_message|crates/habilis-network-iroh-webrtc-transport/src/verdict.rs|8|
 assert_no_message|crates/habilis-network-iroh-webrtc-transport/src/native/session_registry.rs|1|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-webrtc-transport/src/native/stun.rs|18|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-webrtc-transport/src/registry.rs|10|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-iroh-webrtc-transport/src/selector.rs|1|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_preferred.rs|1|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-webrtc-transport/src/web/jsep.rs|11|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-webrtc-transport/tests/loopback.rs|13|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-logging/src/messages.rs|2|kept: assert without a message, to be given one (P13 rollout)
@@ -238,7 +238,7 @@ long_chain|crates/habilis-network-iroh-webrtc-transport/src/native/web_rtc_endpo
 long_chain|crates/habilis-network-iroh-webrtc-transport/src/native/stun.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-webrtc-transport/src/native/web_rtc_transport.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-webrtc-transport/src/registry.rs|7|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-iroh-webrtc-transport/src/selector.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_preferred.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-webrtc-transport/src/web/jsep.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-webrtc-transport/tests/browser_harness/mod.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -577,7 +577,7 @@ fn_import|crates/habilis-network-iroh-gossip-transport/src/receive_loop.rs|1|kep
 fn_import|crates/habilis-network-iroh-gossip-transport/src/gossip_handle.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-webrtc-transport/src/lib.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_handle.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-iroh-webrtc-transport/src/selector.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
+fn_import|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_preferred.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/game/src/ui.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/runtime.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/tui/diff.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
@@ -652,7 +652,7 @@ abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/lib.rs|2|existing l
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/native/driver.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/native/web_rtc_sender.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/native/stun.rs|7|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/selector.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_preferred.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-logging/src/filter.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-logging/src/messages.rs|27|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count

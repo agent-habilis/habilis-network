@@ -1,6 +1,6 @@
 use iroh::endpoint::transports;
 
-use crate::{AttachError, selector};
+use crate::{AttachError, web_rtc_preferred};
 #[cfg(all(feature = "web", not(feature = "native")))]
 use crate::{BrowserHubTransport, BrowserSessionGuard, DataChannelCounters, SessionCounts};
 #[cfg(feature = "native")]
@@ -41,11 +41,13 @@ impl WebRtcHandle {
 
     /// The path selector that keeps the relay a rendezvous, for
     /// `Builder::path_selector`. Install it wherever [`Self::transport`] is
-    /// registered — see `crate::selector` for why registering the transport
+    /// registered — see `crate::web_rtc_preferred` for why registering the transport
     /// alone is not enough.
     #[must_use]
     pub fn path_selector(&self) -> std::sync::Arc<dyn transports::PathSelector> {
-        std::sync::Arc::new(selector::WebRtcPreferred::new(self.inner.local_id()))
+        std::sync::Arc::new(web_rtc_preferred::WebRtcPreferred::new(
+            self.inner.local_id(),
+        ))
     }
 
     /// Attach a negotiated session for `remote`.
@@ -116,11 +118,13 @@ impl WebRtcHandle {
 
     /// The path selector that keeps the relay a rendezvous, for
     /// `Builder::path_selector`. Install it wherever [`Self::transport`] is
-    /// registered — see [`crate::selector`] for why registering the transport
+    /// registered — see [`crate::web_rtc_preferred`] for why registering the transport
     /// alone is not enough.
     #[must_use]
     pub fn path_selector(&self) -> std::sync::Arc<dyn transports::PathSelector> {
-        std::sync::Arc::new(selector::WebRtcPreferred::new(self.inner.local_id()))
+        std::sync::Arc::new(web_rtc_preferred::WebRtcPreferred::new(
+            self.inner.local_id(),
+        ))
     }
 
     /// Attach a negotiated browser session for `remote`.
