@@ -390,7 +390,7 @@ turbofish_collect_parse|crates/habilis-network-protocol/src/mesh/tests.rs|4|kept
 turbofish_collect_parse|crates/habilis-network-protocol/src/message/mod.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-protocol/src/peer_addr_error.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-protocol/src/reassembly.rs|7|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network-protocol/src/resolver/mod.rs|6|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
+turbofish_collect_parse|crates/habilis-network-protocol/src/resolver/mod.rs|4|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-stream/src/hash/mod.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-util/src/bounded_queue.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network/examples/mesh_peer.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
@@ -755,3 +755,5 @@ trait_import_scope|crates/habilis-network/src/transport/probe.rs|1|kept: a trait
 abbrev_name|crates/habilis-network-protocol/src/mesh/mesh.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network-protocol/src/mesh/locked_mesh.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/mesh/mesh.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+turbofish_collect_parse|crates/habilis-network-protocol/src/resolver/join_target.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
+turbofish_collect_parse|crates/habilis-network-protocol/src/resolver/resolve.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
