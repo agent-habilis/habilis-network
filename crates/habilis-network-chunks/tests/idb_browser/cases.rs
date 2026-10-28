@@ -1,6 +1,6 @@
-use habilis_network_chunks::idb::IdbStore;
 use habilis_network_chunks::{
-    CHUNK_BYTES_USIZE, ChunkHash, ChunkMap, ChunkSource, ChunkStore, Coverage, FileId, chunk_hash,
+    CHUNK_BYTES_USIZE, ChunkHash, ChunkMap, ChunkSource, ChunkStore, Coverage, FileId, IdbStore,
+    chunk_hash,
 };
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 

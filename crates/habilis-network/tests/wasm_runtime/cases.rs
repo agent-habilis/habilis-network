@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use habilis_network::protocol::{MeshId, Message, Nickname};
-use habilis_network::util::clock;
+use habilis_network::util::{clock, unix_secs};
 use wasm_bindgen_test::wasm_bindgen_test;
 
 // Deliberately *not* `wasm_bindgen_test_configure!(run_in_browser)`: that needs
