@@ -442,9 +442,8 @@ impl MultihopHandle {
     /// The application ids of the hops whose underlay has stayed on the relay,
     /// refused by the gate, for longer than the configured deadline. They are not
     /// advertised as links.
-    #[must_use]
-    pub fn stuck_hops(&self) -> Vec<AppId> {
-        self.inner.forwarder.stuck_hops()
+    pub fn stuck_hops(&self) -> impl Iterator<Item = AppId> {
+        self.inner.forwarder.stuck_hops().into_iter()
     }
 
     /// Close the underlay: stop its accept loop and close its endpoint, so iroh
@@ -538,7 +537,7 @@ impl MultihopHandle {
     /// the vectors it sent before.
     #[must_use]
     pub fn link_vector(&self, mut links: Vec<(AppId, u32)>) -> LinkVector {
-        let stuck = self.stuck_hops();
+        let stuck = self.stuck_hops().collect::<Vec<_>>();
         links.retain(|(neighbour, _)| !stuck.contains(neighbour));
         let now = topology::wall_clock_ms();
         let mut seq = now;
@@ -958,7 +957,7 @@ mod tests {
             .forwarder
             .refuse_hop_for_test(short_underlay, short);
         assert!(
-            handle.stuck_hops().is_empty(),
+            handle.stuck_hops().next().is_none(),
             "refused now, not past the deadline: the link vector still names the hop"
         );
         assert_eq!(first_hop_of(&handle, dst), long_a);
@@ -1288,7 +1287,7 @@ mod tests {
                 packet: vec![1, 2, 3],
             };
             let deadline = std::time::Instant::now() + Duration::from_secs(8);
-            while from.stuck_hops().is_empty() && std::time::Instant::now() < deadline {
+            while from.stuck_hops().next().is_none() && std::time::Instant::now() < deadline {
                 from.inner.forwarder.enqueue(&hop(to, to_id), cell.clone());
                 tokio::time::sleep(Duration::from_millis(150)).await;
             }
