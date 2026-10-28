@@ -111,7 +111,7 @@ impl MeshName {
     /// values, or contains a forbidden character (control, whitespace, bidi
     /// formatting, or any of `< > #`).
     pub fn try_new(value: impl Into<String>) -> Result<Self, NameError> {
-        let value = value.into();
+        let value: String = value.into();
         let count = value.chars().count();
         if !(ident::MIN_CHARS..=ident::MAX_CHARS).contains(&count) {
             return Err(NameError::Length(count));

@@ -361,23 +361,6 @@ long_chain|crates/habilis-network/tests/underlay_webrtc_loopback.rs|4|kept: stat
 long_chain|crates/habilis-network/tests/unknown_peer_requests_loopback.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/tests/webrtc_full_roster_loopback.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 
-# untyped_generic_let: a let that takes its type from parse, into or try_into (P4). Each row is a count that may only go down.
-untyped_generic_let|crates/habilis-network-chunks/src/fs.rs|1|kept: a let whose type comes from parse, into or try_into; the type is to be named (P4 rollout)
-untyped_generic_let|crates/habilis-network-chunks/src/idb.rs|1|kept: a let whose type comes from parse, into or try_into; the type is to be named (P4 rollout)
-untyped_generic_let|crates/habilis-network-iroh-multihop-transport/src/topology.rs|1|kept: a let whose type comes from parse, into or try_into; the type is to be named (P4 rollout)
-untyped_generic_let|crates/habilis-network-iroh-multihop-transport/src/underlay.rs|2|kept: a let whose type comes from parse, into or try_into; the type is to be named (P4 rollout)
-untyped_generic_let|crates/habilis-network-iroh-webrtc-transport/examples/session_cost.rs|1|kept: a let whose type comes from parse, into or try_into; the type is to be named (P4 rollout)
-untyped_generic_let|crates/habilis-network-protocol/src/mesh/id.rs|1|kept: a let whose type comes from parse, into or try_into; the type is to be named (P4 rollout)
-untyped_generic_let|crates/habilis-network-protocol/src/mesh/name.rs|1|kept: a let whose type comes from parse, into or try_into; the type is to be named (P4 rollout)
-untyped_generic_let|crates/habilis-network-protocol/src/message/body.rs|1|kept: a let whose type comes from parse, into or try_into; the type is to be named (P4 rollout)
-untyped_generic_let|crates/habilis-network-protocol/src/message/id.rs|1|kept: a let whose type comes from parse, into or try_into; the type is to be named (P4 rollout)
-untyped_generic_let|crates/habilis-network-protocol/src/message/mod.rs|2|kept: a let whose type comes from parse, into or try_into; the type is to be named (P4 rollout)
-untyped_generic_let|crates/habilis-network-protocol/src/nickname.rs|1|kept: a let whose type comes from parse, into or try_into; the type is to be named (P4 rollout)
-untyped_generic_let|crates/habilis-network/src/daemon/beacon_arm.rs|1|kept: a let whose type comes from parse, into or try_into; the type is to be named (P4 rollout)
-untyped_generic_let|crates/habilis-network/src/gossip/lan.rs|1|kept: a let whose type comes from parse, into or try_into; the type is to be named (P4 rollout)
-untyped_generic_let|crates/habilis-network/src/lookup/mod.rs|1|kept: a let whose type comes from parse, into or try_into; the type is to be named (P4 rollout)
-untyped_generic_let|crates/habilis-network/src/transport/probe.rs|4|kept: a let whose type comes from parse, into or try_into; the type is to be named (P4 rollout)
-untyped_generic_let|crates/habilis-network/src/transport/webrtc.rs|3|kept: a let whose type comes from parse, into or try_into; the type is to be named (P4 rollout)
 
 # dyn_param: a public fn takes a trait object. Each row is a trait object that stays, with its reason.
 dyn_param|crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|attach stores an Arc<dyn FrameSink>, so the transport holds one sink of any type

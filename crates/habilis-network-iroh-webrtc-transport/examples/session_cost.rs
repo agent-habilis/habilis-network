@@ -439,7 +439,7 @@ async fn main() -> anyhow::Result<()> {
                 Some("answerer") => Role::Answerer,
                 _ => bail!("--role offerer|answerer"),
             };
-            let sessions = argument(&args, "--k").context("--k")?.parse()?;
+            let sessions: usize = argument(&args, "--k").context("--k")?.parse()?;
             let settle = argument(&args, "--settle").map_or(Ok(5), |value| value.parse())?;
             let hold = argument(&args, "--hold").map_or(Ok(60), |value| value.parse())?;
             measure(role, sessions, settle, hold).await

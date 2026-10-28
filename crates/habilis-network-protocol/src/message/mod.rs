@@ -183,7 +183,7 @@ impl AppTag {
     /// A [`AppTagError::Invalid`] when the tag is empty, longer than 32 bytes, or not
     /// an ASCII slug.
     pub fn try_new(raw: impl Into<String>) -> Result<Self, AppTagError> {
-        let raw = raw.into();
+        let raw: String = raw.into();
         if !Self::validate(&raw) {
             return Err(AppTagError::Invalid);
         }
@@ -223,7 +223,7 @@ impl CorrId {
     /// A [`CorrIdError::Invalid`] when the correlation id is empty or longer than 64
     /// bytes.
     pub fn try_new(raw: impl Into<String>) -> Result<Self, CorrIdError> {
-        let raw = raw.into();
+        let raw: String = raw.into();
         if !Self::validate(&raw) {
             return Err(CorrIdError::Invalid);
         }

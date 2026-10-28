@@ -213,8 +213,11 @@ function countLongChains(raw: string): number {
 // `let x = s.parse()?;`, `let x = v.into();`. The reader sees no type in the code, so the type is named.
 function countUntypedGenericLets(raw: string): number {
   const text = blankStrings(stripComments(raw));
-  const pattern = /\blet\s+(?:mut\s+)?\w+\s*=\s*[^;]*\.(?:parse|into|try_into)\(\)(?:\?|\.expect\([^;]*\)|\.unwrap\(\))?\s*;/g;
-  return text.match(pattern)?.length ?? 0;
+  let count = 0;
+  for (const m of text.matchAll(/\blet\s+(?:mut\s+)?\w+\s*=\s*([^;]*);/g)) {
+    if (/\.(?:parse|into|try_into)\(\)(?:\?|\.expect\([^()]*\)|\.unwrap\(\))?\s*$/.test(m[1] ?? "")) count++;
+  }
+  return count;
 }
 
 // The turbofish of collect and parse: `.collect::<T>()`, `.parse::<T>()`. A typed `let` names the type

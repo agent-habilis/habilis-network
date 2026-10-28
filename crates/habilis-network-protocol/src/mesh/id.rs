@@ -67,7 +67,7 @@ impl MeshId {
     /// # Errors
     /// The value is empty, over-long, or not valid base58.
     pub fn try_new(value: impl Into<String>) -> Result<Self, MeshIdError> {
-        let value = value.into();
+        let value: String = value.into();
         let len = value.len();
         if !(MIN_LEN..=MAX_LEN).contains(&len) {
             return Err(MeshIdError::Length(len));

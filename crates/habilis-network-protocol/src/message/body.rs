@@ -49,7 +49,7 @@ impl MessageBody {
     /// Returns [`BodyError`] if `value` contains a disallowed control
     /// character (e.g. NUL or other C0/C1 controls).
     pub fn try_new(value: impl Into<String>) -> Result<Self, BodyError> {
-        let value = value.into();
+        let value: String = value.into();
         if value
             .chars()
             .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\t' | '\r'))

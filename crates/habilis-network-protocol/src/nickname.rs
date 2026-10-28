@@ -68,7 +68,7 @@ impl Nickname {
     /// characters, or contains a forbidden scalar (see
     /// `is_forbidden`).
     pub fn try_new(value: impl Into<String>) -> Result<Self, NicknameError> {
-        let value = value.into();
+        let value: String = value.into();
         let count = value.chars().count();
         if !(super::ident::MIN_CHARS..=super::ident::MAX_CHARS).contains(&count) {
             return Err(NicknameError::Length(count));
