@@ -256,10 +256,10 @@ test("manual_hash: a derive does not count", () => {
 
 // The assert_no_message rule (P13): an assert with a condition or values and no message needs a row.
 test("assert_no_message: an assert! with no message fails with no row", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(x: bool) {\n    assert!(x);\n}", 1, "");
+  expectExit("crates/demo/src/lib.rs", "fn f(x: bool) {\n    assert!(x);\n}", 1, "");
 });
 test("assert_no_message: an assert! with a message passes", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(x: bool) {\n    assert!(x, \"the flag is set\");\n}", 0, "");
+  expectExit("crates/demo/src/lib.rs", "fn f(x: bool) {\n    assert!(x, \"the flag is set\");\n}", 0, "");
 });
 test("assert_no_message: an assert_eq! with two values and no message fails", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(a: u8) {\n    assert_eq!(a, 1);\n}", 1, "");
@@ -268,18 +268,18 @@ test("assert_no_message: an assert_eq! with a message passes, across lines", () 
   expectExit("crates/demo/src/lib.rs", "pub fn f(a: u8) {\n    assert_eq!(\n        a,\n        1,\n        \"a is {a}\"\n    );\n}", 0, "");
 });
 test("assert_no_message: a trailing comma adds no message", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(x: bool) {\n    assert!(x,);\n}", 1, "");
+  expectExit("crates/demo/src/lib.rs", "fn f(x: bool) {\n    assert!(x,);\n}", 1, "");
 });
 test("assert_no_message: a debug_assert! is not an assert! here", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(x: bool) {\n    debug_assert!(x);\n}", 0, "");
+  expectExit("crates/demo/src/lib.rs", "fn f(x: bool) {\n    debug_assert!(x);\n}", 0, "");
 });
 test("assert_no_message: the exact count is allowed", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(x: bool) {\n    assert!(x);\n    assert!(!x);\n}", 0, "assert_no_message|crates/demo/src/lib.rs|2|fixture");
+  expectExit("crates/demo/src/lib.rs", "fn f(x: bool) {\n    assert!(x);\n    assert!(!x);\n}", 0, "assert_no_message|crates/demo/src/lib.rs|2|fixture");
 });
 
 // The assert_repeats_condition rule (P14): a message that only repeats the condition fails.
 test("assert_repeats_condition: a message that repeats the condition fails", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(x: bool) {\n    assert!(x, \"x\");\n}", 1, "");
+  expectExit("crates/demo/src/lib.rs", "fn f(x: bool) {\n    assert!(x, \"x\");\n}", 1, "");
 });
 test("assert_repeats_condition: spacing and case do not hide a repeat", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(a: u8) {\n    assert!(a == 1, \"A  ==  1\");\n}", 1, "");
@@ -436,4 +436,18 @@ test("accessor_name: the guide's shapes are clean", () => {
 });
 test("accessor_name: a free take_ function is clean", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn take_array(bytes: &[u8], pos: &mut usize) -> u8 {\n    let _ = (bytes, pos);\n    0\n}", 0);
+});
+
+// The bool_param_comment rule: a public function's bool parameter has its purpose written above it (I14).
+test("bool_param_comment: a bool with no comment counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(on: bool) {\n    let _ = on;\n}", 1);
+});
+test("bool_param_comment: a bool in a multi-line list with no comment counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(\n    on: bool,\n) {\n    let _ = on;\n}", 1);
+});
+test("bool_param_comment: a comment above the bool is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(\n    // true turns it on\n    on: bool,\n) {\n    let _ = on;\n}", 0);
+});
+test("bool_param_comment: a private fn is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "fn f(on: bool) {\n    let _ = on;\n}", 0);
 });

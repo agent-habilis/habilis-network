@@ -240,7 +240,11 @@ impl<'mesh> StateMergeParams<'mesh> {
 
     /// Whether the write is reported to the operator as a `state` or `meta` event.
     #[must_use]
-    pub fn with_surface(self, surface: bool) -> Self {
+    pub fn with_surface(
+        self,
+        // true reports the write to the operator as a state or meta event
+        surface: bool,
+    ) -> Self {
         Self { surface, ..self }
     }
 }

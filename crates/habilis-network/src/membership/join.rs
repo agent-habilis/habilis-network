@@ -172,7 +172,10 @@ static NEW_MEMBERS_ARE_BLIND: atomic::AtomicBool = atomic::AtomicBool::new(false
 /// Tests only: make every member that [`join`] sets up from now on blind (`blind`), or not. The
 /// dial is process-wide, so a test turns it on around the opens that it means and off again.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-pub fn blind_new_members(blind: bool) {
+pub fn blind_new_members(
+    // true makes every member that join sets up from now on blind
+    blind: bool,
+) {
     NEW_MEMBERS_ARE_BLIND.store(blind, Ordering::SeqCst);
 }
 

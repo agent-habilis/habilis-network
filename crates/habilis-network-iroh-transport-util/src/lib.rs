@@ -302,7 +302,10 @@ pub fn is_blocked_to(
 /// process. iroh re-runs selection on its path-stat updates, so a live
 /// connection leaves UDP within a few seconds and returns once it is cleared.
 #[cfg(feature = "test-hooks")]
-pub fn block_ip_paths(blocked: bool) {
+pub fn block_ip_paths(
+    // true blocks every IP path, false clears the block
+    blocked: bool,
+) {
     IP_BLOCKED.store(blocked, Ordering::SeqCst);
 }
 
@@ -339,7 +342,12 @@ pub fn block_ip_to(local: iroh::EndpointId, remote_ports: impl IntoIterator<Item
 ///
 /// Panics if another thread panicked while it held the block table.
 #[cfg(feature = "test-hooks")]
-pub fn block_rung(local: iroh::EndpointId, rung: Rung, blocked: bool) {
+pub fn block_rung(
+    local: iroh::EndpointId,
+    rung: Rung,
+    // true blocks the rung for local, false clears it
+    blocked: bool,
+) {
     let mut blocks = RUNGS_BLOCKED.lock().expect("rung blocks");
     let blocks = blocks.get_or_insert_with(HashSet::new);
     if blocked {
@@ -360,7 +368,13 @@ pub fn block_rung(local: iroh::EndpointId, rung: Rung, blocked: bool) {
 ///
 /// Panics if another thread panicked while it held the block table.
 #[cfg(feature = "test-hooks")]
-pub fn block_rung_to(local: iroh::EndpointId, rung: Rung, remote: iroh::EndpointId, blocked: bool) {
+pub fn block_rung_to(
+    local: iroh::EndpointId,
+    rung: Rung,
+    remote: iroh::EndpointId,
+    // true blocks the rung from local to remote, false clears it
+    blocked: bool,
+) {
     let mut blocks = RUNGS_BLOCKED_TO.lock().expect("rung blocks to a remote");
     let blocks = blocks.get_or_insert_with(HashSet::new);
     if blocked {

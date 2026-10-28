@@ -163,7 +163,11 @@ impl Default for HandleConfig {
 impl HandleConfig {
     /// Set whether the relay carries payload.
     #[must_use]
-    pub const fn with_relay_payload(mut self, relay_payload: bool) -> Self {
+    pub const fn with_relay_payload(
+        mut self,
+        // true lets the relay carry payload
+        relay_payload: bool,
+    ) -> Self {
         self.relay_payload = relay_payload;
         self
     }

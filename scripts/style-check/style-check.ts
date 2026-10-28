@@ -260,6 +260,35 @@ function countAccessorNames(raw: string): number {
   return count;
 }
 
+// A public fn whose bool parameter has no comment above it. The guide asks for the purpose of a bool
+// parameter to be written beside it, so a call site says what true means.
+function countBoolParamNoComment(raw: string): number {
+  const text = stripTestModules(blankStrings(raw));
+  let count = 0;
+  for (const m of text.matchAll(PUB_FN)) {
+    const open = text.indexOf("(", m.index! + m[0].length);
+    let depth = 0;
+    let close = open;
+    for (; close < text.length; close++) {
+      if (text[close] === "(") depth++;
+      else if (text[close] === ")" && --depth === 0) break;
+    }
+    const block = text.slice(open + 1, close);
+    if (!block.includes("\n")) {
+      count += [...block.matchAll(/:\s*bool\b/g)].length;
+      continue;
+    }
+    const lines = block.split("\n");
+    lines.forEach((line, i) => {
+      if (!/:\s*bool\b/.test(line)) return;
+      let j = i - 1;
+      while (j >= 0 && lines[j]!.trim() === "") j--;
+      if (!(j >= 0 && lines[j]!.trim().startsWith("//"))) count++;
+    });
+  }
+  return count;
+}
+
 // A public fn that returns a Vec. The guide prefers an iterator, so a Vec needs a counted allow row with its reason.
 function countPubVecReturn(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
@@ -501,6 +530,13 @@ const RULES: Rule[] = [
     skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
     glob: "crates/**/*.rs",
     why: "A public accessor follows the guide: no get_ prefix, replace_ returns the old value, take_ clears through &mut self, _mut returns &mut, set_ takes its value by value.",
+  },
+  {
+    name: "bool_param_comment",
+    scan: countBoolParamNoComment,
+    skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
+    glob: "crates/**/*.rs",
+    why: "A public function with a bool parameter writes its purpose in a comment above the parameter, so a call site says what true means.",
   },
 ];
 

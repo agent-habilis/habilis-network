@@ -206,28 +206,44 @@ pub struct TransportOpts {
 impl TransportOpts {
     /// Set the UDP transport.
     #[must_use]
-    pub fn with_udp(mut self, udp: bool) -> Self {
+    pub fn with_udp(
+        mut self,
+        // true enables the UDP transport
+        udp: bool,
+    ) -> Self {
         self.udp = udp;
         self
     }
 
     /// Set the relay.
     #[must_use]
-    pub fn with_relay(mut self, relay: bool) -> Self {
+    pub fn with_relay(
+        mut self,
+        // true enables the relay
+        relay: bool,
+    ) -> Self {
         self.relay = relay;
         self
     }
 
     /// Set the WebRTC transport.
     #[must_use]
-    pub fn with_webrtc(mut self, webrtc: bool) -> Self {
+    pub fn with_webrtc(
+        mut self,
+        // true enables the WebRTC transport
+        webrtc: bool,
+    ) -> Self {
         self.webrtc = webrtc;
         self
     }
 
     /// Set the gossip transport.
     #[must_use]
-    pub fn with_gossip(mut self, gossip: bool) -> Self {
+    pub fn with_gossip(
+        mut self,
+        // true enables the gossip transport
+        gossip: bool,
+    ) -> Self {
         self.gossip = gossip;
         self
     }
@@ -964,7 +980,10 @@ static UNDERLAY_LEG_OFF: atomic::AtomicBool = atomic::AtomicBool::new(false);
 
 /// Tests only: see `UNDERLAY_LEG_OFF`.
 #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
-pub fn set_underlay_leg_off(off: bool) {
+pub fn set_underlay_leg_off(
+    // true turns the underlay leg off, false turns it back on
+    off: bool,
+) {
     UNDERLAY_LEG_OFF.store(off, Ordering::SeqCst);
 }
 

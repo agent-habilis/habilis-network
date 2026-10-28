@@ -45,7 +45,12 @@ impl AppClass {
 
     /// This policy, plus `flag` when `on`.
     #[must_use]
-    pub const fn with_if(self, flag: Self, on: bool) -> Self {
+    pub const fn with_if(
+        self,
+        flag: Self,
+        // true adds flag to the policy, false leaves the policy as it is
+        on: bool,
+    ) -> Self {
         if on { self.union(flag) } else { self }
     }
 

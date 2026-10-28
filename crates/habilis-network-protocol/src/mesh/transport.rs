@@ -128,35 +128,55 @@ impl Default for TransportPolicy {
 impl TransportPolicy {
     /// Set the UDP transport. Start from `default()` and chain the `with_` methods.
     #[must_use]
-    pub fn with_udp(mut self, udp: bool) -> Self {
+    pub fn with_udp(
+        mut self,
+        // true enables the UDP transport
+        udp: bool,
+    ) -> Self {
         self.udp = udp;
         self
     }
 
     /// Set the WebRTC transport.
     #[must_use]
-    pub fn with_webrtc(mut self, webrtc: bool) -> Self {
+    pub fn with_webrtc(
+        mut self,
+        // true enables the WebRTC transport
+        webrtc: bool,
+    ) -> Self {
         self.webrtc = webrtc;
         self
     }
 
     /// Set the multihop transport.
     #[must_use]
-    pub fn with_multihop(mut self, multihop: bool) -> Self {
+    pub fn with_multihop(
+        mut self,
+        // true enables the multihop transport
+        multihop: bool,
+    ) -> Self {
         self.multihop = multihop;
         self
     }
 
     /// Set the gossip transport.
     #[must_use]
-    pub fn with_gossip(mut self, gossip: bool) -> Self {
+    pub fn with_gossip(
+        mut self,
+        // true enables the gossip transport
+        gossip: bool,
+    ) -> Self {
         self.gossip = gossip;
         self
     }
 
     /// Set whether the relay carries payload.
     #[must_use]
-    pub fn with_relay_transport(mut self, relay_transport: bool) -> Self {
+    pub fn with_relay_transport(
+        mut self,
+        // true lets the relay carry payload
+        relay_transport: bool,
+    ) -> Self {
         self.relay_transport = relay_transport;
         self
     }

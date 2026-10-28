@@ -73,7 +73,11 @@ impl CreateParams {
 
     /// Set whether the mesh is invite-only.
     #[must_use]
-    pub fn with_invite_only(mut self, invite_only: bool) -> Self {
+    pub fn with_invite_only(
+        mut self,
+        // true makes the mesh invite-only
+        invite_only: bool,
+    ) -> Self {
         self.invite_only = invite_only;
         self
     }

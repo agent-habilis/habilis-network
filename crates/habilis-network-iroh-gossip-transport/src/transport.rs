@@ -212,7 +212,12 @@ impl GossipHandle {
     /// path of a pair changes: a pair that a higher rung carries has no use for the
     /// flood. A destination that was never named is allowed, so that a handshake to
     /// a new peer is not dropped.
-    pub fn allow(&self, dst: EndpointId, allowed: bool) {
+    pub fn allow(
+        &self,
+        dst: EndpointId,
+        // true lets frames to dst through, false stops them
+        allowed: bool,
+    ) {
         let mut blocked = locked(&self.shared.blocked);
         if allowed {
             blocked.remove(&dst);
@@ -244,7 +249,12 @@ impl GossipHandle {
     /// destination that has none are handshakes: they are not charged to the
     /// budget, so a new pair is not starved by a bulk flow. The engine calls this
     /// from where it knows the connections.
-    pub fn set_established(&self, dst: EndpointId, established: bool) {
+    pub fn set_established(
+        &self,
+        dst: EndpointId,
+        // true marks dst as connected, false as not connected
+        established: bool,
+    ) {
         let mut destinations = locked(&self.shared.established);
         if established {
             destinations.insert(dst);
