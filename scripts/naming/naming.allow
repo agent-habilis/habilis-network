@@ -40,3 +40,5 @@ from_name|crates/habilis-network/src/blob/blob_digest.rs|1|no impl From in this 
 from_name|crates/habilis-network-protocol/src/mesh/locked_mesh.rs|1|no impl From in this file: the FromStr of a locked id, split from mesh/mod.rs
 from_name|crates/habilis-network-protocol/src/mesh/mesh.rs|1|no impl From in this file: the from_ constructors of a mesh, split from mesh/mod.rs
 from_name|crates/habilis-network-protocol/src/resolver/join_target.rs|1|no impl From in this file beside from_str (N12), to add the From impl or rename
+from_name|tasks/src/bench/run/measured.rs|1|Measured::from_samples builds a measurement from raw samples, not a From conversion; it has call sites in four bench files
+from_name|tasks/src/bench/run/rtt.rs|1|Rtt::from_samples builds an Rtt from raw samples, not a From conversion; it has call sites in four bench files
