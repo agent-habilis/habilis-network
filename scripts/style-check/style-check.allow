@@ -601,7 +601,7 @@ fn_import|crates/habilis-network/src/lib.rs|1|kept: a top-level function importe
 fn_import|crates/habilis-network/src/lifecycle/heartbeat.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/lifecycle/mod.rs|3|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/lookup/capability.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network/src/lookup/mod.rs|9|kept: a top-level function imported by its bare name (O23 rollout), and two facade re-exports of the lookup builders so callers keep the lookup::build_endpoint path (O11 split), and the facade re-exports of the peer builders (O11 split), and the facade re-exports of the peer builders (O11 split), and the facade re-exports of the lookup builders moved under O11, so callers keep their paths
+fn_import|crates/habilis-network/src/lookup/mod.rs|10|kept: a top-level function imported by its bare name (O23 rollout), and two facade re-exports of the lookup builders so callers keep the lookup::build_endpoint path (O11 split), and the facade re-exports of the peer builders (O11 split), and the facade re-exports of the peer builders (O11 split), and the facade re-exports of the lookup builders moved under O11, so callers keep their paths
 fn_import|crates/habilis-network/src/membership/membership_app.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/membership/opts.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/membership/mod.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
@@ -708,8 +708,8 @@ abbrev_name|crates/habilis-network/src/lifecycle/heartbeat.rs|4|existing letter-
 abbrev_name|crates/habilis-network/src/lifecycle/mod.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/capability.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/mdns.rs|6|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/lookup/mod.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/peer.rs|18|moved from mod.rs with the peer builders; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/lookup/address_book.rs|8|moved from mod.rs with the address book; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/probe_answer.rs|8|moved from mod.rs with the probe code; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/lan.rs|5|moved from mod.rs with the LAN code; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/endpoint.rs|2|moved from mod.rs with the endpoint builders; the rename to a full word is a follow-up that lowers this count

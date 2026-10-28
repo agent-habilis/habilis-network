@@ -3,6 +3,8 @@
 //! its own submodule — [`mdns`] (LAN multicast), [`dht`] (mainline DHT),
 //! and [`relay`] (the relay ladder + bootstrap-rung selection/failover).
 
+mod address_book;
+
 mod underlay_leg;
 
 mod peer;
@@ -32,9 +34,9 @@ mod transport_opts;
 // Only the `host` loopback bind names a socket address; a browser has no IP
 // stack to bind one on.
 
+use iroh::Endpoint;
 use iroh::address_lookup::memory::MemoryLookup;
 use iroh::protocol::Router;
-use iroh::{Endpoint, EndpointAddr};
 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use iroh_gossip::proto::HyparviewConfig;
 
@@ -82,6 +84,9 @@ pub(crate) use probe_answer::{ProbeAnswer, probe_answer};
 
 pub use endpoint::build_endpoint;
 
+pub(crate) use address_book::replace_peer_addr;
+pub use address_book::{add_peer_addr, address_book};
+
 #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
 pub use underlay_leg::set_underlay_leg_off;
 #[cfg(feature = "multihop")]
@@ -91,44 +96,6 @@ pub(crate) use endpoint::install_transports;
 pub(crate) use lan::{build_endpoint_keeping_mdns, lan_contacts};
 pub(crate) use lan_event::LanEvent;
 pub use mdns_handle::MdnsHandle;
-
-/// The address book of `endpoint`: one `MemoryLookup`, added to the lookup services of the
-/// endpoint. Call it once per endpoint, where the endpoint is built, and keep the book with the
-/// endpoint. [`add_peer_addr`] is the one writer of the book. The addresses of the peers change
-/// (a home relay comes late, an interface changes) and are told again, so a lookup per call would
-/// add one service to the endpoint for each of them.
-///
-/// An endpoint that exposes no lookup services gets a book that nothing reads, as a call of
-/// `add_peer_addr` used to fail and be ignored.
-pub fn address_book(endpoint: &Endpoint) -> MemoryLookup {
-    let book = MemoryLookup::new();
-    match endpoint.address_lookup() {
-        Ok(services) => services.add(book.clone()),
-        Err(error) => {
-            tracing::warn!(target: "habilis_network::lookup", %error, "the endpoint has no lookup services for its address book");
-        }
-    }
-    book
-}
-
-/// Register a peer's address in the address book of the endpoint, so that the endpoint can
-/// connect to it by its id. The book is made by [`address_book`].
-pub fn add_peer_addr(book: &MemoryLookup, addr: EndpointAddr) {
-    let node = addr.id.fmt_short();
-    let ip_addrs: Vec<_> = addr.ip_addrs().copied().collect();
-    book.add_endpoint_info(addr);
-    tracing::debug!(target: "habilis_network::lookup", %node, ?ip_addrs, "registered a direct peer address with the endpoint");
-}
-
-/// [`add_peer_addr`] for an identity that changes holder: the entry is replaced, not merged. A merge
-/// keeps the address of every beacon that this process held under the id, and a dial to the id
-/// then tries ports of beacons that are gone.
-pub(crate) fn replace_peer_addr(book: &MemoryLookup, addr: EndpointAddr) {
-    let node = addr.id.fmt_short();
-    let ip_addrs: Vec<_> = addr.ip_addrs().copied().collect();
-    book.set_endpoint_info(addr);
-    tracing::debug!(target: "habilis_network::lookup", %node, ?ip_addrs, "replaced the address of a peer in the endpoint's book");
-}
 
 /// How many events of a topic the gossip keeps for a task that is not scheduled yet: sixteen full
 /// answers to an anti-entropy digest. A late joiner meets the answers of its peers in one burst,
