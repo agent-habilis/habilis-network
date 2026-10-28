@@ -81,7 +81,8 @@ mod selector;
 pub use habilis_network_iroh_transport_util::{Rung, expected_rung};
 #[cfg(feature = "test-hooks")]
 pub use selector::{block_ip_paths, block_ip_to, block_rung, block_rung_to};
-mod signaling;
+mod signal_envelope;
+mod signal_error;
 
 pub use addr::{WEBRTC_TRANSPORT_ID, custom_addr, parse_custom_addr};
 pub use consts::{DATA_CHANNEL_LABEL, DEFAULT_STUN_HOSTS};
@@ -90,7 +91,8 @@ pub(crate) use consts::{IN_QUEUE, OUT_QUEUE};
 #[cfg(any(feature = "native", feature = "web"))]
 pub(crate) use drop_policy::{drops_are_sustained, should_log_drop};
 pub use ice_uri::accept_ice_uri;
-pub use signaling::{MAX_ENVELOPE_BYTES, SIGNAL_VERSION, SignalEnvelope, SignalError};
+pub use signal_envelope::{MAX_ENVELOPE_BYTES, SIGNAL_VERSION, SignalEnvelope};
+pub use signal_error::SignalError;
 
 /// The iroh this crate is built against. **Take it from here, never as your own
 /// dependency.**

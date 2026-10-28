@@ -545,7 +545,7 @@ pub_vec_param|crates/habilis-network/src/lookup/mod.rs|1|build_endpoint: hands t
 # pub_impl_into: a public function takes impl Into<T>. A library may do so where call-site ergonomics
 # matter most. These are the validating constructors that take a &str or a String, and the signaling
 # builders that store an SDP string or a reason.
-pub_impl_into|crates/habilis-network-iroh-webrtc-transport/src/signaling.rs|3|offer, answer and error: take a &str or a String and store it owned in the signal
+pub_impl_into|crates/habilis-network-iroh-webrtc-transport/src/signal_envelope.rs|3|offer, answer and error: take a &str or a String and store it owned in the signal
 pub_impl_into|crates/habilis-network-protocol/src/mesh/mesh_id_error.rs|1|MeshId::new: a validating constructor that takes a &str or a String
 pub_impl_into|crates/habilis-network-protocol/src/mesh/name_error.rs|1|MeshName::new: a validating constructor that takes a &str or a String
 pub_impl_into|crates/habilis-network-protocol/src/message/body_error.rs|1|MessageBody::new: a validating constructor that takes a &str or a String
