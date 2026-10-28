@@ -4,7 +4,10 @@
 //! so a consumer's own surface can be; a diagnostics command that genuinely
 //! needs an `Endpoint` reaches in here and accepts the coupling.
 
-pub use crate::gossip::conn_path;
+use crate::gossip::PathSummary;
+use iroh::endpoint::TransportAddrUsage;
+use iroh::{Endpoint, EndpointId, RelayUrl, TransportAddr};
+
 #[cfg(feature = "multihop")]
 pub use crate::lookup::multihop_handle_config;
 #[cfg(all(
@@ -54,4 +57,47 @@ pub mod direct {
     /// Tests only: take UDP away from every connection in the process.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub use habilis_network_iroh_webrtc_transport::block_ip_paths;
+}
+
+/// Snapshot the active transport paths to `node_id`, plus the relay URL
+/// when one is in use. Point-in-time, not a watcher — iroh starts a fresh
+/// link relayed and upgrades to direct after hole-punching, so a reading
+/// taken right at `NeighborUp` skews toward `relay`; the periodic census
+/// reading is the representative one. Diagnostics only; other iroh apps
+/// wanted this too (sendme #67/#112, psyche #586).
+pub async fn conn_path(
+    endpoint: &Endpoint,
+    node_id: EndpointId,
+) -> (PathSummary, Option<RelayUrl>) {
+    let Some(info) = endpoint.remote_info(node_id).await else {
+        return (PathSummary::Unknown, None);
+    };
+    let mut has_direct = false;
+    let mut has_relay = false;
+    let mut relay_url = None;
+    for addr in info.addrs() {
+        if !matches!(addr.usage(), TransportAddrUsage::Active) {
+            continue;
+        }
+        // `TransportAddr` is `#[non_exhaustive]`, so a wildcard is
+        // mandatory and the match can't be made exhaustive.
+        match addr.addr() {
+            TransportAddr::Relay(url) => {
+                has_relay = true;
+                relay_url = Some(url.clone());
+            }
+            // A custom transport (`WebRTC`, multihop) is a peer-to-peer path
+            // as far as the relay is concerned: nothing on it crosses the
+            // relay server.
+            TransportAddr::Ip(_) | TransportAddr::Custom(_) => has_direct = true,
+            _ => {}
+        }
+    }
+    let summary = match (has_direct, has_relay) {
+        (true, true) => PathSummary::Mixed,
+        (true, false) => PathSummary::Direct,
+        (false, true) => PathSummary::Relay,
+        (false, false) => PathSummary::Unknown,
+    };
+    (summary, relay_url)
 }

@@ -4,7 +4,7 @@
 //! iroh keeps every path it has to a peer open and picks one to carry data;
 //! the relay path is never closed, only demoted. So "is this peer relayed" is
 //! a question about the *selected* path, not about which paths exist —
-//! `gossip::conn_path` answers the latter, for diagnostics.
+//! `net::conn_path` answers the latter, for diagnostics.
 
 use std::time::Duration;
 

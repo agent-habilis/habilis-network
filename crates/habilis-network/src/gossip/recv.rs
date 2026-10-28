@@ -24,9 +24,10 @@ use crate::util::clock::Instant;
 // `clock::Instant` off wasm32. See `daemon::state`.
 use n0_future::time::Instant as TokioInstant;
 
+use super::antientropy;
 use super::app::{AppClass, InboundApp, NodeApp};
 use super::broadcast::{announce_arrival, broadcast_peer_info};
-use super::{antientropy, conn_path};
+use crate::net::conn_path;
 
 #[cfg(feature = "multihop")]
 use crate::daemon::event_loop;

@@ -72,7 +72,7 @@ fn warn_on_high_resident_memory(
 /// roster is non-empty is the silent-partition signature, surfaced at
 /// `warn` for post-freeze diagnosis. At `debug` it also classifies each
 /// live peer link `direct`/`relay`/`mixed` (see
-/// [`crate::gossip::conn_path`]) — this periodic reading is the
+/// [`crate::net::conn_path`]) — this periodic reading is the
 /// representative one (post hole-punch upgrade), unlike the `NeighborUp`
 /// snapshot which skews `relay`. Gated on `debug` being live so the
 /// per-peer `remote_info` round-trips are skipped at the default level.
@@ -162,7 +162,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
     let (mut direct, mut relay, mut other) = (0usize, 0usize, 0usize);
     let linked: Vec<_> = state.linked_endpoints.iter().copied().collect();
     for peer_id in linked {
-        let (conn, relay_url) = crate::gossip::conn_path(endpoint, peer_id).await;
+        let (conn, relay_url) = crate::net::conn_path(endpoint, peer_id).await;
         match conn {
             crate::gossip::PathSummary::Direct => direct += 1,
             crate::gossip::PathSummary::Relay => relay += 1,
