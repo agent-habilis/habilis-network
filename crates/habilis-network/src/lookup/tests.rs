@@ -105,10 +105,12 @@ async fn two_members_on_the_lan_link_with_no_beacon() {
     use futures_util::StreamExt as _;
     use iroh_gossip::api::Event;
 
-    use super::{
-        Endpoint, GOSSIP_ALPN, Gossip, LanEvent, MemoryLookup, Router, TransportHandles,
-        address_book,
-    };
+    use iroh::Endpoint;
+    use iroh::address_lookup::memory::MemoryLookup;
+    use iroh::protocol::Router;
+    use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
+
+    use super::{LanEvent, TransportHandles, address_book};
 
     struct Member {
         endpoint: Endpoint,
