@@ -8,7 +8,7 @@ ctor_name|crates/habilis-network-protocol/src/message/body_error.rs|1|no plain n
 ctor_name|crates/habilis-network-protocol/src/message/id_error.rs|1|no plain new beside new_accepts_uuid_v4,new_rejects_garbage (N10), to add new() or rename
 ctor_name|crates/habilis-network-protocol/src/nickname_error.rs|1|no plain new beside new_accepts_valid_nicknames,new_rejects_empty_and_overlong,new_rejects_unsafe_chars (N10), to add new() or rename
 ctor_name|crates/habilis-network-test-tracing/src/guard.rs|1|no plain new beside new_guard (N10), to add new() or rename
-ctor_name|crates/habilis-network/src/lookup/mod.rs|1|no plain new beside new_gossip_handle,new_webrtc_handle (N10), to add new() or rename
+ctor_name|crates/habilis-network/src/lookup/peer.rs|1|no plain new beside new_gossip_handle,new_webrtc_handle (N10), to add new() or rename
 from_name|crates/habilis-network-chunks/src/chunk_hash.rs|1|no impl From in this file beside from_bits,from_bytes,from_hex,from_leaves (N12), to add the From impl or rename
 from_name|crates/habilis-network-chunks/src/chunk_map.rs|1|no impl From in this file beside from_bits,from_bytes,from_hex,from_leaves (N12), to add the From impl or rename
 from_name|crates/habilis-network-chunks/src/coverage.rs|1|no impl From in this file beside from_bits,from_bytes,from_hex,from_leaves (N12), to add the From impl or rename

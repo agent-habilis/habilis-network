@@ -1,5 +1,5 @@
-use super::{LookupOpts, TransportOpts, build_peer_endpoint};
-use crate::protocol::mesh::TransportPolicy;
+use super::{TransportOpts, build_peer_endpoint};
+use crate::protocol::mesh::{LookupOpts, RelayChoice, TransportPolicy};
 use crate::transport::PayloadPath;
 use habilis_network_test_tracing::test;
 use std::collections::HashSet;
@@ -106,8 +106,8 @@ async fn two_members_on_the_lan_link_with_no_beacon() {
     use iroh_gossip::api::Event;
 
     use super::{
-        Endpoint, GOSSIP_ALPN, Gossip, LanEvent, MemoryLookup, RelayChoice, Router,
-        TransportHandles, address_book,
+        Endpoint, GOSSIP_ALPN, Gossip, LanEvent, MemoryLookup, Router, TransportHandles,
+        address_book,
     };
 
     struct Member {
@@ -647,7 +647,7 @@ async fn the_member_of_a_udp_and_gossip_list_keeps_ip_above_gossip() {
 #[test]
 fn the_handle_config_of_a_browser_differs_from_the_engine_s_in_the_link_cost_only() {
     let native = super::multihop_handle_config(PayloadPath::RelayAllowed);
-    let browser = super::browser_handle_config(PayloadPath::RelayAllowed);
+    let browser = super::peer::browser_handle_config(PayloadPath::RelayAllowed);
     assert_eq!(native.link_cost, 10);
     assert_eq!(browser.link_cost, 100);
     assert_eq!(browser.with_link_cost(native.link_cost), native);
