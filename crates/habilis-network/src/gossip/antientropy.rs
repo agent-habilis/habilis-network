@@ -19,7 +19,13 @@
 //! or meta answer is the exception: it goes point-to-point to the linked
 //! neighbor that asked, see [`handle_state_digest`].
 
-use std::collections::{HashMap, HashSet};
+mod answered;
+mod digest_trigger;
+mod fast_rounds;
+mod plane;
+mod serve_budget;
+
+use std::collections::HashSet;
 use std::hash::{Hash as _, Hasher as _};
 
 use crate::transport::{MeshSender, Resend};
@@ -32,14 +38,18 @@ use crate::protocol::message::{Verified, WireFrame};
 use crate::protocol::{AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, UnixSecs};
 use crate::util::clock::Instant;
 use crate::util::tuning::{
-    ANTIENTROPY_ANSWERERS, ANTIENTROPY_DIGEST_WINDOW_IDS, ANTIENTROPY_SERVE_COOLDOWN,
-    ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE, FAST_ROUND_AHEAD_MAX, FAST_ROUND_AHEAD_TTL,
-    FAST_ROUND_MIN_INTERVAL, FAST_ROUND_RETRY, antientropy_max_resend,
+    ANTIENTROPY_ANSWERERS, ANTIENTROPY_DIGEST_WINDOW_IDS, antientropy_max_resend,
 };
 
 use super::broadcast_msg;
 
 use std::collections::hash_map;
+
+pub(crate) use answered::Answered;
+pub(crate) use digest_trigger::DigestTrigger;
+pub(crate) use fast_rounds::FastRounds;
+pub(crate) use plane::Plane;
+pub(crate) use serve_budget::ServeBudget;
 /// One window on the wire: its `[lo, hi]` bounds (`hi` timestamp `i64::MAX` ⇒
 /// open-ended), each a timestamp and the id key of the message at that edge, plus
 /// its dedup keys packed as 16 bytes each, Base58-encoded. The key is what lets an
@@ -383,15 +393,6 @@ pub(crate) async fn broadcast_state_digests(
     broadcast_state_digest(state, sender, origin, Channel::Meta, trigger).await;
 }
 
-/// What sends a state digest. The tick is the fallback of a stalled fast
-/// round, so it goes out even while one runs; a digest that an event sends
-/// (a new peer, the first real-peer link) waits for the round.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DigestTrigger {
-    Event,
-    Tick,
-}
-
 #[derive(Clone, Copy)]
 struct DigestOrigin<'mesh> {
     mesh: &'mesh MeshId,
@@ -452,273 +453,6 @@ fn heads_digest(
         Message::new_channel_digest(origin.mesh, origin.author, body, channel)
             .sign(&state.identity),
     )
-}
-
-/// The state digest answers served in the current window, per asker, channel
-/// and plane: at most [`ANTIENTROPY_SERVES_PER_WINDOW`] on the unicast plane,
-/// one on gossip. On unicast the same heads are answered again only after
-/// [`FAST_ROUND_MIN_INTERVAL`], so a burst of one asker's digests draws one
-/// answer and a lost answer can still be asked for again. A serve is counted
-/// when the answer is handed to the pool, not when it is delivered, so a batch
-/// that fails costs one serve, and the asker's next ask is answered. The
-/// heads alone cannot be the gate: the holder does not check them, so a
-/// digest with made-up heads would be new every time.
-#[derive(Debug, Default)]
-pub(crate) struct ServeBudget {
-    /// The asker's key: every digest is verified, so it always has one.
-    windows: HashMap<(AuthorKey, Channel, Plane), Served>,
-}
-
-#[derive(Debug)]
-struct Served {
-    since: Instant,
-    answers: usize,
-    /// When each heads was last answered.
-    heads: HashMap<u64, Instant>,
-}
-
-impl ServeBudget {
-    /// Fast rounds run point-to-point only, so only the unicast plane needs
-    /// more than one answer per window.
-    fn limit(plane: Plane) -> usize {
-        match plane {
-            Plane::Unicast => ANTIENTROPY_SERVES_PER_WINDOW,
-            Plane::Gossip => 1,
-        }
-    }
-
-    /// Whether an answer to these heads may go out now.
-    pub(crate) fn admits(
-        &self,
-        key: &(AuthorKey, Channel, Plane),
-        heads: u64,
-        now: Instant,
-    ) -> bool {
-        match self.windows.get(key) {
-            Some(served) if now.duration_since(served.since) < ANTIENTROPY_SERVE_COOLDOWN => {
-                // The same heads are answered again after the fast-round interval on
-                // the unicast plane: the asker repeats them when an answer was lost.
-                let repeat_too_soon = served.heads.get(&heads).is_some_and(|at| {
-                    key.2 == Plane::Gossip || now.duration_since(*at) < FAST_ROUND_MIN_INTERVAL
-                });
-                !repeat_too_soon && served.answers < Self::limit(key.2)
-            }
-            _ => true,
-        }
-    }
-
-    /// Record an answer to these heads, dropping windows that have ended.
-    pub(crate) fn note(&mut self, key: (AuthorKey, Channel, Plane), heads: u64, now: Instant) {
-        self.windows
-            .retain(|_, served| now.duration_since(served.since) < ANTIENTROPY_SERVE_COOLDOWN);
-        let served = self.windows.entry(key).or_insert_with(|| Served {
-            since: now,
-            answers: 0,
-            heads: HashMap::new(),
-        });
-        served.answers += 1;
-        served.heads.insert(heads, now);
-    }
-}
-
-/// The running fast round of one channel: the peer we ask, when we last
-/// asked, and our heads and change count at that ask.
-#[derive(Debug)]
-struct Round {
-    peer: AuthorKey,
-    at: Instant,
-    heads: u64,
-    changes: usize,
-}
-
-/// A peer whose heads showed it is ahead of us.
-#[derive(Debug, Clone)]
-struct Waiting {
-    key: AuthorKey,
-    author: Nickname,
-    heads: Vec<String>,
-    noted: Instant,
-}
-
-/// This node's fast rounds: when a linked neighbor's digest shows heads we do
-/// not hold, we ask that neighbor directly, and its answer ends with its heads,
-/// so we ask again until we hold them. The tick asked once per interval, and
-/// an answer carries one resend budget, so a long history took one tick per
-/// budget. One round runs per channel, with one peer: every linked holder is
-/// ahead of a backfilling node, and a round with each would multiply the
-/// frames that reach its unicast inbox.
-#[derive(Debug, Default)]
-pub(crate) struct FastRounds {
-    /// The running round per channel.
-    rounds: HashMap<Channel, Round>,
-    /// Per channel, the peers whose heads showed they are ahead of us. A
-    /// round can die with no progress (a request or its answer is lost, or its
-    /// peer refuses us), and nothing else would ask them before the tick.
-    ahead: HashMap<Channel, Vec<Waiting>>,
-    /// When a change last landed per channel: an answer's frames still arrive.
-    last_change: HashMap<Channel, Instant>,
-}
-
-impl FastRounds {
-    /// The peer of the running round may be asked at once once a full answer
-    /// landed since the last ask: the heads that close an answer are the cue
-    /// to go on. New heads alone are not, because two answers can be in
-    /// flight at once and our heads move with every frame of either; asking
-    /// on each ran two chains of asks at two serves per round. Otherwise the
-    /// round waits [`FAST_ROUND_MIN_INTERVAL`] or the retry tick, 400 to
-    /// 800 ms, so a peer that advertises heads nobody can hold costs one small
-    /// frame per interval. A holder with a smaller resend budget never sends a
-    /// full answer, so each of its rounds takes that wait. Another peer starts
-    /// a round only when the running one went quiet for
-    /// [`FAST_ROUND_ACTIVE`].
-    fn may_ask(
-        &self,
-        peer: &AuthorKey,
-        channel: Channel,
-        heads: u64,
-        changes: usize,
-        now: Instant,
-    ) -> bool {
-        self.rounds.get(&channel).is_none_or(|round| {
-            if round.peer == *peer {
-                let quiet = now.duration_since(self.quiet_since(channel, round));
-                let answered = changes.saturating_sub(round.changes) >= antientropy_max_resend();
-                (round.heads != heads && answered) || quiet >= FAST_ROUND_MIN_INTERVAL
-            } else {
-                now.duration_since(round.at) >= FAST_ROUND_ACTIVE
-            }
-        })
-    }
-
-    fn note_asked(
-        &mut self,
-        peer: AuthorKey,
-        channel: Channel,
-        heads: u64,
-        changes: usize,
-        now: Instant,
-    ) {
-        self.rounds.insert(
-            channel,
-            Round {
-                peer,
-                at: now,
-                heads,
-                changes,
-            },
-        );
-    }
-
-    /// A change landed on `channel`: an answer's frames are still arriving.
-    pub(crate) fn note_change(&mut self, channel: Channel, now: Instant) {
-        self.last_change.insert(channel, now);
-    }
-
-    /// Whether a change landed on `channel` within [`FAST_ROUND_MIN_INTERVAL`]:
-    /// a holder is serving us, so a digest an event would send now draws a
-    /// second answer that overlaps the one arriving.
-    pub(crate) fn changed_recently(&self, channel: Channel, now: Instant) -> bool {
-        self.last_change
-            .get(&channel)
-            .is_some_and(|&changed| now.duration_since(changed) < FAST_ROUND_MIN_INTERVAL)
-    }
-
-    /// Where a round's wait starts: its ask, or the last change that landed
-    /// after it, since under load an answer's frames arrive over more than the
-    /// wait and an ask sent meanwhile draws an answer that overlaps it. Capped
-    /// at [`FAST_ROUND_ACTIVE`] after the ask, so live writes cannot hold a
-    /// stalled round; an answer slower than that overlaps again.
-    fn quiet_since(&self, channel: Channel, round: &Round) -> Instant {
-        let latest = self
-            .last_change
-            .get(&channel)
-            .map_or(round.at, |&changed| changed.max(round.at));
-        latest.min(round.at + FAST_ROUND_ACTIVE)
-    }
-
-    /// Our heads when we last asked for `channel`, if a round ran.
-    #[cfg(test)]
-    pub(crate) fn asked_heads(&self, channel: Channel) -> Option<u64> {
-        self.rounds.get(&channel).map(|round| round.heads)
-    }
-
-    fn note_ahead(
-        &mut self,
-        channel: Channel,
-        key: AuthorKey,
-        author: Nickname,
-        heads: Vec<String>,
-        now: Instant,
-    ) {
-        let ahead = self.ahead.entry(channel).or_default();
-        ahead.retain(|peer| Self::fresh(peer, now));
-        let peer = Waiting {
-            key,
-            author,
-            heads,
-            noted: now,
-        };
-        if let Some(known) = ahead.iter_mut().find(|known| known.key == peer.key) {
-            *known = peer;
-        } else if ahead.len() < FAST_ROUND_AHEAD_MAX {
-            ahead.push(peer);
-        }
-    }
-
-    /// The peers remembered as ahead for `channel`.
-    fn ahead(&self, channel: Channel) -> Vec<Waiting> {
-        self.ahead.get(&channel).cloned().unwrap_or_default()
-    }
-
-    fn fresh(peer: &Waiting, now: Instant) -> bool {
-        now.duration_since(peer.noted) < FAST_ROUND_AHEAD_TTL
-    }
-
-    /// The peer to ask again for `channel` once nothing was asked for
-    /// [`FAST_ROUND_RETRY`]. Peers whose heads we now hold (`holds`), or
-    /// whose heads have not shown for [`FAST_ROUND_AHEAD_TTL`], are
-    /// forgotten first. While the round brings progress (`ours`, our heads
-    /// now, moved since the last ask) its own peer stays first; when it does
-    /// not, the next `reachable` peer after it takes a turn, so one peer that
-    /// never answers cannot hold the pull.
-    fn retry_target(
-        &mut self,
-        channel: Channel,
-        now: Instant,
-        ours: u64,
-        holds: impl Fn(&[String]) -> bool,
-        reachable: impl Fn(&AuthorKey) -> bool,
-    ) -> Option<(AuthorKey, Nickname)> {
-        let waiting = self.rounds.get(&channel).is_some_and(|round| {
-            now.duration_since(self.quiet_since(channel, round)) < FAST_ROUND_RETRY
-        });
-        let ahead = self.ahead.get_mut(&channel)?;
-        ahead.retain(|peer| !holds(&peer.heads) && Self::fresh(peer, now));
-        let round = self.rounds.get(&channel);
-        if waiting {
-            return None;
-        }
-        let candidates: Vec<&Waiting> = ahead.iter().filter(|peer| reachable(&peer.key)).collect();
-        let round_index =
-            round.and_then(|round| candidates.iter().position(|peer| peer.key == round.peer));
-        let progress = round.is_none_or(|round| round.heads != ours);
-        let pick = match round_index {
-            Some(index) if progress => candidates.get(index),
-            Some(index) => candidates.get((index + 1) % candidates.len()),
-            None => candidates.first(),
-        };
-        pick.map(|peer| (peer.key, peer.author.clone()))
-    }
-
-    /// Whether a direct round runs for `channel`: we asked a peer within
-    /// [`FAST_ROUND_ACTIVE`]. Our broadcast digests wait meanwhile: during
-    /// a backfill each one draws a full answer from every linked holder, and
-    /// together they overflow our unicast inbox.
-    pub(crate) fn active(&self, channel: Channel, now: Instant) -> bool {
-        self.rounds
-            .get(&channel)
-            .is_some_and(|round| now.duration_since(round.at) < FAST_ROUND_ACTIVE)
-    }
 }
 
 /// Ask the author of `digest` directly for what we miss, when its heads show
@@ -848,22 +582,6 @@ fn heads_key(digest: &Message) -> u64 {
     let mut hasher = hash_map::DefaultHasher::new();
     digest.body.as_str().hash(&mut hasher);
     hasher.finish()
-}
-
-/// Which plane a state digest answer takes; part of the serve gate's key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Plane {
-    Unicast,
-    Gossip,
-}
-
-/// How [`handle_state_digest`] sent its answer, in frames. `unicast` counts
-/// frames handed to a background send, not proof that they arrived, and not
-/// the heads frame that closes a point-to-point answer.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct Answered {
-    pub(crate) unicast: usize,
-    pub(crate) broadcast: usize,
 }
 
 /// Handle a received state digest: the sender advertised its automerge heads, so
