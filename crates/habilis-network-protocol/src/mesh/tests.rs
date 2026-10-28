@@ -300,8 +300,8 @@ fn golden_passwordless_id_and_topic_are_pinned() {
         mesh.to_string(),
         "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqazmpTSgH"
     );
-    let topic = super::crypto::derive_topic_id(
-        super::crypto::Keying::Wire(mesh.seed()),
+    let topic = crate::crypto::derive_topic_id(
+        crate::crypto::Keying::Wire(mesh.seed()),
         mesh.name(),
         &mesh.config_bytes(),
     );
@@ -350,8 +350,8 @@ fn an_id_of_an_older_default_mesh_keeps_its_id_and_its_topic() {
     let mesh: LockedMesh = older.parse().expect("an older id decodes");
     assert!(!mesh.config().transport.gossip, "it has no gossip");
     assert_eq!(mesh.to_string(), older, "and it keeps its id");
-    let topic = super::crypto::derive_topic_id(
-        super::crypto::Keying::Wire(mesh.seed()),
+    let topic = crate::crypto::derive_topic_id(
+        crate::crypto::Keying::Wire(mesh.seed()),
         mesh.name(),
         &mesh.config_bytes(),
     );
