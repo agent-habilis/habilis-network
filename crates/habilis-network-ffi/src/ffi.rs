@@ -823,7 +823,11 @@ pub unsafe extern "C" fn habilis_network_streams_bind(
             .with_transport(transport)
             .with_relay_urls(
                 relay_urls
-                    .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
+                    .map(|urls| {
+                        urls.split(',')
+                            .map(|url| url.trim().to_owned())
+                            .collect::<Vec<String>>()
+                    })
                     .unwrap_or_default(),
             );
         boxed(Streams::bind(&parsed).map(|streams| HabilisNetworkStreams { streams }))

@@ -53,22 +53,22 @@ pub struct StreamOpts {
 impl StreamOpts {
     /// Set the lookups.
     #[must_use]
-    pub fn with_lookup(mut self, lookup: Vec<Lookup>) -> Self {
-        self.lookup = lookup;
+    pub fn with_lookup(mut self, lookup: impl IntoIterator<Item = Lookup>) -> Self {
+        self.lookup = lookup.into_iter().collect();
         self
     }
 
     /// Set the transports.
     #[must_use]
-    pub fn with_transport(mut self, transport: Vec<Transport>) -> Self {
-        self.transport = transport;
+    pub fn with_transport(mut self, transport: impl IntoIterator<Item = Transport>) -> Self {
+        self.transport = transport.into_iter().collect();
         self
     }
 
     /// Set the relay URLs.
     #[must_use]
-    pub fn with_relay_urls(mut self, relay_urls: Vec<String>) -> Self {
-        self.relay_urls = relay_urls;
+    pub fn with_relay_urls(mut self, relay_urls: impl IntoIterator<Item = String>) -> Self {
+        self.relay_urls = relay_urls.into_iter().collect();
         self
     }
 }

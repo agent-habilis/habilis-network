@@ -1067,8 +1067,8 @@ impl Message {
     /// seen when authoring) before signing. Consuming-builder, composes
     /// with [`with_chain`](Self::with_chain) and [`sign`](Self::sign).
     #[must_use]
-    pub fn with_parents(mut self, parents: Vec<ContentHash>) -> Self {
-        self.parents = parents;
+    pub fn with_parents(mut self, parents: impl IntoIterator<Item = ContentHash>) -> Self {
+        self.parents = parents.into_iter().collect();
         self
     }
 
