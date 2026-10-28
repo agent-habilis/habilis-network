@@ -60,7 +60,12 @@ pub use signer::Signer;
 mod body_error;
 
 use body_error as body;
-mod error;
+mod message_error;
+pub use message_error::MessageError;
+mod app_tag_error;
+pub use app_tag_error::AppTagError;
+mod corr_id_error;
+pub use corr_id_error::CorrIdError;
 mod id_error;
 use id_error as id;
 mod shard;
@@ -72,7 +77,6 @@ pub use verified::{Authored, Proof, Verified};
 pub use wire::WireFrame;
 
 pub use body::{BodyError, MessageBody};
-pub use error::{AppTagError, CorrIdError, MessageError};
 pub use id::{IdError, MessageId};
 pub use shard::{Shard, ShardGroup, shard_fits_log};
 

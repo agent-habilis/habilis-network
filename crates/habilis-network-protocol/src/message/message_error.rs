@@ -1,5 +1,4 @@
-//! The errors of the message wire: a message that does not parse or encode,
-//! and the tags and correlation ids a message carries.
+//! Why a message does not parse or encode.
 
 use std::error::Error;
 use std::fmt;
@@ -76,37 +75,3 @@ impl Error for MessageError {
         }
     }
 }
-
-/// Why an app tag is refused: empty, longer than 32 bytes, or not an ASCII slug.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
-pub enum AppTagError {
-    /// The text is not a valid app tag.
-    Invalid,
-}
-
-impl fmt::Display for AppTagError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("invalid app tag")
-    }
-}
-
-impl Error for AppTagError {}
-
-/// Why a correlation id is refused: empty or longer than 64 bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-#[must_use]
-pub enum CorrIdError {
-    /// The text is not a valid correlation id.
-    Invalid,
-}
-
-impl fmt::Display for CorrIdError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("invalid correlation id")
-    }
-}
-
-impl Error for CorrIdError {}
