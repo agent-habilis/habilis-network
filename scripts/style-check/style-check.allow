@@ -557,7 +557,7 @@ pub_impl_into|crates/habilis-network-protocol/src/message/id_error.rs|1|MessageI
 pub_impl_into|crates/habilis-network-protocol/src/message/app_tag.rs|1|AppTag::new: a validating constructor that takes a &str or a String
 pub_impl_into|crates/habilis-network-protocol/src/message/corr_id.rs|1|CorrId::new: a validating constructor that takes a &str or a String
 pub_impl_into|crates/habilis-network-protocol/src/nickname_error.rs|1|Nickname::new: a validating constructor that takes a &str or a String
-pub_impl_into|crates/habilis-network/src/lookup/mod.rs|1|a function that takes an address or anything that converts into one
+pub_impl_into|crates/habilis-network/src/lookup/probe.rs|1|a function that takes an address or anything that converts into one
 
 # crate_example: a library crate with no doc example (D2). Each row is a count that may only go down.
 crate_example|crates/habilis-network-bench-wasm/src/lib.rs|1|kept: no doc example yet in this crate; its entry point is to get one (D2 rollout)
@@ -706,7 +706,8 @@ abbrev_name|crates/habilis-network/src/lifecycle/heartbeat.rs|4|existing letter-
 abbrev_name|crates/habilis-network/src/lifecycle/mod.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/capability.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/mdns.rs|6|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/lookup/mod.rs|34|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/lookup/mod.rs|26|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/lookup/probe_answer.rs|8|moved from mod.rs with the probe code; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/lan.rs|5|moved from mod.rs with the LAN code; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/endpoint.rs|2|moved from mod.rs with the endpoint builders; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/membership_app.rs|60|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count

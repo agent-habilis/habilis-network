@@ -941,7 +941,7 @@ async fn a_router_that_carries_no_unicast_completes_a_nudge() {
 fn every_way_a_dial_ends_is_read_by_what_it_proves() {
     use iroh::endpoint::{ConnectionError, TransportError, TransportErrorCode};
 
-    use super::{ProbeAnswer, answer_of_connection_error};
+    use super::probe_answer::{ProbeAnswer, answer_of_connection_error};
 
     let alert = |code: u8| {
         ConnectionError::TransportError(TransportError::new(
