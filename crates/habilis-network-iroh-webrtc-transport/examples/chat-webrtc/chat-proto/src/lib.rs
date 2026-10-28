@@ -256,7 +256,10 @@ impl Ticket {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        ClientMsg, EndpointId, FRAME_HEADER_LEN, MAX_NICK_CHARS, ServerMsg, Ticket, decode_body,
+        decode_frame_len, encode_frame,
+    };
     use habilis_network_test_tracing::test;
 
     /// Generated rather than a hardcoded array: an endpoint id is a point on a

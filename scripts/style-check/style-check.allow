@@ -22,8 +22,6 @@ anyhow_pub|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|3|benchmark
 anyhow_pub|crates/habilis-network/src/lookup/mod.rs|1|the test relay helper spawn_plain, behind the iroh-test-utils feature (a test helper, not library API)
 
 # glob: every glob import still to be replaced with explicit imports (tracker items G2 and G3). The rows go away with the fix.
-glob|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/room.rs|1|replace with explicit imports (G2, G3)
-glob|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-proto/src/lib.rs|1|replace with explicit imports (G2, G3)
 
 # operator: an overload that has a math or logic meaning (U22). Each line names the meaning.
 operator|crates/habilis-network-netplay/src/frame.rs|4|Frame: a frame plus or minus a number of frames, and the gap between two frames.
@@ -394,7 +392,6 @@ turbofish_collect_parse|crates/habilis-network-netplay/examples/light-cycles/nat
 turbofish_collect_parse|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/tui/layout.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/tui/node.rs|5|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-netplay/examples/light-cycles/web/wasm/src/app.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network-netplay/examples/light-cycles/web/wasm/src/lib.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-netplay/src/mesh/lobby.rs|4|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-netplay/src/sync.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-netplay/tests/mesh_loopback.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)

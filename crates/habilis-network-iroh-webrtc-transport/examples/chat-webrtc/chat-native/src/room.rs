@@ -216,7 +216,7 @@ impl Drop for Membership {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Room, ServerMsg};
     use habilis_network_test_tracing::test;
 
     #[test]
