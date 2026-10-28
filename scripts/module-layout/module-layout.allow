@@ -2,7 +2,6 @@
 # Used by scripts/module-layout/module-layout.ts. Each leaf file that is named for none of its public types has one row. A row goes when the file is renamed or split.
 
 crates/habilis-network-ffi/src/ffi.rs|1|rename pending: public type(s) HabilisNetworkOpts, HabilisNetworkMsg, HabilisNetworkMesh, HabilisNetworkStreamOpts, HabilisNetworkStreams, HabilisNetworkProducer, HabilisNetworkReader
-crates/habilis-network-iroh-multihop-transport/src/underlay.rs|1|rename pending: public type(s) Delivered, Forwarder, ForwardAcceptor
 
 # O11: a mod.rs or lib.rs that defines items. Each row goes when the items move to leaf files.
 crates/habilis-network/src/lookup/mod.rs|1|defines items; to move into leaf files (O11)
