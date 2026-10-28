@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use habilis_network_util::clock::{Instant, UnixSecs};
+use habilis_network_util::clock::Instant;
+use habilis_network_util::unix_secs::UnixSecs;
 
 use super::{Ad, Listing, ListingChange};
 

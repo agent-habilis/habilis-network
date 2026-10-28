@@ -46,7 +46,7 @@ pub_const_fn|crates/habilis-network-protocol/src/mesh/lookup.rs|2|kept: const co
 pub_const_fn|crates/habilis-network-protocol/src/message/verified.rs|2|kept: trivial accessor key of a verified message (reviewer to confirm)
 pub_const_fn|crates/habilis-network-protocol/src/topic_id.rs|3|kept: newtype rule (from_bytes, as_bytes, to_bytes of a 32- or 16-byte key or hash)
 pub_const_fn|crates/habilis-network-stream/src/hash/stream_id.rs|2|kept: newtype rule (StreamId from_bytes and as_bytes)
-pub_const_fn|crates/habilis-network-util/src/unix_secs.rs|5|kept: 4 UnixSecs newtype accessors and constructors (newtype rule); millis_saturating is used in a const item (const context, clock.rs test ONE_SECOND).
+pub_const_fn|crates/habilis-network-util/src/unix_secs.rs|4|kept: 4 UnixSecs newtype accessors and constructors (newtype rule)
 pub_const_fn|crates/habilis-network/src/gossip/app/app_class.rs|7|kept: flag set of a gossip message (union, with_if, loggable, beat, valid, chained, sealed): bit-flag logic
 
 # A hand-written Eq, Ord or PartialOrd: the compiler checks a derive, not a manual impl.
@@ -154,7 +154,7 @@ assert_no_message|crates/habilis-network-test-tracing/tests/writer.rs|1|kept: as
 assert_no_message|crates/habilis-network-util/src/bounded_fifo_set.rs|12|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-util/src/bounded_queue.rs|5|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-util/src/line_read.rs|5|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-util/src/unix_secs.rs|30|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network-util/src/unix_secs.rs|24|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-util/src/cooldown.rs|6|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-util/src/lib.rs|8|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-util/src/log_config.rs|2|kept: assert without a message, to be given one (P13 rollout)
@@ -281,7 +281,7 @@ long_chain|crates/habilis-network-test-tracing/src/guard.rs|3|kept: statements w
 long_chain|crates/habilis-network-test-tracing/tests/atexit.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-test-tracing/tests/late.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-test-tracing/tests/twice.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-util/src/unix_secs.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-util/src/unix_secs.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-util/src/process.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-wasm/src/mesh_peer.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-wasm/src/tracing_console.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -825,3 +825,6 @@ anyhow_pub|crates/habilis-network/src/lookup/test_relay.rs|1|the test relay help
 abbrev_name|crates/habilis-network/src/gossip/lan/lan_grafts.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-multihop-transport/src/underlay/forwarder.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network-iroh-multihop-transport/src/underlay/forwarder.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+assert_no_message|crates/habilis-network-util/src/clock.rs|6|kept: assert without a message, to be given one (P13 rollout)
+long_chain|crates/habilis-network-util/src/clock.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+pub_const_fn|crates/habilis-network-util/src/clock.rs|1|kept: millis_saturating is used in a const item (a const context)

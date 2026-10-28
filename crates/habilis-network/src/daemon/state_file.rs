@@ -46,7 +46,7 @@ use anyhow::Result;
 
 use crate::protocol::mesh::MeshName;
 use crate::protocol::{MeshId, Nickname};
-use crate::util::clock;
+use crate::util::unix_secs;
 
 use std::sync::atomic;
 /// Owns a session state file for the lifetime of a daemon process.
@@ -194,7 +194,7 @@ impl StateFile {
         }
         obj.insert(
             "last_updated".into(),
-            clock::UnixSecs::now().as_secs().into(),
+            unix_secs::UnixSecs::now().as_secs().into(),
         );
         let mut json = serde_json::to_vec(&obj).map_err(std::io::Error::other)?;
         json.push(b'\n');
@@ -438,7 +438,8 @@ mod tests {
         assert!(std::error::Error::source(&unreadable).is_some());
     }
 
-    use super::{MeshId, MeshName, Nickname, StateFile, clock};
+    use super::{MeshId, MeshName, Nickname, StateFile};
+    use crate::util::clock;
 
     fn name(value: &str) -> MeshName {
         MeshName::try_new(value).expect("valid mesh name")

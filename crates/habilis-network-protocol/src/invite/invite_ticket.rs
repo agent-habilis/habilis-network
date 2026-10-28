@@ -19,7 +19,7 @@ use crate::base58check::{self, take_array};
 use crate::crypto::{self, Password, SymmetricKey};
 use crate::mesh::{LockedMesh, Mesh};
 use crate::{identity, seal_error};
-use habilis_network_util::clock::UnixSecs;
+use habilis_network_util::unix_secs::UnixSecs;
 use zeroize::Zeroizing;
 
 /// Framing version. Bumped only on a breaking framing change.
@@ -299,7 +299,7 @@ mod tests {
     use super::{InviteTicket, mint, signing_bytes};
     use crate::crypto::{Password, Seed};
     use crate::mesh::{Mesh, MeshConfig, MeshName};
-    use habilis_network_util::clock::UnixSecs;
+    use habilis_network_util::unix_secs::UnixSecs;
     use iroh_base::SecretKey;
 
     fn pw(text: &str) -> Password {

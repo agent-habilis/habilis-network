@@ -3,7 +3,7 @@
 #[cfg(any(test, feature = "test-fixtures"))]
 use iroh_base::Signature;
 
-use habilis_network_util::clock::UnixSecs;
+use habilis_network_util::unix_secs::UnixSecs;
 
 use crate::identity::{self, Identity};
 use crate::mesh::MeshId;

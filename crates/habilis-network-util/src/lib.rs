@@ -7,16 +7,16 @@ pub mod bounded_queue;
 // Gated with its only caller, the engine's IPC listener: line framing over a
 // unix socket / named pipe, which a browser has no equivalent of. `async-io` is
 // also the crate's only tokio user.
-#[cfg(feature = "async-io")]
-pub mod line_read;
-pub mod unix_secs;
-pub use unix_secs as clock;
+pub mod clock;
 pub mod consts;
 pub mod cooldown;
+#[cfg(feature = "async-io")]
+pub mod line_read;
 pub mod log_config;
 /// Process helpers for the daemon: the parent-process walk that the orphan watch uses.
 #[cfg(feature = "host")]
 pub mod process;
+pub mod unix_secs;
 // Portable: the reading itself is `cfg`'d down to `None` off a libc host, so
 // the leak gauge compiles everywhere and simply reports 0 in a browser. Keeping
 // the module un-gated is what lets `timers` stay free of `cfg` at its call sites.

@@ -29,7 +29,7 @@ fn monotonic_clock_runs() {
 /// `SystemTime::now()`, through the wire-path helper that stamps every frame.
 #[wasm_bindgen_test]
 fn wall_clock_stamps_a_plausible_time() {
-    let secs = clock::UnixSecs::now().as_secs();
+    let secs = unix_secs::UnixSecs::now().as_secs();
     // 2020-01-01. Guards against the "returns 0 on failure" path silently
     // becoming the normal case, which would put epoch timestamps on the wire.
     assert!(secs > 1_577_836_800, "implausible unix time: {secs}");

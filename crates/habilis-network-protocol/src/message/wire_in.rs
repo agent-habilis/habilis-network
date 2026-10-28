@@ -1,6 +1,6 @@
 //! The wire form of a message as it is read: every field a string or a plain value.
 
-use habilis_network_util::clock::UnixSecs;
+use habilis_network_util::unix_secs::UnixSecs;
 use serde::Deserialize;
 
 use super::{Message, MessageBody, MessageId, MessageKind, Shard, Signer, default_ext};

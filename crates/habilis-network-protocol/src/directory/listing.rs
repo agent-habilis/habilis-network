@@ -3,7 +3,8 @@
 use crate::MeshId;
 use crate::mesh::MeshName;
 
-use habilis_network_util::clock::{Instant, UnixSecs};
+use habilis_network_util::clock::Instant;
+use habilis_network_util::unix_secs::UnixSecs;
 
 /// One live directory entry, decoded from an [`super::Ad`].
 #[derive(Debug, Clone)]
