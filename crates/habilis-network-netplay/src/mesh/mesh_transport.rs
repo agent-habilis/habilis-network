@@ -6,7 +6,9 @@ use habilis_network::protocol::{AuthorKey, Nickname};
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::mesh::driver::{Mailboxes, Outbound, RollbackDriver, encode};
+use crate::mesh::mailboxes::Mailboxes;
+use crate::mesh::outbound::Outbound;
+use crate::mesh::rollback_driver;
 use crate::transport::{Message, Transport};
 
 /// A [`Transport`] over a habilis-network mesh.
@@ -46,60 +48,14 @@ impl<T: Config> std::fmt::Debug for MeshTransport<T> {
     }
 }
 
-impl<T: Config> RollbackDriver<T> {
-    /// Build a driver and the transport that talks to it.
-    ///
-    /// Hand the driver to `Node::spawn`, then pass the node's
-    /// `sender()` to `PendingTransport::connect` to finish wiring:
-    ///
-    /// ```ignore
-    /// let (driver, pending) = RollbackDriver::<MyGame>::new();
-    /// let node = Node::spawn(config, driver, None, SignalHandling::Leave);
-    /// let transport = pending.connect(node.sender());
-    /// ```
-    ///
-    /// Split in two because the outbound channel only exists once the node
-    /// has been spawned, and the node needs the driver to spawn.
-    #[must_use]
-    pub fn new() -> (Self, PendingTransport<T>) {
-        let mailboxes = Arc::new(Mailboxes::new());
-        (
-            Self::from_mailboxes(Arc::clone(&mailboxes)),
-            PendingTransport { mailboxes },
-        )
-    }
-}
-
-/// A transport waiting for the node's sender.
-///
-/// See [`RollbackDriver::new`].
-pub struct PendingTransport<T: Config> {
-    mailboxes: Arc<Mailboxes<T>>,
-}
-
-impl<T: Config> std::fmt::Debug for PendingTransport<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PendingTransport")
-            .finish_non_exhaustive()
-    }
-}
-
-impl<T: Config> PendingTransport<T> {
-    /// Finish wiring, given `Node::sender()`.
-    #[must_use]
-    pub fn connect(self, outbox: mpsc::Sender<Outbound>) -> MeshTransport<T> {
-        MeshTransport {
-            mailboxes: self.mailboxes,
-            outbox,
-        }
-    }
-}
-
 impl<T: Config> MeshTransport<T> {
+    pub(super) fn new(mailboxes: Arc<Mailboxes<T>>, outbox: mpsc::Sender<Outbound>) -> Self {
+        Self { mailboxes, outbox }
+    }
+
     /// Queue a lobby packet for every peer in the mesh roster.
     pub fn broadcast_lobby<S: serde::Serialize>(&self, value: &S) {
-        if let Some(payload) = encode(value) {
+        if let Some(payload) = rollback_driver::encode(value) {
             let _ = self.outbox.try_send(Outbound::Lobby { payload });
         }
     }
@@ -161,7 +117,7 @@ impl<T: Config> MeshTransport<T> {
 /// mean inventing a conversion that only ever has one sensible implementation.
 impl<T: Config<Address = AuthorKey>> Transport<T> for MeshTransport<T> {
     fn send_to(&mut self, message: &Message<T::Input>, addr: &AuthorKey) {
-        let Some(payload) = encode(message) else {
+        let Some(payload) = rollback_driver::encode(message) else {
             return;
         };
         // `try_send`, never `send().await`: this is called from the frame

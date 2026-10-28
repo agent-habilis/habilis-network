@@ -1,81 +1,25 @@
 //! The engine-facing half: mailboxes, framing, and the only `send_app` call.
 
 use habilis_network::protocol::message::Authored;
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver,
 };
 use habilis_network::protocol::message::Verified;
-use habilis_network::protocol::{AppFrameParams, AppTag, AuthorKey, MessageBody, Nickname};
+use habilis_network::protocol::{AppFrameParams, AppTag, MessageBody, Nickname};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
+use crate::mesh::mailboxes::Mailboxes;
+use crate::mesh::outbound::Outbound;
+use crate::mesh::pending_transport::PendingTransport;
 use crate::transport::Message;
 
 /// App tag for rollback packets.
 pub const ROLLBACK_TAG: &str = "rb_input";
 /// App tag for lobby packets.
 pub const LOBBY_TAG: &str = "rb_lobby";
-
-/// What the frame loop asks the event loop to send.
-///
-/// Pushed through `Node::sender()`; drained by
-/// [`RollbackDriver::handle_session`], which is where `&mut EventLoopState`
-/// finally exists.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum Outbound {
-    /// A rollback packet for one peer, addressed by public key.
-    Rollback {
-        /// The recipient's public key.
-        to: AuthorKey,
-        /// Pre-serialized packet.
-        payload: String,
-    },
-    /// A lobby packet for everyone currently in the mesh roster.
-    Lobby {
-        /// Pre-serialized packet.
-        payload: String,
-    },
-}
-
-/// Everything the frame loop and the event loop share.
-///
-/// Cloning shares the mailboxes rather than copying them; the driver keeps
-/// one handle and each transport another.
-pub(crate) struct Mailboxes<T: Config> {
-    /// Decoded rollback packets, tagged with the sender's public key.
-    pub(crate) inbound: Mutex<VecDeque<(AuthorKey, Message<T::Input>)>>,
-    /// Raw lobby packets, tagged with the sender's public key.
-    pub(crate) lobby: Mutex<Vec<(AuthorKey, String)>>,
-    /// This peer's own public key, known only once the event loop starts.
-    pub(crate) local_pubkey: Mutex<Option<AuthorKey>>,
-    /// public key -> nickname, learned from inbound frames.
-    ///
-    /// Needed because `send_app` addresses by `Nickname` while inputs are
-    /// filed by public key — the protocol treats nicknames as cosmetic and
-    /// explicitly non-unique, so they cannot be the identity.
-    pub(crate) directory: Mutex<HashMap<AuthorKey, Nickname>>,
-}
-
-impl<T: Config> std::fmt::Debug for Mailboxes<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Mailboxes").finish_non_exhaustive()
-    }
-}
-
-impl<T: Config> Mailboxes<T> {
-    pub(crate) fn new() -> Self {
-        Self {
-            inbound: Mutex::new(VecDeque::new()),
-            lobby: Mutex::new(Vec::new()),
-            local_pubkey: Mutex::new(None),
-            directory: Mutex::new(HashMap::new()),
-        }
-    }
-}
 
 /// The `NodeApp`/`NodeDriver` a rollback consumer hands to `Node::spawn`.
 ///
@@ -97,6 +41,30 @@ impl<T: Config> std::fmt::Debug for RollbackDriver<T> {
 impl<T: Config> RollbackDriver<T> {
     pub(crate) fn from_mailboxes(mailboxes: Arc<Mailboxes<T>>) -> Self {
         Self { mailboxes }
+    }
+}
+
+impl<T: Config> RollbackDriver<T> {
+    /// Build a driver and the transport that talks to it.
+    ///
+    /// Hand the driver to `Node::spawn`, then pass the node's
+    /// `sender()` to `PendingTransport::connect` to finish wiring:
+    ///
+    /// ```ignore
+    /// let (driver, pending) = RollbackDriver::<MyGame>::new();
+    /// let node = Node::spawn(config, driver, None, SignalHandling::Leave);
+    /// let transport = pending.connect(node.sender());
+    /// ```
+    ///
+    /// Split in two because the outbound channel only exists once the node
+    /// has been spawned, and the node needs the driver to spawn.
+    #[must_use]
+    pub fn new() -> (Self, PendingTransport<T>) {
+        let mailboxes = Arc::new(Mailboxes::new());
+        (
+            Self::from_mailboxes(Arc::clone(&mailboxes)),
+            PendingTransport::new(mailboxes),
+        )
     }
 }
 
