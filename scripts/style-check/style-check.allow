@@ -24,3 +24,8 @@ anyhow_pub|crates/habilis-network/src/lookup/mod.rs|1|the test relay helper spaw
 # glob: every glob import still to be replaced with explicit imports (tracker items G2 and G3). The rows go away with the fix.
 glob|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/room.rs|1|replace with explicit imports (G2, G3)
 glob|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-proto/src/lib.rs|1|replace with explicit imports (G2, G3)
+
+# operator: an overload that has a math or logic meaning (U22). Each line names the meaning.
+operator|crates/habilis-network-netplay/src/frame.rs|4|Frame: a frame plus or minus a number of frames, and the gap between two frames.
+operator|crates/habilis-network-util/src/clock.rs|2|UnixSecs plus or minus a Duration: a point in time moved by a span.
+operator|crates/habilis-network/src/gossip/app.rs|1|AppClass bit flags: BitOr joins two sets of flags.

@@ -172,6 +172,12 @@ const RULES: Rule[] = [
     why: "Import each name. No glob import: not `use super::*` in a test module, not a `pub use` facade, not a third-party prelude. Clippy exempts the first two, so only this rule stops them.",
   },
   {
+    name: "operator",
+    pattern: /^\s*impl(<[^>]*>)?\s+(std::ops::|ops::)?(Add|Sub|Mul|Div|Rem|Neg|Not|Index|IndexMut|BitAnd|BitOr|BitXor|Shl|Shr)(Assign)?\b/,
+    glob: "crates/**/*.rs",
+    why: "An operator overload has a math or logic meaning only (a frame advances by frames, a flag set joins flags). Any other use needs a line in style-check.allow with a reason.",
+  },
+  {
     name: "anyhow_pub",
     scan: countAnyhowPub,
     skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/[^/]+\/src\/)/,
