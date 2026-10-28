@@ -10,7 +10,6 @@ crates/habilis-network/src/blob/error.rs|1|rename pending: public type(s) BlobEr
 crates/habilis-network/src/blob/produce.rs|1|rename pending: public type(s) ServeLimits, BlobServer
 crates/habilis-network/src/blob/store.rs|1|rename pending: public type(s) BlobEntry, NewSecret, Registered, ContentMeta, BlobStore
 crates/habilis-network/src/blob/ticket.rs|1|rename pending: public type(s) BlobTicket
-crates/habilis-network/src/gossip/app.rs|1|rename pending: public type(s) AppClass, InboundApp, NodeApp
 crates/habilis-network/src/gossip/lan.rs|1|rename pending: public type(s) LanGrafts
 crates/habilis-network/src/gossip/split.rs|1|rename pending: public type(s) TopicItem, Route, MeshReceiver
 crates/habilis-network/src/lookup/capability.rs|1|rename pending: public type(s) NetworkCapability

@@ -28,7 +28,7 @@ anyhow_pub|crates/habilis-network/src/lookup/mod.rs|1|the test relay helper spaw
 # operator: an overload that has a math or logic meaning (U22). Each line names the meaning.
 operator|crates/habilis-network-netplay/src/frame.rs|4|Frame: a frame plus or minus a number of frames, and the gap between two frames.
 operator|crates/habilis-network-util/src/unix_secs.rs|2|UnixSecs plus or minus a Duration: a point in time moved by a span.
-operator|crates/habilis-network/src/gossip/app.rs|1|AppClass bit flags: BitOr joins two sets of flags.
+operator|crates/habilis-network/src/gossip/app/app_class.rs|1|AppClass bit flags: BitOr joins two sets of flags.
 
 # pub_const_fn: a public const fn (U21). Each row is a count that may only go down.
 pub_const_fn|crates/habilis-network-chunks/src/chunk_hash.rs|4|kept: ChunkHash and Root newtype accessors and constructors (from_bytes, as_bytes), plus trivial accessors (root, size, len, is_empty)
@@ -48,7 +48,7 @@ pub_const_fn|crates/habilis-network-protocol/src/message/verified.rs|2|kept: tri
 pub_const_fn|crates/habilis-network-protocol/src/topic_id.rs|3|kept: newtype rule (from_bytes, as_bytes, to_bytes of a 32- or 16-byte key or hash)
 pub_const_fn|crates/habilis-network-stream/src/hash/stream_id.rs|2|kept: newtype rule (StreamId from_bytes and as_bytes)
 pub_const_fn|crates/habilis-network-util/src/unix_secs.rs|5|kept: 4 UnixSecs newtype accessors and constructors (newtype rule); millis_saturating is used in a const item (const context, clock.rs test ONE_SECOND).
-pub_const_fn|crates/habilis-network/src/gossip/app.rs|7|kept: flag set of a gossip message (union, with_if, loggable, beat, valid, chained, sealed): bit-flag logic
+pub_const_fn|crates/habilis-network/src/gossip/app/app_class.rs|7|kept: flag set of a gossip message (union, with_if, loggable, beat, valid, chained, sealed): bit-flag logic
 
 # A hand-written Eq, Ord or PartialOrd: the compiler checks a derive, not a manual impl.
 manual_eq_ord|crates/habilis-network-stream/src/hash/stream_hash.rs|1|Eq marker for StreamHash: a 32-byte hash compared bytewise, so equality is reflexive
@@ -300,7 +300,7 @@ long_chain|crates/habilis-network/src/daemon/shutdown.rs|1|kept: statements with
 long_chain|crates/habilis-network/src/daemon/state.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/daemon/state_file.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/gossip/antientropy.rs|8|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/src/gossip/app.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network/src/gossip/app/app_class.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/gossip/merge_ctx.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/gossip/heal.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/gossip/recv.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -692,7 +692,7 @@ abbrev_name|crates/habilis-network/src/daemon/shutdown.rs|9|existing letter-dele
 abbrev_name|crates/habilis-network/src/daemon/state/event_loop_state.rs|18|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/daemon/timers.rs|5|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/antientropy.rs|24|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/gossip/app.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/gossip/app/node_app.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/merge_ctx.rs|60|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/event.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/heal.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
