@@ -324,3 +324,15 @@ test("turbofish_collect_parse: a typed let passes", () => {
 test("turbofish_collect_parse: a forced _ passes", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(s: &str) -> Option<u8> {\n    s.parse::<_>().ok()\n}", 0, "");
 });
+test("dyn_param: a dyn parameter counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(sink: &dyn Sink) {}", 1);
+});
+test("dyn_param: a counted dyn parameter passes", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(sink: &dyn Sink) {}", 0, "dyn_param|crates/demo/src/lib.rs|1|fixture");
+});
+test("dyn_param: a generic parameter is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f<T: Sink>(sink: &T) {}", 0);
+});
+test("dyn_param: a dyn return is not a parameter", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Box<dyn Sink> { todo!() }", 0);
+});

@@ -249,6 +249,27 @@ function countAnyhowPub(raw: string): number {
   return count;
 }
 
+/** The parameter list that starts at `from`, from its `(` to the matching `)`. */
+function paramsOf(text: string, from: number): string {
+  let depth = 0;
+  let i = from;
+  for (; i < text.length; i++) {
+    if (text[i] === "(") depth++;
+    else if (text[i] === ")" && --depth === 0) break;
+  }
+  return text.slice(from, i + 1);
+}
+
+/** Public fns that take a `dyn` trait object as a parameter. A generic `T: Trait` is the library form. */
+function countDynParams(raw: string): number {
+  const text = stripTestModules(blankStrings(stripComments(raw)));
+  let count = 0;
+  for (const m of text.matchAll(PUB_FN)) {
+    if (/\bdyn\b/.test(paramsOf(text, m.index! + m[0].length))) count++;
+  }
+  return count;
+}
+
 const RULES: Rule[] = [
   {
     name: "poison",
@@ -352,6 +373,13 @@ const RULES: Rule[] = [
     skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/[^/]+\/src\/)/,
     glob: "crates/**/*.rs",
     why: "A public signature returns a typed error, not anyhow. A binary, a CLI and a private helper may keep anyhow.",
+  },
+  {
+    name: "dyn_param",
+    scan: countDynParams,
+    skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/[^/]+\/src\/)/,
+    glob: "crates/**/*.rs",
+    why: "A library fn takes a generic (T: Trait or impl Trait), not a dyn Trait parameter. A counted row is a trait object that stays, with its reason.",
   },
 ];
 

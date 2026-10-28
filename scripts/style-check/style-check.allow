@@ -280,7 +280,7 @@ long_chain|crates/habilis-network-protocol/src/mesh/name.rs|2|kept: statements w
 long_chain|crates/habilis-network-protocol/src/mesh/tests.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/mesh/transport.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/message/mod.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-protocol/src/reassembly.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-protocol/src/reassembly.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/wordlist.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream-cli/src/args.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream-cli/src/main.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -408,3 +408,9 @@ turbofish_collect_parse|crates/habilis-network/src/transport/path.rs|1|kept: col
 turbofish_collect_parse|crates/habilis-network/src/transport/underlay_webrtc.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network/tests/late_joiner_after_release_loopback.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network/tests/loopback_room_split.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
+# dyn_param: a public fn takes a trait object. Each row is a trait object that stays, with its reason.
+dyn_param|crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|attach stores an Arc<dyn FrameSink>, so the transport holds one sink of any type
+dyn_param|crates/habilis-network-iroh-multihop-transport/src/lib.rs|1|the protocol list holds iroh's own DynProtocolHandler, a trait object that iroh owns
+dyn_param|crates/habilis-network/src/daemon/setup.rs|2|the protocol list holds iroh's DynProtocolHandler, and the builder takes the NodeSink as a trait object
+dyn_param|crates/habilis-network/src/gossip/broadcast.rs|1|a public fn takes a &dyn NodeSink that the context keeps as a field
+dyn_param|crates/habilis-network/src/membership/join.rs|1|a public fn takes a &dyn NodeSink for the join path
