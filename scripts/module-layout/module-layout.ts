@@ -44,7 +44,15 @@ function leafHit(file: string, src: string): string | undefined {
   const types = [...body.matchAll(PUB_TYPE)].map((m) => m[1] ?? "");
   if (types.length === 0) return undefined;
   if (types.some((name) => snake(name) === base)) return undefined;
-  return types.join(", ");
+  return `leaf file named for none of its public types (${types.join(", ")}). Rename it`;
+}
+
+// A mod.rs or lib.rs holds module declarations and re-exports. A definition in it (O11) is a hit.
+const DEFINITION = /^(pub(\([^)]*\))? )?(unsafe )?(struct|enum|trait|union|fn|impl|const|static|type)\b/m;
+function nonLeafHit(file: string, src: string): string | undefined {
+  if (!/(^|\/)(mod|lib)\.rs$/.test(file)) return undefined;
+  const body = src.split(/^#\[cfg\(test\)\]/m)[0] ?? "";
+  return DEFINITION.test(body) ? "mod.rs or lib.rs defines items. Move them into a leaf file" : undefined;
 }
 
 function readAllow(): { allowed: Map<string, number>; problems: string[] } {
@@ -70,15 +78,14 @@ async function main(): Promise<number> {
   const { allowed, problems } = readAllow();
   const found = new Map<string, string>();
   for (const file of listFiles()) {
-    const hit = leafHit(file, readFileSync(path.join(ROOT, file), "utf8"));
+    const src = readFileSync(path.join(ROOT, file), "utf8");
+    const hit = leafHit(file, src) ?? nonLeafHit(file, src);
     if (hit !== undefined) found.set(file, hit);
   }
-  for (const [file, types] of [...found].sort()) {
+  for (const [file, reason] of [...found].sort()) {
     const expected = allowed.get(file);
     if (expected === undefined) {
-      problems.push(
-        `module-layout: ${file}: leaf file named for none of its public types (${types}). Rename it, or add a row to ${allowFile} with the reason.`,
-      );
+      problems.push(`module-layout: ${file}: ${reason}. Or add a row to ${allowFile} with the reason.`);
     } else if (expected !== 1) {
       problems.push(`module-layout: ${file}: 1 hit found, ${expected} allowed. Set the count in ${allowFile}.`);
     }

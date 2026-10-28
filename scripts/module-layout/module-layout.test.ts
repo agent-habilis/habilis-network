@@ -54,8 +54,24 @@ test("a leaf with no public type is fine", () => {
   expectExit({ [leaf]: "fn helper() {}" }, 0);
 });
 
-test("a mod.rs or lib.rs is not a leaf", () => {
-  expectExit({ "crates/x/src/mod.rs": "pub struct Other;" }, 0);
+test("a mod.rs that only declares modules is not a leaf", () => {
+  expectExit({ "crates/x/src/mod.rs": "pub mod inner;\npub use inner::Other;" }, 0);
+});
+
+test("a mod.rs that defines an item is refused", () => {
+  expectExit({ "crates/x/src/mod.rs": "pub struct Other;" }, 1);
+});
+
+test("a lib.rs that defines an item is refused", () => {
+  expectExit({ "crates/x/src/lib.rs": "pub fn f() {}" }, 1);
+});
+
+test("a mod.rs with items only under cfg(test) is clean", () => {
+  expectExit({ "crates/x/src/mod.rs": "pub mod inner;\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}" }, 0);
+});
+
+test("a counted mod.rs passes", () => {
+  expectExit({ "crates/x/src/mod.rs": "pub struct Other;" }, 0, "crates/x/src/mod.rs|1|items to move");
 });
 
 test("a file with a child module is not a leaf", () => {
