@@ -1,7 +1,8 @@
 use iroh::address_lookup::memory;
 use iroh::{Endpoint, EndpointId};
 
-use super::{Held, Rendezvous, RendezvousParams, RungWatch, claim_holder};
+use super::claim::claim_holder;
+use super::{Held, Rendezvous, RendezvousParams, RungWatch};
 
 /// Two holders of one beacon: this node and a rival that it has read. One struct for the pair,
 /// because both are an `EndpointId` and a swap compiles and flips the answer.

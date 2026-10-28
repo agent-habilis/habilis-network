@@ -7,10 +7,11 @@ use crate::lookup::{ProbeAnswer, TransportHandles, build_endpoint, probe_answer}
 use crate::protocol::mesh::LookupOpts;
 use crate::util::clock::Instant;
 
+use super::claim::claim_holder;
 use super::rung_ladder::{admit_rung, forget_rungs, settle_on_rung};
 use super::{
-    Rendezvous, RendezvousLane, RendezvousParams, RivalProbe, RungRead, RungWatch, claim_holder,
-    releasable, rung_is_busy, spawn_rival_probe,
+    Rendezvous, RendezvousLane, RendezvousParams, RivalProbe, RungRead, RungWatch, releasable,
+    rung_is_busy, spawn_rival_probe,
 };
 
 /// What the busy rungs of a private ladder answer to an identity probe, by port, before a joiner's

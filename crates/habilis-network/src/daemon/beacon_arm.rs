@@ -631,6 +631,7 @@ mod tests {
     use habilis_network_test_tracing::{expect_warn, test};
     use std::time::Duration;
 
+    use crate::beacon::claim;
     use crate::daemon::{config, state};
     use crate::protocol::mesh;
     use crate::util::{clock, tuning};
@@ -1021,7 +1022,7 @@ mod tests {
         let mut held = None;
         let mut holder_probe = None;
         assert!(
-            crate::beacon::ensure(
+            claim::ensure(
                 &params,
                 &holder_endpoint,
                 &holder_book,
@@ -1198,7 +1199,7 @@ mod tests {
         let mut other_held = None;
         let mut other_probe = None;
         assert!(
-            crate::beacon::ensure(
+            claim::ensure(
                 &other,
                 &other_endpoint,
                 &other_book,
@@ -1331,7 +1332,7 @@ mod tests {
             let mut other_beacon = None;
             let mut other_probe = None;
             assert!(
-                crate::beacon::ensure(
+                claim::ensure(
                     &other,
                     &other_endpoint,
                     &other_book,
@@ -1348,7 +1349,7 @@ mod tests {
             let mut rendezvous = None;
             let mut probe = None;
             assert!(
-                crate::beacon::ensure(
+                claim::ensure(
                     &params,
                     &endpoint,
                     &book,
@@ -1387,8 +1388,7 @@ mod tests {
             let mut beacon = None;
             let mut probe = None;
             assert!(
-                crate::beacon::ensure(&self.params, &member, &book, &mut beacon, false, &mut probe)
-                    .await,
+                claim::ensure(&self.params, &member, &book, &mut beacon, false, &mut probe).await,
                 "a member of the mesh binds the first rung"
             );
             (member, beacon.expect("it holds the beacon"))
