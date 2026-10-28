@@ -372,7 +372,6 @@ impl MultihopHandle {
     /// route again when the gate refuses a hop. A hop whose underlay is unknown is
     /// left alone.
     #[cfg(feature = "test-hooks")]
-    #[doc(hidden)]
     pub fn refuse_hop_for_test(&self, hop: AppId) {
         if let Some(underlay) = self.underlay_addr_of(hop) {
             self.inner
@@ -386,7 +385,6 @@ impl MultihopHandle {
     /// reading that the relay gate takes before it admits a cell. `None` when no
     /// writer for that hop is live.
     #[cfg(feature = "test-hooks")]
-    #[doc(hidden)]
     #[must_use]
     pub fn underlay_paths_for_test(
         &self,
