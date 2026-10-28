@@ -15,7 +15,6 @@ use super::AuthorKey;
 #[cfg(test)]
 use super::identity;
 #[cfg(any(test, feature = "test-fixtures"))]
-use super::identity::Identity;
 #[cfg(any(test, feature = "test-fixtures"))]
 use super::mesh::MeshId;
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -47,6 +46,10 @@ mod corr_id;
 pub use corr_id::CorrId;
 mod sole_addressee;
 pub use sole_addressee::sole_addressee;
+#[cfg(any(test, feature = "test-fixtures"))]
+mod build_msg_bytes;
+#[cfg(any(test, feature = "test-fixtures"))]
+pub use build_msg_bytes::build_msg_bytes;
 mod resend;
 pub use resend::RESEND_TRAILER_LEN;
 use resend::{split_resend_trailer, wire_with_resend_nonce};
@@ -145,38 +148,6 @@ pub(super) fn default_ext() -> serde_json::Value {
 
 pub(super) fn empty_body() -> MessageBody {
     MessageBody::try_new("").expect("empty string is always a valid MessageBody")
-}
-
-/// Build the serialized wire bytes for an outbound user message
-/// (open or directed reply), returning the bytes alongside the
-/// canonical [`Message`] so callers can echo it without re-parsing.
-/// The single message-construction point shared by the IPC `msg`
-/// command, the library API send path, and interactive stdin.
-///
-/// # Errors
-/// A [`MessageError`] from the message encoding: an oversized payload or a JSON failure.
-#[cfg(any(test, feature = "test-fixtures"))]
-/// # Errors
-/// Serialization fails, or the message exceeds `MAX_MESSAGE_SIZE`.
-pub fn build_msg_bytes(
-    params: BuildMsgParams<'_>,
-    identity: &Identity,
-) -> Result<(WireFrame, Verified), MessageError> {
-    let msg = Message::new_app(
-        params.mesh,
-        params.author,
-        AppFrameParams {
-            tag: params.tag,
-            to: None,
-            corr: None,
-            body: params.body,
-        },
-    )
-    .with_chain(params.chain.seq, params.chain.prev)
-    .with_parents(params.chain.parents)
-    .sign(identity);
-    let raw = msg.serialize()?;
-    Ok((raw, msg))
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
