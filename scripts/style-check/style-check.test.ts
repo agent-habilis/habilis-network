@@ -522,3 +522,11 @@ test("abbrev_name: the word in a string or a comment is clean", () => {
 test("abbrev_name: a path such as rand::rng is clean", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f() {\n    let _ = rand::rng();\n}", 0);
 });
+
+// The trait_import_scope rule (O22): a top-level `use ... as _;` needs a row.
+test("trait_import_scope: a top-level as _ import with no row fails", () => {
+  expectExit("crates/demo/src/lib.rs", "use std::io::Write as _;\npub fn f() {}", 1, "");
+});
+test("trait_import_scope: an indented as _ import inside a fn passes", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f() {\n    use std::io::Write as _;\n}", 0, "");
+});

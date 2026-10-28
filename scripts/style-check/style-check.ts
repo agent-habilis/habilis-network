@@ -623,6 +623,12 @@ const RULES: Rule[] = [
     why: "Call a top-level function through its module (mem::swap, not a bare swap), so the reader sees where it comes from (O23).",
   },
   {
+    name: "trait_import_scope",
+    pattern: /^use\s[^;]*\sas\s_;/,
+    glob: "crates/**/*.rs",
+    why: "A trait imported only for its methods is imported where it is used, or left at the top with a row: a top-level `as _` import shows the reader nothing about the fn that needs it (O22).",
+  },
+  {
     name: "anyhow_pub",
     scan: countAnyhowPub,
     skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/[^/]+\/src\/)/,
