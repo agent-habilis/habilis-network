@@ -578,35 +578,26 @@ self_convention|crates/habilis-network-protocol/src/mesh/transport.rs|1|Transpor
 self_convention|crates/habilis-network-protocol/src/topic_id.rs|1|TopicId::to_bytes: a Copy type, so self by value
 self_convention|crates/habilis-network-util/src/unix_secs.rs|2|UnixSecs::as_secs and to_le_bytes: a Copy type, so self by value
 # fn_import: a top-level function imported by its bare name (O23). Each row is a count that may only go down.
-fn_import|crates/habilis-network-iroh-webrtc-transport/src/lib.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/game/src/ui.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/runtime.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/tui/diff.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/tui/paint.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-protocol/src/invite/mod.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-stream/src/hash/stream_id.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/examples/mesh_peer_load.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network/src/blob/mod.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/blob/produce.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/daemon/cohost_arm.rs|4|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/daemon/event_loop.rs|3|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network/src/daemon/mod.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/daemon/setup.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/daemon/shutdown.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/daemon/timers.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/gossip/antientropy.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/gossip/recv.rs|18|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/gossip/split.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network/src/lib.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/lifecycle/heartbeat.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network/src/lifecycle/mod.rs|3|kept: a top-level function imported by its bare name (O23 rollout)
+fn_import|crates/habilis-network/src/lifecycle/mod.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/lookup/capability.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network/src/lookup/mod.rs|10|kept: a top-level function imported by its bare name (O23 rollout), and two facade re-exports of the lookup builders so callers keep the lookup::build_endpoint path (O11 split), and the facade re-exports of the peer builders (O11 split), and the facade re-exports of the peer builders (O11 split), and the facade re-exports of the lookup builders moved under O11, so callers keep their paths
 fn_import|crates/habilis-network/src/membership/membership_app.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/membership/opts.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network/src/membership/mod.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network/src/net.rs|4|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network/src/ops.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/transport/admission.rs|4|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/transport/ceiling.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/transport/direct_only_gossip.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
@@ -616,16 +607,12 @@ fn_import|crates/habilis-network/src/transport/pool/unicast_pool.rs|1|kept: a to
 
 fn_import|crates/habilis-network/src/transport/redial.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/transport/send.rs|7|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network/src/transport/webrtc.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/tests/multihop_after_deny_loopback.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/tests/path_ladder_loopback.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/tests/send_ladder_matrix.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/tests/underlay_survives_link_loss_loopback.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/tests/underlay_webrtc_loopback.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 
-fn_import|crates/habilis-network-logging/src/lib.rs|1|fn re-exported at the crate root, its public path (O11)
-fn_import|crates/habilis-network-util/src/lib.rs|1|fn re-exported at the crate root, its public path (O11)
-fn_import|crates/habilis-network-wasm/src/lib.rs|2|fn re-exported at the crate root, its public path (O11)
 
 # abbrev_name: identifiers that are still letter-deleted abbreviations (ctx, addr, conn, msg, buf, opts, prev, ...).
 # Each row goes down as the names are renamed; a new one fails the check. Reason: a follow-up rename of an existing name.
@@ -822,7 +809,6 @@ long_chain|crates/habilis-network/src/beacon/tests.rs|5|kept: statements with a 
 turbofish_collect_parse|crates/habilis-network/src/beacon/claim.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 untyped_long_chain_let|crates/habilis-network/src/beacon/tests.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)abbrev_name|crates/habilis-network/src/beacon/rung_probe.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/beacon/rung_probe.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-fn_import|crates/habilis-network/src/beacon/mod.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
 
 assert_no_message|crates/habilis-network/src/lookup/tests.rs|20|kept: assert without a message, to be given one (P13 rollout)
 long_chain|crates/habilis-network/src/lookup/tests.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)

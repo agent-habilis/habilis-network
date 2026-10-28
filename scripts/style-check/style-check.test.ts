@@ -520,6 +520,9 @@ test("fn_import: a module import is clean", () => {
 test("fn_import: a module of an outside crate that shares a name with a local fn is clean", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn broadcast() {}\nuse tokio::sync::broadcast;", 0);
 });
+test("fn_import: a pub use re-export of a function is not a bare call-site import", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn build_mesh() {}\npub use crate::demo::build_mesh;\npub(crate) use crate::demo::build_mesh as other;", 0);
+});
 test("fn_import: the exact count is allowed", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn build_mesh() {}\nuse crate::demo::build_mesh;", 0, "fn_import|crates/demo/src/lib.rs|1|fixture");
 });

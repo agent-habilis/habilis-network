@@ -454,7 +454,8 @@ function countFnImports(raw: string): number {
   const { fns, mods } = declaredNames();
   const text = stripComments(raw);
   let count = 0;
-  for (const m of text.matchAll(/^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?use[ \t]+((?:[A-Za-z_][A-Za-z0-9_]*::)*)([a-z_][a-z0-9_]*)[ \t]*;/gm)) {
+  // A `pub use` is a re-export for other modules, not an import that a call site in this file reads.
+  for (const m of text.matchAll(/^[ \t]*use[ \t]+((?:[A-Za-z_][A-Za-z0-9_]*::)*)([a-z_][a-z0-9_]*)[ \t]*;/gm)) {
     const root = (m[1] ?? "").split("::")[0] ?? "";
     const name = m[2] ?? "";
     // A fn of this workspace is imported through crate, super, self, one of its crates or a child module.
