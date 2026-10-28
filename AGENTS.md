@@ -218,6 +218,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - `.clone()`: 1,094 calls (`git grep`, 2026-10-27). No lint tells a needed copy from a lazy one: `redundant_clone` is in `nursery`, and `implicit_clone` and `clone_on_copy` catch the easy cases only. The reviewer asks for a borrow where one is clear. (B3)
 - Trait imports: 446 `use` lines sit 8 or more spaces deep (inline modules and fn bodies, not separable by `git grep`) against 2,033 at the top of a file. Clippy has no lint for the scope of an import. The reviewer asks for a local import when only one function uses the trait. (O22)
 - Calls to top-level functions: about 1,200 `module::function(` matches, mixed with `std`. `absolute_paths` covers types and long paths, not this rule, and no lint covers it. The reviewer asks for `mem::swap`, not a bare `swap`. (O23)
+- Doc examples: 4 `# Examples` sections exist (2026-10-27). The guide says to consider them. A `compile_fail` doc test pins each illegal typestate transition (see Typestate). The reviewer asks for an example on a new public item whose use is not clear from the signature. (D2)
 
 ### Rules of the guide that do not apply
 
