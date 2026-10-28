@@ -66,7 +66,7 @@ assert_no_message|crates/habilis-network-iroh-gossip-transport/src/frame.rs|20|k
 assert_no_message|crates/habilis-network-iroh-gossip-transport/src/gossip_lookup.rs|2|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-gossip-transport/src/recursion.rs|1|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-gossip-transport/src/gossip_ladder.rs|4|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-iroh-gossip-transport/src/sink.rs|4|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network-iroh-gossip-transport/src/receive_loop.rs|4|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-gossip-transport/src/transport.rs|30|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-multihop-transport/src/route.rs|12|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-multihop-transport/src/graph.rs|13|kept: assert without a message, to be given one (P13 rollout)
@@ -216,7 +216,7 @@ long_chain|crates/habilis-network-ffi/src/ffi.rs|4|kept: statements with a chain
 long_chain|crates/habilis-network-ffi/src/mesh.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-gossip-transport/src/recursion.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-gossip-transport/src/gossip_ladder.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-iroh-gossip-transport/src/sink.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-iroh-gossip-transport/src/receive_loop.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-gossip-transport/src/transport.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-multihop-transport/src/route.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-multihop-transport/src/graph.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -372,7 +372,7 @@ turbofish_collect_parse|crates/habilis-network-doc/src/mesh_doc.rs|10|kept: coll
 turbofish_collect_parse|crates/habilis-network-ffi/src/ffi.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-iroh-gossip-transport/src/recursion.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-iroh-gossip-transport/src/gossip_ladder.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network-iroh-gossip-transport/src/sink.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
+turbofish_collect_parse|crates/habilis-network-iroh-gossip-transport/src/receive_loop.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-iroh-multihop-transport/src/route.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-iroh-multihop-transport/src/lib.rs|3|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
@@ -442,7 +442,7 @@ untyped_long_chain_let|crates/habilis-network-doc/src/mesh_doc.rs|2|kept: a let 
 untyped_long_chain_let|crates/habilis-network-ffi/src/ffi.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-gossip-transport/src/recursion.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-gossip-transport/src/gossip_ladder.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-iroh-gossip-transport/src/sink.rs|4|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+untyped_long_chain_let|crates/habilis-network-iroh-gossip-transport/src/receive_loop.rs|4|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-gossip-transport/src/transport.rs|3|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-multihop-transport/src/lib.rs|4|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-multihop-transport/src/multihop_lookup.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
@@ -572,7 +572,7 @@ self_convention|crates/habilis-network-protocol/src/mesh/transport.rs|1|Transpor
 self_convention|crates/habilis-network-protocol/src/topic_id.rs|1|TopicId::to_bytes: a Copy type, so self by value
 self_convention|crates/habilis-network-util/src/unix_secs.rs|2|UnixSecs::as_secs and to_le_bytes: a Copy type, so self by value
 # fn_import: a top-level function imported by its bare name (O23). Each row is a count that may only go down.
-fn_import|crates/habilis-network-iroh-gossip-transport/src/sink.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
+fn_import|crates/habilis-network-iroh-gossip-transport/src/receive_loop.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/host.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-webrtc-transport/src/lib.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
@@ -756,7 +756,7 @@ long_chain|crates/habilis-network-stream/src/produce/registry.rs|1|kept: stateme
 # trait_import_scope: a top-level `use ... as _;` (O22). Each row is a count that may only go down.
 trait_import_scope|crates/habilis-network-chunks/src/fs/disk_store.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
 trait_import_scope|crates/habilis-network-iroh-gossip-transport/src/recursion.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
-trait_import_scope|crates/habilis-network-iroh-gossip-transport/src/sink.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
+trait_import_scope|crates/habilis-network-iroh-gossip-transport/src/receive_loop.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
 trait_import_scope|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-web/src/lib.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
 trait_import_scope|crates/habilis-network-iroh-webrtc-transport/src/web/jsep.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
 trait_import_scope|crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)

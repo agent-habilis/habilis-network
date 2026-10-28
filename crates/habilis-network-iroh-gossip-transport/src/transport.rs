@@ -187,7 +187,7 @@ impl GossipHandle {
     /// The engine calls this when it joins the topic, and again where it replaces
     /// the topic's sender after a resubscribe.
     pub fn attach_gossip(&self, sender: iroh_gossip::api::GossipSender) {
-        self.attach(Arc::new(crate::sink::GossipSink::spawn(sender)));
+        self.attach(Arc::new(crate::gossip_sink::GossipSink::spawn(sender)));
     }
 
     /// The address lookup, for `Builder::address_lookup`: it answers the first dial

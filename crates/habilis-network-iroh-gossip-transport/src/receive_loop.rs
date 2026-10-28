@@ -1,49 +1,9 @@
-//! A sink over a real gossip topic.
+//! The task that reads a gossip topic into a handle.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-use bytes::Bytes;
-use iroh_gossip::api::{Event, GossipReceiver, GossipSender};
+use iroh_gossip::api::{Event, GossipReceiver};
 use n0_future::StreamExt as _;
-use tokio::sync::mpsc;
 
-use crate::{FrameSink, GossipHandle};
-
-/// Frames waiting for the topic's sender. A full queue refuses the frame: QUIC
-/// treats that as loss.
-const QUEUE: usize = 256;
-
-/// Hands frames to the topic's sender from a task of its own, because the
-/// sender's `broadcast` is async and a sink must not block.
-///
-/// The task ends when the topic is closed or when the sink is dropped. When it
-/// ends it clears the alive flag, and the handle then treats the path as not valid
-/// and counts a datagram as `dropped_no_sink`.
-#[derive(Debug)]
-pub struct GossipSink {
-    queue: mpsc::Sender<Bytes>,
-    alive: Arc<AtomicBool>,
-}
-
-impl GossipSink {
-    /// Start the task that sends on `sender`.
-    #[must_use]
-    pub fn spawn(sender: GossipSender) -> Self {
-        let (queue, mut frames) = mpsc::channel::<Bytes>(QUEUE);
-        let alive = Arc::new(AtomicBool::new(true));
-        let task_alive = Arc::clone(&alive);
-        n0_future::task::spawn(async move {
-            while let Some(frame) = frames.recv().await {
-                if sender.broadcast(frame).await.is_err() {
-                    break;
-                }
-            }
-            task_alive.store(false, Ordering::SeqCst);
-        });
-        Self { queue, alive }
-    }
-}
+use crate::GossipHandle;
 
 /// The task of [`spawn_receive_loop`]. `abort()` stops it.
 pub type ReceiveLoop = n0_future::task::JoinHandle<()>;
@@ -70,16 +30,6 @@ pub(crate) fn handle_event(handle: &GossipHandle, event: Event) {
         }
         Event::Lagged => handle.note_lagged(),
         Event::NeighborUp(_) | Event::NeighborDown(_) => {}
-    }
-}
-
-impl FrameSink for GossipSink {
-    fn try_send(&self, frame: Bytes) -> bool {
-        self.queue.try_send(frame).is_ok()
-    }
-
-    fn is_alive(&self) -> bool {
-        self.alive.load(Ordering::SeqCst)
     }
 }
 
