@@ -210,6 +210,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 
 - Do not overuse type inference (P1): three gates name the cases the compiler cannot show. `untyped_generic_let` (P4) counts a let that takes its type from parse, into or try_into. `untyped_long_chain_let` (P5) counts a let of a five-call chain with no type. `turbofish_collect_parse` (P2) counts a collect or parse turbofish. A gate over every untyped let would count 9261 lines and separate no correct code from a wrong one, so P1 is not gated on its own.- U10, `_mut` accessors: the `accessor_name` rule of `scripts/style-check/style-check.ts` refuses a method named `*_mut` that does not return `&mut`. A probe `pub fn x_mut(&mut self) -> &u8` makes the rule count 1 (red), and its removal makes the count 0.
 - U11, `take_` methods: the `accessor_name` rule refuses a method named `take_*` that does not take `&mut self`. A probe `pub fn take_x(self) -> u8` makes the rule count 1 (red), and the `&mut self` form counts 0. A free function such as `take_array` is not a method and is not counted.
+- U14, `replace_` methods: the `accessor_name` rule refuses a `replace_*` method with no return value. A probe `pub fn replace_x(&mut self, v: u8)` makes the rule count 1 (red), and `-> u8` counts 0.
 
 ### Rules we decline, or leave to the reviewer
 
