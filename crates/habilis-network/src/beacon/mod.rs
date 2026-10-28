@@ -62,7 +62,9 @@ use crate::util::tuning::{
 use crate::util::tuning;
 use iroh::address_lookup::memory;
 
+mod dependents;
 mod rendezvous_params;
+pub(crate) use dependents::Dependents;
 pub(crate) use rendezvous_params::RendezvousParams;
 
 /// A live co-hosted rendezvous endpoint. Dropping it aborts both tasks,
@@ -99,47 +101,6 @@ type RendezvousLane = Option<(
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
     crate::transport::SignalAdmission,
 )>;
-
-/// The sessions in `live` whose remote is none of `own`. A member's own endpoints
-/// attach to its beacon's answerer as well, and no other peer hangs off the beacon
-/// through them: counted, they made each split holder defer its shed for the full wait.
-fn foreign_sessions(live: &[EndpointId], own: &[EndpointId]) -> Vec<EndpointId> {
-    live.iter()
-        .copied()
-        .filter(|id| !own.contains(id))
-        .collect()
-}
-
-/// Who hangs off a beacon's data channel: the sessions on its answerer, the endpoints that
-/// are ours, and the number of rounds still negotiating a session.
-#[derive(Debug, Default)]
-pub(crate) struct Dependents {
-    live: Vec<EndpointId>,
-    own: Vec<EndpointId>,
-    pub(crate) in_flight: usize,
-}
-
-impl Dependents {
-    pub(crate) fn count(&self) -> usize {
-        foreign_sessions(&self.live, &self.own).len() + self.in_flight
-    }
-
-    pub(crate) fn foreign_ids(&self) -> Vec<String> {
-        short_ids(&foreign_sessions(&self.live, &self.own))
-    }
-
-    pub(crate) fn live_ids(&self) -> Vec<String> {
-        short_ids(&self.live)
-    }
-
-    pub(crate) fn own_ids(&self) -> Vec<String> {
-        short_ids(&self.own)
-    }
-}
-
-fn short_ids(ids: &[EndpointId]) -> Vec<String> {
-    ids.iter().map(|id| id.fmt_short().to_string()).collect()
-}
 
 impl Rendezvous {
     /// How many peers depend on this beacon's data channel: sessions attached
@@ -1763,10 +1724,11 @@ async fn claim_holder(
 
 #[cfg(test)]
 mod tests {
+    use super::dependents::foreign_sessions;
     use super::{
         Contest, Endpoint, LookupOpts, Rendezvous, RendezvousParams, RivalProbe, claim, ensure,
-        foreign_sessions, holder_entry, oneshot, probe_verdict, releasable, rendezvous_addr,
-        spawn_rival_probe, verdict_of,
+        holder_entry, oneshot, probe_verdict, releasable, rendezvous_addr, spawn_rival_probe,
+        verdict_of,
     };
     use habilis_network_test_tracing::test;
     use iroh::SecretKey;
