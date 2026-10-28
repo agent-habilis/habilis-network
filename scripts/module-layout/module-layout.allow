@@ -12,7 +12,6 @@ crates/habilis-network/src/blob/produce.rs|1|rename pending: public type(s) Serv
 crates/habilis-network/src/blob/store.rs|1|rename pending: public type(s) BlobEntry, NewSecret, Registered, ContentMeta, BlobStore
 crates/habilis-network/src/blob/ticket.rs|1|rename pending: public type(s) BlobTicket
 crates/habilis-network/src/daemon/app.rs|1|rename pending: public type(s) NodeDriver, IpcRequest
-crates/habilis-network/src/daemon/setup.rs|1|rename pending: public type(s) SetupKind, InjectedEndpoint, SetupParams
 crates/habilis-network/src/daemon/shutdown.rs|1|rename pending: public type(s) QuitParams, OwnerPidError, Owner, OwnedEndpoints
 crates/habilis-network/src/daemon/state.rs|1|rename pending: public type(s) Reach, TestDrop, ParkedLinkStates, RosterEntry, RosterSnapshot, DirectState, RivalFlag, DirectCounts, EventLoopState, IdleCounters, PingRound, MeshSecrets, StateInit
 crates/habilis-network/src/gossip/antientropy.rs|1|rename pending: public type(s) DigestTrigger, ServeBudget, FastRounds, Plane, Answered
