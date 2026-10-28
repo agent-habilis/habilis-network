@@ -129,6 +129,5 @@ crates/habilis-network-protocol/src/resolver/mod.rs|1|defines items; to move int
 crates/habilis-network-test-tracing-macros/src/lib.rs|1|defines items; to move into leaf files (O11)
 crates/habilis-network/src/beacon/mod.rs|1|defines items; to move into leaf files (O11)
 crates/habilis-network/src/blob/mod.rs|1|defines items; to move into leaf files (O11)
-crates/habilis-network/src/lifecycle/mod.rs|1|defines items; to move into leaf files (O11)
 crates/habilis-network/src/lookup/mod.rs|1|defines items; to move into leaf files (O11)
 tasks/src/util/mod.rs|1|defines items; to move into leaf files (O11)
