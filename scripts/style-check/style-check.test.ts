@@ -292,7 +292,7 @@ test("assert_repeats_condition: a bracket inside a message does not end the call
 });
 
 // The long_chain rule (P15): a statement with five or more chained calls needs a row.
-const longChain = "pub fn f(v: Vec<u8>) -> usize {\n    v.iter().map(|x| x + 1).filter(|x| *x > 1).count()\n}";
+const longChain = "fn f(v: Vec<u8>) -> usize {\n    v.iter().map(|x| x + 1).filter(|x| *x > 1).count()\n}";
 test("long_chain: a chain of five calls fails with no row", () => {
   expectExit("crates/demo/src/lib.rs", longChain.replace("count()", "take(3).count()"), 1, "");
 });
@@ -373,4 +373,21 @@ test("pub_vec_return: an example is clean", () => {
 });
 test("pub_vec_return: an allowed row with its count passes", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f() -> Vec<u8> { Vec::new() }", 0, "pub_vec_return|crates/demo/src/lib.rs|1|the owned bytes");
+});
+
+// The pub_vec_param rule: a public function takes a Vec parameter, outside tests and examples.
+test("pub_vec_param: a pub fn with a Vec parameter counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(xs: Vec<u8>) -> usize { xs.len() }", 1);
+});
+test("pub_vec_param: a multi-line parameter list counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(\n    a: u8,\n    xs: Vec<u8>,\n) -> usize {\n    xs.len()\n}", 1);
+});
+test("pub_vec_param: an impl IntoIterator is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(xs: impl IntoIterator<Item = u8>) -> usize { xs.into_iter().count() }", 0);
+});
+test("pub_vec_param: a private fn is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "fn f(xs: Vec<u8>) -> usize { xs.len() }", 0);
+});
+test("pub_vec_param: an allowed row with its count passes", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(xs: Vec<u8>) -> usize { xs.len() }", 0, "pub_vec_param|crates/demo/src/lib.rs|1|keeps the list");
 });

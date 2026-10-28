@@ -535,3 +535,16 @@ pub_vec_return|crates/habilis-network-protocol/src/mesh/lookup.rs|1|to_bytes: th
 pub_vec_return|crates/habilis-network-protocol/src/message/mod.rs|2|canonical_bytes: the owned byte buffer that is signed; verify_canonical: the owned bytes returned with the verified message
 pub_vec_return|crates/habilis-network-protocol/src/seal.rs|2|seal_symmetric: the owned ciphertext; open_symmetric: the owned plaintext
 pub_vec_return|crates/habilis-network-wasm/src/stream.rs|1|read: the owned bytes handed to JavaScript
+
+# pub_vec_param: a public function takes a Vec. The guide prefers impl IntoIterator when the function
+# only iterates. These keep the list, sort it, or hand it on as an owned value.
+pub_vec_param|crates/habilis-network-chunks/src/lib.rs|1|from_leaves: checks the length, then keeps the leaves in the tree
+pub_vec_param|crates/habilis-network-iroh-multihop-transport/src/lib.rs|2|with_protocols: keeps the owned protocol handlers in the config; link_vector: sorts and filters the links in place
+pub_vec_param|crates/habilis-network-iroh-multihop-transport/src/topology.rs|1|signed: keeps the links in the signed link vector
+pub_vec_param|crates/habilis-network-iroh-webrtc-transport/src/lib.rs|1|attach_parts: keeps the owned JavaScript callbacks of the session
+pub_vec_param|crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|1|attach: takes the owned JavaScript callbacks, which it mutates
+pub_vec_param|crates/habilis-network-netplay/src/session.rs|1|new: keeps the owned player list of the session
+pub_vec_param|crates/habilis-network-protocol/src/reassembly.rs|1|insert: keeps the owned frames of the shard group in the cache
+pub_vec_param|crates/habilis-network-wasm/src/stream.rs|1|write: the owned bytes handed to the stream at the JavaScript edge
+pub_vec_param|crates/habilis-network/src/daemon/setup.rs|2|bind: hands the owned ALPN list to the endpoint; with_protocols: keeps the owned protocol handlers
+pub_vec_param|crates/habilis-network/src/lookup/mod.rs|1|build_endpoint: hands the owned ALPN list to the endpoint

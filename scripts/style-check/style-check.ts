@@ -249,6 +249,23 @@ function countPubVecReturn(raw: string): number {
   return count;
 }
 
+// A public fn with a Vec parameter. The guide prefers impl IntoIterator when the fn only iterates; a fn that keeps the list needs the Vec.
+function countPubVecParam(raw: string): number {
+  const text = stripTestModules(blankStrings(stripComments(raw)));
+  let count = 0;
+  for (const m of text.matchAll(PUB_FN)) {
+    const open = text.indexOf("(", m.index! + m[0].length);
+    let depth = 0;
+    let i = open;
+    for (; i < text.length; i++) {
+      if (text[i] === "(") depth++;
+      else if (text[i] === ")" && --depth === 0) break;
+    }
+    if (/:\s*Vec\s*</.test(text.slice(open + 1, i))) count++;
+  }
+  return count;
+}
+
 function countAnyhowPub(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   const bare = new Set<string>();
@@ -418,6 +435,13 @@ const RULES: Rule[] = [
     skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
     glob: "crates/**/*.rs",
     why: "A public function returns an iterator, not a Vec. A Vec is allowed where the caller needs an owned collection or the function builds a byte buffer, and each such function has a counted row with its reason.",
+  },
+  {
+    name: "pub_vec_param",
+    scan: countPubVecParam,
+    skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
+    glob: "crates/**/*.rs",
+    why: "A public function takes an impl IntoIterator, not a Vec, when it only iterates. A function that keeps the list takes a Vec, and each such function has a counted row with its reason.",
   },
 ];
 
