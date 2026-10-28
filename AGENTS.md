@@ -194,6 +194,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - `scripts/style-check/style-check.ts` rule `anyhow_pub`: a public function of a library file returns a typed error, not `anyhow`. It counts each public fn whose return type names `anyhow::Result` or `anyhow::Error` (also through a `use anyhow::Result as X` or a `pub type` alias, and a `pub trait` method), and it skips binaries, CLIs and `bin/` targets. Its exceptions are its rows in `style-check.allow`, each with a reason.
 - `scripts/script-language/script-language.ts` refuses a `.sh`, `.bash` or `.py` file, and a file with a shell or Python shebang. See the Scripts section.
 - `typecheck:scripts` in `package.json` runs `tsc --noEmit -p tsconfig.scripts.json`. The `typecheck` script runs it too.
+- `clippy::missing_panics_doc` (in `pedantic`, not silenced) refuses a public function that can panic and has no `# Panics` section. A probe fn with `expect` fails with "docs for function which may panic missing `# Panics` section" (2026-10-27).
 
 ### Rules we decline, or leave to the reviewer
 
