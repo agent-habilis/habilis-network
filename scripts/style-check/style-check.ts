@@ -221,7 +221,7 @@ function countUntypedGenericLets(raw: string): number {
 // on the variable instead, so the reader finds it at the binding (P2). A `_` the compiler forces stays.
 function countTurbofish(raw: string): number {
   const text = blankStrings(stripComments(raw));
-  return text.match(/\.(?:collect|parse)::<(?!_>)[^>]*>\(/g)?.length ?? 0;
+  return text.match(/\.(?:collect|parse)::<(?!_>)[^;]*?>\(/g)?.length ?? 0;
 }
 
 function countAnyhowPub(raw: string): number {
