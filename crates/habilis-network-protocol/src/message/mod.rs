@@ -21,6 +21,8 @@ use super::nickname::Nickname;
 use super::{AuthorKey, ContentHash, DedupKey};
 use crate::newtype::string_newtype;
 
+mod presence_subtype;
+pub use presence_subtype::PresenceSubtype;
 mod app_frame_params;
 pub use app_frame_params::AppFrameParams;
 mod wire_in;
@@ -107,31 +109,6 @@ pub(crate) use habilis_network_util::consts::MAX_MESSAGE_SIZE;
 /// - `3.0` — the application-payload migration.
 /// - `2.0` — RFC 6902 → RFC 7386 shared state.
 pub(crate) const VERSION: &str = "12.0";
-
-/// Presence subtype.
-/// `Joined`/`Left` are user-visible; `Alive` is a silent keepalive used
-/// by the heartbeat-based peer tracker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-#[non_exhaustive]
-pub enum PresenceSubtype {
-    /// A member joined.
-    Joined,
-    /// A member left.
-    Left,
-    /// A member is still here.
-    Alive,
-}
-
-impl fmt::Display for PresenceSubtype {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PresenceSubtype::Joined => write!(f, "joined"),
-            PresenceSubtype::Left => write!(f, "left"),
-            PresenceSubtype::Alive => write!(f, "alive"),
-        }
-    }
-}
 
 /// The single addressee of a directed frame — the routing mirror of
 /// `gossip::recv::addressed_to_us`. `Some(nick)` for a frame that targets
