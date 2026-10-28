@@ -15,7 +15,7 @@ use crate::blob::{BlobDigest, HASH_LEN, SECRET_LEN};
 #[non_exhaustive]
 pub struct BlobTicket {
     /// The endpoint address of the producer that serves the blob.
-    pub addr: EndpointAddr,
+    pub address: EndpointAddr,
     /// The bearer secret of the ticket.
     pub secret: TicketSecret,
     /// The SHA-256 of the blob.
@@ -35,6 +35,40 @@ pub struct BlobTicket {
 }
 
 impl BlobTicket {
+    /// A ticket for the blob with `sha256` and `size` bytes, served by the producer at `address`
+    /// and redeemed with `secret`. It has no password until [`Self::with_password`]. The six types
+    /// differ, so no two arguments can be swapped.
+    #[must_use]
+    pub fn new(
+        address: EndpointAddr,
+        secret: TicketSecret,
+        sha256: BlobDigest,
+        size: u64,
+        lookups: LookupOpts,
+        relay_transport: PayloadPath,
+    ) -> Self {
+        Self {
+            address,
+            secret,
+            sha256,
+            size,
+            lookups,
+            password: false,
+            relay_transport,
+        }
+    }
+
+    /// Set whether the ticket needs the mesh password.
+    #[must_use]
+    pub fn with_password(
+        mut self,
+        // true makes the consumer present the stretch of the password
+        password: bool,
+    ) -> Self {
+        self.password = password;
+        self
+    }
+
     /// Encode as a bare base58 blob ticket.
     #[must_use]
     /// # Panics
@@ -53,9 +87,9 @@ impl BlobTicket {
         payload.extend_from_slice(self.sha256.as_bytes());
         payload.extend_from_slice(&self.size.to_le_bytes());
         self.lookups.encode_into(&mut payload);
-        let addr_json = serde_json::to_vec(&endpoint_addr_to_json(&self.addr))
+        let address_json = serde_json::to_vec(&endpoint_addr_to_json(&self.address))
             .expect("EndpointAddr JSON always serializes");
-        payload.extend_from_slice(&addr_json);
+        payload.extend_from_slice(&address_json);
         let mut framed = Vec::with_capacity(2 + payload.len());
         framed.push(VERSION);
         framed.push(KIND);
@@ -105,12 +139,12 @@ impl BlobTicket {
         let size_bytes = take_array::<8>(payload, &mut position).context("ticket missing size")?;
         let size = u64::from_le_bytes(size_bytes);
         let lookups = LookupOpts::decode_from(payload, &mut position)?;
-        let addr_json = payload.get(position..).context("ticket missing address")?;
+        let address_json = payload.get(position..).context("ticket missing address")?;
         let value: serde_json::Value =
-            serde_json::from_slice(addr_json).context("invalid ticket address json")?;
-        let (_id, addr) = endpoint_addr_from_json(&value)?;
+            serde_json::from_slice(address_json).context("invalid ticket address json")?;
+        let (_id, address) = endpoint_addr_from_json(&value)?;
         Ok(Self {
-            addr,
+            address,
             secret,
             sha256,
             size,

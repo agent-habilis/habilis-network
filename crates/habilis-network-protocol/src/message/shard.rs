@@ -81,6 +81,27 @@ pub struct Shard {
     pub total: u32,
 }
 
+impl Shard {
+    /// The header of the first shard (index 0) of a group of `total`. Set the position with
+    /// [`Self::with_index`]. It checks nothing: the receiver's `Deserialize` refuses a `total`
+    /// outside `2..=MAX_SHARD_TOTAL` and an index past it.
+    #[must_use]
+    pub fn new(group: ShardGroup, total: u32) -> Self {
+        Self {
+            group,
+            index: 0,
+            total,
+        }
+    }
+
+    /// Set the position of the shard in its group.
+    #[must_use]
+    pub fn with_index(mut self, index: u32) -> Self {
+        self.index = index;
+        self
+    }
+}
+
 impl<'de> Deserialize<'de> for Shard {
     fn deserialize<Decoder>(deserializer: Decoder) -> Result<Self, Decoder::Error>
     where

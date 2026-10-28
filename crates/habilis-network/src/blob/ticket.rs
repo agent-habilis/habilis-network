@@ -49,7 +49,7 @@ mod tests {
 
     fn sample(password: bool) -> BlobTicket {
         BlobTicket {
-            addr: sample_addr(3),
+            address: sample_addr(3),
             secret: TicketSecret::from_bytes([9u8; SECRET_LEN]),
             sha256: BlobDigest::from_bytes([7u8; HASH_LEN]),
             size: 1_234_567,
@@ -66,7 +66,7 @@ mod tests {
         assert!(encoded.is_ascii());
         assert!(!encoded.contains("://"));
         let decoded = BlobTicket::decode(&encoded).expect("decode");
-        assert_eq!(decoded.addr.id, ticket.addr.id);
+        assert_eq!(decoded.address.id, ticket.address.id);
         assert_eq!(decoded.secret.as_bytes(), &[9u8; SECRET_LEN]);
         assert_eq!(decoded.sha256, BlobDigest::from_bytes([7u8; HASH_LEN]));
         assert_eq!(decoded.size, 1_234_567);
@@ -87,7 +87,7 @@ mod tests {
     fn decode_of_the_golden_string_gives_the_same_fields() {
         let decoded = BlobTicket::decode(GOLDEN).expect("decode");
         let expected = sample(false);
-        assert_eq!(decoded.addr, expected.addr);
+        assert_eq!(decoded.address, expected.address);
         assert_eq!(decoded.secret.as_bytes(), expected.secret.as_bytes());
         assert_eq!(decoded.sha256, expected.sha256);
         assert_eq!(decoded.size, expected.size);

@@ -79,6 +79,18 @@ pub struct SelfWriteGate {
     pub field: String,
 }
 
+impl SelfWriteGate {
+    /// The gate for the per-peer map `map`, where only `<nick>` writes `<map>/<nick>/<field>`.
+    /// The map is a `String` and the field a `&str`, so a call with the two swapped does not compile.
+    #[must_use]
+    pub fn new(map: String, field: &str) -> Self {
+        Self {
+            map,
+            field: field.to_owned(),
+        }
+    }
+}
+
 /// One buffered orphan: the frame that carried it, and the change already
 /// decoded.
 ///

@@ -246,3 +246,8 @@ required-features = ["host"]
 [[example]]
 name = "mesh_peer_load"
 required-features = ["host", "iroh-test-utils"]
+
+# Builds the blob types from outside the crate, so it needs the `blob` feature that exposes them.
+[[test]]
+name = "blob_constructors"
+required-features = ["blob"]

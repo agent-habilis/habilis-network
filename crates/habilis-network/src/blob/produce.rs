@@ -158,7 +158,7 @@ impl BlobServer {
             bail!("file too large to offload ({size} bytes > {MAX_BLOB_BYTES})");
         }
         let ticket = |registered: super::store::Registered| BlobTicket {
-            addr: self.endpoint.addr(),
+            address: self.endpoint.addr(),
             secret: registered.ticket_secret,
             sha256,
             size,

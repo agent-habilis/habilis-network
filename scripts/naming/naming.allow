@@ -1,7 +1,6 @@
 # rule|file|count|reason
 # Used by scripts/naming/naming.ts. Each file breaks one naming rule. Keep each count exact.
 
-ctor_name|crates/habilis-network-doc/src/mesh_doc.rs|1|no plain new beside new_gated,new_span,new_ungated (N10), to add new() or rename
 ctor_name|crates/habilis-network-protocol/src/mesh/mesh_id_error.rs|1|no plain new beside new_accepts_well_formed_id,new_rejects_a_mistyped_hash,new_rejects_invalid_base58_chars,new_rejects_too_short (N10), to add new() or rename
 ctor_name|crates/habilis-network-protocol/src/mesh/tests.rs|1|no plain new beside new_and_from_topic_refuse_a_config_that_names_a_secret (N10), to add new() or rename
 ctor_name|crates/habilis-network-protocol/src/message/body_error.rs|1|no plain new beside new_accepts_ascii,new_accepts_newline_and_tab,new_accepts_unicode,new_rejects_control_chars (N10), to add new() or rename

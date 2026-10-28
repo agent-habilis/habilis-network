@@ -58,7 +58,7 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let endpoint = build_peer_endpoint(&ticket.lookups).await?;
-    add_peer_addr(&address_book(&endpoint), ticket.addr.clone());
+    add_peer_addr(&address_book(&endpoint), ticket.address.clone());
     let result = fetch_over(&endpoint, ticket, token, out).await;
     endpoint.close().await;
     result
@@ -149,7 +149,7 @@ fn auth_token(ticket: &BlobTicket, password: Option<&Password>) -> Result<Ticket
 async fn dial(endpoint: &Endpoint, ticket: &BlobTicket) -> Result<Connection> {
     let started = Instant::now();
     loop {
-        match endpoint.connect(ticket.addr.clone(), BLOB_ALPN).await {
+        match endpoint.connect(ticket.address.clone(), BLOB_ALPN).await {
             Ok(conn) => return Ok(conn),
             Err(error) if started.elapsed() < DISCOVERY_DEADLINE => {
                 tracing::debug!(%error, "blob dial retrying while the address propagates");

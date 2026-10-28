@@ -23,3 +23,25 @@ pub struct BuildMsgParams<'mesh> {
     /// that consumer would then fail to recognise.
     pub tag: AppTag,
 }
+
+#[cfg(any(test, feature = "test-fixtures"))]
+impl<'mesh> BuildMsgParams<'mesh> {
+    /// The tag, the mesh, the author, the body and the chain of one test message. The five types
+    /// differ, so no two arguments can be swapped.
+    #[must_use]
+    pub fn new(
+        tag: AppTag,
+        mesh: &'mesh MeshId,
+        author: &'mesh Nickname,
+        body: MessageBody,
+        chain: ChainCtx,
+    ) -> Self {
+        Self {
+            mesh,
+            author,
+            body,
+            chain,
+            tag,
+        }
+    }
+}

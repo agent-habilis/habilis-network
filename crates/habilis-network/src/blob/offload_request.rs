@@ -24,6 +24,28 @@ pub struct OffloadRequest {
     pub password: Option<crypto::Password>,
 }
 
+impl OffloadRequest {
+    /// An offload of the file at `path` into the content group `content_id`, spooled in
+    /// `spool_dir`, with no mesh password. The two paths are not next to each other, so a swap
+    /// of the file and the directory shows.
+    #[must_use]
+    pub fn new(path: PathBuf, content_id: ContentId, spool_dir: PathBuf) -> Self {
+        Self {
+            path,
+            spool_dir,
+            content_id,
+            password: None,
+        }
+    }
+
+    /// Set the mesh password that the ticket inherits.
+    #[must_use]
+    pub fn with_password(mut self, password: Option<crypto::Password>) -> Self {
+        self.password = password;
+        self
+    }
+}
+
 /// Offload a file over the blob channel and return the [`BlobTicket`] that
 /// fetches it back. Lazily binds `server` on the first call (into
 /// `request.spool_dir`), reusing it thereafter — so a caller holds one
