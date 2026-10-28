@@ -20,7 +20,7 @@ crates/habilis-network-netplay/src/transport.rs|1|generic bound: Transport, the 
 crates/habilis-network-protocol/src/message/verified.rs|2|sealed trait: Sealed (private supertrait) and Proof, implemented only by this crate
 
 # A generic bound: the daemon is generic over a NodeApp.
-crates/habilis-network/src/daemon/app.rs|1|generic bound: NodeDriver, the daemon over a NodeApp
+crates/habilis-network/src/daemon/app/node_driver.rs|1|generic bound: NodeDriver, the daemon over a NodeApp
 
 # A generic bound: the app surface that each app implements.
 crates/habilis-network/src/gossip/app.rs|1|generic bound: NodeApp, the app surface each app implements
