@@ -24,7 +24,7 @@ use super::Args;
 use super::engine::Engine;
 use super::native::{JSEP_DEADLINE, WebRtcPeer};
 use super::run::{Measured, Outcome, Sample, TRANSFER_TIMEOUT};
-use super::serve::Static;
+use super::serve::StaticServer;
 
 /// The wasm page has to fetch and instantiate the module before `#ready`.
 const PAGE_TIMEOUT: Duration = Duration::from_mins(1);
@@ -68,7 +68,7 @@ struct Tab {
 }
 
 impl Tab {
-    fn open(engine: Engine, server: &Static, page: &str) -> Result<Self, Skip> {
+    fn open(engine: Engine, server: &StaticServer, page: &str) -> Result<Self, Skip> {
         let page_obj = match engine {
             Engine::Chrome => Driver::Chrome(Box::new(cdp::Browser::launch()?)),
             Engine::Safari => Driver::Safari(webdriver::Session::open("safari-tp", SAFARI_TP)?),
@@ -137,7 +137,7 @@ fn rounds(
 
 /// What every browser cell needs: the page server and the run's arguments.
 pub(crate) struct Browser<'bench> {
-    pub(crate) server: &'bench Static,
+    pub(crate) server: &'bench StaticServer,
     pub(crate) args: &'bench Args,
 }
 

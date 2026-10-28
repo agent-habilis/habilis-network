@@ -283,7 +283,7 @@ impl Row {
     }
 }
 
-fn serve_page() -> Result<serve::Static, Box<dyn std::error::Error>> {
+fn serve_page() -> Result<serve::StaticServer, Box<dyn std::error::Error>> {
     wasm::check_wasm_bindgen()?;
     let env = wasm::wasm_env()?;
     output::status("Building", "the browser side (habilis-network-bench-wasm)");
@@ -291,7 +291,7 @@ fn serve_page() -> Result<serve::Static, Box<dyn std::error::Error>> {
     let glue = wasm::build_wasm_cdylib("habilis-network-bench-wasm", &env, &wasm_dir)?;
     output::detail(&format!("             {}", glue.display()));
     let www = repo_root().join("crates/habilis-network-bench-wasm/www");
-    let server = serve::Static::serve(www, wasm_dir)?;
+    let server = serve::StaticServer::serve(www, wasm_dir)?;
     output::status("Serving", &server.url);
     Ok(server)
 }
