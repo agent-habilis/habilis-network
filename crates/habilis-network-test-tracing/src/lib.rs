@@ -368,6 +368,7 @@ impl io::Write for CaptureWriter {
 /// Fails the test, when it drops, if the test logged a WARN or ERROR event
 /// that it did not expect, or did not log a WARN event that it expected.
 #[derive(Debug)]
+#[must_use]
 pub struct Guard {
     slot: Arc<Slot>,
 }

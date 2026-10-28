@@ -321,6 +321,7 @@ fn root_of(leaves: &[ChunkHash], size: u64) -> Root {
 /// The shape an origin needs: read [`CHUNK_BYTES`] at a time, hash, discard.
 /// Peak memory is one chunk plus the row, and the row is ~0.05 % of the file.
 #[derive(Debug, Default)]
+#[must_use]
 pub struct ChunkMapBuilder {
     leaves: Vec<ChunkHash>,
     size: u64,
@@ -329,7 +330,6 @@ pub struct ChunkMapBuilder {
 
 impl ChunkMapBuilder {
     /// A builder holding nothing.
-    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
