@@ -391,3 +391,14 @@ test("pub_vec_param: a private fn is clean", () => {
 test("pub_vec_param: an allowed row with its count passes", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(xs: Vec<u8>) -> usize { xs.len() }", 0, "pub_vec_param|crates/demo/src/lib.rs|1|keeps the list");
 });
+
+// The pub_impl_into rule: a public function takes impl Into<T>, outside tests and examples.
+test("pub_impl_into: a pub fn with impl Into counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(s: impl Into<String>) -> String { s.into() }", 1);
+});
+test("pub_impl_into: a private fn is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "fn f(s: impl Into<String>) -> String { s.into() }", 0);
+});
+test("pub_impl_into: an allowed row with its count passes", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(s: impl Into<String>) -> String { s.into() }", 0, "pub_impl_into|crates/demo/src/lib.rs|1|a validating constructor");
+});

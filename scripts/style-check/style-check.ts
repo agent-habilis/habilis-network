@@ -266,6 +266,23 @@ function countPubVecParam(raw: string): number {
   return count;
 }
 
+// A public fn with an `impl Into<...>` parameter. The guide allows it in a library when call-site ergonomics matter most.
+function countPubImplInto(raw: string): number {
+  const text = stripTestModules(blankStrings(stripComments(raw)));
+  let count = 0;
+  for (const m of text.matchAll(PUB_FN)) {
+    const open = text.indexOf("(", m.index! + m[0].length);
+    let depth = 0;
+    let i = open;
+    for (; i < text.length; i++) {
+      if (text[i] === "(") depth++;
+      else if (text[i] === ")" && --depth === 0) break;
+    }
+    if (/\bimpl Into</.test(text.slice(open + 1, i))) count++;
+  }
+  return count;
+}
+
 function countAnyhowPub(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   const bare = new Set<string>();
@@ -442,6 +459,13 @@ const RULES: Rule[] = [
     skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
     glob: "crates/**/*.rs",
     why: "A public function takes an impl IntoIterator, not a Vec, when it only iterates. A function that keeps the list takes a Vec, and each such function has a counted row with its reason.",
+  },
+  {
+    name: "pub_impl_into",
+    scan: countPubImplInto,
+    skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
+    glob: "crates/**/*.rs",
+    why: "A public function takes impl Into<T> only where call-site ergonomics matter most in a library. Each such function has a counted row with its reason.",
   },
 ];
 
