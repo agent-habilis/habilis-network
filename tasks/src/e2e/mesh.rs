@@ -15,9 +15,11 @@
 //! non-linking cell (policy off × native relay-only) must *never* link, and
 //! must say why in the engine's own words (`relay-only path refused`).
 
+mod bun_server;
+mod native;
+
 use std::fmt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -33,7 +35,9 @@ use super::{Args, Skip, build};
 
 use habilis_network::net::test_relay;
 use habilis_network::util::tuning;
-use tokio::sync::{mpsc, oneshot};
+
+pub(super) use bun_server::BunServer;
+pub(super) use native::Native;
 /// A linked pair has to survive the beacon claim (~8 s), a WebRTC
 /// negotiation or a hole punch, and one alive-tick retry.
 pub(super) const LINK_TIMEOUT: Duration = Duration::from_mins(4);
@@ -199,87 +203,6 @@ pub(super) fn drain_logs() -> String {
 
 // ── the native peer ─────────────────────────────────────────────────────
 
-/// The in-process side of a cell: a live membership plus everything a check
-/// reads — inbound messages, surfaced events, the roster on demand.
-pub(super) struct Native {
-    pub(super) membership: membership::Membership,
-    events: mpsc::UnboundedReceiver<String>,
-    seen_events: Vec<serde_json::Value>,
-    seen_msgs: Vec<membership::Inbound>,
-}
-
-impl Native {
-    pub(super) async fn open(opts: &membership::Opts) -> Result<Self, Skip> {
-        let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink)
-            .await
-            .map_err(|error| Skip(format!("native peer failed to open: {error:#}")))?;
-        Ok(Self {
-            membership,
-            events,
-            seen_events: Vec::new(),
-            seen_msgs: Vec::new(),
-        })
-    }
-
-    fn pump(&mut self) {
-        while let Ok(json) = self.events.try_recv() {
-            if let Ok(event) = serde_json::from_str(&json) {
-                self.seen_events.push(event);
-            }
-        }
-        while let Ok(msg) = self.membership.inbound.try_recv() {
-            self.seen_msgs.push(msg);
-        }
-    }
-
-    pub(super) fn saw_event(&mut self, kind: &str, nick: &str) -> bool {
-        self.pump();
-        self.seen_events.iter().any(|event| {
-            event.get("kind").and_then(serde_json::Value::as_str) == Some(kind)
-                && event.get("nick").and_then(serde_json::Value::as_str) == Some(nick)
-        })
-    }
-
-    pub(super) fn saw_msg(&mut self, text: &str, directed: bool) -> bool {
-        self.pump();
-        self.seen_msgs
-            .iter()
-            .any(|msg| msg.directed == directed && msg.text == text)
-    }
-
-    pub(super) async fn request<T>(
-        &self,
-        build: impl FnOnce(oneshot::Sender<T>) -> membership::Request,
-    ) -> Result<T, String> {
-        self.membership.request(build).await
-    }
-
-    pub(super) async fn roster_json(&self) -> String {
-        self.request(|reply| membership::Request::Peers { reply })
-            .await
-            .unwrap_or_default()
-    }
-
-    pub(super) async fn send(&self, to: Option<&str>, text: &str) -> Result<(), String> {
-        let to = membership::parse_to(to).map_err(|error| error.to_string())?;
-        let body = membership::msg_body(text).map_err(|error| error.to_string())?;
-        self.request(|reply| membership::Request::Send { to, body, reply })
-            .await?
-    }
-
-    async fn state_merge(&self, merge: serde_json::Value) -> Result<(), String> {
-        self.request(|reply| membership::Request::StateMerge { merge, reply })
-            .await?
-    }
-
-    async fn state_json(&self) -> String {
-        self.request(|reply| membership::Request::StateJson { reply })
-            .await
-            .unwrap_or_default()
-    }
-}
-
 /// Every payload lane, both directions: broadcast, directed, state merge.
 /// Send from the native side, retrying inside the payload window. The first
 /// directed frame to a fresh peer can race the very path it needs — a dial
@@ -371,47 +294,6 @@ async fn check_payload_lanes(page: &Page, native: &mut Native) -> Result<(), Cel
 }
 
 // ── the served page ─────────────────────────────────────────────────────
-
-/// A Bun dev server (the harness page, the chat page), killed when it goes
-/// out of scope. Stderr is discarded — the old piped-but-never-read handle
-/// could only ever stall the child on a full pipe.
-pub(super) struct BunServer {
-    child: Child,
-    pub(super) url: String,
-}
-
-impl Drop for BunServer {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-impl BunServer {
-    pub(super) fn serve(dir: &std::path::Path, script: &str, what: &str) -> Result<Self, Skip> {
-        let port = free_port()?;
-        let child = Command::new("bun")
-            .arg("run")
-            .arg(script)
-            .arg(port.to_string())
-            .current_dir(dir)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| Skip(format!("could not start bun for {what}: {error}")))?;
-        let server = Self {
-            child,
-            url: format!("http://127.0.0.1:{port}"),
-        };
-        let up = wait_for(Duration::from_secs(30), Duration::from_millis(250), || {
-            crate::util::reachable(&server.url).then_some(())
-        });
-        if up.is_none() {
-            return Err(Skip(format!("the {what} server never came up")));
-        }
-        Ok(server)
-    }
-}
 
 pub(super) use crate::util::webdriver::free_port;
 
