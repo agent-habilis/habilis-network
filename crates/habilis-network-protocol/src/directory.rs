@@ -55,10 +55,10 @@ const DIRECTORY_BASE_SEED: Seed = Seed::from_bytes(*b"habilis-mesh/directory/dom
 ///
 /// # Panics
 /// Never. The directory config carries no password or invite issuer, which
-/// [`Mesh::new`] refuses, so the constructor cannot fail here.
+/// [`Mesh::try_new`] refuses, so the constructor cannot fail here.
 #[must_use]
 pub fn directory_mesh(directory: &MeshName, lookups: LookupOpts) -> Mesh {
-    Mesh::new(
+    Mesh::try_new(
         Seed::from_bytes(*derive_secret(
             DIRECTORY_BASE_SEED.as_bytes(),
             directory.as_bytes(),

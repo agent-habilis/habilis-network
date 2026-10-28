@@ -75,7 +75,7 @@ async fn meet(foreign_rungs: &[usize]) -> (bool, [u16; 8]) {
     // rungs are in that order puts the foreign listener of rung 0 before the rung that the
     // beacon takes (rung 1, the first one that binds), which is the order that fails every dial.
     let (mesh, ladder) = loop {
-        let mesh = Mesh::new(
+        let mesh = Mesh::try_new(
             fresh_seed(),
             MeshName::try_new("foreign-rung".to_owned()).expect("a name"),
             config.clone(),

@@ -252,7 +252,7 @@ mod tests {
     fn rejects_a_mesh_token() {
         // A mesh id shares the bare-base58 shape but has a different payload;
         // blob decode must refuse it (wrong kind / structure).
-        let mesh = mesh::Mesh::new(
+        let mesh = mesh::Mesh::try_new(
             crate::protocol::Seed::from_bytes([1u8; 32]),
             mesh::MeshName::try_new("t").unwrap(),
             mesh::MeshConfig::loopback(),
@@ -270,7 +270,7 @@ mod tests {
         // crate depends on it and can see both.
         use crate::protocol::mesh::{Mesh, MeshConfig, MeshName};
 
-        let mut creator = Mesh::new(
+        let mut creator = Mesh::try_new(
             crate::protocol::Seed::from_bytes([1u8; 32]),
             MeshName::try_new("t").unwrap(),
             MeshConfig::loopback(),

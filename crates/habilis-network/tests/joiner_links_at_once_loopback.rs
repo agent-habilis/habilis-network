@@ -149,7 +149,7 @@ fn a_joiner_meets_a_running_beacon_before_the_grace() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
-        let mesh = Mesh::new(
+        let mesh = Mesh::try_new(
             fresh_seed(),
             MeshName::try_new("fast-join".to_owned()).expect("a name"),
             config,

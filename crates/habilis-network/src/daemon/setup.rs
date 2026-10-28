@@ -1204,7 +1204,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
     let (endpoint, multihop, webrtc, admission, underlay_webrtc, mdns) =
         build_member_endpoint(build).await?;
 
-    let mut mesh = Mesh::new(
+    let mut mesh = Mesh::try_new(
         crate::protocol::Seed::from_bytes(seed),
         name.clone(),
         config,

@@ -32,7 +32,7 @@ fn custom_config() -> MeshConfig {
 
 #[test]
 fn round_trip_loopback() {
-    let mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::loopback()).unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback()).unwrap();
     let encoded = mesh.to_string();
     assert!(
         encoded.bytes().all(|byte| byte.is_ascii_alphanumeric()),
@@ -47,7 +47,7 @@ fn round_trip_loopback() {
 
 #[test]
 fn round_trip_public_preset() {
-    let mesh = Mesh::new(
+    let mesh = Mesh::try_new(
         Seed::from_bytes([0xABu8; SEED_LEN]),
         dummy_name(),
         MeshConfig::public_preset(),
@@ -62,7 +62,7 @@ fn round_trip_public_preset() {
 
 #[test]
 fn round_trip_custom_relay_ladder() {
-    let mesh = Mesh::new(dummy_seed(), dummy_name(), custom_config()).unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), custom_config()).unwrap();
     let decoded: LockedMesh = mesh.to_string().parse().unwrap();
     assert_eq!(decoded.config(), &custom_config());
 }
@@ -122,7 +122,7 @@ fn validate_rejects_a_relay_url_over_the_wire_ceiling() {
 
 #[test]
 fn seed_drives_rendezvous_identity() {
-    let mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
     let decoded = mesh
         .to_string()
         .parse::<LockedMesh>()
@@ -135,14 +135,14 @@ fn seed_drives_rendezvous_identity() {
 
 #[test]
 fn different_seeds_yield_different_ids() {
-    let one = Mesh::new(
+    let one = Mesh::try_new(
         Seed::from_bytes([1u8; SEED_LEN]),
         dummy_name(),
         MeshConfig::loopback(),
     )
     .unwrap()
     .to_string();
-    let two = Mesh::new(
+    let two = Mesh::try_new(
         Seed::from_bytes([2u8; SEED_LEN]),
         dummy_name(),
         MeshConfig::loopback(),
@@ -154,10 +154,10 @@ fn different_seeds_yield_different_ids() {
 
 #[test]
 fn different_config_yields_different_id() {
-    let one = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::loopback())
+    let one = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback())
         .unwrap()
         .to_string();
-    let two = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset())
+    let two = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())
         .unwrap()
         .to_string();
     assert_ne!(one, two, "config is part of the id");
@@ -171,8 +171,8 @@ fn password_verifier_yields_different_id_and_round_trips() {
         issuer_pubkey: None,
         transport: TransportPolicy::default(),
     };
-    let one = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
-    // `Mesh::new` refuses a passworded config, so the id is built as it sits on
+    let one = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+    // `Mesh::try_new` refuses a passworded config, so the id is built as it sits on
     // the wire: the secret is never in it.
     let two = LockedMesh {
         name: dummy_name(),
@@ -195,7 +195,7 @@ fn new_and_from_topic_refuse_a_config_that_names_a_secret() {
         ..MeshConfig::public_preset()
     };
     for config in [with_password, with_issuer] {
-        let by_new = Mesh::new(dummy_seed(), dummy_name(), config.clone()).unwrap_err();
+        let by_new = Mesh::try_new(dummy_seed(), dummy_name(), config.clone()).unwrap_err();
         assert!(by_new.to_string().contains("set_password"), "got: {by_new}");
         let by_topic = Mesh::from_topic("topic", config).unwrap_err();
         assert!(
@@ -209,7 +209,7 @@ fn new_and_from_topic_refuse_a_config_that_names_a_secret() {
 fn set_password_bakes_verifier_and_unlock_verifies_it() {
     let password = Password::new("hunter2".to_owned());
 
-    let mut creator = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+    let mut creator = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
     let passwordless_topic = creator.topic_id();
     let passwordless_rendezvous = creator.rendezvous_id();
     creator.set_password(&password);
@@ -240,7 +240,7 @@ fn set_password_bakes_verifier_and_unlock_verifies_it() {
 
 #[test]
 fn unlock_with_a_password_on_a_passwordless_id_is_rejected() {
-    let locked = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset())
+    let locked = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())
         .unwrap()
         .locked();
     let error = locked
@@ -251,7 +251,7 @@ fn unlock_with_a_password_on_a_passwordless_id_is_rejected() {
 
 #[test]
 fn unlock_without_the_password_on_a_passworded_id_is_rejected() {
-    let mut creator = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+    let mut creator = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
     creator.set_password(&Password::new("hunter2".to_owned()));
     let error = creator.locked().unlock(None).unwrap_err();
     assert_eq!(error, UnlockError::PasswordRequired);
@@ -259,7 +259,7 @@ fn unlock_without_the_password_on_a_passworded_id_is_rejected() {
 
 #[test]
 fn unlock_refuses_an_invite_only_id() {
-    let mut creator = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+    let mut creator = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
     creator.set_invite();
     let error = creator.locked().unlock(None).unwrap_err();
     assert_eq!(error, UnlockError::InviteOnly);
@@ -267,7 +267,7 @@ fn unlock_refuses_an_invite_only_id() {
 
 #[test]
 fn unlock_without_a_password_on_a_passwordless_id_derives_from_the_wire_seed() {
-    let mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
     let unlocked = mesh.locked().unlock(None).unwrap();
     assert_eq!(unlocked.topic_id(), mesh.topic_id());
     assert_eq!(unlocked.rendezvous_id(), mesh.rendezvous_id());
@@ -292,7 +292,7 @@ fn golden_passwordless_id_and_topic_are_pinned() {
     // That split is the point: this pair is what proved the de-branding
     // reached the key-derivation transcript (topic moved) without leaking
     // into the id encoding (id held).
-    let mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
     assert_eq!(
         mesh.to_string(),
         "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqazmpTSgH"
@@ -313,7 +313,7 @@ fn golden_passwordless_id_and_topic_are_pinned() {
 // derivation, and none of the outputs moved.
 #[test]
 fn golden_passworded_mesh_id_topic_and_rendezvous_are_pinned() {
-    let mut mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+    let mut mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
     mesh.set_password(&Password::new("hunter2".to_owned()));
     assert_eq!(
         mesh.to_string(),
@@ -398,7 +398,7 @@ fn a_prefixed_id_is_rejected() {
     // An id is bare Base58Check, so anything glued to the front is not a
     // brand to strip — it is corruption, and the checksum says so. Covers
     // both a stale glyph paste and the ASCII brands other tools use.
-    let encoded = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::loopback())
+    let encoded = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback())
         .unwrap()
         .to_string();
     for prefix in ["💬", "💬://", "sw1", "xyz", "ahs"] {
@@ -412,7 +412,7 @@ fn a_prefixed_id_is_rejected() {
 
 #[test]
 fn invalid_checksum_rejected() {
-    let encoded = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::loopback())
+    let encoded = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback())
         .unwrap()
         .to_string();
     let mut bad = encoded.clone();
@@ -446,7 +446,7 @@ fn a_mesh_id_carries_the_transport_policy_for_every_list() {
     let mut seen: Vec<(TransportPolicy, String)> = Vec::new();
     for list in lists {
         let config = MeshConfig::resolve(&[Lookup::Relay], None, list).expect("a valid list");
-        let id = Mesh::new(dummy_seed(), dummy_name(), config.clone())
+        let id = Mesh::try_new(dummy_seed(), dummy_name(), config.clone())
             .unwrap()
             .to_string();
         let decoded: LockedMesh = id.parse().expect("the id decodes");
@@ -470,7 +470,7 @@ fn a_mesh_id_carries_the_transport_policy_for_every_list() {
 
 #[test]
 fn a_version_1_mesh_id_is_rejected_with_upgrade() {
-    let mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::loopback()).unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback()).unwrap();
     let mut bytes = mesh.encode_bytes();
     bytes[0] = 1; // the format before the transport policy had its own byte
     let error = LockedMesh::decode_bytes(&bytes).expect_err("a version 1 id is refused");
@@ -482,7 +482,7 @@ fn a_version_1_mesh_id_is_rejected_with_upgrade() {
 
 #[test]
 fn unknown_version_rejected() {
-    let mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::loopback()).unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback()).unwrap();
     let mut bytes = mesh.encode_bytes();
     bytes[0] = 3; // an unknown version byte
     assert!(LockedMesh::decode_bytes(&bytes).is_err());
@@ -491,7 +491,7 @@ fn unknown_version_rejected() {
 #[test]
 fn mesh_id_round_trips_unicode_name() {
     let name = MeshName::try_new("café-日本-🎉").unwrap();
-    let mesh = Mesh::new(dummy_seed(), name.clone(), MeshConfig::loopback()).unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), name.clone(), MeshConfig::loopback()).unwrap();
     let decoded: LockedMesh = mesh.to_string().parse().expect("decode failed");
     assert_eq!(decoded.name(), &name);
 }
@@ -502,7 +502,7 @@ fn mesh_id_round_trips_max_byte_name() {
     // length field can carry; exercises the encode/decode upper edge.
     let name = MeshName::try_new("🎉".repeat(32)).unwrap();
     assert_eq!(name.as_bytes().len(), 128);
-    let mesh = Mesh::new(dummy_seed(), name.clone(), MeshConfig::public_preset()).unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), name.clone(), MeshConfig::public_preset()).unwrap();
     let decoded: LockedMesh = mesh.to_string().parse().expect("decode failed");
     assert_eq!(decoded.name(), &name);
 }
@@ -548,7 +548,7 @@ mod prop {
             name in arb_name(),
             config in arb_config(),
         ) {
-            // Built as the id on the wire, since `Mesh::new` refuses a secret config.
+            // Built as the id on the wire, since `Mesh::try_new` refuses a secret config.
             let wire = Seed::from_bytes(seed);
             let locked = LockedMesh { name: name.clone(), seed: wire, config: config.clone() };
             let decoded: LockedMesh = locked.to_string().parse().expect("decode failed");
@@ -559,7 +559,7 @@ mod prop {
 
         #[test]
         fn prop_bare_base58(seed in arb_seed(), name in arb_name()) {
-            let id = Mesh::new(Seed::from_bytes(seed), name, MeshConfig::loopback()).unwrap().to_string();
+            let id = Mesh::try_new(Seed::from_bytes(seed), name, MeshConfig::loopback()).unwrap().to_string();
             prop_assert!(!id.contains("://"));
             prop_assert!(id.is_ascii());
             prop_assert!(!id.is_empty());
@@ -582,8 +582,8 @@ mod prop {
             name in arb_name(),
         ) {
             prop_assume!(seed_a != seed_b);
-            let one = Mesh::new(Seed::from_bytes(seed_a), name.clone(), MeshConfig::loopback()).unwrap().to_string();
-            let two = Mesh::new(Seed::from_bytes(seed_b), name, MeshConfig::loopback()).unwrap().to_string();
+            let one = Mesh::try_new(Seed::from_bytes(seed_a), name.clone(), MeshConfig::loopback()).unwrap().to_string();
+            let two = Mesh::try_new(Seed::from_bytes(seed_b), name, MeshConfig::loopback()).unwrap().to_string();
             prop_assert_ne!(one, two);
         }
     }
