@@ -137,7 +137,6 @@ fn maxrss_bytes() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::peak_resident_memory_bytes;
     use habilis_network_test_tracing::test;
 
     /// The current reading falls when memory is given back, which the peak never
@@ -151,11 +150,9 @@ mod tests {
         reason = "libc mmap and munmap: the pages must go back at once"
     )]
     fn the_current_resident_memory_falls_when_memory_is_given_back() {
-        use super::current_resident_memory_bytes;
-
         const BLOCK: usize = 128 * 1024 * 1024;
         const MIB: u64 = 1024 * 1024;
-        let before = current_resident_memory_bytes().expect("readable");
+        let before = super::current_resident_memory_bytes().expect("readable");
         // SAFETY: an anonymous private mapping of BLOCK bytes that nothing else
         // uses; every write is inside it, and it is unmapped once, with the same
         // length.
@@ -173,11 +170,11 @@ mod tests {
             for page in (0..BLOCK).step_by(4096) {
                 bytes.add(page).write_volatile(1);
             }
-            let with_block = current_resident_memory_bytes().expect("readable");
+            let with_block = super::current_resident_memory_bytes().expect("readable");
             assert_eq!(libc::munmap(base, BLOCK), 0, "the unmapping");
             (
                 with_block,
-                current_resident_memory_bytes().expect("readable"),
+                super::current_resident_memory_bytes().expect("readable"),
             )
         };
         assert!(
@@ -196,7 +193,7 @@ mod tests {
         // The test process holds a real address space, so resident memory is
         // readable and non-trivial — guards against a units/selector regression
         // returning 0.
-        let bytes = peak_resident_memory_bytes().expect("resident memory readable on unix");
+        let bytes = super::peak_resident_memory_bytes().expect("resident memory readable on unix");
         assert!(
             bytes > 1024 * 1024,
             "resident memory should exceed 1 MiB, got {bytes} bytes"

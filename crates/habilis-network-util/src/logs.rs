@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 #[cfg(feature = "host")]
-use crate::mesh_prefix;
 #[cfg(feature = "host")]
 use crate::tuning::LOG_FILE_MAX_BYTES;
 
@@ -81,7 +80,7 @@ fn resolve_log_dir(override_dir: Option<PathBuf>, base: Option<PathBuf>) -> Path
 #[must_use]
 pub fn log_file_path(mesh_id: &str, nickname: &str) -> PathBuf {
     log_dir()
-        .join(mesh_prefix(mesh_id))
+        .join(crate::mesh_prefix(mesh_id))
         .join(format!("{nickname}.tracing.log"))
 }
 
@@ -108,17 +107,15 @@ mod tests {
     use habilis_network_test_tracing::test;
     use std::path::PathBuf;
 
-    use super::resolve_log_dir;
-
     #[test]
     fn default_is_the_configured_runtime_base() {
         let base = crate::runtime_base("demo");
-        assert_eq!(resolve_log_dir(None, Some(base.clone())), base);
+        assert_eq!(super::resolve_log_dir(None, Some(base.clone())), base);
     }
 
     #[test]
     fn override_wins_verbatim() {
-        let dir = resolve_log_dir(
+        let dir = super::resolve_log_dir(
             Some(PathBuf::from("/custom/x")),
             Some(PathBuf::from("/base")),
         );

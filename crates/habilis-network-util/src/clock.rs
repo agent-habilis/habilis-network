@@ -262,22 +262,26 @@ mod millis_saturating_tests {
     use habilis_network_test_tracing::test;
     use std::time::Duration;
 
-    use super::millis_saturating;
-
-    const ONE_SECOND: u64 = millis_saturating(Duration::from_secs(1));
+    const ONE_SECOND: u64 = super::millis_saturating(Duration::from_secs(1));
 
     #[test]
     fn it_counts_the_whole_seconds_and_the_subsecond_part() {
         assert_eq!(ONE_SECOND, 1000);
-        assert_eq!(millis_saturating(Duration::ZERO), 0);
-        assert_eq!(millis_saturating(Duration::from_millis(1500)), 1500);
+        assert_eq!(super::millis_saturating(Duration::ZERO), 0);
+        assert_eq!(super::millis_saturating(Duration::from_millis(1500)), 1500);
         // A part of a millisecond is cut, as `Duration::as_millis` cuts it.
-        assert_eq!(millis_saturating(Duration::new(2, 999_999_999)), 2999);
+        assert_eq!(
+            super::millis_saturating(Duration::new(2, 999_999_999)),
+            2999
+        );
     }
 
     #[test]
     fn it_saturates_where_a_u64_of_milliseconds_overflows() {
-        assert_eq!(millis_saturating(Duration::from_secs(u64::MAX)), u64::MAX);
-        assert_eq!(millis_saturating(Duration::MAX), u64::MAX);
+        assert_eq!(
+            super::millis_saturating(Duration::from_secs(u64::MAX)),
+            u64::MAX
+        );
+        assert_eq!(super::millis_saturating(Duration::MAX), u64::MAX);
     }
 }
