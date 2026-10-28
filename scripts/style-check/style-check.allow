@@ -259,7 +259,7 @@ long_chain|crates/habilis-network-netplay/src/mesh/lobby.rs|1|kept: statements w
 long_chain|crates/habilis-network-netplay/src/peer_protocol.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-netplay/src/request.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-netplay/src/saved_states.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-netplay/src/session.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-netplay/src/p2p_session.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-netplay/src/sync.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-netplay/src/sync_test_session.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/directory/listings.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -458,7 +458,7 @@ untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/nati
 untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/web/wasm/src/app.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/web/wasm/src/lib.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-netplay/src/mesh/rollback_driver.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-netplay/src/session.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+untyped_long_chain_let|crates/habilis-network-netplay/src/p2p_session.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-netplay/tests/mesh_loopback.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-protocol/src/invite/invite_ticket.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-protocol/src/mesh/lookup.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
@@ -511,7 +511,7 @@ pub_vec_return|crates/habilis-network-doc/src/mesh_doc.rs|1|build_change: the ow
 pub_vec_return|crates/habilis-network-doc/src/wire.rs|1|parse_change_body: the owned decoded bytes of a change body
 pub_vec_return|crates/habilis-network-iroh-multihop-transport/src/lib.rs|1|underlay_paths_for_test: a test helper whose owned list the test compares
 pub_vec_return|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|2|benchmark harness behind the bench feature: payload is an owned byte buffer, rtt_samples an owned list
-pub_vec_return|crates/habilis-network-netplay/src/session.rs|1|advance_frame: the owned requests of this frame, which the caller takes
+pub_vec_return|crates/habilis-network-netplay/src/p2p_session.rs|1|advance_frame: the owned requests of this frame, which the caller takes
 pub_vec_return|crates/habilis-network-netplay/src/sync_test_session.rs|1|advance_frame: the owned requests of this frame, which the caller takes
 pub_vec_return|crates/habilis-network-protocol/src/base58_error.rs|1|decode: the owned decoded bytes
 pub_vec_return|crates/habilis-network-protocol/src/identity.rs|1|decode_hex: the owned decoded bytes
@@ -527,7 +527,7 @@ pub_vec_param|crates/habilis-network-iroh-multihop-transport/src/lib.rs|2|with_p
 pub_vec_param|crates/habilis-network-iroh-multihop-transport/src/topology.rs|1|signed: keeps the links in the signed link vector
 pub_vec_param|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_handle.rs|1|attach_parts: keeps the owned JavaScript callbacks of the session
 pub_vec_param|crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|1|attach: takes the owned JavaScript callbacks, which it mutates
-pub_vec_param|crates/habilis-network-netplay/src/session.rs|1|new: keeps the owned player list of the session
+pub_vec_param|crates/habilis-network-netplay/src/p2p_session.rs|1|new: keeps the owned player list of the session
 pub_vec_param|crates/habilis-network-protocol/src/reassembly/shard_cache.rs|1|insert: keeps the owned frames of the shard group in the cache
 pub_vec_param|crates/habilis-network-wasm/src/stream_node.rs|1|write: the owned bytes handed to the stream at the JavaScript edge
 pub_vec_param|crates/habilis-network/src/daemon/setup.rs|2|bind: hands the owned ALPN list to the endpoint; with_protocols: keeps the owned protocol handlers
@@ -651,7 +651,8 @@ abbrev_name|crates/habilis-network-logging/src/log_sink.rs|9|existing letter-del
 abbrev_name|crates/habilis-network-netplay/src/mesh/rollback_driver.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/mesh/mesh_transport.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/peer_protocol.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-netplay/src/session.rs|29|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-netplay/src/p2p_session.rs|27|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-netplay/src/event.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/transport.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/lib.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/mesh/lookup.rs|12|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count

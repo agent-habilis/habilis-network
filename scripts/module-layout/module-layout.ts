@@ -28,11 +28,14 @@ function listFiles(): string[] {
 }
 
 // `frame_cache` for `FrameCache`: the snake_case of a type name, so `HTTPClient` names `http_client`.
-function snake(camel: string): string {
-  return camel
-    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
-    .toLowerCase();
+// A digit before a capital may split the word (`sha256_hash`) or not (`P2PSession` names `p2p_session`).
+function snakes(camel: string): string[] {
+  const split = (digitsSplit: boolean) =>
+    camel
+      .replace(digitsSplit ? /([a-z0-9])([A-Z])/g : /([a-z])([A-Z])/g, "$1_$2")
+      .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+      .toLowerCase();
+  return [split(true), split(false)];
 }
 
 // The public types of a leaf file, read before its `#[cfg(test)]` module. A type whose snake_case
@@ -43,7 +46,7 @@ function leafHit(file: string, src: string): string | undefined {
   const body = src.split(/^#\[cfg\(test\)\]/m)[0] ?? "";
   const types = [...body.matchAll(PUB_TYPE)].map((m) => m[1] ?? "");
   if (types.length === 0) return undefined;
-  if (types.some((name) => snake(name) === base)) return undefined;
+  if (types.some((name) => snakes(name).includes(base))) return undefined;
   return `leaf file named for none of its public types (${types.join(", ")}). Rename it`;
 }
 

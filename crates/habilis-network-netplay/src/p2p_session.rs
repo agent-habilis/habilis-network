@@ -19,54 +19,15 @@
 //! ```
 
 use crate::config::Config;
+use crate::event::Event;
 use crate::frame::Frame;
 use crate::peer_protocol::{PeerEvent, PeerProtocol, PeerState};
 use crate::player_handle::PlayerHandle;
 use crate::request::Request;
 use crate::rollback_error::RollbackError;
+use crate::session_state::SessionState;
 use crate::sync::Sync;
 use crate::transport::{Message, Transport};
-
-/// Whether the session is still handshaking or actually playing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum SessionState {
-    /// At least one peer has not completed its handshake. **Do not advance
-    /// frames yet** — this is what makes every peer start together, without
-    /// needing a shared wall clock.
-    Synchronizing,
-    /// Every peer is connected; the match is live.
-    Running,
-}
-
-/// Something the application should know about.
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
-#[non_exhaustive]
-pub enum Event<Peer> {
-    /// A peer finished its handshake.
-    Synchronized {
-        /// Who.
-        addr: Peer,
-    },
-    /// Every peer has synchronized; the match starts now.
-    Running,
-    /// A peer went silent past the timeout.
-    Disconnected {
-        /// Who.
-        addr: Peer,
-    },
-    /// A peer's checksum disagrees with ours: the two are no longer
-    /// simulating the same game. Unrecoverable — see
-    /// [`RollbackError::Desync`].
-    Desync {
-        /// The frame that disagreed.
-        frame: Frame,
-        /// Our checksum.
-        local: u128,
-        /// Theirs.
-        remote: u128,
-    },
-}
 
 /// A peer-to-peer rollback session.
 pub struct P2PSession<T: Config, Link: Transport<T>> {

@@ -50,6 +50,12 @@ test("a leaf named for its public type passes", () => {
   expectExit({ [leaf]: "pub struct FrameCache;" }, 0);
 });
 
+test("a leaf named for a type with an acronym and a digit passes (P2PSession, Sha256Hash)", () => {
+  expectExit({ "crates/x/src/p2p_session.rs": "pub struct P2PSession;" }, 0);
+  expectExit({ "crates/x/src/sha256_hash.rs": "pub struct Sha256Hash;" }, 0);
+  expectExit({ "crates/x/src/p2p_other.rs": "pub struct P2PSession;" }, 1);
+});
+
 test("a leaf with no public type is fine", () => {
   expectExit({ [leaf]: "fn helper() {}" }, 0);
 });
