@@ -47,18 +47,9 @@ crates/habilis-network/src/membership/app.rs|1|rename pending: public type(s) In
 crates/habilis-network/src/membership/event.rs|1|rename pending: public type(s) MembershipEvent
 crates/habilis-network/src/membership/join.rs|1|rename pending: public type(s) Opts, Membership
 crates/habilis-network/src/testing.rs|1|rename pending: public type(s) LogCapture, LaneNode
-crates/habilis-network/src/transport/accept.rs|1|rename pending: public type(s) UnicastAcceptor
 crates/habilis-network/src/transport/admission.rs|1|rename pending: public type(s) Refusal, Sessions, SignalAdmission, BusyGuard, ConnectionHook, AdmissionGuard
-crates/habilis-network/src/transport/direct_gossip.rs|1|rename pending: public type(s) DirectOnlyGossip
-crates/habilis-network/src/transport/endpoint_proof.rs|1|rename pending: public type(s) ProvenEndpoints
 crates/habilis-network/src/transport/ipc.rs|1|rename pending: public type(s) Addressed
-crates/habilis-network/src/transport/outbox.rs|1|rename pending: public type(s) Resend, ResendOutbox
-crates/habilis-network/src/transport/path.rs|1|rename pending: public type(s) PayloadPath
-crates/habilis-network/src/transport/pool.rs|1|rename pending: public type(s) UnicastPool, WarmSend, Registration, InFlightDial
 crates/habilis-network/src/transport/probe.rs|1|rename pending: public type(s) DirectOutcome, PathKind, PathAction, PathChange, PairToClimb, NudgeAddrs, StepInput, Step, GraftRequest, GraftTarget
-crates/habilis-network/src/transport/redial.rs|1|rename pending: public type(s) Track, Redials
-crates/habilis-network/src/transport/send.rs|1|rename pending: public type(s) Delivered, PendingSend, SendError, Lane
-crates/habilis-network/src/transport/sender.rs|1|rename pending: public type(s) MeshSender
 crates/habilis-network/src/transport/underlay_webrtc.rs|1|rename pending: public type(s) Plan, Allowed, UnderlaySignalGate, UnderlayWebRtc
 crates/habilis-network/src/transport/webrtc.rs|1|rename pending: public type(s) SignalDeadlines, IceProfile, WebRtcSignalAcceptor, UdpTransport, NudgeAcceptor
 tasks/src/bench/native.rs|1|rename pending: public type(s) WebRtcPeer

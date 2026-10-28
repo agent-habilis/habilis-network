@@ -1145,7 +1145,7 @@ impl EndpointHooks for ConnectionHook {
             && self.admission.watch_dialed_gossip.load(Ordering::Relaxed)
             && conn.alpn() == iroh_gossip::net::GOSSIP_ALPN
         {
-            super::direct_gossip::watch_relay_policy(conn, self.admission.path_sink());
+            super::direct_only_gossip::watch_relay_policy(conn, self.admission.path_sink());
         }
         AfterHandshakeOutcome::accept()
     }

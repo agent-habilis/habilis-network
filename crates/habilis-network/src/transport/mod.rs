@@ -20,16 +20,18 @@
 //! cross-transport dedup are identical on both planes.
 
 use tokio::sync::oneshot;
-mod accept;
 mod admission;
 pub(crate) mod ceiling;
-mod direct_gossip;
-pub(crate) mod endpoint_proof;
+mod direct_only_gossip;
+pub(crate) mod proven_endpoints;
+mod unicast_acceptor;
+pub(crate) use proven_endpoints as endpoint_proof;
 pub(crate) mod graft_backoff;
 #[cfg(feature = "host")]
 pub(crate) mod ipc;
 pub(crate) mod outbox;
-pub(crate) mod path;
+pub(crate) mod payload_path;
+pub(crate) use payload_path as path;
 mod pool;
 pub(crate) mod probe;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -52,20 +54,20 @@ pub(crate) mod underlay_webrtc;
 /// and simply never fire — a browser binds no socket, so its receiver is always
 /// `None`. Only the socket *server* needs `interprocess`.
 pub(crate) type IpcMessage<Cmd> = (Cmd, oneshot::Sender<String>);
+mod mesh_sender;
 mod send;
-pub(crate) mod sender;
 
-pub(crate) use accept::UnicastAcceptor;
 pub use admission::SignalAdmission;
-pub(crate) use direct_gossip::DirectOnlyGossip;
+pub(crate) use direct_only_gossip::DirectOnlyGossip;
+pub use mesh_sender::MeshSender;
 pub(crate) use outbox::{Resend, ResendOutbox};
 #[cfg(feature = "blob")]
-pub(crate) use path::{PROBE_DEADLINE, refuse_relayed};
-pub(crate) use path::{PayloadPath, RELAY_REFUSED, payload_allowed_on};
+pub(crate) use payload_path::{PROBE_DEADLINE, refuse_relayed};
+pub(crate) use payload_path::{PayloadPath, RELAY_REFUSED, payload_allowed_on};
 pub(crate) use pool::UnicastPool;
 pub use send::{Delivered, Lane, PendingSend, SendError, deliver, deliver_in_background};
 pub(crate) use send::{lane_for, note_held, resolve, send_best_effort, unicast_answer_target};
-pub use sender::MeshSender;
+pub(crate) use unicast_acceptor::UnicastAcceptor;
 pub use webrtc::MAX_DIRECT_PEERS;
 pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, UdpTransport, WebRtcSignalAcceptor};
 

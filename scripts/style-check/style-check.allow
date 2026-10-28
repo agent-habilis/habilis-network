@@ -2,7 +2,9 @@
 # Used by scripts/style-check/style-check.ts. Keep the count exact: the check fails when it is too low as well.
 
 # A Drop that runs while a panic unwinds must not panic: a second panic aborts the process.
-poison|crates/habilis-network/src/transport/pool.rs|2|InFlightDial::drop clears the in-flight entry during unwinding. register_dial must read the same map.
+poison|crates/habilis-network/src/transport/pool/in_flight_dial.rs|1|InFlightDial::drop clears the in-flight entry during unwinding. register_dial must read the same map.
+poison|crates/habilis-network/src/transport/pool/unicast_pool.rs|1|register_dial reads the map that the in-flight drop clears: a poisoned lock is reached only from the pool
+
 # The guard of a test must survive a test that panicked, or it hides the failure that matters.
 poison|crates/habilis-network-test-tracing/src/guard.rs|2|lock helper of the test guard: the import and the call.
 
@@ -185,14 +187,14 @@ assert_no_message|crates/habilis-network/src/lookup/mod.rs|20|kept: assert witho
 assert_no_message|crates/habilis-network/src/lookup/relay.rs|19|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/membership/app.rs|7|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/membership/join.rs|23|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network/src/transport/accept.rs|1|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network/src/transport/unicast_acceptor.rs|1|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/transport/admission.rs|53|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/transport/ceiling.rs|24|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network/src/transport/direct_gossip.rs|2|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network/src/transport/endpoint_proof.rs|2|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network/src/transport/direct_only_gossip.rs|2|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network/src/transport/proven_endpoints.rs|2|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/transport/graft_backoff.rs|10|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/transport/ipc.rs|11|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network/src/transport/path.rs|3|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network/src/transport/payload_path.rs|3|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/transport/pool.rs|11|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/transport/probe.rs|59|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/transport/redial.rs|4|kept: assert without a message, to be given one (P13 rollout)
@@ -316,8 +318,10 @@ long_chain|crates/habilis-network/src/testing.rs|2|kept: statements with a chain
 long_chain|crates/habilis-network/src/transport/admission.rs|15|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/transport/ceiling.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/transport/ipc.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/src/transport/path.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/src/transport/pool.rs|7|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network/src/transport/payload_path.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network/src/transport/pool/unicast_pool.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network/src/transport/pool.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+
 long_chain|crates/habilis-network/src/transport/probe.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/transport/send.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/transport/underlay_webrtc.rs|5|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -409,7 +413,7 @@ turbofish_collect_parse|crates/habilis-network/src/lookup/relay.rs|2|kept: colle
 turbofish_collect_parse|crates/habilis-network/src/membership/app.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network/src/membership/join.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network/src/transport/admission.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/transport/path.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
+turbofish_collect_parse|crates/habilis-network/src/transport/payload_path.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network/src/transport/send.rs|4|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network/src/transport/underlay_webrtc.rs|4|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network/src/transport/webrtc.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
@@ -489,8 +493,10 @@ untyped_long_chain_let|crates/habilis-network/src/lookup/mod.rs|5|kept: a let of
 untyped_long_chain_let|crates/habilis-network/src/membership/app.rs|5|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/testing.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/transport/admission.rs|5|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/src/transport/endpoint_proof.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/src/transport/pool.rs|5|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+untyped_long_chain_let|crates/habilis-network/src/transport/proven_endpoints.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+untyped_long_chain_let|crates/habilis-network/src/transport/pool/unicast_pool.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+untyped_long_chain_let|crates/habilis-network/src/transport/pool.rs|3|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+
 untyped_long_chain_let|crates/habilis-network/src/transport/probe.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/transport/send.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/transport/underlay_webrtc.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
@@ -599,10 +605,12 @@ fn_import|crates/habilis-network/src/net.rs|4|kept: a top-level function importe
 fn_import|crates/habilis-network/src/ops.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/transport/admission.rs|4|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/transport/ceiling.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network/src/transport/direct_gossip.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
+fn_import|crates/habilis-network/src/transport/direct_only_gossip.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/transport/graft_backoff.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/transport/ipc.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network/src/transport/pool.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
+fn_import|crates/habilis-network/src/transport/pool.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
+fn_import|crates/habilis-network/src/transport/pool/unicast_pool.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
+
 fn_import|crates/habilis-network/src/transport/probe.rs|14|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/transport/redial.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/transport/send.rs|7|kept: a top-level function imported by its bare name (O23 rollout)
@@ -705,14 +713,17 @@ abbrev_name|crates/habilis-network/src/membership/app.rs|60|existing letter-dele
 abbrev_name|crates/habilis-network/src/membership/event.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/join.rs|15|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/testing.rs|6|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/transport/accept.rs|23|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/unicast_acceptor.rs|23|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/admission.rs|59|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/transport/direct_gossip.rs|24|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/direct_only_gossip.rs|24|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/ipc.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/transport/path.rs|36|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/transport/pool.rs|56|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/payload_path.rs|36|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/pool/unicast_pool.rs|56|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+
 abbrev_name|crates/habilis-network/src/transport/probe.rs|175|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/transport/send.rs|15|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/send/deliver.rs|13|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/send/route.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+
 abbrev_name|crates/habilis-network/src/transport/underlay_webrtc.rs|24|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/webrtc.rs|211|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network-chunks/src/fs/disk_store.rs|2|kept: statements with a chain of five or more calls, moved with fs.rs (P15 rollout)
@@ -754,8 +765,8 @@ trait_import_scope|crates/habilis-network-test-tracing/src/guard.rs|1|kept: a tr
 trait_import_scope|crates/habilis-network/src/beacon/mod.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
 trait_import_scope|crates/habilis-network/src/blob/produce.rs|2|kept: a trait imported at the top of the file for its methods (O22 rollout)
 trait_import_scope|crates/habilis-network/src/daemon/event_loop.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
-trait_import_scope|crates/habilis-network/src/transport/direct_gossip.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
-trait_import_scope|crates/habilis-network/src/transport/path.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
+trait_import_scope|crates/habilis-network/src/transport/direct_only_gossip.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
+trait_import_scope|crates/habilis-network/src/transport/payload_path.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
 trait_import_scope|crates/habilis-network/src/transport/probe.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
 abbrev_name|crates/habilis-network-protocol/src/mesh/mesh.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network-protocol/src/mesh/locked_mesh.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
