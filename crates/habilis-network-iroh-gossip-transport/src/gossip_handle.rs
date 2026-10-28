@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use bytes::Bytes;
 use iroh::EndpointId;
 use iroh::address_lookup::AddressLookup;
 use iroh::endpoint::transports::{
@@ -23,123 +22,12 @@ use tokio::sync::mpsc;
 
 use crate::budget::Budget;
 use crate::counters::{Counters, Stats};
-use crate::frame::{self, EncodeError, Frame};
-use crate::{gossip_addr, parse_gossip_addr};
+use crate::delivery::Delivery;
+use crate::frame_sink::FrameSink;
+use crate::shared::{INBOUND_CAP, Packet, Shared, locked};
+use crate::{frame, gossip_addr, parse_gossip_addr};
 
 use iroh::endpoint::transports;
-/// The guard of `mutex`. A poisoned lock means a panic happened while it was held,
-/// so this function panics too.
-pub(crate) fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().expect("the lock is poisoned")
-}
-
-/// Packets waiting for iroh to read them.
-const INBOUND_CAP: usize = 256;
-
-/// Where a frame goes: the mesh gossip topic, once the engine has joined it.
-/// It never blocks. `false` means the frame was not accepted.
-pub trait FrameSink: std::fmt::Debug + Send + Sync + 'static {
-    /// Hand over one frame. It never blocks. Returns `false` if the frame was not accepted.
-    fn try_send(&self, frame: Bytes) -> bool;
-
-    /// Whether the sink can still carry a frame. A sink whose topic has closed
-    /// says no, and the path is not valid until the next `attach`.
-    fn is_alive(&self) -> bool {
-        true
-    }
-}
-
-/// What became of a frame that arrived from the topic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Delivery {
-    /// Queued for iroh.
-    Queued,
-    /// Addressed to another member.
-    NotForUs,
-    /// Not a frame this build reads.
-    Malformed,
-    /// iroh is not reading fast enough, or has stopped.
-    QueueFull,
-}
-
-/// A packet from another member, on its way to iroh.
-#[derive(Debug)]
-struct Packet {
-    remote: CustomAddr,
-    bytes: Vec<u8>,
-}
-
-#[derive(Debug)]
-pub(crate) struct Shared {
-    pub(crate) app_id: EndpointId,
-    local_addr: CustomAddr,
-    sink: Mutex<Option<Arc<dyn FrameSink>>>,
-    pub(crate) attached: AtomicBool,
-    /// Destinations that the engine stopped, because a higher rung carries them.
-    blocked: Mutex<HashSet<EndpointId>>,
-    /// The byte budget of this node, if one is set.
-    budget: Mutex<Option<Budget>>,
-    /// Destinations that have an established connection. A frame to any other
-    /// destination is a handshake and is not charged to the budget.
-    established: Mutex<HashSet<EndpointId>>,
-    counters: Counters,
-}
-
-impl Shared {
-    /// A path is valid while a sink is attached and alive.
-    pub(crate) fn path_is_valid(&self) -> bool {
-        if !self.attached.load(Ordering::SeqCst) {
-            return false;
-        }
-        let sink = locked(&self.sink).clone();
-        sink.is_some_and(|sink| sink.is_alive())
-    }
-
-    /// One QUIC datagram to `dst`: framed and handed to the sink. A datagram that
-    /// does not fit a frame, or that has no sink to go to, is dropped and the call
-    /// still succeeds, as a NIC drops what it cannot carry. QUIC recovers.
-    pub(crate) fn send_datagram(&self, dst: EndpointId, datagram: &[u8]) {
-        if locked(&self.blocked).contains(&dst) {
-            return self.counters.dropped_not_allowed();
-        }
-        let frame = match (Frame {
-            dst,
-            src: self.app_id,
-            datagram,
-        })
-        .encode()
-        {
-            Ok(frame) => frame,
-            Err(EncodeError::Empty) => return self.counters.dropped_empty(),
-            Err(EncodeError::TooLarge { .. }) => return self.counters.dropped_too_large(),
-        };
-        let sink = locked(&self.sink).clone().filter(|sink| sink.is_alive());
-        let Some(sink) = sink else {
-            return self.counters.dropped_no_sink();
-        };
-        let bytes = frame.len();
-        // A frame to a destination with a connection is charged to the budget. A
-        // frame to any other is a handshake and passes: a new pair must not be
-        // starved by a bulk flow that has used the budget up.
-        let charged = locked(&self.established).contains(&dst);
-        let mut budgeted = false;
-        if let Some(budget) = locked(&self.budget).as_mut() {
-            budgeted = true;
-            if charged && !budget.take(Instant::now(), bytes as u64) {
-                return self.counters.dropped_budget();
-            }
-        }
-        if sink.try_send(frame) {
-            self.counters.sent(bytes);
-            if budgeted && !charged {
-                self.counters.exempt();
-            }
-        } else {
-            self.counters.dropped_sink_refused();
-        }
-    }
-}
 
 /// A handle to a gossip transport. Clone-cheap. Register `custom_transport()` on
 /// the endpoint builder, and `attach` a sink once the topic is joined.
@@ -451,11 +339,15 @@ mod tests {
     use iroh::protocol::{AcceptError, ProtocolHandler, Router};
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
 
+    use bytes::Bytes;
+
     use super::{
-        Arc, Bytes, Context, CustomTransport, Delivery, EndpointId, Frame, FrameSink, GossipHandle,
-        INBOUND_CAP, Mutex, Ordering, Poll, RecvInfo, gossip_addr, io, locked,
+        Arc, Context, CustomTransport, Delivery, EndpointId, FrameSink, GossipHandle, Mutex,
+        Ordering, Poll, RecvInfo, gossip_addr, io,
     };
+    use crate::frame::Frame;
     use crate::memory::Hub;
+    use crate::shared::{INBOUND_CAP, locked};
     use crate::{GOSSIP_TRANSPORT_ID, frame};
 
     const ECHO_ALPN: &[u8] = b"habilis-network-gossip/test-echo/0";

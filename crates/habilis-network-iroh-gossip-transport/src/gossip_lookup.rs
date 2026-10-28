@@ -10,7 +10,7 @@ use iroh::{EndpointId, TransportAddr};
 use n0_future::boxed::BoxStream;
 use n0_future::stream;
 
-use crate::transport::Shared;
+use crate::shared::Shared;
 
 /// Provenance tag that iroh attaches to the items this lookup produces.
 const PROVENANCE: &str = "iroh-gossip-transport";

@@ -5,7 +5,7 @@
 crates/habilis-network-chunks/src/chunk_store.rs|2|generic bounds: ChunkSource and ChunkStore, one impl per storage backend
 
 # A dyn object: the transport holds one Arc<dyn FrameSink>, of any type.
-crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|dyn object: FrameSink, held as an Arc<dyn FrameSink>
+crates/habilis-network-iroh-gossip-transport/src/frame_sink.rs|1|dyn object: FrameSink, held as an Arc<dyn FrameSink>
 
 # A generic bound: Runtime<H: Host>, one impl per frontend.
 crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/host.rs|1|generic bound: Host, one impl per frontend
