@@ -208,6 +208,7 @@ unsafe_code = "deny"
 unreachable_pub = "warn"
 unused_qualifications = "warn"
 missing_debug_implementations = "warn"
+missing_copy_implementations = "warn"
 # Reject non-ASCII identifiers (homoglyph / supply-chain hardening;
 # matches the project's ASCII-only protocol ethos).
 non_ascii_idents = "deny"
