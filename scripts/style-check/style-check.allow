@@ -51,7 +51,7 @@ pub_const_fn|crates/habilis-network-protocol/src/message/mod.rs|4|kept: not yet 
 pub_const_fn|crates/habilis-network-protocol/src/message/verified.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
 pub_const_fn|crates/habilis-network-protocol/src/topic.rs|3|kept: not yet classified; reviewer to confirm const stays (U21).
 pub_const_fn|crates/habilis-network-stream/src/hash.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
-pub_const_fn|crates/habilis-network-util/src/clock.rs|5|kept: not yet classified; reviewer to confirm const stays (U21).
+pub_const_fn|crates/habilis-network-util/src/clock.rs|5|kept: 4 UnixSecs newtype accessors and constructors (newtype rule); millis_saturating is used in a const item (const context, clock.rs test ONE_SECOND).
 pub_const_fn|crates/habilis-network/src/blob/mod.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
 pub_const_fn|crates/habilis-network/src/daemon/params.rs|2|kept: not yet classified; reviewer to confirm const stays (U21).
 pub_const_fn|crates/habilis-network/src/gossip/app.rs|7|kept: not yet classified; reviewer to confirm const stays (U21).
