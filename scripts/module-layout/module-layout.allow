@@ -55,7 +55,6 @@ crates/habilis-network-protocol/src/peer_addr.rs|1|rename pending: public type(s
 crates/habilis-network-protocol/src/reassembly.rs|1|rename pending: public type(s) ShardIngest, ReassemblyStore, RepairTicket, ShardCache
 crates/habilis-network-protocol/src/seal.rs|1|rename pending: public type(s) SealError
 crates/habilis-network-protocol/src/topic.rs|1|rename pending: public type(s) TopicId
-crates/habilis-network-stream/src/produce.rs|1|rename pending: public type(s) Registry, StreamAcceptor, Producer
 crates/habilis-network-wasm/src/stream.rs|1|rename pending: public type(s) StreamNode, Producer, Reader
 crates/habilis-network/src/blob/error.rs|1|rename pending: public type(s) BlobError
 crates/habilis-network/src/blob/produce.rs|1|rename pending: public type(s) ServeLimits, BlobServer

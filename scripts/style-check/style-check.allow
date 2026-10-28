@@ -275,7 +275,6 @@ long_chain|crates/habilis-network-stream-cli/src/args.rs|1|kept: statements with
 long_chain|crates/habilis-network-stream-cli/src/main.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream-cli/tests/binary.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream/src/hash/stream_hash.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-stream/src/produce.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream/tests/stream.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-test-tracing/src/guard.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-test-tracing/tests/atexit.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -575,7 +574,6 @@ fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rus
 fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/tui/paint.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-protocol/src/invite/mod.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-stream/src/hash/stream_id.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-stream/src/produce.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/examples/mesh_peer_load.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/blob/mod.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/blob/produce.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
@@ -667,7 +665,6 @@ abbrev_name|crates/habilis-network-protocol/src/seal.rs|4|existing letter-delete
 abbrev_name|crates/habilis-network-stream-cli/src/args.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream-cli/src/main.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream/src/hash/stream_hash.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream/src/produce.rs|15|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream/src/read/reader.rs|5|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream/src/read/refused.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-test-tracing-macros/src/lib.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
@@ -731,3 +728,8 @@ assert_no_message|crates/habilis-network-stream/src/node/tests.rs|2|kept: assert
 fn_import|crates/habilis-network-stream/src/node/tests.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 long_chain|crates/habilis-network-stream/src/node/stream_node.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 turbofish_collect_parse|crates/habilis-network-stream/src/node/stream_node.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
+abbrev_name|crates/habilis-network-stream/src/produce/producer.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-stream/src/produce/registry.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-stream/src/produce/stream_acceptor.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+fn_import|crates/habilis-network-stream/src/produce/registry.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
+long_chain|crates/habilis-network-stream/src/produce/registry.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
