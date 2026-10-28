@@ -163,7 +163,7 @@ assert_no_message|crates/habilis-network-util/src/process.rs|10|kept: assert wit
 assert_no_message|crates/habilis-network/src/blob/mod.rs|11|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/blob/store.rs|14|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/blob/ticket.rs|25|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network/src/daemon/beacon_arm.rs|29|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network/src/daemon/cohost_arm.rs|29|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/daemon/event_loop.rs|14|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/daemon/heal.rs|12|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network/src/daemon/message_log.rs|22|kept: assert without a message, to be given one (P13 rollout)
@@ -289,7 +289,7 @@ long_chain|crates/habilis-network-wasm/src/stream_node.rs|1|kept: statements wit
 long_chain|crates/habilis-network/examples/mesh_peer.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/examples/mesh_peer_load.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/blob/mod.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/src/daemon/beacon_arm.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network/src/daemon/cohost_arm.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/daemon/handler_ctx.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/daemon/event_loop.rs|5|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/daemon/heal.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -588,7 +588,7 @@ fn_import|crates/habilis-network-stream/src/hash/stream_id.rs|1|kept: a top-leve
 fn_import|crates/habilis-network/examples/mesh_peer_load.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/blob/mod.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/blob/produce.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network/src/daemon/beacon_arm.rs|4|kept: a top-level function imported by its bare name (O23 rollout)
+fn_import|crates/habilis-network/src/daemon/cohost_arm.rs|4|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/daemon/event_loop.rs|3|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/daemon/mod.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/daemon/setup.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
@@ -689,7 +689,7 @@ abbrev_name|crates/habilis-network/src/blob/consume.rs|16|existing letter-delete
 abbrev_name|crates/habilis-network/src/blob/produce.rs|18|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/blob/ticket.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/daemon/app.rs|12|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/daemon/beacon_arm.rs|19|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/daemon/cohost_arm.rs|19|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/daemon/event_loop.rs|140|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/daemon/heal.rs|15|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/daemon/message_log.rs|30|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count

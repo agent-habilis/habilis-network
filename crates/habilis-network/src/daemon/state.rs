@@ -639,8 +639,8 @@ pub struct EventLoopState {
     /// When the member last said that every rung of its ladder is held by another process.
     pub(crate) no_rung_noted_at: Option<Instant>,
     /// Consecutive due sheds held back because a data-channel peer depends
-    /// on this beacon; see `beacon_arm::defer_shed`. Cleared by a shed and by a
-    /// fresh claim (`beacon_arm::schedule_rival_recheck`).
+    /// on this beacon; see `cohost_arm::defer_shed`. Cleared by a shed and by a
+    /// fresh claim (`cohost_arm::schedule_rival_recheck`).
     pub(crate) rival_recheck_deferrals: u32,
     /// The close of the beacon that a rival re-check just shed: when it resolves the loop
     /// re-probes the id at once, instead of at the next reclaim tick. `None` when no shed runs.
@@ -1502,7 +1502,7 @@ impl EventLoopState {
             // our re-check away. Pushed, not dropped: a holder that never re-checks never finds
             // a co-host it does not know of.
             let pushed = now
-                + super::beacon_arm::next_recheck_delay(
+                + super::cohost_arm::next_recheck_delay(
                     self.rival_recheck_rounds.max(1),
                     self.peers.len(),
                     own,
@@ -1533,7 +1533,7 @@ impl EventLoopState {
         {
             return;
         }
-        let brisk = now + super::beacon_arm::next_recheck_delay(0, self.peers.len(), own);
+        let brisk = now + super::cohost_arm::next_recheck_delay(0, self.peers.len(), own);
         if due <= brisk {
             return;
         }

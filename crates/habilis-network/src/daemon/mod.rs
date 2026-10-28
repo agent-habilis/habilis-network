@@ -44,7 +44,7 @@ pub(crate) mod state_file;
 pub(crate) mod timers;
 
 /// Beacon policy: the co-host decision, split out of `event_loop`.
-mod beacon_arm;
+mod cohost_arm;
 pub(crate) mod event_loop;
 /// Mesh healing and resubscribe, split out of `event_loop`.
 mod heal;

@@ -39,7 +39,7 @@ use n0_future::time::Instant as TokioInstant;
 use crate::{beacon, gossip, lifecycle};
 
 use super::app::NodeDriver;
-use super::beacon_arm::{
+use super::cohost_arm::{
     CohostArm, claims_at_startup, may_cohost, maybe_cohost, maybe_reclaim, note_rival_holds,
     offer_to_the_new_holder, probes_before_claim, release_rendezvous, schedule_rival_recheck,
     shed_rival_beacon_if_due, verdict_after_known_holders,
@@ -847,9 +847,9 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
     let mut exit_after_release = false;
     loop {
         #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-        super::beacon_arm::shed_on_request(&mut state, &rendezvous_params, &mut rendezvous);
+        super::cohost_arm::shed_on_request(&mut state, &rendezvous_params, &mut rendezvous);
         #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-        super::beacon_arm::stall_on_request(&mut state, rendezvous.as_ref());
+        super::cohost_arm::stall_on_request(&mut state, rendezvous.as_ref());
         // Whether this process hosts the beacon is read here, once per turn,
         // from the one place that owns it, so that no path that claims or sheds
         // the beacon has to remember to say so.

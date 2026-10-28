@@ -509,7 +509,7 @@ pub const RECLAIM_WINDOW: Duration = Duration::from_secs(6);
 pub const RECLAIM_INTERVAL: Duration = Duration::from_millis(400);
 
 /// How often a member repeats that every port of its room's ladder is held by other processes
-/// (`daemon::beacon_arm`: the warning and the event of the app).
+/// (`daemon::cohost_arm`: the warning and the event of the app).
 ///
 /// The walk runs at every heal tick and at every tick of the reclaim burst, and the state does
 /// not change in between. A line every heal tick is 240 lines an hour in the log and in the
@@ -631,7 +631,7 @@ pub fn rival_recheck_meshed() -> Duration {
 }
 
 /// Shed cadence ceiling for a holder with an **empty roster** — the tier
-/// `daemon::beacon_arm::next_recheck_delay` picks when `roster == 0`.
+/// `daemon::cohost_arm::next_recheck_delay` picks when `roster == 0`.
 ///
 /// [`RIVAL_RECHECK_MESHED`] is priced for two multi-member islands, and
 /// the geometric ramp caps there for every small roster. A node that knows no

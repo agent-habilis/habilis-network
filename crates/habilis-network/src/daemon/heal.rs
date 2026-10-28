@@ -1,7 +1,7 @@
 //! Healing the gossip mesh: the heal tick, the resubscribe path when the
 //! stream ends, and applying a rung change chosen off-loop.
 //!
-//! Split out of `event_loop` for the same reason as `beacon_arm` — this is
+//! Split out of `event_loop` for the same reason as `cohost_arm` — this is
 //! recovery, not the loop, and it reads better without the tick arms around it.
 
 use std::time::Duration;
