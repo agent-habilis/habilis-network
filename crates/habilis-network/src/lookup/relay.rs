@@ -87,13 +87,14 @@ static RENDEZVOUS_RELAY_LADDER_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| 
     clippy::match_same_arms,
     reason = "the named variants are listed on purpose, so a new variant stays visible"
 )]
-pub fn relay_ladder(choice: &RelayChoice) -> Vec<RelayUrl> {
-    match choice {
+pub fn relay_ladder(choice: &RelayChoice) -> impl Iterator<Item = RelayUrl> {
+    let rungs = match choice {
         RelayChoice::Disabled => Vec::new(),
         RelayChoice::Pinned => RENDEZVOUS_RELAY_LADDER_URLS.clone(),
         RelayChoice::Custom(ladder) => ladder.clone(),
         _ => Vec::new(),
-    }
+    };
+    rungs.into_iter()
 }
 
 /// The relay config of one rung. A rung over plain `http://` has no TLS, and QUIC needs TLS, so
@@ -204,13 +205,16 @@ where
 /// rung's online status. Unlike `select_bootstrap_rung` this does **not**
 /// short-circuit at the first reachable rung — `doctor --mesh` shows the full
 /// ladder's health, not just the bootstrap pick.
-pub async fn probe_ladder(ladder: &[RelayUrl], per_rung: Duration) -> Vec<(RelayUrl, bool)> {
+pub async fn probe_ladder(
+    ladder: &[RelayUrl],
+    per_rung: Duration,
+) -> impl Iterator<Item = (RelayUrl, bool)> {
     let mut statuses = Vec::with_capacity(ladder.len());
     for rung in ladder {
         let reachable = relay_rung_reachable(rung, per_rung, None).await;
         statuses.push((rung.clone(), reachable));
     }
-    statuses
+    statuses.into_iter()
 }
 
 /// Probe a single relay rung: bind an ephemeral endpoint pinned to just
@@ -523,13 +527,16 @@ mod tests {
     #[test]
     fn pinned_ladder_resolves_to_prod_set() {
         assert_eq!(
-            relay_ladder(&RelayChoice::Pinned),
+            relay_ladder(&RelayChoice::Pinned).collect::<Vec<_>>(),
             *RENDEZVOUS_RELAY_LADDER_URLS,
             "Pinned ⇒ the full n0 prod ladder"
         );
-        assert!(relay_ladder(&RelayChoice::Disabled).is_empty());
+        assert!(relay_ladder(&RelayChoice::Disabled).next().is_none());
         let custom = vec!["https://a.example./".parse::<RelayUrl>().unwrap()];
-        assert_eq!(relay_ladder(&RelayChoice::Custom(custom.clone())), custom);
+        assert_eq!(
+            relay_ladder(&RelayChoice::Custom(custom.clone())).collect::<Vec<_>>(),
+            custom
+        );
     }
 
     #[test]

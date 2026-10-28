@@ -103,7 +103,7 @@ fn rendezvous_params(
     // beacon's own liveness self-monitor correct it off the event loop
     // via `rung_tx` if rung 0 turns out to be unreachable. Empty for
     // private / relay-disabled ⇒ `None`.
-    let bootstrap_relay = relay_ladder(&lookups.relay_lookup).first().cloned();
+    let bootstrap_relay = relay_ladder(&lookups.relay_lookup).next();
     RendezvousParams {
         topic_id,
         secret: mesh.rendezvous_secret(),
@@ -994,7 +994,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     // event loop applies it (re-register + re-home) without ever running
     // a ladder walk on the sole loop. Initialized to the optimistic
     // rung 0 (empty ladder ⇒ `None`).
-    let ladder = relay_ladder(&lookups.relay_lookup);
+    let ladder = relay_ladder(&lookups.relay_lookup).collect::<Vec<_>>();
     let (rung_tx, rung_rx) = watch::channel(ladder.first().cloned());
 
     let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport);

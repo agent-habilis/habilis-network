@@ -1753,7 +1753,7 @@ async fn claim_holder(
     // stall rendezvous bridging. Spawned whenever relay is enabled
     // (public + a non-empty ladder) — *not* gated on currently holding a
     // rung, so a relay-less beacon keeps probing to rediscover one.
-    let ladder = crate::lookup::relay_ladder(&params.lookups.relay_lookup);
+    let ladder = crate::lookup::relay_ladder(&params.lookups.relay_lookup).collect::<Vec<_>>();
     let monitors_relay = !params.lookups.is_loopback() && !ladder.is_empty();
     let monitor_endpoint = endpoint.clone();
     let monitor_homed = params.bootstrap_relay.is_some();
