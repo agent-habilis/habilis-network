@@ -9,223 +9,22 @@
 //! advertise validation, and the target resolution live — instead of three
 //! near-identical copies in `cli`, `api`, and `mcp`.
 
+mod create_params;
+mod join_params;
+mod resolved;
+mod topic_params;
+
 use super::setup_error::SetupError;
 
-use crate::protocol::Nickname;
-use crate::protocol::crypto::Password;
-use crate::protocol::mesh::{
-    AdvertiseRequiresReachable, DirectorySelection, LookupOpts, Mesh, MeshConfig, MeshName,
-    TransportPolicy, UnlockError, validate_advertise,
-};
-use crate::resolver::{self, JoinTarget};
-
-use super::setup::SetupKind;
+use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, TransportPolicy};
 
 use crate::protocol::mesh::RelayChoice;
 use crate::util::tuning;
-/// The create intent, before resolution. Each frontend builds this from its
-/// own input struct (the lookups are already resolved into `config`).
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct CreateParams {
-    /// The name of the mesh.
-    pub name: MeshName,
-    /// `None` ⇒ a random `word-word` nickname is minted in `resolve`.
-    pub nickname: Option<Nickname>,
-    /// The mesh configuration.
-    pub config: MeshConfig,
-    /// How the mesh is advertised.
-    pub advertise: DirectorySelection,
-    /// Password to protect the mesh with; the verifier is baked into the
-    /// id at setup (the salt is the seed, minted there).
-    pub password: Option<Password>,
-    /// `--invite-only`: the mesh's issuer keypair + invite root are minted at
-    /// setup and only creator-signed invites can join.
-    pub invite_only: bool,
-}
 
-impl CreateParams {
-    /// The name, nickname, config and advertisement of a new mesh. Set the password and the
-    /// invite-only flag with their `with_` methods.
-    #[must_use]
-    pub fn new(
-        name: MeshName,
-        nickname: Option<Nickname>,
-        config: MeshConfig,
-        advertise: DirectorySelection,
-    ) -> Self {
-        Self {
-            name,
-            nickname,
-            config,
-            advertise,
-            password: None,
-            invite_only: false,
-        }
-    }
-
-    /// The password that unlocks the mesh, when the mesh has one.
-    #[must_use]
-    pub fn with_password(mut self, password: Option<Password>) -> Self {
-        self.password = password;
-        self
-    }
-
-    /// Set whether the mesh is invite-only.
-    #[must_use]
-    pub fn with_invite_only(
-        mut self,
-        // true makes the mesh invite-only
-        invite_only: bool,
-    ) -> Self {
-        self.invite_only = invite_only;
-        self
-    }
-}
-
-/// The join intent, before resolution.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct JoinParams {
-    /// The target to join.
-    pub target: JoinTarget,
-    /// The nickname of the member.
-    pub nickname: Option<Nickname>,
-    /// Password for a passworded id; verified against the id's verifier in
-    /// `resolve` (before any network).
-    pub password: Option<Password>,
-}
-
-impl JoinParams {
-    /// The join target, the nickname and the password: every field a join sets.
-    #[must_use]
-    pub fn new(target: JoinTarget, nickname: Option<Nickname>, password: Option<Password>) -> Self {
-        Self {
-            target,
-            nickname,
-            password,
-        }
-    }
-}
-
-/// The topic intent: a mesh derived deterministically from a shared string,
-/// always public. Name + config are derived, not supplied — the string alone
-/// determines the mesh.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct TopicParams {
-    /// The shared string that fixes the mesh. Every peer that passes the same string meets in the same mesh.
-    pub string: String,
-    /// `None` ⇒ a random `word-word` nickname is minted in `resolve`.
-    pub nickname: Option<Nickname>,
-}
-
-/// A resolved create/join, ready to hand to
-/// [`setup_mesh`](super::setup::setup_mesh). `advertise_directory` is the
-/// directory to re-broadcast into (`create --advertise`), or `None`.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct Resolved {
-    /// What the setup creates.
-    pub kind: SetupKind,
-    /// This member's nickname, the author of every message it sends.
-    pub author: Nickname,
-    /// The directory the mesh is advertised to, if any.
-    pub advertise_directory: Option<MeshName>,
-}
-
-impl CreateParams {
-    /// Validate the advertise request against the config, default the
-    /// nickname, and build the create [`SetupKind`].
-    ///
-    /// # Errors
-    /// Returns [`AdvertiseRequiresReachable`] if `advertise` is set on a
-    /// loopback-only mesh.
-    pub fn resolve(self) -> Result<Resolved, AdvertiseRequiresReachable> {
-        validate_advertise(&self.advertise, &self.config.lookups)?;
-        let advertise_directory = self.advertise.directory();
-        Ok(Resolved {
-            kind: SetupKind::Create {
-                name: self.name,
-                config: self.config,
-                advertise: advertise_directory.clone(),
-                password: self.password,
-                invite_only: self.invite_only,
-            },
-            author: self.nickname.unwrap_or_else(Nickname::random),
-            advertise_directory,
-        })
-    }
-}
-
-impl JoinParams {
-    /// Resolve the mesh id target into a [`Mesh`], verify the password
-    /// against the id's verifier (locally — a wrong password fails here,
-    /// before any network), and default the nickname. `join` never
-    /// advertises.
-    ///
-    /// # Errors
-    /// The id cannot be decoded into a [`Mesh`]; the id requires a password
-    /// and none was given (`PasswordRequired`, typed for the frontends);
-    /// the password is wrong; or a password was given for a passwordless id.
-    ///
-    /// [`Mesh`]: crate::protocol::mesh::Mesh
-    pub fn resolve(self) -> Result<Resolved, SetupError> {
-        let mesh = match &self.target {
-            JoinTarget::Mesh(_) => {
-                let locked = resolver::resolve(&self.target).map_err(SetupError::Resolve)?;
-                // ~100ms of Argon2id, accepted synchronously: this runs once
-                // per join, before the daemon exists. `unlock` decides whether a
-                // password is needed; only its typed reason is mapped here.
-                #[expect(
-                    clippy::wildcard_enum_match_arm,
-                    reason = "foreign non_exhaustive enum: the compiler needs a wildcard arm; the named variants are listed before it"
-                )]
-                let unlocked =
-                    locked
-                        .unlock(self.password.as_ref())
-                        .map_err(|error| match error {
-                            UnlockError::PasswordRequired => SetupError::PasswordRequired,
-                            error @ (UnlockError::InviteOnly
-                            | UnlockError::NoPassword
-                            | UnlockError::WrongPassword) => SetupError::Unlock(error),
-                            other => SetupError::Unlock(other),
-                        })?;
-                unlocked
-            }
-            // Redeem the invite: verify the creator's signature + expiry and
-            // unwrap the join root. An invite-only mesh carries no id-level
-            // password verifier — the invite's own `password` flag drives the
-            // prompt, and `redeem` unwraps the root with it.
-            JoinTarget::Invite(invite) => {
-                match (&self.password, invite.requires_password()) {
-                    (None, true) => return Err(SetupError::PasswordRequired),
-                    (Some(_), false) => return Err(SetupError::InviteNoPassword),
-                    _ => {}
-                }
-                invite
-                    .redeem(self.password.as_ref())
-                    .map_err(SetupError::Invite)?
-            }
-            _ => {
-                return Err(SetupError::internal(anyhow::anyhow!(
-                    "this join target is not supported by this build"
-                )));
-            }
-        };
-        Ok(Resolved {
-            kind: SetupKind::Join {
-                mesh,
-                // Retained so the daemon can key blob-ticket protection with the
-                // same password (`None` for a passwordless id/invite).
-                password: self.password,
-            },
-            author: self.nickname.unwrap_or_else(Nickname::random),
-            advertise_directory: None,
-        })
-    }
-}
-
+pub use create_params::CreateParams;
+pub use join_params::JoinParams;
+pub use resolved::Resolved;
+pub use topic_params::TopicParams;
 /// The canonical [`Mesh`] a topic string derives — always the public preset.
 /// The single source of that derivation *and* of the empty/whitespace-string
 /// guard, shared by [`TopicParams::resolve`] and the MCP idempotency check so
@@ -300,27 +99,6 @@ pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh
         MeshConfig::new(config.lookups, None, None, config.transport),
     )
     .map_err(SetupError::Config)
-}
-
-impl TopicParams {
-    /// Derive the mesh from the string (always the public preset) and default
-    /// the nickname. A topic never advertises. The empty/whitespace-string
-    /// guard lives in [`derive_topic_mesh`], which every frontend (CLI,
-    /// in-process) funnels through.
-    ///
-    /// # Errors
-    /// Fails if the string is empty or whitespace-only.
-    pub fn resolve(self) -> Result<Resolved, SetupError> {
-        let mesh = derive_topic_mesh(&self.string)?;
-        Ok(Resolved {
-            kind: SetupKind::Topic {
-                mesh,
-                topic_string: self.string,
-            },
-            author: self.nickname.unwrap_or_else(Nickname::random),
-            advertise_directory: None,
-        })
-    }
 }
 
 #[cfg(test)]
@@ -420,8 +198,9 @@ mod topic_derivation_tests {
 
 #[cfg(test)]
 mod join_password_tests {
-    use super::{JoinParams, Password, SetupError};
+    use super::{JoinParams, SetupError};
     use crate::protocol::Seed;
+    use crate::protocol::crypto::Password;
     use crate::protocol::mesh::{Mesh, MeshConfig, MeshName};
 
     /// A passworded id, as a joiner is handed it.

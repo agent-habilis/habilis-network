@@ -1,0 +1,102 @@
+use super::Resolved;
+use crate::daemon::setup_error::SetupError;
+
+use crate::protocol::Nickname;
+use crate::protocol::crypto::Password;
+use crate::protocol::mesh::UnlockError;
+use crate::resolver::{self, JoinTarget};
+
+use crate::daemon::setup::SetupKind;
+
+/// The join intent, before resolution.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct JoinParams {
+    /// The target to join.
+    pub target: JoinTarget,
+    /// The nickname of the member.
+    pub nickname: Option<Nickname>,
+    /// Password for a passworded id; verified against the id's verifier in
+    /// `resolve` (before any network).
+    pub password: Option<Password>,
+}
+
+impl JoinParams {
+    /// The join target, the nickname and the password: every field a join sets.
+    #[must_use]
+    pub fn new(target: JoinTarget, nickname: Option<Nickname>, password: Option<Password>) -> Self {
+        Self {
+            target,
+            nickname,
+            password,
+        }
+    }
+}
+
+impl JoinParams {
+    /// Resolve the mesh id target into a [`Mesh`], verify the password
+    /// against the id's verifier (locally — a wrong password fails here,
+    /// before any network), and default the nickname. `join` never
+    /// advertises.
+    ///
+    /// # Errors
+    /// The id cannot be decoded into a [`Mesh`]; the id requires a password
+    /// and none was given (`PasswordRequired`, typed for the frontends);
+    /// the password is wrong; or a password was given for a passwordless id.
+    ///
+    /// [`Mesh`]: crate::protocol::mesh::Mesh
+    pub fn resolve(self) -> Result<Resolved, SetupError> {
+        let mesh = match &self.target {
+            JoinTarget::Mesh(_) => {
+                let locked = resolver::resolve(&self.target).map_err(SetupError::Resolve)?;
+                // ~100ms of Argon2id, accepted synchronously: this runs once
+                // per join, before the daemon exists. `unlock` decides whether a
+                // password is needed; only its typed reason is mapped here.
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign non_exhaustive enum: the compiler needs a wildcard arm; the named variants are listed before it"
+                )]
+                let unlocked =
+                    locked
+                        .unlock(self.password.as_ref())
+                        .map_err(|error| match error {
+                            UnlockError::PasswordRequired => SetupError::PasswordRequired,
+                            error @ (UnlockError::InviteOnly
+                            | UnlockError::NoPassword
+                            | UnlockError::WrongPassword) => SetupError::Unlock(error),
+                            other => SetupError::Unlock(other),
+                        })?;
+                unlocked
+            }
+            // Redeem the invite: verify the creator's signature + expiry and
+            // unwrap the join root. An invite-only mesh carries no id-level
+            // password verifier — the invite's own `password` flag drives the
+            // prompt, and `redeem` unwraps the root with it.
+            JoinTarget::Invite(invite) => {
+                match (&self.password, invite.requires_password()) {
+                    (None, true) => return Err(SetupError::PasswordRequired),
+                    (Some(_), false) => return Err(SetupError::InviteNoPassword),
+                    _ => {}
+                }
+                invite
+                    .redeem(self.password.as_ref())
+                    .map_err(SetupError::Invite)?
+            }
+            _ => {
+                return Err(SetupError::internal(anyhow::anyhow!(
+                    "this join target is not supported by this build"
+                )));
+            }
+        };
+        Ok(Resolved {
+            kind: SetupKind::Join {
+                mesh,
+                // Retained so the daemon can key blob-ticket protection with the
+                // same password (`None` for a passwordless id/invite).
+                password: self.password,
+            },
+            author: self.nickname.unwrap_or_else(Nickname::random),
+            advertise_directory: None,
+        })
+    }
+}
