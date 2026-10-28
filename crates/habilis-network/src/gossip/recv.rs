@@ -26,7 +26,7 @@ use n0_future::time::Instant as TokioInstant;
 
 use super::antientropy;
 use super::app::{AppClass, InboundApp, NodeApp};
-use super::broadcast::{announce_arrival, broadcast_peer_info};
+use super::merge_ctx::{announce_arrival, broadcast_peer_info};
 use crate::net::conn_path;
 
 #[cfg(feature = "multihop")]
@@ -465,7 +465,7 @@ fn requeue(
     msg: Verified,
     bytes: WireFrame,
 ) -> bool {
-    super::broadcast::park_and_offer(state, ctx, &msg, &bytes);
+    super::merge_ctx::park_and_offer(state, ctx, &msg, &bytes);
     state.pending_outbound.push((msg, bytes))
 }
 

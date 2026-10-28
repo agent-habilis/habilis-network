@@ -10,7 +10,7 @@
 
 pub(crate) mod antientropy;
 pub(crate) mod app;
-mod broadcast;
+mod merge_ctx;
 pub(crate) mod event;
 pub(crate) mod heal;
 pub(crate) mod lan;
@@ -37,11 +37,11 @@ const _: () = assert!(
     "MAX_MESSAGE_SIZE leaves too little headroom under iroh-gossip's DEFAULT_MAX_MESSAGE_SIZE"
 );
 
-pub use broadcast::{
+pub use merge_ctx::{
     MergeCtx, StateMergeParams, app_frame, broadcast_msg, broadcast_state_merge, send_app,
     start_ping_round, unicast_farewell,
 };
-pub(crate) use broadcast::{broadcast_peer_info, send_second_probe};
+pub(crate) use merge_ctx::{broadcast_peer_info, send_second_probe};
 pub(crate) use json_body::json_body;
 pub(crate) use path_summary::PathSummary;
 
