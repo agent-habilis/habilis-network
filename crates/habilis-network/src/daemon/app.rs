@@ -171,9 +171,9 @@ pub trait NodeDriver: NodeApp {
 /// beyond the loop state and handler context.
 #[derive(Debug)]
 #[non_exhaustive]
-pub struct IpcRequest<'name, C> {
+pub struct IpcRequest<'name, Cmd> {
     /// The parsed IPC command.
-    pub cmd: C,
+    pub cmd: Cmd,
     /// Gets the text of the answer.
     pub resp: oneshot::Sender<String>,
     /// The name of the mesh.

@@ -101,7 +101,7 @@ impl<T: Config> RollbackDriver<T> {
 }
 
 /// Decode a packet body, ignoring anything malformed.
-fn decode<D: for<'de> Deserialize<'de>>(body: &str) -> Option<D> {
+fn decode<Decoder: for<'de> Deserialize<'de>>(body: &str) -> Option<Decoder> {
     serde_json::from_str(body).ok()
 }
 

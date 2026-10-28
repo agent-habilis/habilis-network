@@ -42,9 +42,9 @@ string_newtype!(
 );
 
 impl<'de> Deserialize<'de> for ShardGroup {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<Decoder>(deserializer: Decoder) -> Result<Self, Decoder::Error>
     where
-        D: Deserializer<'de>,
+        Decoder: Deserializer<'de>,
     {
         let raw = String::deserialize(deserializer)?;
         Uuid::parse_str(&raw).map_err(|_| serde::de::Error::custom("invalid shard group"))?;
@@ -81,9 +81,9 @@ pub struct Shard {
 }
 
 impl<'de> Deserialize<'de> for Shard {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<Decoder>(deserializer: Decoder) -> Result<Self, Decoder::Error>
     where
-        D: Deserializer<'de>,
+        Decoder: Deserializer<'de>,
     {
         #[derive(Deserialize)]
         struct Raw {

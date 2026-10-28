@@ -35,13 +35,13 @@ const CHUNK: usize = 64 * 1024;
 /// A password mismatch with the ticket, dial/handshake failure, the producer
 /// refusing (bad secret / unknown blob), a size disagreement, a truncated
 /// stream, or a final digest that does not match the ticket.
-pub async fn fetch<W>(
+pub async fn fetch<Writer>(
     ticket: &BlobTicket,
-    out: &mut W,
+    out: &mut Writer,
     password: Option<Password>,
 ) -> Result<(), BlobError>
 where
-    W: AsyncWrite + Unpin,
+    Writer: AsyncWrite + Unpin,
 {
     let token = auth_token(ticket, password.as_ref())?;
     fetch_with_token(ticket, out, &token)
@@ -49,9 +49,13 @@ where
         .map_err(BlobError::internal)
 }
 
-async fn fetch_with_token<W>(ticket: &BlobTicket, out: &mut W, token: &TicketSecret) -> Result<()>
+async fn fetch_with_token<Writer>(
+    ticket: &BlobTicket,
+    out: &mut Writer,
+    token: &TicketSecret,
+) -> Result<()>
 where
-    W: AsyncWrite + Unpin,
+    Writer: AsyncWrite + Unpin,
 {
     let endpoint = build_peer_endpoint(&ticket.lookups).await?;
     add_peer_addr(&address_book(&endpoint), ticket.addr.clone());
@@ -60,14 +64,14 @@ where
     result
 }
 
-async fn fetch_over<W>(
+async fn fetch_over<Writer>(
     endpoint: &Endpoint,
     ticket: &BlobTicket,
     token: &TicketSecret,
-    out: &mut W,
+    out: &mut Writer,
 ) -> Result<()>
 where
-    W: AsyncWrite + Unpin,
+    Writer: AsyncWrite + Unpin,
 {
     use sha2::Digest;
     use tokio::io::AsyncWriteExt as _;

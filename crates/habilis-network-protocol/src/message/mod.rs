@@ -232,9 +232,9 @@ impl CorrId {
 }
 
 impl<'de> Deserialize<'de> for CorrId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<Decoder>(deserializer: Decoder) -> Result<Self, Decoder::Error>
     where
-        D: serde::Deserializer<'de>,
+        Decoder: serde::Deserializer<'de>,
     {
         // The engine stays payload-agnostic (the app enforces its own UUID
         // contract), but a length bound caps DoS at the wire boundary: the app
@@ -648,7 +648,9 @@ impl Serialize for Wire<'_> {
 }
 
 impl<'de> Deserialize<'de> for Message {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<Decoder: serde::Deserializer<'de>>(
+        deserializer: Decoder,
+    ) -> Result<Self, Decoder::Error> {
         let wire = WireIn::deserialize(deserializer)?;
         Message::try_from(wire).map_err(serde::de::Error::custom)
     }

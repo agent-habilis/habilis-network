@@ -34,9 +34,9 @@ use tokio::signal::unix;
 /// best-effort `Left` broadcast and its 500 ms propagation sleep so a
 /// kill landing during that window can't strand the file with a still-fresh
 /// `last_updated`, leaving a ghost pill on the statusline.
-pub(super) async fn shutdown<A: NodeDriver>(
+pub(super) async fn shutdown<Driver: NodeDriver>(
     state: &mut EventLoopState,
-    app: &mut A,
+    app: &mut Driver,
     ctx: &HandlerCtx<'_>,
     quit: &QuitParams<'_>,
 ) {
@@ -83,9 +83,9 @@ pub(super) struct QuitParams<'name> {
 /// from here skips both, and the peers of the beacon wait for its idle timeout. Under the
 /// `dhat-heap` profiling build we *never* hard-exit regardless: it skips destructors, so the
 /// heap profiler would never flush `dhat-heap.json`; `main` unwinds and the profiler drops.
-pub(super) async fn announce_departure<A: NodeDriver>(
+pub(super) async fn announce_departure<Driver: NodeDriver>(
     state: &mut EventLoopState,
-    app: &mut A,
+    app: &mut Driver,
     ctx: &HandlerCtx<'_>,
     quit: QuitParams<'_>,
 ) -> bool {

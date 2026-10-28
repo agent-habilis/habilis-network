@@ -489,3 +489,14 @@ test("self_convention: an into_ by reference counts", () => {
 test("self_convention: the guide's shapes are clean", () => {
   expectExit("crates/demo/src/lib.rs", selfConv("    pub fn as_x(&self) -> u8 {\n        1\n    }\n    pub fn to_x(&self) -> u8 {\n        1\n    }\n    pub fn into_x(self) -> u8 {\n        1\n    }"), 0);
 });
+
+// The generic_name rule: a generic parameter is a short letter from the allowed set, or a CamelCase word (N7).
+test("generic_name: a single letter outside the set counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub struct Wrap<A>(pub A);", 1);
+});
+test("generic_name: a lowercase generic counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f<x: Copy>(v: x) -> x {\n    v\n}", 1);
+});
+test("generic_name: the allowed letters and a CamelCase word are clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub struct Pair<T, Handle>(pub T, pub Handle);\npub fn f<Decoder: Copy>(v: Decoder) -> Decoder {\n    v\n}", 0);
+});

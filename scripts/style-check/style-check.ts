@@ -304,6 +304,23 @@ function countSelfConvention(raw: string): number {
   return count;
 }
 
+// The generic parameters of a declaration that are not T, U, E, K, V, F, I, R or S, and not a CamelCase word of
+// three or more letters. A single letter says nothing about what the parameter stands for.
+function countGenericNames(raw: string): number {
+  const text = stripTestModules(blankStrings(raw.replace(/\/\/[^\n]*/g, "")));
+  const allowed = /^(?:[TUEKVFIRS]|[A-Z][A-Za-z]{2,})$/;
+  let count = 0;
+  const decls = [...text.matchAll(/\b(?:fn|struct|enum|trait|type|union) \w+<([^>{;()]*)>/g), ...text.matchAll(/^\s*impl<([^>{;()]*)>/gm)];
+  for (const m of decls) {
+    for (const part of (m[1] ?? "").split(",")) {
+      const name = part.trim().split(/[:\s=]/)[0] ?? "";
+      if (!name || name.startsWith("'") || name === "const") continue;
+      if (!allowed.test(name)) count++;
+    }
+  }
+  return count;
+}
+
 // A public fn that returns a Vec. The guide prefers an iterator, so a Vec needs a counted allow row with its reason.
 function countPubVecReturn(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
@@ -617,6 +634,13 @@ const RULES: Rule[] = [
     skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
     glob: "crates/**/*.rs",
     why: "A public as_ or to_ method takes a reference, and an into_ method takes self. A by-value as_ or to_ is a Copy type, and it has a counted row.",
+  },
+  {
+    name: "generic_name",
+    scan: countGenericNames,
+    skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
+    glob: "crates/**/*.rs",
+    why: "A generic parameter is T, U, E, K, V, F, I, R or S, or a CamelCase word of three letters or more.",
   },
 ];
 

@@ -42,18 +42,18 @@ pub enum SessionState {
 /// Something the application should know about.
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 #[non_exhaustive]
-pub enum Event<A> {
+pub enum Event<Peer> {
     /// A peer finished its handshake.
     Synchronized {
         /// Who.
-        addr: A,
+        addr: Peer,
     },
     /// Every peer has synchronized; the match starts now.
     Running,
     /// A peer went silent past the timeout.
     Disconnected {
         /// Who.
-        addr: A,
+        addr: Peer,
     },
     /// A peer's checksum disagrees with ours: the two are no longer
     /// simulating the same game. Unrecoverable — see
@@ -69,10 +69,10 @@ pub enum Event<A> {
 }
 
 /// A peer-to-peer rollback session.
-pub struct P2PSession<T: Config, X: Transport<T>> {
+pub struct P2PSession<T: Config, Link: Transport<T>> {
     sync: Sync<T>,
     peers: Vec<PeerProtocol<T>>,
-    transport: X,
+    transport: Link,
     local_handle: PlayerHandle,
     state: SessionState,
     events: Vec<Event<T::Address>>,
@@ -95,7 +95,7 @@ pub struct P2PSession<T: Config, X: Transport<T>> {
     unaddressed_drops: u64,
 }
 
-impl<T: Config, X: Transport<T>> std::fmt::Debug for P2PSession<T, X> {
+impl<T: Config, Link: Transport<T>> std::fmt::Debug for P2PSession<T, Link> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("P2PSession")
@@ -107,7 +107,7 @@ impl<T: Config, X: Transport<T>> std::fmt::Debug for P2PSession<T, X> {
     }
 }
 
-impl<T: Config, X: Transport<T>> P2PSession<T, X> {
+impl<T: Config, Link: Transport<T>> P2PSession<T, Link> {
     /// Build a session.
     ///
     /// `players` is every participant's address **in handle order**, and
@@ -126,7 +126,7 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
     pub fn new(
         players: Vec<T::Address>,
         local_handle: PlayerHandle,
-        transport: X,
+        transport: Link,
         max_prediction: usize,
         input_delay: usize,
         magic: u32,

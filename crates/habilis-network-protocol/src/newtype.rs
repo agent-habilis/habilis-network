@@ -58,9 +58,9 @@ macro_rules! string_newtype {
 
     (@extra deserialize, $name:ident, $error:ty) => {
         impl<'de> ::serde::Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+            fn deserialize<Decoder>(deserializer: Decoder) -> ::std::result::Result<Self, Decoder::Error>
             where
-                D: ::serde::Deserializer<'de>,
+                Decoder: ::serde::Deserializer<'de>,
             {
                 let raw = <String as ::serde::Deserialize>::deserialize(deserializer)?;
                 Self::try_new(raw).map_err(::serde::de::Error::custom)

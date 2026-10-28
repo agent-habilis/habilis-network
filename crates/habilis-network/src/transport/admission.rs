@@ -630,38 +630,38 @@ impl SignalAdmission {
     /// # Errors
     /// A [`Refusal`] saying which gate closed. All of them are "not now" — none
     /// is a fault, and all but `ShuttingDown` clear on their own.
-    pub(crate) fn try_admit<H>(
+    pub(crate) fn try_admit<Handle>(
         &self,
         peer: EndpointId,
-        handle: &H,
+        handle: &Handle,
     ) -> Result<AdmissionGuard, Refusal>
     where
-        H: Sessions + Clone,
+        Handle: Sessions + Clone,
     {
         self.try_admit_at(peer, handle, Instant::now())
     }
 
-    pub(crate) fn try_admit_at<H>(
+    pub(crate) fn try_admit_at<Handle>(
         &self,
         peer: EndpointId,
-        handle: &H,
+        handle: &Handle,
         now: Instant,
     ) -> Result<AdmissionGuard, Refusal>
     where
-        H: Sessions + Clone,
+        Handle: Sessions + Clone,
     {
         self.admit(peer, handle, now, false)
     }
 
-    fn admit<H>(
+    fn admit<Handle>(
         &self,
         peer: EndpointId,
-        handle: &H,
+        handle: &Handle,
         now: Instant,
         outgoing: bool,
     ) -> Result<AdmissionGuard, Refusal>
     where
-        H: Sessions + Clone,
+        Handle: Sessions + Clone,
     {
         let mut inner = self.lock();
         if inner.closed {
@@ -713,25 +713,25 @@ impl SignalAdmission {
 
     /// [`Self::try_admit`] for a round that this node offers, not one that it answers. Only such
     /// a round can be given up for an offer of the peer, see [`Self::preempt_offer`].
-    pub(crate) fn try_admit_offer<H>(
+    pub(crate) fn try_admit_offer<Handle>(
         &self,
         peer: EndpointId,
-        handle: &H,
+        handle: &Handle,
     ) -> Result<AdmissionGuard, Refusal>
     where
-        H: Sessions + Clone,
+        Handle: Sessions + Clone,
     {
         self.try_admit_offer_at(peer, handle, Instant::now())
     }
 
-    fn try_admit_offer_at<H>(
+    fn try_admit_offer_at<Handle>(
         &self,
         peer: EndpointId,
-        handle: &H,
+        handle: &Handle,
         now: Instant,
     ) -> Result<AdmissionGuard, Refusal>
     where
-        H: Sessions + Clone,
+        Handle: Sessions + Clone,
     {
         self.admit(peer, handle, now, true)
     }

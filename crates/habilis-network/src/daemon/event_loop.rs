@@ -107,11 +107,11 @@ impl std::error::Error for EventLoopError {
 ///
 /// # Errors
 /// Propagates a fatal setup/transport error that terminates the event loop.
-pub async fn run<A: NodeDriver>(
+pub async fn run<Driver: NodeDriver>(
     cfg: EventLoopConfig,
-    app: A,
-    session_rx: Option<mpsc::Receiver<A::Session>>,
-    http_rx: Option<mpsc::Receiver<A::Http>>,
+    app: Driver,
+    session_rx: Option<mpsc::Receiver<Driver::Session>>,
+    http_rx: Option<mpsc::Receiver<Driver::Http>>,
 ) -> Result<(), EventLoopError> {
     run_checked(cfg, app, session_rx, http_rx)
         .await
@@ -122,11 +122,11 @@ pub async fn run<A: NodeDriver>(
     clippy::too_many_lines,
     reason = "session setup + secrets + sender/receiver wiring before handing off to event_loop; each step is a single call, and splitting further would only scatter sequential setup across helpers"
 )]
-async fn run_checked<A: NodeDriver>(
+async fn run_checked<Driver: NodeDriver>(
     cfg: EventLoopConfig,
-    app: A,
-    session_rx: Option<mpsc::Receiver<A::Session>>,
-    http_rx: Option<mpsc::Receiver<A::Http>>,
+    app: Driver,
+    session_rx: Option<mpsc::Receiver<Driver::Session>>,
+    http_rx: Option<mpsc::Receiver<Driver::Http>>,
 ) -> Result<()> {
     let EventLoopConfig {
         topic,
@@ -362,7 +362,7 @@ async fn run_checked<A: NodeDriver>(
     }
 
     #[cfg(feature = "host")]
-    let ipc_rx = spawn_ipc_rx::<A::Ipc>(
+    let ipc_rx = spawn_ipc_rx::<Driver::Ipc>(
         ipc_listener_disabled,
         runtime_base.as_deref(),
         &mesh_str,
@@ -372,7 +372,7 @@ async fn run_checked<A: NodeDriver>(
     // A browser binds no control socket. The loop keeps its IPC `select!` arm —
     // `IpcMessage` is portable — and the arm simply never fires.
     #[cfg(not(feature = "host"))]
-    let ipc_rx: Option<mpsc::Receiver<IpcMessage<A::Ipc>>> = {
+    let ipc_rx: Option<mpsc::Receiver<IpcMessage<Driver::Ipc>>> = {
         drop(runtime_base);
         None
     };
@@ -664,7 +664,7 @@ fn sweep_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, sink: &dyn N
 /// locals the orchestrator used to hold inline. Splitting the 11-arm
 /// `select!` out keeps both functions within the readability budget
 /// (clippy `too_many_lines`) without an `#[allow]`.
-struct EventLoop<A: NodeDriver> {
+struct EventLoop<Driver: NodeDriver> {
     sender: MeshSender,
     receiver: gossip::split::MeshReceiver<GossipReceiver>,
     /// The gossip frontend, kept so the loop can re-subscribe the topic
@@ -684,8 +684,8 @@ struct EventLoop<A: NodeDriver> {
     state: EventLoopState,
     /// Application state behind the [`NodeDriver`] seam, disjoint from the mesh
     /// `state` and threaded as its own `&mut` through the app callbacks.
-    app: A,
-    ipc_rx: Option<mpsc::Receiver<IpcMessage<A::Ipc>>>,
+    app: Driver,
+    ipc_rx: Option<mpsc::Receiver<IpcMessage<Driver::Ipc>>>,
     intervals: MaintenanceIntervals,
     rendezvous: Option<beacon::Rendezvous>,
     /// The outstanding probe-before-claim, whose verdict the loop applies on
@@ -707,12 +707,12 @@ struct EventLoop<A: NodeDriver> {
     started: Instant,
     external_quit_rx: Option<mpsc::Receiver<()>>,
     /// The in-process typed session channel (in-process: library API or MCP); `None` on the CLI.
-    external_req_rx: Option<mpsc::Receiver<A::Session>>,
+    external_req_rx: Option<mpsc::Receiver<Driver::Session>>,
     external_msg_tx: Option<broadcast::Sender<Authored>>,
     quit_rx: mpsc::Receiver<()>,
     exit_on_quit: bool,
     /// The application's localhost HTTP binding request channel; `None` off.
-    http_rx: Option<mpsc::Receiver<A::Http>>,
+    http_rx: Option<mpsc::Receiver<Driver::Http>>,
     /// Inbound unicast frames from the `UNICAST_ALPN` acceptor, drained into
     /// `gossip::ingest` (same validation + dedup path as gossip). `Option` so
     /// the `select!` arm can disable itself if the channel ever closes.
@@ -752,7 +752,7 @@ fn log_daemon_start(author: &Nickname) {
     clippy::too_many_lines,
     reason = "the daemon's central select! loop: one arm per event source (ipc, http, gossip, the maintenance ticks, quit); each arm delegates to a helper, but the arm list itself is irreducibly long"
 )]
-async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
+async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result<()> {
     let EventLoop {
         mut sender,
         mut receiver,
@@ -1218,13 +1218,13 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
 /// `disabled` is set by the in-process drivers (library API / MCP), which use
 /// the typed `session_rx` and bind no socket.
 #[cfg(feature = "host")]
-fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
+fn spawn_ipc_rx<Cmd: serde::de::DeserializeOwned + Send + 'static>(
     disabled: bool,
     runtime_base: Option<&std::path::Path>,
     mesh: &MeshId,
     author: &Nickname,
     sink: &Arc<dyn NodeSink>,
-) -> Option<mpsc::Receiver<IpcMessage<C>>> {
+) -> Option<mpsc::Receiver<IpcMessage<Cmd>>> {
     // In-process mode (in-process: library API or MCP): no socket. Returning `None` leaves
     // the loop's IPC `select!` arm inert (it pends forever), so the
     // unix-socket listener is never bound — those drivers use the typed
@@ -1249,8 +1249,8 @@ fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
             return None;
         }
     };
-    let (ipc_tx, rx) = mpsc::channel::<IpcMessage<C>>(32);
-    tokio::spawn(ipc::serve::<C>(listener, ipc_tx, Arc::clone(sink)));
+    let (ipc_tx, rx) = mpsc::channel::<IpcMessage<Cmd>>(32);
+    tokio::spawn(ipc::serve::<Cmd>(listener, ipc_tx, Arc::clone(sink)));
     Some(rx)
 }
 

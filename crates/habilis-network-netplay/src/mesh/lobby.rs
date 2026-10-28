@@ -168,14 +168,15 @@ mod key_list {
         serializer.collect_seq(keys.iter().map(ToString::to_string))
     }
 
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Vec<AuthorKey>, D::Error> {
+    pub(super) fn deserialize<'de, Decoder: Deserializer<'de>>(
+        deserializer: Decoder,
+    ) -> Result<Vec<AuthorKey>, Decoder::Error> {
         Vec::<String>::deserialize(deserializer)?
             .iter()
             .map(|text| {
-                AuthorKey::from_hex(text)
-                    .ok_or_else(|| D::Error::custom(format!("{text:?} is not a lowercase hex key")))
+                AuthorKey::from_hex(text).ok_or_else(|| {
+                    Decoder::Error::custom(format!("{text:?} is not a lowercase hex key"))
+                })
             })
             .collect()
     }

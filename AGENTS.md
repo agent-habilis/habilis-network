@@ -213,6 +213,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - U11, `take_` methods: the `accessor_name` rule refuses a method named `take_*` that does not take `&mut self`. A probe `pub fn take_x(self) -> u8` makes the rule count 1 (red), and the `&mut self` form counts 0. A free function such as `take_array` is not a method and is not counted.
 - U14, `replace_` methods: the `accessor_name` rule refuses a `replace_*` method with no return value. A probe `pub fn replace_x(&mut self, v: u8)` makes the rule count 1 (red), and `-> u8` counts 0.
 - N1, method names with a `self` receiver: the `self_convention` rule of `scripts/style-check/style-check.ts` counts a public `as_`/`to_` method that takes self by value and an `into_` method that takes a reference. Its 7 counted rows are Copy types. Clippy's `wrong_self_convention` did not fire in two probes (`as_x(self)` on a non-Copy type, and `into_x(&self)`), so the rule carries the check. Probes: `cargo clippy -p habilis-network-util -- -D warnings` on each.
+- N7, generic parameter names: the `generic_name` rule of `scripts/style-check/style-check.ts` counts a generic that is not T, U, E, K, V, F, I, R or S and not a CamelCase word of three letters or more. Its 43 hits (A, C, D, H, W, X, O, Q) were renamed to words (Driver, Peer, Decoder, Handle, Writer, Link, Reply, Query, Cmd). A probe `pub struct Wrap<A>` makes the rule count 1 (red), and the renamed form counts 0.
 
 ### Rules we decline, or leave to the reviewer
 

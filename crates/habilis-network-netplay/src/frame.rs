@@ -38,10 +38,12 @@ impl Serialize for Frame {
 }
 
 impl<'de> Deserialize<'de> for Frame {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<Decoder: Deserializer<'de>>(
+        deserializer: Decoder,
+    ) -> Result<Self, Decoder::Error> {
         let number = i32::deserialize(deserializer)?;
         if number < 0 {
-            return Err(D::Error::custom(format!(
+            return Err(Decoder::Error::custom(format!(
                 "frame {number} is negative, and no frame is an absent field"
             )));
         }

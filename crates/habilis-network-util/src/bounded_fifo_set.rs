@@ -53,10 +53,10 @@ impl<T: Clone + Eq + Hash> BoundedFifoSet<T> {
     }
 
     /// Remove `item`, keeping the eviction queue consistent. `true` if present.
-    pub fn remove<Q>(&mut self, item: &Q) -> bool
+    pub fn remove<Query>(&mut self, item: &Query) -> bool
     where
-        T: Borrow<Q>,
-        Q: Eq + Hash + ?Sized,
+        T: Borrow<Query>,
+        Query: Eq + Hash + ?Sized,
     {
         if self.set.remove(item) {
             self.order.retain(|queued| queued.borrow() != item);
@@ -67,10 +67,10 @@ impl<T: Clone + Eq + Hash> BoundedFifoSet<T> {
     }
 
     /// Whether the set holds the item.
-    pub fn contains<Q>(&self, item: &Q) -> bool
+    pub fn contains<Query>(&self, item: &Query) -> bool
     where
-        T: Borrow<Q>,
-        Q: Eq + Hash + ?Sized,
+        T: Borrow<Query>,
+        Query: Eq + Hash + ?Sized,
     {
         self.set.contains(item)
     }

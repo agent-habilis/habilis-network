@@ -121,9 +121,9 @@ pub fn init_capturing(default_directives: &str) -> Guard {
 ///
 /// Panics under the same conditions as [`init`].
 #[must_use = "the guard fails the test when it drops; bind it to a local"]
-pub fn init_with_writer<W>(default_directives: &str, writer: W) -> Guard
+pub fn init_with_writer<Writer>(default_directives: &str, writer: Writer) -> Guard
 where
-    W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
+    Writer: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
     install(Mode::Writer, default_directives, writer);
     new_guard()
@@ -216,7 +216,7 @@ pub fn at_end(cleanup: impl Future<Output = ()> + 'static) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn finish<O>(output: O) -> O {
+async fn finish<Reply>(output: Reply) -> Reply {
     let mut pending: Vec<Cleanup> =
         CLEANUPS.with(|cleanups| cleanups.borrow_mut().drain(..).collect());
     std::future::poll_fn(|context| {
@@ -299,9 +299,9 @@ fn fail_the_binary_on_a_late_event_at_exit() {
     });
 }
 
-fn install<W>(mode: Mode, default_directives: &str, writer: W)
+fn install<Writer>(mode: Mode, default_directives: &str, writer: Writer)
 where
-    W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
+    Writer: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
     #[cfg(not(target_arch = "wasm32"))]
     fail_the_binary_on_a_late_event_at_exit();

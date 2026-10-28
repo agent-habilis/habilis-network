@@ -126,12 +126,12 @@ pub(crate) fn bind(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -
 /// Server-side accept loop over an already-[`bind`]-ed socket: forward
 /// each connection's command to the event loop. Spawned after `bind`
 /// returns, so by the time this runs the socket is already accepting.
-pub(crate) async fn serve<C>(
+pub(crate) async fn serve<Cmd>(
     listener: Listener,
-    tx: mpsc::Sender<IpcMessage<C>>,
+    tx: mpsc::Sender<IpcMessage<Cmd>>,
     sink: std::sync::Arc<dyn event::NodeSink>,
 ) where
-    C: DeserializeOwned + Send + 'static,
+    Cmd: DeserializeOwned + Send + 'static,
 {
     // Accept errors are retried forever: they are almost always
     // transient (fd exhaustion under load, an aborted handshake), and
@@ -148,7 +148,7 @@ pub(crate) async fn serve<C>(
                 backoff = IPC_ACCEPT_BACKOFF_MIN;
                 failing = false;
                 let tx = tx.clone();
-                tokio::spawn(handle_connection::<C>(stream, tx));
+                tokio::spawn(handle_connection::<Cmd>(stream, tx));
             }
             Err(error) => {
                 if !failing {
@@ -174,9 +174,9 @@ fn next_accept_backoff(current: Duration) -> Duration {
     current.saturating_mul(2).min(IPC_ACCEPT_BACKOFF_MAX)
 }
 
-async fn handle_connection<C>(stream: Stream, tx: mpsc::Sender<IpcMessage<C>>)
+async fn handle_connection<Cmd>(stream: Stream, tx: mpsc::Sender<IpcMessage<Cmd>>)
 where
-    C: DeserializeOwned + Send + 'static,
+    Cmd: DeserializeOwned + Send + 'static,
 {
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
@@ -213,7 +213,7 @@ where
         }
     };
 
-    let response = match serde_json::from_str::<C>(line.trim()) {
+    let response = match serde_json::from_str::<Cmd>(line.trim()) {
         Err(error) => json_error(&format!("parse error: {error}")),
         Ok(cmd) => {
             let (resp_tx, resp_rx) = oneshot::channel();
@@ -305,13 +305,13 @@ impl std::error::Error for IpcError {
 /// # Errors
 /// [`NoDaemon`] when no server is listening; otherwise an invalid socket name
 /// or a failed request/response round trip.
-pub async fn send<C>(
+pub async fn send<Cmd>(
     base: &std::path::Path,
-    cmd: &C,
+    cmd: &Cmd,
     nickname: &Nickname,
 ) -> Result<String, IpcError>
 where
-    C: Serialize + Addressed,
+    Cmd: Serialize + Addressed,
 {
     let mesh = cmd
         .mesh_id()
@@ -334,9 +334,9 @@ where
 /// # Errors
 /// The path is not valid UTF-8, the socket can't be connected (no live
 /// daemon), or the request/response round trip fails.
-pub async fn send_to_path<C: Serialize>(
+pub async fn send_to_path<Cmd: Serialize>(
     path: &std::path::Path,
-    cmd: &C,
+    cmd: &Cmd,
 ) -> Result<String, IpcError> {
     use anyhow::Context;
     let path_str = path
@@ -353,7 +353,7 @@ pub async fn send_to_path<C: Serialize>(
 
 /// Write `cmd`, half-close, and read back the single-line JSON response.
 /// The shared body of [`send`] and [`send_to_path`].
-async fn round_trip<C: Serialize>(stream: Stream, cmd: &C) -> Result<String> {
+async fn round_trip<Cmd: Serialize>(stream: Stream, cmd: &Cmd) -> Result<String> {
     let (read_half, mut write_half) = tokio::io::split(stream);
 
     let json = serde_json::to_string(cmd)?;

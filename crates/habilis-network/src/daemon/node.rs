@@ -27,11 +27,11 @@ pub enum SignalHandling {
 /// A live in-process membership over a background event loop, generic over the
 /// application driver `A`. Drop it (or call [`Node::leave`]) to wind the loop
 /// down.
-pub struct Node<A: NodeDriver> {
+pub struct Node<Driver: NodeDriver> {
     mesh_id: MeshId,
     name: MeshName,
     nickname: Nickname,
-    req_tx: mpsc::Sender<A::Session>,
+    req_tx: mpsc::Sender<Driver::Session>,
     quit_tx: mpsc::Sender<()>,
     task: Option<JoinHandle<Result<(), super::event_loop::EventLoopError>>>,
     /// The ports this node's endpoint is bound on, for a test that names which
@@ -57,7 +57,7 @@ pub struct Node<A: NodeDriver> {
 
 // `A::Session` need not be `Debug`, and the channels/handle aren't useful in a
 // log line — surface the identity fields a reader cares about.
-impl<A: NodeDriver> fmt::Debug for Node<A> {
+impl<Driver: NodeDriver> fmt::Debug for Node<Driver> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Node")
@@ -68,7 +68,7 @@ impl<A: NodeDriver> fmt::Debug for Node<A> {
     }
 }
 
-impl<A: NodeDriver + 'static> Node<A> {
+impl<Driver: NodeDriver + 'static> Node<Driver> {
     /// Wire the in-process driver channels into `cfg`, spawn the event loop with
     /// `app`, and return the handle. `handle_signals` registers the process-wide
     /// ctrl-c / SIGTERM listeners (pass `true` for a foreground command that owns
@@ -84,11 +84,11 @@ impl<A: NodeDriver + 'static> Node<A> {
     #[must_use]
     pub fn spawn(
         mut cfg: EventLoopConfig,
-        app: A,
+        app: Driver,
         push: Option<broadcast::Sender<Authored>>,
         handle_signals: SignalHandling,
     ) -> Self {
-        let (req_tx, req_rx) = mpsc::channel::<A::Session>(SESSION_REQUEST_CAP);
+        let (req_tx, req_rx) = mpsc::channel::<Driver::Session>(SESSION_REQUEST_CAP);
         let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
         cfg.driver = DriverMode::InProcess {
             msg_tx: push,
@@ -225,7 +225,7 @@ impl<A: NodeDriver + 'static> Node<A> {
     ///
     /// # Errors
     /// Fails if the event loop has stopped (its receiver dropped).
-    pub async fn send(&self, req: A::Session) -> Result<(), crate::transport::SendError> {
+    pub async fn send(&self, req: Driver::Session) -> Result<(), crate::transport::SendError> {
         self.req_tx
             .send(req)
             .await
@@ -240,7 +240,7 @@ impl<A: NodeDriver + 'static> Node<A> {
     /// re-entrant `borrow_mut` during it then panics. Taking a sender first
     /// lets the borrow end before anything is awaited.
     #[must_use]
-    pub fn sender(&self) -> mpsc::Sender<A::Session> {
+    pub fn sender(&self) -> mpsc::Sender<Driver::Session> {
         self.req_tx.clone()
     }
 
@@ -272,7 +272,7 @@ impl<A: NodeDriver + 'static> Node<A> {
     }
 }
 
-impl<A: NodeDriver> Drop for Node<A> {
+impl<Driver: NodeDriver> Drop for Node<Driver> {
     fn drop(&mut self) {
         // Fallback if `leave()` was never called: abort the loop so it doesn't leak.
         if let Some(task) = self.task.take() {

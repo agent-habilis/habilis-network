@@ -51,7 +51,7 @@ pub(crate) mod underlay_webrtc;
 /// portable is what lets the event loop's IPC `select!` arm compile everywhere
 /// and simply never fire — a browser binds no socket, so its receiver is always
 /// `None`. Only the socket *server* needs `interprocess`.
-pub(crate) type IpcMessage<C> = (C, oneshot::Sender<String>);
+pub(crate) type IpcMessage<Cmd> = (Cmd, oneshot::Sender<String>);
 mod send;
 pub(crate) mod sender;
 
