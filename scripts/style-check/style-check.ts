@@ -467,6 +467,13 @@ const RULES: Rule[] = [
     glob: "crates/**/*.rs",
     why: "A public function takes impl Into<T> only where call-site ergonomics matter most in a library. Each such function has a counted row with its reason.",
   },
+  {
+    name: "app_impl_into",
+    pattern: /impl Into</,
+    skip: /^(?!(?:.*\/)?(?:main\.rs$|bin\/))/,
+    glob: "*.rs",
+    why: "Application code does not take impl Into<T>. A binary or a bin/ target takes a concrete type.",
+  },
 ];
 
 // The files git knows, tracked or not yet, minus what .gitignore hides: the same list `git ls-files

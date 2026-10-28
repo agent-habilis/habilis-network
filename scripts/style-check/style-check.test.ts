@@ -402,3 +402,14 @@ test("pub_impl_into: a private fn is clean", () => {
 test("pub_impl_into: an allowed row with its count passes", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(s: impl Into<String>) -> String { s.into() }", 0, "pub_impl_into|crates/demo/src/lib.rs|1|a validating constructor");
 });
+
+// The app_impl_into rule: application code (main.rs and bin/ targets) takes a concrete type.
+test("app_impl_into: a main.rs fn with impl Into counts", () => {
+  expectExit("crates/demo/src/main.rs", "fn f(s: impl Into<String>) -> String { s.into() }", 1);
+});
+test("app_impl_into: a bin target counts", () => {
+  expectExit("crates/demo/src/bin/tool.rs", "fn f(s: impl Into<String>) -> String { s.into() }", 1);
+});
+test("app_impl_into: a library file is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "fn f(s: impl Into<String>) -> String { s.into() }", 0);
+});
