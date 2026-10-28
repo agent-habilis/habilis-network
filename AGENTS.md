@@ -229,6 +229,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - Context strings on `assert!`: `missing_assert_message` makes one required outside test code. Whether the string helps (a logged value, misuse versus bug) is for the reviewer. (P13)
 - An assertion message that only repeats the condition: no lint covers it. The reviewer asks for a message that adds the value or the reason. (P14)
 - Long or complex iterator chains: no lint measures length. `.for_each(` has 0 calls (2026-10-27). The reviewer asks for a `for` loop or a named step when a chain stops being short. (P15)
+- Macros (M3): no gate. The reviewer checks each new `macro_rules!`, and `AGENTS.md` allows only `string_newtype!` for a newtype. Eight `macro_rules!` sites on 2026-10-28, all in `git grep "macro_rules!"`: `digest_newtype` (chunks), `for_each_case` and two `run` (chunks conformance), `warn_refusal` (doc), `string_newtype` and `check` (protocol), `cells` (network send ladder matrix test).
 
 ### Rules of the guide that do not apply
 
