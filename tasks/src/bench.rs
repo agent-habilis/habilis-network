@@ -19,6 +19,10 @@ use crate::TaskOutcome;
 use crate::util::output;
 
 #[cfg(feature = "bench")]
+mod browser;
+#[cfg(feature = "bench")]
+mod engine;
+#[cfg(feature = "bench")]
 mod gossip;
 #[cfg(feature = "bench")]
 mod multihop;
@@ -28,8 +32,6 @@ mod native;
 mod run;
 #[cfg(feature = "bench")]
 mod serve;
-#[cfg(feature = "bench")]
-mod web;
 
 #[derive(ClapArgs)]
 pub(crate) struct Args {

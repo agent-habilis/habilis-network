@@ -21,19 +21,13 @@ use crate::util::webdriver::{self, SAFARI_TP};
 use crate::util::{Skip, cdp, output};
 
 use super::Args;
+use super::engine::Engine;
 use super::native::{JSEP_DEADLINE, WebRtcPeer};
 use super::run::{Measured, Outcome, Sample, TRANSFER_TIMEOUT};
 use super::serve::Static;
 
 /// The wasm page has to fetch and instantiate the module before `#ready`.
 const PAGE_TIMEOUT: Duration = Duration::from_mins(1);
-
-/// Which browser a tab runs in.
-#[derive(Clone, Copy)]
-pub(crate) enum Engine {
-    Chrome,
-    Safari,
-}
 
 /// The driver behind one tab.
 enum Driver {

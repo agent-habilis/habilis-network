@@ -9,8 +9,8 @@ use habilis_network_iroh_webrtc_transport::bench;
 use crate::TaskOutcome;
 use crate::util::{output, repo_root, wasm};
 
-use super::web::Engine::{Chrome, Safari};
-use super::{Args, Cell, Direction, gossip, multihop, native, serve, wanted, web};
+use super::engine::Engine::{Chrome, Safari};
+use super::{Args, Cell, Direction, browser, gossip, multihop, native, serve, wanted};
 
 impl Direction {
     pub(crate) fn protocol(self) -> bench::Direction {
@@ -434,7 +434,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     let mut rows = Vec::new();
     for cell in cells {
         output::status("Running", cell.label());
-        let browser = || web::Browser {
+        let browser = || browser::Browser {
             server: server.as_ref().expect("built above"),
             args,
         };
