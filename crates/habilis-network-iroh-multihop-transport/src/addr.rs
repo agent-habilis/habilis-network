@@ -32,7 +32,7 @@ pub(crate) const MAX_ROUTE_HOPS: usize = 8;
 /// One hop in a source route: which node it is (its [`AppId`])
 /// and which multihop **underlay** endpoint carries its cells. Two ids, 64 bytes,
 /// and no address: see the module note.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy)]
 pub struct RouteHop {
     pub(crate) app_id: AppId,
     pub(crate) underlay_id: UnderlayId,
@@ -122,7 +122,7 @@ impl Route {
             .iter()
             .rev()
             .skip(1) // drop the destination (ourselves)
-            .cloned()
+            .copied()
             .collect();
         hops.push(source);
         Self::try_new(hops)
@@ -227,10 +227,10 @@ mod tests {
     fn reverse_is_an_involution_across_the_two_ends() {
         // Source S=hop(9); forward route to B: [R1, R2, B].
         let (source, r1, r2, dest) = (hop(9), hop(1), hop(2), hop(3));
-        let forward = vec![r1.clone(), r2.clone(), dest.clone()];
+        let forward = vec![r1, r2, dest];
 
         // At B, the return route is [R2, R1, S].
-        let ret = Route::reverse_from(&forward, source.clone()).expect("reverses");
+        let ret = Route::reverse_from(&forward, source).expect("reverses");
         assert_eq!(ret.0, vec![r2, r1, source]);
 
         // Reversing again at S (source now B) reproduces the forward route.

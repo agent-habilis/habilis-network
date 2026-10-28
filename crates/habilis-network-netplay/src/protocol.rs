@@ -59,7 +59,7 @@ pub enum PeerState {
 }
 
 /// Something worth telling the application about.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub(crate) enum PeerEvent {
     /// The handshake completed and this peer is now exchanging inputs.
     Synchronized,

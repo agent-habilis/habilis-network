@@ -67,7 +67,7 @@ impl EvictionBackoff {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Copy)]
 struct Entry {
     opened_at: Option<Instant>,
     last_use: Option<Instant>,

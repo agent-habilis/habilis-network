@@ -18,7 +18,7 @@ pub(crate) struct TestInput(pub(crate) i32);
 ///
 /// `frame` is the frame this state sits *before* — a fresh state is at frame
 /// 0, having simulated nothing yet, and advancing frame N leaves it at N+1.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Copy)]
 pub(crate) struct TestState {
     pub(crate) value: i64,
     pub(crate) frame: crate::frame::Frame,
@@ -61,7 +61,7 @@ impl TestRunner {
     pub(crate) fn handle(&mut self, request: Request<TestGame>) {
         match request {
             Request::SaveState { cell, frame } => {
-                cell.save(frame, self.state.clone(), Some(Self::checksum(&self.state)));
+                cell.save(frame, self.state, Some(Self::checksum(&self.state)));
             }
             Request::LoadState { cell } => {
                 self.state = cell.load().expect("session asked to load an unsaved frame");

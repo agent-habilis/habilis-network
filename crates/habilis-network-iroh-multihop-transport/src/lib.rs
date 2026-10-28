@@ -294,7 +294,7 @@ impl MultihopHandle {
             app_id,
             underlay_id: UnderlayId::new(underlay.id()),
         };
-        let self_addr = RouteInner::singleton(self_hop.clone()).encode();
+        let self_addr = RouteInner::singleton(self_hop).encode();
         let shared = Arc::new(Shared {
             self_hop,
             self_addr,

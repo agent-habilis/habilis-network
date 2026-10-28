@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct Input(i32);
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Copy)]
 struct State {
     value: i64,
     frame: i32,
@@ -61,7 +61,7 @@ impl Runner {
     fn handle(&mut self, request: Request<Game>) {
         match request {
             Request::SaveState { cell, frame } => {
-                cell.save(frame, self.state.clone(), Some(Self::checksum(&self.state)));
+                cell.save(frame, self.state, Some(Self::checksum(&self.state)));
             }
             Request::LoadState { cell } => {
                 self.state = cell.load().expect("the session only loads frames it saved");

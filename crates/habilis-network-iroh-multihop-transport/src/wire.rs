@@ -57,7 +57,7 @@ impl Cell {
         Cell {
             path: self.path.clone(),
             pos: self.pos + 1,
-            source: self.source.clone(),
+            source: self.source,
             packet: self.packet.clone(),
         }
     }

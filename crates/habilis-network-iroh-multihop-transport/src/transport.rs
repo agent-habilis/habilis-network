@@ -48,7 +48,7 @@ impl MultihopTransport {
     /// The hop that this transport stamps as the source of the cells it originates.
     #[cfg(test)]
     pub(crate) fn self_hop(&self) -> RouteHop {
-        self.shared.self_hop.clone()
+        self.shared.self_hop
     }
 
     pub(crate) fn new(shared: Arc<Shared>, inbound: mpsc::Receiver<Delivered>) -> Self {
@@ -171,7 +171,7 @@ impl CustomSender for MultihopSender {
             // We would be the first node to execute the loop.
             return Poll::Ready(Err(io::Error::other("multihop route revisits this node")));
         }
-        let Some(first) = route.hops().first().cloned() else {
+        let Some(first) = route.hops().first().copied() else {
             return Poll::Ready(Err(io::Error::other("empty multihop route")));
         };
         // A GSO batch is several datagrams concatenated; each is an independent
@@ -180,7 +180,7 @@ impl CustomSender for MultihopSender {
             let cell = Cell {
                 path: route.clone(),
                 pos: 0,
-                source: self.shared.self_hop.clone(),
+                source: self.shared.self_hop,
                 packet: chunk.to_vec(),
             };
             self.shared.forwarder.enqueue(&first, cell);

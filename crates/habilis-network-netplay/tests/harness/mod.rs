@@ -24,7 +24,7 @@ impl Runner {
     pub(crate) fn handle(&mut self, request: Request<Game>) {
         match request {
             Request::SaveState { cell, frame } => {
-                cell.save(frame, self.state.clone(), Some(Self::checksum(&self.state)));
+                cell.save(frame, self.state, Some(Self::checksum(&self.state)));
             }
             Request::LoadState { cell } => {
                 self.state = cell.load().expect("the session only loads frames it saved");

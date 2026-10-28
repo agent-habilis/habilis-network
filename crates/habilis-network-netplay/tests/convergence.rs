@@ -28,7 +28,7 @@ use harness::{Runner, sim};
 pub struct Input(pub i32);
 
 /// The game state that every peer must agree on.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Copy)]
 #[non_exhaustive]
 pub struct State {
     /// The sum of every input applied so far.

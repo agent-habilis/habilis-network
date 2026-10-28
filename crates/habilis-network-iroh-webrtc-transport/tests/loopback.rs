@@ -12,7 +12,7 @@ use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
 const ECHO_ALPN: &[u8] = b"habilis-network-webrtc/test-echo/0";
 const JSEP_DEADLINE: Duration = Duration::from_secs(30);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Echo;
 
 impl ProtocolHandler for Echo {

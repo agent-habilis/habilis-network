@@ -40,7 +40,7 @@ pub enum SessionState {
 }
 
 /// Something the application should know about.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
 #[non_exhaustive]
 pub enum Event<A> {
     /// A peer finished its handshake.

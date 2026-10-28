@@ -110,7 +110,7 @@ fn header(direction: Direction, wanted: u32) -> [u8; HEADER_LEN] {
 /// Serves one exchange per bi-stream, as many streams as the client opens,
 /// until the connection closes. A benchmark reuses one connection so only its
 /// warm-up round pays the handshake and the congestion-window ramp.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Copy)]
 #[non_exhaustive]
 pub struct Bench;
 

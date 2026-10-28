@@ -565,7 +565,7 @@ impl MeshConfig {
 /// One type for what were two identical enums — relay intent and directory
 /// intent — each with the same three variants and the same private `is_set`.
 /// The duplicate admitted it in a doc comment.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Copy)]
 #[non_exhaustive]
 pub enum OptFlag<T> {
     /// The flag was absent.
@@ -648,7 +648,8 @@ impl OptFlag<MeshName> {
         match self {
             DirectorySelection::Unset => None,
             DirectorySelection::Default => Some(
-                MeshName::try_new(DEFAULT_DIRECTORY).expect("DEFAULT_DIRECTORY is a valid mesh name"),
+                MeshName::try_new(DEFAULT_DIRECTORY)
+                    .expect("DEFAULT_DIRECTORY is a valid mesh name"),
             ),
             DirectorySelection::Named(name) => Some(name.clone()),
         }
@@ -659,7 +660,7 @@ impl OptFlag<MeshName> {
 /// requires a mesh reachable across machines, so this is a hard error
 /// (never a silent no-op). Typed so callers can classify it — the MCP
 /// server maps it to `invalid_params`, the CLI to an `anyhow` bail.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
 #[non_exhaustive]
 pub struct AdvertiseRequiresReachable;
 

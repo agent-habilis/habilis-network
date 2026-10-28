@@ -20,7 +20,7 @@ const ECHO_ALPN: &[u8] = b"multihop-test/echo/1";
 /// Uniform link cost; the exact value is irrelevant when there is one route.
 const COST: u32 = 10;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Echo;
 
 impl ProtocolHandler for Echo {

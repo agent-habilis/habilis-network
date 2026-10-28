@@ -761,7 +761,7 @@ impl Forwarder {
         }
         match cell.next_hop() {
             Some(next) => {
-                let next = next.clone();
+                let next = *next;
                 self.forwarded.fetch_add(1, Ordering::Relaxed);
                 self.enqueue(&next, cell.advanced());
             }
@@ -1063,7 +1063,7 @@ mod tests {
         // The happy path the refusals below are measured against.
         let (forwarder, _app, mut received) = forwarder().await;
         let source = stranger(1);
-        let subject = cell(vec![self_hop(&forwarder)], 0, source.clone());
+        let subject = cell(vec![self_hop(&forwarder)], 0, source);
         forwarder.handle_cell(subject, source.underlay_id);
         assert!(received.try_recv().is_ok());
         assert_eq!(
@@ -1077,7 +1077,7 @@ mod tests {
     async fn a_cell_that_ends_at_us_is_counted_as_delivered() {
         let (forwarder, _app, _received) = forwarder().await;
         let source = stranger(1);
-        let subject = cell(vec![self_hop(&forwarder)], 0, source.clone());
+        let subject = cell(vec![self_hop(&forwarder)], 0, source);
         forwarder.handle_cell(subject, source.underlay_id);
         let counters = forwarder.counters();
         assert_eq!(
@@ -1097,7 +1097,7 @@ mod tests {
         let (forwarder, _app, _received) = forwarder().await;
         let source = stranger(1);
         for _ in 0..6 {
-            let subject = cell(vec![self_hop(&forwarder)], 0, source.clone());
+            let subject = cell(vec![self_hop(&forwarder)], 0, source);
             forwarder.handle_cell(subject, source.underlay_id);
         }
         let counters = forwarder.counters();
@@ -1125,7 +1125,7 @@ mod tests {
         // would spend our bandwidth on a stranger's behalf.
         let (forwarder, _app, mut received) = forwarder().await;
         let source = stranger(1);
-        let subject = cell(vec![stranger(2), stranger(3)], 0, source.clone());
+        let subject = cell(vec![stranger(2), stranger(3)], 0, source);
         forwarder.handle_cell(subject, source.underlay_id);
         assert!(received.try_recv().is_err());
         assert_eq!(live_writers(&forwarder), 0, "no writer, no dial, no bytes");
@@ -1144,7 +1144,7 @@ mod tests {
         let source = stranger(1);
         let downstream = stranger(4);
         let subject = cell(
-            vec![stranger(2), self_hop(&forwarder), downstream.clone()],
+            vec![stranger(2), self_hop(&forwarder), downstream],
             1,
             source,
         );
@@ -1161,7 +1161,7 @@ mod tests {
         );
         let (forwarder, _app, mut received) = forwarder().await;
         let source = stranger(1);
-        let subject = cell(vec![self_hop(&forwarder)], 7, source.clone());
+        let subject = cell(vec![self_hop(&forwarder)], 7, source);
         forwarder.handle_cell(subject, source.underlay_id);
         assert!(received.try_recv().is_err());
     }
@@ -1175,7 +1175,7 @@ mod tests {
         let (forwarder, _app, mut received) = forwarder().await;
         let source = stranger(1);
         let next = stranger(5);
-        let subject = cell(vec![self_hop(&forwarder), next.clone()], 0, source.clone());
+        let subject = cell(vec![self_hop(&forwarder), next], 0, source);
         forwarder.handle_cell(subject, source.underlay_id);
         assert!(received.try_recv().is_err(), "not ours to deliver");
         assert_eq!(live_writers(&forwarder), 1);
@@ -1190,7 +1190,7 @@ mod tests {
         );
         let (forwarder, _app, _received) = forwarder().await;
         let source = stranger(1);
-        let subject = cell(vec![stranger(2), stranger(3)], 0, source.clone());
+        let subject = cell(vec![stranger(2), stranger(3)], 0, source);
         forwarder.handle_cell(subject, source.underlay_id);
         assert_eq!(forwarder.forwarded_cells(), 0);
     }
@@ -1275,9 +1275,9 @@ mod tests {
     async fn cell_arrives(from: &RelayNode, to: &mut RelayNode) -> bool {
         from.learns(to);
         let subject = Cell {
-            path: Route::try_new(vec![to.hop.clone()]).expect("legal route"),
+            path: Route::try_new(vec![to.hop]).expect("legal route"),
             pos: 0,
-            source: from.hop.clone(),
+            source: from.hop,
             packet: vec![7, 7, 7],
         };
         // Retried: the first attempts can find the connection still being set up.
@@ -1454,7 +1454,7 @@ mod tests {
     async fn a_hop_without_a_vector_is_not_a_warning() {
         let (forwarder, _app, _received) = forwarder().await;
         let sender = stranger(140);
-        let delivered = cell(vec![self_hop(&forwarder)], 0, sender.clone());
+        let delivered = cell(vec![self_hop(&forwarder)], 0, sender);
         forwarder.handle_cell(delivered, sender.underlay_id);
         assert_eq!(forwarder.counters().delivered, 1, "the cell was delivered");
         let warnings = Arc::new(AtomicUsize::new(0));
@@ -1633,7 +1633,7 @@ mod tests {
         let cap = u16::try_from(super::HEARD_HOPS_CAP).expect("fits");
         for seed in 0..=cap {
             let sender = hop(seed);
-            let delivered = cell(vec![self_hop(&forwarder)], 0, sender.clone());
+            let delivered = cell(vec![self_hop(&forwarder)], 0, sender);
             forwarder.handle_cell(delivered, sender.underlay_id);
             received.try_recv().expect("delivered");
         }
@@ -1947,7 +1947,7 @@ mod tests {
         let (forwarder, _app, _received) = forwarder().await;
         let source = stranger(1);
         let next = stranger(7);
-        forwarder.enqueue(&next, cell(vec![next.clone()], 0, source));
+        forwarder.enqueue(&next, cell(vec![next], 0, source));
         assert_eq!(live_writers(&forwarder), 1, "writer spawned");
 
         // DIAL_ATTEMPTS with linear backoff is ~1s; allow margin.
@@ -1984,7 +1984,7 @@ mod tests {
             if next.underlay_id == UnderlayId::new(forwarder.underlay.id()) {
                 continue;
             }
-            forwarder.enqueue(&next, cell(vec![next.clone()], 0, source.clone()));
+            forwarder.enqueue(&next, cell(vec![next], 0, source));
         }
         assert!(live_writers(&forwarder) <= MAX_WRITERS);
     }

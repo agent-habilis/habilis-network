@@ -987,7 +987,7 @@ pub const NUDGE_ALPN: &[u8] = b"habilis-mesh/nudge/0";
 
 /// Closes every nudge at once. See [`NUDGE_ALPN`]. An endpoint that runs the `WebRTC` signal
 /// acceptor must serve this too: its answerer dials the nudge when a session attaches.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Copy)]
 #[non_exhaustive]
 pub struct NudgeAcceptor;
 
