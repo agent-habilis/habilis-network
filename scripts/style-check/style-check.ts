@@ -405,6 +405,35 @@ function countRestatingDocs(text: string): number {
   return count;
 }
 
+// The function names and the module names of the repo, read once from git grep. A lowercase name that
+// is imported on its own, and is a function here (or a std function), is a top-level function that a
+// call should qualify with its module (O23).
+let fnAndModNames: { fns: Set<string>; mods: Set<string> } | undefined;
+const NOT_FNS = new Set(["test", "mpsc", "presets", "fmt", "oneshot", "memory", "io", "catch_panic", "atomic", "webrtc", "test_relay", "tuning", "watch", "thread", "fs", "path", "time", "env", "net", "sync", "mem", "ptr", "iter", "hash", "error", "collections", "cmp", "any", "ops", "str", "vec", "process", "convert", "borrow", "marker", "num", "future", "task", "stream", "signal", "timeout", "sleep_until"]);
+const STD_FNS = new Set(["swap", "replace", "take", "spawn", "sleep", "channel", "identity", "min", "max", "size_of", "from_fn", "once", "repeat", "empty", "unbounded_channel", "read_to_string", "write"]);
+function declaredNames(): { fns: Set<string>; mods: Set<string> } {
+  if (fnAndModNames) return fnAndModNames;
+  const fns = new Set<string>();
+  const mods = new Set<string>();
+  const proc = spawnSync("git", ["grep", "-h", "--untracked", "-E", "(^|[[:space:]])(fn|mod)[[:space:]]+[a-z_][a-z0-9_]*", "--", "crates"], { cwd: ROOT, encoding: "utf8" });
+  for (const line of (proc.stdout ?? "").split("\n")) {
+    for (const m of line.matchAll(/\bfn\s+([a-z_][a-z0-9_]*)/g)) fns.add(m[1] ?? "");
+    for (const m of line.matchAll(/\bmod\s+([a-z_][a-z0-9_]*)/g)) mods.add(m[1] ?? "");
+  }
+  fnAndModNames = { fns, mods };
+  return fnAndModNames;
+}
+function countFnImports(raw: string): number {
+  const { fns, mods } = declaredNames();
+  const text = stripComments(raw);
+  let count = 0;
+  for (const m of text.matchAll(/^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?use[ \t]+(?:[A-Za-z_][A-Za-z0-9_]*::)*([a-z_][a-z0-9_]*)[ \t]*;/gm)) {
+    const name = m[1] ?? "";
+    if ((fns.has(name) || STD_FNS.has(name)) && !mods.has(name) && !NOT_FNS.has(name)) count++;
+  }
+  return count;
+}
+
 function countAnyhowPub(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   const bare = new Set<string>();
@@ -571,6 +600,12 @@ const RULES: Rule[] = [
     pattern: /^\s*\/\/[\/!].*\b(?:this is an? (?:function|struct|trait|method|type|module|enum)|an? (?:struct|trait|enum) that|returns an? (?:Result|Option)\b)/i,
     glob: "*.rs",
     why: "A doc comment does not explain Rust: no `this is a function`, no `a struct that`, no `returns a Result` (D6). It says what the item does.",
+  },
+  {
+    name: "fn_import",
+    scan: countFnImports,
+    glob: "crates/**/*.rs",
+    why: "Call a top-level function through its module (mem::swap, not a bare swap), so the reader sees where it comes from (O23).",
   },
   {
     name: "anyhow_pub",

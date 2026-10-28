@@ -500,3 +500,14 @@ test("generic_name: a lowercase generic counts", () => {
 test("generic_name: the allowed letters and a CamelCase word are clean", () => {
   expectExit("crates/demo/src/lib.rs", "pub struct Pair<T, Handle>(pub T, pub Handle);\npub fn f<Decoder: Copy>(v: Decoder) -> Decoder {\n    v\n}", 0);
 });
+
+// The fn_import rule (O23): a top-level function imported by its bare name needs a row.
+test("fn_import: a bare function import with no row fails", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn build_mesh() {}\nuse crate::demo::build_mesh;", 1, "");
+});
+test("fn_import: a module import is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub mod wire {}\nuse crate::demo::wire;", 0, "");
+});
+test("fn_import: the exact count is allowed", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn build_mesh() {}\nuse crate::demo::build_mesh;", 0, "fn_import|crates/demo/src/lib.rs|1|fixture");
+});
