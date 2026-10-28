@@ -3,8 +3,6 @@
 
 use std::process::Command;
 
-use habilis_network_test_tracing::init;
-
 const CHILD: &str = "HABILIS_TEST_TRACING_CHILD";
 
 #[test]
@@ -28,6 +26,6 @@ fn child_logs_after_its_guard() {
     if std::env::var_os(CHILD).is_none() {
         return;
     }
-    drop(init());
+    drop(habilis_network_test_tracing::init());
     tracing::error!("late at exit");
 }
