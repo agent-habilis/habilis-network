@@ -6,12 +6,12 @@
 
 pub mod messages;
 #[cfg(feature = "host")]
-mod sink;
+mod log_sink;
 
 #[cfg(feature = "host")]
-pub use sink::LogSink;
+pub use log_sink::LogSink;
 #[cfg(feature = "host")]
-pub use sink::{attach, flush_pending_to_stderr, install};
+pub use log_sink::{attach, flush_pending_to_stderr, install};
 
 #[cfg(feature = "host")]
 mod filter;

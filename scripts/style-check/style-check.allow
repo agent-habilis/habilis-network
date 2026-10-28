@@ -92,7 +92,7 @@ assert_no_message|crates/habilis-network-iroh-webrtc-transport/src/selector.rs|1
 assert_no_message|crates/habilis-network-iroh-webrtc-transport/src/web/jsep.rs|11|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-webrtc-transport/tests/loopback.rs|13|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-logging/src/messages.rs|2|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-logging/src/sink.rs|2|kept: assert without a message, to be given one (P13 rollout)
+assert_no_message|crates/habilis-network-logging/src/log_sink.rs|2|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-netplay/examples/light-cycles/native/game/src/round.rs|5|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-netplay/examples/light-cycles/native/game/src/sim.rs|2|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-netplay/examples/light-cycles/native/game/src/ui.rs|2|kept: assert without a message, to be given one (P13 rollout)
@@ -243,7 +243,7 @@ long_chain|crates/habilis-network-iroh-webrtc-transport/src/web/jsep.rs|2|kept: 
 long_chain|crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-webrtc-transport/tests/browser_harness/mod.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-iroh-webrtc-transport/tests/browser_matrix.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-logging/src/sink.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network-logging/src/log_sink.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-netplay/examples/light-cycles/native/game/src/app.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-netplay/examples/light-cycles/native/game/src/round.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-netplay/examples/light-cycles/native/game/src/ui.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -457,7 +457,7 @@ untyped_long_chain_let|crates/habilis-network-iroh-webrtc-transport/src/native/d
 untyped_long_chain_let|crates/habilis-network-iroh-webrtc-transport/src/native/endpoint.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-webrtc-transport/src/web/jsep.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|3|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-logging/src/sink.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
+untyped_long_chain_let|crates/habilis-network-logging/src/log_sink.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/native/game/src/app.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/tui/layout.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/web/wasm/src/app.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
@@ -653,7 +653,7 @@ abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/selector.rs|3|exist
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-logging/src/filter.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-logging/src/messages.rs|27|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-logging/src/sink.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-logging/src/log_sink.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/mesh/driver.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/mesh/transport.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/protocol.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
