@@ -60,7 +60,6 @@ pub fn accept_ice_uri(uri: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::accept_ice_uri;
     use habilis_network_test_tracing::test;
 
     #[test]
@@ -71,7 +70,7 @@ mod tests {
             "stuns:example.com:5349",
             "stun:example.com",
         ] {
-            assert_eq!(accept_ice_uri(uri).as_deref(), Some(uri), "{uri}");
+            assert_eq!(super::accept_ice_uri(uri).as_deref(), Some(uri), "{uri}");
         }
     }
 
@@ -84,7 +83,7 @@ mod tests {
             "turn:167.235.241.140:3478?transport=udp",
             "turns:example.com:5349?transport=tcp",
         ] {
-            assert_eq!(accept_ice_uri(uri), None, "{uri} must be refused");
+            assert_eq!(super::accept_ice_uri(uri), None, "{uri} must be refused");
         }
     }
 
@@ -93,7 +92,7 @@ mod tests {
         // RFC 7064 gives `stun:` no query at all, so this is meaningless rather
         // than merely redundant — stripping recovers the intended server.
         assert_eq!(
-            accept_ice_uri("stun:example.com:3478?transport=udp").as_deref(),
+            super::accept_ice_uri("stun:example.com:3478?transport=udp").as_deref(),
             Some("stun:example.com:3478")
         );
     }
@@ -109,7 +108,7 @@ mod tests {
             "stun",
             "stun:?transport=udp",
         ] {
-            assert_eq!(accept_ice_uri(uri), None, "{uri}");
+            assert_eq!(super::accept_ice_uri(uri), None, "{uri}");
         }
     }
 }

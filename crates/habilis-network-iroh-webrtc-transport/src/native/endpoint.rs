@@ -9,7 +9,6 @@ use tokio::sync::mpsc;
 
 use super::sender::WebRtcSender;
 use super::session::{InboundPacket, SessionRegistry};
-use crate::custom_addr;
 
 pub(crate) struct WebRtcEndpoint {
     local_addr: CustomAddr,
@@ -93,8 +92,10 @@ impl CustomEndpoint for WebRtcEndpoint {
                     bufs[filled][..packet.payload.len()].copy_from_slice(&packet.payload);
                     metas[filled].len = packet.payload.len();
                     metas[filled].stride = packet.payload.len();
-                    recv_infos[filled] =
-                        RecvInfo::new(custom_addr(packet.from), Some(self.local_addr.clone()));
+                    recv_infos[filled] = RecvInfo::new(
+                        crate::custom_addr(packet.from),
+                        Some(self.local_addr.clone()),
+                    );
                     filled += 1;
                 }
             }

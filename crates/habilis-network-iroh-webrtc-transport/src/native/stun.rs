@@ -497,29 +497,27 @@ mod tests {
 
     #[test]
     fn plain_stun_responses_are_recognized_and_peer_traffic_is_not() {
-        use super::is_plain_stun_response;
-
         // A gather straggler: a well-formed Binding Success.
         let success = response(ATTR_XOR_MAPPED_ADDRESS, &xor_ipv4_value(), TXID);
-        assert!(is_plain_stun_response(&success));
+        assert!(super::is_plain_stun_response(&success));
 
         // A Binding Error Response counts too — a losing server can refuse.
         let mut error = success.clone();
         error[0..2].copy_from_slice(&0x0111u16.to_be_bytes());
-        assert!(is_plain_stun_response(&error));
+        assert!(super::is_plain_stun_response(&error));
 
         // A Binding *Request* is not a response; neither is a wrong cookie.
         let request = binding_request(TXID);
-        assert!(!is_plain_stun_response(&request));
+        assert!(!super::is_plain_stun_response(&request));
         let mut bad_cookie = success.clone();
         bad_cookie[4] ^= 0xFF;
-        assert!(!is_plain_stun_response(&bad_cookie));
+        assert!(!super::is_plain_stun_response(&bad_cookie));
 
         // Truncated garbage and DTLS-shaped bytes are peer traffic, not
         // gather residue.
-        assert!(!is_plain_stun_response(&[]));
-        assert!(!is_plain_stun_response(&success[..HEADER_LEN - 1]));
-        assert!(!is_plain_stun_response(&[
+        assert!(!super::is_plain_stun_response(&[]));
+        assert!(!super::is_plain_stun_response(&success[..HEADER_LEN - 1]));
+        assert!(!super::is_plain_stun_response(&[
             0x16, 0xFE, 0xFD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
         ]));
     }

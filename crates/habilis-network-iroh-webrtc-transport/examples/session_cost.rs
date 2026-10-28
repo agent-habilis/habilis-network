@@ -30,7 +30,7 @@ use habilis_network_iroh_webrtc_transport::iroh_base::{EndpointId, SecretKey};
 use habilis_network_iroh_webrtc_transport::{
     IceConfig, SignalEnvelope, WebRtcTransport, answer_with, offer_with,
 };
-use habilis_network_util::resident_memory::current_resident_memory_bytes;
+use habilis_network_util::resident_memory;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
@@ -181,7 +181,7 @@ async fn open_one(
 }
 
 fn resident() -> u64 {
-    current_resident_memory_bytes().unwrap_or(0)
+    resident_memory::current_resident_memory_bytes().unwrap_or(0)
 }
 
 /// Waits `settle` seconds, then the median of five readings one second apart.
@@ -212,7 +212,7 @@ fn load1() -> Option<f64> {
 
 async fn measure(role: Role, sessions: usize, settle: u64, hold: u64) -> anyhow::Result<()> {
     anyhow::ensure!(
-        current_resident_memory_bytes().is_some(),
+        resident_memory::current_resident_memory_bytes().is_some(),
         "the resident memory of this process cannot be read on this platform"
     );
     let mut child = Command::new(std::env::current_exe()?)
