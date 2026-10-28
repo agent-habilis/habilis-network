@@ -5,7 +5,6 @@ crates/habilis-network-ffi/src/ffi.rs|1|rename pending: public type(s) HabilisNe
 crates/habilis-network-iroh-gossip-transport/src/memory.rs|1|rename pending: public type(s) Hub
 crates/habilis-network-iroh-multihop-transport/src/underlay.rs|1|rename pending: public type(s) Delivered, Forwarder, ForwardAcceptor
 crates/habilis-network-iroh-webrtc-transport/src/native/driver.rs|1|rename pending: public type(s) NegotiatedSession, ChannelReadyTarget
-crates/habilis-network-iroh-webrtc-transport/src/native/stun.rs|1|rename pending: public type(s) IceConfig
 crates/habilis-network-iroh-webrtc-transport/src/selector.rs|1|rename pending: public type(s) WebRtcPreferred
 crates/habilis-network-iroh-webrtc-transport/src/web/jsep.rs|1|rename pending: public type(s) IceServer, IceServers, BrowserSession, PendingOffer, PendingAnswer, PreAttachBacklog
 crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|1|rename pending: public type(s) InboundPacket, SessionCounters, SessionCounts, DataChannelCounters, SelectedPairStats, BrowserSessionGuard, BrowserHubTransport, BrowserRtcTransport

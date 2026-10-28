@@ -6,8 +6,8 @@ use str0m::Rtc;
 use tokio::net::UdpSocket;
 
 use super::driver::{add_host_candidate, add_reflexive_candidate, bind_ephemeral_udp, build_rtc};
+use super::ice_config::IceConfig;
 use super::jsep_error::JsepError;
-use super::stun::IceConfig;
 
 pub(super) struct Negotiating {
     pub(super) rtc: Rtc,

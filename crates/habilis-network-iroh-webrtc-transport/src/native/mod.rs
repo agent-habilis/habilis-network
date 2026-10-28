@@ -5,6 +5,7 @@
 //! root, not here.
 
 mod driver;
+mod ice_config;
 mod inbound_packet;
 mod jsep_error;
 mod negotiating;
@@ -19,8 +20,8 @@ mod web_rtc_sender;
 mod web_rtc_transport;
 
 pub use driver::NegotiatedSession;
+pub use ice_config::IceConfig;
 pub use jsep_error::JsepError;
 pub use pending_answer::{PendingAnswer, answer, answer_with};
 pub use pending_offer::{PendingOffer, offer, offer_with};
-pub use stun::IceConfig;
 pub use web_rtc_transport::WebRtcTransport;

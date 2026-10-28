@@ -5,9 +5,9 @@ use std::time::Duration;
 use str0m::change::SdpOffer;
 
 use super::driver::{ChannelReadyTarget, NegotiatedSession, drive_until_channel_ready};
+use super::ice_config::IceConfig;
 use super::jsep_error::JsepError;
 use super::negotiating::{Negotiating, start};
-use super::stun::IceConfig;
 use crate::SignalEnvelope;
 
 /// Answerer-side JSEP state between sending the answer and the channel

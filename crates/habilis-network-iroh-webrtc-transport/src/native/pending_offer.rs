@@ -6,9 +6,9 @@ use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 
 use super::driver::{ChannelReadyTarget, NegotiatedSession, drive_until_channel_ready};
+use super::ice_config::IceConfig;
 use super::jsep_error::JsepError;
 use super::negotiating::{Negotiating, start};
-use super::stun::IceConfig;
 use crate::{DATA_CHANNEL_LABEL, SignalEnvelope};
 
 /// Offerer-side JSEP state between sending the offer and applying the

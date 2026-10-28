@@ -85,7 +85,7 @@ pub(crate) async fn add_reflexive_candidate(
     rtc: &mut Rtc,
     socket: &UdpSocket,
     base: SocketAddr,
-    config: &super::stun::IceConfig,
+    config: &super::ice_config::IceConfig,
 ) -> bool {
     let Some(reflexive) = super::stun::gather_reflexive(socket, config).await else {
         return false;

@@ -575,7 +575,6 @@ self_convention|crates/habilis-network-util/src/unix_secs.rs|2|UnixSecs::as_secs
 # fn_import: a top-level function imported by its bare name (O23). Each row is a count that may only go down.
 fn_import|crates/habilis-network-iroh-gossip-transport/src/receive_loop.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-gossip-transport/src/gossip_handle.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/host.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-webrtc-transport/src/lib.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_handle.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network-iroh-webrtc-transport/src/selector.rs|1|kept: a top-level function imported by its bare name (O23 rollout)

@@ -11,7 +11,6 @@ use habilis_network_iroh_webrtc_transport::iroh::{Endpoint, RelayMode, SecretKey
 use habilis_network_iroh_webrtc_transport::iroh_base::RelayUrl;
 use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
 
-use crate::ice_config;
 use crate::room::Room;
 use crate::serve::ChatAcceptor;
 use crate::signal::SignalAcceptor;
@@ -68,7 +67,7 @@ pub async fn run(nick: &str, relay: Option<RelayUrl>, host_ice: bool) -> Result<
     }
 
     let room = Room::new();
-    let ice = ice_config(host_ice);
+    let ice = crate::ice_config(host_ice);
     let router = Router::builder(endpoint.clone())
         .accept(SIGNAL_ALPN, SignalAcceptor::new(handle.clone(), id, ice))
         .accept(CHAT_ALPN, ChatAcceptor::new(room.clone(), handle.clone()))
