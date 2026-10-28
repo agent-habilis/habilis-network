@@ -67,9 +67,9 @@ pub use chunk_map::{ChunkMap, ChunkMapBuilder, chunk_count};
 pub use chunk_store::{ChunkSource, ChunkStore};
 pub use coverage::{Coverage, FileId};
 
-mod error;
+mod chunk_error;
 
-pub use error::ChunkError;
+pub use chunk_error::ChunkError;
 
 /// The filesystem backends. Host-only, and gated on the target rather than a
 /// feature so it cannot be misconfigured: a wasm build simply does not have
@@ -78,14 +78,17 @@ pub use error::ChunkError;
 pub mod fs;
 /// The browser backend. Main-thread capable, so a tab can seed without a Worker.
 #[cfg(target_arch = "wasm32")]
-pub mod idb;
-pub mod mem;
+pub mod idb_store;
+#[cfg(target_arch = "wasm32")]
+pub use idb_store as idb;
+pub mod in_memory_store;
+pub use in_memory_store as mem;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use fs::{DiskOrigin, DiskStore};
 #[cfg(target_arch = "wasm32")]
-pub use idb::IdbStore;
-pub use mem::InMemoryStore;
+pub use idb_store::IdbStore;
+pub use in_memory_store::InMemoryStore;
 
 #[cfg(test)]
 mod tests {
