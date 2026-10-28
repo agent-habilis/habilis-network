@@ -387,7 +387,8 @@ impl ShardCache {
 /// If the envelope carries no shard header; callers only pass shard messages.
 pub fn synthesize_from(header: &Verified, body: MessageBody, group_id: &ShardGroup) -> Authored {
     let mut envelope = Message::clone(header);
-    envelope.id = MessageId::try_new(group_id.as_str()).expect("a shard group is a valid message id");
+    envelope.id =
+        MessageId::try_new(group_id.as_str()).expect("a shard group is a valid message id");
     envelope.body = body;
     envelope.shard = None;
     envelope.seq = None;

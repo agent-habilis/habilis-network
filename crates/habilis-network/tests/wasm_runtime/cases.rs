@@ -73,8 +73,9 @@ async fn tasks_spawn() {
 /// only one of the two is set.
 #[wasm_bindgen_test]
 fn a_message_can_be_authored() {
-    let mesh = MeshId::try_new("2GQJSpKX5vEMq2owsG3v2ogLga3CESfHDQMoEKwLFuGHAgViR3vDstEekpHE3KNqALrk")
-        .expect("a well-formed mesh id");
+    let mesh =
+        MeshId::try_new("2GQJSpKX5vEMq2owsG3v2ogLga3CESfHDQMoEKwLFuGHAgViR3vDstEekpHE3KNqALrk")
+            .expect("a well-formed mesh id");
     let nick = Nickname::try_new("wasm-guard").expect("a well-formed nickname");
     let message = Message::new_joined(&mesh, &nick);
     assert!(

@@ -209,7 +209,8 @@ fn new_and_from_topic_refuse_a_config_that_names_a_secret() {
 fn set_password_bakes_verifier_and_unlock_verifies_it() {
     let password = Password::new("hunter2".to_owned());
 
-    let mut creator = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+    let mut creator =
+        Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
     let passwordless_topic = creator.topic_id();
     let passwordless_rendezvous = creator.rendezvous_id();
     creator.set_password(&password);
@@ -251,7 +252,8 @@ fn unlock_with_a_password_on_a_passwordless_id_is_rejected() {
 
 #[test]
 fn unlock_without_the_password_on_a_passworded_id_is_rejected() {
-    let mut creator = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+    let mut creator =
+        Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
     creator.set_password(&Password::new("hunter2".to_owned()));
     let error = creator.locked().unlock(None).unwrap_err();
     assert_eq!(error, UnlockError::PasswordRequired);
@@ -259,7 +261,8 @@ fn unlock_without_the_password_on_a_passworded_id_is_rejected() {
 
 #[test]
 fn unlock_refuses_an_invite_only_id() {
-    let mut creator = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+    let mut creator =
+        Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
     creator.set_invite();
     let error = creator.locked().unlock(None).unwrap_err();
     assert_eq!(error, UnlockError::InviteOnly);

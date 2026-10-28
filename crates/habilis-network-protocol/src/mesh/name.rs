@@ -183,7 +183,8 @@ impl MeshName {
             head
         };
 
-        Self::try_new(name).unwrap_or_else(|_| Self::try_new("topic").expect("`topic` is a valid name"))
+        Self::try_new(name)
+            .unwrap_or_else(|_| Self::try_new("topic").expect("`topic` is a valid name"))
     }
 
     /// The name as bytes.

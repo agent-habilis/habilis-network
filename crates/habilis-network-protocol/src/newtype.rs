@@ -125,13 +125,19 @@ mod tests {
         }
 
         let uuid = "b3f1c2d4-5e6a-4b8c-9d0e-1f2a3b4c5d6e";
-        check!(Nickname::try_new("lotus-anvil").expect("nick"), "lotus-anvil");
+        check!(
+            Nickname::try_new("lotus-anvil").expect("nick"),
+            "lotus-anvil"
+        );
         check!(MessageId::try_new(uuid).expect("id"), uuid);
         check!(MessageBody::try_new("hello").expect("body"), "hello");
         check!(AppTag::try_new("app_msg").expect("tag"), "app_msg");
         check!(CorrId::try_new("corr-1").expect("corr"), "corr-1");
         check!(ShardGroup::from_uuid_str(uuid).expect("group"), uuid);
-        check!(MeshName::try_new("kernel-parch").expect("name"), "kernel-parch");
+        check!(
+            MeshName::try_new("kernel-parch").expect("name"),
+            "kernel-parch"
+        );
     }
 
     /// Deserialization stays **validating** — the property the hand-written

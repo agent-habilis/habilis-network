@@ -429,7 +429,10 @@ mod tests {
     #[test]
     fn owner_refuses_init_self_and_a_dead_pid() {
         assert!(Owner::try_new(0).is_err());
-        assert!(Owner::try_new(std::process::id()).is_err(), "self is no owner");
+        assert!(
+            Owner::try_new(std::process::id()).is_err(),
+            "self is no owner"
+        );
         let init = Owner::try_new(1).expect_err("init refused").to_string();
         assert!(!init.contains('\n'), "one error line: {init}");
         assert!(!init.contains("agent"), "engine vocabulary only: {init}");

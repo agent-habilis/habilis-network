@@ -2893,9 +2893,10 @@ mod first_contact_tests {
                 break id;
             }
         };
-        let body =
-            MessageBody::try_new(endpoint_addr_to_json(&iroh::EndpointAddr::new(lower)).to_string())
-                .expect("an address body");
+        let body = MessageBody::try_new(
+            endpoint_addr_to_json(&iroh::EndpointAddr::new(lower)).to_string(),
+        )
+        .expect("an address body");
         let peer_info =
             Message::new_peer_info(&node.mesh, &nick("lower"), body).sign(&Identity::generate());
 
@@ -2940,9 +2941,10 @@ mod first_contact_tests {
                 break id;
             }
         };
-        let body =
-            MessageBody::try_new(endpoint_addr_to_json(&iroh::EndpointAddr::new(newcomer)).to_string())
-                .expect("an address body");
+        let body = MessageBody::try_new(
+            endpoint_addr_to_json(&iroh::EndpointAddr::new(newcomer)).to_string(),
+        )
+        .expect("an address body");
         let peer_info =
             Message::new_peer_info(&node.mesh, &nick("newcomer"), body).sign(&Identity::generate());
         let crowd = |state: &mut EventLoopState, members: usize| {

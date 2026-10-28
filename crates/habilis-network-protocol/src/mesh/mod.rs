@@ -656,7 +656,8 @@ impl LockedMesh {
         pos += name_len;
         let name_str = std::str::from_utf8(name_raw)
             .map_err(ConfigError::with_step("invalid mesh name UTF-8"))?;
-        let name = MeshName::try_new(name_str).map_err(ConfigError::with_step("invalid mesh name"))?;
+        let name =
+            MeshName::try_new(name_str).map_err(ConfigError::with_step("invalid mesh name"))?;
 
         let config_len = lookup::read_u16(bytes, &mut pos)
             .map_err(ConfigError::with_step("truncated config length"))?
