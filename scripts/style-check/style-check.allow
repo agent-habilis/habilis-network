@@ -695,7 +695,7 @@ abbrev_name|crates/habilis-network/src/daemon/heal.rs|14|existing letter-deleted
 abbrev_name|crates/habilis-network/src/daemon/message_log.rs|30|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/daemon/setup.rs|19|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/daemon/shutdown.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/daemon/state.rs|18|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/daemon/state/event_loop_state.rs|18|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/daemon/timers.rs|5|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/antientropy.rs|24|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/app.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
