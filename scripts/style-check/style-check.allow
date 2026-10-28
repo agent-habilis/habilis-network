@@ -32,7 +32,6 @@ operator|crates/habilis-network/src/gossip/app.rs|1|AppClass bit flags: BitOr jo
 pub_const_fn|crates/habilis-network-chunks/src/chunk_hash.rs|4|kept: ChunkHash and Root newtype accessors and constructors (from_bytes, as_bytes), plus trivial accessors (root, size, len, is_empty)
 pub_const_fn|crates/habilis-network-chunks/src/chunk_map.rs|2|kept: ChunkHash and Root newtype accessors and constructors (from_bytes, as_bytes), plus trivial accessors (root, size, len, is_empty)
 pub_const_fn|crates/habilis-network-chunks/src/coverage.rs|2|kept: ChunkHash and Root newtype accessors and constructors (from_bytes, as_bytes), plus trivial accessors (root, size, len, is_empty)
-pub_const_fn|crates/habilis-network-ffi/src/ffi.rs|3|kept: C-edge empty values (empty), used by the FFI structs (reviewer to confirm const context)
 pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/metric.rs|2|kept: newtype rule (LinkMetric new and get)
 pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/role.rs|4|kept: newtype rule (AppId and UnderlayId new and get)
 pub_const_fn|crates/habilis-network-netplay/src/frame.rs|2|kept: newtype rule (Frame new and get)

@@ -64,7 +64,7 @@ pub struct HabilisNetworkOpts {
 impl HabilisNetworkOpts {
     /// Every pointer NULL and every number zero, which takes the engine defaults.
     #[must_use]
-    pub const fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             mesh: std::ptr::null(),
             topic: std::ptr::null(),
@@ -156,7 +156,7 @@ pub struct HabilisNetworkMsg {
 impl HabilisNetworkMsg {
     /// No nickname, no directed flag and no text.
     #[must_use]
-    pub const fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             nick: [0; NICK_CAP],
             directed: 0,
@@ -718,7 +718,7 @@ pub struct HabilisNetworkStreamOpts {
 impl HabilisNetworkStreamOpts {
     /// Every pointer NULL, which takes the engine defaults.
     #[must_use]
-    pub const fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             lookup: std::ptr::null(),
             transport: std::ptr::null(),
