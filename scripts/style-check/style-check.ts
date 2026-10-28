@@ -239,6 +239,27 @@ function countUntypedLongChainLets(raw: string): number {
   return count;
 }
 
+// The accessor names of the guide's Rust rules U9 to U14, on the methods of a public type. A method
+// is indented, so a free function that takes a cursor, such as take_array, is not one.
+function countAccessorNames(raw: string): number {
+  const text = stripTestModules(blankStrings(stripComments(raw)));
+  let count = 0;
+  for (const m of text.matchAll(/^([ \t]*)pub (?:const )?fn (\w+)/gm)) {
+    const [, indent = "", name = ""] = m;
+    const method = indent.length >= 4;
+    const after = m.index! + m[0].length;
+    const open = text.indexOf("(", after);
+    const ret = returnType(text, after);
+    const params = text.slice(open + 1, open + 1 + 200);
+    if (name.startsWith("get_")) count++;
+    if (name.startsWith("replace_") && ret === "") count++;
+    if (method && name.startsWith("take_") && !/^\s*&mut self/.test(params)) count++;
+    if (method && name.endsWith("_mut") && !ret.includes("&mut")) count++;
+    if (method && name.startsWith("set_") && /^\s*&(?:mut )?self,\s*\w+:\s*&/.test(params)) count++;
+  }
+  return count;
+}
+
 // A public fn that returns a Vec. The guide prefers an iterator, so a Vec needs a counted allow row with its reason.
 function countPubVecReturn(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
@@ -473,6 +494,13 @@ const RULES: Rule[] = [
     skip: /^(?!(?:.*\/)?(?:main\.rs$|bin\/))/,
     glob: "*.rs",
     why: "Application code does not take impl Into<T>. A binary or a bin/ target takes a concrete type.",
+  },
+  {
+    name: "accessor_name",
+    scan: countAccessorNames,
+    skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
+    glob: "crates/**/*.rs",
+    why: "A public accessor follows the guide: no get_ prefix, replace_ returns the old value, take_ clears through &mut self, _mut returns &mut, set_ takes its value by value.",
   },
 ];
 

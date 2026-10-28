@@ -413,3 +413,27 @@ test("app_impl_into: a bin target counts", () => {
 test("app_impl_into: a library file is clean", () => {
   expectExit("crates/demo/src/lib.rs", "fn f(s: impl Into<String>) -> String { s.into() }", 0);
 });
+
+// The accessor_name rule: the names and receivers of the public accessors (U9 to U14).
+const accessor = (body: string) => `impl Demo {\n${body}\n}`;
+test("accessor_name: a get_ method counts", () => {
+  expectExit("crates/demo/src/lib.rs", accessor("    pub fn get_x(&self) -> u8 {\n        1\n    }"), 1);
+});
+test("accessor_name: a replace_ method with no return counts", () => {
+  expectExit("crates/demo/src/lib.rs", accessor("    pub fn replace_x(&mut self, v: u8) {\n        let _ = v;\n    }"), 1);
+});
+test("accessor_name: a take_ method that does not take &mut self counts", () => {
+  expectExit("crates/demo/src/lib.rs", accessor("    pub fn take_x(self) -> u8 {\n        1\n    }"), 1);
+});
+test("accessor_name: a _mut method that returns a shared ref counts", () => {
+  expectExit("crates/demo/src/lib.rs", accessor("    pub fn x_mut(&mut self) -> &u8 {\n        &self.v\n    }"), 1);
+});
+test("accessor_name: a set_ method that takes a reference counts", () => {
+  expectExit("crates/demo/src/lib.rs", accessor("    pub fn set_x(&mut self, v: &u8) {\n        let _ = v;\n    }"), 1);
+});
+test("accessor_name: the guide's shapes are clean", () => {
+  expectExit("crates/demo/src/lib.rs", accessor("    pub fn x(&self) -> &u8 {\n        &self.v\n    }\n    pub fn x_mut(&mut self) -> &mut u8 {\n        &mut self.v\n    }\n    pub fn take_x(&mut self) -> u8 {\n        std::mem::take(&mut self.v)\n    }\n    pub fn set_x(&mut self, v: u8) {\n        self.v = v;\n    }"), 0);
+});
+test("accessor_name: a free take_ function is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn take_array(bytes: &[u8], pos: &mut usize) -> u8 {\n    let _ = (bytes, pos);\n    0\n}", 0);
+});
