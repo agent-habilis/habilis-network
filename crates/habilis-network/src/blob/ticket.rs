@@ -37,7 +37,7 @@ const PASSWORD_BIT: u8 = 0b0000_0001;
 const RELAY_TRANSPORT_BIT: u8 = 0b0000_0010;
 
 /// A decoded blob ticket.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct BlobTicket {
     /// The endpoint address of the producer that serves the blob.

@@ -65,7 +65,7 @@ impl ContentId {
 /// One offload: which file, where to spool it, which content group it belongs to,
 /// and the mesh password it inherits (so a scraped ticket cannot be redeemed
 /// without it).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct OffloadRequest {
     /// The file to offload.

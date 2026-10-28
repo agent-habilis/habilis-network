@@ -25,7 +25,7 @@ use crate::protocol::mesh::RelayChoice;
 use crate::util::tuning;
 /// The create intent, before resolution. Each frontend builds this from its
 /// own input struct (the lookups are already resolved into `config`).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CreateParams {
     /// The name of the mesh.
@@ -80,7 +80,7 @@ impl CreateParams {
 }
 
 /// The join intent, before resolution.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct JoinParams {
     /// The target to join.
@@ -111,7 +111,7 @@ impl JoinParams {
 /// The topic intent: a mesh derived deterministically from a shared string,
 /// always public. Name + config are derived, not supplied — the string alone
 /// determines the mesh.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct TopicParams {
     /// The shared string that fixes the mesh. Every peer that passes the same string meets in the same mesh.
@@ -123,7 +123,7 @@ pub struct TopicParams {
 /// A resolved create/join, ready to hand to
 /// [`setup_mesh`](super::setup::setup_mesh). `advertise_directory` is the
 /// directory to re-broadcast into (`create --advertise`), or `None`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Resolved {
     /// What the setup creates.

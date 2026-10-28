@@ -69,7 +69,7 @@ pub(crate) struct MissingQuery<'query> {
 /// front — chosen so the **retained set** is a deterministic function of the
 /// message set, identical on every node regardless of gossip delivery order
 /// (see [`MessageLog::eviction_index`]).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MessageLog {
     capacity: usize,
     messages: VecDeque<Verified>,

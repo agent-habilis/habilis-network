@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 /// deliberately do *not* ride this channel: base64 inside JSON for every frame
 /// would inflate every byte on the mesh by a third to hand it to a language that
 /// already has a byte array.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum MembershipEvent {

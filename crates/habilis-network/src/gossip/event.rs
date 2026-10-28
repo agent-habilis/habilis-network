@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 /// `OutputEvent`. The app's [`NodeSink`] impl maps each variant onto the
 /// existing `Output` method, so the rendered stdout / `--output json` / library API
 /// forms stay byte-identical.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum NodeEvent {
     /// The daemon can serve. Mesh identity only — a consumer that wants to

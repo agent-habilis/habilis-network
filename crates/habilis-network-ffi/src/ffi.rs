@@ -36,7 +36,7 @@ thread_local! {
 /// NUL-terminated C strings or NULL; `max_peers == 0` and `max_direct == 0` take
 /// the engine defaults (G is 32, C is 64).
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HabilisNetworkOpts {
     /// The mesh id to join, NUL-terminated, or NULL. Set at most one of `mesh` and `topic`.
@@ -142,7 +142,7 @@ const _: () = {
 /// text itself lands in the caller's own buffer, NUL-terminated; `len` says how
 /// many bytes it has, excluding the NUL.
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HabilisNetworkMsg {
     /// The nickname of the sender, NUL-terminated.
@@ -704,7 +704,7 @@ pub unsafe extern "C" fn habilis_network_mesh_close(handle: *mut HabilisNetworkM
 /// header: the same three lists `habilis_network_opts` carries, without the mesh
 /// selectors a stream has no use for.
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HabilisNetworkStreamOpts {
     /// The lookups, as a NUL-terminated string.

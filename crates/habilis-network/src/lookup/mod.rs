@@ -124,7 +124,7 @@ pub(crate) use relay::{
 /// transport is independently optional, and several are host-only (they own
 /// UDP sockets), so the field list itself differs per target. `Default` is
 /// "IP and relay only".
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct TransportHandles {
     /// Source-routed multi-hop: reach a peer with no direct path by relaying

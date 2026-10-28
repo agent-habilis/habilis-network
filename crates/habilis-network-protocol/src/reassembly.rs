@@ -27,7 +27,7 @@ pub fn slot_charge(body_len: usize) -> usize {
 const LOG_TARGET: &str = "habilis_network::gossip";
 
 /// What became of one ingested shard.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ShardIngest {
     /// Buffered; its group is still incomplete.
@@ -321,7 +321,7 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Auth
 
 /// One stalled big group's repair ask: which author to query and which shard
 /// indexes we still lack.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RepairTicket {
     /// The member that sent the missing shards.

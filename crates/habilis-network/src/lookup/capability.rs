@@ -15,7 +15,7 @@ use super::build_peer_endpoint;
 /// net-report fields are `Option` because the endpoint can bind locally even
 /// when no report completes (offline / slow): then only `node_id` /
 /// `local_addrs` are known and the rest stay `None`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct NetworkCapability {
     /// The node id, in hex.

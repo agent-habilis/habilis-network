@@ -35,7 +35,7 @@ use tokio::sync::oneshot;
 /// have it land here, which is what stops the browser and the C caller growing
 /// two different option sets. `deny_unknown_fields` so a typo is an error rather
 /// than a silently loopback mesh; `default` so every field stays optional.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Opts {

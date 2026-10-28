@@ -247,7 +247,7 @@ impl Drop for StateFile {
 /// `ready: true` left by a prior daemon killed with SIGKILL is rejected). The
 /// session identity is read separately ([`read_identity`]) only on the success
 /// path, so the poll loop allocates nothing beyond these two fields.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ReadySnapshot {
     /// Whether the daemon is ready.
@@ -259,7 +259,7 @@ pub struct ReadySnapshot {
 /// Best-effort session identity for a consumer's readiness report. Each field is
 /// `None` when the state file is unreadable, not JSON, or predates that field
 /// — so the JSON the gate prints carries only the keys actually present.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SessionIdentity {
     /// The mesh id, as text.
@@ -312,7 +312,7 @@ fn mesh_field(doc: &serde_json::Value) -> Option<String> {
 /// whether the calling session owns it. Every field is `Option`: a file
 /// written by an older binary predates `pid`, and discovery must still be
 /// able to *report* such an entry rather than error on it.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SessionEntry {
     /// The mesh id, as text.

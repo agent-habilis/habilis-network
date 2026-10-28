@@ -110,7 +110,7 @@ fn escaped_len(text: &str) -> usize {
 }
 
 /// One surfaced `msg`, flattened for a consumer outside the engine.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Inbound {
     /// The author's nickname.
@@ -503,7 +503,7 @@ pub use habilis_network_iroh_webrtc_transport::Rung;
 /// being written anywhere: a browser's `js_sys::Function` is neither `Send`
 /// nor `Sync`, and [`NodeApp`] is `Send`, so the driver could not keep one even
 /// if it wanted to. Consumers drain the queue on their own schedule.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MembershipApp {
     inbound: mpsc::Sender<Inbound>,
     /// Messages dropped since the queue last had room. One error is surfaced

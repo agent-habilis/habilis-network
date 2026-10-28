@@ -15,7 +15,7 @@ use std::hash::Hash;
 
 /// A set that holds at most `capacity` items. When an insert goes past the limit, the oldest item
 /// is dropped.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BoundedFifoSet<T> {
     capacity: usize,
     set: HashSet<T>,

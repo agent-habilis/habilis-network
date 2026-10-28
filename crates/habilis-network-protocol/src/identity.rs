@@ -29,7 +29,7 @@ use crate::{AuthorKey, DedupKey, SymmetricKey};
 /// A per-peer signing identity — just the secret key. The nickname
 /// it speaks under is carried by the message `author` field and bound to
 /// this key trust-on-first-use by receivers, so it is not stored here.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Identity {
     secret: SecretKey,
 }

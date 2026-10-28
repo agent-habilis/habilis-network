@@ -7,7 +7,7 @@ use crate::invite::InviteTicket;
 use crate::mesh::{LockedMesh, MeshIdError};
 
 /// Why a join target does not resolve to a locked mesh.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 #[must_use]
 pub enum ResolveError {

@@ -175,7 +175,7 @@ const MAX_LISTINGS: usize = 256;
 /// deterministic (the caller supplies `now`), so it unit-tests without
 /// a clock or a network. Shared by the CLI `discover` stream and the
 /// in-process directory watcher.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Listings {
     entries: HashMap<MeshId, Listing>,
 }

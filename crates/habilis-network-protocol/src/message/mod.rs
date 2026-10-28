@@ -720,7 +720,7 @@ fn is_lower_hex(value: &str, bytes: usize) -> bool {
 
 /// Parameters for [`Message::new_app`] (and `habilis_network::ops::send_app`, which
 /// shares the same `App` frame shape).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct AppFrameParams {
     /// The application tag, which routes the frame to its app handler.
@@ -1218,7 +1218,7 @@ impl Message {
 /// send path (`gossip::broadcast`) stamps the chain inline to interleave it with
 /// the multipart split.
 #[cfg(any(test, feature = "test-fixtures"))]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ChainCtx {
     /// The position of the message in its author's chain.
@@ -1244,7 +1244,7 @@ impl ChainCtx {
 
 /// The inputs of a test message: the mesh, the author, the body, the chain and the app tag.
 #[cfg(any(test, feature = "test-fixtures"))]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct BuildMsgParams<'mesh> {
     /// The mesh of the message.

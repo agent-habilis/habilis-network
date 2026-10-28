@@ -36,7 +36,7 @@ use iroh::address_lookup::memory;
 use std::sync::atomic;
 /// What kind of mesh we're setting up — either minting a new one
 /// (create) or attaching to an existing one (join).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum SetupKind {
     /// Create a mesh.

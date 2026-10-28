@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 
 /// A first-in, first-out queue of at most `capacity` items. It keeps duplicates, and a push is
 /// rejected when the queue is full.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BoundedQueue<T> {
     capacity: usize,
     queue: VecDeque<T>,

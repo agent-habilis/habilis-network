@@ -74,7 +74,7 @@ impl StreamOpts {
 }
 
 /// One endpoint serving and opening streams. It never joins a gossip mesh.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StreamNode {
     endpoint: Endpoint,
     router: Router,

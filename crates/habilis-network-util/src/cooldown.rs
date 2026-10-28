@@ -16,7 +16,7 @@ use crate::clock::Instant;
 /// A set of keys each "on cooldown" until `window` after its last [`note`].
 ///
 /// [`note`]: Cooldown::note
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Cooldown<K> {
     seen: HashMap<K, Instant>,
     window: Duration,
