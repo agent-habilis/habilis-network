@@ -319,7 +319,7 @@ test("turbofish_collect_parse: a collect turbofish with no row fails", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(v: &[u8]) -> Vec<u8> {\n    v.iter().copied().collect::<Vec<u8>>()\n}", 1, "");
 });
 test("turbofish_collect_parse: a typed let passes", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(v: &[u8]) -> Vec<u8> {\n    let out: Vec<u8> = v.iter().copied().collect();\n    out\n}", 0, "");
+  expectExit("crates/demo/src/lib.rs", "fn f(v: &[u8]) -> Vec<u8> {\n    let out: Vec<u8> = v.iter().copied().collect();\n    out\n}", 0, "");
 });
 test("turbofish_collect_parse: a forced _ passes", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(s: &str) -> Option<u8> {\n    s.parse::<_>().ok()\n}", 0, "");
@@ -347,4 +347,30 @@ test("untyped_long_chain_let: a typed let passes", () => {
 });
 test("untyped_long_chain_let: the exact count is allowed", () => {
   expectExit("crates/demo/src/lib.rs", untypedChain, 0, "long_chain|crates/demo/src/lib.rs|1|fixture\nuntyped_long_chain_let|crates/demo/src/lib.rs|1|fixture");
+});
+
+// The pub_vec_return rule: a public function returns a Vec, outside tests and examples.
+test("pub_vec_return: a pub fn that returns a Vec counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Vec<u8> { Vec::new() }", 1);
+});
+test("pub_vec_return: a multi-line signature counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(\n    x: u8,\n) -> Vec<u8> {\n    vec![x]\n}", 1);
+});
+test("pub_vec_return: a Vec inside a Result counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Result<Vec<u8>, ()> { Ok(Vec::new()) }", 1);
+});
+test("pub_vec_return: an iterator is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f() -> impl Iterator<Item = u8> { std::iter::empty() }", 0);
+});
+test("pub_vec_return: a private fn is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "fn f() -> Vec<u8> { Vec::new() }", 0);
+});
+test("pub_vec_return: a test module is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "#[cfg(test)]\nmod tests {\n    pub fn f() -> Vec<u8> { Vec::new() }\n}", 0);
+});
+test("pub_vec_return: an example is clean", () => {
+  expectExit("crates/demo/examples/e.rs", "pub fn f() -> Vec<u8> { Vec::new() }", 0);
+});
+test("pub_vec_return: an allowed row with its count passes", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Vec<u8> { Vec::new() }", 0, "pub_vec_return|crates/demo/src/lib.rs|1|the owned bytes");
 });

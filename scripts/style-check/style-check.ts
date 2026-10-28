@@ -239,6 +239,16 @@ function countUntypedLongChainLets(raw: string): number {
   return count;
 }
 
+// A public fn that returns a Vec. The guide prefers an iterator, so a Vec needs a counted allow row with its reason.
+function countPubVecReturn(raw: string): number {
+  const text = stripTestModules(blankStrings(stripComments(raw)));
+  let count = 0;
+  for (const m of text.matchAll(PUB_FN)) {
+    if (/\bVec\s*</.test(returnType(text, m.index! + m[0].length))) count++;
+  }
+  return count;
+}
+
 function countAnyhowPub(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   const bare = new Set<string>();
@@ -401,6 +411,13 @@ const RULES: Rule[] = [
     skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/[^/]+\/src\/)/,
     glob: "crates/**/*.rs",
     why: "A library fn takes a generic (T: Trait or impl Trait), not a dyn Trait parameter. A counted row is a trait object that stays, with its reason.",
+  },
+  {
+    name: "pub_vec_return",
+    scan: countPubVecReturn,
+    skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
+    glob: "crates/**/*.rs",
+    why: "A public function returns an iterator, not a Vec. A Vec is allowed where the caller needs an owned collection or the function builds a byte buffer, and each such function has a counted row with its reason.",
   },
 ];
 
