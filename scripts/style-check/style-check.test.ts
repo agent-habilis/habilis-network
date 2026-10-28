@@ -290,3 +290,15 @@ test("assert_repeats_condition: a message that says why passes", () => {
 test("assert_repeats_condition: a bracket inside a message does not end the call", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(a: u8) {\n    assert!(a == 1, \"got )\"); assert!(a == 1, \"a == 1\");\n}", 1, "");
 });
+
+// The long_chain rule (P15): a statement with five or more chained calls needs a row.
+const longChain = "pub fn f(v: Vec<u8>) -> usize {\n    v.iter().map(|x| x + 1).filter(|x| *x > 1).count()\n}";
+test("long_chain: a chain of five calls fails with no row", () => {
+  expectExit("crates/demo/src/lib.rs", longChain.replace("count()", "take(3).count()"), 1, "");
+});
+test("long_chain: a chain of four calls passes", () => {
+  expectExit("crates/demo/src/lib.rs", longChain, 0, "");
+});
+test("long_chain: the exact count is allowed", () => {
+  expectExit("crates/demo/src/lib.rs", longChain.replace("count()", "take(3).count()"), 0, "long_chain|crates/demo/src/lib.rs|1|fixture");
+});

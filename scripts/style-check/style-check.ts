@@ -196,6 +196,19 @@ function countAssertsRepeatingCondition(raw: string): number {
   return count;
 }
 
+// The statements with a method chain of five or more calls. A statement ends at a `;`, a `{` or a `}`
+// outside a string, so a chain cannot hide across a block. Comments and strings are blanked first.
+const CHAIN_LIMIT = 5;
+function countLongChains(raw: string): number {
+  const text = blankStrings(stripComments(raw));
+  let count = 0;
+  for (const stmt of text.split(/[;{}]/)) {
+    const calls = stmt.match(/\.\s*\w+\s*(?:::<[^>]*>\s*)?\(/g);
+    if (calls && calls.length >= CHAIN_LIMIT) count++;
+  }
+  return count;
+}
+
 function countAnyhowPub(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   const bare = new Set<string>();
@@ -299,6 +312,12 @@ const RULES: Rule[] = [
     scan: countAssertsRepeatingCondition,
     glob: "crates/**/*.rs",
     why: "An assert message says why, not what: a message that only repeats the condition adds nothing (P14).",
+  },
+  {
+    name: "long_chain",
+    scan: countLongChains,
+    glob: "crates/**/*.rs",
+    why: "A statement with a chain of five or more calls is hard to read in one pass: name the middle step (P15).",
   },
   {
     name: "anyhow_pub",
