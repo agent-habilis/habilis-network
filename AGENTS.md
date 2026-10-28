@@ -217,6 +217,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - `&String` in a trait impl: a method of a trait takes `&T::Address`, so an impl with `type Address = String` must take `&String`. `ptr_arg` does not fire on trait impls, and `cargo clippy -p habilis-network-netplay --tests -- -D warnings` is clean. The one such site is `Wire::send_to` in `habilis-network-netplay/tests/peers.rs`.
 - `.clone()`: 1,094 calls (`git grep`, 2026-10-27). No lint tells a needed copy from a lazy one: `redundant_clone` is in `nursery`, and `implicit_clone` and `clone_on_copy` catch the easy cases only. The reviewer asks for a borrow where one is clear. (B3)
 - Trait imports: 446 `use` lines sit 8 or more spaces deep (inline modules and fn bodies, not separable by `git grep`) against 2,033 at the top of a file. Clippy has no lint for the scope of an import. The reviewer asks for a local import when only one function uses the trait. (O22)
+- Calls to top-level functions: about 1,200 `module::function(` matches, mixed with `std`. `absolute_paths` covers types and long paths, not this rule, and no lint covers it. The reviewer asks for `mem::swap`, not a bare `swap`. (O23)
 
 ### Rules of the guide that do not apply
 
