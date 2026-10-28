@@ -260,8 +260,7 @@ impl ReassemblyStore {
     /// [`REASSEMBLY_REPAIR_IDLE`] window. Small groups are excluded —
     /// their shards live in the message log and heal via anti-entropy, which
     /// re-sends a directed shard point-to-point to its addressee.
-    #[must_use]
-    pub fn repair_tickets(&mut self, now: Instant) -> Vec<RepairTicket> {
+    pub fn repair_tickets(&mut self, now: Instant) -> impl Iterator<Item = RepairTicket> {
         let mut tickets = Vec::new();
         for ((_, group_id), group) in &mut self.groups {
             if group.total <= LOGGED_SHARD_GROUP_MAX_TOTAL || group.is_complete() {
@@ -285,7 +284,7 @@ impl ReassemblyStore {
                 missing,
             });
         }
-        tickets
+        tickets.into_iter()
     }
 
     /// Remove a group and release its budget.
@@ -367,14 +366,19 @@ impl ShardCache {
 
     /// The cached frames for `group` at the requested indexes (missing or
     /// out-of-range indexes are skipped; empty when the group was evicted).
-    #[must_use]
-    pub fn frames(&self, group: &ShardGroup, idxs: &[u32]) -> Vec<WireFrame> {
-        let Some(cached) = self.groups.iter().find(|entry| entry.group == *group) else {
-            return Vec::new();
-        };
-        idxs.iter()
-            .filter_map(|idx| cached.frames.get(*idx as usize).cloned())
-            .collect()
+    pub fn frames<'a>(
+        &'a self,
+        group: &ShardGroup,
+        idxs: &'a [u32],
+    ) -> impl Iterator<Item = WireFrame> + 'a {
+        self.groups
+            .iter()
+            .find(|entry| entry.group == *group)
+            .into_iter()
+            .flat_map(move |cached| {
+                idxs.iter()
+                    .filter_map(move |idx| cached.frames.get(*idx as usize).cloned())
+            })
     }
 }
 
@@ -1074,11 +1078,11 @@ mod tests {
         );
 
         // Not stalled yet — no tickets.
-        assert!(store.repair_tickets(start).is_empty());
+        assert!(store.repair_tickets(start).collect::<Vec<_>>().is_empty());
 
         // Stalled: only the big group is ticketed, with exactly its gaps.
         let stalled = start + REASSEMBLY_REPAIR_IDLE;
-        let tickets = store.repair_tickets(stalled);
+        let tickets = store.repair_tickets(stalled).collect::<Vec<_>>();
         assert_eq!(tickets.len(), 1, "small groups heal via anti-entropy");
         assert_eq!(tickets[0].group, big);
         assert_eq!(tickets[0].author.as_str(), "author");
@@ -1087,10 +1091,10 @@ mod tests {
         assert!(tickets[0].missing.contains(&1));
 
         // Asked once per window — the immediate re-check yields nothing.
-        assert!(store.repair_tickets(stalled).is_empty());
+        assert!(store.repair_tickets(stalled).collect::<Vec<_>>().is_empty());
         // The next window asks again.
         let next = stalled + REASSEMBLY_REPAIR_IDLE;
-        assert_eq!(store.repair_tickets(next).len(), 1);
+        assert_eq!(store.repair_tickets(next).collect::<Vec<_>>().len(), 1);
     }
 
     #[test]
@@ -1102,16 +1106,19 @@ mod tests {
             crate::message::WireFrame::new(bytes::Bytes::from(vec![tag; len]))
         };
         cache.insert(first.clone(), vec![frame(1, 10), frame(2, 10)]);
-        let served = cache.frames(&first, &[1, 7]);
+        let served = cache.frames(&first, &[1, 7]).collect::<Vec<_>>();
         assert_eq!(served.len(), 1, "out-of-range idx skipped");
         assert_eq!(served[0].as_bytes()[0], 2);
 
         // A budget-filling newcomer evicts the oldest group whole.
         let second = group("00000000-0000-4000-8000-0000000000c2");
         cache.insert(second.clone(), vec![frame(3, SHARD_CACHE_BUDGET_BYTES)]);
-        assert!(cache.frames(&first, &[0]).is_empty(), "old group evicted");
+        assert!(
+            cache.frames(&first, &[0]).collect::<Vec<_>>().is_empty(),
+            "old group evicted"
+        );
         assert_eq!(
-            cache.frames(&second, &[0]).len(),
+            cache.frames(&second, &[0]).collect::<Vec<_>>().len(),
             1,
             "the newest group always stays"
         );
