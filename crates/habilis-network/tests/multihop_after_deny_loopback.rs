@@ -101,7 +101,7 @@ impl Member {
     }
 
     fn underlay_ports(&self) -> Vec<u16> {
-        self.membership.node.underlay_ports().collect::<Vec<_>>()
+        self.membership.node.underlay_ports().to_vec()
     }
 
     async fn block_ip_to(&self, ports: Vec<u16>) {
