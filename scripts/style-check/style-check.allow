@@ -21,7 +21,6 @@ catch_unwind|crates/habilis-network-test-tracing/src/guard.rs|1|catch_panic, the
 # anyhow_pub: a public signature returns anyhow. Exceptions: test and benchmark helpers behind a
 # feature, not library API.
 anyhow_pub|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|3|benchmark harness behind the bench feature, not library API
-anyhow_pub|crates/habilis-network/src/lookup/mod.rs|1|the test relay helper spawn_plain, behind the iroh-test-utils feature (a test helper, not library API)
 
 # glob: every glob import still to be replaced with explicit imports (tracker items G2 and G3). The rows go away with the fix.
 
@@ -706,7 +705,7 @@ abbrev_name|crates/habilis-network/src/lifecycle/heartbeat.rs|4|existing letter-
 abbrev_name|crates/habilis-network/src/lifecycle/mod.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/capability.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/mdns.rs|6|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/lookup/mod.rs|45|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/lookup/mod.rs|41|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/membership_app.rs|60|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/membership_event.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/opts.rs|15|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
@@ -825,3 +824,8 @@ untyped_long_chain_let|crates/habilis-network/src/lookup/tests.rs|2|kept: a let 
 fn_import|crates/habilis-network/src/lookup/tests.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
 abbrev_name|crates/habilis-network/src/lookup/tests.rs|3|kept: calls of the iroh method Endpoint::addr(), a foreign name that this crate cannot rename (N13)
 abbrev_name|crates/habilis-network/src/membership/mod.rs|3|the module opts (the file opts.rs, named after the type Opts) is an abbreviation of options; the type name is fixed by its callers
+
+abbrev_name|crates/habilis-network/src/lookup/test_relay.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/lookup/transport_handles.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/lookup/transport_opts.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+anyhow_pub|crates/habilis-network/src/lookup/test_relay.rs|1|the test relay helper spawn_plain, behind the iroh-test-utils feature (a test helper, not library API)

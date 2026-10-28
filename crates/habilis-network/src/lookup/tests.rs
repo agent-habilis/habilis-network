@@ -1,4 +1,5 @@
-use super::{LookupOpts, TransportOpts, TransportPolicy, build_peer_endpoint};
+use super::{LookupOpts, TransportOpts, build_peer_endpoint};
+use crate::protocol::mesh::TransportPolicy;
 use crate::transport::PayloadPath;
 use habilis_network_test_tracing::test;
 use std::collections::HashSet;

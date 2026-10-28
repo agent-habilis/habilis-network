@@ -23,6 +23,8 @@ mod error;
 #[cfg(all(feature = "host", feature = "mdns"))]
 mod mdns;
 mod relay;
+mod transport_handles;
+mod transport_opts;
 
 // Only the `host` loopback bind names a socket address; a browser has no IP
 // stack to bind one on.
@@ -40,7 +42,7 @@ use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use iroh_gossip::proto::HyparviewConfig;
 
-use crate::protocol::mesh::{LookupOpts, RelayChoice, TransportPolicy};
+use crate::protocol::mesh::{LookupOpts, RelayChoice};
 use crate::transport::PayloadPath;
 use crate::util::clock::millis_saturating;
 
@@ -58,40 +60,7 @@ use crate::util::clock::millis_saturating;
         reason = "`net` re-exports it only with `iroh-test-utils`"
     )
 )]
-pub mod test_relay {
-    use anyhow::Context as _;
-
-    /// Spawn the relay; the URL is `http://127.0.0.1:<port>/`. Dropping the
-    /// server stops it.
-    ///
-    /// # Errors
-    /// Binding or spawning the relay server fails.
-    #[cfg_attr(
-        not(feature = "iroh-test-utils"),
-        expect(
-            unreachable_pub,
-            reason = "`net` re-exports it only with `iroh-test-utils`"
-        )
-    )]
-    pub async fn spawn_plain() -> anyhow::Result<(iroh::RelayUrl, iroh_relay::server::Server)> {
-        let mut config = iroh_relay::server::ServerConfig::default();
-        config.relay = Some(iroh_relay::server::RelayConfig::new((
-            std::net::Ipv4Addr::LOCALHOST,
-            0,
-        )));
-        config.quic = None;
-        let server = iroh_relay::server::Server::spawn(config)
-            .await
-            .context("spawning the local relay server")?;
-        let addr = server
-            .http_addr()
-            .context("the local relay server bound no HTTP address")?;
-        let url = format!("http://{addr}/")
-            .parse()
-            .context("the local relay address is not a relay URL")?;
-        Ok((url, server))
-    }
-}
+pub mod test_relay;
 
 #[cfg(feature = "host")]
 pub use capability::{NetworkCapability, probe as capability_probe};
@@ -100,228 +69,8 @@ pub use relay::{RENDEZVOUS_RELAY_LADDER, probe_ladder, relay_ladder};
 pub(crate) use relay::{
     RungRefresh, StoppableTask, plan_rung_refresh, select_bootstrap_rung, spawn_relay_monitor,
 };
-
-/// Build an iroh endpoint for a mesh's lookups.
-///
-/// - `lookups`: which address-lookups (mDNS / DHT) and relay to wire.
-///   When any lookup is on, the builder is composed from
-///   `presets::Minimal` plus the selected lookups; the relay maps via
-///   `relay::relay_mode`. An all-off (loopback-only) set wires none of
-///   them.
-/// - `secret_key`: `Some` pins a deterministic identity (used for the
-///   shared rendezvous endpoint); `None` lets iroh generate a fresh
-///   random key (the normal peer endpoint).
-/// - `bind_port`: loopback-only — `Some(port)` binds
-///   `127.0.0.1:port` (the deterministic rendezvous port; a bind
-///   failure with `AddrInUse` is the claim-if-free signal that another
-///   member already holds the beacon). `None` binds an ephemeral port.
-///   Ignored when lookups are on (N0 manages binding).
-/// # Errors
-/// Returns an error if the inputs are invalid or the operation fails.
-/// The custom transports to register on an endpoint.
-///
-/// A struct rather than more positional arguments because the set grows: each
-/// transport is independently optional, and several are host-only (they own
-/// UDP sockets), so the field list itself differs per target. `Default` is
-/// "IP and relay only".
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct TransportHandles {
-    /// Source-routed multi-hop: reach a peer with no direct path by relaying
-    /// through intermediate peers. Built with the `multihop` feature; the native
-    /// underlay builder, `build_peer_multihop_with`, is host-only.
-    #[cfg(feature = "multihop")]
-    pub multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
-    /// QUIC over a `WebRTC` data channel. The browser's only way onto the
-    /// mesh, and an opportunistic extra path for a native peer.
-    pub webrtc: Option<habilis_network_iroh_webrtc_transport::WebRtcHandle>,
-    /// Gossip as a path: QUIC packets carried as frames on the mesh topic, below every
-    /// direct path and above the relay. On the member endpoint only: the beacon, the
-    /// blob endpoint and the multihop underlay never carry it.
-    pub gossip: Option<habilis_network_iroh_gossip_transport::GossipHandle>,
-    /// The table that decides who holds a direct-peer slot. When set, the
-    /// endpoint reports every connection to it, so that it can drop the ones
-    /// that are gone.
-    pub admission: Option<crate::transport::SignalAdmission>,
-    /// The endpoint is a multi-hop underlay, an internal forwarding endpoint
-    /// and not a peer or a beacon. Changes only the role a log line names.
-    pub underlay: bool,
-    /// Which transports this instance may carry data on. Lives here rather than
-    /// as another positional argument for the same reason the handles do.
-    pub opts: TransportOpts,
-}
-
-impl TransportHandles {
-    /// True when no custom transport is registered.
-    #[must_use]
-    fn is_empty(&self) -> bool {
-        #[cfg(feature = "multihop")]
-        if self.multihop.is_some() {
-            return false;
-        }
-        self.webrtc.is_none() && self.gossip.is_none()
-    }
-}
-
-/// Which transports this *instance* may carry data on.
-///
-/// Deliberately **not** part of the mesh id. [`LookupOpts`] is mixed into
-/// `derive_topic_id` so that every member provably agrees on where to
-/// rendezvous — right for discovery, and exactly wrong for transports: a
-/// browser only ever has relay and `WebRTC`, a native peer also has IP and
-/// multihop. Baking transports into mesh identity would mean a browser could
-/// never join a mesh a CLI created. So this is local, per-peer, and reconciled
-/// per pair by ICE and iroh's own path selection.
-///
-/// `Default` is "everything this target has".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "one independent on/off per path this node may carry data on"
-)]
-#[non_exhaustive]
-pub struct TransportOpts {
-    /// QUIC on direct and hole-punched UDP paths, plus the address lookups
-    /// that find them. Cleared by a WebRTC-only instance.
-    pub udp: bool,
-    /// The relay. **Never cleared by `webrtc`-only**, because the relay is the
-    /// rendezvous: it carries the bootstrap dial and the JSEP exchange. Clearing
-    /// it would sever the very thing that lets a `WebRTC` session be negotiated.
-    ///
-    /// Not the mesh policy: this says whether *this node* registers a relay
-    /// transport at all, the way `udp` and `webrtc` do. Whether the relay may
-    /// carry payload is mesh-wide and lives in the id, as
-    /// `protocol::TransportPolicy::relay_transport`.
-    pub relay: bool,
-    /// QUIC over a `WebRTC` data channel. Off, the transport is not registered
-    /// on the endpoint, no offer is answered and none is made — so a pair
-    /// with IP cleared too has the relay as its only path.
-    pub webrtc: bool,
-    /// Gossip as a path: the mesh's own topic carries the QUIC packets of a pair that has no
-    /// other path. Off by default, and set only by [`Self::within`]: it is a choice of the
-    /// mesh, which every member makes the same way, and not a limit of this node.
-    pub gossip: bool,
-}
-
-impl TransportOpts {
-    /// Set the UDP transport.
-    #[must_use]
-    pub fn with_udp(
-        mut self,
-        // true enables the UDP transport
-        udp: bool,
-    ) -> Self {
-        self.udp = udp;
-        self
-    }
-
-    /// The relay to dial for the lookup, instead of the one the mesh names.
-    #[must_use]
-    pub fn with_relay(
-        mut self,
-        // true enables the relay
-        relay: bool,
-    ) -> Self {
-        self.relay = relay;
-        self
-    }
-
-    /// Set the WebRTC transport.
-    #[must_use]
-    pub fn with_webrtc(
-        mut self,
-        // true enables the WebRTC transport
-        webrtc: bool,
-    ) -> Self {
-        self.webrtc = webrtc;
-        self
-    }
-
-    /// Set the gossip transport.
-    #[must_use]
-    pub fn with_gossip(
-        mut self,
-        // true enables the gossip transport
-        gossip: bool,
-    ) -> Self {
-        self.gossip = gossip;
-        self
-    }
-}
-
-impl Default for TransportOpts {
-    fn default() -> Self {
-        Self {
-            udp: true,
-            relay: true,
-            webrtc: true,
-            gossip: false,
-        }
-    }
-}
-
-impl TransportOpts {
-    /// Data-plane exclusivity for `WebRTC`: IP paths cleared, relay kept for
-    /// rendezvous and signalling.
-    ///
-    /// The intent is to make a WebRTC-only run *falsifiable* — with IP cleared,
-    /// any data path that is not the `WebRTC` one is a failure rather than a
-    /// silent fallback. Note this is not the transport crate's
-    /// `ExclusivePreset`, which clears relay transports outright and would
-    /// leave nothing to negotiate over.
-    ///
-    /// # History, because the code once said otherwise
-    ///
-    /// This was documented as broken: with IP cleared, peers appeared to see
-    /// each other on the roster but never link (`link_len=0, meshed=false`) and
-    /// never attempt a JSEP round. It **does not reproduce** — verified twice,
-    /// mixed (one peer IP-less, one not) and with both peers IP-less; each run
-    /// reaches `link_len=1, meshed=true` with a session in each direction.
-    ///
-    /// The original failure was most likely environmental: it was measured
-    /// while a pile of stale peers from earlier runs were still holding relay
-    /// registrations for the same meshes. Worth knowing if it comes back —
-    /// check for orphaned processes before concluding the flag is at fault.
-    ///
-    /// One real bug *was* found and fixed along the way: `clear_address_lookup()`
-    /// must not be part of this. `add_peer_addr` registers a `MemoryLookup` on
-    /// the endpoint and the zero-lookup rendezvous bootstrap **is** that
-    /// registration, so clearing the store leaves a peer unable to dial anything
-    /// while still showing a healthy roster — which reads like a NAT problem and
-    /// is not one.
-    #[must_use]
-    pub fn webrtc_only() -> Self {
-        Self {
-            udp: false,
-            relay: true,
-            webrtc: true,
-            gossip: false,
-        }
-    }
-}
-
-impl TransportOpts {
-    /// These paths, less any the mesh's transport list leaves out. Never
-    /// widens: a path this node lacks stays off whatever the mesh allows, and
-    /// a browser has no UDP at all.
-    #[must_use]
-    pub fn within(self, policy: &TransportPolicy) -> Self {
-        Self {
-            udp: self.udp && policy.udp && !cfg!(target_arch = "wasm32"),
-            webrtc: self.webrtc && policy.webrtc,
-            // Set, not narrowed: the mesh decides, and it needs a direct path to ride.
-            gossip: policy.gossip && (policy.udp || policy.webrtc) && !cfg!(target_arch = "wasm32"),
-            ..self
-        }
-    }
-
-    /// Whether these paths carry payload on a node with no UDP, such as a
-    /// browser: only a data channel or relay payload can.
-    #[must_use]
-    pub fn carry_without_udp(self, policy: &TransportPolicy) -> bool {
-        self.webrtc || policy.relay_transport
-    }
-}
+pub use transport_handles::TransportHandles;
+pub use transport_opts::TransportOpts;
 
 /// Install on `builder` every custom transport and hook a mesh node needs: the
 /// multi-hop transport (with its address lookup and backup path selector), the
