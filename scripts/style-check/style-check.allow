@@ -544,7 +544,7 @@ pub_vec_param|crates/habilis-network-protocol/src/reassembly/shard_cache.rs|1|in
 pub_vec_param|crates/habilis-network-wasm/src/stream_node.rs|1|write: the owned bytes handed to the stream at the JavaScript edge
 pub_vec_param|crates/habilis-network/src/daemon/setup/injected_endpoint.rs|1|bind: hands the owned ALPN list to the endpoint
 pub_vec_param|crates/habilis-network/src/daemon/setup/setup_params.rs|1|with_protocols: keeps the owned protocol handlers
-pub_vec_param|crates/habilis-network/src/lookup/mod.rs|1|build_endpoint: hands the owned ALPN list to the endpoint
+pub_vec_param|crates/habilis-network/src/lookup/endpoint.rs|1|build_endpoint: hands the owned ALPN list to the endpoint
 
 # pub_impl_into: a public function takes impl Into<T>. A library may do so where call-site ergonomics
 # matter most. These are the validating constructors that take a &str or a String, and the signaling
@@ -599,7 +599,7 @@ fn_import|crates/habilis-network/src/lib.rs|1|kept: a top-level function importe
 fn_import|crates/habilis-network/src/lifecycle/heartbeat.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/lifecycle/mod.rs|3|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/lookup/capability.rs|2|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network/src/lookup/mod.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
+fn_import|crates/habilis-network/src/lookup/mod.rs|3|kept: a top-level function imported by its bare name (O23 rollout), and two facade re-exports of the lookup builders so callers keep the lookup::build_endpoint path (O11 split)
 fn_import|crates/habilis-network/src/membership/membership_app.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/membership/opts.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/membership/mod.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
@@ -706,7 +706,8 @@ abbrev_name|crates/habilis-network/src/lifecycle/heartbeat.rs|4|existing letter-
 abbrev_name|crates/habilis-network/src/lifecycle/mod.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/capability.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/mdns.rs|6|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/lookup/mod.rs|41|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/lookup/mod.rs|39|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/lookup/endpoint.rs|2|moved from mod.rs with the endpoint builders; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/membership_app.rs|60|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/membership_event.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/opts.rs|15|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
