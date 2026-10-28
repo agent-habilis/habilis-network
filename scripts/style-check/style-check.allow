@@ -514,7 +514,7 @@ pub_vec_return|crates/habilis-network-netplay/src/sync_test.rs|1|advance_frame: 
 pub_vec_return|crates/habilis-network-protocol/src/base58_error.rs|1|decode: the owned decoded bytes
 pub_vec_return|crates/habilis-network-protocol/src/identity.rs|1|decode_hex: the owned decoded bytes
 pub_vec_return|crates/habilis-network-protocol/src/mesh/lookup.rs|1|to_bytes: the owned encoded byte buffer
-pub_vec_return|crates/habilis-network-protocol/src/message/mod.rs|2|canonical_bytes: the owned byte buffer that is signed; verify_canonical: the owned bytes returned with the verified message
+pub_vec_return|crates/habilis-network-protocol/src/message/message.rs|2|canonical_bytes: the owned byte buffer that is signed; verify_canonical: the owned bytes returned with the verified message
 pub_vec_return|crates/habilis-network-protocol/src/seal_error.rs|2|seal_symmetric: the owned ciphertext; open_symmetric: the owned plaintext
 pub_vec_return|crates/habilis-network-wasm/src/stream.rs|1|read: the owned bytes handed to JavaScript
 
@@ -653,7 +653,8 @@ abbrev_name|crates/habilis-network-netplay/src/transport.rs|1|existing letter-de
 abbrev_name|crates/habilis-network-protocol/src/lib.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/mesh/lookup.rs|12|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/mesh/name_error.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/message/mod.rs|17|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-protocol/src/message/mod.rs|7|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-protocol/src/message/message.rs|10|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/message/shard.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/message/tests.rs|107|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/peer_addr_error.rs|10|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
