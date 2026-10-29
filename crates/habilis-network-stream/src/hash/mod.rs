@@ -124,7 +124,7 @@ mod tests {
     }
 
     #[test]
-    fn from_zeroizing_keeps_the_bytes() {
+    fn zeroizing_keeps_the_bytes() {
         let secret = StreamSecret::from(Zeroizing::new([4; SECRET_LEN]));
         assert_eq!(
             secret.as_bytes(),

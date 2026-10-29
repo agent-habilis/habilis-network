@@ -463,7 +463,7 @@ fn an_id_of_an_older_default_mesh_keeps_its_id_and_its_topic() {
 }
 
 #[test]
-fn from_topic_is_deterministic() {
+fn topic_is_deterministic() {
     let one = Mesh::from_topic("habilis-network", MeshConfig::public_preset()).unwrap();
     let two = Mesh::from_topic("habilis-network", MeshConfig::public_preset()).unwrap();
     assert_eq!(
@@ -474,7 +474,7 @@ fn from_topic_is_deterministic() {
 }
 
 #[test]
-fn from_topic_name_is_the_sanitized_string() {
+fn topic_name_is_the_sanitized_string() {
     let mesh = Mesh::from_topic(
         "https://github.com/example-org/example-project",
         MeshConfig::public_preset(),
@@ -490,7 +490,7 @@ fn from_topic_name_is_the_sanitized_string() {
 }
 
 #[test]
-fn from_topic_differs_by_string() {
+fn topic_differs_by_string() {
     let one = Mesh::from_topic("alpha", MeshConfig::public_preset()).unwrap();
     let two = Mesh::from_topic("beta", MeshConfig::public_preset()).unwrap();
     assert_ne!(
@@ -501,7 +501,7 @@ fn from_topic_differs_by_string() {
 }
 
 #[test]
-fn from_topic_round_trips_through_from_str() {
+fn topic_round_trips_through_from_str() {
     let mesh = Mesh::from_topic("habilis-network", MeshConfig::public_preset()).unwrap();
     let decoded: LockedMesh = mesh.to_string().parse().expect("decode failed");
     assert_eq!(
