@@ -64,12 +64,11 @@ impl MultihopTransport {
 
 impl CustomTransport for MultihopTransport {
     fn bind(&self) -> io::Result<Box<dyn CustomEndpoint>> {
-        let inbound = self
-            .inbound
-            .lock()
-            .expect("inbound mutex poisoned")
-            .take()
-            .ok_or_else(|| io::Error::other("multihop transport already bound"))?;
+        let inbound = {
+            let mut slot = self.inbound.lock().expect("inbound mutex poisoned");
+            slot.take()
+                .ok_or_else(|| io::Error::other("multihop transport already bound"))
+        }?;
         let local = n0_watcher::Watchable::new(vec![self.shared.self_addr.clone()]);
         Ok(Box::new(MultihopEndpoint {
             shared: Arc::clone(&self.shared),

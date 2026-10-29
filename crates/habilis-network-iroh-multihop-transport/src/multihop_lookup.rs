@@ -91,7 +91,8 @@ impl RouteChooser {
             dst,
         };
         let shortest = topology.route_to(leg, 1).next();
-        let first_hop = shortest.as_ref().and_then(|route| route.hops().first());
+        let best = shortest.as_ref();
+        let first_hop = best.and_then(|route| route.hops().first());
         let first_is_refused: bool = first_hop.is_some_and(|hop| refused.contains(&hop.app_id));
         if first_is_refused
             && let Some(route) = topology.route_to_avoiding_first_hops(leg, &refused)

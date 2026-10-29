@@ -269,13 +269,14 @@ impl Forwarder {
     /// each with whether it is the selected one: the reading that the gate takes.
     #[cfg(feature = "test-hooks")]
     pub(crate) fn writer_paths(&self, hop: UnderlayId) -> Option<Vec<(TransportAddr, bool)>> {
-        let connection = self
-            .pool
-            .connections
-            .lock()
-            .expect("connections mutex poisoned")
-            .get(&hop)
-            .cloned()?;
+        let connection = {
+            let connections = self
+                .pool
+                .connections
+                .lock()
+                .expect("connections mutex poisoned");
+            connections.get(&hop).cloned()
+        }?;
         Some(paths_of(&connection))
     }
 

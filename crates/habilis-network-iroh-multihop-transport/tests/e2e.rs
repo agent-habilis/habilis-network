@@ -85,10 +85,8 @@ async fn make_node(secret: SecretKey) -> Node {
     let builder = Endpoint::builder(presets::Minimal)
         .secret_key(secret.clone())
         .relay_mode(RelayMode::Disabled);
-    let configured = builder
-        .preset(handle.clone())
-        .clear_ip_transports()
-        .clear_relay_transports();
+    let preset = builder.preset(handle.clone());
+    let configured = preset.clear_ip_transports().clear_relay_transports();
     let app: Endpoint = configured.bind().await.expect("bind app endpoint");
     Node {
         app,
@@ -113,8 +111,8 @@ async fn make_dual_node(
         .relay_mode(RelayMode::Disabled);
     let transport = webrtc.transport();
     let selector = webrtc.path_selector();
-    let configured = builder
-        .preset(handle.clone())
+    let preset = builder.preset(handle.clone());
+    let configured = preset
         .add_custom_transport(transport)
         .path_selector(selector);
     let configured = configured.clear_ip_transports().clear_relay_transports();

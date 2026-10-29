@@ -863,7 +863,8 @@ mod tests {
     fn best_route(store: &Topology, src: AppId, dst: AppId) -> Option<Vec<AppId>> {
         let routes: Vec<_> = store.route_to(Leg { src, dst }, 1).collect();
         let hops_of = |route: &crate::Route| -> Vec<AppId> {
-            route.hops().iter().map(|hop| hop.app_id).collect()
+            let hops = route.hops();
+            hops.iter().map(|hop| hop.app_id).collect()
         };
         routes.first().map(hops_of)
     }
