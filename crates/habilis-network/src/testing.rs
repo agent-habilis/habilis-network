@@ -40,6 +40,7 @@ pub(crate) fn fresh_state_with_book(address_book: memory::MemoryLookup) -> Event
         StateInit {
             #[cfg(feature = "host")]
             state_file: None,
+            // the identity is shared with the loop and its handlers, which hold clones
             identity: Arc::new(Identity::generate()),
             secrets: MeshSecrets::default(),
             per_peer_gate: None,

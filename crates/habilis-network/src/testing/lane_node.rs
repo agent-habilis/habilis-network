@@ -40,14 +40,13 @@ impl LaneNode {
 
         let key = SecretKey::generate();
         let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
-        let endpoint = iroh::Endpoint::builder(presets::Minimal)
+        let transport = handle.transport();
+        let builder = iroh::Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(iroh::RelayMode::Disabled)
             .clear_address_lookup()
-            .add_custom_transport(handle.transport())
-            .bind()
-            .await
-            .expect("bind a loopback endpoint");
+            .add_custom_transport(transport);
+        let endpoint = builder.bind().await.expect("bind a loopback endpoint");
         let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
         let topic = gossip
             .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])

@@ -3,6 +3,7 @@ use std::sync::Arc;
 /// The logs that a test captured from its own thread, see [`LogCapture::start`].
 #[cfg(feature = "multihop")]
 #[derive(Clone, Default)]
+// the capture and its writer share one buffer, which the test reads
 pub(crate) struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
 
 #[cfg(feature = "multihop")]
@@ -20,13 +21,13 @@ impl LogCapture {
             .get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
         let capture = Self::default();
         let writer = capture.clone();
-        let guard = tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_writer(move || writer.clone())
-                .with_ansi(false)
-                .with_max_level(level)
-                .finish(),
-        );
+        let make_writer = move || writer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(make_writer)
+            .with_ansi(false)
+            .with_max_level(level)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
         (capture, guard)
     }
 
