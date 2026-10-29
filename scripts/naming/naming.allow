@@ -1,13 +1,6 @@
 # rule|file|count|reason
 # Used by scripts/naming/naming.ts. Each file breaks one naming rule. Keep each count exact.
 
-ctor_name|crates/habilis-network-protocol/src/mesh/mesh_id_error.rs|1|no plain new beside new_accepts_well_formed_id,new_rejects_a_mistyped_hash,new_rejects_invalid_base58_chars,new_rejects_too_short (N10), to add new() or rename
-ctor_name|crates/habilis-network-protocol/src/mesh/tests.rs|1|no plain new beside new_and_from_topic_refuse_a_config_that_names_a_secret (N10), to add new() or rename
-ctor_name|crates/habilis-network-protocol/src/message/body_error.rs|1|no plain new beside new_accepts_ascii,new_accepts_newline_and_tab,new_accepts_unicode,new_rejects_control_chars (N10), to add new() or rename
-ctor_name|crates/habilis-network-protocol/src/message/id_error.rs|1|no plain new beside new_accepts_uuid_v4,new_rejects_garbage (N10), to add new() or rename
-ctor_name|crates/habilis-network-protocol/src/nickname_error.rs|1|no plain new beside new_accepts_valid_nicknames,new_rejects_empty_and_overlong,new_rejects_unsafe_chars (N10), to add new() or rename
-ctor_name|crates/habilis-network-test-tracing/src/guard.rs|1|no plain new beside new_guard (N10), to add new() or rename
-ctor_name|crates/habilis-network/src/lookup/peer.rs|1|no plain new beside new_gossip_handle,new_webrtc_handle (N10), to add new() or rename
 from_name|crates/habilis-network-chunks/src/chunk_hash.rs|1|no impl From in this file beside from_bits,from_bytes,from_hex,from_leaves (N12), to add the From impl or rename
 from_name|crates/habilis-network-chunks/src/chunk_map.rs|1|no impl From in this file beside from_bits,from_bytes,from_hex,from_leaves (N12), to add the From impl or rename
 from_name|crates/habilis-network-chunks/src/coverage.rs|1|no impl From in this file beside from_bits,from_bytes,from_hex,from_leaves (N12), to add the From impl or rename

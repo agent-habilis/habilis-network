@@ -144,7 +144,7 @@ mod tests {
     use habilis_network_test_tracing::test;
 
     #[test]
-    fn new_accepts_valid_nicknames() {
+    fn accepts_valid_nicknames() {
         for ok in [
             "a",
             "alice",
@@ -165,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn new_rejects_empty_and_overlong() {
+    fn rejects_empty_and_overlong() {
         assert!(Nickname::try_new("").is_err());
         let too_long = "a".repeat(super::super::ident::MAX_CHARS + 1);
         assert!(Nickname::try_new(&too_long).is_err());
@@ -179,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn new_rejects_unsafe_chars() {
+    fn rejects_unsafe_chars() {
         assert!(Nickname::try_new("alice bot").is_err()); // space
         assert!(Nickname::try_new("alice/bob").is_err()); // path sep
         assert!(Nickname::try_new("alice\\bob").is_err()); // path sep

@@ -33,7 +33,7 @@ pub(crate) async fn build_rendezvous_endpoint(
         // JSEP: a browser-shaped peer has no IP to punch with, so on a mesh
         // whose relay is lookup only the data channel is the only path its
         // rendezvous link can ever be admitted on.
-        let webrtc = crate::lookup::new_webrtc_handle(params.secret.public());
+        let webrtc = crate::lookup::build_webrtc_handle(params.secret.public());
         // Made before the endpoint: the endpoint reports its connections to it
         // from the first handshake on.
         let admission = crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS);

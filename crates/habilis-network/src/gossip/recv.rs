@@ -2541,7 +2541,7 @@ mod first_contact_tests {
         let ctx = node.ctx();
         let mut state = fresh_state();
         state.rendezvous_id = Some(ctx.rendezvous_id);
-        let hub = crate::lookup::new_webrtc_handle(node.endpoint.id());
+        let hub = crate::lookup::build_webrtc_handle(node.endpoint.id());
         let held_round = state
             .webrtc_admission
             .try_admit(ctx.rendezvous_id, &hub)
@@ -3076,7 +3076,7 @@ mod first_contact_tests {
         let node = Node::spawn().await;
         let ctx = node.ctx();
         let mut state = fresh_state();
-        state.webrtc = Some(crate::lookup::new_webrtc_handle(node.endpoint.id()));
+        state.webrtc = Some(crate::lookup::build_webrtc_handle(node.endpoint.id()));
         state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         state.local_udp_transport = UdpTransport::Present;
         state.rendezvous_linked = true;
@@ -3105,7 +3105,7 @@ mod first_contact_tests {
         let node = Node::spawn().await;
         let ctx = node.ctx();
         let mut state = fresh_state();
-        state.webrtc = Some(crate::lookup::new_webrtc_handle(node.endpoint.id()));
+        state.webrtc = Some(crate::lookup::build_webrtc_handle(node.endpoint.id()));
         state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         state.local_udp_transport = UdpTransport::Present;
         state.rendezvous_answers_jsep = false;

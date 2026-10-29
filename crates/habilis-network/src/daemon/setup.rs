@@ -1337,7 +1337,7 @@ mod tests {
     /// handle with `relay_payload`, and one key.
     async fn injected(relay_payload: PayloadPath) -> super::InjectedEndpoint {
         let secret = iroh::SecretKey::from_bytes(&[91; 32]);
-        let webrtc = crate::lookup::new_webrtc_handle(secret.public());
+        let webrtc = crate::lookup::build_webrtc_handle(secret.public());
         let handle = multihop_on(&secret, relay_payload).await;
         super::InjectedEndpoint::bind(
             &LookupOpts::loopback(),
@@ -1380,8 +1380,8 @@ mod tests {
                 crate::transport::MAX_DIRECT_PEERS,
             )
         };
-        let own_webrtc = crate::lookup::new_webrtc_handle(secret.public());
-        let other_webrtc = crate::lookup::new_webrtc_handle(other.public());
+        let own_webrtc = crate::lookup::build_webrtc_handle(secret.public());
+        let other_webrtc = crate::lookup::build_webrtc_handle(other.public());
 
         let other_hop = multihop_on(&other, PayloadPath::DirectOnly).await;
         let hop_error = bind(Some(own_webrtc.clone()), Some(other_hop.clone()))
@@ -1436,7 +1436,7 @@ mod tests {
             secret.clone(),
             vec![ALPN.to_vec()],
             crate::lookup::TransportHandles {
-                webrtc: Some(crate::lookup::new_webrtc_handle(secret.public())),
+                webrtc: Some(crate::lookup::build_webrtc_handle(secret.public())),
                 ..crate::lookup::TransportHandles::default()
             },
             crate::transport::MAX_DIRECT_PEERS,

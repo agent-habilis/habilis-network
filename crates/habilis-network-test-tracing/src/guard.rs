@@ -56,7 +56,7 @@ enum Mode {
 #[must_use = "the guard fails the test when it drops; bind it to a local"]
 pub fn init() -> Guard {
     install(Mode::Stderr, "", || CapturedStderr);
-    new_guard()
+    build_guard()
 }
 
 /// Stderr through `eprint!`. The capture of the test harness holds what `eprint!` writes, so the
@@ -86,7 +86,7 @@ impl io::Write for CapturedStderr {
 #[must_use = "the guard fails the test when it drops; bind it to a local"]
 pub fn init_capturing(default_directives: &str) -> Guard {
     install(Mode::Capture, default_directives, Capture);
-    new_guard()
+    build_guard()
 }
 
 /// Like [`init_capturing`], but the events go to `writer`, for a test that
@@ -102,7 +102,7 @@ where
     Writer: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
     install(Mode::Writer, default_directives, writer);
-    new_guard()
+    build_guard()
 }
 
 /// The log text that [`init_capturing`] collected, for the whole binary. Empty
@@ -302,7 +302,7 @@ where
     );
 }
 
-fn new_guard() -> Guard {
+fn build_guard() -> Guard {
     let thread = thread::current().name().unwrap_or_default().to_owned();
     assert!(
         thread.is_empty() || !LIVE.lock().iter().any(|slot| slot.thread == thread),

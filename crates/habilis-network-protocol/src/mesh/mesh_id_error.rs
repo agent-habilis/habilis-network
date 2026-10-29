@@ -154,17 +154,17 @@ mod mesh_id_tests {
     }
 
     #[test]
-    fn new_accepts_well_formed_id() {
+    fn accepts_well_formed_id() {
         MeshId::try_new(&valid_id()).unwrap();
     }
 
     #[test]
-    fn new_rejects_too_short() {
+    fn rejects_too_short() {
         assert!(matches!(MeshId::try_new("a"), Err(MeshIdError::Length(_))));
     }
 
     #[test]
-    fn new_rejects_invalid_base58_chars() {
+    fn rejects_invalid_base58_chars() {
         // `0`, `O`, `I`, `l` are not in the Base58 alphabet — and neither is
         // the glyph prefix ids used to carry, so a stale paste lands here too.
         assert!(matches!(
@@ -188,7 +188,7 @@ mod mesh_id_tests {
     }
 
     #[test]
-    fn new_rejects_a_mistyped_hash() {
+    fn rejects_a_mistyped_hash() {
         let mut mistyped = valid_id();
         let replacement = if mistyped.ends_with('1') { "2" } else { "1" };
         mistyped.replace_range(mistyped.len() - 1.., replacement);

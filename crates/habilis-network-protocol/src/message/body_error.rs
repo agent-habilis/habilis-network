@@ -113,28 +113,28 @@ mod body_tests {
     use habilis_network_test_tracing::test;
 
     #[test]
-    fn new_accepts_ascii() {
+    fn accepts_ascii() {
         MessageBody::try_new("hello world").unwrap();
         MessageBody::try_new("").unwrap();
         MessageBody::try_new("special chars: !@#$%^&*()").unwrap();
     }
 
     #[test]
-    fn new_accepts_unicode() {
+    fn accepts_unicode() {
         MessageBody::try_new("héllo").unwrap();
         MessageBody::try_new("emoji 🎉").unwrap();
         MessageBody::try_new("日本語のメッセージ").unwrap();
     }
 
     #[test]
-    fn new_accepts_newline_and_tab() {
+    fn accepts_newline_and_tab() {
         MessageBody::try_new("line one\nline two").unwrap();
         MessageBody::try_new("col1\tcol2").unwrap();
         MessageBody::try_new("crlf\r\nline").unwrap();
     }
 
     #[test]
-    fn new_rejects_control_chars() {
+    fn rejects_control_chars() {
         assert!(MessageBody::try_new("nul\0byte").is_err());
         assert!(MessageBody::try_new("bell\u{7}char").is_err());
     }

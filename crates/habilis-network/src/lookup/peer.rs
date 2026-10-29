@@ -167,8 +167,8 @@ pub(crate) async fn build_peer_webrtc_with(
     Option<super::MdnsHandle>,
 )> {
     let secret = mint_secret();
-    let handle = new_webrtc_handle(secret.public());
-    let gossip = new_gossip_handle(opts, secret.public(), admission);
+    let handle = build_webrtc_handle(secret.public());
+    let gossip = build_gossip_handle(opts, secret.public(), admission);
     let (endpoint, mdns) = super::build_endpoint_keeping_mdns(
         lookups,
         Some(secret),
@@ -198,7 +198,7 @@ pub(crate) async fn build_peer_webrtc_with(
 /// runs without one. The admission table keeps the handle: the table sees the connections, so
 /// it is what tells the handle which peers are established and which pairs a higher rung
 /// carries, and the event loop reads the handle back from it.
-fn new_gossip_handle(
+fn build_gossip_handle(
     opts: super::TransportOpts,
     local: iroh::EndpointId,
     admission: Option<&crate::transport::SignalAdmission>,
@@ -219,7 +219,7 @@ fn new_gossip_handle(
 /// a `RTCPeerConnection` hub in a tab — but the handle type does not, so this is
 /// the one place the split shows.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn new_webrtc_handle(
+pub(crate) fn build_webrtc_handle(
     local: iroh::EndpointId,
 ) -> habilis_network_iroh_webrtc_transport::WebRtcHandle {
     habilis_network_iroh_webrtc_transport::WebRtcHandle::new(
@@ -228,7 +228,7 @@ pub(crate) fn new_webrtc_handle(
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn new_webrtc_handle(
+pub(crate) fn build_webrtc_handle(
     local: iroh::EndpointId,
 ) -> habilis_network_iroh_webrtc_transport::WebRtcHandle {
     habilis_network_iroh_webrtc_transport::WebRtcHandle::hub(local)
@@ -309,15 +309,15 @@ pub(crate) async fn build_peer_multihop_with(
     Option<super::MdnsHandle>,
 )> {
     let secret = mint_secret();
-    let webrtc = new_webrtc_handle(secret.public());
-    let gossip = new_gossip_handle(opts, secret.public(), admission);
+    let webrtc = build_webrtc_handle(secret.public());
+    let gossip = build_gossip_handle(opts, secret.public(), admission);
     let underlay_secret = habilis_network_iroh_multihop_transport::underlay_secret(&secret);
     // The `WebRTC` leg of the underlay: the handle and the table are made before
     // the endpoint, because the endpoint takes the transport and reports its
     // connections to the table from the first handshake on.
     let underlay_leg = underlay_cap.filter(|_| opts.webrtc).map(|cap| {
         (
-            new_webrtc_handle(underlay_secret.public()),
+            build_webrtc_handle(underlay_secret.public()),
             crate::transport::SignalAdmission::new_route_table(cap),
         )
     });

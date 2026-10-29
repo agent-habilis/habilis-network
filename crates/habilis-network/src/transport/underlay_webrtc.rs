@@ -326,7 +326,7 @@ mod tests {
         let server = loopback_endpoint().await;
         let allowed = Allowed::default();
         let acceptor = WebRtcSignalAcceptor::new(
-            crate::lookup::new_webrtc_handle(server.id()),
+            crate::lookup::build_webrtc_handle(server.id()),
             server.clone(),
             crate::lookup::address_book(&server.clone()),
             server.id(),
@@ -378,7 +378,7 @@ mod tests {
         let server = loopback_endpoint().await;
         let allowed = Allowed::default();
         let acceptor = WebRtcSignalAcceptor::new(
-            crate::lookup::new_webrtc_handle(server.id()),
+            crate::lookup::build_webrtc_handle(server.id()),
             server.clone(),
             crate::lookup::address_book(&server.clone()),
             server.id(),
@@ -392,7 +392,7 @@ mod tests {
             )
             .spawn();
         let client = loopback_endpoint().await;
-        let handle = crate::lookup::new_webrtc_handle(client.id());
+        let handle = crate::lookup::build_webrtc_handle(client.id());
         let book = crate::lookup::address_book(&client);
 
         let error = webrtc::dial_signal::dial_signal(

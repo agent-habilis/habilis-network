@@ -118,13 +118,13 @@ mod id_tests {
     use habilis_network_test_tracing::test;
 
     #[test]
-    fn new_accepts_uuid_v4() {
+    fn accepts_uuid_v4() {
         let id = MessageId::try_new("550e8400-e29b-41d4-a716-446655440000").unwrap();
         assert_eq!(id.as_str(), "550e8400-e29b-41d4-a716-446655440000");
     }
 
     #[test]
-    fn new_rejects_garbage() {
+    fn rejects_garbage() {
         assert!(MessageId::try_new("not-a-uuid").is_err());
         assert!(MessageId::try_new("").is_err());
         assert!(MessageId::try_new("550e8400").is_err());

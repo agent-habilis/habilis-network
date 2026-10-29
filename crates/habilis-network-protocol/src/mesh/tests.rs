@@ -181,7 +181,7 @@ fn password_verifier_yields_different_id_and_round_trips() {
 }
 
 #[test]
-fn new_and_from_topic_refuse_a_config_that_names_a_secret() {
+fn constructors_refuse_a_config_that_names_a_secret() {
     let with_password = MeshConfig {
         password: Some([1u8; 16]),
         ..MeshConfig::public_preset()

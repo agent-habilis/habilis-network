@@ -684,7 +684,7 @@ mod tests {
         endpoint: iroh::Endpoint,
     ) -> (Option<crate::beacon::Rendezvous>, impl Sized) {
         use crate::transport::{MAX_DIRECT_PEERS, SignalAdmission};
-        let handle = crate::lookup::new_webrtc_handle(params.id);
+        let handle = crate::lookup::build_webrtc_handle(params.id);
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let tab = iroh::SecretKey::generate().public();
         let round = admission.try_admit(tab, &handle).expect("a free slot");
@@ -1643,7 +1643,7 @@ mod tests {
         let endpoint = loopback_endpoint().await;
         let mut state = crate::testing::fresh_state();
         state.rendezvous_id = Some(params.id);
-        let hub = crate::lookup::new_webrtc_handle(endpoint.id());
+        let hub = crate::lookup::build_webrtc_handle(endpoint.id());
         let held_round = state
             .webrtc_admission
             .try_admit(params.id, &hub)
@@ -1739,7 +1739,7 @@ mod tests {
         let mut state = fresh_state();
         state.meshed = true;
         state.rendezvous_id = Some(params.id);
-        let hub = crate::lookup::new_webrtc_handle(endpoint.id());
+        let hub = crate::lookup::build_webrtc_handle(endpoint.id());
         let held_round = state
             .webrtc_admission
             .try_admit(params.id, &hub)
@@ -1841,7 +1841,7 @@ mod tests {
 
         let mut state = fresh_state();
         state.rendezvous_id = Some(params.id);
-        let hub = crate::lookup::new_webrtc_handle(endpoint.id());
+        let hub = crate::lookup::build_webrtc_handle(endpoint.id());
         let held_round = state
             .webrtc_admission
             .try_admit(params.id, &hub)

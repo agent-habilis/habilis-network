@@ -69,7 +69,7 @@ pub(crate) use peer::build_peer_multihop_with;
 #[cfg(feature = "multihop")]
 pub use peer::multihop_handle_config;
 pub use peer::{build_peer_endpoint, build_peer_webrtc};
-pub(crate) use peer::{build_peer_webrtc_with, check_injected_against_mesh, new_webrtc_handle};
+pub(crate) use peer::{build_peer_webrtc_with, build_webrtc_handle, check_injected_against_mesh};
 
 pub use probe::probe_connect;
 pub(crate) use probe_answer::{ProbeAnswer, probe_answer};
