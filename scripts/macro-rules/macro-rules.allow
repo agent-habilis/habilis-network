@@ -1,6 +1,3 @@
 # file|count|reason
 # Used by scripts/macro-rules/macro-rules.ts. Keep each count exact: the check fails when it is too high or too low.
 
-# A proc macro: the test attribute that guards each test against a WARN or ERROR event. A plain fn
-# cannot wrap a test body and register its own #[test], so the attribute stays test-only.
-crates/habilis-network-test-tracing-macros/src/lib.rs|1|the test attribute of habilis-network-test-tracing (test-only proc macro, 154 files use it)

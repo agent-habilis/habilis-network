@@ -37,4 +37,3 @@ pub use guard::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use guard::{at_end, run, run_multi_thread};
-pub use habilis_network_test_tracing_macros::test;

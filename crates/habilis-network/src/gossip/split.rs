@@ -548,6 +548,7 @@ mod real_gossip {
         receiver: GossipReceiver,
         handle: GossipHandle,
         capacity: usize,
+        // the splitter and the run share the gauge, so each holds a handle
     ) -> (Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
         // the gauge is shared: the splitter writes it, the run reads it after the load
         let mut mesh = spawn_split_capped(receiver, Some(handle), capacity);
