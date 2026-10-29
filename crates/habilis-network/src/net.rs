@@ -102,6 +102,23 @@ pub async fn conn_path(
     (summary, relay_url)
 }
 
+/// The transport addresses that carry traffic to `node_id` right now, or none when the endpoint
+/// knows no such peer.
+pub async fn active_transport_addrs(
+    endpoint: &Endpoint,
+    node_id: EndpointId,
+) -> impl Iterator<Item = TransportAddr> + use<> {
+    let mut active: Vec<TransportAddr> = Vec::new();
+    if let Some(info) = endpoint.remote_info(node_id).await {
+        for address in info.addrs() {
+            if matches!(address.usage(), TransportAddrUsage::Active) {
+                active.push(address.addr().clone());
+            }
+        }
+    }
+    active.into_iter()
+}
+
 /// The address that other peers dial to reach `endpoint`.
 #[must_use]
 pub fn endpoint_address(endpoint: &Endpoint) -> EndpointAddr {
@@ -126,6 +143,25 @@ mod tests {
             super::endpoint_address(&endpoint).id,
             endpoint.id(),
             "the address carries the id of the endpoint"
+        );
+        endpoint.close().await;
+    }
+
+    #[test]
+    async fn an_unknown_peer_has_no_active_addresses() {
+        let endpoint: Endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .expect("bind loopback endpoint");
+        let stranger = iroh::SecretKey::generate().public();
+        assert!(
+            super::active_transport_addrs(&endpoint, stranger)
+                .await
+                .next()
+                .is_none(),
+            "an endpoint that never met a peer reports no active address for it"
         );
         endpoint.close().await;
     }
