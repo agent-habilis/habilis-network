@@ -15,8 +15,6 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
-use crate::newtype::string_newtype;
-
 use habilis_network_util::consts::MAX_SHARD_TOTAL;
 
 /// Whether a frame belongs in the message log as far as sharding is
@@ -32,14 +30,27 @@ pub fn shard_fits_log(message: &super::Message) -> bool {
     })
 }
 
-string_newtype!(
 /// The correlation id shared by every shard of one logical body — a UUID v4
 /// string form, minted once by the sender when it splits a body. Like
 /// task id, deserialization is **validating**, so a
 /// non-UUID group is rejected at `Message::parse`.
-    ShardGroup,
-    error = &'static str,
-);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
+#[serde(transparent)]
+pub struct ShardGroup(String);
+
+impl ShardGroup {
+    /// The wrapped string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ::std::fmt::Display for ShardGroup {
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
 
 impl<'de> Deserialize<'de> for ShardGroup {
     fn deserialize<Decoder>(deserializer: Decoder) -> Result<Self, Decoder::Error>

@@ -79,42 +79,6 @@ impl Harness for MemHarness {
     }
 }
 
-/// The case list, written once and applied to each backend.
-///
-/// A callback macro rather than a nested repetition, because `macro_rules`
-/// cannot iterate two independent metavariable groups against each other — the
-/// cases and the backends repeat different numbers of times. Each backend
-/// defines a one-case macro and hands it here; see `mod mem` below for the
-/// shape, which is three lines to add a backend.
-macro_rules! for_each_case {
-    ($case:ident) => {
-        $case!(round_trip);
-        $case!(a_lying_chunk_is_refused_and_stores_nothing);
-        $case!(an_unknown_chunk_is_absent_not_an_error);
-        $case!(an_empty_chunk_is_storable);
-        $case!(maps_round_trip);
-        $case!(an_unknown_root_covers_nothing);
-        $case!(coverage_grows_chunk_by_chunk);
-        $case!(an_empty_file_is_complete_immediately);
-        $case!(a_shared_chunk_is_stored_once_and_covers_both_files);
-        $case!(binding_survives_and_a_version_change_breaks_it);
-        $case!(a_sweep_keeps_marked_and_drops_the_rest);
-        $case!(a_sweep_with_no_marks_clears_everything);
-        $case!(a_shared_chunk_survives_a_sweep_that_marks_only_one_owner);
-        $case!(marking_a_root_with_no_stored_map_is_refused);
-        $case!(a_new_pass_forgets_the_previous_marks);
-        $case!(clear_drops_only_what_it_names);
-        $case!(coverage_shrinks_when_chunks_are_cleared);
-        $case!(stored_chunks_still_verify_against_their_map);
-        $case!(coverage_survives_being_described_and_rebuilt);
-        $case!(coverage_of_agrees_with_coverage_root_for_root);
-        $case!(coverage_of_keeps_its_place_for_a_root_it_does_not_know);
-        $case!(coverage_of_nothing_is_nothing);
-        $case!(putting_a_held_chunk_again_is_idempotent);
-        $case!(a_one_bit_difference_is_caught);
-    };
-}
-
 // ---------------------------------------------------------------------------
 // Storing and addressing
 // ---------------------------------------------------------------------------
@@ -822,34 +786,330 @@ impl Harness for FsHarness {
 mod mem {
     use super::{InMemoryStore, MemHarness, block_on};
 
-    macro_rules! run {
-        ($case:ident) => {
-            #[test]
-            fn $case() {
-                // A fresh store per case: conformance must not depend on what
-                // some earlier case happened to leave behind.
-                block_on(super::$case(&MemHarness(InMemoryStore::new())));
-            }
-        };
+    // A fresh store per case: conformance must not depend on what
+    // some earlier case happened to leave behind.
+    #[test]
+    fn round_trip() {
+        block_on(super::round_trip(&MemHarness(InMemoryStore::new())));
     }
 
-    for_each_case!(run);
+    #[test]
+    fn a_lying_chunk_is_refused_and_stores_nothing() {
+        block_on(super::a_lying_chunk_is_refused_and_stores_nothing(
+            &MemHarness(InMemoryStore::new()),
+        ));
+    }
+
+    #[test]
+    fn an_unknown_chunk_is_absent_not_an_error() {
+        block_on(super::an_unknown_chunk_is_absent_not_an_error(&MemHarness(
+            InMemoryStore::new(),
+        )));
+    }
+
+    #[test]
+    fn an_empty_chunk_is_storable() {
+        block_on(super::an_empty_chunk_is_storable(&MemHarness(
+            InMemoryStore::new(),
+        )));
+    }
+
+    #[test]
+    fn maps_round_trip() {
+        block_on(super::maps_round_trip(&MemHarness(InMemoryStore::new())));
+    }
+
+    #[test]
+    fn an_unknown_root_covers_nothing() {
+        block_on(super::an_unknown_root_covers_nothing(&MemHarness(
+            InMemoryStore::new(),
+        )));
+    }
+
+    #[test]
+    fn coverage_grows_chunk_by_chunk() {
+        block_on(super::coverage_grows_chunk_by_chunk(&MemHarness(
+            InMemoryStore::new(),
+        )));
+    }
+
+    #[test]
+    fn an_empty_file_is_complete_immediately() {
+        block_on(super::an_empty_file_is_complete_immediately(&MemHarness(
+            InMemoryStore::new(),
+        )));
+    }
+
+    #[test]
+    fn a_shared_chunk_is_stored_once_and_covers_both_files() {
+        block_on(super::a_shared_chunk_is_stored_once_and_covers_both_files(
+            &MemHarness(InMemoryStore::new()),
+        ));
+    }
+
+    #[test]
+    fn binding_survives_and_a_version_change_breaks_it() {
+        block_on(super::binding_survives_and_a_version_change_breaks_it(
+            &MemHarness(InMemoryStore::new()),
+        ));
+    }
+
+    #[test]
+    fn a_sweep_keeps_marked_and_drops_the_rest() {
+        block_on(super::a_sweep_keeps_marked_and_drops_the_rest(&MemHarness(
+            InMemoryStore::new(),
+        )));
+    }
+
+    #[test]
+    fn a_sweep_with_no_marks_clears_everything() {
+        block_on(super::a_sweep_with_no_marks_clears_everything(&MemHarness(
+            InMemoryStore::new(),
+        )));
+    }
+
+    #[test]
+    fn a_shared_chunk_survives_a_sweep_that_marks_only_one_owner() {
+        block_on(
+            super::a_shared_chunk_survives_a_sweep_that_marks_only_one_owner(&MemHarness(
+                InMemoryStore::new(),
+            )),
+        );
+    }
+
+    #[test]
+    fn marking_a_root_with_no_stored_map_is_refused() {
+        block_on(super::marking_a_root_with_no_stored_map_is_refused(
+            &MemHarness(InMemoryStore::new()),
+        ));
+    }
+
+    #[test]
+    fn a_new_pass_forgets_the_previous_marks() {
+        block_on(super::a_new_pass_forgets_the_previous_marks(&MemHarness(
+            InMemoryStore::new(),
+        )));
+    }
+
+    #[test]
+    fn clear_drops_only_what_it_names() {
+        block_on(super::clear_drops_only_what_it_names(&MemHarness(
+            InMemoryStore::new(),
+        )));
+    }
+
+    #[test]
+    fn coverage_shrinks_when_chunks_are_cleared() {
+        block_on(super::coverage_shrinks_when_chunks_are_cleared(
+            &MemHarness(InMemoryStore::new()),
+        ));
+    }
+
+    #[test]
+    fn stored_chunks_still_verify_against_their_map() {
+        block_on(super::stored_chunks_still_verify_against_their_map(
+            &MemHarness(InMemoryStore::new()),
+        ));
+    }
+
+    #[test]
+    fn coverage_survives_being_described_and_rebuilt() {
+        block_on(super::coverage_survives_being_described_and_rebuilt(
+            &MemHarness(InMemoryStore::new()),
+        ));
+    }
+
+    #[test]
+    fn coverage_of_agrees_with_coverage_root_for_root() {
+        block_on(super::coverage_of_agrees_with_coverage_root_for_root(
+            &MemHarness(InMemoryStore::new()),
+        ));
+    }
+
+    #[test]
+    fn coverage_of_keeps_its_place_for_a_root_it_does_not_know() {
+        block_on(
+            super::coverage_of_keeps_its_place_for_a_root_it_does_not_know(&MemHarness(
+                InMemoryStore::new(),
+            )),
+        );
+    }
+
+    #[test]
+    fn coverage_of_nothing_is_nothing() {
+        block_on(super::coverage_of_nothing_is_nothing(&MemHarness(
+            InMemoryStore::new(),
+        )));
+    }
+
+    #[test]
+    fn putting_a_held_chunk_again_is_idempotent() {
+        block_on(super::putting_a_held_chunk_again_is_idempotent(
+            &MemHarness(InMemoryStore::new()),
+        ));
+    }
+
+    #[test]
+    fn a_one_bit_difference_is_caught() {
+        block_on(super::a_one_bit_difference_is_caught(&MemHarness(
+            InMemoryStore::new(),
+        )));
+    }
 }
 
 /// The filesystem backend, held to exactly the same contract.
 mod fs_store {
     use super::{FsHarness, block_on};
 
-    macro_rules! run {
-        ($case:ident) => {
-            #[test]
-            fn $case() {
-                block_on(super::$case(&FsHarness::new()));
-            }
-        };
+    #[test]
+    fn round_trip() {
+        block_on(super::round_trip(&FsHarness::new()));
     }
 
-    for_each_case!(run);
+    #[test]
+    fn a_lying_chunk_is_refused_and_stores_nothing() {
+        block_on(super::a_lying_chunk_is_refused_and_stores_nothing(
+            &FsHarness::new(),
+        ));
+    }
+
+    #[test]
+    fn an_unknown_chunk_is_absent_not_an_error() {
+        block_on(super::an_unknown_chunk_is_absent_not_an_error(
+            &FsHarness::new(),
+        ));
+    }
+
+    #[test]
+    fn an_empty_chunk_is_storable() {
+        block_on(super::an_empty_chunk_is_storable(&FsHarness::new()));
+    }
+
+    #[test]
+    fn maps_round_trip() {
+        block_on(super::maps_round_trip(&FsHarness::new()));
+    }
+
+    #[test]
+    fn an_unknown_root_covers_nothing() {
+        block_on(super::an_unknown_root_covers_nothing(&FsHarness::new()));
+    }
+
+    #[test]
+    fn coverage_grows_chunk_by_chunk() {
+        block_on(super::coverage_grows_chunk_by_chunk(&FsHarness::new()));
+    }
+
+    #[test]
+    fn an_empty_file_is_complete_immediately() {
+        block_on(super::an_empty_file_is_complete_immediately(
+            &FsHarness::new(),
+        ));
+    }
+
+    #[test]
+    fn a_shared_chunk_is_stored_once_and_covers_both_files() {
+        block_on(super::a_shared_chunk_is_stored_once_and_covers_both_files(
+            &FsHarness::new(),
+        ));
+    }
+
+    #[test]
+    fn binding_survives_and_a_version_change_breaks_it() {
+        block_on(super::binding_survives_and_a_version_change_breaks_it(
+            &FsHarness::new(),
+        ));
+    }
+
+    #[test]
+    fn a_sweep_keeps_marked_and_drops_the_rest() {
+        block_on(super::a_sweep_keeps_marked_and_drops_the_rest(
+            &FsHarness::new(),
+        ));
+    }
+
+    #[test]
+    fn a_sweep_with_no_marks_clears_everything() {
+        block_on(super::a_sweep_with_no_marks_clears_everything(
+            &FsHarness::new(),
+        ));
+    }
+
+    #[test]
+    fn a_shared_chunk_survives_a_sweep_that_marks_only_one_owner() {
+        block_on(
+            super::a_shared_chunk_survives_a_sweep_that_marks_only_one_owner(&FsHarness::new()),
+        );
+    }
+
+    #[test]
+    fn marking_a_root_with_no_stored_map_is_refused() {
+        block_on(super::marking_a_root_with_no_stored_map_is_refused(
+            &FsHarness::new(),
+        ));
+    }
+
+    #[test]
+    fn a_new_pass_forgets_the_previous_marks() {
+        block_on(super::a_new_pass_forgets_the_previous_marks(
+            &FsHarness::new(),
+        ));
+    }
+
+    #[test]
+    fn clear_drops_only_what_it_names() {
+        block_on(super::clear_drops_only_what_it_names(&FsHarness::new()));
+    }
+
+    #[test]
+    fn coverage_shrinks_when_chunks_are_cleared() {
+        block_on(super::coverage_shrinks_when_chunks_are_cleared(
+            &FsHarness::new(),
+        ));
+    }
+
+    #[test]
+    fn stored_chunks_still_verify_against_their_map() {
+        block_on(super::stored_chunks_still_verify_against_their_map(
+            &FsHarness::new(),
+        ));
+    }
+
+    #[test]
+    fn coverage_survives_being_described_and_rebuilt() {
+        block_on(super::coverage_survives_being_described_and_rebuilt(
+            &FsHarness::new(),
+        ));
+    }
+
+    #[test]
+    fn coverage_of_agrees_with_coverage_root_for_root() {
+        block_on(super::coverage_of_agrees_with_coverage_root_for_root(
+            &FsHarness::new(),
+        ));
+    }
+
+    #[test]
+    fn coverage_of_keeps_its_place_for_a_root_it_does_not_know() {
+        block_on(super::coverage_of_keeps_its_place_for_a_root_it_does_not_know(&FsHarness::new()));
+    }
+
+    #[test]
+    fn coverage_of_nothing_is_nothing() {
+        block_on(super::coverage_of_nothing_is_nothing(&FsHarness::new()));
+    }
+
+    #[test]
+    fn putting_a_held_chunk_again_is_idempotent() {
+        block_on(super::putting_a_held_chunk_again_is_idempotent(
+            &FsHarness::new(),
+        ));
+    }
+
+    #[test]
+    fn a_one_bit_difference_is_caught() {
+        block_on(super::a_one_bit_difference_is_caught(&FsHarness::new()));
+    }
 }
 
 /// Dedup is a storage-level claim, so assert it at storage level too: the

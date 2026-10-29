@@ -2,19 +2,30 @@
 
 use serde::Deserialize;
 
-use crate::newtype::string_newtype;
-
 use super::CorrIdError;
 
-string_newtype!(
 /// An opaque request/response correlation id carried on a directed
 /// [`super::MessageKind::App`] frame (the `corr` field). Matched by the engine's
 /// pending-call registry to pair a reply with its outstanding call; the app
 /// mints and interprets its value (the application layer uses a UUID). Kept generic so
 /// the engine correlates without knowing the payload model.
-    CorrId,
-    error = CorrIdError,
-);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
+#[serde(transparent)]
+pub struct CorrId(String);
+
+impl CorrId {
+    /// The wrapped string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ::std::fmt::Display for CorrId {
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
 
 impl CorrId {
     fn validate(raw: &str) -> bool {

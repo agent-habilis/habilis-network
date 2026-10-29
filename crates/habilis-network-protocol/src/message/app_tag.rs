@@ -1,20 +1,40 @@
 //! The application-payload tag of an app frame.
 
-use crate::newtype::string_newtype;
-
 use super::AppTagError;
 
-string_newtype!(
 /// An opaque application-payload tag — the wire discriminant for a
 /// [`super::MessageKind::App`] frame (serialized in the `tag` field). The engine never
 /// interprets it; the consuming application owns the taxonomy (e.g. an application
 /// layer's `app_msg` / `app_status` / `app_req` tags) and dispatches on it.
 /// Validated as a short non-empty ASCII slug so a crafted value can't smuggle
 /// structure into the routing layer.
-    AppTag,
-    error = &'static str,
-    deserialize,
-);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
+#[serde(transparent)]
+pub struct AppTag(String);
+
+impl AppTag {
+    /// The wrapped string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ::std::fmt::Display for AppTag {
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for AppTag {
+    fn deserialize<Decoder>(deserializer: Decoder) -> ::std::result::Result<Self, Decoder::Error>
+    where
+        Decoder: ::serde::Deserializer<'de>,
+    {
+        let raw = <String as ::serde::Deserialize>::deserialize(deserializer)?;
+        Self::try_new(&raw).map_err(::serde::de::Error::custom)
+    }
+}
 
 impl AppTag {
     fn validate(raw: &str) -> bool {

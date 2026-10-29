@@ -5,23 +5,60 @@
 use std::fmt;
 
 use super::LockedMesh;
-use crate::newtype::string_newtype;
 
 const MIN_LEN: usize = 3;
 const MAX_LEN: usize = 512;
 
-string_newtype!(
 /// A mesh identifier — the encoded bare `Base58Check` string.
 ///
 /// Construction validates the length, Base58 charset, checksum, version, and
 /// complete payload. Consequently every `MeshId` can be decoded as a [`LockedMesh`](super::LockedMesh).
-    MeshId,
-    error = MeshIdError,
-    deserialize,
-    from_str,
-    as_ref,
-    borrow,
-);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
+#[serde(transparent)]
+pub struct MeshId(String);
+
+impl MeshId {
+    /// The wrapped string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ::std::fmt::Display for MeshId {
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for MeshId {
+    fn deserialize<Decoder>(deserializer: Decoder) -> ::std::result::Result<Self, Decoder::Error>
+    where
+        Decoder: ::serde::Deserializer<'de>,
+    {
+        let raw = <String as ::serde::Deserialize>::deserialize(deserializer)?;
+        Self::try_new(&raw).map_err(::serde::de::Error::custom)
+    }
+}
+
+impl ::std::str::FromStr for MeshId {
+    type Err = MeshIdError;
+    fn from_str(text: &str) -> ::std::result::Result<Self, Self::Err> {
+        Self::try_new(text)
+    }
+}
+
+impl ::std::convert::AsRef<str> for MeshId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ::std::borrow::Borrow<str> for MeshId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Why a mesh id text was refused: its length, a character outside the alphabet, or a bad hash.
 #[derive(Debug, Clone, PartialEq, Eq)]

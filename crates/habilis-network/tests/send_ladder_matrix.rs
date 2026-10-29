@@ -884,35 +884,6 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
     }
 }
 
-macro_rules! cells {
-    ($($(#[$meta:meta])* $name:ident { $($transport:ident),+ } $blocked:ident $via_third:literal;)*) => {
-        /// Every cell, by name, so that a test can check the matrix against the
-        /// transport lists that the protocol accepts.
-        const CELLS: &[(&str, Cell)] = &[$((
-            stringify!($name),
-            Cell {
-                transports: &[$(Transport::$transport),+],
-                blocked: Blocked::$blocked,
-                kinds: &[Kind::Unicast],
-                via_third: $via_third,
-                target_full: false,
-            },
-        )),*];
-
-        $(
-            #[test]
-            $(#[$meta])*
-            fn $name() {
-                let (_, cell) = CELLS
-                    .iter()
-                    .find(|(name, _)| *name == stringify!($name))
-                    .expect("the cell is in the table");
-                run_cell(*cell, stringify!($name), SenderId::Any);
-            }
-        )*
-    };
-}
-
 /// A frame that is parked for the session arrives once the session is up. The sender has the
 /// higher id, so nobody but its own engine can see IP go: the proof of a direct path is taken
 /// back, the frames are parked (the roster reads `relay-only`), and the session carries them
@@ -1043,104 +1014,993 @@ fn udp_webrtc_ip_direct_sender_has_the_lower_id() {
     );
 }
 
-cells! {
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_none_direct { Udp } None false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_ip_direct { Udp } Ip false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    webrtc_none_direct { WebRtc } None false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    webrtc_ip_webrtc_direct { WebRtc } IpWebRtc false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_webrtc_none_direct { Udp, WebRtc } None false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_webrtc_ip_direct { Udp, WebRtc } Ip false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_webrtc_ip_webrtc_direct { Udp, WebRtc } IpWebRtc false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_multihop_none_direct { Udp, Multihop } None false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_multihop_ip_direct { Udp, Multihop } Ip false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_multihop_ip_webrtc_multihop_direct { Udp, Multihop } IpWebRtcMultihop false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_multihop_ip_webrtc_via_third { Udp, Multihop } IpWebRtc true;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_relay_none_direct { Udp, Relay } None false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_relay_ip_direct { Udp, Relay } Ip false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    webrtc_relay_none_direct { WebRtc, Relay } None false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    webrtc_relay_ip_webrtc_direct { WebRtc, Relay } IpWebRtc false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_webrtc_multihop_none_direct { Udp, WebRtc, Multihop } None false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_webrtc_multihop_ip_direct { Udp, WebRtc, Multihop } Ip false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_webrtc_multihop_ip_webrtc_direct { Udp, WebRtc, Multihop } IpWebRtc false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_webrtc_multihop_ip_webrtc_multihop_direct { Udp, WebRtc, Multihop } IpWebRtcMultihop false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_webrtc_multihop_ip_webrtc_via_third { Udp, WebRtc, Multihop } IpWebRtc true;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_webrtc_relay_none_direct { Udp, WebRtc, Relay } None false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_webrtc_relay_ip_direct { Udp, WebRtc, Relay } Ip false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_webrtc_relay_ip_webrtc_direct { Udp, WebRtc, Relay } IpWebRtc false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_multihop_relay_none_direct { Udp, Multihop, Relay } None false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_multihop_relay_ip_direct { Udp, Multihop, Relay } Ip false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_multihop_relay_ip_webrtc_multihop_direct { Udp, Multihop, Relay } IpWebRtcMultihop false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_webrtc_multihop_relay_none_direct { Udp, WebRtc, Multihop, Relay } None false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_webrtc_multihop_relay_ip_direct { Udp, WebRtc, Multihop, Relay } Ip false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_webrtc_multihop_relay_ip_webrtc_direct { Udp, WebRtc, Multihop, Relay } IpWebRtc false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_webrtc_multihop_relay_ip_webrtc_multihop_direct { Udp, WebRtc, Multihop, Relay } IpWebRtcMultihop false;
-    // The lists without `udp` that D8 made valid: a member with `webrtc` and `multihop` reaches
-    // its peer on WebRTC, then on multihop (its underlay still has UDP until Phase 4c step 3).
-    // After step 3 the direct edge is the underlay's WebRTC session, and these cells keep their
-    // expectation. The relay lists have no `via_third` cell: see
-    // `no_cell_through_a_third_member_has_the_relay_in_its_list`.
-    #[ignore = "run by cargo task matrix"]
-    webrtc_multihop_none_direct { WebRtc, Multihop } None false;
-    #[ignore = "run by cargo task matrix"]
-    webrtc_multihop_ip_webrtc_direct { WebRtc, Multihop } IpWebRtc false;
-    #[ignore = "run by cargo task matrix"]
-    webrtc_multihop_ip_webrtc_multihop_direct { WebRtc, Multihop } IpWebRtcMultihop false;
-    #[ignore = "run by cargo task matrix"]
-    webrtc_multihop_ip_webrtc_via_third { WebRtc, Multihop } IpWebRtc true;
-    #[ignore = "run by cargo task matrix"]
-    webrtc_multihop_relay_none_direct { WebRtc, Multihop, Relay } None false;
-    #[ignore = "run by cargo task matrix"]
-    webrtc_multihop_relay_ip_webrtc_direct { WebRtc, Multihop, Relay } IpWebRtc false;
-    #[ignore = "run by cargo task matrix"]
-    webrtc_multihop_relay_ip_webrtc_multihop_direct { WebRtc, Multihop, Relay } IpWebRtcMultihop false;
-    // The gossip cells. Gossip sits between multihop and the relay: it wins over the relay,
-    // and loses to multihop. See `GOSSIP_INSTALLED`.
-    #[ignore = "run by cargo task matrix"]
-    udp_gossip_ip_direct { Udp, Gossip } Ip false;
-    #[ignore = "run by cargo task matrix"]
-    udp_webrtc_gossip_ip_webrtc_direct { Udp, WebRtc, Gossip } IpWebRtc false;
-    #[ignore = "run by cargo task matrix"]
-    udp_multihop_gossip_ip_webrtc_multihop_direct { Udp, Multihop, Gossip } IpWebRtcMultihop false;
-    #[ignore = "run by cargo task matrix"]
-    udp_webrtc_multihop_gossip_ip_webrtc_multihop_direct { Udp, WebRtc, Multihop, Gossip } IpWebRtcMultihop false;
-    #[ignore = "run by cargo task matrix"]
-    udp_multihop_gossip_ip_webrtc_via_third { Udp, Multihop, Gossip } IpWebRtc true;
-    #[ignore = "run by cargo task matrix"]
-    udp_gossip_relay_ip_direct { Udp, Gossip, Relay } Ip false;
-    #[ignore = "run by cargo task matrix"]
-    udp_gossip_relay_all_blocked { Udp, Gossip, Relay } IpWebRtcMultihopGossip false;
-    #[ignore = "run by cargo task matrix"]
-    udp_gossip_all_blocked { Udp, Gossip } IpWebRtcMultihopGossip false;
+/// Every cell, by name, so that a test can check the matrix against the
+/// transport lists that the protocol accepts.
+const CELLS: &[(&str, Cell)] = &[
+    (
+        "udp_none_direct",
+        Cell {
+            transports: &[Transport::Udp],
+            blocked: Blocked::None,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_ip_direct",
+        Cell {
+            transports: &[Transport::Udp],
+            blocked: Blocked::Ip,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "webrtc_none_direct",
+        Cell {
+            transports: &[Transport::WebRtc],
+            blocked: Blocked::None,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "webrtc_ip_webrtc_direct",
+        Cell {
+            transports: &[Transport::WebRtc],
+            blocked: Blocked::IpWebRtc,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_none_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::WebRtc],
+            blocked: Blocked::None,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_ip_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::WebRtc],
+            blocked: Blocked::Ip,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_ip_webrtc_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::WebRtc],
+            blocked: Blocked::IpWebRtc,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_multihop_none_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::Multihop],
+            blocked: Blocked::None,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_multihop_ip_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::Multihop],
+            blocked: Blocked::Ip,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_multihop_ip_webrtc_multihop_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::Multihop],
+            blocked: Blocked::IpWebRtcMultihop,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_multihop_ip_webrtc_via_third",
+        Cell {
+            transports: &[Transport::Udp, Transport::Multihop],
+            blocked: Blocked::IpWebRtc,
+            kinds: &[Kind::Unicast],
+            via_third: true,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_relay_none_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::Relay],
+            blocked: Blocked::None,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_relay_ip_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::Relay],
+            blocked: Blocked::Ip,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "webrtc_relay_none_direct",
+        Cell {
+            transports: &[Transport::WebRtc, Transport::Relay],
+            blocked: Blocked::None,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "webrtc_relay_ip_webrtc_direct",
+        Cell {
+            transports: &[Transport::WebRtc, Transport::Relay],
+            blocked: Blocked::IpWebRtc,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_multihop_none_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::WebRtc, Transport::Multihop],
+            blocked: Blocked::None,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_multihop_ip_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::WebRtc, Transport::Multihop],
+            blocked: Blocked::Ip,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_multihop_ip_webrtc_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::WebRtc, Transport::Multihop],
+            blocked: Blocked::IpWebRtc,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_multihop_ip_webrtc_multihop_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::WebRtc, Transport::Multihop],
+            blocked: Blocked::IpWebRtcMultihop,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_multihop_ip_webrtc_via_third",
+        Cell {
+            transports: &[Transport::Udp, Transport::WebRtc, Transport::Multihop],
+            blocked: Blocked::IpWebRtc,
+            kinds: &[Kind::Unicast],
+            via_third: true,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_relay_none_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::WebRtc, Transport::Relay],
+            blocked: Blocked::None,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_relay_ip_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::WebRtc, Transport::Relay],
+            blocked: Blocked::Ip,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_relay_ip_webrtc_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::WebRtc, Transport::Relay],
+            blocked: Blocked::IpWebRtc,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_multihop_relay_none_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::Multihop, Transport::Relay],
+            blocked: Blocked::None,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_multihop_relay_ip_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::Multihop, Transport::Relay],
+            blocked: Blocked::Ip,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_multihop_relay_ip_webrtc_multihop_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::Multihop, Transport::Relay],
+            blocked: Blocked::IpWebRtcMultihop,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_multihop_relay_none_direct",
+        Cell {
+            transports: &[
+                Transport::Udp,
+                Transport::WebRtc,
+                Transport::Multihop,
+                Transport::Relay,
+            ],
+            blocked: Blocked::None,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_multihop_relay_ip_direct",
+        Cell {
+            transports: &[
+                Transport::Udp,
+                Transport::WebRtc,
+                Transport::Multihop,
+                Transport::Relay,
+            ],
+            blocked: Blocked::Ip,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_multihop_relay_ip_webrtc_direct",
+        Cell {
+            transports: &[
+                Transport::Udp,
+                Transport::WebRtc,
+                Transport::Multihop,
+                Transport::Relay,
+            ],
+            blocked: Blocked::IpWebRtc,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_multihop_relay_ip_webrtc_multihop_direct",
+        Cell {
+            transports: &[
+                Transport::Udp,
+                Transport::WebRtc,
+                Transport::Multihop,
+                Transport::Relay,
+            ],
+            blocked: Blocked::IpWebRtcMultihop,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "webrtc_multihop_none_direct",
+        Cell {
+            transports: &[Transport::WebRtc, Transport::Multihop],
+            blocked: Blocked::None,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "webrtc_multihop_ip_webrtc_direct",
+        Cell {
+            transports: &[Transport::WebRtc, Transport::Multihop],
+            blocked: Blocked::IpWebRtc,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "webrtc_multihop_ip_webrtc_multihop_direct",
+        Cell {
+            transports: &[Transport::WebRtc, Transport::Multihop],
+            blocked: Blocked::IpWebRtcMultihop,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "webrtc_multihop_ip_webrtc_via_third",
+        Cell {
+            transports: &[Transport::WebRtc, Transport::Multihop],
+            blocked: Blocked::IpWebRtc,
+            kinds: &[Kind::Unicast],
+            via_third: true,
+            target_full: false,
+        },
+    ),
+    (
+        "webrtc_multihop_relay_none_direct",
+        Cell {
+            transports: &[Transport::WebRtc, Transport::Multihop, Transport::Relay],
+            blocked: Blocked::None,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "webrtc_multihop_relay_ip_webrtc_direct",
+        Cell {
+            transports: &[Transport::WebRtc, Transport::Multihop, Transport::Relay],
+            blocked: Blocked::IpWebRtc,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "webrtc_multihop_relay_ip_webrtc_multihop_direct",
+        Cell {
+            transports: &[Transport::WebRtc, Transport::Multihop, Transport::Relay],
+            blocked: Blocked::IpWebRtcMultihop,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_gossip_ip_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::Gossip],
+            blocked: Blocked::Ip,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_gossip_ip_webrtc_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::WebRtc, Transport::Gossip],
+            blocked: Blocked::IpWebRtc,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_multihop_gossip_ip_webrtc_multihop_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::Multihop, Transport::Gossip],
+            blocked: Blocked::IpWebRtcMultihop,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_webrtc_multihop_gossip_ip_webrtc_multihop_direct",
+        Cell {
+            transports: &[
+                Transport::Udp,
+                Transport::WebRtc,
+                Transport::Multihop,
+                Transport::Gossip,
+            ],
+            blocked: Blocked::IpWebRtcMultihop,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_multihop_gossip_ip_webrtc_via_third",
+        Cell {
+            transports: &[Transport::Udp, Transport::Multihop, Transport::Gossip],
+            blocked: Blocked::IpWebRtc,
+            kinds: &[Kind::Unicast],
+            via_third: true,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_gossip_relay_ip_direct",
+        Cell {
+            transports: &[Transport::Udp, Transport::Gossip, Transport::Relay],
+            blocked: Blocked::Ip,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_gossip_relay_all_blocked",
+        Cell {
+            transports: &[Transport::Udp, Transport::Gossip, Transport::Relay],
+            blocked: Blocked::IpWebRtcMultihopGossip,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+    (
+        "udp_gossip_all_blocked",
+        Cell {
+            transports: &[Transport::Udp, Transport::Gossip],
+            blocked: Blocked::IpWebRtcMultihopGossip,
+            kinds: &[Kind::Unicast],
+            via_third: false,
+            target_full: false,
+        },
+    ),
+];
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_none_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_none_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_none_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_ip_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_ip_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_ip_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn webrtc_none_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "webrtc_none_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "webrtc_none_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn webrtc_ip_webrtc_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "webrtc_ip_webrtc_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "webrtc_ip_webrtc_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_webrtc_none_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_none_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_webrtc_none_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_webrtc_ip_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_ip_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_webrtc_ip_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_webrtc_ip_webrtc_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_ip_webrtc_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_webrtc_ip_webrtc_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_multihop_none_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_multihop_none_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_multihop_none_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_multihop_ip_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_multihop_ip_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_multihop_ip_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_multihop_ip_webrtc_multihop_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_multihop_ip_webrtc_multihop_direct")
+        .expect("the cell is in the table");
+    run_cell(
+        *cell,
+        "udp_multihop_ip_webrtc_multihop_direct",
+        SenderId::Any,
+    );
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_multihop_ip_webrtc_via_third() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_multihop_ip_webrtc_via_third")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_multihop_ip_webrtc_via_third", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_relay_none_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_relay_none_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_relay_none_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_relay_ip_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_relay_ip_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_relay_ip_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn webrtc_relay_none_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "webrtc_relay_none_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "webrtc_relay_none_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn webrtc_relay_ip_webrtc_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "webrtc_relay_ip_webrtc_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "webrtc_relay_ip_webrtc_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_webrtc_multihop_none_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_multihop_none_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_webrtc_multihop_none_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_webrtc_multihop_ip_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_multihop_ip_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_webrtc_multihop_ip_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_webrtc_multihop_ip_webrtc_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_multihop_ip_webrtc_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_webrtc_multihop_ip_webrtc_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_webrtc_multihop_ip_webrtc_multihop_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_multihop_ip_webrtc_multihop_direct")
+        .expect("the cell is in the table");
+    run_cell(
+        *cell,
+        "udp_webrtc_multihop_ip_webrtc_multihop_direct",
+        SenderId::Any,
+    );
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_webrtc_multihop_ip_webrtc_via_third() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_multihop_ip_webrtc_via_third")
+        .expect("the cell is in the table");
+    run_cell(
+        *cell,
+        "udp_webrtc_multihop_ip_webrtc_via_third",
+        SenderId::Any,
+    );
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_webrtc_relay_none_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_relay_none_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_webrtc_relay_none_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_webrtc_relay_ip_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_relay_ip_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_webrtc_relay_ip_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_webrtc_relay_ip_webrtc_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_relay_ip_webrtc_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_webrtc_relay_ip_webrtc_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_multihop_relay_none_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_multihop_relay_none_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_multihop_relay_none_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_multihop_relay_ip_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_multihop_relay_ip_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_multihop_relay_ip_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_multihop_relay_ip_webrtc_multihop_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_multihop_relay_ip_webrtc_multihop_direct")
+        .expect("the cell is in the table");
+    run_cell(
+        *cell,
+        "udp_multihop_relay_ip_webrtc_multihop_direct",
+        SenderId::Any,
+    );
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_webrtc_multihop_relay_none_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_multihop_relay_none_direct")
+        .expect("the cell is in the table");
+    run_cell(
+        *cell,
+        "udp_webrtc_multihop_relay_none_direct",
+        SenderId::Any,
+    );
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_webrtc_multihop_relay_ip_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_multihop_relay_ip_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_webrtc_multihop_relay_ip_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_webrtc_multihop_relay_ip_webrtc_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_multihop_relay_ip_webrtc_direct")
+        .expect("the cell is in the table");
+    run_cell(
+        *cell,
+        "udp_webrtc_multihop_relay_ip_webrtc_direct",
+        SenderId::Any,
+    );
+}
+
+#[test]
+#[ignore = "run by cargo task matrix and by the gate row"]
+fn udp_webrtc_multihop_relay_ip_webrtc_multihop_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_multihop_relay_ip_webrtc_multihop_direct")
+        .expect("the cell is in the table");
+    run_cell(
+        *cell,
+        "udp_webrtc_multihop_relay_ip_webrtc_multihop_direct",
+        SenderId::Any,
+    );
+}
+
+// The lists without `udp` that D8 made valid: a member with `webrtc` and `multihop` reaches
+// its peer on WebRTC, then on multihop (its underlay still has UDP until Phase 4c step 3).
+// After step 3 the direct edge is the underlay's WebRTC session, and these cells keep their
+// expectation. The relay lists have no `via_third` cell: see
+// `no_cell_through_a_third_member_has_the_relay_in_its_list`.
+#[test]
+#[ignore = "run by cargo task matrix"]
+fn webrtc_multihop_none_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "webrtc_multihop_none_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "webrtc_multihop_none_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix"]
+fn webrtc_multihop_ip_webrtc_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "webrtc_multihop_ip_webrtc_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "webrtc_multihop_ip_webrtc_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix"]
+fn webrtc_multihop_ip_webrtc_multihop_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "webrtc_multihop_ip_webrtc_multihop_direct")
+        .expect("the cell is in the table");
+    run_cell(
+        *cell,
+        "webrtc_multihop_ip_webrtc_multihop_direct",
+        SenderId::Any,
+    );
+}
+
+#[test]
+#[ignore = "run by cargo task matrix"]
+fn webrtc_multihop_ip_webrtc_via_third() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "webrtc_multihop_ip_webrtc_via_third")
+        .expect("the cell is in the table");
+    run_cell(*cell, "webrtc_multihop_ip_webrtc_via_third", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix"]
+fn webrtc_multihop_relay_none_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "webrtc_multihop_relay_none_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "webrtc_multihop_relay_none_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix"]
+fn webrtc_multihop_relay_ip_webrtc_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "webrtc_multihop_relay_ip_webrtc_direct")
+        .expect("the cell is in the table");
+    run_cell(
+        *cell,
+        "webrtc_multihop_relay_ip_webrtc_direct",
+        SenderId::Any,
+    );
+}
+
+#[test]
+#[ignore = "run by cargo task matrix"]
+fn webrtc_multihop_relay_ip_webrtc_multihop_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "webrtc_multihop_relay_ip_webrtc_multihop_direct")
+        .expect("the cell is in the table");
+    run_cell(
+        *cell,
+        "webrtc_multihop_relay_ip_webrtc_multihop_direct",
+        SenderId::Any,
+    );
+}
+
+// The gossip cells. Gossip sits between multihop and the relay: it wins over the relay,
+// and loses to multihop. See `GOSSIP_INSTALLED`.
+#[test]
+#[ignore = "run by cargo task matrix"]
+fn udp_gossip_ip_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_gossip_ip_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_gossip_ip_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix"]
+fn udp_webrtc_gossip_ip_webrtc_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_gossip_ip_webrtc_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_webrtc_gossip_ip_webrtc_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix"]
+fn udp_multihop_gossip_ip_webrtc_multihop_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_multihop_gossip_ip_webrtc_multihop_direct")
+        .expect("the cell is in the table");
+    run_cell(
+        *cell,
+        "udp_multihop_gossip_ip_webrtc_multihop_direct",
+        SenderId::Any,
+    );
+}
+
+#[test]
+#[ignore = "run by cargo task matrix"]
+fn udp_webrtc_multihop_gossip_ip_webrtc_multihop_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_webrtc_multihop_gossip_ip_webrtc_multihop_direct")
+        .expect("the cell is in the table");
+    run_cell(
+        *cell,
+        "udp_webrtc_multihop_gossip_ip_webrtc_multihop_direct",
+        SenderId::Any,
+    );
+}
+
+#[test]
+#[ignore = "run by cargo task matrix"]
+fn udp_multihop_gossip_ip_webrtc_via_third() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_multihop_gossip_ip_webrtc_via_third")
+        .expect("the cell is in the table");
+    run_cell(
+        *cell,
+        "udp_multihop_gossip_ip_webrtc_via_third",
+        SenderId::Any,
+    );
+}
+
+#[test]
+#[ignore = "run by cargo task matrix"]
+fn udp_gossip_relay_ip_direct() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_gossip_relay_ip_direct")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_gossip_relay_ip_direct", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix"]
+fn udp_gossip_relay_all_blocked() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_gossip_relay_all_blocked")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_gossip_relay_all_blocked", SenderId::Any);
+}
+
+#[test]
+#[ignore = "run by cargo task matrix"]
+fn udp_gossip_all_blocked() {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(name, _)| *name == "udp_gossip_all_blocked")
+        .expect("the cell is in the table");
+    run_cell(*cell, "udp_gossip_all_blocked", SenderId::Any);
 }
 
 /// The matrix covers exactly the lists that the protocol accepts: every valid

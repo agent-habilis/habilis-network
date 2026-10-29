@@ -1,8 +1,5 @@
 use std::fmt;
 
-use crate::newtype::string_newtype;
-
-string_newtype!(
 /// An agent nickname — a "safe UTF-8" identifier.
 ///
 /// 1..=32 Unicode scalar values from any script (letters, marks,
@@ -17,14 +14,63 @@ string_newtype!(
 /// over-length nickname is rejected at `Message::parse` instead of reaching
 /// the surfaced display string (terminal-injection / `<nick>`/`#mesh`
 /// spoofing).
-    Nickname,
-    error = NicknameError,
-    deserialize,
-    from_str,
-    as_ref,
-    borrow,
-    test_from,
-);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
+#[serde(transparent)]
+pub struct Nickname(String);
+
+impl Nickname {
+    /// The wrapped string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ::std::fmt::Display for Nickname {
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for Nickname {
+    fn deserialize<Decoder>(deserializer: Decoder) -> ::std::result::Result<Self, Decoder::Error>
+    where
+        Decoder: ::serde::Deserializer<'de>,
+    {
+        let raw = <String as ::serde::Deserialize>::deserialize(deserializer)?;
+        Self::try_new(&raw).map_err(::serde::de::Error::custom)
+    }
+}
+
+impl ::std::str::FromStr for Nickname {
+    type Err = NicknameError;
+    fn from_str(text: &str) -> ::std::result::Result<Self, Self::Err> {
+        Self::try_new(text)
+    }
+}
+
+impl ::std::convert::AsRef<str> for Nickname {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ::std::borrow::Borrow<str> for Nickname {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(any(test, feature = "test-fixtures"))]
+impl ::std::convert::From<&str> for Nickname {
+    fn from(text: &str) -> Self {
+        Self::try_new(text).expect(concat!(
+            "invalid ",
+            stringify!(Nickname),
+            " in test fixture"
+        ))
+    }
+}
 
 /// Why a nickname was refused: its length, or a character outside the allowed set.
 #[derive(Debug, Clone, PartialEq, Eq)]

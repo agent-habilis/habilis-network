@@ -73,3 +73,11 @@ test("a from_<x> fn beside an impl From is clean", () => {
 test("a counted from_<x> fn passes", () => {
   expectExit({ [file]: "impl A {\n    pub fn from_bytes(b: u8) -> Self { A(b) }\n}" }, 0, `from_name|${file}|1|a fixture`);
 });
+
+test("a fn from_str is the FromStr method, not a constructor, and is clean", () => {
+  expectExit({ [file]: "impl std::str::FromStr for A {\n    type Err = u8;\n    fn from_str(s: &str) -> Result<Self, u8> { Ok(A(s.len() as u8)) }\n}" }, 0);
+});
+
+test("an impl From written with a path counts as an impl From", () => {
+  expectExit({ [file]: "impl ::std::convert::From<u8> for A {\n    fn from(b: u8) -> Self { A(b) }\n}\nimpl A {\n    pub fn from_bytes(b: u8) -> Self { A(b) }\n}" }, 0);
+});

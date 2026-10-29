@@ -16,7 +16,7 @@ const allowFile = process.env.NAMING_ALLOW || "scripts/naming/naming.allow";
 
 const rules: Record<string, (src: string) => boolean> = {
   ctor_name: (src) => /\bfn new_\w+\s*[(<]/.test(src) && !/\bfn new\s*[(<]/.test(src),
-  from_name: (src) => /\bfn from_\w+\s*[(<]/.test(src) && !/impl(<[^>]*>)? From</.test(src),
+  from_name: (src) => /\bfn from_(?!str\b)\w+\s*[(<]/.test(src) && !/impl(<[^>]*>)? (?:[\w:]*::)?From</.test(src),
 };
 
 const HINT: Record<string, string> = {

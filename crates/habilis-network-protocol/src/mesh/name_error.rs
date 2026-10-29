@@ -6,10 +6,8 @@
 
 use std::fmt;
 
-use crate::newtype::string_newtype;
 use crate::{ident, wordlist};
 
-string_newtype!(
 /// A human-readable mesh label, bound cryptographically into the topic id.
 ///
 /// 1..=32 "safe UTF-8" scalar values from any script; see
@@ -19,10 +17,30 @@ string_newtype!(
 /// separators `/ \`** — it is never used in a filesystem path — so a mesh name
 /// can be a URL. The newtype is the single validation point — every
 /// construction path goes through `new`.
-    MeshName,
-    error = NameError,
-    from_str,
-);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
+#[serde(transparent)]
+pub struct MeshName(String);
+
+impl MeshName {
+    /// The wrapped string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ::std::fmt::Display for MeshName {
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl ::std::str::FromStr for MeshName {
+    type Err = NameError;
+    fn from_str(text: &str) -> ::std::result::Result<Self, Self::Err> {
+        Self::try_new(text)
+    }
+}
 
 /// Why a mesh name was refused: its length, or a character outside the allowed set.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,15 +1,6 @@
 # file|count|reason
 # Used by scripts/macro-rules/macro-rules.ts. Keep each count exact: the check fails when it is too high or too low.
 
-# The validated-string macro that AGENTS.md allows, one per newtype family.
-crates/habilis-network-protocol/src/newtype.rs|1|string_newtype!, the validated-string macro that AGENTS.md allows
-
-# Each writes one #[test] per case per backend, which a fn cannot do without repeating each case.
-crates/habilis-network-chunks/tests/conformance/cases.rs|3|for_each_case and the two run callbacks: one #[test] per case per backend, which a fn cannot write
-
-# Writes one #[test] per cell of the matrix, with the table of cells in one place.
-crates/habilis-network/tests/send_ladder_matrix.rs|1|cells!: one #[test] per cell of the matrix, with the table in one place
-
 # A proc macro: the test attribute that guards each test against a WARN or ERROR event. A plain fn
 # cannot wrap a test body and register its own #[test], so the attribute stays test-only.
 crates/habilis-network-test-tracing-macros/src/lib.rs|1|the test attribute of habilis-network-test-tracing (test-only proc macro, 154 files use it)

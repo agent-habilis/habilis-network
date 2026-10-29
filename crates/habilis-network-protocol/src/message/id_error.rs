@@ -6,9 +6,6 @@ use std::fmt;
 
 use uuid::Uuid;
 
-use crate::newtype::string_newtype;
-
-string_newtype!(
 /// A protocol message identifier — UUID v4 string form.
 ///
 /// Construction goes through `new` (validates UUID format) or `random`
@@ -18,14 +15,63 @@ string_newtype!(
 /// transparent one): an inbound id off the wire is run through `new`, so a
 /// non-UUID `id` is rejected at `Message::parse` rather than panicking later
 /// in `as_uuid_bytes` (the dedup key path).
-    MessageId,
-    error = IdError,
-    deserialize,
-    from_str,
-    as_ref,
-    borrow,
-    test_from,
-);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
+#[serde(transparent)]
+pub struct MessageId(String);
+
+impl MessageId {
+    /// The wrapped string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ::std::fmt::Display for MessageId {
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for MessageId {
+    fn deserialize<Decoder>(deserializer: Decoder) -> ::std::result::Result<Self, Decoder::Error>
+    where
+        Decoder: ::serde::Deserializer<'de>,
+    {
+        let raw = <String as ::serde::Deserialize>::deserialize(deserializer)?;
+        Self::try_new(&raw).map_err(::serde::de::Error::custom)
+    }
+}
+
+impl ::std::str::FromStr for MessageId {
+    type Err = IdError;
+    fn from_str(text: &str) -> ::std::result::Result<Self, Self::Err> {
+        Self::try_new(text)
+    }
+}
+
+impl ::std::convert::AsRef<str> for MessageId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ::std::borrow::Borrow<str> for MessageId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(any(test, feature = "test-fixtures"))]
+impl ::std::convert::From<&str> for MessageId {
+    fn from(text: &str) -> Self {
+        Self::try_new(text).expect(concat!(
+            "invalid ",
+            stringify!(MessageId),
+            " in test fixture"
+        ))
+    }
+}
 
 /// A message id text that is not a valid UUID.
 #[derive(Debug, Clone, PartialEq, Eq)]

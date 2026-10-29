@@ -4,9 +4,6 @@
 
 use std::fmt;
 
-use crate::newtype::string_newtype;
-
-string_newtype!(
 /// A protocol message body — UTF-8 text. Newlines and tabs are allowed
 /// (multi-line snippets); other control characters are rejected. Empty
 /// is legal: presence and `PeerInfo` messages use it.
@@ -16,13 +13,57 @@ string_newtype!(
 /// control characters (e.g. ANSI/terminal escapes) is rejected at
 /// `Message::parse` instead of being embedded byte-for-byte in the surfaced
 /// display string.
-    MessageBody,
-    error = BodyError,
-    deserialize,
-    from_str,
-    as_ref,
-    test_from,
-);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
+#[serde(transparent)]
+pub struct MessageBody(String);
+
+impl MessageBody {
+    /// The wrapped string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ::std::fmt::Display for MessageBody {
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for MessageBody {
+    fn deserialize<Decoder>(deserializer: Decoder) -> ::std::result::Result<Self, Decoder::Error>
+    where
+        Decoder: ::serde::Deserializer<'de>,
+    {
+        let raw = <String as ::serde::Deserialize>::deserialize(deserializer)?;
+        Self::try_new(&raw).map_err(::serde::de::Error::custom)
+    }
+}
+
+impl ::std::str::FromStr for MessageBody {
+    type Err = BodyError;
+    fn from_str(text: &str) -> ::std::result::Result<Self, Self::Err> {
+        Self::try_new(text)
+    }
+}
+
+impl ::std::convert::AsRef<str> for MessageBody {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(any(test, feature = "test-fixtures"))]
+impl ::std::convert::From<&str> for MessageBody {
+    fn from(text: &str) -> Self {
+        Self::try_new(text).expect(concat!(
+            "invalid ",
+            stringify!(MessageBody),
+            " in test fixture"
+        ))
+    }
+}
 
 /// A message body with a control character other than tab or newline.
 #[derive(Debug, Clone, PartialEq, Eq)]
