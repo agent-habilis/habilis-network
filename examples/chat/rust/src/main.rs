@@ -19,7 +19,10 @@ use habilis_network::membership::{
 };
 use tokio::sync::oneshot;
 
+use std::{env, io, thread};
+
 use tokio::sync::mpsc;
+
 struct Args {
     opts: JoinOptions,
     robot: bool,
@@ -28,7 +31,7 @@ struct Args {
 fn parse_args() -> Result<Args> {
     let mut opts = JoinOptions::default();
     let mut robot = false;
-    let mut args = std::env::args().skip(1);
+    let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().with_context(|| format!("{name} needs a value"));
         match arg.as_str() {
@@ -62,7 +65,7 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "habilis_network=warn".into()),
         )
-        .with_writer(std::io::stderr)
+        .with_writer(io::stderr)
         .init();
 
     let args = parse_args()?;
@@ -72,9 +75,9 @@ async fn main() -> Result<()> {
     // Stdin on its own thread: the engine owns no stdio, and tokio's own stdin
     // wants the `io-std` feature this crate deliberately leaves off.
     let (lines_tx, mut lines) = mpsc::unbounded_channel::<String>();
-    std::thread::spawn(move || {
+    thread::spawn(move || {
         use std::io::BufRead as _;
-        for line in std::io::stdin().lock().lines() {
+        for line in io::stdin().lock().lines() {
             let Ok(line) = line else { break };
             if lines_tx.send(line).is_err() {
                 break;
