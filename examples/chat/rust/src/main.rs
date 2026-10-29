@@ -15,18 +15,18 @@
 
 use anyhow::{Context as _, Result, bail};
 use habilis_network::membership::{
-    Inbound, Membership, Opts, Request, depart, join, json_sink, msg_body, parse_to,
+    Inbound, Membership, JoinOptions, Request, depart, join, json_sink, msg_body, parse_to,
 };
 use tokio::sync::oneshot;
 
 use tokio::sync::mpsc;
 struct Args {
-    opts: Opts,
+    opts: JoinOptions,
     robot: bool,
 }
 
 fn parse_args() -> Result<Args> {
-    let mut opts = Opts::default();
+    let mut opts = JoinOptions::default();
     let mut robot = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {

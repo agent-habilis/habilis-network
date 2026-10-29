@@ -49,7 +49,7 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::Opts) -> Self {
+    async fn open(opts: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
         let membership = membership::join(opts, sink).await.expect("open a member");
         Self {
@@ -60,7 +60,7 @@ impl Member {
 
     async fn create(nick: &str, relay: &RelayUrl, max_peers: usize) -> Self {
         Self::open(
-            &membership::Opts::default()
+            &membership::JoinOptions::default()
                 .with_nick(Some(nick.to_owned()))
                 .with_lookup(vec![Lookup::Relay])
                 .with_transport(vec![
@@ -77,7 +77,7 @@ impl Member {
 
     async fn join(nick: &str, creator: &Self, max_peers: usize) -> Self {
         Self::open(
-            &membership::Opts::default()
+            &membership::JoinOptions::default()
                 .with_nick(Some(nick.to_owned()))
                 .with_mesh(Some(creator.membership.node.mesh_id().to_string()))
                 .with_max_peers(max_peers),

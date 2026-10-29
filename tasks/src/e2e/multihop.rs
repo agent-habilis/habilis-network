@@ -52,8 +52,8 @@ fn transports() -> String {
         .join(",")
 }
 
-fn native_opts(nick: &str, topic: &str, relay_url: &str) -> membership::Opts {
-    membership::Opts::default()
+fn native_opts(nick: &str, topic: &str, relay_url: &str) -> membership::JoinOptions {
+    membership::JoinOptions::default()
         .with_topic(Some(topic.to_owned()))
         .with_nick(Some(nick.to_owned()))
         .with_relay_urls(vec![relay_url.to_owned()])

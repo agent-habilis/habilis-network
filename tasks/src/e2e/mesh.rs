@@ -307,8 +307,8 @@ impl fmt::Display for CellFailure {
     }
 }
 
-fn native_opts(cell: &Cell, relay_url: &str, selector: NativeSelector<'_>) -> membership::Opts {
-    let mut opts = membership::Opts::default();
+fn native_opts(cell: &Cell, relay_url: &str, selector: NativeSelector<'_>) -> membership::JoinOptions {
+    let mut opts = membership::JoinOptions::default();
     match selector {
         NativeSelector::Topic(topic) => opts.topic = Some(topic.to_owned()),
         // A topic always uses every lookup; a create names its own, and the

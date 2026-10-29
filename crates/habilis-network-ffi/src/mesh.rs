@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, oneshot};
 
 // Re-exported rather than re-imported at every use site, so the C shim next
 // door names `crate::mesh::…` only.
-pub(crate) use habilis_network::membership::{Inbound, MAX_MSG, Opts};
+pub(crate) use habilis_network::membership::{Inbound, MAX_MSG, JoinOptions};
 
 /// A live mesh membership, driven synchronously from a foreign caller's thread.
 /// Owns the tokio runtime the event loop runs on.
@@ -40,7 +40,7 @@ impl Mesh {
     /// # Errors
     /// An unparseable id/topic/nickname, conflicting selectors, or a failure
     /// standing up the endpoint and gossip overlay.
-    pub(crate) fn open(opts: &Opts) -> Result<Self> {
+    pub(crate) fn open(opts: &JoinOptions) -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()

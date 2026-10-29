@@ -8,7 +8,7 @@
 
 mod membership_app;
 mod membership_event;
-mod opts;
+mod join_options;
 
 pub use crate::daemon::SetupError;
 pub use crate::transport::SendError;
@@ -22,5 +22,5 @@ pub use membership_app::{
 };
 pub use membership_event::{MembershipEvent, json_sink};
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-pub use opts::blind_new_members;
-pub use opts::{Membership, Opts, depart, join, resolve_kind};
+pub use join_options::blind_new_members;
+pub use join_options::{JoinOptions, Membership, depart, join, resolve_kind};

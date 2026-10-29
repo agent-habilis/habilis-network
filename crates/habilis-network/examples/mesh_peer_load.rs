@@ -45,7 +45,7 @@ use std::time::{Duration, Instant};
 
 use habilis_network::embed::SilentSink;
 use habilis_network::membership::{
-    INBOUND_CAP, MembershipApp, Opts, Request, msg_body, resolve_kind,
+    INBOUND_CAP, MembershipApp, JoinOptions, Request, msg_body, resolve_kind,
 };
 use habilis_network::protocol::{Lookup, Nickname, Transport};
 use habilis_network::runtime::{Node, SetupParams, SignalHandling, setup_mesh};
@@ -247,11 +247,11 @@ async fn main() -> anyhow::Result<()> {
 
     let mut relay_server = None;
     let opts = if let Some(id) = std::env::args().nth(1) {
-        Opts::default().with_mesh(Some(id))
+        JoinOptions::default().with_mesh(Some(id))
     } else {
         let (url, server) = test_relay::spawn_plain().await?;
         relay_server = Some(server);
-        Opts::default()
+        JoinOptions::default()
             .with_lookup(vec![Lookup::Relay])
             .with_transport(transports()?)
             .with_relay_urls(vec![url.to_string()])

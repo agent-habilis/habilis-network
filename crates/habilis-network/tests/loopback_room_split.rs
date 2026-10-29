@@ -245,7 +245,7 @@ impl Member {
     async fn open(nick: &str, mesh: Option<&str>) -> Self {
         let (sink, events) = membership::json_sink();
         let membership = membership::join(
-            &membership::Opts::default()
+            &membership::JoinOptions::default()
                 .with_nick(Some(nick.to_owned()))
                 .with_mesh(mesh.map(str::to_owned)),
             sink,
@@ -716,7 +716,7 @@ async fn holder_whose_beacon_stops_answering(
 async fn open_watched(nick: &str, mesh: &str) -> (Member, UnboundedReceiver<String>) {
     let (sink, events) = membership::json_sink();
     let membership = membership::join(
-        &membership::Opts::default()
+        &membership::JoinOptions::default()
             .with_nick(Some(nick.to_owned()))
             .with_mesh(Some(mesh.to_owned())),
         sink,

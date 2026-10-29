@@ -69,7 +69,7 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let (first_sink, _first_events) = membership::json_sink();
         let creator = membership::join(
-            &membership::Opts::default()
+            &membership::JoinOptions::default()
                 .with_nick(Some("m0".to_owned()))
                 .with_lookup(vec![Lookup::Relay])
                 .with_transport(vec![
@@ -91,7 +91,7 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
             sinks.push(events);
             members.push(
                 membership::join(
-                    &membership::Opts::default()
+                    &membership::JoinOptions::default()
                         .with_nick(Some(format!("m{index}")))
                         .with_mesh(Some(mesh.clone()))
                         .with_max_peers(CAP),

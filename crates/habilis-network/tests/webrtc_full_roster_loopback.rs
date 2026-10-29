@@ -34,7 +34,7 @@ fn logs() -> String {
     habilis_network_test_tracing::captured_logs()
 }
 
-async fn open(nick: &str, opts: membership::Opts) -> Membership {
+async fn open(nick: &str, opts: membership::JoinOptions) -> Membership {
     let (sink, _events) = membership::json_sink();
     let opts = opts.with_nick(Some(nick.to_owned()));
     membership::join(&opts, sink).await.expect("open a member")
@@ -64,7 +64,7 @@ async fn roster_len(member: &Membership) -> usize {
 async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
     let creator = open(
         "member-00",
-        membership::Opts::default()
+        membership::JoinOptions::default()
             .with_lookup(vec![Lookup::Relay])
             .with_transport(vec![Transport::WebRtc])
             .with_relay_urls(vec![relay.to_string()]),
@@ -85,7 +85,7 @@ async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
         members.push(
             open(
                 &format!("member-{index:02}"),
-                membership::Opts::default().with_mesh(Some(mesh.clone())),
+                membership::JoinOptions::default().with_mesh(Some(mesh.clone())),
             )
             .await,
         );
@@ -218,7 +218,7 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
         members.push(
             open(
                 "late-joiner",
-                membership::Opts::default().with_mesh(Some(mesh)),
+                membership::JoinOptions::default().with_mesh(Some(mesh)),
             )
             .await,
         );

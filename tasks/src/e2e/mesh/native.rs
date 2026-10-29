@@ -14,7 +14,7 @@ pub(in crate::e2e) struct Native {
 }
 
 impl Native {
-    pub(in crate::e2e) async fn open(opts: &membership::Opts) -> Result<Self, Skip> {
+    pub(in crate::e2e) async fn open(opts: &membership::JoinOptions) -> Result<Self, Skip> {
         let (sink, events) = membership::json_sink();
         let membership = membership::join(opts, sink)
             .await

@@ -1173,9 +1173,9 @@ mod tests {
             (vec![Transport::Udp, Transport::WebRtc], false),
             (vec![Transport::Udp, Transport::Multihop], true),
         ] {
-            let opts = crate::membership::Opts {
+            let opts = crate::membership::JoinOptions {
                 transport: list.clone(),
-                ..crate::membership::Opts::default()
+                ..crate::membership::JoinOptions::default()
             };
             let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
             let config = super::setup_mesh(
@@ -1219,11 +1219,11 @@ mod tests {
             ),
         ] {
             // A node without UDP needs the relay: it carries the offers of its data channels.
-            let opts = crate::membership::Opts {
+            let opts = crate::membership::JoinOptions {
                 transport: vec![Transport::WebRtc, Transport::Multihop],
                 lookup: vec![Lookup::Relay],
                 relay_urls: vec![relay_url.to_string()],
-                ..crate::membership::Opts::default()
+                ..crate::membership::JoinOptions::default()
             };
             let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
             let config = super::setup_mesh(
@@ -1248,11 +1248,11 @@ mod tests {
     #[test]
     async fn the_underlay_of_a_member_without_udp_has_no_ip_socket_and_has_a_webrtc_leg() {
         let (relay_url, _relay) = test_relay::spawn_plain().await.expect("a local relay");
-        let opts = crate::membership::Opts {
+        let opts = crate::membership::JoinOptions {
             transport: vec![Transport::WebRtc, Transport::Multihop],
             lookup: vec![Lookup::Relay],
             relay_urls: vec![relay_url.to_string()],
-            ..crate::membership::Opts::default()
+            ..crate::membership::JoinOptions::default()
         };
         let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
         let config = super::setup_mesh(
@@ -1291,7 +1291,7 @@ mod tests {
             (0, 0, GOSSIP_ACTIVE_VIEW_CAPACITY, MAX_DIRECT_PEERS),
             (5, 3, 5, 3),
         ] {
-            let opts = crate::membership::Opts::default();
+            let opts = crate::membership::JoinOptions::default();
             let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
             let config = super::setup_mesh(
                 kind,
@@ -1489,9 +1489,9 @@ mod tests {
         list: Vec<Transport>,
         injected: super::InjectedEndpoint,
     ) -> anyhow::Result<super::EventLoopConfig> {
-        let opts = crate::membership::Opts {
+        let opts = crate::membership::JoinOptions {
             transport: list,
-            ..crate::membership::Opts::default()
+            ..crate::membership::JoinOptions::default()
         };
         let (kind, author) = crate::membership::resolve_kind(&opts, None)?;
         super::setup_mesh(
@@ -1601,7 +1601,7 @@ mod tests {
     // The node closes what its setup bound, so iroh has nothing to log as dropped.
     #[test]
     async fn leave_closes_the_endpoint_and_the_underlay_that_setup_bound() {
-        let opts = crate::membership::Opts::default();
+        let opts = crate::membership::JoinOptions::default();
         let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
         let config = super::setup_mesh(
             kind,
@@ -1646,11 +1646,11 @@ mod browser_tests {
         let (relay_url, _relay) = crate::lookup::test_relay::spawn_plain()
             .await
             .expect("a local relay");
-        let opts = crate::membership::Opts {
+        let opts = crate::membership::JoinOptions {
             transport: vec![Transport::WebRtc, Transport::Multihop],
             lookup: vec![Lookup::Relay],
             relay_urls: vec![relay_url.to_string()],
-            ..crate::membership::Opts::default()
+            ..crate::membership::JoinOptions::default()
         };
         let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
         let mut config = super::setup_mesh(

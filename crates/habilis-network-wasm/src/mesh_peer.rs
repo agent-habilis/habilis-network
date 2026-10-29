@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 
-use habilis_network::membership::{Inbound, MAX_MSG, MembershipApp, Opts, Request, json_sink};
+use habilis_network::membership::{Inbound, MAX_MSG, MembershipApp, JoinOptions, Request, json_sink};
 use habilis_network::runtime::Node;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
@@ -24,7 +24,7 @@ pub struct MeshPeer {
 #[wasm_bindgen]
 impl MeshPeer {
     /// Join (or create) the mesh `opts_json` selects — a JSON encoding of
-    /// `habilis_network::membership::Opts`, the same object `habilis-network-ffi` takes. Resolves to
+    /// `habilis_network::membership::JoinOptions`, the same object `habilis-network-ffi` takes. Resolves to
     /// the live peer once the mesh is set up.
     ///
     /// # Errors
@@ -32,7 +32,7 @@ impl MeshPeer {
     /// mesh, say — a browser cannot reach one), or setup itself fails.
     pub async fn open(opts_json: String) -> Result<MeshPeer, JsValue> {
         console_error_panic_hook::set_once();
-        let opts: Opts = serde_json::from_str(&opts_json)
+        let opts: JoinOptions = serde_json::from_str(&opts_json)
             .map_err(|error| to_js_error(&format!("invalid options: {error}")))?;
         let (sink, events) = json_sink();
         let membership = habilis_network::membership::join(&opts, sink)

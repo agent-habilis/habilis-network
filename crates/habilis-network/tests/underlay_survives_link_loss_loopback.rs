@@ -76,7 +76,7 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let (sink_a, _events_a) = membership::json_sink();
         let alice = membership::join(
-            &membership::Opts::default()
+            &membership::JoinOptions::default()
                 .with_nick(Some("alice".to_owned()))
                 .with_lookup(vec![Lookup::Relay])
                 .with_transport(vec![
@@ -91,7 +91,7 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
         .expect("open alice");
         let (sink_b, _events_b) = membership::json_sink();
         let bob = membership::join(
-            &membership::Opts::default()
+            &membership::JoinOptions::default()
                 .with_nick(Some("bob".to_owned()))
                 .with_mesh(Some(alice.node.mesh_id().to_string())),
             sink_b,

@@ -26,7 +26,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::mesh::{Inbound, MAX_MSG, Mesh, Opts};
+use crate::mesh::{Inbound, MAX_MSG, Mesh, JoinOptions};
 use crate::streams::{Read, Streams};
 
 pub use habilis_network_mesh::HabilisNetworkMesh;
@@ -249,7 +249,7 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
         let relay_urls: Vec<String> = relay_urls
             .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
             .unwrap_or_default();
-        let parsed = Opts::default()
+        let parsed = JoinOptions::default()
             .with_mesh(mesh.map(str::to_owned))
             .with_topic(topic.map(str::to_owned))
             .with_nick(nick.map(str::to_owned))
