@@ -123,7 +123,7 @@ impl DiskStore {
                 let name = entry.file_name();
                 let Some(name) = name.to_str() else { continue };
                 // Skip the temp files `write_atomic` leaves if it is interrupted.
-                if let Ok(hash) = ChunkHash::from_hex(name) {
+                if let Ok(hash) = ChunkHash::try_from(name) {
                     found.push(hash);
                 }
             }
@@ -188,7 +188,7 @@ fn load_binds(path: &Path) -> HashMap<String, (u64, i64, Root)> {
         // the tree.
         let parsed_size: Result<u64, _> = size.parse();
         let parsed_mtime: Result<i64, _> = mtime.parse();
-        let (Ok(bytes), Ok(modified), Ok(root)) = (parsed_size, parsed_mtime, Root::from_hex(root))
+        let (Ok(bytes), Ok(modified), Ok(root)) = (parsed_size, parsed_mtime, Root::try_from(root))
         else {
             continue;
         };
@@ -229,7 +229,7 @@ fn decode_map(bytes: &[u8]) -> Result<ChunkMap, ChunkError> {
         let start = 12 + index * 32;
         let mut digest = [0u8; 32];
         digest.copy_from_slice(&bytes[start..start + 32]);
-        leaves.push(ChunkHash::from_bytes(digest));
+        leaves.push(ChunkHash::from(digest));
     }
     // `from_leaves` recomputes the root, so a row that was corrupted on disk
     // simply names a different file rather than impersonating this one.

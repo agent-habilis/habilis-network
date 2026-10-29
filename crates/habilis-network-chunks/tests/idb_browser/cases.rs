@@ -94,10 +94,7 @@ async fn a_one_bit_difference_is_caught() {
     let mut wrong = *chunk_hash(&chunk).as_bytes();
     wrong[31] ^= 1;
     assert!(
-        store
-            .put(ChunkHash::from_bytes(wrong), &chunk)
-            .await
-            .is_err(),
+        store.put(ChunkHash::from(wrong), &chunk).await.is_err(),
         "a chunk whose hash does not match its bytes is refused"
     );
 }

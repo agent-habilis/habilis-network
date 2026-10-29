@@ -427,7 +427,7 @@ impl IdbStore {
         let mut found = Vec::with_capacity(keys.length() as usize);
         for index in 0..keys.length() {
             if let Some(text) = keys.get(index).as_string()
-                && let Ok(hash) = ChunkHash::from_hex(&text)
+                && let Ok(hash) = ChunkHash::try_from(text.as_str())
             {
                 found.push(hash);
             }
@@ -453,7 +453,7 @@ impl IdbStore {
             let parsed_size: Result<u64, _> = size.parse();
             let parsed_mtime: Result<i64, _> = mtime.parse();
             let (Ok(file_len), Ok(file_mtime), Ok(root)) =
-                (parsed_size, parsed_mtime, Root::from_hex(root))
+                (parsed_size, parsed_mtime, Root::try_from(root))
             else {
                 continue;
             };
@@ -504,7 +504,7 @@ fn decode_map(bytes: &[u8]) -> Result<ChunkMap, ChunkError> {
         let start = 12 + index * 32;
         let mut digest = [0u8; 32];
         digest.copy_from_slice(&bytes[start..start + 32]);
-        leaves.push(ChunkHash::from_bytes(digest));
+        leaves.push(ChunkHash::from(digest));
     }
     // `from_leaves` recomputes the root, so a row corrupted in storage simply
     // names a different file rather than impersonating this one.

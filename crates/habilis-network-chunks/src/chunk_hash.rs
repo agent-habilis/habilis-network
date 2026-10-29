@@ -60,13 +60,26 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-impl ChunkHash {
-    /// Wrap raw digest bytes.
-    #[must_use]
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+/// Wrap raw digest bytes.
+impl From<[u8; 32]> for ChunkHash {
+    fn from(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
+}
 
+/// Parse the form [`ChunkHash::to_hex`] writes.
+///
+/// # Errors
+/// [`ChunkError::Malformed`] when the text is not exactly 64 hex digits, or is not hex.
+impl TryFrom<&str> for ChunkHash {
+    type Error = ChunkError;
+
+    fn try_from(text: &str) -> Result<Self, Self::Error> {
+        digest_from_hex(text, "chunk hash").map(Self)
+    }
+}
+
+impl ChunkHash {
     /// The raw digest bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -77,14 +90,6 @@ impl ChunkHash {
     #[must_use]
     pub fn to_hex(&self) -> String {
         digest_to_hex(&self.0)
-    }
-
-    /// Parse the form [`Self::to_hex`] writes.
-    ///
-    /// # Errors
-    /// [`ChunkError::Malformed`] when the text is not exactly 64 hex digits, or is not hex.
-    pub fn from_hex(text: &str) -> Result<Self, ChunkError> {
-        digest_from_hex(text, "chunk hash").map(Self)
     }
 }
 
@@ -94,13 +99,26 @@ impl fmt::Display for ChunkHash {
     }
 }
 
-impl Root {
-    /// Wrap raw digest bytes.
-    #[must_use]
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+/// Wrap raw digest bytes.
+impl From<[u8; 32]> for Root {
+    fn from(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
+}
 
+/// Parse the form [`Root::to_hex`] writes.
+///
+/// # Errors
+/// [`ChunkError::Malformed`] when the text is not exactly 64 hex digits, or is not hex.
+impl TryFrom<&str> for Root {
+    type Error = ChunkError;
+
+    fn try_from(text: &str) -> Result<Self, Self::Error> {
+        digest_from_hex(text, "root").map(Self)
+    }
+}
+
+impl Root {
     /// The raw digest bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -111,14 +129,6 @@ impl Root {
     #[must_use]
     pub fn to_hex(&self) -> String {
         digest_to_hex(&self.0)
-    }
-
-    /// Parse the form [`Self::to_hex`] writes.
-    ///
-    /// # Errors
-    /// [`ChunkError::Malformed`] when the text is not exactly 64 hex digits, or is not hex.
-    pub fn from_hex(text: &str) -> Result<Self, ChunkError> {
-        digest_from_hex(text, "root").map(Self)
     }
 }
 

@@ -467,23 +467,23 @@ mod tests {
     fn digests_round_trip_through_hex() {
         let hash = chunk_hash(b"payload");
         assert_eq!(
-            ChunkHash::from_hex(&hash.to_hex()).expect("hex"),
+            ChunkHash::try_from(hash.to_hex().as_str()).expect("hex"),
             hash,
             "a chunk hash round trips through hex"
         );
         let root = ChunkMap::build(b"payload").root();
         assert_eq!(
-            Root::from_hex(&root.to_hex()).expect("hex"),
+            Root::try_from(root.to_hex().as_str()).expect("hex"),
             root,
             "a root round trips through hex"
         );
         assert_eq!(hash.to_hex().len(), 64, "a hex digest is 64 characters");
         assert!(
-            ChunkHash::from_hex("nope").is_err(),
+            ChunkHash::try_from("nope").is_err(),
             "a short hex string is refused"
         );
         assert!(
-            ChunkHash::from_hex(&"z".repeat(64)).is_err(),
+            ChunkHash::try_from("z".repeat(64).as_str()).is_err(),
             "a non-hex string is refused"
         );
     }
@@ -501,11 +501,11 @@ mod tests {
             "non-ascii hex of the right byte length has 64 bytes"
         );
         assert!(
-            ChunkHash::from_hex(&text).is_err(),
+            ChunkHash::try_from(text.as_str()).is_err(),
             "non-ascii hex is refused for a chunk hash"
         );
         assert!(
-            Root::from_hex(&text).is_err(),
+            Root::try_from(text.as_str()).is_err(),
             "non-ascii hex is refused for a root"
         );
     }
