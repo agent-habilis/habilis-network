@@ -22,11 +22,8 @@ impl LogCapture {
         let capture = Self::default();
         let writer = capture.clone();
         let make_writer = move || writer.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(make_writer)
-            .with_ansi(false)
-            .with_max_level(level)
-            .finish();
+        let builder = tracing_subscriber::fmt().with_writer(make_writer);
+        let subscriber = builder.with_ansi(false).with_max_level(level).finish();
         let guard = tracing::subscriber::set_default(subscriber);
         (capture, guard)
     }

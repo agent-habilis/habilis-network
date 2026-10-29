@@ -73,9 +73,8 @@ pub(crate) fn endpoint_id(seed: u8) -> EndpointId {
 pub(crate) fn silent_relay_rung() -> (std::net::TcpListener, iroh::RelayUrl) {
     let silent = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .expect("a silent loopback listener");
-    let rung = format!("http://{}", silent.local_addr().expect("its address"))
-        .parse()
-        .expect("a relay url");
+    let address = silent.local_addr().expect("its address");
+    let rung = format!("http://{address}").parse().expect("a relay url");
     (silent, rung)
 }
 
@@ -129,7 +128,7 @@ mod log_capture_tests {
         second_event();
         third_event();
         let text = logs.text();
-        let seen = ["first event", "second event", "third event"]
+        let seen: usize = ["first event", "second event", "third event"]
             .iter()
             .filter(|line| text.contains(**line))
             .count();

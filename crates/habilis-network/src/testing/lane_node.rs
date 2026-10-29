@@ -41,8 +41,8 @@ impl LaneNode {
         let key = SecretKey::generate();
         let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
         let transport = handle.transport();
-        let builder = iroh::Endpoint::builder(presets::Minimal)
-            .secret_key(key)
+        let base = iroh::Endpoint::builder(presets::Minimal).secret_key(key);
+        let builder = base
             .relay_mode(iroh::RelayMode::Disabled)
             .clear_address_lookup()
             .add_custom_transport(transport);

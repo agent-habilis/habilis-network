@@ -115,7 +115,8 @@ where
     let mut remaining = size;
     let mut buffer = vec![0u8; CHUNK];
     while remaining > 0 {
-        let want = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let capacity = buffer.len();
+        let want = usize::try_from(remaining.min(capacity as u64)).unwrap_or(capacity);
         let read = match recv.read(&mut buffer[..want]).await? {
             Some(read) if read > 0 => read,
             _ => bail!("blob stream ended {remaining} bytes early"),

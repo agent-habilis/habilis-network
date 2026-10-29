@@ -48,6 +48,7 @@ pub(crate) fn compute(
     );
     let after_goodbye = !is_left && state.sent_before_goodbye(author, timestamp);
     let returned = !after_goodbye && state.quiet.contains(author.as_str());
+    let known = state.peers.contains(author.as_str());
     #[expect(
         clippy::match_same_arms,
         reason = "the named variants are listed on purpose, so a new variant stays visible"
@@ -76,8 +77,8 @@ pub(crate) fn compute(
         | MessageKind::MetaDigest
         | MessageKind::Ping
         | MessageKind::Pong { .. }
-        | MessageKind::LinkState => !state.peers.contains(author.as_str()),
-        _ => !state.peers.contains(author.as_str()),
+        | MessageKind::LinkState => !known,
+        _ => !known,
     };
     MembershipUpdate {
         returned,

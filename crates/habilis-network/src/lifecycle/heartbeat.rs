@@ -280,11 +280,11 @@ mod tests {
         tick_sweep(&mut state, &SilentSink);
 
         let roster = state.roster_snapshot();
-        let entry = roster
+        let found = roster
             .peers
             .iter()
-            .find(|entry| entry.nickname.as_str() == "calm-otter")
-            .expect("quiet peer present in roster");
+            .find(|entry| entry.nickname.as_str() == "calm-otter");
+        let entry = found.expect("quiet peer present in roster");
         assert!(entry.quiet, "evicted peer is marked quiet");
         let secs = entry
             .last_seen_secs_ago
