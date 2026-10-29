@@ -44,3 +44,15 @@ describe("macros", () => {
     expect(text).toBe("if cfg!(unix) { let config = 1; }");
   });
 });
+
+describe("macro syntax and module names", () => {
+  test("keeps a macro variable and its fragment specifier", () => {
+    const { text } = renameInFile("a.rs", "($ctx:expr, $ident:ident) => { let ctx = 1; };");
+    expect(text).toBe("($ctx:expr, $ident:ident) => { let context = 1; };");
+  });
+
+  test("keeps a module name, which names a file", () => {
+    const { text } = renameInFile("a.rs", "mod ident;\nlet ident = 2;");
+    expect(text).toBe("mod ident;\nlet ident = 2;");
+  });
+});

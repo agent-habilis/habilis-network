@@ -19,7 +19,6 @@ export const FULL_WORDS: Record<string, string> = {
   cmd: "command",
   conn: "connection",
   ctx: "context",
-  ident: "identifier",
   idx: "index",
   msg: "message",
   opts: "options",
@@ -95,6 +94,10 @@ export function renameInFile(file: string, src: string): { text: string; hits: H
     // A method call on a value, such as endpoint.addr(): the method may be a foreign API's.
     // It is reported, not renamed (the caller sends the site to the rule owner).
     if (src[offset - 1] === "." && src[offset + word.length] === "(") return word;
+    // A macro variable ($x) and a fragment specifier (x:ident) are the macro's syntax, not a name.
+    if (src[offset - 1] === "$" || /^\s*:\s*$/.test(src.slice(Math.max(0, offset - 8), offset))) return word;
+    // A module declaration names a file: the file is renamed by hand, with the module.
+    if (/\bmod\s+$/.test(src.slice(Math.max(0, offset - 16), offset))) return word;
     const line = src.slice(0, offset).split("\n").length;
     hits.push({ file, line, from: word, to: full });
     return full;
