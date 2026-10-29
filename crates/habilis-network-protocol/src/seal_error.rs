@@ -58,6 +58,18 @@ struct Envelope {
 }
 
 /// Why a seal does not open, or a sealed body does not decode.
+/// # Examples
+///
+/// A blob opened with another key returns this error.
+///
+/// ```
+/// use habilis_network_protocol::crypto::SymmetricKey;
+/// use habilis_network_protocol::seal_error::{open_symmetric, seal_symmetric};
+///
+/// let blob = seal_symmetric(&SymmetricKey::from([9u8; 32]), b"state");
+/// let result = open_symmetric(&SymmetricKey::from([8u8; 32]), &blob);
+/// assert!(result.is_err());
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]
@@ -172,6 +184,19 @@ fn unseal(our_secret: &StaticSecret, sealed: &Sealed) -> Result<Vec<u8>, SealErr
 /// # Panics
 /// If `Envelope` fails to serialize. Its fields are `String`s and a version
 /// tag, so serialization cannot fail short of an allocator failure.
+/// # Examples
+///
+/// Only the holder of the matching secret can open the body.
+///
+/// ```
+/// use habilis_network_protocol::identity::Identity;
+/// use habilis_network_protocol::seal_error::{seal_to_body, unseal_from_body};
+///
+/// let me = Identity::generate();
+/// let body = seal_to_body(&me.seal_public(), "hello").expect("seal the body");
+/// let text = unseal_from_body(&me.seal_secret(), &body).expect("open the body");
+/// assert_eq!(text, "hello");
+/// ```
 pub fn seal_to_body(recipient_pub: &PublicKey, plaintext: &str) -> Result<MessageBody, SealError> {
     let sealed = seal(recipient_pub, plaintext.as_bytes());
     let envelope: Envelope = Envelope {
@@ -192,6 +217,16 @@ pub fn seal_to_body(recipient_pub: &PublicKey, plaintext: &str) -> Result<Messag
 /// A [`SealError::Source`] when the body is not a sealed envelope or a field does
 /// not decode, [`SealError::UnsupportedVersion`] for another envelope version, or
 /// [`SealError::Failed`] when the seal does not open.
+/// # Examples
+///
+/// ```
+/// use habilis_network_protocol::identity::Identity;
+/// use habilis_network_protocol::seal_error::{seal_to_body, unseal_from_body};
+///
+/// let me = Identity::generate();
+/// let body = seal_to_body(&me.seal_public(), "hello").expect("seal the body");
+/// assert_eq!(unseal_from_body(&me.seal_secret(), &body).expect("open"), "hello");
+/// ```
 pub fn unseal_from_body(
     our_secret: &StaticSecret,
     body: &MessageBody,
@@ -231,6 +266,18 @@ fn decode_array<const N: usize>(encoded: &str) -> Result<[u8; N], SealError> {
 /// # Panics
 /// Never in practice: ChaCha20-Poly1305 encryption cannot fail for a valid
 /// key/nonce pair, and both are constructed here.
+/// # Examples
+///
+/// Every holder of the key can open the blob.
+///
+/// ```
+/// use habilis_network_protocol::crypto::SymmetricKey;
+/// use habilis_network_protocol::seal_error::{open_symmetric, seal_symmetric};
+///
+/// let key = SymmetricKey::from([9u8; 32]);
+/// let blob = seal_symmetric(&key, b"state");
+/// assert_eq!(open_symmetric(&key, &blob).expect("open the blob"), b"state");
+/// ```
 pub fn seal_symmetric(key: &SymmetricKey, plaintext: &[u8]) -> Vec<u8> {
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_bytes()));
     let mut nonce = [0u8; 12];
@@ -256,6 +303,16 @@ pub fn seal_symmetric(key: &SymmetricKey, plaintext: &[u8]) -> Vec<u8> {
 /// # Errors
 /// [`SealError::Failed`] when the blob is too short to carry a nonce, or the AEAD
 /// fails to authenticate (a wrong key or tampered bytes).
+/// # Examples
+///
+/// ```
+/// use habilis_network_protocol::crypto::SymmetricKey;
+/// use habilis_network_protocol::seal_error::{open_symmetric, seal_symmetric};
+///
+/// let key = SymmetricKey::from([9u8; 32]);
+/// let blob = seal_symmetric(&key, b"state");
+/// assert_eq!(open_symmetric(&key, &blob).expect("open the blob"), b"state");
+/// ```
 pub fn open_symmetric(key: &SymmetricKey, blob: &[u8]) -> Result<Vec<u8>, SealError> {
     if blob.len() < 12 {
         return Err(SealError::Failed("symmetric blob too short for a nonce"));

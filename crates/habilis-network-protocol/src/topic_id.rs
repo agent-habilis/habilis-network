@@ -11,6 +11,17 @@
 
 /// A gossip topic: the 32 bytes derived from a mesh's seed, name and config by
 /// `crypto::derive_topic_id`.
+/// # Examples
+///
+/// A topic keeps its 32 bytes, and the bytes come back unchanged.
+///
+/// ```
+/// use habilis_network_protocol::TopicId;
+///
+/// let topic = TopicId::from_bytes([1u8; 32]);
+/// assert_eq!(topic.as_bytes(), &[1u8; 32]);
+/// assert_eq!(topic.to_bytes(), [1u8; 32]);
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TopicId([u8; 32]);
 

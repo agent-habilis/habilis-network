@@ -14,6 +14,19 @@ use std::fmt;
 /// over-length nickname is rejected at `Message::parse` instead of reaching
 /// the surfaced display string (terminal-injection / `<nick>`/`#mesh`
 /// spoofing).
+/// # Examples
+///
+/// A nickname checks its text on the way in, and a random one always passes the check.
+///
+/// ```
+/// use habilis_network_protocol::Nickname;
+///
+/// let nick = Nickname::try_new("alice").expect("a valid nickname");
+/// assert_eq!(nick.as_str(), "alice");
+///
+/// let random = Nickname::random();
+/// assert!(Nickname::try_new(random.as_str()).is_ok());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
 #[serde(transparent)]
 pub struct Nickname(String);
@@ -73,6 +86,16 @@ impl ::std::convert::From<&str> for Nickname {
 }
 
 /// Why a nickname was refused: its length, or a character outside the allowed set.
+/// # Examples
+///
+/// A rejected nickname returns an error that says why.
+///
+/// ```
+/// use habilis_network_protocol::Nickname;
+///
+/// let error = Nickname::try_new("").unwrap_err();
+/// assert!(!error.to_string().is_empty());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 #[must_use]

@@ -29,6 +29,17 @@ use crate::{AuthorKey, DedupKey, SymmetricKey};
 /// A per-peer signing identity — just the secret key. The nickname
 /// it speaks under is carried by the message `author` field and bound to
 /// this key trust-on-first-use by receivers, so it is not stored here.
+/// # Examples
+///
+/// A fresh identity has a public key, and the key encodes to 64 hex characters.
+///
+/// ```
+/// use habilis_network_protocol::identity::{Identity, encode_pubkey};
+///
+/// let identity = Identity::generate();
+/// let text = encode_pubkey(&identity.public());
+/// assert_eq!(text.len(), 64);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Identity {
     secret: SecretKey,
@@ -127,6 +138,14 @@ pub(crate) fn dedup_key16(author: Option<&AuthorKey>, id_bytes: &[u8; 16]) -> De
 // inspectable and does not depend on iroh's serde representation.
 
 /// The public key as lowercase hex, 64 characters.
+/// # Examples
+///
+/// ```
+/// use habilis_network_protocol::identity::{Identity, encode_pubkey};
+///
+/// let identity = Identity::generate();
+/// assert_eq!(encode_pubkey(&identity.public()).len(), 64);
+/// ```
 #[must_use]
 pub fn encode_pubkey(pubkey: &PublicKey) -> String {
     to_hex(pubkey.as_bytes())
@@ -141,6 +160,13 @@ pub(crate) fn decode_sig(hex: &str) -> Result<Signature> {
 }
 
 /// Lowercase hex of `bytes`, the spelling the wire uses for keys and signatures.
+/// # Examples
+///
+/// ```
+/// use habilis_network_protocol::identity::encode_hex;
+///
+/// assert_eq!(encode_hex(&[0x0a, 0xff]), "0aff");
+/// ```
 #[must_use]
 pub fn encode_hex(bytes: &[u8]) -> String {
     to_hex(bytes)
@@ -151,6 +177,25 @@ pub fn encode_hex(bytes: &[u8]) -> String {
 ///
 /// # Errors
 /// The formatter fails.
+/// # Examples
+///
+/// A caller writes the hex of bytes into any formatter, such as a Display impl.
+///
+/// ```
+/// use std::fmt;
+///
+/// use habilis_network_protocol::identity::write_hex;
+///
+/// struct Hex<'bytes>(&'bytes [u8]);
+///
+/// impl fmt::Display for Hex<'_> {
+///     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+///         write_hex(formatter, self.0)
+///     }
+/// }
+///
+/// assert_eq!(Hex(&[0x0a, 0xff]).to_string(), "0aff");
+/// ```
 pub fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
     for byte in bytes {
         write!(formatter, "{byte:02x}")?;
@@ -189,6 +234,16 @@ pub(crate) fn encode_lower_hex_32(bytes: &[u8; 32]) -> [u8; 64] {
 
 /// The bytes of a hex string, either case; `None` for odd length or a non-hex
 /// digit.
+/// # Examples
+///
+/// A text that is not hex decodes to None.
+///
+/// ```
+/// use habilis_network_protocol::identity::decode_hex;
+///
+/// assert_eq!(decode_hex("0aff"), Some(vec![0x0a, 0xff]));
+/// assert_eq!(decode_hex("zz"), None);
+/// ```
 #[must_use]
 pub fn decode_hex(hex: &str) -> Option<Vec<u8>> {
     parse_hex(hex).ok()

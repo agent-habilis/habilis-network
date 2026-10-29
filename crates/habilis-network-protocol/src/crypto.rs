@@ -47,6 +47,20 @@ pub use ticket_secret::TicketSecret;
 /// Constant-time equality for 32-byte auth tokens: XOR-fold the full pair so
 /// the cost never depends on where the first mismatch lies (a short-circuit
 /// `==` is a timing oracle on the secret).
+/// # Examples
+///
+/// Two tokens compare equal only when all 32 bytes match.
+///
+/// ```
+/// use habilis_network_protocol::ct_eq;
+///
+/// let token = [7u8; 32];
+/// assert!(ct_eq(&token, &[7u8; 32]));
+///
+/// let mut other = token;
+/// other[31] ^= 1;
+/// assert!(!ct_eq(&token, &other));
+/// ```
 #[must_use]
 pub fn ct_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
     left.iter()

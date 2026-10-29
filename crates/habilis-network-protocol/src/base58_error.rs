@@ -18,6 +18,16 @@ use sha2::Sha256;
 /// The double-SHA-256 checksum, truncated to its first 4 bytes.
 /// Why a Base58Check text does not decode. `what` names the text, for example
 /// `mesh identifier`.
+/// # Examples
+///
+/// A character outside the Base58 alphabet fails before the checksum is read.
+///
+/// ```
+/// use habilis_network_protocol::base58check::{Base58Error, decode};
+///
+/// let error = decode("0OIl", "invite ticket").unwrap_err();
+/// assert!(matches!(error, Base58Error::Alphabet(_)));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Base58Error {
@@ -51,6 +61,16 @@ fn checksum(bytes: &[u8]) -> [u8; 4] {
 }
 
 /// Encode `payload` with its checksum appended.
+/// # Examples
+///
+/// The text is the payload and a 4-byte checksum, in Base58.
+///
+/// ```
+/// use habilis_network_protocol::base58check::encode;
+///
+/// let text = encode(b"mesh");
+/// assert!(!text.is_empty());
+/// ```
 #[must_use]
 pub fn encode(payload: &[u8]) -> String {
     let mut with_checksum = payload.to_vec();
@@ -69,6 +89,20 @@ pub fn encode(payload: &[u8]) -> String {
 /// [`Base58Error::Alphabet`] when `encoded` is not Base58, [`Base58Error::Short`]
 /// when it is too short to carry a checksum, or [`Base58Error::Checksum`] when the
 /// checksum does not match the payload.
+/// # Examples
+///
+/// A text with a changed character fails its checksum, so a mistyped id is an error.
+///
+/// ```
+/// use habilis_network_protocol::base58check::{decode, encode};
+///
+/// let text = encode(b"mesh");
+/// assert_eq!(decode(&text, "mesh identifier").unwrap(), b"mesh");
+///
+/// let mut damaged = text.clone();
+/// damaged.pop();
+/// assert!(decode(&damaged, "mesh identifier").is_err());
+/// ```
 pub fn decode(encoded: &str, what: &str) -> Result<Vec<u8>, Base58Error> {
     let Ok(decoded) = bs58::decode(encoded).into_vec() else {
         return Err(Base58Error::Alphabet(what.to_owned()));
@@ -87,6 +121,19 @@ pub fn decode(encoded: &str, what: &str) -> Result<Vec<u8>, Base58Error> {
 ///
 /// The cursor half of the same wire vocabulary: every ticket body here is a
 /// sequence of fixed-width fields read in order.
+/// # Examples
+///
+/// Each call reads the next fixed-width field and moves the cursor past it.
+///
+/// ```
+/// use habilis_network_protocol::base58check::take_array;
+///
+/// let bytes = [1, 2, 3, 4, 5];
+/// let mut position = 0;
+/// let first: Option<[u8; 2]> = take_array(&bytes, &mut position);
+/// assert_eq!(first, Some([1, 2]));
+/// assert_eq!(position, 2);
+/// ```
 pub fn take_array<const N: usize>(bytes: &[u8], position: &mut usize) -> Option<[u8; N]> {
     let slice = bytes.get(*position..position.checked_add(N)?)?;
     let mut out = [0u8; N];
