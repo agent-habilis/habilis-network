@@ -259,7 +259,7 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
         let topic_name = topic.map(str::to_owned);
         let nick_name = nick.map(str::to_owned);
         let display_name = name.map(str::to_owned);
-        let base = JoinOptions::default()
+        let base: JoinOptions = JoinOptions::default()
             .with_mesh(mesh_name)
             .with_topic(topic_name)
             .with_nick(nick_name)

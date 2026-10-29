@@ -390,7 +390,7 @@ fn recv(handle: *mut HabilisNetworkMesh, cap: usize) -> (c_long, HabilisNetworkM
             &raw mut message,
         )
     };
-    let text = if got == 1 {
+    let text: String = if got == 1 {
         // SAFETY: a result of 1 means `buf` holds a NUL-terminated text.
         unsafe { CStr::from_ptr(buffer.as_ptr().cast::<c_char>()) }
             .to_string_lossy()
