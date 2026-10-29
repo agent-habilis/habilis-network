@@ -14,6 +14,18 @@ use crate::transport::probe;
 
 /// Closes every nudge at once. See [`NUDGE_ALPN`]. An endpoint that runs the `WebRTC` signal
 /// acceptor must serve this too: its answerer dials the nudge when a session attaches.
+///
+/// # Examples
+///
+/// A nudge acceptor takes the nudges that ask a peer to open a direct path. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::net::direct::NudgeAcceptor;
+///
+/// # fn demo(acceptor: NudgeAcceptor) {
+/// drop(acceptor);
+/// # }
+/// ```
 #[derive(Debug, Clone, Default, Copy)]
 #[non_exhaustive]
 pub struct NudgeAcceptor;

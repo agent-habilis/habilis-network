@@ -11,6 +11,18 @@
 /// Target-independent on purpose. The native backend maps it onto `IceConfig`;
 /// the browser backend ignores it, because a tab is never a loopback peer — it
 /// has no loopback peers to reach.
+///
+/// # Examples
+///
+/// An ICE profile says how a WebRTC session finds its candidate addresses. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::net::direct::IceProfile;
+///
+/// # fn demo(profile: IceProfile) {
+/// let _ = profile;
+/// # }
+/// ```
 #[derive(Debug, Clone, Copy, Default)]
 #[non_exhaustive]
 pub struct IceProfile {

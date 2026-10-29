@@ -128,6 +128,18 @@ pub(crate) fn with_refusal(
 /// exchange is self-contained and the loop has nothing to decide about it — and
 /// routing it through the loop would put a multi-second negotiation on the one
 /// task that must never block.
+///
+/// # Examples
+///
+/// A WebRTC signal acceptor takes the signals that open a WebRTC session from a peer. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::net::direct::WebRtcSignalAcceptor;
+///
+/// # fn demo(acceptor: WebRtcSignalAcceptor) {
+/// drop(acceptor);
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct WebRtcSignalAcceptor {
     handle: WebRtcHandle,

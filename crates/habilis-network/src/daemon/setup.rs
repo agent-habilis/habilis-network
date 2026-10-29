@@ -426,6 +426,21 @@ fn reaches_relay(lookups: &LookupOpts, transports: lookup::TransportOpts) -> boo
 /// A browser that cannot reach the relay (`reaches_relay`). Or a list that
 /// leaves both the data channel and relay payload out: nothing could carry
 /// its payload.
+///
+/// # Examples
+///
+/// In a browser, a setup that asks for a transport the browser lacks is refused. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::net::TransportOpts;
+/// use habilis_network::protocol::TransportPolicy;
+/// use habilis_network::protocol::mesh::LookupOpts;
+/// use habilis_network::runtime::{SetupError, refuse_in_browser};
+///
+/// # fn demo(lookups: &LookupOpts, policy: TransportPolicy, transports: TransportOpts) -> Result<(), SetupError> {
+/// refuse_in_browser(lookups, policy, transports)
+/// # }
+/// ```
 pub fn refuse_in_browser(
     lookups: &LookupOpts,
     policy: crate::protocol::TransportPolicy,

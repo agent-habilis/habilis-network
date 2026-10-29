@@ -14,6 +14,19 @@ use crate::transport::probe;
 /// Whether a pair needs the lane: **either** end lacking IP is enough. The
 /// remote is judged by its advertised address, this node by what it knows
 /// about itself.
+///
+/// # Examples
+///
+/// It says whether a pair of peers needs a WebRTC lane, because neither side reaches the other over UDP. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::iroh::EndpointAddr;
+/// use habilis_network::net::direct::{UdpTransport, pair_needs_lane};
+///
+/// # fn demo(remote: &EndpointAddr, udp: UdpTransport) -> bool {
+/// pair_needs_lane(remote, udp)
+/// # }
+/// ```
 #[must_use]
 pub fn pair_needs_lane(remote: &EndpointAddr, local_has_udp_transport: UdpTransport) -> bool {
     lane_needs::needs_webrtc_lane(remote)

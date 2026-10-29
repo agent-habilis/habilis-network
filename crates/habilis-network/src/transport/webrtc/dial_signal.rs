@@ -20,6 +20,22 @@ use crate::lookup::EndpointError;
 /// # Errors
 /// The signalling dial fails, the peer refuses, or the negotiation does not
 /// complete before the deadline.
+///
+/// # Examples
+///
+/// It dials a peer over the signal to open a WebRTC session with it. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::iroh::{Endpoint, EndpointAddr};
+/// use habilis_network::net::{EndpointError, address_book};
+/// use habilis_network::net::direct::{IceProfile, dial_signal};
+/// use habilis_network::net::direct::WebRtcHandle;
+///
+/// # async fn demo(endpoint: &Endpoint, peer: EndpointAddr, handle: &WebRtcHandle, ice: IceProfile) -> Result<(), EndpointError> {
+/// let book = address_book(endpoint);
+/// dial_signal(endpoint, &book, peer, handle, ice).await
+/// # }
+/// ```
 pub async fn dial_signal(
     endpoint: &Endpoint,
     book: &MemoryLookup,

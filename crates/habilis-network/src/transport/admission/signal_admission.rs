@@ -21,6 +21,18 @@ use super::{
 use tokio::sync::mpsc;
 
 /// The one place a direct-peer slot is granted, for both roles.
+///
+/// # Examples
+///
+/// A signal admission decides which peers may open a WebRTC session through the signal. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::net::direct::SignalAdmission;
+///
+/// # fn demo(admission: SignalAdmission) {
+/// let _ = admission;
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct SignalAdmission {
     // the table and the sampler share the inner state

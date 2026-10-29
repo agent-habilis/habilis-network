@@ -137,6 +137,21 @@ pub(crate) const RELAY_REFUSED: &str =
 /// Wait until `conn`'s selected path is not the relay, or `deadline` passes.
 /// Every path event is a reason to re-read the path list: the event's own
 /// address may be stale by the time it is handled.
+///
+/// # Examples
+///
+/// It waits until the connection has a direct path, or the deadline passes. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use std::time::Duration;
+///
+/// use habilis_network::iroh::endpoint::Connection;
+/// use habilis_network::net::direct::wait_direct;
+///
+/// # async fn demo(connection: &Connection) -> bool {
+/// wait_direct(connection, Duration::from_secs(1)).await
+/// # }
+/// ```
 pub async fn wait_direct(connection: &Connection, deadline: Duration) -> bool {
     wait_selected(connection, deadline, selected_is_direct).await
 }
@@ -148,6 +163,18 @@ pub(crate) async fn wait_ip(connection: &Connection, deadline: Duration) -> bool
 }
 
 /// Whether a payload may flow on the relay path, or only on a direct one.
+///
+/// # Examples
+///
+/// A payload path says which transports may carry a payload to a peer. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::net::direct::PayloadPath;
+///
+/// # fn demo(path: PayloadPath) {
+/// let _ = path;
+/// # }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PayloadPath {
@@ -219,6 +246,21 @@ async fn wait_selected_outcome(
 /// iroh to select a non-relay path, and on timeout close `conn` with
 /// `close_code` so the other end reads the cause. Returns whether payload
 /// may flow on `conn`.
+///
+/// # Examples
+///
+/// It refuses a relayed payload unless the connection finds a direct path before the deadline. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use std::time::Duration;
+///
+/// use habilis_network::iroh::endpoint::Connection;
+/// use habilis_network::net::direct::{PayloadPath, refuse_unless_direct};
+///
+/// # async fn demo(connection: &Connection, relay: PayloadPath) {
+/// let _ = refuse_unless_direct(connection, relay, Duration::from_secs(1), 0).await;
+/// # }
+/// ```
 pub async fn refuse_unless_direct(
     connection: &Connection,
     relay: PayloadPath,
