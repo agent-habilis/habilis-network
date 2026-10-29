@@ -5,6 +5,17 @@
 use tokio::io::{self, AsyncBufRead, AsyncBufReadExt};
 
 /// Outcome of [`read_bounded_line`].
+///
+/// # Examples
+///
+/// A read yields a line, the end of input, or a line that was too long.
+///
+/// ```
+/// use habilis_network_util::line_read::LineRead;
+///
+/// let line = LineRead::Line("hello".to_owned());
+/// assert!(matches!(line, LineRead::Line(ref text) if text == "hello"));
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum LineRead {
@@ -23,6 +34,20 @@ pub enum LineRead {
 /// and discarded until the newline, then `TooLong` is returned.
 /// # Errors
 /// Propagates the reader's I/O errors.
+///
+/// # Examples
+///
+/// It reads from an async input. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_util::line_read::read_bounded_line;
+///
+/// # async fn demo() -> std::io::Result<()> {
+/// let mut reader = tokio::io::BufReader::new(&b"hello\n"[..]);
+/// let line = read_bounded_line(&mut reader, 1024).await?;
+/// # Ok(())
+/// # }
+/// ```
 pub async fn read_bounded_line<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     max: usize,

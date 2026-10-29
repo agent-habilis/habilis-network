@@ -43,6 +43,17 @@ static BUILD_VERSION: OnceLock<&'static str> = OnceLock::new();
 /// Register the consumer's build stamp. Idempotent: the first caller wins and
 /// later calls are ignored, so a test that spins up several in-process daemons
 /// cannot panic on a re-set.
+///
+/// # Examples
+///
+/// A build string set at start is the one that the build reports.
+///
+/// ```
+/// use habilis_network_util::version::{build_string, set_build_string};
+///
+/// set_build_string("1.2.3");
+/// assert_eq!(build_string(), "1.2.3");
+/// ```
 pub fn set_build_string(version: &'static str) {
     let _ = BUILD_VERSION.set(version);
 }
@@ -50,6 +61,16 @@ pub fn set_build_string(version: &'static str) {
 /// The consumer's stamp, or this engine's own [`VERSION`] when nothing
 /// registered one. The fallback keeps a direct engine embedder truthful rather
 /// than blank.
+///
+/// # Examples
+///
+/// The build string is never empty.
+///
+/// ```
+/// use habilis_network_util::version::build_string;
+///
+/// assert!(!build_string().is_empty());
+/// ```
 #[must_use]
 pub fn build_string() -> &'static str {
     BUILD_VERSION.get().copied().unwrap_or(VERSION)

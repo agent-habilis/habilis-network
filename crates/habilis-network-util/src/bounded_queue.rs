@@ -15,6 +15,20 @@ use std::collections::VecDeque;
 
 /// A first-in, first-out queue of at most `capacity` items. It keeps duplicates, and a push is
 /// rejected when the queue is full.
+///
+/// # Examples
+///
+/// A full queue refuses a new item until its items are taken.
+///
+/// ```
+/// use habilis_network_util::bounded_queue::BoundedQueue;
+///
+/// let mut queue = BoundedQueue::new(1);
+/// assert!(queue.push(1));
+/// assert!(!queue.push(2));
+/// assert_eq!(queue.take().len(), 1);
+/// assert!(queue.is_empty());
+/// ```
 #[derive(Debug, Clone)]
 pub struct BoundedQueue<T> {
     capacity: usize,

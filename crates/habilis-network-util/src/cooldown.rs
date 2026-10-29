@@ -16,6 +16,21 @@ use crate::clock::Instant;
 /// A set of keys each "on cooldown" until `window` after its last [`note`].
 ///
 /// [`note`]: Cooldown::note
+///
+/// # Examples
+///
+/// A key that was noted stays on cooldown for the whole window.
+///
+/// ```
+/// use std::time::{Duration, Instant};
+///
+/// use habilis_network_util::cooldown::Cooldown;
+///
+/// let mut cooldown = Cooldown::new(Duration::from_secs(5));
+/// let now = Instant::now();
+/// cooldown.note("peer", now);
+/// assert!(cooldown.on_cooldown(&"peer", now));
+/// ```
 #[derive(Debug, Clone)]
 pub struct Cooldown<K> {
     seen: HashMap<K, Instant>,

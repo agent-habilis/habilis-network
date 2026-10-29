@@ -4,6 +4,16 @@
 ///
 /// An id is bare Base58, so the stem is plain ASCII and needs no escaping or
 /// separator-stripping before it lands in a path.
+///
+/// # Examples
+///
+/// The same mesh id always gives the same prefix.
+///
+/// ```
+/// use habilis_network_util::mesh_prefix;
+///
+/// assert_eq!(mesh_prefix("abc"), mesh_prefix("abc"));
+/// ```
 #[must_use]
 pub fn mesh_prefix(mesh_id: &str) -> String {
     mesh_id.chars().take(16).collect()
@@ -34,6 +44,16 @@ pub fn mesh_prefix(mesh_id: &str) -> String {
 /// silently relocate everything) and keeps us consistent with the project's "no
 /// env-var config" rule. The `-<uid>` suffix adds only a few bytes, so the
 /// socket path stays well inside the `AF_UNIX` `sun_path` ~104-byte limit.
+///
+/// # Examples
+///
+/// The runtime base for a product is an absolute path.
+///
+/// ```
+/// use habilis_network_util::runtime_base;
+///
+/// assert!(runtime_base("chat").is_absolute());
+/// ```
 #[must_use]
 #[cfg(feature = "host")]
 pub fn runtime_base(product: &str) -> std::path::PathBuf {
@@ -71,6 +91,20 @@ fn current_uid() -> u32 {
 /// user (a squatting attempt — a clear message so the operator can remove it);
 /// or the create / chmod syscalls fail. Fails *closed*: a failure here must
 /// abort the write, never fall through to an unvalidated directory.
+///
+/// # Examples
+///
+/// It creates the directory on disk, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use std::path::Path;
+/// use habilis_network_util::ensure_runtime_base;
+///
+/// # fn demo(base: &Path) -> std::io::Result<()> {
+/// ensure_runtime_base(base)?;
+/// # Ok(())
+/// # }
+/// ```
 #[cfg(feature = "host")]
 pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
@@ -121,6 +155,17 @@ pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
 
 /// Whether `path` is inside `base`. A `--state-file` / `--log-dir` override can
 /// point outside the base and must not be gated on its validation.
+///
+/// # Examples
+///
+/// A path inside the runtime base is under it.
+///
+/// ```
+/// use habilis_network_util::{is_under_runtime_base, mesh_runtime_dir, runtime_base};
+///
+/// let base = runtime_base("chat");
+/// assert!(is_under_runtime_base(&base, &mesh_runtime_dir(&base, "abc")));
+/// ```
 #[must_use]
 #[cfg(feature = "host")]
 pub fn is_under_runtime_base(base: &std::path::Path, path: &std::path::Path) -> bool {
@@ -140,6 +185,20 @@ pub fn is_under_runtime_base(base: &std::path::Path, path: &std::path::Path) -> 
 /// [`ensure_runtime_base`] rejected the base, or the parent create failed.
 /// `base` is `None` for a consumer that configured no runtime base at all —
 /// there is then no protected directory to validate, only a parent to create.
+///
+/// # Examples
+///
+/// It creates directories on disk, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use std::path::Path;
+/// use habilis_network_util::ensure_parent_private;
+///
+/// # fn demo(base: &Path, path: &Path) -> std::io::Result<()> {
+/// ensure_parent_private(Some(base), path)?;
+/// # Ok(())
+/// # }
+/// ```
 #[cfg(feature = "host")]
 pub fn ensure_parent_private(
     base: Option<&std::path::Path>,
@@ -168,6 +227,17 @@ pub fn ensure_parent_private(
 /// `<nick>.state.json`) live here, so the socket, log, and state-file path
 /// builders all derive from it. Pure — a path only; use
 /// [`ensure_mesh_runtime_dir`] when about to *create* files under it.
+///
+/// # Examples
+///
+/// A mesh directory lies inside the runtime base.
+///
+/// ```
+/// use habilis_network_util::{mesh_runtime_dir, runtime_base};
+///
+/// let base = runtime_base("chat");
+/// assert!(mesh_runtime_dir(&base, "abc").starts_with(&base));
+/// ```
 #[must_use]
 #[cfg(feature = "host")]
 pub fn mesh_runtime_dir(base: &std::path::Path, mesh_id: &str) -> std::path::PathBuf {
@@ -182,6 +252,20 @@ pub fn mesh_runtime_dir(base: &std::path::Path, mesh_id: &str) -> std::path::Pat
 ///
 /// # Errors
 /// [`ensure_runtime_base`] rejected the base, or the subdir create failed.
+///
+/// # Examples
+///
+/// It creates the mesh directory on disk, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use std::path::Path;
+/// use habilis_network_util::ensure_mesh_runtime_dir;
+///
+/// # fn demo(base: &Path) -> std::io::Result<()> {
+/// ensure_mesh_runtime_dir(base, "abc")?;
+/// # Ok(())
+/// # }
+/// ```
 #[cfg(feature = "host")]
 pub fn ensure_mesh_runtime_dir(
     base: &std::path::Path,

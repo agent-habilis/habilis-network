@@ -21,6 +21,16 @@ fn bsdinfo_for(pid: u32) -> Option<libc::proc_bsdinfo> {
 }
 
 /// The parent pid of `pid`, or `None` if the lookup fails.
+///
+/// # Examples
+///
+/// The parent of a running process is a process too.
+///
+/// ```
+/// use habilis_network_util::process::parent_of;
+///
+/// assert!(parent_of(std::process::id()).is_some());
+/// ```
 #[cfg(target_os = "macos")]
 #[must_use]
 pub fn parent_of(pid: u32) -> Option<u32> {
@@ -28,6 +38,16 @@ pub fn parent_of(pid: u32) -> Option<u32> {
 }
 
 /// The command name of `pid`, or `None` if the lookup fails or the name is not UTF-8.
+///
+/// # Examples
+///
+/// A running process has a command name.
+///
+/// ```
+/// use habilis_network_util::process::comm_of;
+///
+/// assert!(comm_of(std::process::id()).is_some());
+/// ```
 #[cfg(target_os = "macos")]
 #[must_use]
 pub fn comm_of(pid: u32) -> Option<String> {
@@ -42,6 +62,16 @@ pub fn comm_of(pid: u32) -> Option<String> {
 /// The start time of a live process, in microseconds since the epoch. `None`
 /// for a pid with no process, or a zombie: an exited owner that its parent has
 /// not reaped yet is gone for every purpose but `kill(pid, 0)`.
+///
+/// # Examples
+///
+/// A running process has a start time.
+///
+/// ```
+/// use habilis_network_util::process::live_start_time;
+///
+/// assert!(live_start_time(std::process::id()).is_some());
+/// ```
 #[cfg(target_os = "macos")]
 #[must_use]
 pub fn live_start_time(pid: u32) -> Option<u64> {
@@ -51,6 +81,16 @@ pub fn live_start_time(pid: u32) -> Option<u64> {
 }
 
 /// The parent pid of `pid`, or `None` if the lookup fails.
+///
+/// # Examples
+///
+/// The parent of a running process is a process too.
+///
+/// ```
+/// use habilis_network_util::process::parent_of;
+///
+/// assert!(parent_of(std::process::id()).is_some());
+/// ```
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn parent_of(pid: u32) -> Option<u32> {
@@ -67,6 +107,16 @@ pub fn parent_of(pid: u32) -> Option<u32> {
 /// 22). `None` for a pid with no process, or a zombie (see the macOS twin). The
 /// units differ from macOS, which is fine: a caller only compares two values
 /// from one host for equality.
+///
+/// # Examples
+///
+/// A running process has a start time.
+///
+/// ```
+/// use habilis_network_util::process::live_start_time;
+///
+/// assert!(live_start_time(std::process::id()).is_some());
+/// ```
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn live_start_time(pid: u32) -> Option<u64> {
@@ -80,6 +130,16 @@ pub fn live_start_time(pid: u32) -> Option<u64> {
 }
 
 /// The command name of `pid`, or `None` if the lookup fails or the name is not UTF-8.
+///
+/// # Examples
+///
+/// A running process has a command name.
+///
+/// ```
+/// use habilis_network_util::process::comm_of;
+///
+/// assert!(comm_of(std::process::id()).is_some());
+/// ```
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn comm_of(pid: u32) -> Option<String> {
@@ -89,6 +149,16 @@ pub fn comm_of(pid: u32) -> Option<String> {
 
 /// Whether a process with this pid exists (regardless of whether we could
 /// signal it: `EPERM` still proves existence).
+///
+/// # Examples
+///
+/// The running test process is alive.
+///
+/// ```
+/// use habilis_network_util::process::is_alive;
+///
+/// assert!(is_alive(std::process::id()));
+/// ```
 #[expect(
     unsafe_code,
     reason = "libc::kill(pid, 0) FFI; no safe existence probe exists"
@@ -111,6 +181,19 @@ pub fn is_alive(pid: u32) -> bool {
 /// `InvalidInput` for pid 0, which `kill(2)` reads as our own process group, and for a pid that
 /// does not fit a `pid_t`. Otherwise it propagates the `kill(2)` failure — no such process, or
 /// no permission.
+///
+/// # Examples
+///
+/// It sends a signal that stops a process, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_util::process::terminate;
+///
+/// # fn demo(child_pid: u32) -> std::io::Result<()> {
+/// terminate(child_pid)?;
+/// # Ok(())
+/// # }
+/// ```
 pub fn terminate(pid: u32) -> std::io::Result<()> {
     if pid == 0 {
         return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
@@ -132,6 +215,19 @@ pub fn terminate(pid: u32) -> std::io::Result<()> {
 /// session iff the session's process is one of its ancestors. Never relax
 /// this to "shares an ancestor" — every process shares init/launchd, and
 /// two sessions in one terminal share the login shell.
+///
+/// # Examples
+///
+/// A process has its parent in its ancestry.
+///
+/// ```
+/// use habilis_network_util::process::{ancestry_contains, parent_of};
+///
+/// let pid = std::process::id();
+/// if let Some(parent) = parent_of(pid) {
+///     assert!(ancestry_contains(pid, parent));
+/// }
+/// ```
 #[must_use]
 pub fn ancestry_contains(pid: u32, ancestor: u32) -> bool {
     let mut current = pid;

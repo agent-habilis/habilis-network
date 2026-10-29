@@ -15,6 +15,18 @@
 /// instantaneous deliberately: a memory leak climbs monotonically, so peak ==
 /// current in the case we care about, and crossing the threshold is exactly
 /// the leak signal — with one cheap syscall and no `/proc` parsing or mach FFI.
+///
+/// # Examples
+///
+/// The peak resident memory is reported in bytes, where the platform gives it.
+///
+/// ```
+/// use habilis_network_util::resident_memory::peak_resident_memory_bytes;
+///
+/// if let Some(bytes) = peak_resident_memory_bytes() {
+///     assert!(bytes > 0);
+/// }
+/// ```
 #[must_use]
 pub fn peak_resident_memory_bytes() -> Option<u64> {
     maxrss_bytes()
@@ -27,6 +39,18 @@ pub fn peak_resident_memory_bytes() -> Option<u64> {
 /// memory is monotonic, so a churn-proportional leak shows as a rising slope on
 /// one always-on timeline next to the roster/link counts — no external `ps`
 /// sampler needed (the gap the distributed-soak runbook had to work around).
+///
+/// # Examples
+///
+/// The peak resident memory is reported in megabytes, where the platform gives it.
+///
+/// ```
+/// use habilis_network_util::resident_memory::peak_resident_memory_mb;
+///
+/// if let Some(mb) = peak_resident_memory_mb() {
+///     assert!(mb > 0);
+/// }
+/// ```
 #[must_use]
 pub fn peak_resident_memory_mb() -> Option<u64> {
     peak_resident_memory_bytes().map(|bytes| bytes / (1024 * 1024))
@@ -38,12 +62,36 @@ pub fn peak_resident_memory_mb() -> Option<u64> {
 /// The peak above cannot show that memory grew after a point: it includes the
 /// burst at start-up, and it never falls. A measurement of what a feature costs
 /// reads this before and after.
+///
+/// # Examples
+///
+/// The current resident memory is reported in bytes, where the platform gives it.
+///
+/// ```
+/// use habilis_network_util::resident_memory::current_resident_memory_bytes;
+///
+/// if let Some(bytes) = current_resident_memory_bytes() {
+///     assert!(bytes > 0);
+/// }
+/// ```
 #[must_use]
 pub fn current_resident_memory_bytes() -> Option<u64> {
     current_rss_bytes()
 }
 
 /// [`current_resident_memory_bytes`] in `MiB`.
+///
+/// # Examples
+///
+/// The current resident memory is reported in megabytes, where the platform gives it.
+///
+/// ```
+/// use habilis_network_util::resident_memory::current_resident_memory_mb;
+///
+/// if let Some(mb) = current_resident_memory_mb() {
+///     assert!(mb > 0);
+/// }
+/// ```
 #[must_use]
 pub fn current_resident_memory_mb() -> Option<u64> {
     current_resident_memory_bytes().map(|bytes| bytes / (1024 * 1024))

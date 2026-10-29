@@ -13,6 +13,19 @@ use crate::tuning::LOG_FILE_MAX_BYTES;
 /// `--log-max-bytes` / `--log-raw` flags. The consumer parses the flags and
 /// calls [`configure`]; if it never does (a path that doesn't log to files)
 /// the defaults apply.
+///
+/// # Examples
+///
+/// A log config turns on raw logging for the process.
+///
+/// ```
+/// use habilis_network_util::log_config::{LogConfig, configure, log_raw};
+///
+/// let mut config = LogConfig::default();
+/// config.raw = true;
+/// configure(config);
+/// assert!(log_raw());
+/// ```
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct LogConfig {
@@ -33,6 +46,19 @@ pub struct LogConfig {
 static LOG_CONFIG: OnceLock<LogConfig> = OnceLock::new();
 
 /// Install the log-path config, once. A second call is ignored.
+///
+/// # Examples
+///
+/// Configure sets the limits that the log files use.
+///
+/// ```
+/// use habilis_network_util::log_config::{LogConfig, configure, log_max_bytes};
+///
+/// let mut config = LogConfig::default();
+/// config.max_bytes = Some(4096);
+/// configure(config);
+/// assert_eq!(log_max_bytes(), 4096);
+/// ```
 pub fn configure(config: LogConfig) {
     let _ = LOG_CONFIG.set(config);
 }
@@ -47,6 +73,16 @@ fn config() -> LogConfig {
 ///
 /// Falls back to the temp dir only when a consumer configured neither — a path
 /// that never opens a log file, so the value is unobservable.
+///
+/// # Examples
+///
+/// The log directory is never an empty path.
+///
+/// ```
+/// use habilis_network_util::log_config::log_dir;
+///
+/// assert!(!log_dir().as_os_str().is_empty());
+/// ```
 #[must_use]
 pub fn log_dir() -> PathBuf {
     let config = config();
@@ -60,6 +96,16 @@ pub fn log_dir() -> PathBuf {
 ///
 /// `host`-only, with the rest of the file-sink path: a browser has no log file
 /// to open and so no parent to check.
+///
+/// # Examples
+///
+/// Without a configured base, the default applies.
+///
+/// ```
+/// use habilis_network_util::log_config::configured_base;
+///
+/// assert!(configured_base().is_none());
+/// ```
 #[cfg(feature = "host")]
 #[must_use]
 pub fn configured_base() -> Option<PathBuf> {
@@ -76,6 +122,17 @@ fn resolve_log_dir(override_dir: Option<PathBuf>, base: Option<PathBuf>) -> Path
 /// mesh's runtime folder beside its `<nick>.ipc.sock` / `<nick>.state.json`.
 /// The sink's `open()` creates the parent dir, so the nesting needs no
 /// pre-creation here.
+///
+/// # Examples
+///
+/// A log file is named for its nickname.
+///
+/// ```
+/// use habilis_network_util::log_config::log_file_path;
+///
+/// let path = log_file_path("mesh", "alice");
+/// assert!(path.to_string_lossy().contains("alice"));
+/// ```
 #[cfg(feature = "host")]
 #[must_use]
 pub fn log_file_path(mesh_id: &str, nickname: &str) -> PathBuf {
@@ -87,6 +144,16 @@ pub fn log_file_path(mesh_id: &str, nickname: &str) -> PathBuf {
 /// Max bytes a log file grows before rotating to `<file>.1`. The
 /// `--log-max-bytes` flag overrides [`LOG_FILE_MAX_BYTES`]; `0` disables
 /// rotation.
+///
+/// # Examples
+///
+/// The log limit is never zero.
+///
+/// ```
+/// use habilis_network_util::log_config::log_max_bytes;
+///
+/// assert!(log_max_bytes() > 0);
+/// ```
 #[cfg(feature = "host")]
 #[must_use]
 pub fn log_max_bytes() -> u64 {
@@ -97,6 +164,16 @@ pub fn log_max_bytes() -> u64 {
 /// redacted to length + a short content-hash prefix so log files stay safe
 /// to share with developers. `--log-raw` opts a local debugging run back
 /// into raw bodies. See [`LogConfig::raw`].
+///
+/// # Examples
+///
+/// Raw logging is off by default.
+///
+/// ```
+/// use habilis_network_util::log_config::log_raw;
+///
+/// assert!(!log_raw());
+/// ```
 #[must_use]
 pub fn log_raw() -> bool {
     config().raw

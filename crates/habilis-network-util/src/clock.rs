@@ -31,6 +31,16 @@ use web_time::UNIX_EPOCH;
 /// or after the year 2262 (i64 nanosecond overflow). Only used by
 /// tests today (unique tmp-file suffixes); gated on `test-fixtures`
 /// to avoid a dead-code lint in release builds.
+///
+/// # Examples
+///
+/// The clock reads the time since the Unix epoch, in nanoseconds.
+///
+/// ```
+/// use habilis_network_util::clock::unix_nanos;
+///
+/// assert!(unix_nanos() > 0);
+/// ```
 #[cfg(any(test, feature = "test-fixtures"))]
 #[must_use]
 pub fn unix_nanos() -> i64 {

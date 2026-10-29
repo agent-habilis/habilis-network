@@ -15,6 +15,21 @@ use std::hash::Hash;
 
 /// A set that holds at most `capacity` items. When an insert goes past the limit, the oldest item
 /// is dropped.
+///
+/// # Examples
+///
+/// A full set forgets its oldest item when a new one arrives.
+///
+/// ```
+/// use habilis_network_util::bounded_fifo_set::BoundedFifoSet;
+///
+/// let mut set = BoundedFifoSet::new(2);
+/// assert!(set.insert(1));
+/// assert!(set.insert(2));
+/// assert!(set.insert(3));
+/// assert!(!set.contains(&1));
+/// assert_eq!(set.len(), 2);
+/// ```
 #[derive(Debug, Clone)]
 pub struct BoundedFifoSet<T> {
     capacity: usize,

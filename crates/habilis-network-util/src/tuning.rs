@@ -57,6 +57,17 @@ pub const KNOWN_ENDPOINTS_CAP: usize = 64;
 pub const ANTIENTROPY_INTERVAL: Duration = Duration::from_secs(10);
 
 /// The live value, after any CLI override of [`ANTIENTROPY_INTERVAL`].
+///
+/// # Examples
+///
+/// The anti-entropy interval is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::antientropy_interval;
+/// use std::time::Duration;
+///
+/// assert!(antientropy_interval() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn antientropy_interval() -> Duration {
     current().antientropy_interval.max(Duration::from_secs(1))
@@ -106,6 +117,16 @@ pub const ANTIENTROPY_DIGEST_WINDOW_IDS: usize = 70;
 pub const ANTIENTROPY_MAX_RESEND: usize = 64;
 
 /// The live value, after any CLI override of [`ANTIENTROPY_MAX_RESEND`].
+///
+/// # Examples
+///
+/// The anti-entropy resend limit is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::antientropy_max_resend;
+///
+/// assert!(antientropy_max_resend() > 0);
+/// ```
 #[must_use]
 pub fn antientropy_max_resend() -> usize {
     current().antientropy_max_resend.max(1)
@@ -146,6 +167,17 @@ pub const ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 pub const ALIVE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// The live value, after any CLI override of [`ALIVE_TIMEOUT`].
+///
+/// # Examples
+///
+/// The alive timeout is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::alive_timeout;
+/// use std::time::Duration;
+///
+/// assert!(alive_timeout() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn alive_timeout() -> Duration {
     current().alive_timeout
@@ -157,6 +189,17 @@ pub fn alive_timeout() -> Duration {
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 
 /// The live value, after any CLI override of [`SWEEP_INTERVAL`].
+///
+/// # Examples
+///
+/// The sweep interval is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::sweep_interval;
+/// use std::time::Duration;
+///
+/// assert!(sweep_interval() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn sweep_interval() -> Duration {
     current().sweep_interval
@@ -171,6 +214,17 @@ pub fn sweep_interval() -> Duration {
 pub const BEACON_COHOST_GRACE: Duration = Duration::from_secs(10);
 
 /// The live value, after any CLI override of [`BEACON_COHOST_GRACE`].
+///
+/// # Examples
+///
+/// The co-host grace is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::cohost_grace;
+/// use std::time::Duration;
+///
+/// assert!(cohost_grace() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn cohost_grace() -> Duration {
     current().cohost_grace
@@ -183,6 +237,17 @@ pub fn cohost_grace() -> Duration {
 pub const PING_WINDOW: Duration = Duration::from_secs(10);
 
 /// The live value, after any CLI override of [`PING_WINDOW`].
+///
+/// # Examples
+///
+/// The ping window is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::ping_window;
+/// use std::time::Duration;
+///
+/// assert!(ping_window() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn ping_window() -> Duration {
     current().ping_window
@@ -200,6 +265,17 @@ pub const PPID_WATCH_INTERVAL: Duration = Duration::from_millis(1500);
 ///
 /// Gated with its only caller (`daemon::event_loop::spawn_orphan_watch`): the
 /// orphan watch is `libc::getppid`, which arrives with `host`.
+///
+/// # Examples
+///
+/// The parent watch interval is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::ppid_watch_interval;
+/// use std::time::Duration;
+///
+/// assert!(ppid_watch_interval() > Duration::ZERO);
+/// ```
 #[cfg(all(unix, feature = "host"))]
 #[must_use]
 pub fn ppid_watch_interval() -> Duration {
@@ -211,6 +287,19 @@ pub fn ppid_watch_interval() -> Duration {
 /// experiment is now an edit-the-const + commit, and a subprocess test passes
 /// the flag. Production runs on [`Tuning::DEFAULTS`] (the `crate::consts`
 /// values) when [`init`] is never called (the in-process path).
+///
+/// # Examples
+///
+/// A tuning starts from the defaults, and each builder sets one value.
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use habilis_network_util::tuning::Tuning;
+///
+/// let tuning = Tuning::default().with_heal_interval(Duration::from_secs(3));
+/// assert_eq!(tuning.heal_interval, Duration::from_secs(3));
+/// ```
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct Tuning {
@@ -348,6 +437,17 @@ static TUNING: std::sync::OnceLock<Tuning> = std::sync::OnceLock::new();
 /// Install the process tuning, once, at daemon startup (from the parsed CLI
 /// flags). A second call is ignored; if never called (in-process: library API or MCP), `current`
 /// returns [`Tuning::DEFAULTS`].
+///
+/// # Examples
+///
+/// Init sets the tuning that the getters read.
+///
+/// ```
+/// use habilis_network_util::tuning::{Tuning, heal_interval, init};
+///
+/// init(Tuning::default());
+/// assert_eq!(heal_interval(), Tuning::default().heal_interval);
+/// ```
 pub fn init(tuning: Tuning) {
     let _ = TUNING.set(tuning);
 }
@@ -374,6 +474,17 @@ pub const STATE_REFRESH: Duration = Duration::from_secs(10);
 pub const HEAL_INTERVAL: Duration = Duration::from_secs(15);
 
 /// The live value, after any CLI override of [`HEAL_INTERVAL`].
+///
+/// # Examples
+///
+/// The heal interval is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::heal_interval;
+/// use std::time::Duration;
+///
+/// assert!(heal_interval() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn heal_interval() -> Duration {
     current().heal_interval.max(Duration::from_secs(1))
@@ -383,6 +494,17 @@ pub fn heal_interval() -> Duration {
 /// partition: one heal and one census tick. The heal arm re-bridges a member that lost its
 /// links, so a shorter gap is a heal that is on its way, or a link that was closed on purpose;
 /// a longer one is a heal that did not work.
+///
+/// # Examples
+///
+/// The silent partition time is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::silent_partition_after;
+/// use std::time::Duration;
+///
+/// assert!(silent_partition_after() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn silent_partition_after() -> Duration {
     heal_interval().saturating_add(STATE_REFRESH)
@@ -479,6 +601,17 @@ pub const HEAL_PROBE_BACKOFF_MAX: Duration = Duration::from_mins(2);
 pub const HEAL_STALL_THRESHOLD: Duration = Duration::from_mins(1);
 
 /// The live value, after any CLI override of [`HEAL_STALL_THRESHOLD`].
+///
+/// # Examples
+///
+/// The heal stall threshold is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::heal_stall_threshold;
+/// use std::time::Duration;
+///
+/// assert!(heal_stall_threshold() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn heal_stall_threshold() -> Duration {
     current().heal_stall_threshold
@@ -493,6 +626,17 @@ pub fn heal_stall_threshold() -> Duration {
 pub const STARVATION_THRESHOLD: Duration = ALIVE_TIMEOUT.saturating_mul(2);
 
 /// The live value, after any CLI override of [`STARVATION_THRESHOLD`].
+///
+/// # Examples
+///
+/// The starvation threshold is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::starvation_threshold;
+/// use std::time::Duration;
+///
+/// assert!(starvation_threshold() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn starvation_threshold() -> Duration {
     current().starvation_threshold
@@ -577,6 +721,17 @@ pub const STARVED: Duration = Duration::from_mins(5);
 pub const ADVERTISE_INTERVAL: Duration = Duration::from_secs(20);
 
 /// The live value, after any CLI override of [`ADVERTISE_INTERVAL`].
+///
+/// # Examples
+///
+/// The advertise interval is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::advertise_interval;
+/// use std::time::Duration;
+///
+/// assert!(advertise_interval() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn advertise_interval() -> Duration {
     current().advertise_interval
@@ -591,6 +746,17 @@ pub fn advertise_interval() -> Duration {
 pub const DIRECTORY_EXPIRY: Duration = Duration::from_mins(1);
 
 /// The live value, after any CLI override of [`DIRECTORY_EXPIRY`].
+///
+/// # Examples
+///
+/// The directory expiry is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::directory_expiry;
+/// use std::time::Duration;
+///
+/// assert!(directory_expiry() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn directory_expiry() -> Duration {
     current().directory_expiry
@@ -603,6 +769,17 @@ pub fn directory_expiry() -> Duration {
 pub const RIVAL_RECHECK_FIRST: Duration = Duration::from_secs(12);
 
 /// The live value, after any CLI override of [`RIVAL_RECHECK_FIRST`].
+///
+/// # Examples
+///
+/// The first rival recheck is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::rival_recheck_first;
+/// use std::time::Duration;
+///
+/// assert!(rival_recheck_first() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn rival_recheck_first() -> Duration {
     current().rival_recheck_first.max(Duration::from_secs(1))
@@ -614,6 +791,17 @@ pub fn rival_recheck_first() -> Duration {
 pub const RIVAL_RECHECK: Duration = Duration::from_secs(30);
 
 /// The live value, after any CLI override of [`RIVAL_RECHECK`].
+///
+/// # Examples
+///
+/// The rival recheck is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::rival_recheck;
+/// use std::time::Duration;
+///
+/// assert!(rival_recheck() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn rival_recheck() -> Duration {
     current().rival_recheck.max(Duration::from_secs(1))
@@ -625,6 +813,17 @@ pub fn rival_recheck() -> Duration {
 pub const RIVAL_RECHECK_MESHED: Duration = Duration::from_mins(5);
 
 /// The live value, after any CLI override of [`RIVAL_RECHECK_MESHED`].
+///
+/// # Examples
+///
+/// The meshed rival recheck is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::rival_recheck_meshed;
+/// use std::time::Duration;
+///
+/// assert!(rival_recheck_meshed() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn rival_recheck_meshed() -> Duration {
     current().rival_recheck_meshed.max(Duration::from_secs(1))
@@ -647,6 +846,17 @@ pub fn rival_recheck_meshed() -> Duration {
 pub const RIVAL_RECHECK_ALONE: Duration = Duration::from_hours(1);
 
 /// The live value, after any CLI override of [`RIVAL_RECHECK_ALONE`].
+///
+/// # Examples
+///
+/// The alone rival recheck is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::rival_recheck_alone;
+/// use std::time::Duration;
+///
+/// assert!(rival_recheck_alone() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn rival_recheck_alone() -> Duration {
     current().rival_recheck_alone.max(Duration::from_secs(1))
@@ -656,6 +866,16 @@ pub fn rival_recheck_alone() -> Duration {
 /// their lookups to mDNS (no DHT, no relay). **Test-only** (hidden flag): the
 /// beacon-claim race is otherwise unreachable in CI (no public relay), same
 /// rationale as `--directory-private` — see `tests/topic_split.rs`.
+///
+/// # Examples
+///
+/// The test hook is off by default.
+///
+/// ```
+/// use habilis_network_util::tuning::topic_mdns_only_for_test;
+///
+/// assert!(!topic_mdns_only_for_test());
+/// ```
 #[must_use]
 pub fn topic_mdns_only_for_test() -> bool {
     current().topic_mdns_only
@@ -666,6 +886,16 @@ pub fn topic_mdns_only_for_test() -> bool {
 /// requires-`--public` guard. **Test-only** (hidden flag): the live
 /// advertise→discover path is otherwise unreachable in CI (no public relay) —
 /// see `tests/directory.rs`.
+///
+/// # Examples
+///
+/// The test hook is off by default.
+///
+/// ```
+/// use habilis_network_util::tuning::directory_private_for_test;
+///
+/// assert!(!directory_private_for_test());
+/// ```
 #[must_use]
 pub fn directory_private_for_test() -> bool {
     current().directory_private
@@ -889,6 +1119,17 @@ pub const RENDEZVOUS_DWELL: Duration = Duration::from_secs(30);
 pub const RENDEZVOUS_PERIODIC_RETURN: Duration = Duration::from_mins(10);
 
 /// The live value, after any override of [`RENDEZVOUS_PERIODIC_RETURN`]. Clamped to `>= 1 s`.
+///
+/// # Examples
+///
+/// The periodic return is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::rendezvous_periodic_return;
+/// use std::time::Duration;
+///
+/// assert!(rendezvous_periodic_return() > Duration::ZERO);
+/// ```
 #[must_use]
 pub fn rendezvous_periodic_return() -> Duration {
     current()
