@@ -4,7 +4,7 @@
 /// solely when [`crate::protocol::MessageKind::app_tag`] is `Some`.
 ///
 /// A set of five independent per-frame wire policies, one bit each. Build one with
-/// [`AppClass::NONE`](super::AppClass::NONE), the flags, [`AppClass::union`](super::AppClass::union) and [`AppClass::if`](super::AppClass::if).
+/// [`AppClass::NONE`](super::AppClass::NONE), the flags, [`AppClass::union`](super::AppClass::union) and [`AppClass::plus_if`](super::AppClass::plus_if).
 ///
 /// # Examples
 ///
