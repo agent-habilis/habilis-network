@@ -352,11 +352,11 @@ impl SignalAdmission {
     /// its task was recorded has its task aborted here.
     pub(crate) fn track(&self, peer: EndpointId, epoch: u64, abort: AbortHandle) {
         let mut inner = self.lock();
-        let round = inner
+        let found = inner
             .slots
             .get_mut(&peer)
-            .filter(|slot| slot.epoch == epoch)
-            .and_then(|slot| slot.round.as_mut());
+            .filter(|slot| slot.epoch == epoch);
+        let round = found.and_then(|slot| slot.round.as_mut());
         match round {
             Some(round) => *round = Round::Running(abort),
             None => abort.abort(),

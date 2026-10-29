@@ -49,9 +49,8 @@ pub(crate) fn next_fill(
     if state.linked_endpoints.len() >= max_peers {
         return None;
     }
-    let candidates = state
-        .peer_endpoints
-        .values()
+    let peer_addresses = state.peer_endpoints.values();
+    let candidates = peer_addresses
         .filter(|address| address.id != rendezvous_id)
         .filter(|address| !state.linked_endpoints.contains(&address.id));
     let cooled = candidates.filter(|address| !state.relink_on_cooldown(address.id, now));
@@ -162,9 +161,8 @@ pub(crate) fn retry_candidates_at(
     if !distrust_links && state.linked_endpoints.len() >= max_peers {
         return Vec::new();
     }
-    let candidates = state
-        .peer_endpoints
-        .values()
+    let peer_addresses = state.peer_endpoints.values();
+    let candidates = peer_addresses
         .filter(|address| address.id != rendezvous_id)
         .filter(|address| distrust_links || !state.linked_endpoints.contains(&address.id));
     let webrtc_session = |address: &iroh::EndpointAddr| {

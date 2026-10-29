@@ -997,8 +997,9 @@ mod tests {
             }
             let server = Self::bind(&self.relay_url, hook).await;
             let id = server.id();
+            let reports = self.reports.clone();
             let router = Router::builder(server.clone())
-                .accept(super::super::UNICAST_ALPN, Report(id, self.reports.clone()))
+                .accept(super::super::UNICAST_ALPN, Report(id, reports))
                 .spawn();
             let relayed = iroh::EndpointAddr::new(id).with_relay_url(self.relay_url.clone());
             let connection = self
@@ -1306,11 +1307,10 @@ mod tests {
             .spawn();
         let before = payload_path::gossip_recursion_closes();
 
+        let target =
+            EndpointAddr::from_parts(bob.id(), [TransportAddr::Custom(gossip_addr(bob.id()))]);
         let connection = alice
-            .connect(
-                EndpointAddr::from_parts(bob.id(), [TransportAddr::Custom(gossip_addr(bob.id()))]),
-                iroh_gossip::net::GOSSIP_ALPN,
-            )
+            .connect(target, iroh_gossip::net::GOSSIP_ALPN)
             .await
             .expect("connect over the gossip path");
 
@@ -1456,9 +1456,9 @@ mod tests {
         let router = iroh::protocol::Router::builder(bob.clone())
             .accept(GOSSIP_TEST_ALPN, HoldConnections)
             .spawn();
-        let both = bob.addr().addrs.into_iter().chain([TransportAddr::Custom(
-            habilis_network_iroh_gossip_transport::gossip_addr(bob.id()),
-        )]);
+        let custom =
+            TransportAddr::Custom(habilis_network_iroh_gossip_transport::gossip_addr(bob.id()));
+        let both = bob.addr().addrs.into_iter().chain([custom]);
         let _connection = alice
             .connect(EndpointAddr::from_parts(bob.id(), both), GOSSIP_TEST_ALPN)
             .await
@@ -1504,16 +1504,14 @@ mod tests {
         let router = iroh::protocol::Router::builder(bob.clone())
             .accept(GOSSIP_TEST_ALPN, HoldConnections)
             .spawn();
+        let target = EndpointAddr::from_parts(
+            bob.id(),
+            [TransportAddr::Custom(
+                habilis_network_iroh_gossip_transport::gossip_addr(bob.id()),
+            )],
+        );
         let connection = alice
-            .connect(
-                EndpointAddr::from_parts(
-                    bob.id(),
-                    [TransportAddr::Custom(
-                        habilis_network_iroh_gossip_transport::gossip_addr(bob.id()),
-                    )],
-                ),
-                GOSSIP_TEST_ALPN,
-            )
+            .connect(target, GOSSIP_TEST_ALPN)
             .await
             .expect("connect over gossip");
 
@@ -1552,16 +1550,14 @@ mod tests {
         let router = iroh::protocol::Router::builder(bob.clone())
             .accept(GOSSIP_TEST_ALPN, HoldConnections)
             .spawn();
+        let target = EndpointAddr::from_parts(
+            bob.id(),
+            [TransportAddr::Custom(
+                habilis_network_iroh_gossip_transport::gossip_addr(bob.id()),
+            )],
+        );
         let connection = alice
-            .connect(
-                EndpointAddr::from_parts(
-                    bob.id(),
-                    [TransportAddr::Custom(
-                        habilis_network_iroh_gossip_transport::gossip_addr(bob.id()),
-                    )],
-                ),
-                GOSSIP_TEST_ALPN,
-            )
+            .connect(target, GOSSIP_TEST_ALPN)
             .await
             .expect("connect over gossip");
         connection.close(0u32.into(), b"done");
@@ -1596,16 +1592,14 @@ mod tests {
         let router = iroh::protocol::Router::builder(bob.clone())
             .accept(GOSSIP_TEST_ALPN, HoldConnections)
             .spawn();
+        let target = EndpointAddr::from_parts(
+            bob.id(),
+            [TransportAddr::Custom(
+                habilis_network_iroh_gossip_transport::gossip_addr(bob.id()),
+            )],
+        );
         let connection = alice
-            .connect(
-                EndpointAddr::from_parts(
-                    bob.id(),
-                    [TransportAddr::Custom(
-                        habilis_network_iroh_gossip_transport::gossip_addr(bob.id()),
-                    )],
-                ),
-                GOSSIP_TEST_ALPN,
-            )
+            .connect(target, GOSSIP_TEST_ALPN)
             .await
             .expect("connect over gossip");
 

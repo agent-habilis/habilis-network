@@ -336,9 +336,8 @@ impl Ceiling {
             let target = (self.cap * 9).div_ceil(10);
             let extra = units.saturating_sub(evict.len()).saturating_sub(target);
             let already = evict.len();
-            let victims = candidates
-                .iter()
-                .skip(already)
+            let remaining = candidates.iter().skip(already);
+            let victims = remaining
                 .take_while(|candidate| candidate.class == 0)
                 .take(extra);
             evict.extend(victims.map(|candidate| candidate.peer));

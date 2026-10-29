@@ -350,7 +350,7 @@ mod tests {
         let (logs, _log_guard) = crate::testing::LogCapture::start(tracing::Level::DEBUG);
         let server = loopback_endpoint().await;
         let allowed = Allowed::default();
-        let acceptor = WebRtcSignalAcceptor::new(
+        let acceptor: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
             crate::lookup::build_webrtc_handle(server.id()),
             server.clone(),
             crate::lookup::address_book(&server.clone()),
@@ -358,7 +358,7 @@ mod tests {
             SignalAdmission::new(4),
             IceProfile { host_only: true },
         );
-        let router = Router::builder(server.clone())
+        let router: Router = Router::builder(server.clone())
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
                 UnderlaySignalGate::new(acceptor, allowed.clone()),
@@ -402,7 +402,7 @@ mod tests {
     async fn an_offer_that_the_gate_turns_away_is_told_apart_from_a_cap_refusal() {
         let server = loopback_endpoint().await;
         let allowed = Allowed::default();
-        let acceptor = WebRtcSignalAcceptor::new(
+        let acceptor: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
             crate::lookup::build_webrtc_handle(server.id()),
             server.clone(),
             crate::lookup::address_book(&server.clone()),
@@ -410,7 +410,7 @@ mod tests {
             SignalAdmission::new(4),
             IceProfile { host_only: true },
         );
-        let router = Router::builder(server.clone())
+        let router: Router = Router::builder(server.clone())
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
                 UnderlaySignalGate::new(acceptor, allowed.clone()),

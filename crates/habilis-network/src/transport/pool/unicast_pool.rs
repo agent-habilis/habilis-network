@@ -268,9 +268,8 @@ impl UnicastPool {
     pub(crate) fn used_connection(&self, eid: EndpointId) -> Option<Connection> {
         self.inner.conns.try_lock().ok().and_then(|conns| {
             let used = conns.get(&eid).filter(|pooled| pooled.hold == Hold::Used);
-            let open = used
-                .map(|pooled| &pooled.connection)
-                .filter(|connection| connection.close_reason().is_none());
+            let pooled_connection = used.map(|pooled| &pooled.connection);
+            let open = pooled_connection.filter(|connection| connection.close_reason().is_none());
             open.cloned()
         })
     }
@@ -292,9 +291,8 @@ impl UnicastPool {
     /// using it: every caller is about to send or probe on it.
     pub(in crate::transport::pool) async fn warm(&self, eid: EndpointId) -> Option<Connection> {
         let mut conns = self.inner.conns.lock().await;
-        let pooled = conns
-            .get_mut(&eid)
-            .filter(|pooled| pooled.connection.close_reason().is_none())?;
+        let slot = conns.get_mut(&eid);
+        let pooled = slot.filter(|pooled| pooled.connection.close_reason().is_none())?;
         pooled.last_used = PoolInstant::now();
         pooled.hold = Hold::Used;
         Some(pooled.connection.clone())
@@ -666,12 +664,10 @@ impl UnicastPool {
         };
         #[cfg(test)]
         {
-            let gate = self
-                .inner
-                .dial_gate
-                .lock()
-                .ok()
-                .and_then(|mut slot| slot.take());
+            let gate = {
+                let gate_slot = self.inner.dial_gate.lock().ok();
+                gate_slot.and_then(|mut slot| slot.take())
+            };
             if let Some(gate) = gate {
                 gate.notified().await;
             }

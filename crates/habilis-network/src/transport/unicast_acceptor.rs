@@ -104,10 +104,8 @@ impl ProtocolHandler for UnicastAcceptor {
         loop {
             match n0_future::time::timeout(self.idle, connection.accept_uni()).await {
                 Ok(Ok(mut recv)) => {
-                    let _busy = self
-                        .admission
-                        .as_ref()
-                        .map(|table| table.busy(connection.remote_id()));
+                    let admission = self.admission.as_ref();
+                    let _busy = admission.map(|table| table.busy(connection.remote_id()));
                     self.handle_frame(recv.read_to_end(MAX_UNICAST_FRAME).await);
                 }
                 Ok(Err(_closed)) => break,

@@ -97,10 +97,11 @@ async fn round_trip<Cmd: Serialize>(stream: Stream, command: &Cmd) -> Result<Str
 /// walks the per-mesh subfolders.
 pub fn active_socket_paths(base: &std::path::Path) -> impl Iterator<Item = std::path::PathBuf> {
     let entries = std::fs::read_dir(base).into_iter().flatten().flatten();
-    let dirs = entries
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir());
-    let files = dirs.flat_map(|dir| std::fs::read_dir(dir).into_iter().flatten().flatten());
+    let dir_paths = entries.map(|entry| entry.path());
+    let dirs = dir_paths.filter(|path| path.is_dir());
+    let read_mesh =
+        |dir: std::path::PathBuf| std::fs::read_dir(dir).into_iter().flatten().flatten();
+    let files = dirs.flat_map(read_mesh);
     let paths = files.map(|entry| entry.path());
     paths.filter(|path| path.extension().is_some_and(|ext| ext == "sock"))
 }

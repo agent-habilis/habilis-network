@@ -387,7 +387,8 @@ mod tests {
         let transport = handle.transport();
         let builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
-            .relay_mode(RelayMode::Disabled)
+            .relay_mode(RelayMode::Disabled);
+        let builder = builder
             .clear_address_lookup()
             .add_custom_transport(transport);
         let endpoint: Endpoint = builder.bind().await.expect("bind loopback endpoint");
@@ -400,7 +401,8 @@ mod tests {
         let transport = handle.transport();
         let builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
-            .relay_mode(RelayMode::Disabled)
+            .relay_mode(RelayMode::Disabled);
+        let builder = builder
             .clear_address_lookup()
             .add_custom_transport(transport);
         let endpoint: Endpoint = builder.bind().await.expect("bind loopback endpoint");
@@ -409,7 +411,7 @@ mod tests {
 
     fn serve(endpoint: &Endpoint, handle: &WebRtcHandle, admission: &SignalAdmission) -> Router {
         let book = crate::lookup::address_book(&endpoint.clone());
-        let signal = WebRtcSignalAcceptor::new(
+        let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
             handle.clone(),
             endpoint.clone(),
             book,
@@ -672,7 +674,7 @@ mod tests {
             server.id(),
         );
 
-        let connection = tokio::time::timeout(
+        let connection: Connection = tokio::time::timeout(
             Duration::from_secs(10),
             client.connect(EndpointAddr::new(server.id()), MESH_WEBRTC_SIGNAL_ALPN),
         )
@@ -721,7 +723,7 @@ mod tests {
         // attach the poll above observed; give it a beat to land.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let connection = tokio::time::timeout(
+        let connection: Connection = tokio::time::timeout(
             Duration::from_secs(10),
             server.connect(EndpointAddr::new(client.id()), MESH_WEBRTC_SIGNAL_ALPN),
         )
@@ -755,7 +757,7 @@ mod tests {
         // One Router for both ALPNs: `Router::spawn` overrides the endpoint's
         // ALPN list, so a second Router silently unregisters the first's.
         let book = crate::lookup::address_book(&server.clone());
-        let signal = WebRtcSignalAcceptor::new(
+        let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
             server_hub.clone(),
             server.clone(),
             book,
@@ -857,7 +859,8 @@ mod tests {
             async move {
                 let builder = Endpoint::builder(presets::Minimal)
                     .secret_key(key)
-                    .relay_mode(RelayMode::custom([relay_url]))
+                    .relay_mode(RelayMode::custom([relay_url]));
+                let builder = builder
                     .add_custom_transport(transport)
                     .path_selector(selector);
                 // A browser has no IP stack: without this, localhost punches
@@ -881,7 +884,7 @@ mod tests {
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let server_gossip = Gossip::builder().spawn(server.clone());
         let book = crate::lookup::address_book(&server.clone());
-        let signal = WebRtcSignalAcceptor::new(
+        let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
             server_hub.clone(),
             server.clone(),
             book,
@@ -1013,13 +1016,13 @@ mod tests {
         let high = bind(high_key, &high_hub).await;
 
         let (held_tx, mut held_rx) = mpsc::channel(1);
-        let low_router = Router::builder(low.clone())
+        let low_router: Router = Router::builder(low.clone())
             .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(HOLD_ALPN, Hold(held_tx))
             .spawn();
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let book = crate::lookup::address_book(&high.clone());
-        let signal = WebRtcSignalAcceptor::new(
+        let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
             high_hub.clone(),
             high.clone(),
             book,
@@ -1115,7 +1118,7 @@ mod tests {
 
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let book = crate::lookup::address_book(&server.clone());
-        let signal = WebRtcSignalAcceptor::new(
+        let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
             server_hub.clone(),
             server.clone(),
             book,
@@ -1145,7 +1148,7 @@ mod tests {
         .await
         .expect("the signal round must attach a session");
 
-        let connection = tokio::time::timeout(
+        let connection: Connection = tokio::time::timeout(
             Duration::from_secs(10),
             client.connect(EndpointAddr::new(server.id()), HOLD_ALPN),
         )
@@ -1190,7 +1193,8 @@ mod tests {
             async move {
                 let builder = Endpoint::builder(presets::Minimal)
                     .secret_key(key)
-                    .relay_mode(RelayMode::custom([relay_url]))
+                    .relay_mode(RelayMode::custom([relay_url]));
+                let builder = builder
                     .add_custom_transport(transport)
                     .path_selector(selector);
                 // A browser has no IP stack: without this, localhost punches
@@ -1214,7 +1218,7 @@ mod tests {
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let server_gossip = Gossip::builder().spawn(server.clone());
         let book = crate::lookup::address_book(&server.clone());
-        let signal = WebRtcSignalAcceptor::new(
+        let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
             server_hub.clone(),
             server.clone(),
             book,
@@ -1456,7 +1460,7 @@ mod tests {
         // Bound, and never read: packets to it vanish, and nothing answers.
         let silent =
             std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("a socket");
-        let nobody = EndpointAddr::new(SecretKey::generate().public())
+        let nobody: EndpointAddr = EndpointAddr::new(SecretKey::generate().public())
             .with_ip_addr(silent.local_addr().expect("its address"));
         let (client, client_hub) = endpoint().await;
         let deadlines = SignalDeadlines {
@@ -2445,7 +2449,7 @@ mod tests {
             LANE_OFFERS_IN_FLIGHT,
             "the budget of rounds, not one per member"
         );
-        let touched = members
+        let touched: usize = members
             .iter()
             .filter(|id| state.direct.contains_key(*id))
             .count();
@@ -2508,10 +2512,8 @@ mod tests {
 
         probe::retry_direct(&mut state, &context, false).await;
         let touched = |node: &state::EventLoopState| {
-            members
-                .iter()
-                .filter(|id| node.direct.contains_key(*id))
-                .count()
+            let direct = &node.direct;
+            members.iter().filter(|id| direct.contains_key(*id)).count()
         };
         assert_eq!(touched(&state), LANE_OFFERS_IN_FLIGHT, "the first pass");
 
@@ -2523,7 +2525,7 @@ mod tests {
         );
 
         // One round ends: its slot is free.
-        let offered = *members
+        let offered: EndpointId = *members
             .iter()
             .find(|id| state.direct.contains_key(*id))
             .expect("an offered member");

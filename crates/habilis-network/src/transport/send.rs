@@ -1207,8 +1207,8 @@ mod tests {
         use crate::protocol::Channel;
 
         let seed = *state.identity.public().as_bytes();
-        let change = state
-            .doc(Channel::State)
+        let doc = state.doc(Channel::State);
+        let change = doc
             .build_change(&serde_json::json!({ format!("k{step}"): step }), &seed)
             .expect("a JSON object merges")
             .expect("a non-empty merge yields a change");
@@ -1284,9 +1284,8 @@ mod tests {
         // Two batches of signed frames, each frame with its own id, so the reader sees four distinct
         // frames in whatever order the batches land.
         let batch = || -> Vec<WireFrame> {
-            (0..2)
-                .map(|_| directed_msg().serialize().expect("serialize"))
-                .collect()
+            let frames = (0..2).map(|_| directed_msg().serialize().expect("serialize"));
+            frames.collect()
         };
         let state_batch = batch();
         let meta_batch = batch();

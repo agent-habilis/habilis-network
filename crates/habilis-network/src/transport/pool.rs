@@ -323,11 +323,9 @@ mod tests {
         // leaves the endpoint a runtime to close on.
         let endpoint_runtime = tokio::runtime::Runtime::new().expect("an endpoint runtime");
         let endpoint = endpoint_runtime.block_on(async {
-            iroh::Endpoint::builder(presets::Minimal)
-                .relay_mode(iroh::RelayMode::Disabled)
-                .bind()
-                .await
-                .expect("bind a loopback endpoint")
+            let builder =
+                iroh::Endpoint::builder(presets::Minimal).relay_mode(iroh::RelayMode::Disabled);
+            builder.bind().await.expect("bind a loopback endpoint")
         });
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

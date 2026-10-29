@@ -298,7 +298,8 @@ mod tests {
         let alpns = vec![ALPN.to_vec()];
         let builder = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
-            .alpns(alpns)
+            .alpns(alpns);
+        let builder = builder
             .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
             .expect("valid bind addr");
         builder.bind().await.expect("bind a loopback endpoint")

@@ -84,11 +84,9 @@ impl Inner {
         let mut idle = Vec::new();
         for peer in self.ceiling.session_peers() {
             let held: bool = self.slots.get(&peer).is_some_and(|slot| {
-                let on_gossip = slot
-                    .conns
-                    .iter()
-                    .filter_map(WeakConnectionHandle::upgrade)
-                    .any(|connection| connection.alpn() == iroh_gossip::net::GOSSIP_ALPN);
+                let mut gossip = slot.conns.iter().filter_map(WeakConnectionHandle::upgrade);
+                let on_gossip =
+                    gossip.any(|connection| connection.alpn() == iroh_gossip::net::GOSSIP_ALPN);
                 slot.round.is_some() || on_gossip
             });
             if held || !hub.has_session(&peer) {
@@ -175,8 +173,8 @@ impl Inner {
             // recursion rule before iroh moves it onto the session. With a live connection its
             // own path decides: a session whose rung is cut carries nothing, and a block would
             // starve the connection that does.
-            let carried =
-                kinds.is_empty() && self.hub.as_ref().is_some_and(|hub| hub.has_session(peer));
+            let session_hub = self.hub.as_ref();
+            let carried = kinds.is_empty() && session_hub.is_some_and(|hub| hub.has_session(peer));
             gossip.allow(*peer, allowed && !carried);
         }
     }
