@@ -18,6 +18,8 @@ use clap::{Args as ClapArgs, ValueEnum};
 use crate::TaskOutcome;
 use crate::util::output;
 
+#[cfg(not(feature = "bench"))]
+use crate::util;
 #[cfg(feature = "bench")]
 mod browser;
 #[cfg(feature = "bench")]
@@ -174,5 +176,5 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     #[cfg(feature = "bench")]
     return run::run(args);
     #[cfg(not(feature = "bench"))]
-    crate::util::reexec_with_feature("bench", "the benchmark", true)
+    util::reexec_with_feature("bench", "the benchmark", true)
 }

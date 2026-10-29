@@ -17,6 +17,8 @@ use crate::TaskOutcome;
 use crate::util::webdriver::{Driver, SAFARI_TP};
 use crate::util::{Skip, json_to_string, output};
 
+#[cfg(not(feature = "mesh"))]
+use crate::util;
 use crate::util::{cdp as util_cdp, wasm};
 use std::env;
 pub(crate) mod build;
@@ -310,7 +312,7 @@ fn run_engine_suite(args: &Args) -> TaskOutcome {
 /// build; a plain `--workspace` build never sees `iroh-test-utils`.
 #[cfg(not(feature = "mesh"))]
 fn run_engine_suite(_: &Args) -> TaskOutcome {
-    crate::util::reexec_with_feature("mesh", "the engine suites", false)
+    util::reexec_with_feature("mesh", "the engine suites", false)
 }
 
 pub(crate) fn run(args: &Args) -> TaskOutcome {
