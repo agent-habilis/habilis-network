@@ -33,9 +33,9 @@ fn log_raw() -> bool {
 /// across multiple members' log files without revealing the raw body. 8
 /// hex chars = 32 bits — wide enough that a per-session collision is
 /// unlikely while staying compact.
-fn redacted_body(msg: &Message) -> String {
-    let len = msg.body.as_str().len();
-    let hash = msg.content_hash().to_string();
+fn redacted_body(message: &Message) -> String {
+    let len = message.body.as_str().len();
+    let hash = message.content_hash().to_string();
     format!("<redacted {len}B {}>", &hash[..8])
 }
 
@@ -45,22 +45,22 @@ fn redacted_body(msg: &Message) -> String {
 /// One helper rather than the choice inlined per arm — the broadcast arm used
 /// to spell the whole `tracing::info!` twice, differing in this one field, so
 /// a field added to one copy and not the other would have gone unnoticed.
-fn logged_body(msg: &Message) -> String {
+fn logged_body(message: &Message) -> String {
     if log_raw() {
-        msg.body.as_str().to_owned()
+        message.body.as_str().to_owned()
     } else {
-        redacted_body(msg)
+        redacted_body(message)
     }
 }
 
 /// Log an inbound (received) mesh message.
-pub fn log_in(msg: &Message) {
-    log("in", msg);
+pub fn log_in(message: &Message) {
+    log("in", message);
 }
 
 /// Log an outbound (sent) mesh message.
-pub fn log_out(msg: &Message) {
-    log("out", msg);
+pub fn log_out(message: &Message) {
+    log("out", message);
 }
 
 #[expect(
@@ -71,17 +71,17 @@ pub fn log_out(msg: &Message) {
     clippy::wildcard_enum_match_arm,
     reason = "foreign non_exhaustive enum: the compiler needs a wildcard arm; the named variants are listed before it"
 )]
-fn log(direction: &'static str, msg: &Message) {
+fn log(direction: &'static str, message: &Message) {
     let plumbing = || {
         tracing::trace!(
             target: "habilis_network::messages",
             dir = direction,
-            author = %msg.author,
-            kind = %msg.kind,
+            author = %message.author,
+            kind = %message.kind,
             "plumbing"
         );
     };
-    match &msg.kind {
+    match &message.kind {
         // Keyed on the frame's **shape**, not on any tag name. This used to match
         // the shipped app's tag strings, which meant the engine's redaction log
         // silently stopped working for any other consumer — and would break the
@@ -98,9 +98,9 @@ fn log(direction: &'static str, msg: &Message) {
             (None, _) => tracing::info!(
                 target: "habilis_network::messages",
                 dir = direction,
-                author = %msg.author,
-                ts = msg.timestamp.as_secs(),
-                body = %logged_body(msg),
+                author = %message.author,
+                ts = message.timestamp.as_secs(),
+                body = %logged_body(message),
                 "msg"
             ),
             (Some(_), None) => {
@@ -111,11 +111,11 @@ fn log(direction: &'static str, msg: &Message) {
                 tracing::info!(
                     target: "habilis_network::messages",
                     dir = direction,
-                    author = %msg.author,
-                    ts = msg.timestamp.as_secs(),
+                    author = %message.author,
+                    ts = message.timestamp.as_secs(),
                     to = ?to,
-                    kind = %msg.kind,
-                    body = %logged_body(msg),
+                    kind = %message.kind,
+                    body = %logged_body(message),
                     "directed"
                 );
             }
@@ -128,8 +128,8 @@ fn log(direction: &'static str, msg: &Message) {
         } => tracing::info!(
             target: "habilis_network::messages",
             dir = direction,
-            author = %msg.author,
-            ts = msg.timestamp.as_secs(),
+            author = %message.author,
+            ts = message.timestamp.as_secs(),
             presence = %subtype,
             "presence"
         ),
@@ -138,10 +138,10 @@ fn log(direction: &'static str, msg: &Message) {
         MessageKind::State | MessageKind::Meta => tracing::info!(
             target: "habilis_network::messages",
             dir = direction,
-            author = %msg.author,
-            ts = msg.timestamp.as_secs(),
-            channel = %msg.kind,
-            body = %logged_body(msg),
+            author = %message.author,
+            ts = message.timestamp.as_secs(),
+            channel = %message.kind,
+            body = %logged_body(message),
             "state"
         ),
         // Plumbing. A kind added later falls to the wildcard, which logs no body.
@@ -167,8 +167,8 @@ mod tests {
     #[test]
     fn redacted_body_omits_raw_text() {
         let secret = "totally private chat content";
-        let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), secret);
-        let redacted = super::redacted_body(&msg);
+        let message = Message::fixture(MessageKind::app_broadcast("app_msg"), secret);
+        let redacted = super::redacted_body(&message);
         assert!(
             !redacted.contains(secret),
             "redacted form must not leak the raw body: {redacted}"
@@ -178,8 +178,8 @@ mod tests {
     #[test]
     fn redacted_body_carries_length_and_hash_prefix() {
         let body = "hello world"; // 11 bytes
-        let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), body);
-        let redacted = super::redacted_body(&msg);
+        let message = Message::fixture(MessageKind::app_broadcast("app_msg"), body);
+        let redacted = super::redacted_body(&message);
 
         assert!(
             redacted.starts_with("<redacted 11B "),
@@ -201,8 +201,8 @@ mod tests {
 
     #[test]
     fn redacted_body_is_deterministic_for_the_same_message() {
-        let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "same body");
-        assert_eq!(super::redacted_body(&msg), super::redacted_body(&msg));
+        let message = Message::fixture(MessageKind::app_broadcast("app_msg"), "same body");
+        assert_eq!(super::redacted_body(&message), super::redacted_body(&message));
     }
 
     #[test]

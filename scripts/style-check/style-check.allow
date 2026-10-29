@@ -593,8 +593,6 @@ abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/native/stun.rs|7|ex
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_preferred.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-logging/src/filter.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-logging/src/messages.rs|27|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-logging/src/log_sink.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/mesh/rollback_driver.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/mesh/mesh_transport.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/peer_protocol.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count

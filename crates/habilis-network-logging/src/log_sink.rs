@@ -148,10 +148,10 @@ impl LogSink {
         match opened {
             Ok(mut file) => {
                 let mut written = 0u64;
-                if let State::Pending(buf) = &*state {
-                    let _ = file.write_all(buf);
+                if let State::Pending(buffer) = &*state {
+                    let _ = file.write_all(buffer);
                     let _ = file.flush();
-                    written = buf.len() as u64;
+                    written = buffer.len() as u64;
                 }
                 *state = State::Attached {
                     file,
@@ -189,8 +189,8 @@ pub fn flush_pending_to_stderr() {
 }
 
 fn drain_to_stderr(state: &mut State) {
-    if let State::Pending(buf) = state {
-        let _ = io::stderr().write_all(buf);
+    if let State::Pending(buffer) = state {
+        let _ = io::stderr().write_all(buffer);
         let _ = io::stderr().flush();
     }
     *state = State::Stderr;
@@ -200,15 +200,15 @@ impl Write for LogSink {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let mut state = self.0.lock().expect("log sink poisoned");
         match &mut *state {
-            State::Pending(buf) => {
-                if buf.len() + bytes.len() > LOG_BUF_CAP {
+            State::Pending(buffer) => {
+                if buffer.len() + bytes.len() > LOG_BUF_CAP {
                     let mut err = io::stderr();
-                    let _ = err.write_all(buf);
+                    let _ = err.write_all(buffer);
                     let _ = err.write_all(bytes);
                     let _ = err.flush();
                     *state = State::Stderr;
                 } else {
-                    buf.extend_from_slice(bytes);
+                    buffer.extend_from_slice(bytes);
                 }
             }
             State::Attached {
