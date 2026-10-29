@@ -184,6 +184,25 @@ pub struct MergeCtx<'mesh> {
     pub sink: &'mesh dyn NodeSink,
 }
 
+impl<'mesh> MergeCtx<'mesh> {
+    /// Gather the four parts of a write context. An app that holds the parts and no
+    /// [`HandlerCtx`] builds the context with this.
+    #[must_use]
+    pub fn new<Sink: NodeSink>(
+        mesh: &'mesh MeshId,
+        author: &'mesh Nickname,
+        sender: &'mesh MeshSender,
+        sink: &'mesh Sink,
+    ) -> Self {
+        Self {
+            mesh,
+            author,
+            sender,
+            sink,
+        }
+    }
+}
+
 impl<'context> From<&HandlerCtx<'context>> for MergeCtx<'context> {
     fn from(context: &HandlerCtx<'context>) -> Self {
         Self {
