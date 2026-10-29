@@ -94,7 +94,7 @@ pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh
         return Err(SetupError::EmptyTopic);
     }
     config.validate().map_err(SetupError::Config)?;
-    Mesh::from_topic(
+    Mesh::for_topic(
         string,
         MeshConfig::new(config.lookups, None, None, config.transport),
     )

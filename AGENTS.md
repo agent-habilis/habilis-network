@@ -38,7 +38,7 @@ Layer: identity. Keyed by seed.
 
 A mesh whose seed is derived from a string, not minted at random. The string alone fixes the mesh, so every peer that uses the same string meets.
 
-Code: `crypto::topic_seed`, `Mesh::from_topic`.
+Code: `crypto::topic_seed`, `Mesh::for_topic`.
 
 ### password
 

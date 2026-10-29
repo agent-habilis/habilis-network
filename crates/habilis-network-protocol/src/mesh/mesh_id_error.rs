@@ -131,7 +131,7 @@ impl From<&str> for MeshId {
         if let Ok(id) = Self::try_new(label) {
             return id;
         }
-        let mesh = super::Mesh::from_topic(label, super::MeshConfig::loopback())
+        let mesh = super::Mesh::for_topic(label, super::MeshConfig::loopback())
             .expect("generated test mesh");
         Self::try_new(&mesh.to_string()).expect("generated test mesh id must be valid")
     }

@@ -447,7 +447,7 @@ Divergences from upstream, in the order they were made.
     - `cli/mod.rs`, `cli/doctor.rs`, `a2a/send.rs`, `topic.rs`, `bridge/ticket.rs`:
       `parse::<Mesh>()` is `parse::<LockedMesh>()`. Read the config with `config()`, and
       derive with `LockedMesh::unlock(password)`, which returns `UnlockError`.
-    - `Mesh::new` and `Mesh::from_topic` return a `Result`.
+    - `Mesh::new` and `Mesh::for_topic` return a `Result`.
     - `a2a/node.rs`, `output/mod.rs`, `api/inproc.rs`, `api/session.rs`: `NodeApp::classify`,
       `InboundApp::message`, `NodeEvent::Presence` and `NodeEvent::StateChanged`, and the
       external message channel take an `Authored`.

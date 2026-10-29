@@ -181,7 +181,7 @@ published to a registry; pin it with
   `LockedMesh`, and `LockedMesh::unlock(password)` gives the `Mesh`; it replaces
   `Mesh::apply_password`, and returns `UnlockError` (`InviteOnly`, `PasswordRequired`,
   `NoPassword`, `WrongPassword`). Only `Mesh` derives a topic, a rendezvous or a port.
-  `InviteTicket::redeem` returns a `Mesh`. Embedder: `Mesh::new` and `Mesh::from_topic` now
+  `InviteTicket::redeem` returns a `Mesh`. Embedder: `Mesh::new` and `Mesh::for_topic` now
   return a `Result` and refuse a config that carries a secret, so add `?`.
 - **Breaking:** `Message::signed` is gone. Embedder: sign with `Message::sign(&Identity)`, which
   returns a `Verified`, and check a received message with `Message::verify()`, or with

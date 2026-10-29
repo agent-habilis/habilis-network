@@ -170,7 +170,7 @@ impl MeshName {
     /// name — every kept char is non-forbidden, `-` and `…` are allowed, and
     /// the length is bounded.
     #[must_use]
-    pub(crate) fn from_topic_string(raw: &str) -> Self {
+    pub(crate) fn sanitize_topic(raw: &str) -> Self {
         let mut out = String::new();
         let mut pending_dash = false;
         for ch in topic_name_source(raw.trim()).chars() {
@@ -226,14 +226,14 @@ mod tests {
     use habilis_network_test_tracing::test;
 
     #[test]
-    fn from_topic_string_passthrough_and_case_preserving() {
+    fn sanitize_topic_passes_through_and_keeps_case() {
         assert_eq!(
-            MeshName::from_topic_string("habilis-network").as_str(),
+            MeshName::sanitize_topic("habilis-network").as_str(),
             "habilis-network",
             "a topic string passes through unchanged"
         );
         assert_eq!(
-            MeshName::from_topic_string("Repo").as_str(),
+            MeshName::sanitize_topic("Repo").as_str(),
             "Repo",
             "the case of a topic string is preserved"
         );
@@ -244,18 +244,18 @@ mod tests {
         // The scheme is stripped and the `/`s kept; this URL also exceeds the
         // 32-char name cap, so the tail truncates to `…` (see `MAX_CHARS`).
         assert_eq!(
-            MeshName::from_topic_string("https://github.com/example-org/example-project").as_str(),
+            MeshName::sanitize_topic("https://github.com/example-org/example-project").as_str(),
             "github.com/example-org/example…",
             "a url scheme is stripped and the slashes are kept"
         );
         assert_eq!(
-            MeshName::from_topic_string("git://h/a").as_str(),
+            MeshName::sanitize_topic("git://h/a").as_str(),
             "h/a",
             "a git scheme is stripped to the host and path"
         );
         // Only the `scheme://` form is stripped.
         assert_eq!(
-            MeshName::from_topic_string("note:x").as_str(),
+            MeshName::sanitize_topic("note:x").as_str(),
             "note:x",
             "a note scheme is not stripped"
         );
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn http_url_drops_query_and_fragment() {
         assert_eq!(
-            MeshName::from_topic_string(
+            MeshName::sanitize_topic(
                 "https://github.com/example-org/example-project?tab=readme#install"
             )
             .as_str(),
@@ -272,30 +272,30 @@ mod tests {
             "an http url drops its query and fragment"
         );
         assert_eq!(
-            MeshName::from_topic_string("https://x/p?q=1#f").as_str(),
+            MeshName::sanitize_topic("https://x/p?q=1#f").as_str(),
             "x/p",
             "a url drops its query and fragment"
         );
         assert_eq!(
-            MeshName::from_topic_string("https://x#f").as_str(),
+            MeshName::sanitize_topic("https://x#f").as_str(),
             "x",
             "a url without a path keeps its host"
         );
         // Scheme detection is case-insensitive.
         assert_eq!(
-            MeshName::from_topic_string("HTTP://x?y").as_str(),
+            MeshName::sanitize_topic("HTTP://x?y").as_str(),
             "x",
             "an upper-case http scheme is stripped"
         );
         // Non-http schemes keep the query (scheme-strip only).
         assert_eq!(
-            MeshName::from_topic_string("git://x?y").as_str(),
+            MeshName::sanitize_topic("git://x?y").as_str(),
             "x?y",
             "a git url keeps its query"
         );
         // Empty after stripping the query ⇒ the `topic` fallback.
         assert_eq!(
-            MeshName::from_topic_string("https://?q").as_str(),
+            MeshName::sanitize_topic("https://?q").as_str(),
             "topic",
             "a url without a host falls back to the topic name"
         );
@@ -306,22 +306,22 @@ mod tests {
         // whitespace, `#`, `<>`, and control collapse to one `-`; leading and
         // trailing suppressed. `/` is NOT forbidden and survives verbatim.
         assert_eq!(
-            MeshName::from_topic_string("my secret gossip").as_str(),
+            MeshName::sanitize_topic("my secret gossip").as_str(),
             "my-secret-gossip",
             "a run of spaces collapses to one dash"
         );
         assert_eq!(
-            MeshName::from_topic_string("a#b").as_str(),
+            MeshName::sanitize_topic("a#b").as_str(),
             "a-b",
             "a hash collapses to a dash"
         );
         assert_eq!(
-            MeshName::from_topic_string("a\u{0007}b").as_str(),
+            MeshName::sanitize_topic("a\u{0007}b").as_str(),
             "a-b",
             "a control character collapses to a dash"
         );
         assert_eq!(
-            MeshName::from_topic_string("  a/b  ").as_str(),
+            MeshName::sanitize_topic("  a/b  ").as_str(),
             "a/b",
             "surrounding spaces and slashes are trimmed"
         );
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn overlong_name_truncates_with_ellipsis() {
-        let name = MeshName::from_topic_string(&"x".repeat(100));
+        let name = MeshName::sanitize_topic(&"x".repeat(100));
         assert_eq!(
             name.as_str().chars().count(),
             identifier::MAX_CHARS,
@@ -343,12 +343,12 @@ mod tests {
     #[test]
     fn empty_after_filtering_falls_back_to_topic() {
         assert_eq!(
-            MeshName::from_topic_string("###  <>").as_str(),
+            MeshName::sanitize_topic("###  <>").as_str(),
             "topic",
             "a name empty after filtering falls back to topic"
         );
         assert_eq!(
-            MeshName::from_topic_string("https://").as_str(),
+            MeshName::sanitize_topic("https://").as_str(),
             "topic",
             "a url with no host falls back to topic"
         );

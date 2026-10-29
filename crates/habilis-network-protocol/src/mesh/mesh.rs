@@ -89,7 +89,7 @@ impl Mesh {
     /// Build a mesh deterministically from an arbitrary string (the `topic`
     /// command). The seed is `crypto::topic_seed` of the string; the name is
     /// the string itself sanitized into a [`MeshName`]
-    /// (`MeshName::from_topic_string`). Both are deterministic functions of
+    /// (`MeshName::sanitize_topic`). Both are deterministic functions of
     /// the string, so callers passing the same string + config converge on the
     /// same id with zero coordination.
     ///
@@ -97,10 +97,10 @@ impl Mesh {
     /// # Errors
     /// A [`ConfigError::Invalid`] when the config carries a password verifier or an
     /// invite issuer (see [`Mesh::try_new`]). A topic's secret is the string itself.
-    pub fn from_topic(topic: &str, config: MeshConfig) -> Result<Self, ConfigError> {
+    pub fn for_topic(topic: &str, config: MeshConfig) -> Result<Self, ConfigError> {
         refuse_secret_config(&config)?;
         let seed = crypto::topic_seed(topic);
-        let name = MeshName::from_topic_string(topic);
+        let name = MeshName::sanitize_topic(topic);
         Ok(Mesh {
             name,
             seed,

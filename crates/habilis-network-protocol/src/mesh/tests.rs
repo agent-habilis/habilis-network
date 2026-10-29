@@ -243,7 +243,7 @@ fn constructors_refuse_a_config_that_names_a_secret() {
     for config in [with_password, with_issuer] {
         let by_new = Mesh::try_new(dummy_seed(), dummy_name(), config.clone()).unwrap_err();
         assert!(by_new.to_string().contains("set_password"), "got: {by_new}");
-        let by_topic = Mesh::from_topic("topic", config).unwrap_err();
+        let by_topic = Mesh::for_topic("topic", config).unwrap_err();
         assert!(
             by_topic.to_string().contains("set_invite"),
             "got: {by_topic}"
@@ -464,8 +464,8 @@ fn an_id_of_an_older_default_mesh_keeps_its_id_and_its_topic() {
 
 #[test]
 fn topic_is_deterministic() {
-    let one = Mesh::from_topic("habilis-network", MeshConfig::public_preset()).unwrap();
-    let two = Mesh::from_topic("habilis-network", MeshConfig::public_preset()).unwrap();
+    let one = Mesh::for_topic("habilis-network", MeshConfig::public_preset()).unwrap();
+    let two = Mesh::for_topic("habilis-network", MeshConfig::public_preset()).unwrap();
     assert_eq!(
         one.to_string(),
         two.to_string(),
@@ -475,7 +475,7 @@ fn topic_is_deterministic() {
 
 #[test]
 fn topic_name_is_the_sanitized_string() {
-    let mesh = Mesh::from_topic(
+    let mesh = Mesh::for_topic(
         "https://github.com/example-org/example-project",
         MeshConfig::public_preset(),
     )
@@ -491,8 +491,8 @@ fn topic_name_is_the_sanitized_string() {
 
 #[test]
 fn topic_differs_by_string() {
-    let one = Mesh::from_topic("alpha", MeshConfig::public_preset()).unwrap();
-    let two = Mesh::from_topic("beta", MeshConfig::public_preset()).unwrap();
+    let one = Mesh::for_topic("alpha", MeshConfig::public_preset()).unwrap();
+    let two = Mesh::for_topic("beta", MeshConfig::public_preset()).unwrap();
     assert_ne!(
         one.to_string(),
         two.to_string(),
@@ -502,7 +502,7 @@ fn topic_differs_by_string() {
 
 #[test]
 fn topic_round_trips_through_from_str() {
-    let mesh = Mesh::from_topic("habilis-network", MeshConfig::public_preset()).unwrap();
+    let mesh = Mesh::for_topic("habilis-network", MeshConfig::public_preset()).unwrap();
     let decoded: LockedMesh = mesh.to_string().parse().expect("decode failed");
     assert_eq!(
         decoded.seed(),

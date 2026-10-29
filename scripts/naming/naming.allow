@@ -1,5 +1,3 @@
 # rule|file|count|reason
 # Used by scripts/naming/naming.ts. Each file breaks one naming rule. Keep each count exact.
 
-from_name|crates/habilis-network-protocol/src/mesh/name_error.rs|1|no impl From in this file beside from_topic_string,from_topic_string_passthrough_and_case_preserving (N12), to add the From impl or rename
-from_name|crates/habilis-network-protocol/src/mesh/mesh.rs|1|no impl From in this file: the from_ constructors of a mesh, split from mesh/mod.rs
