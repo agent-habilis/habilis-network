@@ -208,7 +208,7 @@ impl Game {
     }
 
     fn nick_for(&self, pubkey: &str) -> &str {
-        AuthorKey::from_hex(pubkey)
+        AuthorKey::decode_hex(pubkey)
             .and_then(|key| self.nicks.get(&key))
             .map_or("?", Nickname::as_str)
     }

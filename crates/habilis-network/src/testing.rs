@@ -25,7 +25,7 @@ pub(crate) use log_capture::LogCapture;
 pub(crate) fn author_of(name: &str) -> AuthorKey {
     let mut bytes = [0u8; 32];
     bytes[..name.len()].copy_from_slice(name.as_bytes());
-    AuthorKey::from_bytes(bytes)
+    AuthorKey::from(bytes)
 }
 
 /// A bare state with a fresh identity: no state file, no secrets, no per-peer

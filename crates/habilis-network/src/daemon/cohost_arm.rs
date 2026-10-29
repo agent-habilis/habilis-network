@@ -737,7 +737,7 @@ mod tests {
 
         state.note_rival_beacon_flag(
             own,
-            crate::protocol::AuthorKey::from_bytes([9u8; 32]),
+            crate::protocol::AuthorKey::from([9u8; 32]),
             holder,
             RivalFlag {
                 proven: true,
@@ -749,7 +749,7 @@ mod tests {
 
         state.note_rival_beacon_flag(
             own,
-            crate::protocol::AuthorKey::from_bytes([9u8; 32]),
+            crate::protocol::AuthorKey::from([9u8; 32]),
             holder,
             RivalFlag {
                 proven: true,
@@ -774,7 +774,7 @@ mod tests {
 
         state.note_rival_beacon_flag(
             own,
-            crate::protocol::AuthorKey::from_bytes([9u8; 32]),
+            crate::protocol::AuthorKey::from([9u8; 32]),
             holder,
             RivalFlag {
                 proven: true,
@@ -1148,7 +1148,7 @@ mod tests {
                 .linked_endpoints
                 .insert(crate::testing::endpoint_id(1));
             state.rival_holders.insert(
-                crate::protocol::AuthorKey::from_bytes([9u8; 32]),
+                crate::protocol::AuthorKey::from([9u8; 32]),
                 crate::testing::endpoint_id(2),
             );
         }))

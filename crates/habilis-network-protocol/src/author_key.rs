@@ -18,19 +18,19 @@ use iroh_base::PublicKey;
 /// ```compile_fail,E0308
 /// use habilis_network_protocol::AuthorKey;
 ///
-/// let _ = AuthorKey::from_bytes([0u8; 32]) == [0u8; 32];
+/// let _ = AuthorKey::from([0u8; 32]) == [0u8; 32];
 /// ```
 ///
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AuthorKey([u8; 32]);
 
-impl AuthorKey {
-    /// Wrap 32 raw bytes.
-    #[must_use]
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+impl From<[u8; 32]> for AuthorKey {
+    fn from(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
+}
 
+impl AuthorKey {
     /// The raw bytes, borrowed.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -46,7 +46,7 @@ impl AuthorKey {
     /// Read the 64-character lowercase hex form, the only one the wire carries. `None` for any
     /// other length, for an uppercase digit, and for a non-hex character.
     #[must_use]
-    pub fn from_hex(hex: &str) -> Option<Self> {
+    pub fn decode_hex(hex: &str) -> Option<Self> {
         crate::identity::decode_lower_hex_32(hex).map(Self)
     }
 
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn it_round_trips_through_its_hex_text() {
-        let key = AuthorKey::from_hex(HEX).expect("a lowercase 64-char string");
+        let key = AuthorKey::decode_hex(HEX).expect("a lowercase 64-char string");
         assert_eq!(key.to_string(), HEX, "the author key displays its hex text");
         assert_eq!(
             key.as_bytes()[0],
@@ -115,22 +115,25 @@ mod tests {
     #[test]
     fn it_rejects_what_the_wire_rejects() {
         assert!(
-            AuthorKey::from_hex("").is_none(),
+            AuthorKey::decode_hex("").is_none(),
             "an empty hex string is refused as an author key"
         );
-        assert!(AuthorKey::from_hex(&HEX[..62]).is_none(), "short");
-        assert!(AuthorKey::from_hex(&format!("{HEX}00")).is_none(), "long");
+        assert!(AuthorKey::decode_hex(&HEX[..62]).is_none(), "short");
+        assert!(AuthorKey::decode_hex(&format!("{HEX}00")).is_none(), "long");
         assert!(
-            AuthorKey::from_hex(&HEX.to_uppercase()).is_none(),
+            AuthorKey::decode_hex(&HEX.to_uppercase()).is_none(),
             "uppercase"
         );
-        assert!(AuthorKey::from_hex(&"zz".repeat(32)).is_none(), "not hex");
-        assert!(AuthorKey::from_hex(&"é".repeat(32)).is_none(), "multibyte");
+        assert!(AuthorKey::decode_hex(&"zz".repeat(32)).is_none(), "not hex");
+        assert!(
+            AuthorKey::decode_hex(&"é".repeat(32)).is_none(),
+            "multibyte"
+        );
     }
 
     #[test]
     fn hex_is_the_display_text_as_bytes() {
-        let key = AuthorKey::from_hex(HEX).unwrap();
+        let key = AuthorKey::decode_hex(HEX).unwrap();
         assert_eq!(
             key.hex().as_slice(),
             HEX.as_bytes(),
@@ -145,7 +148,7 @@ mod tests {
 
     #[test]
     fn matches_hex_agrees_with_display() {
-        let key = AuthorKey::from_hex(HEX).unwrap();
+        let key = AuthorKey::decode_hex(HEX).unwrap();
         assert!(key.matches_hex(HEX), "matches_hex accepts the display text");
         assert!(
             !key.matches_hex(&HEX.to_uppercase()),
@@ -164,8 +167,8 @@ mod tests {
 
     #[test]
     fn it_orders_by_its_bytes() {
-        let low = AuthorKey::from_bytes([1; 32]);
-        let high = AuthorKey::from_bytes([2; 32]);
+        let low = AuthorKey::from([1; 32]);
+        let high = AuthorKey::from([2; 32]);
         assert!(low < high, "author keys order by their bytes");
     }
 
@@ -174,7 +177,7 @@ mod tests {
         let mut bytes = [0u8; 32];
         bytes[0] = 2;
         assert!(
-            AuthorKey::from_bytes(bytes).public_key().is_none(),
+            AuthorKey::from(bytes).public_key().is_none(),
             "a non-curve string is an author key but not a public key"
         );
         let identity = crate::identity::Identity::generate();

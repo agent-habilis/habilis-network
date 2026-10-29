@@ -448,7 +448,7 @@ mod tests {
     /// One fixed author for the plain fixtures, so that they share a victim pool the way the
     /// unsigned messages of these tests always did. A signature is not what these tests check.
     fn signed(message: Message) -> Verified {
-        Verified::fixture_unchecked(message, AuthorKey::from_bytes([0x11; 32]))
+        Verified::fixture_unchecked(message, AuthorKey::from([0x11; 32]))
     }
 
     fn plain(id: &str) -> Message {
@@ -895,13 +895,13 @@ mod tests {
         for index in 0..4 {
             let flood = Verified::fixture_unchecked(
                 plain_at(&format!("flood{index}"), i64::MAX),
-                AuthorKey::from_bytes([0xff; 32]),
+                AuthorKey::from([0xff; 32]),
             );
             log.push(flood);
         }
         let honest = Verified::fixture_unchecked(
             plain_at("honest", 1_700_000_000),
-            AuthorKey::from_bytes([0xaa; 32]),
+            AuthorKey::from([0xaa; 32]),
         );
         let evicted = log.push(honest);
         assert!(
@@ -930,7 +930,7 @@ mod tests {
             let author = ["aa", "bb", "cc"][usize::try_from(step).expect("fits") % 3];
             let message = Verified::fixture_unchecked(
                 plain_at(&format!("{author}-{step}"), 1_700_000_000 + step),
-                AuthorKey::from_hex(&author.repeat(32)).expect("hex"),
+                AuthorKey::decode_hex(&author.repeat(32)).expect("hex"),
             );
             log.push(message);
 
@@ -969,7 +969,7 @@ mod tests {
                     }
                     batch.push(Verified::fixture_unchecked(
                         message,
-                        AuthorKey::from_hex(&author.repeat(32)).expect("hex"),
+                        AuthorKey::decode_hex(&author.repeat(32)).expect("hex"),
                     ));
                 }
             }

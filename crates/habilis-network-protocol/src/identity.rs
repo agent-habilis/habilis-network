@@ -58,7 +58,7 @@ impl Identity {
     /// [`Message::sign`]: crate::Message::sign
     #[must_use]
     pub fn author_key(&self) -> AuthorKey {
-        AuthorKey::from_bytes(*self.public().as_bytes())
+        AuthorKey::from(*self.public().as_bytes())
     }
 
     /// Sign `bytes` (the message's canonical bytes) with our secret.
@@ -273,7 +273,7 @@ mod tests {
         let identity = Identity::generate();
         let hex = encode_pubkey(&identity.public());
         assert_eq!(hex.len(), 64, "a public key hex is 64 characters");
-        let key = AuthorKey::from_hex(&hex).unwrap();
+        let key = AuthorKey::decode_hex(&hex).unwrap();
         assert_eq!(
             key.public_key(),
             Some(identity.public()),
@@ -301,7 +301,7 @@ mod tests {
         let mut id = [0u8; 16];
         id[15] = 1;
         assert_eq!(
-            encode_hex(dedup_key16(AuthorKey::from_hex(pubkey).as_ref(), &id).as_bytes()),
+            encode_hex(dedup_key16(AuthorKey::decode_hex(pubkey).as_ref(), &id).as_bytes()),
             "c7ba26a2ed0d21f0e8913dd8b4456086",
             "the dedup key is pinned for a fixed key and id"
         );
@@ -357,11 +357,11 @@ mod tests {
     #[test]
     fn decode_rejects_bad_hex() {
         assert!(
-            AuthorKey::from_hex("zz").is_none(),
+            AuthorKey::decode_hex("zz").is_none(),
             "a hex string with non-hex characters is refused as an author key"
         );
         assert!(
-            AuthorKey::from_hex("abc").is_none(),
+            AuthorKey::decode_hex("abc").is_none(),
             "an odd-length hex string is refused as an author key"
         ); // odd length
         assert!(
@@ -378,7 +378,7 @@ mod tests {
         // non-char-boundary slice — a one-message remote DoS reachable from
         // `verify_signature`. It must now decode byte-wise and return `Err`.
         assert!(
-            AuthorKey::from_hex("aéa").is_none(),
+            AuthorKey::decode_hex("aéa").is_none(),
             "a non-ascii author hex is refused without a panic"
         );
         assert!(
@@ -387,7 +387,7 @@ mod tests {
         );
         // Pure multibyte input of even byte length, too.
         assert!(
-            AuthorKey::from_hex("€€").is_none(),
+            AuthorKey::decode_hex("€€").is_none(),
             "a multi-byte author hex is refused without a panic"
         ); // 6 bytes, all continuation/non-hex
     }

@@ -61,7 +61,7 @@ impl TryFrom<WireIn> for Message {
     /// no sender emits either, and a message cannot hold one.
     fn try_from(wire: WireIn) -> Result<Self, Self::Error> {
         let key = (!wire.pubkey.is_empty())
-            .then(|| AuthorKey::from_hex(&wire.pubkey).ok_or("malformed pubkey"))
+            .then(|| AuthorKey::decode_hex(&wire.pubkey).ok_or("malformed pubkey"))
             .transpose()?;
         if !wire.signature.is_empty() && !is_lower_hex(&wire.signature, 64) {
             return Err("malformed signature");
@@ -69,12 +69,12 @@ impl TryFrom<WireIn> for Message {
         let previous = wire
             .previous
             .as_deref()
-            .map(|hash| ContentHash::from_hex(hash).ok_or("malformed prev hash"))
+            .map(|hash| ContentHash::decode_hex(hash).ok_or("malformed prev hash"))
             .transpose()?;
         let parents: Result<Vec<ContentHash>, &str> = wire
             .parents
             .iter()
-            .map(|hash| ContentHash::from_hex(hash).ok_or("malformed parent hash"))
+            .map(|hash| ContentHash::decode_hex(hash).ok_or("malformed parent hash"))
             .collect();
         let parents = parents?;
         let signer = match (key, wire.signature.is_empty()) {

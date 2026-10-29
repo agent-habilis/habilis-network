@@ -2833,7 +2833,7 @@ mod first_contact_tests {
         let bob = Identity::generate();
         let stranger = Identity::generate();
         let bob_signer =
-            AuthorKey::from_hex(&identity::encode_pubkey(&bob.public())).expect("a 32-byte key");
+            AuthorKey::decode_hex(&identity::encode_pubkey(&bob.public())).expect("a 32-byte key");
         let peer_info = |proof: Option<&str>, signed_by: &Identity| {
             let mut json =
                 peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(bob_endpoint));
@@ -2852,7 +2852,7 @@ mod first_contact_tests {
             &context,
         )
         .await;
-        let stranger_signer = AuthorKey::from_hex(&identity::encode_pubkey(&stranger.public()))
+        let stranger_signer = AuthorKey::decode_hex(&identity::encode_pubkey(&stranger.public()))
             .expect("a 32-byte key");
         assert_eq!(
             state.proven_endpoints.get(&stranger_signer),

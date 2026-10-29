@@ -130,7 +130,7 @@ mod tests {
     use crate::protocol::{AuthorKey, MeshId};
 
     fn key(byte: u8) -> AuthorKey {
-        AuthorKey::from_bytes([byte; 32])
+        AuthorKey::from([byte; 32])
     }
 
     #[test]
@@ -204,19 +204,19 @@ mod one_signer_tests {
         let attacker = SecretKey::generate().public();
         let linked: HashSet<_> = [attacker].into_iter().collect();
         for byte in 1..=5u8 {
-            proven.insert(AuthorKey::from_bytes([byte; 32]), attacker, &linked);
+            proven.insert(AuthorKey::from([byte; 32]), attacker, &linked);
         }
         let honest = SecretKey::generate().public();
-        proven.insert(AuthorKey::from_bytes([9; 32]), honest, &linked);
+        proven.insert(AuthorKey::from([9; 32]), honest, &linked);
 
         assert_eq!(
-            proven.get(&AuthorKey::from_bytes([9; 32])),
+            proven.get(&AuthorKey::from([9; 32])),
             Some(honest),
             "the honest pair is kept"
         );
         assert_eq!(proven.len(), 2, "the linked endpoint has one signer");
         assert_eq!(
-            proven.get(&AuthorKey::from_bytes([5; 32])),
+            proven.get(&AuthorKey::from([5; 32])),
             Some(attacker),
             "its latest signer"
         );

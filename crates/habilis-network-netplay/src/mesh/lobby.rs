@@ -174,7 +174,7 @@ mod key_list {
         Vec::<String>::deserialize(deserializer)?
             .iter()
             .map(|text| {
-                AuthorKey::from_hex(text).ok_or_else(|| {
+                AuthorKey::decode_hex(text).ok_or_else(|| {
                     Decoder::Error::custom(format!("{text:?} is not a lowercase hex key"))
                 })
             })
@@ -513,7 +513,7 @@ mod tests {
     use habilis_network_test_tracing::test;
 
     fn key(byte: u8) -> AuthorKey {
-        AuthorKey::from_bytes([byte; 32])
+        AuthorKey::from([byte; 32])
     }
 
     fn nick(text: &str) -> Nickname {

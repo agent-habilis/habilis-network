@@ -512,7 +512,7 @@ mod chain {
 
     #[test]
     fn chained_message_carries_seq_prev_and_verifies() {
-        let previous = ContentHash::from_bytes([0xaa; 32]);
+        let previous = ContentHash::from([0xaa; 32]);
         let signed = message("hi")
             .with_chain(5, Some(previous))
             .sign(&Identity::generate());
@@ -572,10 +572,7 @@ mod chain {
 
     #[test]
     fn parents_are_signed_and_round_trip() {
-        let parents = vec![
-            ContentHash::from_bytes([0xaa; 32]),
-            ContentHash::from_bytes([0xbb; 32]),
-        ];
+        let parents = vec![ContentHash::from([0xaa; 32]), ContentHash::from([0xbb; 32])];
         let signed = message("hi")
             .with_chain(1, None)
             .with_parents(parents.clone())
@@ -595,10 +592,10 @@ mod chain {
     #[test]
     fn tampering_parents_breaks_signature() {
         let mut signed = message("hi")
-            .with_parents(vec![ContentHash::from_bytes([0xaa; 32])])
+            .with_parents(vec![ContentHash::from([0xaa; 32])])
             .sign(&Identity::generate())
             .into_message();
-        signed.parents.push(ContentHash::from_bytes([0xbb; 32]));
+        signed.parents.push(ContentHash::from([0xbb; 32]));
         assert!(!signed.verify_signature(), "parents are signed");
     }
 }

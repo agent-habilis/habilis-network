@@ -24,7 +24,7 @@ fn group_a() -> ShardGroup {
 fn author_of(name: &str) -> AuthorKey {
     let mut bytes = [0u8; 32];
     bytes[..name.len()].copy_from_slice(name.as_bytes());
-    AuthorKey::from_bytes(bytes)
+    AuthorKey::from(bytes)
 }
 
 /// A shard frame notionally signed by the author `name`.

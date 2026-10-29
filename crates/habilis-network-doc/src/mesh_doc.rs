@@ -873,7 +873,7 @@ mod tests {
     /// signature is `gossip::ingest`'s job.
     fn frame(who: &Nickname, bytes: &[u8]) -> Verified {
         let change = Change::from_bytes(bytes.to_vec()).expect("a change");
-        let actor = AuthorKey::from_hex(&change.actor_id().to_hex_string())
+        let actor = AuthorKey::decode_hex(&change.actor_id().to_hex_string())
             .expect("a test actor is 32 bytes");
         frame_as(who, bytes, actor)
     }
@@ -1305,7 +1305,7 @@ mod tests {
         assert!(
             sink.pending
                 .values()
-                .any(|entry| entry.frame.key() == AuthorKey::from_bytes([0x11; 32])),
+                .any(|entry| entry.frame.key() == AuthorKey::from([0x11; 32])),
             "the honest orphan survived: the newcomer is refused, not an incumbent evicted"
         );
     }
@@ -1553,7 +1553,7 @@ mod tests {
             .build_change(&json!({"a": "forged"}), &alice_key)
             .expect("merge applies")
             .expect("merge is not a no-op");
-        let forged = frame_as(&mallory, &forged, AuthorKey::from_bytes([0xbb; 32]));
+        let forged = frame_as(&mallory, &forged, AuthorKey::from([0xbb; 32]));
         assert!(
             matches!(sink.ingest(&forged), Ingested::Ignored),
             "the forged change is refused for the author's next seq"
@@ -1591,7 +1591,7 @@ mod tests {
             .build_change(&json!({"a": "forged"}), &alice_key)
             .expect("merge applies")
             .expect("merge is not a no-op");
-        let forged = frame_as(&nick("mallory"), &orphan, AuthorKey::from_bytes([0xbb; 32]));
+        let forged = frame_as(&nick("mallory"), &orphan, AuthorKey::from([0xbb; 32]));
 
         let mut sink = MeshDoc::new_ungated();
         assert!(
@@ -1705,7 +1705,7 @@ mod tests {
         let (wire, _plain) = author_doc
             .compose_wire_body(&bytes, Some(&merge))
             .expect("compose");
-        let signer = AuthorKey::from_bytes(pad_seed(alice.as_str().as_bytes()));
+        let signer = AuthorKey::from(pad_seed(alice.as_str().as_bytes()));
         let carrier = Verified::fixture_unchecked(
             Message::new_channel_event(&MeshId::from("test"), &alice, wire, Channel::State)
                 .with_unverified_key(signer),

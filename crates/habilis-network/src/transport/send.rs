@@ -694,8 +694,8 @@ mod tests {
         let bob = endpoint_id(1);
         let bob_key = "bb".repeat(32);
         let carol_key = "cc".repeat(32);
-        let bob_signer = crate::protocol::AuthorKey::from_hex(&bob_key).expect("a key");
-        let carol_signer = crate::protocol::AuthorKey::from_hex(&carol_key).expect("a key");
+        let bob_signer = crate::protocol::AuthorKey::decode_hex(&bob_key).expect("a key");
+        let carol_signer = crate::protocol::AuthorKey::decode_hex(&carol_key).expect("a key");
         let linked = || {
             let mut state = fresh_state();
             prove(&mut state, &bob_key, bob);
@@ -740,7 +740,7 @@ mod tests {
     /// Record, as a verified `PeerInfo` proof would, that the signing key
     /// `pubkey` (hex) owns `endpoint`.
     fn prove(state: &mut EventLoopState, pubkey: &str, endpoint: EndpointId) {
-        let signer = crate::protocol::AuthorKey::from_hex(pubkey).expect("a 32-byte key");
+        let signer = crate::protocol::AuthorKey::decode_hex(pubkey).expect("a 32-byte key");
         let linked = state.linked_endpoints.clone();
         state.proven_endpoints.insert(signer, endpoint, &linked);
     }

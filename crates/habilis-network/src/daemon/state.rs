@@ -102,7 +102,7 @@ mod tests {
 
         state.note_rival_beacon_flag(
             high,
-            AuthorKey::from_bytes([9u8; 32]),
+            AuthorKey::from([9u8; 32]),
             low,
             RivalFlag {
                 proven: true,
@@ -135,7 +135,7 @@ mod tests {
 
         state.note_rival_beacon_flag(
             low,
-            AuthorKey::from_bytes([9u8; 32]),
+            AuthorKey::from([9u8; 32]),
             high,
             RivalFlag {
                 proven: true,
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn a_flag_that_does_not_count_changes_nothing() {
         let (low, high) = lower_and_higher();
-        let signer = AuthorKey::from_bytes([9u8; 32]);
+        let signer = AuthorKey::from([9u8; 32]);
         let now = Instant::now();
 
         let mut no_flag = fresh_state();
@@ -337,7 +337,7 @@ mod tests {
 
         state.note_rival_beacon_flag(
             high,
-            AuthorKey::from_bytes([9u8; 32]),
+            AuthorKey::from([9u8; 32]),
             low,
             RivalFlag {
                 proven: true,
@@ -386,7 +386,7 @@ mod tests {
         state.linked_endpoints.insert(endpoint_id(1));
         state.note_rival_beacon_flag(
             high,
-            AuthorKey::from_bytes([9u8; 32]),
+            AuthorKey::from([9u8; 32]),
             low,
             RivalFlag {
                 proven: true,
@@ -469,7 +469,7 @@ mod tests {
         let mut state = fresh_state();
         state.note_rival_beacon_flag(
             high,
-            AuthorKey::from_bytes([1u8; 32]),
+            AuthorKey::from([1u8; 32]),
             low,
             RivalFlag {
                 proven: true,
@@ -479,7 +479,7 @@ mod tests {
         );
         state.note_rival_beacon_flag(
             high,
-            AuthorKey::from_bytes([2u8; 32]),
+            AuthorKey::from([2u8; 32]),
             endpoint_id(7),
             RivalFlag {
                 proven: true,
@@ -509,7 +509,7 @@ mod tests {
 
         state.note_rival_beacon_flag(
             low,
-            AuthorKey::from_bytes([9u8; 32]),
+            AuthorKey::from([9u8; 32]),
             high,
             RivalFlag {
                 proven: true,
@@ -522,7 +522,7 @@ mod tests {
 
         state.note_rival_beacon_flag(
             low,
-            AuthorKey::from_bytes([9u8; 32]),
+            AuthorKey::from([9u8; 32]),
             high,
             RivalFlag {
                 proven: true,
@@ -549,7 +549,7 @@ mod tests {
 
         state.note_rival_beacon_flag(
             low,
-            AuthorKey::from_bytes([9u8; 32]),
+            AuthorKey::from([9u8; 32]),
             high,
             RivalFlag {
                 proven: true,
@@ -570,7 +570,7 @@ mod tests {
     #[test]
     fn a_holder_stops_counting_when_it_drops_the_flag_or_leaves() {
         let (low, high) = lower_and_higher();
-        let signer = AuthorKey::from_bytes([9u8; 32]);
+        let signer = AuthorKey::from([9u8; 32]);
         let mut state = fresh_state();
         state.note_rival_beacon_flag(
             high,
@@ -1708,14 +1708,10 @@ mod tests {
         // attack. Distinct pubkeys ⇒ distinct `dedup_key`s.
         let mut state = fresh_state();
         let id = MessageId::random();
-        let victim = message::Verified::fixture_unchecked(
-            plain_with_id(&id),
-            AuthorKey::from_bytes([0xaa; 32]),
-        );
-        let attacker = message::Verified::fixture_unchecked(
-            plain_with_id(&id),
-            AuthorKey::from_bytes([0xbb; 32]),
-        );
+        let victim =
+            message::Verified::fixture_unchecked(plain_with_id(&id), AuthorKey::from([0xaa; 32]));
+        let attacker =
+            message::Verified::fixture_unchecked(plain_with_id(&id), AuthorKey::from([0xbb; 32]));
         assert!(!state.mark_seen(&victim), "victim's message is fresh");
         assert!(
             !state.mark_seen(&attacker),

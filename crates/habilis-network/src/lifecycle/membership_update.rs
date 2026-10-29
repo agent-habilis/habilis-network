@@ -263,7 +263,7 @@ mod tests {
     fn a_message_sent_in_the_second_of_a_goodbye_is_stale() {
         let at = UnixSecs::from(1_000);
         let mut state = fresh_state();
-        state.note_left(&nick("swift-cedar"), AuthorKey::from_bytes([1; 32]), at);
+        state.note_left(&nick("swift-cedar"), AuthorKey::from([1; 32]), at);
         let joined = MessageKind::Presence {
             subtype: PresenceSubtype::Joined,
         };
@@ -290,7 +290,7 @@ mod tests {
     fn a_message_stamped_after_a_goodbye_is_a_return() {
         let at = UnixSecs::from(1_000);
         let mut state = fresh_state();
-        state.note_left(&nick("swift-cedar"), AuthorKey::from_bytes([1; 32]), at);
+        state.note_left(&nick("swift-cedar"), AuthorKey::from([1; 32]), at);
         let joined = MessageKind::Presence {
             subtype: PresenceSubtype::Joined,
         };
@@ -314,13 +314,13 @@ mod tests {
     fn the_mark_of_a_goodbye_only_moves_forward() {
         let mut state = fresh_state();
         let who = nick("swift-cedar");
-        state.note_left(&who, AuthorKey::from_bytes([1; 32]), UnixSecs::from(1_000));
-        state.note_left(&who, AuthorKey::from_bytes([1; 32]), UnixSecs::from(900));
+        state.note_left(&who, AuthorKey::from([1; 32]), UnixSecs::from(1_000));
+        state.note_left(&who, AuthorKey::from([1; 32]), UnixSecs::from(900));
         assert!(
             state.sent_before_goodbye(&who, UnixSecs::from(1_000)),
             "a goodbye marks the messages sent before it"
         );
-        state.note_left(&who, AuthorKey::from_bytes([1; 32]), UnixSecs::from(1_200));
+        state.note_left(&who, AuthorKey::from([1; 32]), UnixSecs::from(1_200));
         assert!(
             state.sent_before_goodbye(&who, UnixSecs::from(1_100)),
             "messages sent just before the goodbye mark still count"

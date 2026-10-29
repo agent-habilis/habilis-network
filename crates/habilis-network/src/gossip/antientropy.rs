@@ -1553,10 +1553,7 @@ mod tests {
     /// One fixed author for every chat fixture, as the unsigned messages of these tests always had:
     /// per-author eviction must see one author, or two logs of the same frames diverge.
     fn chat_at(body: &str, timestamp: i64) -> Verified {
-        Verified::fixture_unchecked(
-            plain_chat_at(body, timestamp),
-            AuthorKey::from_bytes([0x11; 32]),
-        )
+        Verified::fixture_unchecked(plain_chat_at(body, timestamp), AuthorKey::from([0x11; 32]))
     }
 
     fn plain_chat_at(body: &str, timestamp: i64) -> Message {

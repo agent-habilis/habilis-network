@@ -219,7 +219,7 @@ mod tests {
             .insert(nick("lost-heron"), iroh::EndpointAddr::new(holder));
         state
             .rival_holders
-            .insert(crate::protocol::AuthorKey::from_bytes([4u8; 32]), holder);
+            .insert(crate::protocol::AuthorKey::from([4u8; 32]), holder);
         assert!(
             state.rival_holder_known(),
             "the evicted holder's flag is known before the sweep"

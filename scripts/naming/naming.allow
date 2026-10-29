@@ -5,8 +5,6 @@ from_name|crates/habilis-network-chunks/src/chunk_hash.rs|1|no impl From in this
 from_name|crates/habilis-network-chunks/src/chunk_map.rs|1|no impl From in this file beside from_bits,from_bytes,from_hex,from_leaves (N12), to add the From impl or rename
 from_name|crates/habilis-network-chunks/src/coverage.rs|1|no impl From in this file beside from_bits,from_bytes,from_hex,from_leaves (N12), to add the From impl or rename
 from_name|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|1|no impl From in this file beside from_label (N12), to add the From impl or rename
-from_name|crates/habilis-network-protocol/src/author_key.rs|1|no impl From in this file beside from_bytes,from_hex (N12), to add the From impl or rename
-from_name|crates/habilis-network-protocol/src/content_hash.rs|1|no impl From in this file beside from_bytes,from_hex (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/crypto/seed.rs|1|no impl From in this file beside from_bytes (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/identity.rs|1|no impl From in this file beside from_hex (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/mesh/lookup.rs|1|no impl From in this file beside from_bytes,from_flag,from_lookups,from_str (N12), to add the From impl or rename

@@ -14,10 +14,16 @@ use sha2::Sha256;
 /// ```compile_fail,E0308
 /// use habilis_network_protocol::ContentHash;
 ///
-/// let _ = ContentHash::from_bytes([0u8; 32]) == [0u8; 32];
+/// let _ = ContentHash::from([0u8; 32]) == [0u8; 32];
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ContentHash([u8; 32]);
+
+impl From<[u8; 32]> for ContentHash {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
 
 impl ContentHash {
     /// The SHA-256 of `bytes`.
@@ -25,12 +31,6 @@ impl ContentHash {
     pub fn of(bytes: &[u8]) -> Self {
         use sha2::Digest;
         Self(Sha256::digest(bytes).into())
-    }
-
-    /// Wrap 32 raw bytes.
-    #[must_use]
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
     }
 
     /// The raw bytes, borrowed.
@@ -42,7 +42,7 @@ impl ContentHash {
     /// Read the 64-character lowercase hex form, the only one the wire carries. `None` for any
     /// other length, for an uppercase digit, and for a non-hex character.
     #[must_use]
-    pub fn from_hex(hex: &str) -> Option<Self> {
+    pub fn decode_hex(hex: &str) -> Option<Self> {
         crate::identity::decode_lower_hex_32(hex).map(Self)
     }
 
@@ -106,24 +106,24 @@ mod tests {
     #[test]
     fn it_reads_only_lowercase_64_char_hex() {
         assert_eq!(
-            ContentHash::from_hex(EMPTY),
+            ContentHash::decode_hex(EMPTY),
             Some(ContentHash::of(b"")),
             "the lowercase 64-character hex reads back to the hash"
         );
         assert!(
-            ContentHash::from_hex(&EMPTY.to_uppercase()).is_none(),
+            ContentHash::decode_hex(&EMPTY.to_uppercase()).is_none(),
             "upper-case hex is refused"
         );
         assert!(
-            ContentHash::from_hex(&EMPTY[..62]).is_none(),
+            ContentHash::decode_hex(&EMPTY[..62]).is_none(),
             "a short hex is refused"
         );
         assert!(
-            ContentHash::from_hex(&format!("{EMPTY}00")).is_none(),
+            ContentHash::decode_hex(&format!("{EMPTY}00")).is_none(),
             "a hex with extra characters is refused"
         );
         assert!(
-            ContentHash::from_hex(&"é".repeat(32)).is_none(),
+            ContentHash::decode_hex(&"é".repeat(32)).is_none(),
             "non-ascii hex is refused"
         );
     }
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn it_orders_by_its_bytes() {
         assert!(
-            ContentHash::from_bytes([1; 32]) < ContentHash::from_bytes([2; 32]),
+            ContentHash::from([1; 32]) < ContentHash::from([2; 32]),
             "content hashes order by their bytes"
         );
     }
