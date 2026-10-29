@@ -608,7 +608,7 @@ impl UnicastPool {
         if self.inner.endpoint.is_none() {
             bail!("unicast pool has no endpoint");
         }
-        let existing = self
+        let existing: Option<Connection> = self
             .inner
             .conns
             .lock()
@@ -656,7 +656,7 @@ impl UnicastPool {
         {
             bail!("{COOLDOWN_REFUSED}");
         }
-        let address = self
+        let address: EndpointAddr = self
             .inner
             .addrs
             .lock()

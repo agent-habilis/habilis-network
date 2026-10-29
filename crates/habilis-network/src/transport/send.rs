@@ -249,7 +249,7 @@ mod tests {
     /// A loopback endpoint with no relay, and a gossip sender on a peerless
     /// topic: the real pieces a directed send needs, and nothing reachable.
     async fn loopback_node() -> (iroh::Endpoint, crate::transport::MeshSender) {
-        let endpoint = iroh::Endpoint::builder(presets::Minimal)
+        let endpoint: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .alpns(vec![crate::transport::UNICAST_ALPN.to_vec()])
             .bind()
@@ -800,7 +800,8 @@ mod tests {
                 .map(|step| {
                     let change = state
                         .doc(channel)
-                        .build_change(&serde_json::json!({ format!("k{step}"): step }), &seed)
+                        .build_change(&serde_json::json!({ format!("k{step}"): step }), &seed);
+                    let change = change
                         .expect("a JSON object merges")
                         .expect("a non-empty merge yields a change");
                     let (wire, _plain) = state

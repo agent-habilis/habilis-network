@@ -48,7 +48,7 @@ pub(crate) fn plan(
     // Sorted, so that a cap that bites picks the same peers on each run.
     dial.sort_unstable();
     dial.truncate(room);
-    let detach = held
+    let detach: Vec<EndpointId> = held
         .iter()
         .copied()
         .filter(|peer| !kept.contains(peer))

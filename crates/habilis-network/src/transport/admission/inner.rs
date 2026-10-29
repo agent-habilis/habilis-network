@@ -84,7 +84,7 @@ impl Inner {
         };
         let mut idle = Vec::new();
         for peer in self.ceiling.session_peers() {
-            let held = self.slots.get(&peer).is_some_and(|slot| {
+            let held: bool = self.slots.get(&peer).is_some_and(|slot| {
                 slot.round.is_some()
                     || slot
                         .conns
@@ -139,7 +139,7 @@ impl Inner {
     /// End the unit of the unicast connections of `peer` in the ledger if it holds none that is
     /// alive.
     pub(crate) fn drop_quic_without_connection(&mut self, peer: EndpointId) {
-        let alive = self.slots.get(&peer).is_some_and(|slot| {
+        let alive: bool = self.slots.get(&peer).is_some_and(|slot| {
             slot.conns
                 .iter()
                 .filter_map(WeakConnectionHandle::upgrade)

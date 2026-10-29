@@ -675,7 +675,7 @@ mod tests {
             )
             .spawn();
         let admission = SignalAdmission::new(8);
-        let node = iroh::Endpoint::builder(presets::Minimal)
+        let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .hooks(admission.connection_hook())
             .bind()
@@ -726,7 +726,7 @@ mod tests {
             )
             .spawn();
         let admission = SignalAdmission::new(8);
-        let node = iroh::Endpoint::builder(presets::Minimal)
+        let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .hooks(admission.connection_hook())
             .bind()
@@ -796,7 +796,7 @@ mod tests {
             .accept(super::super::UNICAST_ALPN, SlowReader)
             .spawn();
         let admission = SignalAdmission::new(8);
-        let node = iroh::Endpoint::builder(presets::Minimal)
+        let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .hooks(admission.connection_hook())
             .bind()

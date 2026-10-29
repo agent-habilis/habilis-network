@@ -824,9 +824,10 @@ mod tests {
         let bind = |hook: Option<ConnectionHook>| {
             let relay_url = relay_url.clone();
             async move {
-                let mut builder = iroh::Endpoint::builder(presets::Minimal)
-                    .relay_mode(iroh::RelayMode::custom([relay_url]))
-                    .clear_ip_transports();
+                let mut builder: iroh::endpoint::Builder =
+                    iroh::Endpoint::builder(presets::Minimal)
+                        .relay_mode(iroh::RelayMode::custom([relay_url]))
+                        .clear_ip_transports();
                 if let Some(hook) = hook {
                     builder = builder.hooks(hook);
                 }
@@ -1277,12 +1278,12 @@ mod tests {
         hub.join(&alice_handle);
         hub.join(&bob_handle);
         let bind = |key: SecretKey, handle: GossipHandle, admission: Option<SignalAdmission>| async move {
-            let builder = iroh::Endpoint::builder(presets::Minimal)
-                .secret_key(key)
-                .relay_mode(RelayMode::Disabled)
-                .add_custom_transport(handle.custom_transport())
-                .clear_ip_transports()
-                .clear_relay_transports();
+            let builder = iroh::Endpoint::builder(presets::Minimal);
+            let builder = builder.secret_key(key);
+            let builder = builder.relay_mode(RelayMode::Disabled);
+            let builder = builder.add_custom_transport(handle.custom_transport());
+            let builder = builder.clear_ip_transports();
+            let builder = builder.clear_relay_transports();
             let builder = match admission {
                 Some(admission) => builder.hooks(admission.connection_hook()),
                 None => builder,

@@ -437,7 +437,7 @@ impl SignalAdmission {
     }
 
     pub(crate) fn release(&self, peer: EndpointId, epoch: u64) {
-        let ended = self
+        let ended: bool = self
             .lock()
             .slots
             .get_mut(&peer)

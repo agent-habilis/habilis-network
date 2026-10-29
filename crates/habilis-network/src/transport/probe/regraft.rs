@@ -60,7 +60,7 @@ pub(crate) fn next_fill(
     free.sort_unstable_by_key(|address| {
         (webrtc::lane_needs::needs_webrtc_lane(address), address.id)
     });
-    let first_group = free.first().map_or(0, |first| {
+    let first_group: usize = free.first().map_or(0, |first| {
         free.iter()
             .take_while(|address| {
                 webrtc::lane_needs::needs_webrtc_lane(address)

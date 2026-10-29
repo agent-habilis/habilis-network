@@ -88,7 +88,7 @@ impl ProvenEndpoints {
             return;
         }
         if self.order.len() >= self.cap {
-            let evictable = self.order.iter().position(|old| {
+            let evictable: Option<usize> = self.order.iter().position(|old| {
                 self.by_signer
                     .get(old)
                     .is_none_or(|eid| !linked.contains(eid))
