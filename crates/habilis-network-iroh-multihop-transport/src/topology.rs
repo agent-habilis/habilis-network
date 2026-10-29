@@ -462,7 +462,10 @@ mod tests {
             !ingest(&mut store, forged),
             "a vector the origin did not sign is refused"
         );
-        assert!(store.view(other).edges.is_empty());
+        assert!(
+            store.view(other).edges.is_empty(),
+            "a vector that claims another origin leaves the view empty"
+        );
     }
 
     #[test]
@@ -473,14 +476,20 @@ mod tests {
         tampered
             .links
             .push((nc, crate::link_metric::LinkMetric::new(1)));
-        assert!(!ingest(&mut store, tampered));
+        assert!(
+            !ingest(&mut store, tampered),
+            "a tampered vector is refused"
+        );
         let mut moved = vector(na, 1, &[(nb, 10)]);
         moved.underlay = EndpointAddr::new(nc.get());
         assert!(
             !ingest(&mut store, moved),
             "the underlay address is signed too"
         );
-        assert!(ingest(&mut store, vector(na, 1, &[(nb, 10)])));
+        assert!(
+            ingest(&mut store, vector(na, 1, &[(nb, 10)])),
+            "the untampered vector is accepted"
+        );
     }
 
     #[test]
@@ -509,12 +518,21 @@ mod tests {
         let (na, nb) = (eid(1), eid(2));
         let start = Instant::now();
         let mut store = Topology::default();
-        assert!(store.ingest_at(vector(na, 1_000, &[(nb, 1)]), start, 1_000));
-        assert!(store.ingest_at(vector(nb, 1_000, &[(na, 1)]), start, 1_000));
+        assert!(
+            store.ingest_at(vector(na, 1_000, &[(nb, 1)]), start, 1_000),
+            "a stale vector is accepted at its time"
+        );
+        assert!(
+            store.ingest_at(vector(nb, 1_000, &[(na, 1)]), start, 1_000),
+            "the second stale vector is accepted at its time"
+        );
         // `na` speaks again, `nb` has crashed and says nothing.
         let later = start + secs(46);
-        assert!(store.ingest_at(vector(na, 41_000, &[(nb, 1)]), start + secs(40), 41_000));
-        assert_eq!(store.expire_older_than(later), 1);
+        assert!(
+            store.ingest_at(vector(na, 41_000, &[(nb, 1)]), start + secs(40), 41_000),
+            "a newer vector is accepted after the stale ones"
+        );
+        assert_eq!(store.expire_older_than(later), 1, "one old vector expires");
         assert!(
             store
                 .view(na)
@@ -532,12 +550,19 @@ mod tests {
         let (na, nb) = (eid(1), eid(2));
         let start = Instant::now();
         let mut store = Topology::default();
-        assert!(store.ingest_at(vector(na, 7_000, &[(nb, 1)]), start, 7_000));
+        assert!(
+            store.ingest_at(vector(na, 7_000, &[(nb, 1)]), start, 7_000),
+            "a copy of an old vector is accepted"
+        );
         assert!(
             !store.ingest_at(vector(na, 7_000, &[(nb, 1)]), start + secs(46), 7_000),
             "same seq is not fresh"
         );
-        assert_eq!(store.expire_older_than(start + secs(46)), 1);
+        assert_eq!(
+            store.expire_older_than(start + secs(46)),
+            1,
+            "a copy of an old vector expires nothing new"
+        );
     }
 
     #[test]
@@ -547,21 +572,35 @@ mod tests {
         let (na, nb) = (eid(1), eid(2));
         let start = Instant::now();
         let mut store = Topology::default();
-        assert!(store.ingest_at(vector(nb, 7_000, &[(na, 1)]), start, 7_000));
-        assert_eq!(store.expire_older_than(start + secs(46)), 1);
+        assert!(
+            store.ingest_at(vector(nb, 7_000, &[(na, 1)]), start, 7_000),
+            "an expired vector is accepted again when it returns"
+        );
+        assert_eq!(
+            store.expire_older_than(start + secs(46)),
+            1,
+            "the returned vector expires nothing at the first window"
+        );
         assert!(
             !store.ingest_at(vector(nb, 7_000, &[(na, 1)]), start + secs(46), 30_000),
             "the same vector again is refused"
         );
         // Tombstones are kept for one max age, then forgotten.
-        assert_eq!(store.expire_older_than(start + secs(92)), 0);
+        assert_eq!(
+            store.expire_older_than(start + secs(92)),
+            0,
+            "the returned vector expires at the second window"
+        );
     }
 
     #[test]
     fn a_vector_of_a_peer_that_left_does_not_come_back() {
         let (na, nb) = (eid(1), eid(2));
         let mut store = Topology::default();
-        assert!(ingest(&mut store, vector(nb, 7_000, &[(na, 1)])));
+        assert!(
+            ingest(&mut store, vector(nb, 7_000, &[(na, 1)])),
+            "a vector of a peer that left is accepted again"
+        );
         assert!(store.remove(nb), "Left removes the vector");
         assert!(
             !ingest(&mut store, vector(nb, 7_000, &[(na, 1)])),
@@ -580,10 +619,24 @@ mod tests {
         let (na, nb) = (eid(1), eid(2));
         let start = Instant::now();
         let mut store = Topology::default();
-        assert!(store.ingest_at(vector(nb, 1_000, &[(na, 1)]), start, 1_000));
-        assert_eq!(store.expire_older_than(start + secs(46)), 1);
-        assert!(store.ingest_at(vector(nb, 47_000, &[(na, 1)]), start + secs(47), 47_000));
-        assert_eq!(store.view(na).edges.len(), 1);
+        assert!(
+            store.ingest_at(vector(nb, 1_000, &[(na, 1)]), start, 1_000),
+            "a node whose vector expired is accepted with its next vector"
+        );
+        assert_eq!(
+            store.expire_older_than(start + secs(46)),
+            1,
+            "the expired vector is counted once"
+        );
+        assert!(
+            store.ingest_at(vector(nb, 47_000, &[(na, 1)]), start + secs(47), 47_000),
+            "the next vector from the node is accepted"
+        );
+        assert_eq!(
+            store.view(na).edges.len(),
+            1,
+            "the node has one edge after its next vector"
+        );
     }
 
     #[test]
@@ -596,16 +649,22 @@ mod tests {
         // against a late joiner.
         let (na, nb) = (eid(1), eid(2));
         let mut store = Topology::default();
-        assert!(!store.ingest_at(
-            vector(nb, 1_000, &[(na, 1)]),
-            Instant::now(),
-            1_000 + 45_001
-        ));
-        assert!(store.ingest_at(
-            vector(nb, 1_000, &[(na, 1)]),
-            Instant::now(),
-            1_000 + 45_000
-        ));
+        assert!(
+            !store.ingest_at(
+                vector(nb, 1_000, &[(na, 1)]),
+                Instant::now(),
+                1_000 + 45_001
+            ),
+            "a vector older than the max age is refused"
+        );
+        assert!(
+            store.ingest_at(
+                vector(nb, 1_000, &[(na, 1)]),
+                Instant::now(),
+                1_000 + 45_000
+            ),
+            "a vector older than the max age is refused at its time"
+        );
     }
 
     #[test]
@@ -614,21 +673,37 @@ mod tests {
         // key does not start again at 1 and lose to what it sent before.
         let (na, nb) = (eid(1), eid(2));
         let mut store = Topology::default();
-        assert!(ingest(&mut store, vector(nb, 100_000, &[(na, 1)])));
+        assert!(
+            ingest(&mut store, vector(nb, 100_000, &[(na, 1)])),
+            "after a restart the first new vector wins"
+        );
         assert!(
             ingest(&mut store, vector(nb, 100_050, &[(na, 5)])),
             "the first vector after the restart is above the last one before it"
         );
-        assert_eq!(store.view(na).edges[0].metric, 5);
+        assert_eq!(
+            store.view(na).edges[0].metric,
+            5,
+            "after a restart the edge keeps the new metric"
+        );
     }
 
     #[test]
     fn newer_vector_supersedes_older() {
         let (na, nb) = (eid(1), eid(2));
         let mut store = Topology::default();
-        assert!(ingest(&mut store, vector(na, 2_000, &[(nb, 10)])));
-        assert!(!ingest(&mut store, vector(na, 1_000, &[(nb, 1)])));
-        assert!(ingest(&mut store, vector(na, 3_000, &[(nb, 1)])));
+        assert!(
+            ingest(&mut store, vector(na, 2_000, &[(nb, 10)])),
+            "a newer vector supersedes the older one"
+        );
+        assert!(
+            !ingest(&mut store, vector(na, 1_000, &[(nb, 1)])),
+            "an older vector is refused once a newer one is held"
+        );
+        assert!(
+            ingest(&mut store, vector(na, 3_000, &[(nb, 1)])),
+            "a newer-still vector supersedes the held one"
+        );
     }
 
     /// iroh names a path by the bytes of its address, so two spellings of one route are two
@@ -648,10 +723,13 @@ mod tests {
         let moved: EndpointAddr = EndpointAddr::new(nc.get())
             .with_relay_url(relay)
             .with_ip_addr("10.0.0.7:4000".parse().expect("an address"));
-        assert!(ingest(
-            &mut store,
-            LinkVector::signed(&secret_of(nc), 2, moved, Vec::new())
-        ));
+        assert!(
+            ingest(
+                &mut store,
+                LinkVector::signed(&secret_of(nc), 2, moved, Vec::new())
+            ),
+            "the locator of a route ignores the addresses a vector carries"
+        );
         let after_routes: Vec<_> = store.route_to(Leg { src: na, dst: nc }, 1).collect();
         let after = after_routes[0].encode();
         assert_eq!(before, after, "the same route, the same bytes");
@@ -666,11 +744,15 @@ mod tests {
         ingest(&mut store, vector(nc, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nd, 1, &[]));
         let routes: Vec<_> = store.route_to(Leg { src: na, dst: nd }, 3).collect();
-        assert_eq!(routes.len(), 1);
+        assert_eq!(routes.len(), 1, "a route traces the chain of two hops");
         let hops: Vec<_> = routes[0].hops().iter().map(|hop| hop.app_id).collect();
-        assert_eq!(hops, vec![nb, nc, nd]);
+        assert_eq!(hops, vec![nb, nc, nd], "the chain hops are b, c and d");
         // Every hop names the underlay endpoint of that node.
-        assert_eq!(routes[0].hops()[0].underlay_id, UnderlayId::new(nb.get()));
+        assert_eq!(
+            routes[0].hops()[0].underlay_id,
+            UnderlayId::new(nb.get()),
+            "the first hop carries its underlay id"
+        );
     }
 
     #[test]
@@ -688,8 +770,16 @@ mod tests {
             ingest(&mut store, signed);
         }
         let underlay = |id: AppId| UnderlayId::new(id.get());
-        assert_eq!(store.app_id_of(underlay(bob_underlay)), Some(bob));
-        assert_eq!(store.app_id_of(underlay(alice_underlay)), Some(alice));
+        assert_eq!(
+            store.app_id_of(underlay(bob_underlay)),
+            Some(bob),
+            "a known underlay maps to bob's app id"
+        );
+        assert_eq!(
+            store.app_id_of(underlay(alice_underlay)),
+            Some(alice),
+            "a known underlay maps to alice's app id"
+        );
         assert_eq!(
             store.app_id_of(underlay(eid(103))),
             None,
@@ -728,7 +818,7 @@ mod tests {
             "the interior-less direct route ends the search"
         );
         let hops: Vec<_> = routes[0].hops().iter().map(|hop| hop.app_id).collect();
-        assert_eq!(hops, vec![nd]);
+        assert_eq!(hops, vec![nd], "the cheaper direct hop wins over the chain");
     }
 
     #[test]
@@ -741,7 +831,11 @@ mod tests {
         ingest(&mut store, vector(nd, 1, &[]));
         let routes: Vec<_> = store.route_to(Leg { src: na, dst: nd }, 3).collect();
         assert_eq!(routes.len(), 2, "both diamond arms");
-        assert_ne!(routes[0].hops()[0].app_id, routes[1].hops()[0].app_id);
+        assert_ne!(
+            routes[0].hops()[0].app_id,
+            routes[1].hops()[0].app_id,
+            "the alternate routes are disjoint at the first hop"
+        );
     }
 
     /// What a link costs to a native node, and what a browser advertises for its own links
@@ -780,7 +874,10 @@ mod tests {
             (tab, vec![(dst, tab_cost)]),
             (dst, vec![]),
         ] {
-            assert!(ingest(&mut store, vector(origin, 1, &links)));
+            assert!(
+                ingest(&mut store, vector(origin, 1, &links)),
+                "a native and a browser vector are accepted together"
+            );
         }
         (store, [src, n1, n2, dst, tab])
     }
@@ -788,15 +885,31 @@ mod tests {
     #[test]
     fn a_three_hop_native_path_beats_a_one_hop_browser_path() {
         let (store, [src, n1, n2, dst, tab]) = native_and_browser_routes(BROWSER_COST);
-        assert_eq!(best_route(&store, src, dst), Some(vec![n1, n2, dst]));
-        assert_eq!(best_cost(&store, src, dst), Some(3 * NATIVE_COST));
+        assert_eq!(
+            best_route(&store, src, dst),
+            Some(vec![n1, n2, dst]),
+            "a three-hop native path beats a one-hop browser path"
+        );
+        assert_eq!(
+            best_cost(&store, src, dst),
+            Some(3 * NATIVE_COST),
+            "the best cost is the native path's cost"
+        );
         let both: Vec<_> = store.route_to(Leg { src, dst }, 2).collect();
         assert_eq!(both.len(), 2, "the browser route is still a route");
-        assert_eq!(both[1].hops()[0].app_id, tab);
+        assert_eq!(
+            both[1].hops()[0].app_id,
+            tab,
+            "the browser route comes second among the two routes"
+        );
 
         // The cost is what decides: a tab that advertises the native cost wins by its length.
         let (cheap_tab, [from, _, _, to, cheap]) = native_and_browser_routes(NATIVE_COST);
-        assert_eq!(best_route(&cheap_tab, from, to), Some(vec![cheap, to]));
+        assert_eq!(
+            best_route(&cheap_tab, from, to),
+            Some(vec![cheap, to]),
+            "the cheap tab route is the best route"
+        );
     }
 
     #[test]
@@ -809,12 +922,23 @@ mod tests {
             (tab, vec![(bob, BROWSER_COST)]),
             (bob, vec![]),
         ] {
-            assert!(ingest(&mut store, vector(origin, 1, &links)));
+            assert!(
+                ingest(&mut store, vector(origin, 1, &links)),
+                "without the native route the route goes through the browser"
+            );
         }
-        assert_eq!(best_route(&store, alice, bob), Some(vec![carol, bob]));
+        assert_eq!(
+            best_route(&store, alice, bob),
+            Some(vec![carol, bob]),
+            "the route from alice to the browser is found"
+        );
 
         assert!(store.remove(carol), "carol leaves: her vector is gone");
-        assert_eq!(best_route(&store, alice, bob), Some(vec![tab, bob]));
+        assert_eq!(
+            best_route(&store, alice, bob),
+            Some(vec![tab, bob]),
+            "the route through the browser has the browser's hop"
+        );
         assert_eq!(
             best_cost(&store, alice, bob),
             Some(NATIVE_COST + BROWSER_COST),
@@ -832,7 +956,10 @@ mod tests {
                 (src, vec![(dst, NATIVE_COST)]),
                 (dst, vec![(src, last_cost)]),
             ] {
-                assert!(ingest(&mut store, vector(origin, 1, &links)));
+                assert!(
+                    ingest(&mut store, vector(origin, 1, &links)),
+                    "a browser pays nothing as a destination"
+                );
             }
             assert_eq!(
                 best_cost(&store, src, dst),
@@ -855,7 +982,10 @@ mod tests {
                 (other, vec![(hop, NATIVE_COST), (dst, 3 * NATIVE_COST)]),
                 (dst, vec![]),
             ] {
-                assert!(ingest(&mut store, vector(origin, 1, &links)));
+                assert!(
+                    ingest(&mut store, vector(origin, 1, &links)),
+                    "the cost of a source changes no choice"
+                );
             }
             assert_eq!(
                 best_route(&store, src, dst),
@@ -877,6 +1007,9 @@ mod tests {
         let mut dearer = vector(tab, 1, &[(dst, NATIVE_COST)]);
         dearer.links[0].1 = crate::link_metric::LinkMetric::new(BROWSER_COST);
         assert!(!ingest(&mut store, dearer), "a raised cost");
-        assert!(ingest(&mut store, vector(tab, 1, &[(dst, BROWSER_COST)])));
+        assert!(
+            ingest(&mut store, vector(tab, 1, &[(dst, BROWSER_COST)])),
+            "a changed browser cost is refused"
+        );
     }
 }

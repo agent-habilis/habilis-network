@@ -587,7 +587,10 @@ mod tests {
         let source = stranger(1);
         let subject = cell(vec![self_hop(&forwarder)], 0, source);
         forwarder.handle_cell(subject, source.underlay_id);
-        assert!(received.try_recv().is_ok());
+        assert!(
+            received.try_recv().is_ok(),
+            "a cell that ends at us is delivered locally"
+        );
         assert_eq!(
             forwarder.forwarded_cells(),
             0,
@@ -604,7 +607,8 @@ mod tests {
         let counters = forwarder.counters();
         assert_eq!(
             (counters.delivered, counters.dropped, counters.forwarded),
-            (1, 0, 0)
+            (1, 0, 0),
+            "a cell that ends at us is counted as delivered"
         );
     }
 
@@ -623,7 +627,11 @@ mod tests {
             forwarder.handle_cell(subject, source.underlay_id);
         }
         let counters = forwarder.counters();
-        assert_eq!((counters.delivered, counters.dropped), (4, 2));
+        assert_eq!(
+            (counters.delivered, counters.dropped),
+            (4, 2),
+            "a full inbox drops the cell and counts it"
+        );
     }
 
     #[test]
@@ -634,7 +642,11 @@ mod tests {
         );
         let (forwarder, _app, _received) = forwarder().await;
         forwarder.note_oversized(2000, 1500);
-        assert_eq!(forwarder.counters().dropped, 1);
+        assert_eq!(
+            forwarder.counters().dropped,
+            1,
+            "a packet that does not fit the buffer is counted as dropped"
+        );
     }
 
     #[test]
@@ -649,7 +661,10 @@ mod tests {
         let source = stranger(1);
         let subject = cell(vec![stranger(2), stranger(3)], 0, source);
         forwarder.handle_cell(subject, source.underlay_id);
-        assert!(received.try_recv().is_err());
+        assert!(
+            received.try_recv().is_err(),
+            "a cell naming another node is neither delivered nor forwarded"
+        );
         assert_eq!(live_writers(&forwarder), 0, "no writer, no dial, no bytes");
     }
 
@@ -671,8 +686,15 @@ mod tests {
             source,
         );
         forwarder.handle_cell(subject, downstream.underlay_id);
-        assert!(received.try_recv().is_err());
-        assert_eq!(live_writers(&forwarder), 0);
+        assert!(
+            received.try_recv().is_err(),
+            "a cell from the wrong upstream is refused"
+        );
+        assert_eq!(
+            live_writers(&forwarder),
+            0,
+            "a refused cell leaves no live writer"
+        );
     }
 
     #[test]
@@ -685,7 +707,10 @@ mod tests {
         let source = stranger(1);
         let subject = cell(vec![self_hop(&forwarder)], 7, source);
         forwarder.handle_cell(subject, source.underlay_id);
-        assert!(received.try_recv().is_err());
+        assert!(
+            received.try_recv().is_err(),
+            "a cell positioned past the end is not delivered"
+        );
     }
 
     #[test]
@@ -700,8 +725,16 @@ mod tests {
         let subject = cell(vec![self_hop(&forwarder), next], 0, source);
         forwarder.handle_cell(subject, source.underlay_id);
         assert!(received.try_recv().is_err(), "not ours to deliver");
-        assert_eq!(live_writers(&forwarder), 1);
-        assert_eq!(forwarder.forwarded_cells(), 1);
+        assert_eq!(
+            live_writers(&forwarder),
+            1,
+            "a cell passing through us is queued for the next hop"
+        );
+        assert_eq!(
+            forwarder.forwarded_cells(),
+            1,
+            "one cell is forwarded to the next hop"
+        );
     }
 
     #[test]
@@ -714,7 +747,11 @@ mod tests {
         let source = stranger(1);
         let subject = cell(vec![stranger(2), stranger(3)], 0, source);
         forwarder.handle_cell(subject, source.underlay_id);
-        assert_eq!(forwarder.forwarded_cells(), 0);
+        assert_eq!(
+            forwarder.forwarded_cells(),
+            0,
+            "a refused cell is not counted as forwarded"
+        );
     }
 
     /// A node whose underlay can only use the relay, as a forwarder with its
@@ -858,7 +895,10 @@ mod tests {
             !cell_arrives(&from, &mut to).await,
             "the receiver refuses the relay"
         );
-        assert!(to.forwarder.dropped.load(Ordering::Relaxed) > 0);
+        assert!(
+            to.forwarder.dropped.load(Ordering::Relaxed) > 0,
+            "a cell on a relay-selected path is dropped"
+        );
     }
 
     #[test]
@@ -870,13 +910,20 @@ mod tests {
         let (url, _server) = test_support::relay_server().await;
         let from = relay_node(7, &url, false).await;
         let mut to = relay_node(8, &url, true).await;
-        assert!(!cell_arrives(&from, &mut to).await);
+        assert!(
+            !cell_arrives(&from, &mut to).await,
+            "a hop that stays on the relay becomes stuck"
+        );
         // Refused for longer than the deadline: no longer a link.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while from.forwarder.stuck_hops().is_empty() && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert_eq!(from.forwarder.stuck_hops(), vec![to.hop.app_id]);
+        assert_eq!(
+            from.forwarder.stuck_hops(),
+            vec![to.hop.app_id],
+            "the stuck hop is the one that stayed on the relay"
+        );
     }
 
     #[test]
@@ -927,8 +974,16 @@ mod tests {
         let signed = EndpointAddr::new(underlay_id)
             .with_ip_addr("10.0.0.9:4000".parse().expect("an address"));
         let hop = hop_with_vector(&forwarder, 120, &signed, underlay_id);
-        assert_eq!(forwarder.dial_addr(&hop), signed);
-        assert_eq!(forwarder.unresolved_hops(), 0);
+        assert_eq!(
+            forwarder.dial_addr(&hop),
+            signed,
+            "a hop is dialed at the address its vector signed"
+        );
+        assert_eq!(
+            forwarder.unresolved_hops(),
+            0,
+            "no hop is unresolved when its vector is known"
+        );
     }
 
     #[test]
@@ -944,7 +999,11 @@ mod tests {
             EndpointAddr::new(hop.underlay_id.get()),
             "no address is made up"
         );
-        assert_eq!(forwarder.unresolved_hops(), 1);
+        assert_eq!(
+            forwarder.unresolved_hops(),
+            1,
+            "a hop the topology does not know is dialed by id and counted"
+        );
     }
 
     /// Counts the WARN and ERROR events of the thread that installs it. The tests of this module
@@ -983,7 +1042,11 @@ mod tests {
         tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
             forwarder.dial_addr(&sender);
         });
-        assert_eq!(warnings.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            warnings.load(Ordering::Relaxed),
+            0,
+            "a hop without a vector is not a warning"
+        );
         assert_eq!(forwarder.unresolved_hops(), 1, "the hop was counted");
         forwarder.underlay.close().await;
     }
@@ -1185,8 +1248,12 @@ mod tests {
             .with_ip_addr("10.0.0.9:4000".parse().expect("an address"));
         let named = SecretKey::from_bytes(&[125; 32]).public();
         let hop = hop_with_vector(&forwarder, 123, &signed, named);
-        assert_eq!(forwarder.dial_addr(&hop), EndpointAddr::new(named));
-        assert_eq!(forwarder.unresolved_hops(), 1);
+        assert_eq!(
+            forwarder.dial_addr(&hop),
+            EndpointAddr::new(named),
+            "a vector naming another underlay does not resolve the hop"
+        );
+        assert_eq!(forwarder.unresolved_hops(), 1, "that hop stays unresolved");
     }
 
     #[test]
@@ -1311,7 +1378,10 @@ mod tests {
             direct_for_inbound(&[(ip(9), false), (relay(), false)]),
             "an IP path in backup beside the relay in backup"
         );
-        assert!(direct_for_inbound(&[(ip(9), true), (relay(), false)]));
+        assert!(
+            direct_for_inbound(&[(ip(9), true), (relay(), false)]),
+            "an accepted connection is direct when any open path is not the relay"
+        );
         assert!(
             !direct_for_inbound(&[(relay(), false)]),
             "only the relay is open"
@@ -1322,8 +1392,14 @@ mod tests {
         );
         assert!(!direct_for_inbound(&[]), "no path is open");
         // The writer keeps the stricter rule: it sends on the selected path.
-        assert!(!direct_for_writer(&[(ip(9), false), (relay(), false)]));
-        assert!(direct_for_writer(&[(ip(9), true), (relay(), false)]));
+        assert!(
+            !direct_for_writer(&[(ip(9), false), (relay(), false)]),
+            "a writer with only relay paths is not direct"
+        );
+        assert!(
+            direct_for_writer(&[(ip(9), true), (relay(), false)]),
+            "a writer with one open direct path is direct"
+        );
     }
 
     /// A test cut takes a path away from the selector, and iroh does not select again for a
@@ -1351,7 +1427,10 @@ mod tests {
     fn the_accepting_end_gives_up_a_path_that_a_test_blocked_too() {
         use super::{direct_for_inbound, unblocked};
         let paths = vec![(ip(9), false), (relay(), false)];
-        assert!(direct_for_inbound(&paths));
+        assert!(
+            direct_for_inbound(&paths),
+            "the accepting end keeps a path that is direct"
+        );
         assert!(
             !direct_for_inbound(unblocked(&paths, |path| matches!(
                 path,
@@ -1365,7 +1444,7 @@ mod tests {
     fn a_path_that_no_test_blocked_is_kept() {
         let paths = vec![(ip(9), true), (relay(), false)];
         let kept: Vec<_> = super::unblocked(&paths, |_| false).cloned().collect();
-        assert_eq!(kept, paths);
+        assert_eq!(kept, paths, "a path that no test blocked is kept");
     }
 
     #[test]
@@ -1422,7 +1501,11 @@ mod tests {
             cell_arrives(&from, &mut to).await,
             "a cell that came over IP is not a cell over the relay"
         );
-        assert_eq!(to.forwarder.dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            to.forwarder.dropped.load(Ordering::Relaxed),
+            0,
+            "the accepting end drops the cell it selected no path for"
+        );
         assert_eq!(
             from.forwarder.pool.refused_on_relay.load(Ordering::Relaxed),
             0,
@@ -1511,7 +1594,10 @@ mod tests {
             }
             forwarder.enqueue(&next, cell(vec![next], 0, source));
         }
-        assert!(live_writers(&forwarder) <= MAX_WRITERS);
+        assert!(
+            live_writers(&forwarder) <= MAX_WRITERS,
+            "the writers stop at the ceiling"
+        );
     }
 
     /// A test cut reaches a gate at once. The reading of the paths stands for `PATH_RECHECK`,

@@ -135,7 +135,10 @@ mod tests {
         // The linchpin of the design: `Cell.path` is a `Route`, so a hostile
         // route is refused by the codec and never reaches the forwarder.
         let bytes = forged_bytes(vec![hop(1), hop(2), hop(1)], 0);
-        assert!(postcard::from_bytes::<Cell>(&bytes).is_err());
+        assert!(
+            postcard::from_bytes::<Cell>(&bytes).is_err(),
+            "a cyclic route does not deserialize into a cell"
+        );
     }
 
     #[test]
@@ -143,26 +146,42 @@ mod tests {
         let hops: Vec<RouteHop> = (0..=MAX_ROUTE_HOPS)
             .map(|seed| hop(u8::try_from(seed).expect("seed fits")))
             .collect();
-        assert!(postcard::from_bytes::<Cell>(&forged_bytes(hops, 0)).is_err());
+        assert!(
+            postcard::from_bytes::<Cell>(&forged_bytes(hops, 0)).is_err(),
+            "an oversized route does not deserialize into a cell"
+        );
     }
 
     #[test]
     fn a_legal_route_still_deserializes_into_a_cell() {
         let bytes = forged_bytes(vec![hop(1), hop(2)], 0);
-        assert!(postcard::from_bytes::<Cell>(&bytes).is_ok());
+        assert!(
+            postcard::from_bytes::<Cell>(&bytes).is_ok(),
+            "a legal route deserializes into a cell"
+        );
     }
 
     #[test]
     fn current_hop_is_none_when_pos_is_past_the_end() {
         // Today this falls through `next_hop()`'s `None` arm and delivers an
         // attacker's packet locally as though we were the destination.
-        assert!(cell(vec![hop(1), hop(2)], 2).current_hop().is_none());
+        assert!(
+            cell(vec![hop(1), hop(2)], 2).current_hop().is_none(),
+            "the current hop is none past the end of the route"
+        );
     }
 
     #[test]
     fn current_hop_is_the_addressed_hop() {
         let subject = cell(vec![hop(1), hop(2)], 1);
-        assert_eq!(subject.current_hop(), Some(&hop(2)));
-        assert!(subject.next_hop().is_none());
+        assert_eq!(
+            subject.current_hop(),
+            Some(&hop(2)),
+            "the current hop is the addressed hop"
+        );
+        assert!(
+            subject.next_hop().is_none(),
+            "the subject cell has no next hop"
+        );
     }
 }

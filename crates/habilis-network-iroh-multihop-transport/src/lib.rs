@@ -835,7 +835,11 @@ mod tests {
             .expect("the underlay answers the extra ALPN");
         connection.close(0u32.into(), b"done");
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            1,
+            "one extra protocol is accepted on the underlay"
+        );
     }
 
     #[test]
@@ -875,10 +879,14 @@ mod tests {
             their_underlay.clone(),
             Vec::new(),
         );
-        assert!(handle.feed_topology(vector));
+        assert!(
+            handle.feed_topology(vector),
+            "the vector feeds the topology"
+        );
         assert_eq!(
             handle.underlay_addr_of(AppId::new(other.public())),
-            Some(their_underlay)
+            Some(their_underlay),
+            "the underlay address of an origin comes from its link vector"
         );
         assert_eq!(
             handle.underlay_addr_of(AppId::new(me.public())),
@@ -930,7 +938,10 @@ mod tests {
         advertise(&nodes[1], vec![(long_b, 1)]);
         advertise(&nodes[2], vec![(dst, 1)]);
         advertise(&nodes[3], vec![]);
-        assert!(handle.feed_topology(handle.link_vector(vec![(short, 1), (long_a, 1)])));
+        assert!(
+            handle.feed_topology(handle.link_vector(vec![(short, 1), (long_a, 1)])),
+            "the two-route vector feeds the topology"
+        );
         let hops = nodes.map(|node| {
             (
                 AppId::new(node.public()),
@@ -948,7 +959,11 @@ mod tests {
     #[test]
     async fn the_shorter_route_is_chosen_while_its_first_hop_is_not_refused() {
         let (handle, [(short, _), _, _, (dst, _)]) = handle_with_two_routes().await;
-        assert_eq!(first_hop_of(&handle, dst), short);
+        assert_eq!(
+            first_hop_of(&handle, dst),
+            short,
+            "the shorter route is chosen while its first hop is not refused"
+        );
     }
 
     #[test]
@@ -963,7 +978,11 @@ mod tests {
             handle.stuck_hops().next().is_none(),
             "refused now, not past the deadline: the link vector still names the hop"
         );
-        assert_eq!(first_hop_of(&handle, dst), long_a);
+        assert_eq!(
+            first_hop_of(&handle, dst),
+            long_a,
+            "a route whose first hop is refused gives way to the longer one"
+        );
     }
 
     #[test]
@@ -989,10 +1008,13 @@ mod tests {
         };
         advertise(&via, vec![(AppId::new(dst.public()), 1)]);
         advertise(&dst, vec![]);
-        assert!(handle.feed_topology(handle.link_vector(vec![
-            (AppId::new(dst.public()), 1),
-            (AppId::new(via.public()), 1),
-        ])));
+        assert!(
+            handle.feed_topology(handle.link_vector(vec![
+                (AppId::new(dst.public()), 1),
+                (AppId::new(via.public()), 1),
+            ])),
+            "the direct route's vector feeds the topology"
+        );
         let dst_id = AppId::new(dst.public());
         assert_eq!(first_hop_of(&handle, dst_id), dst_id, "direct");
 
@@ -1007,7 +1029,11 @@ mod tests {
             .iter()
             .map(|hop| hop.app_id)
             .collect();
-        assert_eq!(hops, vec![AppId::new(via.public()), dst_id]);
+        assert_eq!(
+            hops,
+            vec![AppId::new(via.public()), dst_id],
+            "the route through a third peer carries the expected hops"
+        );
     }
 
     /// A handle that knows a native route to `dst` of three hops (`a1`, `a2`, `dst`) and a route
@@ -1034,7 +1060,10 @@ mod tests {
         advertise(&nodes[1], vec![(dst, 10)]);
         advertise(&nodes[2], vec![(dst, 100)]);
         advertise(&nodes[3], vec![]);
-        assert!(handle.feed_topology(handle.link_vector(vec![(a1, 10), (tab, 10)])));
+        assert!(
+            handle.feed_topology(handle.link_vector(vec![(a1, 10), (tab, 10)])),
+            "the native and browser vector feeds the topology"
+        );
         let hops = nodes.map(|node| {
             (
                 AppId::new(node.public()),
@@ -1062,7 +1091,11 @@ mod tests {
     #[test]
     async fn a_native_route_is_chosen_over_a_shorter_route_through_a_browser() {
         let (handle, [(a1, _), _, _, (dst, _)]) = handle_with_a_native_and_a_browser_route().await;
-        assert_eq!(first_hop_of(&handle, dst), a1);
+        assert_eq!(
+            first_hop_of(&handle, dst),
+            a1,
+            "a native route beats a shorter route through a browser"
+        );
     }
 
     #[test]
@@ -1085,7 +1118,11 @@ mod tests {
             .inner
             .forwarder
             .refuse_hop_for_test(tab_underlay, tab);
-        assert_eq!(first_hop_of(&handle, dst), a1);
+        assert_eq!(
+            first_hop_of(&handle, dst),
+            a1,
+            "a refused browser first hop leaves the native route in place"
+        );
     }
 
     #[test]
@@ -1113,7 +1150,11 @@ mod tests {
                 .expect("a custom address");
             Route::decode(&custom).expect("a route").hops()[0].app_id
         };
-        assert_eq!(first_hop_resolved().await, short);
+        assert_eq!(
+            first_hop_resolved().await,
+            short,
+            "the address lookup chooses the route like route_addr"
+        );
         handle
             .inner
             .forwarder
@@ -1191,19 +1232,29 @@ mod tests {
 
     #[test]
     fn a_browser_advertises_its_links_at_ten_times_the_cost_of_a_native_node() {
-        assert_eq!(HandleConfig::default().link_cost, 10);
-        assert_eq!(HandleConfig::for_browser().link_cost, 100);
+        assert_eq!(
+            HandleConfig::default().link_cost,
+            10,
+            "the native config keeps the native link cost"
+        );
+        assert_eq!(
+            HandleConfig::for_browser().link_cost,
+            100,
+            "the browser config is the browser preset"
+        );
         // The cost is the only difference.
         assert_eq!(
             HandleConfig {
                 link_cost: HandleConfig::default().link_cost,
                 ..HandleConfig::for_browser()
             },
-            HandleConfig::default()
+            HandleConfig::default(),
+            "the browser handle config has the browser link cost"
         );
         // It stays finite: the graph drops a link of infinite cost, and with it the browser as a hop.
         assert!(
-            crate::link_metric::LinkMetric::new(HandleConfig::for_browser().link_cost).is_usable()
+            crate::link_metric::LinkMetric::new(HandleConfig::for_browser().link_cost).is_usable(),
+            "the browser link cost is ten times the native one"
         );
     }
 
@@ -1216,7 +1267,11 @@ mod tests {
             HandleConfig::default(),
         )
         .expect("a handle");
-        assert_eq!(native.link_cost(), 10);
+        assert_eq!(
+            native.link_cost(),
+            10,
+            "a native handle reports link cost ten"
+        );
         let other = SecretKey::from_bytes(&[92; 32]);
         let browser = MultihopHandle::new(
             &other,
@@ -1224,7 +1279,11 @@ mod tests {
             HandleConfig::for_browser(),
         )
         .expect("a handle");
-        assert_eq!(browser.link_cost(), 100);
+        assert_eq!(
+            browser.link_cost(),
+            100,
+            "a browser handle reports link cost one hundred"
+        );
     }
 
     #[test]
@@ -1246,7 +1305,11 @@ mod tests {
             .inner
             .forwarder
             .refuse_hop_for_test(long_underlay, long_a);
-        assert_eq!(first_hop_of(&handle, dst), short);
+        assert_eq!(
+            first_hop_of(&handle, dst),
+            short,
+            "the shorter route is kept when every first hop is refused"
+        );
     }
 
     #[test]
@@ -1306,7 +1369,10 @@ mod tests {
             from_a.links.is_empty() && from_b.links.is_empty(),
             "no stuck hop is advertised"
         );
-        assert!(first.feed_topology(from_a) && first.feed_topology(from_b));
+        assert!(
+            first.feed_topology(from_a) && first.feed_topology(from_b),
+            "nodes whose underlays only meet on the relay advertise no usable route"
+        );
         assert!(
             first.topology_view().edges.is_empty(),
             "so no route is computed"

@@ -93,9 +93,25 @@ mod tests {
         let id = SecretKey::from_bytes(&[7; 32]).public();
         let raw = postcard::to_allocvec(&id).expect("an endpoint id serializes");
 
-        assert_eq!(postcard::to_allocvec(&AppId::new(id)).unwrap(), raw);
-        assert_eq!(postcard::to_allocvec(&UnderlayId::new(id)).unwrap(), raw);
-        assert_eq!(postcard::from_bytes::<AppId>(&raw).unwrap().get(), id);
-        assert_eq!(postcard::from_bytes::<UnderlayId>(&raw).unwrap().get(), id);
+        assert_eq!(
+            postcard::to_allocvec(&AppId::new(id)).unwrap(),
+            raw,
+            "an app id has the bytes of the endpoint id it wraps"
+        );
+        assert_eq!(
+            postcard::to_allocvec(&UnderlayId::new(id)).unwrap(),
+            raw,
+            "an underlay id has the bytes of the endpoint id it wraps"
+        );
+        assert_eq!(
+            postcard::from_bytes::<AppId>(&raw).unwrap().get(),
+            id,
+            "an app id deserializes from those bytes"
+        );
+        assert_eq!(
+            postcard::from_bytes::<UnderlayId>(&raw).unwrap().get(),
+            id,
+            "an underlay id deserializes from those bytes"
+        );
     }
 }

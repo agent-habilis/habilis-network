@@ -258,7 +258,11 @@ mod tests {
         let refusing = |nodes: &[AppId]| nodes.iter().copied().collect();
 
         let path = |refused| graph.shortest_path_avoiding_first_hops(Leg { src, dst }, &refused);
-        assert_eq!(path(refusing(&[])).expect("direct").hops, vec![dst]);
+        assert_eq!(
+            path(refusing(&[])).expect("direct").hops,
+            vec![dst],
+            "a link to a refused node is skipped even when it is the destination"
+        );
         assert_eq!(
             path(refusing(&[dst])).expect("through via").hops,
             vec![via, dst],
@@ -290,7 +294,11 @@ mod tests {
         let path = graph
             .shortest_path_avoiding_first_hops(Leg { src, dst }, &refused)
             .expect("a route");
-        assert_eq!(path.hops, vec![near, via, dst]);
+        assert_eq!(
+            path.hops,
+            vec![near, via, dst],
+            "a refused first hop is still a hop in the middle of a route"
+        );
     }
 
     #[test]
@@ -302,8 +310,12 @@ mod tests {
         let path = graph
             .shortest_path(Leg { src: na, dst: nc })
             .expect("reachable");
-        assert_eq!(path.hops, vec![nb, nc]);
-        assert_eq!(path.cost, LinkMetric::new(12));
+        assert_eq!(
+            path.hops,
+            vec![nb, nc],
+            "shortest path traces a line of two hops"
+        );
+        assert_eq!(path.cost, LinkMetric::new(12), "the line costs twelve");
     }
 
     #[test]
@@ -317,8 +329,16 @@ mod tests {
         let path = graph
             .shortest_path(Leg { src: na, dst: nd })
             .expect("reachable");
-        assert_eq!(path.hops, vec![nd]);
-        assert_eq!(path.cost, LinkMetric::new(1));
+        assert_eq!(
+            path.hops,
+            vec![nd],
+            "shortest path prefers the cheaper direct hop"
+        );
+        assert_eq!(
+            path.cost,
+            LinkMetric::new(1),
+            "the cheap direct hop costs one"
+        );
     }
 
     #[test]
@@ -332,8 +352,16 @@ mod tests {
         let path = graph
             .shortest_path(Leg { src: na, dst: nd })
             .expect("reachable");
-        assert_eq!(path.hops, vec![nb, nc, nd]);
-        assert_eq!(path.cost, LinkMetric::new(3));
+        assert_eq!(
+            path.hops,
+            vec![nb, nc, nd],
+            "shortest path prefers the chain when the direct link costs more"
+        );
+        assert_eq!(
+            path.cost,
+            LinkMetric::new(3),
+            "the chain costs its link sum"
+        );
     }
 
     #[test]
@@ -347,7 +375,8 @@ mod tests {
                     src: na,
                     dst: lonely
                 })
-                .is_none()
+                .is_none(),
+            "an unreachable destination has no path"
         );
     }
 
@@ -360,7 +389,10 @@ mod tests {
             to: nb,
             cost: LinkMetric::INFINITE,
         });
-        assert!(graph.shortest_path(Leg { src: na, dst: nb }).is_none());
+        assert!(
+            graph.shortest_path(Leg { src: na, dst: nb }).is_none(),
+            "infinite links are dropped from the path search"
+        );
     }
 
     #[test]
@@ -374,9 +406,16 @@ mod tests {
         link(&mut graph, nc, nd, 1);
         let paths = graph.disjoint_paths(Leg { src: na, dst: nd }, 2);
         assert_eq!(paths.len(), 2, "both diamond arms are available");
-        assert_ne!(paths[0].hops[0], paths[1].hops[0]);
+        assert_ne!(
+            paths[0].hops[0], paths[1].hops[0],
+            "disjoint paths are node-disjoint at their first hop"
+        );
         for path in &paths {
-            assert_eq!(*path.hops.last().unwrap(), nd);
+            assert_eq!(
+                *path.hops.last().unwrap(),
+                nd,
+                "each disjoint path ends at the destination"
+            );
         }
     }
 
@@ -392,6 +431,10 @@ mod tests {
             1,
             "the lone hop can't be reused for a 2nd path"
         );
-        assert_eq!(paths[0].hops, vec![nr, nd]);
+        assert_eq!(
+            paths[0].hops,
+            vec![nr, nd],
+            "disjoint paths stop when no alternative exists"
+        );
     }
 }

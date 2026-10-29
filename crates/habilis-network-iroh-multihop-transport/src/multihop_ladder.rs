@@ -65,7 +65,11 @@ mod tests {
     /// one; this is the guard that they stay equal.
     #[test]
     fn the_ladder_knows_the_multihop_transport_id_of_this_crate() {
-        assert_eq!(custom_rung(crate::MULTIHOP_TRANSPORT_ID), Rung::Multihop);
+        assert_eq!(
+            custom_rung(crate::MULTIHOP_TRANSPORT_ID),
+            Rung::Multihop,
+            "the ladder knows the multihop transport id of this crate"
+        );
     }
 
     fn node(seed: u8) -> iroh::EndpointId {
@@ -109,11 +113,20 @@ mod tests {
         let (local, other) = (node(23), node(24));
         let ladder = MultihopLadder::new(local);
         block_rung(local, Rung::Multihop, true);
-        assert!(!ladder.usable(Rung::Multihop, None, None));
+        assert!(
+            !ladder.usable(Rung::Multihop, None, None),
+            "the ladder gives up a rung that a test blocked"
+        );
         assert!(ladder.usable(Rung::Ip, Some(at(1)), None), "another rung");
-        assert!(MultihopLadder::new(other).usable(Rung::Multihop, None, None));
+        assert!(
+            MultihopLadder::new(other).usable(Rung::Multihop, None, None),
+            "another node's ladder keeps the multihop rung"
+        );
         block_rung(local, Rung::Multihop, false);
-        assert!(ladder.usable(Rung::Multihop, None, None));
+        assert!(
+            ladder.usable(Rung::Multihop, None, None),
+            "the ladder keeps the multihop rung when nothing is blocked"
+        );
     }
 
     /// The ladder also gives up the `WebRTC` rung to one remote only, which is what
@@ -123,7 +136,10 @@ mod tests {
         let (local, cut, kept) = (node(25), node(26), node(27));
         let ladder = MultihopLadder::new(local);
         block_rung_to(local, Rung::WebRtc, cut, true);
-        assert!(!ladder.usable(Rung::WebRtc, None, Some(cut)));
+        assert!(
+            !ladder.usable(Rung::WebRtc, None, Some(cut)),
+            "the ladder gives up webrtc to one remote only"
+        );
         assert!(
             ladder.usable(Rung::WebRtc, None, Some(kept)),
             "another remote"
@@ -133,6 +149,9 @@ mod tests {
             "another rung"
         );
         block_rung_to(local, Rung::WebRtc, cut, false);
-        assert!(ladder.usable(Rung::WebRtc, None, Some(cut)));
+        assert!(
+            ladder.usable(Rung::WebRtc, None, Some(cut)),
+            "the ladder keeps webrtc to the other remote"
+        );
     }
 }

@@ -363,8 +363,16 @@ fn connects_through_one_relay_with_webrtc_on_the_same_endpoint() {
 
         assert_multihop_selected(&connection);
         echo_roundtrip(&connection, b"hello with both transports").await;
-        assert_eq!(alice_webrtc.session_count(), 0);
-        assert_eq!(bob_webrtc.session_count(), 0);
+        assert_eq!(
+            alice_webrtc.session_count(),
+            0,
+            "alice has one webrtc session on the shared endpoint"
+        );
+        assert_eq!(
+            bob_webrtc.session_count(),
+            0,
+            "bob has one webrtc session on the shared endpoint"
+        );
 
         connection.close(0u32.into(), b"done");
         echo.shutdown().await.expect("shutdown echo router");

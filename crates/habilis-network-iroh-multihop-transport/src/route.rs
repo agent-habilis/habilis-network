@@ -175,7 +175,11 @@ mod tests {
     fn encode_decode_roundtrips() {
         let route = Route::try_new(vec![hop(1), hop(2), hop(3)]).unwrap();
         let address = route.encode();
-        assert_eq!(Route::decode(&address).expect("decodes"), route);
+        assert_eq!(
+            Route::decode(&address).expect("decodes"),
+            route,
+            "an encoded route decodes back to the same route"
+        );
     }
 
     /// The route is a wire value: iroh dedupes a peer's path on these bytes, and a second
@@ -205,7 +209,8 @@ mod tests {
                 "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394ed",
                 "4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1ca93",
                 "ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c"
-            )
+            ),
+            "a route encodes to fixed bytes"
         );
     }
 
@@ -214,14 +219,20 @@ mod tests {
         let route = Route::try_new(vec![hop(1)]).unwrap();
         let address = route.encode();
         let foreign = iroh_base::CustomAddr::from_parts(0x99, address.data());
-        assert!(Route::decode(&foreign).is_none());
+        assert!(
+            Route::decode(&foreign).is_none(),
+            "a route with a foreign transport id does not decode"
+        );
     }
 
     #[test]
     fn empty_route_does_not_decode() {
         let bytes = postcard::to_allocvec(&Vec::<RouteHop>::new()).unwrap();
         let address = iroh_base::CustomAddr::from_parts(crate::MULTIHOP_TRANSPORT_ID, &bytes);
-        assert!(Route::decode(&address).is_none());
+        assert!(
+            Route::decode(&address).is_none(),
+            "an empty route does not decode"
+        );
     }
 
     #[test]
@@ -232,11 +243,15 @@ mod tests {
 
         // At B, the return route is [R2, R1, S].
         let ret = Route::reverse_from(&forward, source).expect("reverses");
-        assert_eq!(ret.0, vec![r2, r1, source]);
+        assert_eq!(
+            ret.0,
+            vec![r2, r1, source],
+            "the reversed route lists the hops back to the source"
+        );
 
         // Reversing again at S (source now B) reproduces the forward route.
         let back = Route::reverse_from(&ret.0, dest).expect("reverses");
-        assert_eq!(back.0, forward);
+        assert_eq!(back.0, forward, "reversing twice returns the forward route");
     }
 
     #[test]
@@ -246,7 +261,10 @@ mod tests {
         let hops: Vec<RouteHop> = (0..=MAX_ROUTE_HOPS)
             .map(|seed| hop(u8::try_from(seed).expect("seed fits")))
             .collect();
-        assert!(Route::try_new(hops).is_none());
+        assert!(
+            Route::try_new(hops).is_none(),
+            "a route past the hop ceiling is refused"
+        );
     }
 
     #[test]
@@ -254,7 +272,10 @@ mod tests {
         let hops: Vec<RouteHop> = (0..MAX_ROUTE_HOPS)
             .map(|seed| hop(u8::try_from(seed).expect("seed fits")))
             .collect();
-        assert!(Route::try_new(hops).is_some());
+        assert!(
+            Route::try_new(hops).is_some(),
+            "a route at the hop ceiling is accepted"
+        );
     }
 
     #[test]
@@ -262,7 +283,10 @@ mod tests {
         // The [X, Y, X, Y, …] ping-pong: every entry is a real node, so an
         // "am I named here?" check passes at every bounce. Acyclicity is what
         // actually stops it.
-        assert!(Route::try_new(vec![hop(1), hop(2), hop(1)]).is_none());
+        assert!(
+            Route::try_new(vec![hop(1), hop(2), hop(1)]).is_none(),
+            "a route that revisits a hop is refused"
+        );
     }
 
     #[test]
@@ -272,7 +296,10 @@ mod tests {
             .collect();
         let bytes = postcard::to_allocvec(&hops).unwrap();
         let address = iroh_base::CustomAddr::from_parts(crate::MULTIHOP_TRANSPORT_ID, &bytes);
-        assert!(Route::decode(&address).is_none());
+        assert!(
+            Route::decode(&address).is_none(),
+            "a route past the hop ceiling does not decode"
+        );
     }
 
     #[test]
@@ -280,7 +307,10 @@ mod tests {
         let hops = vec![hop(1), hop(2), hop(1)];
         let bytes = postcard::to_allocvec(&hops).unwrap();
         let address = iroh_base::CustomAddr::from_parts(crate::MULTIHOP_TRANSPORT_ID, &bytes);
-        assert!(Route::decode(&address).is_none());
+        assert!(
+            Route::decode(&address).is_none(),
+            "a cyclic route does not decode"
+        );
     }
 
     #[test]
@@ -288,6 +318,9 @@ mod tests {
         // A cell claiming a source that is also one of its hops would reverse
         // into a cyclic return route — including a source claiming to be us.
         let forward = vec![hop(1), hop(2), hop(3)];
-        assert!(Route::reverse_from(&forward, hop(1)).is_none());
+        assert!(
+            Route::reverse_from(&forward, hop(1)).is_none(),
+            "reverse refuses a source already in the path"
+        );
     }
 }
