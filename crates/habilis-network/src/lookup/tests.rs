@@ -155,9 +155,8 @@ async fn two_members_on_the_lan_link_with_no_beacon() {
         .expect("a LAN endpoint");
         super::lan::tag_as_member(&endpoint, &topic).expect("the tag fits");
         let gossip = Gossip::builder().spawn(endpoint.clone());
-        let router = Router::builder(endpoint.clone())
-            .accept(GOSSIP_ALPN, gossip.clone())
-            .spawn();
+        let router_builder = Router::builder(endpoint.clone()).accept(GOSSIP_ALPN, gossip.clone());
+        let router = router_builder.spawn();
         let (sender, receiver) = gossip
             .subscribe(topic, Vec::new())
             .await
@@ -649,8 +648,8 @@ async fn the_member_of_a_udp_and_gossip_list_keeps_ip_above_gossip() {
     let router = iroh::protocol::Router::builder(bob.clone())
         .accept(ALPN, Hold)
         .spawn();
-    let both = bob
-        .addr()
+    let bob_addr = bob.addr();
+    let both = bob_addr
         .addrs
         .into_iter()
         .chain([iroh::TransportAddr::Custom(
@@ -824,10 +823,9 @@ async fn a_holder_of_our_identity_that_serves_no_alpn_yet_is_not_a_foreign_mesh(
 
     let secret = SecretKey::generate();
     let id = secret.public();
-    let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .and_then(|socket| socket.local_addr())
-        .expect("a free loopback port")
-        .port();
+    let bound = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .and_then(|socket| socket.local_addr());
+    let port = bound.expect("a free loopback port").port();
     let holder = build_endpoint(
         &LookupOpts::loopback(),
         Some(secret),
@@ -888,10 +886,9 @@ async fn a_refusal_from_a_listener_of_our_identity_is_not_a_foreign_mesh() {
 
     let secret = SecretKey::generate();
     let id = secret.public();
-    let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .and_then(|socket| socket.local_addr())
-        .expect("a free loopback port")
-        .port();
+    let bound = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .and_then(|socket| socket.local_addr());
+    let port = bound.expect("a free loopback port").port();
     let listener = build_endpoint(
         &LookupOpts::loopback(),
         Some(secret),
@@ -947,10 +944,9 @@ async fn a_router_that_carries_no_unicast_completes_a_nudge() {
 
     let secret = SecretKey::generate();
     let id = secret.public();
-    let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .and_then(|socket| socket.local_addr())
-        .expect("a free loopback port")
-        .port();
+    let bound = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .and_then(|socket| socket.local_addr());
+    let port = bound.expect("a free loopback port").port();
     let beacon = build_endpoint(
         &LookupOpts::loopback(),
         Some(secret),

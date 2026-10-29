@@ -52,10 +52,10 @@ pub(crate) fn build_mesh(
         passive_view_capacity: (active_view_capacity * 2).max(1),
         ..Default::default()
     };
-    let gossip = Gossip::builder()
+    let gossip_builder = Gossip::builder()
         .membership_config(membership)
-        .topic_event_capacity(TOPIC_EVENT_CAPACITY)
-        .spawn(endpoint.clone());
+        .topic_event_capacity(TOPIC_EVENT_CAPACITY);
+    let gossip = gossip_builder.spawn(endpoint.clone());
     let local = endpoint.id();
     // The address book of the endpoint, made where the endpoint is wrapped. The caller keeps it,
     // and the signal acceptor registers webrtc transport addresses in it on attach.

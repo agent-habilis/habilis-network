@@ -47,9 +47,10 @@ pub(crate) fn lan_member_tag(topic: &iroh_gossip::proto::TopicId) -> String {
 
     use sha2::{Digest as _, Sha256};
 
+    let topic_bytes = topic.as_bytes();
     let digest = Sha256::new()
         .chain_update(b"habilis-network/lan-member/1")
-        .chain_update(topic.as_bytes())
+        .chain_update(topic_bytes)
         .finalize();
     let mut tag = String::from("hn1:");
     for byte in &digest[..8] {
@@ -118,11 +119,9 @@ pub(crate) async fn build_endpoint_keeping_mdns(
         {
             let builder = Endpoint::builder(presets::Minimal);
             #[cfg(feature = "host")]
+            let bind_socket = SocketAddrV4::new(Ipv4Addr::LOCALHOST, bind_port.unwrap_or(0));
             let builder = builder
-                .bind_addr(SocketAddrV4::new(
-                    Ipv4Addr::LOCALHOST,
-                    bind_port.unwrap_or(0),
-                ))
+                .bind_addr(bind_socket)
                 .context("failed to set bind address")?
                 .portmapper_config(PortmapperConfig::Disabled);
             builder.relay_mode(RelayMode::Disabled)

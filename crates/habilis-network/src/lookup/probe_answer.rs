@@ -40,25 +40,23 @@ pub(crate) async fn probe_answer(
     let address: EndpointAddr = target.into();
     let started = clock::Instant::now();
     let mut failure = None;
-    let answer =
-        match n0_future::time::timeout(timeout, endpoint.connect(address.clone(), GOSSIP_ALPN))
-            .await
-        {
-            Ok(Ok(connection)) => {
-                // Close explicitly, not via drop: the resolution side effect is
-                // done, and an orderly CONNECTION_CLOSE lets the accept side
-                // (the beacon's gossip, which adopts GOSSIP_ALPN connections)
-                // release the connection immediately instead of via its own
-                // error path.
-                connection.close(0u32.into(), b"probe");
-                ProbeAnswer::Ours
-            }
-            Ok(Err(error)) => {
-                failure = Some(error.to_string());
-                answer_of_connect_error(&error)
-            }
-            Err(_) => ProbeAnswer::NoAnswer,
-        };
+    let connecting = endpoint.connect(address.clone(), GOSSIP_ALPN);
+    let answer = match n0_future::time::timeout(timeout, connecting).await {
+        Ok(Ok(connection)) => {
+            // Close explicitly, not via drop: the resolution side effect is
+            // done, and an orderly CONNECTION_CLOSE lets the accept side
+            // (the beacon's gossip, which adopts GOSSIP_ALPN connections)
+            // release the connection immediately instead of via its own
+            // error path.
+            connection.close(0u32.into(), b"probe");
+            ProbeAnswer::Ours
+        }
+        Ok(Err(error)) => {
+            failure = Some(error.to_string());
+            answer_of_connect_error(&error)
+        }
+        Err(_) => ProbeAnswer::NoAnswer,
+    };
     let connected = answer == ProbeAnswer::Ours;
     // `?addr`: a loopback/private direct addr means a *local*
     // rendezvous co-host (self-partition signature); relay/public is
