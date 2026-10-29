@@ -1596,7 +1596,7 @@ mod tests {
         // Author builds the change and seals the wire body, as the daemon does.
         let merge = json!({"secret": "value"});
         let author_doc = MeshDoc::new_ungated().with_key(Some(SymmetricKey::from_bytes(key)));
-        let bytes = author_doc
+        let bytes: Vec<u8> = author_doc
             .build_change(&merge, &pad_seed(alice.as_str().as_bytes()))
             .expect("builds")
             .expect("not a no-op");
@@ -1664,7 +1664,7 @@ mod tests {
 
         // Alice writing her OWN card through the gate is allowed.
         let mut alice_doc = MeshDoc::new_gated(card_gate());
-        let own_bytes = alice_doc
+        let own_bytes: Vec<u8> = alice_doc
             .build_change(
                 &json!({"peers": {"alice": {"card": {"name": "alice"}}}}),
                 &pad_seed(alice.as_str().as_bytes()),
