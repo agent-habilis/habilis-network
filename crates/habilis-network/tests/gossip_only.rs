@@ -52,23 +52,21 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(
-            &membership::JoinOptions::default()
-                .with_nick(Some(nick.to_owned()))
-                .with_lookup(vec![Lookup::Relay])
-                .with_transport(vec![Transport::Udp, Transport::Gossip])
-                .with_relay_urls(vec![relay.to_string()]),
-        )
-        .await
+        let options = membership::JoinOptions::default()
+            .with_nick(Some(nick.to_owned()))
+            .with_lookup(vec![Lookup::Relay]);
+        let options = options
+            .with_transport(vec![Transport::Udp, Transport::Gossip])
+            .with_relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(
-            &membership::JoinOptions::default()
-                .with_nick(Some(nick.to_owned()))
-                .with_mesh(Some(creator.membership.node.mesh_id().to_string())),
-        )
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .with_nick(Some(nick.to_owned()))
+            .with_mesh(Some(mesh));
+        Self::open(&options).await
     }
 
     async fn roster_len(&self) -> usize {
@@ -77,8 +75,8 @@ impl Member {
             .request(|reply| Request::Peers { reply })
             .await
             .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
+        let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
+        roster
             .and_then(|roster| roster["peers"].as_array().map(Vec::len))
             .unwrap_or(0)
     }
@@ -121,13 +119,15 @@ impl Member {
 
     /// The nicknames that answered one ping round.
     async fn ping(&self) -> Vec<String> {
-        self.membership
+        let answers = self
+            .membership
             .request(|reply| Request::Ping { reply })
             .await
-            .expect("the loop answers")
+            .expect("the loop answers");
+        let names = answers
             .into_iter()
-            .map(|(nick, _)| nick.as_str().to_owned())
-            .collect()
+            .map(|(nick, _)| nick.as_str().to_owned());
+        names.collect()
     }
 
     /// How many gossip connections the recursion rule has closed in this process so far.

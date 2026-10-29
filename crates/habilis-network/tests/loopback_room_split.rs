@@ -154,9 +154,11 @@ impl Round {
 
     /// The `(node, port)` of every beacon that was bound on a rung, in order.
     fn beacons(&self) -> Vec<(String, String)> {
-        self.log()
+        let text = self.log();
+        let lines = text
             .lines()
-            .filter(|line| line.contains("beacon assumed: bound rendezvous ladder rung"))
+            .filter(|line| line.contains("beacon assumed: bound rendezvous ladder rung"));
+        lines
             .map(|line| (field(line, "node="), field(line, "port=")))
             .collect()
     }
@@ -164,20 +166,18 @@ impl Round {
     /// How many times the member with the short id `node` read a lower rung that answered as the
     /// beacon of its mesh: each one is a shed of its beacon.
     fn lower_rung_answers_of(&self, node: &str) -> usize {
-        self.log()
+        let text = self.log();
+        let lines = text
             .lines()
-            .filter(|line| line.contains("a lower rung answers as the beacon of our mesh"))
-            .filter(|line| field(line, "node=") == node)
-            .count()
+            .filter(|line| line.contains("a lower rung answers as the beacon of our mesh"));
+        lines.filter(|line| field(line, "node=") == node).count()
     }
 
     /// The ports that the members with the short ids `nodes` bound a beacon on.
     fn ports_bound_by(&self, nodes: &[String]) -> BTreeSet<String> {
-        self.beacons()
-            .into_iter()
-            .filter(|(node, _)| nodes.contains(node))
-            .map(|(_, port)| port)
-            .collect()
+        let beacons = self.beacons();
+        let bound = beacons.into_iter().filter(|(node, _)| nodes.contains(node));
+        bound.map(|(_, port)| port).collect()
     }
 
     /// Whether the member with the short id `node` bound a rung.
@@ -228,11 +228,9 @@ impl Round {
 
 /// The value of `key` (like `port=`) in a log line, up to the next space.
 fn field(line: &str, key: &str) -> String {
-    line.split(key)
-        .nth(1)
-        .and_then(|rest| rest.split_whitespace().next())
-        .unwrap_or_default()
-        .to_owned()
+    let value = line.split(key).nth(1);
+    let word = value.and_then(|rest| rest.split_whitespace().next());
+    word.unwrap_or_default().to_owned()
 }
 
 struct Member {
@@ -244,14 +242,12 @@ impl Member {
     /// A creator when `mesh` is `None`, a joiner by id otherwise. No lookup: a loopback room.
     async fn open(nick: &str, mesh: Option<&str>) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership: Membership = membership::join(
-            &membership::JoinOptions::default()
-                .with_nick(Some(nick.to_owned()))
-                .with_mesh(mesh.map(str::to_owned)),
-            sink,
-        )
-        .await
-        .expect("open a member");
+        let options = membership::JoinOptions::default()
+            .with_nick(Some(nick.to_owned()))
+            .with_mesh(mesh.map(str::to_owned));
+        let membership: Membership = membership::join(&options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -715,14 +711,12 @@ async fn holder_whose_beacon_stops_answering(
 /// A joiner by id whose sink is read by the caller. The one case that reads what the app is told.
 async fn open_watched(nick: &str, mesh: &str) -> (Member, UnboundedReceiver<String>) {
     let (sink, events) = membership::json_sink();
-    let membership: Membership = membership::join(
-        &membership::JoinOptions::default()
-            .with_nick(Some(nick.to_owned()))
-            .with_mesh(Some(mesh.to_owned())),
-        sink,
-    )
-    .await
-    .expect("open a member");
+    let options = membership::JoinOptions::default()
+        .with_nick(Some(nick.to_owned()))
+        .with_mesh(Some(mesh.to_owned()));
+    let membership: Membership = membership::join(&options, sink)
+        .await
+        .expect("open a member");
     let (_sender, unread) = mpsc::unbounded_channel();
     (
         Member {
@@ -818,11 +812,11 @@ async fn ladder_held_by_other_processes(
             again += 1;
         }
     }
-    let warns: usize = round
-        .log()
+    let text = round.log();
+    let lines = text
         .lines()
-        .filter(|line| line.contains("WARN") && line.contains("no rendezvous port is free"))
-        .count();
+        .filter(|line| line.contains("WARN") && line.contains("no rendezvous port is free"));
+    let warns: usize = lines.count();
     let bound = round.beacons().len() - bound_before;
     if again != 0 || warns != 1 || bound != 0 {
         return Err(format!(

@@ -82,23 +82,21 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
-        Self::open(
-            &membership::JoinOptions::default()
-                .with_nick(Some(nick.to_owned()))
-                .with_lookup(vec![Lookup::Relay])
-                .with_transport(transport)
-                .with_relay_urls(vec![relay.to_string()]),
-        )
-        .await
+        let options = membership::JoinOptions::default()
+            .with_nick(Some(nick.to_owned()))
+            .with_lookup(vec![Lookup::Relay]);
+        let options = options
+            .with_transport(transport)
+            .with_relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(
-            &membership::JoinOptions::default()
-                .with_nick(Some(nick.to_owned()))
-                .with_mesh(Some(creator.membership.node.mesh_id().to_string())),
-        )
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .with_nick(Some(nick.to_owned()))
+            .with_mesh(Some(mesh));
+        Self::open(&options).await
     }
 
     /// A broadcast, which is a `msg` with no addressee.
@@ -234,6 +232,7 @@ impl Peer for Member {
 /// Records the chat frames it gets, and logs them as agent-gossip's app does.
 #[derive(Clone, Default)]
 struct Chat {
+    // Shared with the sink the membership owns: the test reads what arrived after the join.
     received: Arc<Mutex<Vec<String>>>,
 }
 
@@ -330,6 +329,7 @@ impl LoggingMember {
             },
             SetupParams::new(
                 Nickname::try_new(name).expect("valid nickname"),
+                // The membership keeps its sink as a trait object for its whole life.
                 Arc::new(Quiet),
             )
             .with_max_peers(16),

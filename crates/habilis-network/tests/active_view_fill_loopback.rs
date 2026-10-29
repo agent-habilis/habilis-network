@@ -78,13 +78,12 @@ impl Member {
     }
 
     async fn join(nick: &str, creator: &Self, max_peers: usize) -> Self {
-        Self::open(
-            &membership::JoinOptions::default()
-                .with_nick(Some(nick.to_owned()))
-                .with_mesh(Some(creator.membership.node.mesh_id().to_string()))
-                .with_max_peers(max_peers),
-        )
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .with_nick(Some(nick.to_owned()))
+            .with_mesh(Some(mesh));
+        let options = options.with_max_peers(max_peers);
+        Self::open(&options).await
     }
 
     /// The nicknames of the peers this member holds a live gossip link to.
