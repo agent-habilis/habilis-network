@@ -98,7 +98,9 @@ pub fn live_start_time(pid: u32) -> Option<u64> {
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn parent_of(pid: u32) -> Option<u32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    use std::fs;
+
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // The comm field is parenthesized and may itself contain spaces and `)`,
     // so fields are only positional after the *last* `)`.
     let after_comm = stat.rsplit_once(')')?.1;
@@ -124,7 +126,9 @@ pub fn parent_of(pid: u32) -> Option<u32> {
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn live_start_time(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    use std::fs;
+
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
     if fields.next()? == "Z" {
         return None;
@@ -147,7 +151,9 @@ pub fn live_start_time(pid: u32) -> Option<u64> {
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn comm_of(pid: u32) -> Option<String> {
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    use std::fs;
+
+    let comm = fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
     Some(comm.trim_end().to_string())
 }
 

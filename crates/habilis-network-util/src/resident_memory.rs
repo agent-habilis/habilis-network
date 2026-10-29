@@ -136,7 +136,9 @@ fn current_rss_bytes() -> Option<u64> {
 #[cfg(all(target_os = "linux", feature = "host"))]
 #[expect(unsafe_code, reason = "libc sysconf FFI for the page size")]
 fn current_rss_bytes() -> Option<u64> {
-    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    use std::fs;
+
+    let statm = fs::read_to_string("/proc/self/statm").ok()?;
     let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
     // SAFETY: `sysconf` with a valid name has no memory effects.
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };

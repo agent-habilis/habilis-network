@@ -237,7 +237,7 @@ impl StateFile {
             }
             #[cfg(not(unix))]
             {
-                std::fs::File::create(&temp)?
+                fs::File::create(&temp)?
             }
         };
         file.write_all(&json)?;
