@@ -5,10 +5,10 @@
 ///
 /// # Examples
 ///
-/// New data channel counters start at zero. The web module is private, so this is not compiled.
+/// New data channel counters start at zero. The web module is private, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// use habilis_network_iroh_webrtc_transport::web::DataChannelCounters;
+/// ```
+/// use habilis_network_iroh_webrtc_transport::DataChannelCounters;
 ///
 /// let counters = DataChannelCounters::default();
 /// assert_eq!(counters.messages_sent, 0.0);

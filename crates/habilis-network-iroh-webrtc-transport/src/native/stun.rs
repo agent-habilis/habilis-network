@@ -183,10 +183,15 @@ fn decode_address(
 ///
 /// # Examples
 ///
-/// It asks a STUN server on the network, so this is not compiled.
+/// It asks a STUN server on the network, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let address = gather_reflexive(socket).await?;
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::{IceConfig, stun};
+/// use tokio::net::UdpSocket;
+///
+/// # async fn demo(socket: &UdpSocket) -> Option<std::net::SocketAddr> {
+/// stun::gather_reflexive(socket, &IceConfig::host_only()).await
+/// # }
 /// ```
 pub async fn gather_reflexive(socket: &UdpSocket, config: &IceConfig) -> Option<SocketAddr> {
     gather_with_resolver(socket, config, |server: String| async move {

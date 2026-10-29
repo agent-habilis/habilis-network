@@ -3,13 +3,14 @@
 ///
 /// # Examples
 ///
-/// The dropped count adds the frames dropped for each reason. The web module is private, so this is not compiled.
+/// The dropped count adds the frames dropped for each reason. The web module is private, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// use habilis_network_iroh_webrtc_transport::web::SessionCounts;
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::SessionCounts;
 ///
-/// let counts = SessionCounts { sent: 3, dropped_queue_full: 1, dropped_congested: 0, dropped_refused: 0 };
-/// assert_eq!(counts.dropped(), 1);
+/// # fn demo(counts: SessionCounts) -> u64 {
+/// counts.dropped()
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

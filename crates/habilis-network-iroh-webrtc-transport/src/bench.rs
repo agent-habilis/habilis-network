@@ -123,10 +123,15 @@ fn header(direction: Direction, wanted: u32) -> [u8; HEADER_LEN] {
 ///
 /// # Examples
 ///
-/// It runs a benchmark over live connections, so this is not compiled.
+/// It runs a benchmark over live connections, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::bench::Bench;
+///
+/// # fn demo() {
 /// let bench = Bench::new();
+/// let _ = bench;
+/// # }
 /// ```
 #[derive(Debug, Clone, Default, Copy)]
 #[non_exhaustive]
@@ -251,12 +256,15 @@ pub fn is_payload(body: &[u8]) -> bool {
 ///
 /// # Examples
 ///
-/// It reads the selected path of a live connection, so this is not compiled.
+/// It reads the selected path of a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// if on_webrtc(&connection) {
-///     println!("the connection runs over webrtc");
-/// }
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::bench::on_webrtc;
+/// use iroh::endpoint::Connection;
+///
+/// # fn demo(connection: &Connection) -> bool {
+/// on_webrtc(connection)
+/// # }
 /// ```
 #[must_use]
 pub fn on_webrtc(connection: &Connection) -> bool {
@@ -276,10 +284,17 @@ pub fn on_webrtc(connection: &Connection) -> bool {
 ///
 /// # Examples
 ///
-/// It binds a browser endpoint on the network, so this is not compiled.
+/// It binds a browser endpoint on the network, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let endpoint = browser_endpoint(local).await;
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::WebRtcHandle;
+/// use habilis_network_iroh_webrtc_transport::BenchError;
+/// use habilis_network_iroh_webrtc_transport::bench::browser_endpoint;
+/// use iroh::SecretKey;
+///
+/// # async fn demo(hub: &WebRtcHandle) -> Result<iroh::Endpoint, BenchError> {
+/// browser_endpoint(SecretKey::from_bytes(&[1u8; 32]), hub).await
+/// # }
 /// ```
 #[cfg(all(feature = "web", not(feature = "native")))]
 pub async fn browser_endpoint(
@@ -310,10 +325,16 @@ pub async fn browser_endpoint(
 ///
 /// # Examples
 ///
-/// It exchanges bytes over a live connection, so this is not compiled.
+/// It exchanges bytes over a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let reply = exchange(&connection, &payload).await;
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::BenchError;
+/// use habilis_network_iroh_webrtc_transport::bench::{Direction, exchange};
+/// use iroh::endpoint::Connection;
+///
+/// # async fn demo(connection: &Connection) -> Result<usize, BenchError> {
+/// exchange(connection, Direction::Both, 1024).await
+/// # }
 /// ```
 pub async fn exchange(
     connection: &Connection,
@@ -369,10 +390,16 @@ pub const RTT_PROBE_BYTES: usize = 1024;
 ///
 /// # Examples
 ///
-/// It measures round trips over a live connection, so this is not compiled.
+/// It measures round trips over a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let samples = rtt_samples(&connection).await;
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::BenchError;
+/// use habilis_network_iroh_webrtc_transport::bench::rtt_samples;
+/// use iroh::endpoint::Connection;
+///
+/// # async fn demo(connection: &Connection) -> Result<usize, BenchError> {
+/// Ok(rtt_samples(connection, 1, 3).await?.count())
+/// # }
 /// ```
 pub async fn rtt_samples(
     connection: &Connection,

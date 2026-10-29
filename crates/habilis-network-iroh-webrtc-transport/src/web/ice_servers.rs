@@ -7,10 +7,10 @@ use super::ice_server::IceServer;
 ///
 /// # Examples
 ///
-/// A host-only set of ICE servers names none. The web module is private, so this is not compiled.
+/// A host-only set of ICE servers names none. The web module is private, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// use habilis_network_iroh_webrtc_transport::web::IceServers;
+/// ```
+/// use habilis_network_iroh_webrtc_transport::IceServers;
 ///
 /// assert!(IceServers::host_only().0.is_empty());
 /// ```

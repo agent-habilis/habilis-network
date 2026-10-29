@@ -34,12 +34,14 @@ pub const MAX_DATAGRAM_LEN: usize = MAX_FRAME_LEN - HEADER_LEN;
 ///
 /// # Examples
 ///
-/// A frame carries one datagram from a source to a destination. A caller outside the crate cannot build one without the test-fixtures feature, so this is not compiled.
+/// A frame carries one datagram from a source to a destination. A caller outside the crate cannot build one without the test-fixtures feature, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let frame = Frame { dst, src, datagram: b"hello" };
-/// let bytes = frame.encode().expect("a frame encodes");
-/// assert_eq!(decode(&bytes).expect("a frame decodes"), frame);
+/// ```no_run
+/// use habilis_network_iroh_gossip_transport::{EncodeError, Frame};
+///
+/// # fn demo(frame: &Frame<'_>) -> Result<bytes::Bytes, EncodeError> {
+/// frame.encode()
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

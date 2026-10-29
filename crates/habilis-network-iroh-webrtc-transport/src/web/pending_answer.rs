@@ -13,10 +13,14 @@ use super::transport::BrowserHubTransport;
 ///
 /// # Examples
 ///
-/// It waits on a browser peer connection, so this is not compiled.
+/// It waits on a browser peer connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let session = pending.complete(answer)?;
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::BrowserPendingAnswer;
+///
+/// # fn demo(pending: BrowserPendingAnswer) {
+/// drop(pending);
+/// # }
 /// ```
 pub struct PendingAnswer {
     pub(super) peer_connection: OpenPeerConnection,

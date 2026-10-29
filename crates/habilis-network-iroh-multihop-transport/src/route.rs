@@ -35,12 +35,14 @@ pub(crate) const MAX_ROUTE_HOPS: usize = 8;
 ///
 /// # Examples
 ///
-/// The routing code builds a hop, and a caller outside the crate cannot build one, so this is not compiled.
+/// The routing code builds a hop, and a caller outside the crate cannot build one, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// for hop in route.hops() {
-///     println!("{:?}", hop);
-/// }
+/// ```no_run
+/// use habilis_network_iroh_multihop_transport::RouteHop;
+///
+/// # fn demo(hop: RouteHop) {
+/// drop(hop);
+/// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy)]
 pub struct RouteHop {
@@ -60,10 +62,14 @@ pub struct RouteHop {
 ///
 /// # Examples
 ///
-/// The topology builds a route from a Leg, which a caller outside the crate cannot build, so this is not compiled.
+/// The topology builds a route from a Leg, which a caller outside the crate cannot build, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let routes: Vec<Route> = topology.route_to(leg, 2).collect();
+/// ```no_run
+/// use habilis_network_iroh_multihop_transport::Route;
+///
+/// # fn demo(route: &Route) -> Route {
+/// route.clone()
+/// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Route(Vec<RouteHop>);

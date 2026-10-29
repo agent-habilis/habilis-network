@@ -24,10 +24,14 @@ use crate::{IN_QUEUE, OUT_QUEUE, custom_addr};
 ///
 /// # Examples
 ///
-/// It runs on a browser hub, so this is not compiled.
+/// It runs on a browser hub, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let transport = BrowserHubTransport::new(hub);
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::BrowserHubTransport;
+///
+/// # fn demo(transport: BrowserHubTransport) {
+/// drop(transport);
+/// # }
 /// ```
 pub struct BrowserHubTransport {
     local_id: EndpointId,

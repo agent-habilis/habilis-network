@@ -441,10 +441,14 @@ pub struct TopologyView {
 ///
 /// # Examples
 ///
-/// The topology view builds an edge, and a caller outside the crate has no other way to make one, so this is not compiled.
+/// The topology view builds an edge, and a caller outside the crate has no other way to make one, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let edges = view.edges;
+/// ```no_run
+/// use habilis_network_iroh_multihop_transport::TopologyEdge;
+///
+/// # fn demo(edge: &TopologyEdge) -> TopologyEdge {
+/// edge.clone()
+/// # }
 /// ```
 #[derive(Debug, Clone, serde::Serialize)]
 #[non_exhaustive]

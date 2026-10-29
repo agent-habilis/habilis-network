@@ -8,11 +8,14 @@ use crate::GossipHandle;
 ///
 /// # Examples
 ///
-/// The loop reads a live gossip receiver, so this is not compiled.
+/// The loop reads a live gossip receiver, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let task = spawn_receive_loop(receiver, handle);
-/// task.abort();
+/// ```no_run
+/// use habilis_network_iroh_gossip_transport::{GossipHandle, ReceiveLoop, spawn_receive_loop, iroh_gossip::api::GossipReceiver};
+///
+/// # fn demo(receiver: GossipReceiver, handle: GossipHandle) -> ReceiveLoop {
+/// spawn_receive_loop(receiver, handle)
+/// # }
 /// ```
 pub type ReceiveLoop = n0_future::task::JoinHandle<()>;
 
@@ -24,11 +27,15 @@ pub type ReceiveLoop = n0_future::task::JoinHandle<()>;
 ///
 /// # Examples
 ///
-/// It reads a live gossip receiver, so this is not compiled.
+/// It reads a live gossip receiver, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
+/// ```no_run
+/// use habilis_network_iroh_gossip_transport::{GossipHandle, spawn_receive_loop, iroh_gossip::api::GossipReceiver};
+///
+/// # fn demo(receiver: GossipReceiver, handle: GossipHandle) {
 /// let task = spawn_receive_loop(receiver, handle);
 /// task.abort();
+/// # }
 /// ```
 #[must_use]
 pub fn spawn_receive_loop(mut receiver: GossipReceiver, handle: GossipHandle) -> ReceiveLoop {

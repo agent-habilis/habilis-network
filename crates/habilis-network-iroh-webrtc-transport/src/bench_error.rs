@@ -7,10 +7,10 @@ use std::fmt;
 ///
 /// # Examples
 ///
-/// A benchmark whose echo does not match its payload returns this error. The `bench_error` module is private, so this is not compiled.
+/// A benchmark whose echo does not match its payload returns this error. The `bench_error` module is private, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// use habilis_network_iroh_webrtc_transport::bench::BenchError;
+/// ```
+/// use habilis_network_iroh_webrtc_transport::BenchError;
 ///
 /// let error = BenchError::EchoMismatch;
 /// assert!(matches!(error, BenchError::EchoMismatch));

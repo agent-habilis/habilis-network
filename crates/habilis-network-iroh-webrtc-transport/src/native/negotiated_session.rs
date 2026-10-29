@@ -9,10 +9,14 @@ use tokio::net::UdpSocket;
 ///
 /// # Examples
 ///
-/// It is the open data channel that a finished negotiation produces, so this is not compiled.
+/// It is the open data channel that a finished negotiation produces, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let session = pending.complete(answer)?;
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::NegotiatedSession;
+///
+/// # fn demo(session: NegotiatedSession) {
+/// drop(session);
+/// # }
 /// ```
 pub struct NegotiatedSession {
     pub(crate) rtc: Rtc,

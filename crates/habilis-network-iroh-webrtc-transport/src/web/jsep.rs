@@ -82,10 +82,17 @@ fn create_peer_connection(ice: &IceServers) -> Result<(RtcPeerConnection, bool),
 ///
 /// # Examples
 ///
-/// It creates an offer on a browser peer connection, so this is not compiled.
+/// It creates an offer on a browser peer connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let (pending, envelope) = offer(&connection).await?;
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::{IceServers, browser_offer};
+/// use iroh::EndpointId;
+/// use wasm_bindgen::JsValue;
+///
+/// # async fn demo(local: EndpointId, ice: &IceServers) -> Result<(), JsValue> {
+/// let (_pending, _envelope) = browser_offer(local, ice).await?;
+/// Ok(())
+/// # }
 /// ```
 pub async fn offer(
     local: EndpointId,
@@ -141,10 +148,17 @@ pub async fn offer(
 ///
 /// # Examples
 ///
-/// It creates an answer on a browser peer connection, so this is not compiled.
+/// It creates an answer on a browser peer connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let (pending, envelope) = answer(&connection, &offer).await?;
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::{IceServers, SignalEnvelope, browser_answer};
+/// use iroh::EndpointId;
+/// use wasm_bindgen::JsValue;
+///
+/// # async fn demo(local: EndpointId, offer: &SignalEnvelope, ice: &IceServers) -> Result<(), JsValue> {
+/// let (_pending, _envelope) = browser_answer(local, offer, ice).await?;
+/// Ok(())
+/// # }
 /// ```
 pub async fn answer(
     local: EndpointId,
@@ -241,10 +255,14 @@ pub async fn answer(
 ///
 /// # Examples
 ///
-/// It logs the SDP of a live signal, so this is not compiled.
+/// It logs the SDP of a live signal, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// log_signal_sdps(&envelope);
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::{SignalEnvelope, log_signal_sdps};
+///
+/// # fn demo(local: &SignalEnvelope, remote: &SignalEnvelope) {
+/// log_signal_sdps("offer", local, remote);
+/// # }
 /// ```
 pub fn log_signal_sdps(role: &str, local: &SignalEnvelope, remote: &SignalEnvelope) {
     let local_sdp = envelope_sdp(local).unwrap_or("");

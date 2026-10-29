@@ -22,11 +22,14 @@ const QUEUE: usize = 256;
 ///
 /// # Examples
 ///
-/// It sends frames on a live gossip sender, which a caller gets from a running gossip node, so this is not compiled.
+/// It sends frames on a live gossip sender, which a caller gets from a running gossip node, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let sink = GossipSink::spawn(sender);
-/// assert!(sink.is_alive());
+/// ```no_run
+/// use habilis_network_iroh_gossip_transport::{FrameSink, GossipSink, iroh_gossip::api::GossipSender};
+///
+/// # fn demo(sender: GossipSender) -> bool {
+/// GossipSink::spawn(sender).is_alive()
+/// # }
 /// ```
 #[derive(Debug)]
 pub struct GossipSink {

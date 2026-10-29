@@ -25,7 +25,11 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```no_run
+//! use habilis_network_iroh_multihop_transport::{HandleConfig, LinkVector, MultihopHandle, underlay_secret};
+//! use iroh::{Endpoint, SecretKey, endpoint::presets};
+//!
+//! # async fn demo(app_secret: SecretKey, link_vector: LinkVector) -> Result<(), Box<dyn std::error::Error>> {
 //! // A dedicated underlay endpoint the crate forwards over, on the key derived
 //! // from the application key.
 //! let underlay: Endpoint = Endpoint::builder(presets::N0)
@@ -41,6 +45,9 @@
 //!     .await?;
 //! // Feed live link-state so routes can be computed.
 //! handle.feed_topology(link_vector);
+//! # let _ = app;
+//! # Ok(())
+//! # }
 //! ```
 
 use tokio::sync::mpsc;
@@ -255,10 +262,14 @@ impl HandleConfig {
 ///
 /// # Examples
 ///
-/// A handle runs on a live endpoint, so this is not compiled.
+/// A handle runs on a live endpoint, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let handle = MultihopHandle::bind(endpoint, config).await?;
+/// ```no_run
+/// use habilis_network_iroh_multihop_transport::MultihopHandle;
+///
+/// # fn demo(handle: MultihopHandle) {
+/// drop(handle);
+/// # }
 /// ```
 #[derive(Clone, Debug)]
 pub struct MultihopHandle {

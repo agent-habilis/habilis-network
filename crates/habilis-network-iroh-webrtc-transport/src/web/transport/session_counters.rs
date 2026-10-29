@@ -16,10 +16,14 @@ use std::sync::atomic::AtomicU64;
 ///
 /// # Examples
 ///
-/// It counts the frames of a live session, so this is not compiled.
+/// It counts the frames of a live session, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let counters = SessionCounters::default();
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::SessionCounters;
+///
+/// # fn demo(counters: SessionCounters) {
+/// drop(counters);
+/// # }
 /// ```
 #[derive(Debug, Default)]
 #[non_exhaustive]

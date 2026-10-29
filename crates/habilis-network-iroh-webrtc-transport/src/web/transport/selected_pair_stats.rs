@@ -4,10 +4,10 @@
 ///
 /// # Examples
 ///
-/// A new set of pair statistics has no round trip yet. The web module is private, so this is not compiled.
+/// A new set of pair statistics has no round trip yet. The web module is private, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// use habilis_network_iroh_webrtc_transport::web::SelectedPairStats;
+/// ```
+/// use habilis_network_iroh_webrtc_transport::SelectedPairStats;
 ///
 /// let stats = SelectedPairStats::default();
 /// assert!(stats.round_trip.is_none());

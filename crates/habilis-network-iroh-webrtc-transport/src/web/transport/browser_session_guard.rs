@@ -13,10 +13,14 @@ use iroh::EndpointId;
 ///
 /// # Examples
 ///
-/// It guards a browser session, so this is not compiled.
+/// It guards a browser session, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let guard = BrowserSessionGuard::new(session);
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::BrowserSessionGuard;
+///
+/// # fn demo(guard: BrowserSessionGuard) {
+/// drop(guard);
+/// # }
 /// ```
 #[derive(Debug)]
 #[must_use = "an uncommitted session guard tears the session down when dropped"]

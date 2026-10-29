@@ -7,10 +7,15 @@ use iroh::protocol::{DynProtocolHandler, ProtocolHandler};
 ///
 /// # Examples
 ///
-/// A protocol set serves a handler on a live endpoint, so this is not compiled.
+/// A protocol set serves a handler on a live endpoint, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let set = ProtocolSet::default().with_protocol(handler);
+/// ```no_run
+/// use habilis_network_iroh_transport_util::ProtocolSet;
+/// use iroh::protocol::ProtocolHandler;
+///
+/// # fn demo<Handler: ProtocolHandler>(set: ProtocolSet, handler: Handler) -> ProtocolSet {
+/// set.with_protocol(b"chat".to_vec(), handler)
+/// # }
 /// ```
 #[derive(Debug, Default)]
 pub struct ProtocolSet(pub(crate) Vec<(Vec<u8>, Box<dyn DynProtocolHandler>)>);

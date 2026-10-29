@@ -26,10 +26,14 @@ pub(crate) struct Graph {
 ///
 /// # Examples
 ///
-/// A Leg is built by the routing code, and a caller outside the crate cannot build one, so this is not compiled.
+/// A Leg is built by the routing code, and a caller outside the crate cannot build one, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let leg = Leg { src, dst };
+/// ```no_run
+/// use habilis_network_iroh_multihop_transport::{Leg, Topology};
+///
+/// # fn demo(topology: &Topology, leg: Leg) -> usize {
+/// topology.route_to(leg, 2).count()
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

@@ -4,9 +4,13 @@ use super::BrowserHubTransport;
 ///
 /// # Examples
 ///
-/// It is a browser transport type, so this is not compiled.
+/// It is a browser transport type, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let transport: BrowserRtcTransport = make_transport(local);
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::BrowserRtcTransport;
+///
+/// # fn demo(transport: BrowserRtcTransport) {
+/// drop(transport);
+/// # }
 /// ```
 pub type BrowserRtcTransport = BrowserHubTransport;

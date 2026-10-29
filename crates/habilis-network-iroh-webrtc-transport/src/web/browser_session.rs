@@ -4,10 +4,14 @@ use iroh_base::EndpointId;
 ///
 /// # Examples
 ///
-/// It holds a browser peer connection, so this is not compiled.
+/// It holds a browser peer connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let session = BrowserSession::new(hub, peer);
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::BrowserSession;
+///
+/// # fn demo(session: BrowserSession) {
+/// drop(session);
+/// # }
 /// ```
 #[non_exhaustive]
 pub struct BrowserSession {

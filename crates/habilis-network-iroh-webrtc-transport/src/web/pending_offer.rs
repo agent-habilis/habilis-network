@@ -12,10 +12,14 @@ use crate::SignalEnvelope;
 ///
 /// # Examples
 ///
-/// It waits on a browser peer connection, so this is not compiled.
+/// It waits on a browser peer connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let session = pending.complete(answer)?;
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::BrowserPendingOffer;
+///
+/// # fn demo(pending: BrowserPendingOffer) {
+/// drop(pending);
+/// # }
 /// ```
 pub struct PendingOffer {
     pub(super) peer_connection: OpenPeerConnection,

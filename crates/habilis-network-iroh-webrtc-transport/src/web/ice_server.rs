@@ -6,10 +6,14 @@
 ///
 /// # Examples
 ///
-/// It is built for the browser's own peer connection, so this is not compiled.
+/// It is built for the browser's own peer connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let server = IceServer { urls: vec!["stun:stun.example.org".to_owned()] };
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::IceServer;
+///
+/// # fn demo(server: IceServer) -> Vec<String> {
+/// server.urls
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]

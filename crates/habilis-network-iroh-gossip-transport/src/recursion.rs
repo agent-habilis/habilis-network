@@ -15,12 +15,15 @@ use crate::GOSSIP_TRANSPORT_ID;
 ///
 /// # Examples
 ///
-/// It reads the selected path of a live connection, so this is not compiled.
+/// It reads the selected path of a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// if selected_is_gossip(&connection) {
-///     println!("the path runs over gossip");
-/// }
+/// ```no_run
+/// use habilis_network_iroh_gossip_transport::selected_is_gossip;
+/// use iroh::endpoint::Connection;
+///
+/// # fn demo(connection: &Connection) -> bool {
+/// selected_is_gossip(connection)
+/// # }
 /// ```
 #[must_use]
 pub fn selected_is_gossip(connection: &Connection) -> bool {
@@ -39,10 +42,15 @@ pub fn selected_is_gossip(connection: &Connection) -> bool {
 ///
 /// # Examples
 ///
-/// It watches a live connection, so this is not compiled.
+/// It watches a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// watch_recursion(&connection, 1, || println!("the connection closed"));
+/// ```no_run
+/// use habilis_network_iroh_gossip_transport::watch_recursion;
+/// use iroh::endpoint::Connection;
+///
+/// # fn demo(connection: &Connection) {
+/// watch_recursion(connection, 1, || println!("the connection closed"));
+/// # }
 /// ```
 pub fn watch_recursion(
     connection: &Connection,

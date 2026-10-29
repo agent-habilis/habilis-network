@@ -18,10 +18,15 @@ use std::sync::atomic::Ordering;
 ///
 /// # Examples
 ///
-/// It reads the path selection of a live connection, so this is not compiled.
+/// It reads the path selection of a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let best = best_of(paths);
+/// ```no_run
+/// use habilis_network_iroh_transport_util::best_of;
+/// use iroh::endpoint::transports::PathSelectionData;
+///
+/// # fn demo<'a>(paths: &'a [PathSelectionData<'a>]) -> Option<&'a PathSelectionData<'a>> {
+/// best_of(paths.iter())
+/// # }
 /// ```
 #[must_use]
 pub fn best_of<'a>(
@@ -96,10 +101,15 @@ impl Rung {
 ///
 /// # Examples
 ///
-/// It reads the path selection of a live connection, so this is not compiled.
+/// It reads the path selection of a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let rung = rung_of(&path, custom_rung);
+/// ```no_run
+/// use habilis_network_iroh_transport_util::{Rung, custom_rung, rung_of};
+/// use iroh::endpoint::transports::PathSelectionData;
+///
+/// # fn demo(path: &PathSelectionData<'_>) -> Rung {
+/// rung_of(path, custom_rung)
+/// # }
 /// ```
 #[must_use]
 pub fn rung_of(path: &PathSelectionData<'_>, custom: impl Fn(u64) -> Rung) -> Rung {
@@ -176,10 +186,15 @@ pub fn expected_rung(
 ///
 /// # Examples
 ///
-/// It walks the rungs of a live connection, so this is not compiled.
+/// It walks the rungs of a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let next = climb(&rungs, current);
+/// ```no_run
+/// use habilis_network_iroh_transport_util::{Rung, climb, custom_rung};
+/// use iroh::endpoint::transports::PathSelectionData;
+///
+/// # fn demo<'a>(paths: &'a [PathSelectionData<'a>]) -> Option<&'a PathSelectionData<'a>> {
+/// climb(paths, custom_rung, |rung, _path| matches!(rung, Rung::Ip))
+/// # }
 /// ```
 #[must_use]
 pub fn climb<'a>(
@@ -201,10 +216,15 @@ pub fn climb<'a>(
 ///
 /// # Examples
 ///
-/// It reads the path selection of a live connection, so this is not compiled.
+/// It reads the path selection of a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let remote = ip_remote(&path);
+/// ```no_run
+/// use habilis_network_iroh_transport_util::ip_remote;
+/// use iroh::endpoint::transports::PathSelectionData;
+///
+/// # fn demo(path: &PathSelectionData<'_>) -> Option<std::net::SocketAddr> {
+/// ip_remote(path)
+/// # }
 /// ```
 #[must_use]
 pub fn ip_remote(path: &PathSelectionData<'_>) -> Option<std::net::SocketAddr> {
@@ -222,10 +242,15 @@ pub fn ip_remote(path: &PathSelectionData<'_>) -> Option<std::net::SocketAddr> {
 ///
 /// # Examples
 ///
-/// It reads an address of a live connection, so this is not compiled.
+/// It reads an address of a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let id = remote_id_of(&address);
+/// ```no_run
+/// use habilis_network_iroh_transport_util::remote_id_of;
+/// use iroh::endpoint::transports::Addr;
+///
+/// # fn demo(address: &Addr) -> Option<iroh::EndpointId> {
+/// remote_id_of(address)
+/// # }
 /// ```
 #[must_use]
 pub fn remote_id_of(address: &Addr) -> Option<iroh::EndpointId> {
@@ -243,10 +268,15 @@ pub fn remote_id_of(address: &Addr) -> Option<iroh::EndpointId> {
 ///
 /// # Examples
 ///
-/// It reads the path selection of a live connection, so this is not compiled.
+/// It reads the path selection of a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let id = remote_id(&path);
+/// ```no_run
+/// use habilis_network_iroh_transport_util::remote_id;
+/// use iroh::endpoint::transports::PathSelectionData;
+///
+/// # fn demo(path: &PathSelectionData<'_>) -> Option<iroh::EndpointId> {
+/// remote_id(path)
+/// # }
 /// ```
 #[must_use]
 pub fn remote_id(path: &PathSelectionData<'_>) -> Option<iroh::EndpointId> {
@@ -258,10 +288,15 @@ pub fn remote_id(path: &PathSelectionData<'_>) -> Option<iroh::EndpointId> {
 ///
 /// # Examples
 ///
-/// It reads the path selection of a live connection, so this is not compiled.
+/// It reads the path selection of a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let dropped = blocked(local, Rung::Ip, &path);
+/// ```no_run
+/// use habilis_network_iroh_transport_util::{Rung, blocked};
+/// use iroh::endpoint::transports::PathSelectionData;
+///
+/// # fn demo(local: iroh::EndpointId, path: &PathSelectionData<'_>) -> bool {
+/// blocked(local, Rung::Ip, path)
+/// # }
 /// ```
 #[must_use]
 pub fn blocked(local: iroh::EndpointId, rung: Rung, path: &PathSelectionData<'_>) -> bool {
@@ -273,10 +308,14 @@ pub fn blocked(local: iroh::EndpointId, rung: Rung, path: &PathSelectionData<'_>
 ///
 /// # Examples
 ///
-/// It reads the path selection of a live connection, so this is not compiled.
+/// It reads the path selection of a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let dropped = is_blocked(local, Rung::Ip, &path);
+/// ```no_run
+/// use habilis_network_iroh_transport_util::{Rung, is_blocked};
+///
+/// # fn demo(local: iroh::EndpointId) -> bool {
+/// is_blocked(local, Rung::Ip, None)
+/// # }
 /// ```
 #[cfg(not(feature = "test-hooks"))]
 #[must_use]
@@ -292,10 +331,14 @@ pub fn is_blocked(
 ///
 /// # Examples
 ///
-/// It reads the block list of a live connection, so this is not compiled.
+/// It reads the block list of a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let dropped = is_blocked_to(local, remote, Rung::Ip);
+/// ```no_run
+/// use habilis_network_iroh_transport_util::{Rung, is_blocked_to};
+///
+/// # fn demo(local: iroh::EndpointId, remote: iroh::EndpointId) -> bool {
+/// is_blocked_to(local, Rung::Ip, None, Some(remote))
+/// # }
 /// ```
 #[cfg(not(feature = "test-hooks"))]
 #[must_use]
@@ -337,10 +380,14 @@ static RUNGS_BLOCKED_TO: std::sync::Mutex<
 ///
 /// # Examples
 ///
-/// It reads the path selection of a live connection, so this is not compiled.
+/// It reads the path selection of a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let dropped = is_blocked(local, Rung::Ip, &path);
+/// ```no_run
+/// use habilis_network_iroh_transport_util::{Rung, is_blocked};
+///
+/// # fn demo(local: iroh::EndpointId) -> bool {
+/// is_blocked(local, Rung::Ip, None)
+/// # }
 /// ```
 #[cfg(feature = "test-hooks")]
 #[must_use]
@@ -362,10 +409,14 @@ pub fn is_blocked(
 ///
 /// # Examples
 ///
-/// It reads the block list of a live connection, so this is not compiled.
+/// It reads the block list of a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let dropped = is_blocked_to(local, remote, Rung::Ip);
+/// ```no_run
+/// use habilis_network_iroh_transport_util::{Rung, is_blocked_to};
+///
+/// # fn demo(local: iroh::EndpointId, remote: iroh::EndpointId) -> bool {
+/// is_blocked_to(local, Rung::Ip, None, Some(remote))
+/// # }
 /// ```
 #[cfg(feature = "test-hooks")]
 #[must_use]
@@ -408,10 +459,14 @@ pub fn is_blocked_to(
 ///
 /// # Examples
 ///
-/// It changes the block list of the test hooks for the whole process, so this is not compiled.
+/// It changes the block list of the test hooks for the whole process, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// block_ip_paths(local, &path);
+/// ```no_run
+/// use habilis_network_iroh_transport_util::block_ip_paths;
+///
+/// # fn demo() {
+/// block_ip_paths(false);
+/// # }
 /// ```
 #[cfg(feature = "test-hooks")]
 pub fn block_ip_paths(
@@ -435,10 +490,14 @@ pub fn block_ip_paths(
 ///
 /// # Examples
 ///
-/// It changes the block list of the test hooks for the whole process, so this is not compiled.
+/// It changes the block list of the test hooks for the whole process, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
+/// ```no_run
+/// use habilis_network_iroh_transport_util::block_ip_to;
+///
+/// # fn demo(local: iroh::EndpointId) {
 /// block_ip_to(local, [7000]);
+/// # }
 /// ```
 #[cfg(feature = "test-hooks")]
 pub fn block_ip_to(local: iroh::EndpointId, remote_ports: impl IntoIterator<Item = u16>) {
@@ -464,10 +523,14 @@ pub fn block_ip_to(local: iroh::EndpointId, remote_ports: impl IntoIterator<Item
 ///
 /// # Examples
 ///
-/// It changes the block list of the test hooks for the whole process, so this is not compiled.
+/// It changes the block list of the test hooks for the whole process, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// block_rung(local, Rung::Ip);
+/// ```no_run
+/// use habilis_network_iroh_transport_util::{Rung, block_rung};
+///
+/// # fn demo(local: iroh::EndpointId) {
+/// block_rung(local, Rung::Ip, false);
+/// # }
 /// ```
 #[cfg(feature = "test-hooks")]
 pub fn block_rung(
@@ -498,10 +561,14 @@ pub fn block_rung(
 ///
 /// # Examples
 ///
-/// It changes the block list of the test hooks for the whole process, so this is not compiled.
+/// It changes the block list of the test hooks for the whole process, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// block_rung_to(local, remote, Rung::Ip);
+/// ```no_run
+/// use habilis_network_iroh_transport_util::{Rung, block_rung_to};
+///
+/// # fn demo(local: iroh::EndpointId, remote: iroh::EndpointId) {
+/// block_rung_to(local, Rung::Ip, remote, false);
+/// # }
 /// ```
 #[cfg(feature = "test-hooks")]
 pub fn block_rung_to(
@@ -531,10 +598,15 @@ pub fn block_rung_to(
 ///
 /// # Examples
 ///
-/// It reads the transmit of a live connection, so this is not compiled.
+/// It reads the transmit of a live connection, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let parts: Vec<&[u8]> = datagrams(&transmit).collect();
+/// ```no_run
+/// use habilis_network_iroh_transport_util::datagrams;
+/// use iroh::endpoint::transports::Transmit;
+///
+/// # fn demo<'a>(transmit: &'a Transmit<'a>) -> usize {
+/// datagrams(transmit).count()
+/// # }
 /// ```
 pub fn datagrams<'a>(transmit: &'a Transmit<'a>) -> impl Iterator<Item = &'a [u8]> {
     split_segments(transmit.contents, transmit.segment_size)

@@ -1155,11 +1155,14 @@ impl NodeDriver for MembershipApp {
 ///
 /// # Examples
 ///
-/// A name that is not a member of the mesh is reported with this type.
+/// A name that is not a member of the mesh is reported with this type. The doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// // The engine builds this value when a peer is unknown; its field is private.
-/// let peer = UnknownPeer("ghost".to_owned());
+/// ```no_run
+/// use habilis_network::membership::UnknownPeer;
+///
+/// # fn demo(peer: UnknownPeer) {
+/// drop(peer);
+/// # }
 /// ```
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 #[derive(Debug, Clone, PartialEq, Eq)]

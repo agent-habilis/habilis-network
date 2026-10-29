@@ -17,10 +17,14 @@ use crate::SignalEnvelope;
 ///
 /// # Examples
 ///
-/// It needs a live offer from a remote peer, so this is not compiled.
+/// It needs a live offer from a remote peer, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let (pending, envelope) = answer(&offer)?;
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::PendingAnswer;
+///
+/// # fn demo(pending: PendingAnswer) {
+/// drop(pending);
+/// # }
 /// ```
 #[derive(Debug)]
 pub struct PendingAnswer {
@@ -37,10 +41,16 @@ pub struct PendingAnswer {
 ///
 /// # Examples
 ///
-/// It needs a live offer from a remote peer, so this is not compiled.
+/// It needs a live offer from a remote peer, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let (pending, envelope) = answer(&offer)?;
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::{JsepError, SignalEnvelope, answer};
+/// use iroh::EndpointId;
+///
+/// # async fn demo(local: EndpointId, offer: &SignalEnvelope) -> Result<(), JsepError> {
+/// let (_pending, _envelope) = answer(local, offer).await?;
+/// Ok(())
+/// # }
 /// ```
 pub async fn answer(
     local: EndpointId,
@@ -59,10 +69,16 @@ pub async fn answer(
 ///
 /// # Examples
 ///
-/// It needs a live offer from a remote peer, so this is not compiled.
+/// It needs a live offer from a remote peer, so the doc test compiles it but does not run it.
 ///
-/// ```ignore
-/// let (pending, envelope) = answer_with(&offer, config)?;
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::{IceConfig, JsepError, SignalEnvelope, answer_with};
+/// use iroh::EndpointId;
+///
+/// # async fn demo(local: EndpointId, offer: &SignalEnvelope) -> Result<(), JsepError> {
+/// let (_pending, _envelope) = answer_with(local, offer, &IceConfig::host_only()).await?;
+/// Ok(())
+/// # }
 /// ```
 pub async fn answer_with(
     local: EndpointId,
