@@ -32,6 +32,16 @@ export const FULL_WORDS: Record<string, string> = {
   tmp: "temporary",
 };
 
+// The text of an attribute, `#[...]` or `#![...]`, up to its matching bracket.
+function attributeText(rest: string): string {
+  let depth = 0;
+  for (let j = rest.indexOf("["); j < rest.length; j++) {
+    if (rest[j] === "[") depth++;
+    if (rest[j] === "]" && --depth === 0) return rest.slice(0, j + 1);
+  }
+  return rest;
+}
+
 // Keep the code tokens of a Rust source and blank out the rest, keeping its length, so the
 // positions of the code tokens stay the same.
 export function codeMask(src: string): string {
@@ -52,6 +62,8 @@ export function codeMask(src: string): string {
       const hashes = /^r(#*)"/.exec(rest)![1]!;
       const end = rest.indexOf(`"${hashes}`, hashes.length + 2);
       blank(rest.slice(0, end === -1 ? rest.length : end + 1 + hashes.length));
+    } else if (rest.startsWith("#[") || rest.startsWith("#![")) {
+      blank(attributeText(rest));
     } else if (rest.startsWith('"')) {
       let j = 1;
       while (j < rest.length && rest[j] !== '"') j += rest[j] === "\\" ? 2 : 1;
@@ -80,6 +92,7 @@ export function renameInFile(file: string, src: string): { text: string; hits: H
   const text = src.replace(/[A-Za-z_][A-Za-z0-9_]*/g, (word, offset: number) => {
     const full = FULL_WORDS[word];
     if (!full || mask.slice(offset, offset + word.length) !== word) return word;
+    if (src[offset + word.length] === "!") return word; // a macro, such as cfg!
     const line = src.slice(0, offset).split("\n").length;
     hits.push({ file, line, from: word, to: full });
     return full;

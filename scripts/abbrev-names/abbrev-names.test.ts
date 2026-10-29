@@ -24,3 +24,23 @@ describe("renameInFile", () => {
     expect(text).toBe("let ctxs = previous + msgs;");
   });
 });
+
+describe("attributes and macros", () => {
+  test("keeps the words of a cfg attribute", () => {
+    const src = '#[cfg(target_os = "macos")]\nfn ctx() -> u8 { ctx_value() }\n';
+    const { text } = renameInFile("a.rs", src);
+    expect(text).toBe('#[cfg(target_os = "macos")]\nfn context() -> u8 { ctx_value() }\n');
+  });
+
+  test("keeps an inner attribute and a nested bracket", () => {
+    const { text } = renameInFile("a.rs", "#![allow(clippy::x)]\n#[doc = concat!(\"a\", \"b\")]\nlet buf = [1, 2];");
+    expect(text).toBe("#![allow(clippy::x)]\n#[doc = concat!(\"a\", \"b\")]\nlet buffer = [1, 2];");
+  });
+});
+
+describe("macros", () => {
+  test("keeps the name of a macro call", () => {
+    const { text } = renameInFile("a.rs", "if cfg!(unix) { let cfg = 1; }");
+    expect(text).toBe("if cfg!(unix) { let config = 1; }");
+  });
+});
