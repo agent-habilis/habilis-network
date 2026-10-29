@@ -27,6 +27,7 @@ use crate::{IN_QUEUE, OUT_QUEUE, custom_addr};
 /// runs QUIC over the channel like over any other path.
 pub struct WebRtcTransport {
     local_id: EndpointId,
+    // the transport and the endpoint share the session registry
     registry: Arc<SessionRegistry>,
     inbound_tx: mpsc::Sender<InboundPacket>,
     inbound_rx: Mutex<Option<mpsc::Receiver<InboundPacket>>>,
@@ -36,8 +37,10 @@ pub struct WebRtcTransport {
 impl WebRtcTransport {
     /// A transport for `local_id`, with no sessions yet.
     #[must_use]
+    // the transport is shared by the endpoint builder and the caller
     pub fn new(local_id: EndpointId) -> Arc<Self> {
         let (inbound_tx, inbound_rx) = mpsc::channel(IN_QUEUE);
+        // the transport is shared by the endpoint builder and the caller
         Arc::new(Self {
             local_id,
             registry: SessionRegistry::new(),
@@ -65,6 +68,7 @@ impl WebRtcTransport {
         session: NegotiatedSession,
     ) -> Result<(), AttachError> {
         let (out_tx, out_rx) = mpsc::channel(OUT_QUEUE);
+        // the drop counter is shared with the session handles
         let dropped_tx = Arc::new(AtomicU64::new(0));
         // Claim the slot *before* spawning. The driver retires its own
         // generation when it ends, and a session that fails immediately does
@@ -167,6 +171,7 @@ impl CustomTransport for WebRtcTransport {
 }
 
 struct ExclusivePreset {
+    // the preset holds the transport it installs
     factory: Arc<WebRtcTransport>,
 }
 

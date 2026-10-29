@@ -15,6 +15,7 @@ pub(crate) struct WebRtcEndpoint {
     local_addr: CustomAddr,
     watchable: Watchable<Vec<CustomAddr>>,
     receiver: mpsc::Receiver<InboundPacket>,
+    // the endpoint and its senders share the session registry
     registry: Arc<SessionRegistry>,
 }
 
@@ -23,6 +24,7 @@ impl WebRtcEndpoint {
         local_addr: CustomAddr,
         watchable: Watchable<Vec<CustomAddr>>,
         receiver: mpsc::Receiver<InboundPacket>,
+        // the endpoint and its senders share the session registry
         registry: Arc<SessionRegistry>,
     ) -> Self {
         Self {
@@ -48,7 +50,9 @@ impl CustomEndpoint for WebRtcEndpoint {
         self.watchable.watch()
     }
 
+    // trait object: the endpoint calls the sender through this Arc
     fn create_sender(&self) -> Arc<dyn CustomSender> {
+        // the sender is shared with the endpoint, which calls it from its tasks
         Arc::new(WebRtcSender::new(Arc::clone(&self.registry)))
     }
 

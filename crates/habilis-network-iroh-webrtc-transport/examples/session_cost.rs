@@ -291,6 +291,7 @@ async fn measure(role: Role, sessions: usize, settle: u64, hold: u64) -> anyhow:
 async fn run_peer() -> anyhow::Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut out = tokio::io::stdout();
+    // the example keeps each transport alive while its sessions run
     let mut held: Vec<Arc<WebRtcTransport>> = Vec::new();
     let ice = IceConfig::host_only();
     while let Some(line) = lines.next_line().await? {

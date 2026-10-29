@@ -90,6 +90,7 @@ pub(crate) const TRANSFER_DEADLINE: Duration = Duration::from_secs(20);
 pub(crate) struct Pair {
     client: Endpoint,
     server_addr: EndpointAddr,
+    // both ends of the harness share the hub with the test
     pub(crate) client_hub: std::sync::Arc<BrowserHubTransport>,
     pub(crate) server_id: EndpointId,
     router: Router,

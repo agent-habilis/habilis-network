@@ -36,6 +36,7 @@ impl Drop for AbortOnDrop {
 
 pub(crate) struct SessionHandle {
     pub(crate) out_tx: mpsc::Sender<Bytes>,
+    // the session drop counter, shared with the registry
     pub(crate) dropped_tx: Arc<AtomicU64>,
     /// Aborts the driver when the registry drops this handle.
     _task: AbortOnDrop,
@@ -44,6 +45,7 @@ pub(crate) struct SessionHandle {
 impl SessionHandle {
     pub(crate) fn new(
         out_tx: mpsc::Sender<Bytes>,
+        // the session drop counter, shared with the registry
         dropped_tx: Arc<AtomicU64>,
         task: JoinHandle<()>,
     ) -> Self {

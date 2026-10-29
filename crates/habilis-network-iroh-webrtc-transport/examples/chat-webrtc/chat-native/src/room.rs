@@ -45,6 +45,7 @@ struct Inner {
 /// A handle to the room. Cheap to clone; every clone is the same room.
 #[derive(Debug, Clone)]
 pub struct Room {
+    // the room is shared by the accept handlers and the host loop
     inner: Arc<Inner>,
 }
 
@@ -53,6 +54,7 @@ impl Room {
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(FANOUT_CAPACITY);
         Self {
+            // the room is shared by the accept handlers and the host loop
             inner: Arc::new(Inner {
                 members: Mutex::new(HashMap::new()),
                 next_id: AtomicU64::new(0),
@@ -169,6 +171,7 @@ pub struct Membership {
     /// The roster at the moment they joined, themselves included.
     pub roster: Vec<String>,
     rx: broadcast::Receiver<Fanout>,
+    // the room is shared by the accept handlers and the host loop
     inner: Arc<Inner>,
 }
 

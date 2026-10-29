@@ -15,8 +15,10 @@ use crate::{NegotiatedSession, WebRtcTransport};
 #[derive(Debug, Clone)]
 pub struct WebRtcHandle {
     #[cfg(feature = "native")]
+    // the handle and the endpoint share the transport
     inner: std::sync::Arc<WebRtcTransport>,
     #[cfg(all(feature = "web", not(feature = "native")))]
+    // the handle and the page share the hub
     inner: std::sync::Arc<BrowserHubTransport>,
 }
 
@@ -24,6 +26,7 @@ pub struct WebRtcHandle {
 impl WebRtcHandle {
     /// Wrap a host transport.
     #[must_use]
+    // the handle keeps the transport the endpoint shares
     pub fn new(transport: std::sync::Arc<WebRtcTransport>) -> Self {
         Self { inner: transport }
     }
@@ -35,6 +38,7 @@ impl WebRtcHandle {
     /// browser and wrong for a native peer that should still prefer iroh's own
     /// hole-punched paths.
     #[must_use]
+    // the endpoint builder takes its own clone of the transport
     pub fn transport(&self) -> std::sync::Arc<WebRtcTransport> {
         std::sync::Arc::clone(&self.inner)
     }
@@ -44,7 +48,9 @@ impl WebRtcHandle {
     /// registered — see `crate::web_rtc_preferred` for why registering the transport
     /// alone is not enough.
     #[must_use]
+    // trait object: the endpoint builder takes the selector by Arc
     pub fn path_selector(&self) -> std::sync::Arc<dyn transports::PathSelector> {
+        // trait object: the endpoint builder takes the selector by Arc
         std::sync::Arc::new(web_rtc_preferred::WebRtcPreferred::new(
             self.inner.local_id(),
         ))
@@ -100,6 +106,7 @@ impl WebRtcHandle {
 impl WebRtcHandle {
     /// Wrap a browser hub transport (consumer or producer).
     #[must_use]
+    // the handle keeps the hub the page shares
     pub fn new(transport: std::sync::Arc<BrowserHubTransport>) -> Self {
         Self { inner: transport }
     }
@@ -112,6 +119,7 @@ impl WebRtcHandle {
 
     /// The transport to register with `Builder::add_custom_transport`.
     #[must_use]
+    // the endpoint builder takes its own clone of the hub
     pub fn transport(&self) -> std::sync::Arc<BrowserHubTransport> {
         std::sync::Arc::clone(&self.inner)
     }
@@ -121,7 +129,9 @@ impl WebRtcHandle {
     /// registered — see [`crate::web_rtc_preferred`] for why registering the transport
     /// alone is not enough.
     #[must_use]
+    // trait object: the endpoint builder takes the selector by Arc
     pub fn path_selector(&self) -> std::sync::Arc<dyn transports::PathSelector> {
+        // trait object: the endpoint builder takes the selector by Arc
         std::sync::Arc::new(web_rtc_preferred::WebRtcPreferred::new(
             self.inner.local_id(),
         ))

@@ -52,6 +52,7 @@ const MDNS_SUFFIX: &str = ".local";
 #[derive(Debug)]
 struct SessionHandle {
     out_tx: mpsc::Sender<Vec<u8>>,
+    // the counters are shared by the hub and each session
     counters: Arc<SessionCounters>,
     /// Keeps the peer connection and data channel alive.
     keepalive: SessionKeepalive,
@@ -78,6 +79,7 @@ impl Drop for SessionKeepalive {
     }
 }
 
+// the session map is shared by the hub and its sessions
 type SessionMap = Arc<Registry<SessionHandle>>;
 
 /// [`DISCONNECT_GRACE_MS`] for `sleep_ms`, which takes the browser's `i32`
@@ -340,7 +342,9 @@ impl CustomEndpoint for BrowserHubEndpoint {
         self.local_addrs.watch()
     }
 
+    // trait object: the endpoint calls the sender through this Arc
     fn create_sender(&self) -> Arc<dyn CustomSender> {
+        // the sender is shared with the endpoint, which calls it from its tasks
         Arc::new(BrowserHubSender {
             sessions: Arc::clone(&self.sessions),
         })

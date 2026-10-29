@@ -57,7 +57,9 @@ pub(crate) struct Registry<T> {
 }
 
 impl<T> Registry<T> {
+    // the registry is shared by the transport and its sessions
     pub(crate) fn new() -> Arc<Self> {
+        // the registry is shared by the transport and its sessions
         Arc::new(Self {
             slots: Mutex::new(HashMap::new()),
             next_generation: AtomicU64::new(0),
@@ -169,6 +171,7 @@ impl<T> Registry<T> {
 #[derive(Debug)]
 #[must_use = "dropping a reservation releases the peer's slot"]
 pub(crate) struct Reservation<T> {
+    // the guard keeps the registry alive while the slot is held
     registry: Arc<Registry<T>>,
     remote: EndpointId,
     generation: u64,
@@ -229,6 +232,7 @@ impl<T> Drop for Reservation<T> {
 #[derive(Debug)]
 #[must_use = "an uncommitted session guard tears the session down when dropped"]
 pub(crate) struct SessionGuard<T> {
+    // the guard keeps the registry alive while the slot is held
     registry: Arc<Registry<T>>,
     remote: EndpointId,
     generation: u64,

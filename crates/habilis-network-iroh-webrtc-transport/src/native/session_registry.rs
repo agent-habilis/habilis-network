@@ -51,6 +51,7 @@ mod tests {
             reservation
                 .fulfil(SessionHandle::new(
                     out_tx,
+                    // the drop counter is shared by the session and the driver
                     Arc::new(AtomicU64::new(0)),
                     task
                 ))
@@ -83,6 +84,7 @@ mod tests {
         reservation
             .fulfil(SessionHandle::new(
                 out_tx,
+                // the drop counter is shared by the session and the driver
                 Arc::new(AtomicU64::new(0)),
                 task,
             ))

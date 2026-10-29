@@ -94,6 +94,7 @@ pub struct ChatPeer {
     nick: String,
     remote: EndpointId,
     connection: Connection,
+    // the hub is shared with the endpoint and the page session tasks
     hub: Arc<BrowserHubTransport>,
     /// Held only to keep them bound. Dropping either tears its endpoint down,
     /// and the chat endpoint's is the data channel.

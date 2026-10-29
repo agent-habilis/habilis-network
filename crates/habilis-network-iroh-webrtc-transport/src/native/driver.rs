@@ -25,6 +25,7 @@ const MAX_CONSECUTIVE_RECV_ERRORS: usize = 32;
 
 pub(crate) fn build_rtc(now: Instant) -> Rtc {
     Rtc::builder()
+        // the TLS provider is shared by every connection the driver makes
         .set_crypto_provider(Arc::new(str0m_aws_lc_rs::default_provider()))
         .build(now)
 }
@@ -271,9 +272,11 @@ pub(crate) async fn drive_session(
     session: NegotiatedSession,
     remote: EndpointId,
     generation: u64,
+    // the driver and the transport share the session registry
     registry: Arc<SessionRegistry>,
     mut out_rx: mpsc::Receiver<Bytes>,
     in_tx: mpsc::Sender<InboundPacket>,
+    // the driver and the session handles share the drop counter
     dropped_rx: Arc<AtomicU64>,
 ) {
     let NegotiatedSession {

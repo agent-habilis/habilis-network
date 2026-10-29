@@ -32,8 +32,10 @@ pub struct BrowserHubTransport {
 impl BrowserHubTransport {
     /// A transport for `local_id`, with no sessions yet.
     #[must_use]
+    // the hub is shared with the handle and the page
     pub fn new(local_id: EndpointId) -> Arc<Self> {
         let (inbound_tx, inbound_rx) = mpsc::channel(IN_QUEUE);
+        // the hub is shared with the handle and the page
         Arc::new(Self {
             local_id,
             sessions: Registry::new(),
@@ -91,6 +93,7 @@ impl BrowserHubTransport {
 
         let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUT_QUEUE);
         let (mut inbound_sender, mut inbound_receiver) = mpsc::channel::<Vec<u8>>(IN_QUEUE);
+        // the counters are shared by the hub and each session
         let counters = Arc::new(SessionCounters::default());
 
         let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {

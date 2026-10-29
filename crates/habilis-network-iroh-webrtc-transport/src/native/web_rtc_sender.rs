@@ -12,10 +12,12 @@ use super::session_registry::SessionRegistry;
 use crate::{WEBRTC_TRANSPORT_ID, parse_custom_addr};
 
 pub(crate) struct WebRtcSender {
+    // the sender shares the session registry with the endpoint
     registry: Arc<SessionRegistry>,
 }
 
 impl WebRtcSender {
+    // the sender shares the session registry with the endpoint
     pub(crate) fn new(registry: Arc<SessionRegistry>) -> Self {
         Self { registry }
     }
