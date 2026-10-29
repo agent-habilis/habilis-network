@@ -68,11 +68,13 @@ mod tests {
     fn a_bare_producer_uses_every_lookup_and_a_named_one_replaces_them() {
         assert_eq!(
             parse(&[]).opts().lookup,
-            vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay]
+            vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay],
+            "a bare producer uses every lookup"
         );
         assert_eq!(
             parse(&["--lookup", "mdns,relay"]).opts().lookup,
-            vec![Lookup::Mdns, Lookup::Relay]
+            vec![Lookup::Mdns, Lookup::Relay],
+            "a named lookup replaces the default lookups"
         );
     }
 
@@ -80,15 +82,27 @@ mod tests {
     fn transport_is_a_comma_list_of_known_names() {
         assert_eq!(
             parse(&["--transport", "udp,relay"]).opts().transport,
-            vec![Transport::Udp, Transport::Relay]
+            vec![Transport::Udp, Transport::Relay],
+            "transport is a comma list of known names"
         );
-        assert!(Args::try_parse_from(["habilis-network-stream", "--lookup", "public"]).is_err());
+        assert!(
+            Args::try_parse_from(["habilis-network-stream", "--lookup", "public"]).is_err(),
+            "an unknown transport name is refused"
+        );
     }
 
     #[test]
     fn a_positional_argument_is_the_hash_to_read() {
-        assert_eq!(parse(&["abc"]).hash.as_deref(), Some("abc"));
-        assert_eq!(parse(&[]).hash, None);
+        assert_eq!(
+            parse(&["abc"]).hash.as_deref(),
+            Some("abc"),
+            "a positional argument is the hash to read"
+        );
+        assert_eq!(
+            parse(&[]).hash,
+            None,
+            "no positional argument leaves the hash unset"
+        );
     }
 
     #[test]
@@ -96,8 +110,13 @@ mod tests {
         let args = parse(&["--web-url", "http://127.0.0.1:3020/"]);
         assert_eq!(
             args.page_url("abc").as_deref(),
-            Some("http://127.0.0.1:3020/#abc")
+            Some("http://127.0.0.1:3020/#abc"),
+            "the page url carries the hash in the fragment"
         );
-        assert_eq!(parse(&[]).page_url("abc"), None);
+        assert_eq!(
+            parse(&[]).page_url("abc"),
+            None,
+            "no page url without a hash"
+        );
     }
 }

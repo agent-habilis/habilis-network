@@ -82,7 +82,11 @@ fn ten_megabytes_arrive_complete_and_in_order() {
         let elapsed = started.elapsed();
         writer.await.expect("writer");
         println!("10 MB over loopback in {elapsed:?} (gossip pipe baseline: 0.63 s)");
-        assert_eq!(got.len(), sent.len());
+        assert_eq!(
+            got.len(),
+            sent.len(),
+            "ten megabytes arrive complete and in order"
+        );
         assert!(got == sent, "bytes differ");
         producer_node.close().await;
         consumer_node.close().await;
@@ -98,7 +102,10 @@ fn an_empty_stream_reaches_the_end() {
         let hash = producer.hash().clone();
         let closer = tokio::spawn(producer.close());
         let mut reader = consumer_node.open(&hash).await.expect("open");
-        assert!(read_all(&mut reader).await.expect("read").is_empty());
+        assert!(
+            read_all(&mut reader).await.expect("read").is_empty(),
+            "an empty stream reaches the end"
+        );
         closer.await.expect("closer").expect("close");
         producer_node.close().await;
         consumer_node.close().await;
@@ -114,7 +121,11 @@ fn a_read_after_the_end_is_the_end_again() {
         let hash = producer.hash().clone();
         let writer = tokio::spawn(produce(producer, b"once".to_vec(), 64));
         let mut reader = consumer_node.open(&hash).await.expect("open");
-        assert_eq!(read_all(&mut reader).await.expect("read"), b"once");
+        assert_eq!(
+            read_all(&mut reader).await.expect("read"),
+            b"once",
+            "a read after the end is the end again"
+        );
         writer.await.expect("writer");
         // Past the reader's own `DONE` close, which the first end triggered.
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -166,7 +177,11 @@ fn two_racing_consumers_admit_exactly_one() {
             (Ok(Some(bytes)), Err(error)) | (Err(error), Ok(Some(bytes))) => (bytes, error),
             other => panic!("exactly one consumer must win: {other:?}"),
         };
-        assert_eq!(&won[..], b"only one");
+        assert_eq!(
+            &won[..],
+            b"only one",
+            "only one of two racing consumers is admitted"
+        );
         assert_eq!(refusal(&lost), Some(Refused::Taken), "{lost:#}");
         producer.close().await.expect("close");
         producer_node.close().await;
@@ -202,7 +217,11 @@ fn a_closed_stream_is_spent() {
         let hash = producer.hash().clone();
         let writer = tokio::spawn(produce(producer, b"once".to_vec(), 64));
         let mut reader = consumer_node.open(&hash).await.expect("open");
-        assert_eq!(read_all(&mut reader).await.expect("read"), b"once");
+        assert_eq!(
+            read_all(&mut reader).await.expect("read"),
+            b"once",
+            "a closed stream is spent and reads once"
+        );
         writer.await.expect("writer");
 
         let mut again = consumer_node.open(&hash).await.expect("open again");
@@ -242,7 +261,11 @@ fn close_or_abandon_with_a_consumer_ends_the_stream() {
         let mut reader = consumer_node.open(&hash).await.expect("open");
         producer.write(b"kept").await.expect("write");
         producer.close_or_abandon().await.expect("closed");
-        assert_eq!(read_all(&mut reader).await.expect("read"), b"kept");
+        assert_eq!(
+            read_all(&mut reader).await.expect("read"),
+            b"kept",
+            "closing or abandoning with a consumer ends the stream"
+        );
         producer_node.close().await;
         consumer_node.close().await;
     });
@@ -397,7 +420,10 @@ fn a_relay_transport_stream_admits_a_consumer_with_no_direct_path() {
         let producer_node = on_relay(&url, vec![Transport::Udp, Transport::Relay]).await;
         let consumer_node = on_relay(&url, vec![Transport::WebRtc, Transport::Relay]).await;
         let producer = producer_node.create().await;
-        assert!(producer.hash().transport.relay_transport);
+        assert!(
+            producer.hash().transport.relay_transport,
+            "the producer hash carries the relay transport"
+        );
         let hash = producer.hash().clone();
         let writer = tokio::spawn(produce(producer, b"over the relay".to_vec(), 64));
         let mut reader = tokio::time::timeout(BUDGET, consumer_node.open(&hash))
@@ -406,7 +432,8 @@ fn a_relay_transport_stream_admits_a_consumer_with_no_direct_path() {
             .expect("open");
         assert_eq!(
             read_all(&mut reader).await.expect("read"),
-            b"over the relay"
+            b"over the relay",
+            "a relay transport stream admits a consumer with no direct path"
         );
         writer.await.expect("writer");
         producer_node.close().await;
@@ -425,7 +452,10 @@ fn a_webrtc_only_consumer_reads_over_the_data_channel() {
         let producer_node = on_relay(&url, vec![Transport::Udp, Transport::WebRtc]).await;
         let consumer_node = on_relay(&url, vec![Transport::WebRtc]).await;
         let producer = producer_node.create().await;
-        assert!(!producer.hash().transport.relay_transport);
+        assert!(
+            !producer.hash().transport.relay_transport,
+            "the webrtc-only producer hash has no relay transport"
+        );
         let hash = producer.hash().clone();
         let sent = payload(1024 * 1024);
         let writer = tokio::spawn(produce(producer, sent.clone(), 16 * 1024));

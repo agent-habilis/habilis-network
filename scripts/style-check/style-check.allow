@@ -27,19 +27,6 @@ catch_unwind|crates/habilis-network-test-tracing/src/guard.rs|1|catch_panic, the
 # A hand-written Eq, Ord or PartialOrd: the compiler checks a derive, not a manual impl.
 
 # assert_no_message: an assert with no message (P13). Each row is a count that may only go down.
-assert_no_message|crates/habilis-network-ffi/tests/ffi_smoke.rs|19|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-iroh-transport-util/src/lib.rs|27|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-logging/src/messages.rs|2|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-logging/src/log_sink.rs|2|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-stream-cli/src/args.rs|8|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-stream-cli/src/main.rs|2|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-stream-cli/tests/binary.rs|1|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-stream/src/hash/mod.rs|11|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-stream/tests/stream.rs|9|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-test-tracing/tests/capturing.rs|1|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-test-tracing/tests/run.rs|1|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-test-tracing/tests/saw_warn.rs|8|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-test-tracing/tests/writer.rs|1|kept: assert without a message, to be given one (P13 rollout)
 
 # long_chain: a statement with five or more chained calls (P15). Each row is a count that may only go down.
 long_chain|crates/habilis-network-bench-wasm/src/browser.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -291,7 +278,6 @@ abbrev_name|crates/habilis-network/src/lookup/endpoint.rs|1|moved from mod.rs wi
 long_chain|crates/habilis-network-chunks/src/fs/disk_store.rs|2|kept: statements with a chain of five or more calls, moved with fs.rs (P15 rollout)
 long_chain|crates/habilis-network-chunks/src/fs/disk_origin.rs|1|kept: statements with a chain of five or more calls, moved with fs.rs (P15 rollout)
 long_chain|crates/habilis-network-stream/src/hash/mod.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-assert_no_message|crates/habilis-network-stream/src/node/tests.rs|2|kept: assert without a message, to be given one (P13 rollout)
 long_chain|crates/habilis-network-stream/src/node/stream_node.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream/src/produce/registry.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 

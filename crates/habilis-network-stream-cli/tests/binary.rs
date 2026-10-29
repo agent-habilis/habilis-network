@@ -149,7 +149,10 @@ fn a_producer_stopped_by_sigterm_abandons_its_reader_at_once() {
                 .args(["-TERM", &producer.id().to_string()])
                 .status()
                 .expect("kill");
-            assert!(killed.success());
+            assert!(
+                killed.success(),
+                "a producer stopped by sigterm abandons its reader at once"
+            );
             assert_eq!(exit_code(&mut producer), Some(143), "the SIGTERM exit code");
             assert_eq!(exit_code(&mut reader), Some(1), "the reader fails");
             let waited = stopped.elapsed();

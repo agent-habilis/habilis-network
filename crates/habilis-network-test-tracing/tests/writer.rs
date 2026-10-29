@@ -37,7 +37,10 @@ fn the_writer_gets_the_events_and_the_guard_fails_on_an_error() {
                     move || sink.clone()
                 });
                 tracing::info!("round started");
-                assert!(seen.lock().expect("no poison").contains("round started"));
+                assert!(
+                    seen.lock().expect("no poison").contains("round started"),
+                    "the writer receives the events and the guard fails on an error"
+                );
                 tracing::error!("round failed");
             }))
             .expect_err("the guard must panic");

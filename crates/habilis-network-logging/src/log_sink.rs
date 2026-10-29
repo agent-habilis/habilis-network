@@ -282,7 +282,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(
             active.expect("read the active path"),
-            b"after the failed rotation"
+            b"after the failed rotation",
+            "a failed reopen keeps the active handle on the active path"
         );
     }
 
@@ -305,7 +306,11 @@ mod tests {
             !active_exists,
             "the stale backup must not move onto the active path"
         );
-        assert_eq!(backup.expect("stale backup kept"), b"old backup");
+        assert_eq!(
+            backup.expect("stale backup kept"),
+            b"old backup",
+            "a failed reopen leaves a stale backup when the first rename failed"
+        );
     }
 
     #[test]

@@ -204,7 +204,8 @@ mod tests {
         let message = Message::fixture(MessageKind::app_broadcast("app_msg"), "same body");
         assert_eq!(
             super::redacted_body(&message),
-            super::redacted_body(&message)
+            super::redacted_body(&message),
+            "a redacted body is the same for the same message"
         );
     }
 
@@ -213,6 +214,10 @@ mod tests {
         let alpha = Message::fixture(MessageKind::app_broadcast("app_msg"), "alpha");
         let beta = Message::fixture(MessageKind::app_broadcast("app_msg"), "beta");
         // Different lengths *and* different hashes ⇒ different strings.
-        assert_ne!(super::redacted_body(&alpha), super::redacted_body(&beta));
+        assert_ne!(
+            super::redacted_body(&alpha),
+            super::redacted_body(&beta),
+            "a redacted body differs when the content changes"
+        );
     }
 }

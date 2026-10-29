@@ -297,7 +297,10 @@ mod tests {
         while let Some(chunk) = rx.blocking_recv() {
             got.extend(chunk.expect("an interrupted read is not an error"));
         }
-        assert_eq!(got, b"after the signal");
+        assert_eq!(
+            got, b"after the signal",
+            "an interrupted read is retried and returns the bytes"
+        );
     }
 
     /// Any other failure is sent once and ends the input: the producer then
@@ -315,7 +318,8 @@ mod tests {
         let first = rx.blocking_recv().expect("the error is sent");
         assert_eq!(
             first.expect_err("a failed read is an error").to_string(),
-            "the disk went away"
+            "the disk went away",
+            "a failed read reports the disk error"
         );
         assert!(rx.blocking_recv().is_none(), "nothing follows the error");
     }

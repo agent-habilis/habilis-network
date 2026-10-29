@@ -28,7 +28,10 @@ fn a_warn_that_the_filter_hides_still_fails() {
         let err = habilis_network_test_tracing::catch_panic(AssertUnwindSafe(|| {
             let _log = init_capturing("capturing=info");
             tracing::warn!(target: "elsewhere", "link lost");
-            assert!(!captured_logs().contains("link lost"));
+            assert!(
+                !captured_logs().contains("link lost"),
+                "a warn that the filter hides still fails"
+            );
         }))
         .expect_err("the guard must panic");
         let text = err.downcast_ref::<String>().expect("panic text");

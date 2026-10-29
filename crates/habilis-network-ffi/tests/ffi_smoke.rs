@@ -112,7 +112,10 @@ fn null_arguments_are_errors_not_crashes() {
     // SAFETY: passing NULL is explicitly part of each function's contract — the
     // point of this test is that it is rejected rather than dereferenced.
     unsafe {
-        assert!(habilis_network_mesh_open(std::ptr::null()).is_null());
+        assert!(
+            habilis_network_mesh_open(std::ptr::null()).is_null(),
+            "a null mesh open is an error, not a crash"
+        );
         assert!(
             last_error().is_some(),
             "habilis_network_mesh_open(NULL) left no reason"
@@ -120,7 +123,8 @@ fn null_arguments_are_errors_not_crashes() {
 
         assert_eq!(
             habilis_network_msg_send(std::ptr::null_mut(), std::ptr::null(), c"hi".as_ptr()),
-            -1
+            -1,
+            "a null send is an error"
         );
         assert!(
             last_error().is_some(),
@@ -129,7 +133,8 @@ fn null_arguments_are_errors_not_crashes() {
 
         assert_eq!(
             habilis_network_mesh_state_merge(std::ptr::null_mut(), std::ptr::null()),
-            -1
+            -1,
+            "a null state merge is an error"
         );
         assert!(
             last_error().is_some(),
@@ -138,26 +143,44 @@ fn null_arguments_are_errors_not_crashes() {
 
         assert_eq!(
             habilis_network_mesh_state_json(std::ptr::null_mut(), std::ptr::null_mut(), 0),
-            -1
+            -1,
+            "a null state json is an error"
         );
         assert!(
             last_error().is_some(),
             "habilis_network_mesh_state_json(NULL) left no reason"
         );
 
-        assert_eq!(habilis_network_mesh_peer_count(std::ptr::null_mut()), -1);
+        assert_eq!(
+            habilis_network_mesh_peer_count(std::ptr::null_mut()),
+            -1,
+            "a null peer count is an error"
+        );
         assert!(
             last_error().is_some(),
             "habilis_network_mesh_peer_count(NULL) left no reason"
         );
 
-        assert!(habilis_network_mesh_id(std::ptr::null()).is_null());
-        assert!(habilis_network_mesh_name(std::ptr::null()).is_null());
-        assert!(habilis_network_mesh_nickname(std::ptr::null()).is_null());
+        assert!(
+            habilis_network_mesh_id(std::ptr::null()).is_null(),
+            "a null mesh id is null"
+        );
+        assert!(
+            habilis_network_mesh_name(std::ptr::null()).is_null(),
+            "a null mesh name is null"
+        );
+        assert!(
+            habilis_network_mesh_nickname(std::ptr::null()).is_null(),
+            "a null nickname is null"
+        );
 
         // Closing NULL is a no-op success, so a caller's cleanup path needs no
         // guard of its own — and succeeding clears the slot.
-        assert_eq!(habilis_network_mesh_close(std::ptr::null_mut()), 0);
+        assert_eq!(
+            habilis_network_mesh_close(std::ptr::null_mut()),
+            0,
+            "a null close is an error"
+        );
         assert!(
             last_error().is_none(),
             "a successful call must clear the error slot"
@@ -184,7 +207,10 @@ fn a_handle_serves_identity_state_and_roster() {
             habilis_network_mesh_nickname(handle),
         )
     };
-    assert!(!id.is_null() && !mine.is_null());
+    assert!(
+        !id.is_null() && !mine.is_null(),
+        "a handle serves its identity, state, and roster"
+    );
     // SAFETY: both are non-NULL NUL-terminated strings owned by the handle.
     let (id, mine) = unsafe { (CStr::from_ptr(id), CStr::from_ptr(mine)) };
     let id_str = id.to_str().expect("the id is UTF-8");
@@ -428,9 +454,14 @@ fn two_handles_exchange_messages() {
             heard_meta.directed,
             heard_text.as_str()
         ),
-        ("alice", 0, "hello mesh")
+        ("alice", 0, "hello mesh"),
+        "bob hears alice's meta message"
     );
-    assert_eq!(heard_meta.len, heard_text.len());
+    assert_eq!(
+        heard_meta.len,
+        heard_text.len(),
+        "bob's text length matches what was sent"
+    );
 
     let long = "a directed message longer than sixteen bytes";
     let long_c = CString::new(long).expect("no interior NUL");
@@ -462,13 +493,22 @@ fn two_handles_exchange_messages() {
             retried_meta.directed,
             retried_text.as_str()
         ),
-        ("bob", 1, long)
+        ("bob", 1, long),
+        "the retried meta message reaches bob"
     );
 
     // SAFETY: each handle came from `habilis_network_mesh_open` and is not used after this.
     unsafe {
-        assert_eq!(habilis_network_mesh_close(bob), 0);
-        assert_eq!(habilis_network_mesh_close(alice), 0);
+        assert_eq!(
+            habilis_network_mesh_close(bob),
+            0,
+            "bob's close returns zero"
+        );
+        assert_eq!(
+            habilis_network_mesh_close(alice),
+            0,
+            "alice's close returns zero"
+        );
     }
 }
 
@@ -645,9 +685,21 @@ fn a_stream_carries_bytes_to_its_one_reader() {
 
     // SAFETY: each handle is released once and not used after.
     unsafe {
-        assert_eq!(habilis_network_reader_close(reader), 0);
-        assert_eq!(habilis_network_streams_close(consuming), 0);
-        assert_eq!(habilis_network_streams_close(producing), 0);
+        assert_eq!(
+            habilis_network_reader_close(reader),
+            0,
+            "the reader closes with zero"
+        );
+        assert_eq!(
+            habilis_network_streams_close(consuming),
+            0,
+            "the consuming stream closes with zero"
+        );
+        assert_eq!(
+            habilis_network_streams_close(producing),
+            0,
+            "the producing stream closes with zero"
+        );
     }
 }
 
@@ -672,6 +724,10 @@ fn a_write_with_no_consumer_times_out_and_a_wrong_hash_is_refused() {
             0,
             "abandoning is not a failure"
         );
-        assert_eq!(habilis_network_streams_close(streams), 0);
+        assert_eq!(
+            habilis_network_streams_close(streams),
+            0,
+            "a write with no consumer times out and a wrong hash is refused"
+        );
     }
 }

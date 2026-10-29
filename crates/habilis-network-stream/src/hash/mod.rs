@@ -84,9 +84,13 @@ mod tests {
             policy(false, true, true),
         ] {
             let hash = sample(transport);
-            assert_eq!(StreamHash::decode(&hash.encode()).expect("decodes"), hash);
+            assert_eq!(
+                StreamHash::decode(&hash.encode()).expect("decodes"),
+                hash,
+                "a hash round trips every transport list"
+            );
             let reparsed: StreamHash = hash.to_string().parse().expect("parses");
-            assert_eq!(reparsed, hash);
+            assert_eq!(reparsed, hash, "the reparsed hash equals the hash");
         }
     }
 
@@ -96,14 +100,19 @@ mod tests {
 
     #[test]
     fn encode_matches_the_golden_string() {
-        assert_eq!(sample(policy(true, true, true)).encode(), GOLDEN);
+        assert_eq!(
+            sample(policy(true, true, true)).encode(),
+            GOLDEN,
+            "the encoding matches the golden string"
+        );
     }
 
     #[test]
     fn decode_of_the_golden_string_gives_the_same_fields() {
         assert_eq!(
             StreamHash::decode(GOLDEN).expect("decodes"),
-            sample(policy(true, true, true))
+            sample(policy(true, true, true)),
+            "the golden string decodes to the same fields"
         );
     }
 
@@ -118,7 +127,11 @@ mod tests {
     #[test]
     fn from_zeroizing_keeps_the_bytes() {
         let secret = StreamSecret::from_zeroizing(Zeroizing::new([4; SECRET_LEN]));
-        assert_eq!(secret.as_bytes(), &[4; SECRET_LEN]);
+        assert_eq!(
+            secret.as_bytes(),
+            &[4; SECRET_LEN],
+            "from_zeroizing keeps the secret bytes"
+        );
     }
 
     #[test]
@@ -127,7 +140,8 @@ mod tests {
         expected.extend_from_slice(&[2; SECRET_LEN]);
         assert_eq!(
             sample(TransportPolicy::default()).header_bytes().as_slice(),
-            expected.as_slice()
+            expected.as_slice(),
+            "the header bytes are the id then the secret"
         );
     }
 
@@ -147,7 +161,10 @@ mod tests {
         let last = encoded.len() - 1;
         encoded[last] = if encoded[last] == b'2' { b'3' } else { b'2' };
         let encoded = String::from_utf8(encoded).expect("ascii");
-        assert!(StreamHash::decode(&encoded).is_err());
+        assert!(
+            StreamHash::decode(&encoded).is_err(),
+            "a flipped character fails the checksum"
+        );
     }
 
     #[test]
@@ -173,19 +190,29 @@ mod tests {
         let mesh =
             habilis_network::runtime::derive_topic_mesh_with("standup", LookupOpts::loopback())
                 .expect("mesh");
-        assert!(StreamHash::decode(&mesh.to_string()).is_err());
+        assert!(
+            StreamHash::decode(&mesh.to_string()).is_err(),
+            "a mesh id is not a stream hash"
+        );
     }
 
     #[test]
     fn a_secret_prints_no_byte_and_one_byte_makes_two_hashes_differ() {
         let hash = sample(TransportPolicy::default());
-        assert_eq!(format!("{:?}", hash.secret), "StreamSecret(***)");
+        assert_eq!(
+            format!("{:?}", hash.secret),
+            "StreamSecret(***)",
+            "a secret prints no byte in its debug form"
+        );
         let mut other = hash.clone();
-        assert_eq!(hash, other);
+        assert_eq!(hash, other, "equal inputs give equal hashes");
         let mut bytes = *other.secret.as_bytes();
         bytes[SECRET_LEN - 1] ^= 1;
         other.secret = StreamSecret::from_bytes(bytes);
-        assert_ne!(hash, other);
+        assert_ne!(
+            hash, other,
+            "one byte of difference makes two hashes differ"
+        );
     }
 
     #[test]

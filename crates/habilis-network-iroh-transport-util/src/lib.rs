@@ -50,7 +50,10 @@ mod tests {
             Rung::LADDER.is_sorted(),
             "the declaration order is the ladder"
         );
-        assert!(Rung::Ip < Rung::WebRtc);
+        assert!(
+            Rung::Ip < Rung::WebRtc,
+            "the ip rung sits before the webrtc rung"
+        );
         assert!(Rung::WebRtc < Rung::Multihop, "multihop is below WebRTC");
         assert!(Rung::Multihop < Rung::Gossip, "gossip is below multihop");
         assert!(Rung::Gossip < Rung::Relay, "the relay is below gossip");
@@ -89,9 +92,21 @@ mod tests {
     /// One function names the rung of a custom transport id, for every selector.
     #[test]
     fn a_custom_transport_id_names_its_rung() {
-        assert_eq!(custom_rung(WEBRTC_TRANSPORT_ID), Rung::WebRtc);
-        assert_eq!(custom_rung(MULTIHOP_TRANSPORT_ID), Rung::Multihop);
-        assert_eq!(custom_rung(GOSSIP_TRANSPORT_ID), Rung::Gossip);
+        assert_eq!(
+            custom_rung(WEBRTC_TRANSPORT_ID),
+            Rung::WebRtc,
+            "the webrtc transport id names the webrtc rung"
+        );
+        assert_eq!(
+            custom_rung(MULTIHOP_TRANSPORT_ID),
+            Rung::Multihop,
+            "the multihop transport id names the multihop rung"
+        );
+        assert_eq!(
+            custom_rung(GOSSIP_TRANSPORT_ID),
+            Rung::Gossip,
+            "the gossip transport id names the gossip rung"
+        );
         assert_eq!(custom_rung(0x1234), Rung::Other, "a foreign id is last");
     }
 
@@ -101,11 +116,13 @@ mod tests {
         let only = |rungs: &'static [Rung]| move |rung: Rung| rungs.contains(&rung);
         assert_eq!(
             expected_rung(all, only(&[Rung::Relay, Rung::Ip])),
-            Some(Rung::Ip)
+            Some(Rung::Ip),
+            "the expected rung is the relay when the relay is the only usable rung"
         );
         assert_eq!(
             expected_rung(all, only(&[Rung::Relay, Rung::Multihop])),
-            Some(Rung::Multihop)
+            Some(Rung::Multihop),
+            "the expected rung is the relay when all rungs are usable"
         );
         // A rung that policy does not allow is passed over, however good.
         assert_eq!(
@@ -113,10 +130,19 @@ mod tests {
                 only(&[Rung::Multihop, Rung::Relay]),
                 only(&[Rung::Ip, Rung::WebRtc, Rung::Relay])
             ),
-            Some(Rung::Relay)
+            Some(Rung::Relay),
+            "the expected rung is multihop when only multihop is usable"
         );
-        assert_eq!(expected_rung(all, |_| false), None);
-        assert_eq!(expected_rung(|_| false, all), None);
+        assert_eq!(
+            expected_rung(all, |_| false),
+            None,
+            "no rung is expected when none is usable"
+        );
+        assert_eq!(
+            expected_rung(|_| false, all),
+            None,
+            "no rung is expected when none is allowed"
+        );
     }
 
     /// A relay path and a `WebRTC` path name the endpoint they lead to in their
@@ -125,13 +151,29 @@ mod tests {
     fn a_relay_or_webrtc_path_names_its_remote_and_no_other_does() {
         let id = iroh::SecretKey::from_bytes(&[31; 32]).public();
         let relay: iroh::RelayUrl = "https://relay.example".parse().expect("a relay url");
-        assert_eq!(remote_id_of(&Addr::Relay(relay, id)), Some(id));
+        assert_eq!(
+            remote_id_of(&Addr::Relay(relay, id)),
+            Some(id),
+            "a relay path names its remote"
+        );
         let webrtc = iroh_base::CustomAddr::from_parts(WEBRTC_TRANSPORT_ID, id.as_bytes());
-        assert_eq!(remote_id_of(&Addr::Custom(webrtc)), Some(id));
+        assert_eq!(
+            remote_id_of(&Addr::Custom(webrtc)),
+            Some(id),
+            "a custom webrtc path names its remote"
+        );
         let foreign = iroh_base::CustomAddr::from_parts(0x1234, id.as_bytes());
-        assert_eq!(remote_id_of(&Addr::Custom(foreign)), None);
+        assert_eq!(
+            remote_id_of(&Addr::Custom(foreign)),
+            None,
+            "a custom multihop path names its remote"
+        );
         let ip = std::net::SocketAddr::from(([127, 0, 0, 1], 4000));
-        assert_eq!(remote_id_of(&Addr::Ip(ip)), None);
+        assert_eq!(
+            remote_id_of(&Addr::Ip(ip)),
+            None,
+            "an ip path names no remote"
+        );
     }
 
     /// The relay rung can be taken from one remote: the block reads the endpoint id
@@ -143,7 +185,10 @@ mod tests {
         let relay: iroh::RelayUrl = "https://relay.example".parse().expect("a relay url");
         let to = |id| remote_id_of(&Addr::Relay(relay.clone(), id));
         block_rung_to(local, Rung::Relay, remote, true);
-        assert!(is_blocked_to(local, Rung::Relay, None, to(remote)));
+        assert!(
+            is_blocked_to(local, Rung::Relay, None, to(remote)),
+            "a relay block takes the relay rung to one remote"
+        );
         assert!(
             !is_blocked_to(local, Rung::Relay, None, to(other)),
             "another remote"
@@ -153,7 +198,10 @@ mod tests {
             "another rung"
         );
         block_rung_to(local, Rung::Relay, remote, false);
-        assert!(!is_blocked_to(local, Rung::Relay, None, to(remote)));
+        assert!(
+            !is_blocked_to(local, Rung::Relay, None, to(remote)),
+            "a relay block leaves the relay rung to other remotes"
+        );
     }
 
     #[cfg(feature = "test-hooks")]
@@ -169,8 +217,14 @@ mod tests {
         let (blocked, other) = (node(11), node(12));
         let at = |port: u16| Some(std::net::SocketAddr::from(([127, 0, 0, 1], port)));
         block_ip_to(blocked, [4000, 4001]);
-        assert!(is_blocked(blocked, Rung::Ip, at(4000)));
-        assert!(is_blocked(blocked, Rung::Ip, at(4001)));
+        assert!(
+            is_blocked(blocked, Rung::Ip, at(4000)),
+            "an ip port block takes one port of the ip rung"
+        );
+        assert!(
+            is_blocked(blocked, Rung::Ip, at(4001)),
+            "an ip port block takes that port from the node"
+        );
         assert!(!is_blocked(blocked, Rung::Ip, at(4002)), "another port");
         assert!(!is_blocked(other, Rung::Ip, at(4000)), "another node");
         assert!(!is_blocked(blocked, Rung::Relay, None), "another rung");
@@ -186,11 +240,17 @@ mod tests {
     fn a_rung_block_takes_one_whole_rung_from_one_node() {
         let (blocked, other) = (node(13), node(14));
         block_rung(blocked, Rung::Multihop, true);
-        assert!(is_blocked(blocked, Rung::Multihop, None));
+        assert!(
+            is_blocked(blocked, Rung::Multihop, None),
+            "a rung block takes the whole multihop rung from the node"
+        );
         assert!(!is_blocked(blocked, Rung::WebRtc, None), "another rung");
         assert!(!is_blocked(other, Rung::Multihop, None), "another node");
         block_rung(blocked, Rung::Multihop, false);
-        assert!(!is_blocked(blocked, Rung::Multihop, None));
+        assert!(
+            !is_blocked(blocked, Rung::Multihop, None),
+            "a rung block leaves other rungs alone"
+        );
     }
 
     /// A block of one remote takes the `WebRTC` rung from one remote only: another
@@ -202,7 +262,10 @@ mod tests {
         let (local, other_node) = (node(15), node(16));
         let (cut, kept) = (node(17), node(18));
         block_rung_to(local, Rung::WebRtc, cut, true);
-        assert!(is_blocked_to(local, Rung::WebRtc, None, Some(cut)));
+        assert!(
+            is_blocked_to(local, Rung::WebRtc, None, Some(cut)),
+            "a remote block takes the webrtc rung from one remote"
+        );
         assert!(
             !is_blocked_to(local, Rung::WebRtc, None, Some(kept)),
             "another remote"
@@ -224,7 +287,10 @@ mod tests {
             "is_blocked reads no remote block"
         );
         block_rung_to(local, Rung::WebRtc, cut, false);
-        assert!(!is_blocked_to(local, Rung::WebRtc, None, Some(cut)));
+        assert!(
+            !is_blocked_to(local, Rung::WebRtc, None, Some(cut)),
+            "a remote block leaves the webrtc rung to other remotes"
+        );
     }
 
     /// A block of the whole rung still takes it from every remote.
@@ -233,9 +299,15 @@ mod tests {
     fn a_whole_rung_block_still_takes_the_rung_from_every_remote() {
         let (local, remote) = (node(19), node(20));
         block_rung(local, Rung::WebRtc, true);
-        assert!(is_blocked_to(local, Rung::WebRtc, None, Some(remote)));
+        assert!(
+            is_blocked_to(local, Rung::WebRtc, None, Some(remote)),
+            "a whole rung block takes the rung from every remote"
+        );
         block_rung(local, Rung::WebRtc, false);
-        assert!(!is_blocked_to(local, Rung::WebRtc, None, Some(remote)));
+        assert!(
+            !is_blocked_to(local, Rung::WebRtc, None, Some(remote)),
+            "a whole rung block leaves other rungs alone"
+        );
     }
 
     /// The property the three copies disagreed on.
@@ -243,25 +315,40 @@ mod tests {
     fn an_empty_transmit_still_yields_one_datagram() {
         let out: Vec<&[u8]> = split_segments(&[], None).collect();
         assert_eq!(out.len(), 1, "a keep-alive must not be dropped");
-        assert!(out[0].is_empty());
+        assert!(
+            out[0].is_empty(),
+            "an empty transmit still yields one datagram"
+        );
     }
 
     #[test]
     fn a_batched_transmit_splits_on_the_segment_size() {
         let out: Vec<&[u8]> = split_segments(&[1, 2, 3, 4, 5], Some(2)).collect();
-        assert_eq!(out, vec![&[1u8, 2][..], &[3, 4][..], &[5][..]]);
+        assert_eq!(
+            out,
+            vec![&[1u8, 2][..], &[3, 4][..], &[5][..]],
+            "a batched transmit splits on the segment size"
+        );
     }
 
     #[test]
     fn an_unbatched_transmit_is_one_datagram() {
         let out: Vec<&[u8]> = split_segments(&[1, 2, 3], None).collect();
-        assert_eq!(out, vec![&[1u8, 2, 3][..]]);
+        assert_eq!(
+            out,
+            vec![&[1u8, 2, 3][..]],
+            "an unbatched transmit is one datagram"
+        );
     }
 
     /// A zero segment size must not divide by zero or spin.
     #[test]
     fn a_zero_segment_size_is_clamped() {
         let out: Vec<&[u8]> = split_segments(&[1, 2], Some(0)).collect();
-        assert_eq!(out, vec![&[1u8][..], &[2][..]]);
+        assert_eq!(
+            out,
+            vec![&[1u8][..], &[2][..]],
+            "a zero segment size is clamped to one byte per datagram"
+        );
     }
 }

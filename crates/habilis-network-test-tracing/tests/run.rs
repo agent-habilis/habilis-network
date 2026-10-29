@@ -21,7 +21,11 @@ fn panic_text(body: impl FnOnce()) -> String {
 
 #[test]
 fn run_returns_the_output_of_the_future() {
-    assert_eq!(run(init(), async { 7 }), 7);
+    assert_eq!(
+        run(init(), async { 7 }),
+        7,
+        "run returns the output of the future"
+    );
 }
 
 #[test]

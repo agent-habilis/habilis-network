@@ -78,7 +78,11 @@ fn a_browser_refuses_a_stream_with_no_relay_lookup() {
     let transports = TransportOpts::default().within(&config.transport);
     let error = runtime::refuse_in_browser(&config.lookups, config.transport, transports)
         .expect_err("no path to signal on");
-    assert_eq!(error.to_string(), runtime::BROWSER_NEEDS_RELAY_LOOKUP);
+    assert_eq!(
+        error.to_string(),
+        runtime::BROWSER_NEEDS_RELAY_LOOKUP,
+        "a browser refuses a stream with no relay lookup with the browser message"
+    );
 }
 
 // A reader runs only the paths the producer runs: an offer to a producer
@@ -93,7 +97,10 @@ async fn a_reader_takes_the_producers_transport_list() {
     .expect("bind");
     let hash = producer_node.create().await.hash().clone();
     let reader_node = StreamNode::bind_for(&hash).await.expect("bind for");
-    assert!(reader_node.transports.udp);
+    assert!(
+        reader_node.transports.udp,
+        "a reader takes the producer's udp transport"
+    );
     assert!(
         !reader_node.transports.webrtc,
         "no data channel to offer to"
