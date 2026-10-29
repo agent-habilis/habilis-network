@@ -1,8 +1,6 @@
 #!/usr/bin/env bun
-// A `pub trait` is justified when a crate file uses it as a generic bound, a dyn object, an impl bound
-// or a supertrait. Any other `pub trait` is refused unless `pub-trait.allow` names its file with the
-// exact count and a reason.
-// `pub-trait.test.ts` plants one file of each kind.
+// A `pub trait` is refused unless a crate file uses it as a generic bound, a dyn object, an impl
+// bound or a supertrait. Every other one fails the check. `pub-trait.test.ts` plants one file of each kind.
 
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -10,7 +8,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const allowFile = process.env.PUB_TRAIT_ALLOW || "scripts/pub-trait/pub-trait.allow";
 
 const TRAIT = /^\s*pub trait\b/gm;
 const SCOPE = /^crates\/.*\.rs$/;
@@ -43,47 +40,17 @@ function unjustifiedIn(file: string, texts: string[]): number {
   return names.filter((name) => !usedAsBound(name, texts)).length;
 }
 
-function readAllow(): { allowed: Map<string, number>; problems: string[] } {
-  const allowed = new Map<string, number>();
-  const problems: string[] = [];
-  const file = path.join(ROOT, allowFile);
-  if (!existsSync(file)) return { allowed, problems };
-  for (const line of readFileSync(file, "utf8").split("\n")) {
-    if (/^\s*(#|$)/.test(line)) continue;
-    const [target = "", count = ""] = line.split("|");
-    if (allowed.has(target)) {
-      problems.push(`pub-trait: ${allowFile} has two rows for ${target}. Merge them.`);
-    }
-    allowed.set(target, Number(count));
-  }
-  return { allowed, problems };
-}
-
 function main(): number {
-  const { allowed, problems } = readAllow();
-  const found = new Map<string, number>();
+  const problems: string[] = [];
   const files = listFiles();
   const texts = files.map((file) => readFileSync(path.join(ROOT, file), "utf8"));
   for (const file of files) {
     const count = unjustifiedIn(file, texts);
-    if (count > 0) found.set(file, count);
-  }
-  for (const [file, count] of [...found].sort()) {
-    const expected = allowed.get(file);
-    if (expected === undefined) {
-      problems.push(
-        `pub-trait: ${file}: ${count} pub trait not allowed. Define it only for a generic bound, a dyn object, an extension trait or a sealed trait, then add a row to ${allowFile} with the reason.`,
-      );
-    } else if (expected !== count) {
-      problems.push(`pub-trait: ${file}: ${count} pub trait found, ${expected} allowed. Set the count in ${allowFile}.`);
+    if (count > 0) {
+      problems.push(`pub-trait: ${file}: ${count} pub trait not used as a bound, a dyn object or a supertrait. Define it only for one of those, or make it private.`);
     }
   }
-  for (const file of [...allowed.keys()].sort()) {
-    if (!found.has(file)) {
-      problems.push(`pub-trait: ${file}: stale row. No pub trait is left in it. Remove it from ${allowFile}.`);
-    }
-  }
-  for (const problem of problems) console.log(problem);
+  for (const problem of problems.sort()) console.log(problem);
   return problems.length > 0 ? 1 : 0;
 }
 
