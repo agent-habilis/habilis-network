@@ -37,10 +37,11 @@ pub use rung::{is_blocked, is_blocked_to};
 #[cfg(test)]
 mod tests {
     use super::{
-        GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID, block_ip_to,
-        block_rung, block_rung_to, custom_rung, expected_rung, is_blocked, is_blocked_to,
-        remote_id_of, split_segments,
+        GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID, custom_rung,
+        expected_rung, remote_id_of, split_segments,
     };
+    #[cfg(feature = "test-hooks")]
+    use super::{block_ip_to, block_rung, block_rung_to, is_blocked, is_blocked_to};
     use iroh::endpoint::transports::Addr;
 
     #[test]
