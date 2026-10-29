@@ -269,10 +269,10 @@ fn decode_relay_ladder(
         *position = end;
         let text =
             std::str::from_utf8(raw).map_err(ConfigError::with_step("relay URL is not UTF-8"))?;
-        ladder.push(
-            text.parse::<RelayUrl>()
-                .map_err(ConfigError::with_step("invalid relay URL"))?,
-        );
+        let url: RelayUrl = text
+            .parse()
+            .map_err(ConfigError::with_step("invalid relay URL"))?;
+        ladder.push(url);
     }
     Ok(ladder)
 }
@@ -611,7 +611,8 @@ impl FromStr for OptFlag<RelayLadder> {
         if text == "default" {
             Ok(RelaySelection::Default)
         } else {
-            text.parse::<RelayLadder>().map(RelaySelection::Named)
+            let ladder: Result<RelayLadder, _> = text.parse();
+            ladder.map(RelaySelection::Named)
         }
     }
 }
@@ -834,9 +835,10 @@ pub(crate) fn parse_relay_ladder(raw: &str) -> Result<Vec<RelayUrl>, String> {
             if trimmed.is_empty() {
                 return Err(format!("empty entry in relay ladder {raw:?}"));
             }
-            trimmed
-                .parse::<RelayUrl>()
-                .map_err(|error| format!("invalid relay URL {trimmed:?}: {error}"))
+            let url: RelayUrl = trimmed
+                .parse()
+                .map_err(|error| format!("invalid relay URL {trimmed:?}: {error}"))?;
+            Ok(url)
         })
         .collect()
 }
@@ -935,17 +937,18 @@ mod lookup_tests {
         assert_eq!(two.len(), 2);
         // Display round-trips through FromStr (canonical `a,b` text form).
         let rendered = two.to_string();
-        assert_eq!(rendered.parse::<RelayLadder>().unwrap(), two);
+        let reparsed: RelayLadder = rendered.parse().unwrap();
+        assert_eq!(reparsed, two);
         assert_eq!(two.as_urls().len(), 2);
     }
 
     #[test]
     fn relay_ladder_rejects_empty_and_empty_entries() {
-        assert!("".parse::<RelayLadder>().is_err());
+        let empty: Result<RelayLadder, _> = "".parse();
+        assert!(empty.is_err());
+        let doubled: Result<RelayLadder, _> = "https://a.example,,https://b.example".parse();
         assert!(
-            "https://a.example,,https://b.example"
-                .parse::<RelayLadder>()
-                .is_err(),
+            doubled.is_err(),
             "an empty entry must be rejected so a typo never shrinks the ladder"
         );
     }
@@ -1458,17 +1461,22 @@ mod choice_tests {
 
     #[test]
     fn a_lookup_and_a_transport_parse_from_their_names() {
-        assert_eq!("mdns".parse::<Lookup>().unwrap(), Lookup::Mdns);
-        assert_eq!("dht".parse::<Lookup>().unwrap(), Lookup::Dht);
-        assert_eq!("relay".parse::<Lookup>().unwrap(), Lookup::Relay);
-        assert_eq!("udp".parse::<Transport>().unwrap(), Transport::Udp);
-        assert_eq!("webrtc".parse::<Transport>().unwrap(), Transport::WebRtc);
-        assert_eq!("relay".parse::<Transport>().unwrap(), Transport::Relay);
-        assert_eq!(
-            "multihop".parse::<Transport>().unwrap(),
-            Transport::Multihop
-        );
-        assert_eq!("gossip".parse::<Transport>().unwrap(), Transport::Gossip);
+        let mdns: Lookup = "mdns".parse().unwrap();
+        assert_eq!(mdns, Lookup::Mdns);
+        let dht: Lookup = "dht".parse().unwrap();
+        assert_eq!(dht, Lookup::Dht);
+        let relay: Lookup = "relay".parse().unwrap();
+        assert_eq!(relay, Lookup::Relay);
+        let udp: Transport = "udp".parse().unwrap();
+        assert_eq!(udp, Transport::Udp);
+        let webrtc: Transport = "webrtc".parse().unwrap();
+        assert_eq!(webrtc, Transport::WebRtc);
+        let relay_transport: Transport = "relay".parse().unwrap();
+        assert_eq!(relay_transport, Transport::Relay);
+        let multihop: Transport = "multihop".parse().unwrap();
+        assert_eq!(multihop, Transport::Multihop);
+        let gossip: Transport = "gossip".parse().unwrap();
+        assert_eq!(gossip, Transport::Gossip);
         assert_eq!(Transport::Gossip.to_string(), "gossip");
         for (name, lookup) in [
             ("mdns", Lookup::Mdns),
@@ -1482,19 +1490,22 @@ mod choice_tests {
 
     #[test]
     fn the_direct_transport_is_named_udp_not_p2p() {
-        let udp = "udp".parse::<Transport>().unwrap();
+        let udp: Transport = "udp".parse().unwrap();
         assert_eq!(udp.to_string(), "udp");
-        assert!("p2p".parse::<Transport>().is_err());
+        let p2p: Result<Transport, _> = "p2p".parse();
+        assert!(p2p.is_err());
     }
 
     #[test]
     fn an_unknown_name_is_an_error_that_lists_the_choices() {
-        let error = "relai".parse::<Lookup>().unwrap_err().to_string();
+        let misspelt: Result<Lookup, _> = "relai".parse();
+        let error = misspelt.unwrap_err().to_string();
         assert!(
             error.contains("relai") && error.contains("mdns, dht, relay"),
             "{error}"
         );
-        let transport_error = "tcp".parse::<Transport>().unwrap_err().to_string();
+        let unknown_transport: Result<Transport, _> = "tcp".parse();
+        let transport_error = unknown_transport.unwrap_err().to_string();
         assert!(
             transport_error.contains("tcp")
                 && transport_error.contains("udp, webrtc, multihop, gossip, relay"),
