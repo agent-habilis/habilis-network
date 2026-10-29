@@ -19,6 +19,15 @@ const QUEUE: usize = 256;
 /// The task ends when the topic is closed or when the sink is dropped. When it
 /// ends it clears the alive flag, and the handle then treats the path as not valid
 /// and counts a datagram as `dropped_no_sink`.
+///
+/// # Examples
+///
+/// It sends frames on a live gossip sender, which a caller gets from a running gossip node, so this is not compiled.
+///
+/// ```ignore
+/// let sink = GossipSink::spawn(sender);
+/// assert!(sink.is_alive());
+/// ```
 #[derive(Debug)]
 pub struct GossipSink {
     queue: mpsc::Sender<Bytes>,

@@ -12,6 +12,16 @@ use iroh::endpoint::Connection;
 use crate::GOSSIP_TRANSPORT_ID;
 
 /// Whether the selected path of `connection` is the gossip rung.
+///
+/// # Examples
+///
+/// It reads the selected path of a live connection, so this is not compiled.
+///
+/// ```ignore
+/// if selected_is_gossip(&connection) {
+///     println!("the path runs over gossip");
+/// }
+/// ```
 #[must_use]
 pub fn selected_is_gossip(connection: &Connection) -> bool {
     connection.paths().iter().any(|path| {
@@ -26,6 +36,14 @@ pub fn selected_is_gossip(connection: &Connection) -> bool {
 ///
 /// It does not depend on any relay or mesh policy: the rule holds whatever the policy
 /// says.
+///
+/// # Examples
+///
+/// It watches a live connection, so this is not compiled.
+///
+/// ```ignore
+/// watch_recursion(&connection, 1, || println!("the connection closed"));
+/// ```
 pub fn watch_recursion(
     connection: &Connection,
     code: u32,

@@ -4,6 +4,18 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A copy of the counters at one moment.
+///
+/// # Examples
+///
+/// A new set of counters starts at zero.
+///
+/// ```
+/// use habilis_network_iroh_gossip_transport::Stats;
+///
+/// let stats = Stats::default();
+/// assert_eq!(stats.frames_out, 0);
+/// assert_eq!(stats.dropped_no_sink, 0);
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Stats {

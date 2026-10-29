@@ -31,6 +31,16 @@ pub const MAX_DATAGRAM_LEN: usize = MAX_FRAME_LEN - HEADER_LEN;
 
 /// A frame: the two ends and the datagram. A decode borrows the datagram from the
 /// input, and an encode writes this value out.
+///
+/// # Examples
+///
+/// A frame carries one datagram from a source to a destination. A caller outside the crate cannot build one without the test-fixtures feature, so this is not compiled.
+///
+/// ```ignore
+/// let frame = Frame { dst, src, datagram: b"hello" };
+/// let bytes = frame.encode().expect("a frame encodes");
+/// assert_eq!(decode(&bytes).expect("a frame decodes"), frame);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Frame<'datagram> {
@@ -52,6 +62,17 @@ impl<'datagram> Frame<'datagram> {
 }
 
 /// Why a datagram cannot be framed.
+///
+/// # Examples
+///
+/// A datagram that is empty cannot be encoded, and this error says so.
+///
+/// ```
+/// use habilis_network_iroh_gossip_transport::EncodeError;
+///
+/// let error = EncodeError::Empty;
+/// assert_eq!(error, EncodeError::Empty);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[must_use]
@@ -66,6 +87,17 @@ pub enum EncodeError {
 }
 
 /// Why bytes are not a frame this build reads.
+///
+/// # Examples
+///
+/// Bytes that do not start with the frame kind do not decode.
+///
+/// ```
+/// use habilis_network_iroh_gossip_transport::frame::{DecodeError, decode};
+///
+/// let error = decode(&[0u8]).unwrap_err();
+/// assert!(matches!(error, DecodeError::NotAFrame));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[must_use]
@@ -115,6 +147,16 @@ impl Frame<'_> {
 ///
 /// # Errors
 /// The bytes are not a frame of this build: see [`DecodeError`].
+///
+/// # Examples
+///
+/// A byte string that is not a frame returns an error.
+///
+/// ```
+/// use habilis_network_iroh_gossip_transport::frame::decode;
+///
+/// assert!(decode(&[0u8]).is_err());
+/// ```
 pub fn decode(bytes: &[u8]) -> Result<Frame<'_>, DecodeError> {
     if bytes.first() != Some(&FRAME_KIND) {
         return Err(DecodeError::NotAFrame);

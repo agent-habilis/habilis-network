@@ -5,6 +5,15 @@ use iroh_gossip::api::{Event, GossipReceiver};
 use crate::GossipHandle;
 
 /// The task of [`spawn_receive_loop`]. `abort()` stops it.
+///
+/// # Examples
+///
+/// The loop reads a live gossip receiver, so this is not compiled.
+///
+/// ```ignore
+/// let task = spawn_receive_loop(receiver, handle);
+/// task.abort();
+/// ```
 pub type ReceiveLoop = n0_future::task::JoinHandle<()>;
 
 /// Read a topic and hand every message to `handle`, until the topic ends.
@@ -12,6 +21,15 @@ pub type ReceiveLoop = n0_future::task::JoinHandle<()>;
 /// For a topic that carries **only** transport frames, as a test or a benchmark does.
 /// On the mesh topic the engine splits the frames from the mesh messages before
 /// it hands anything to a handle (design doc, section 2.5): this loop does not.
+///
+/// # Examples
+///
+/// It reads a live gossip receiver, so this is not compiled.
+///
+/// ```ignore
+/// let task = spawn_receive_loop(receiver, handle);
+/// task.abort();
+/// ```
 #[must_use]
 pub fn spawn_receive_loop(mut receiver: GossipReceiver, handle: GossipHandle) -> ReceiveLoop {
     use n0_future::StreamExt as _;

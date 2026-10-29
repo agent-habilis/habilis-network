@@ -31,6 +31,19 @@ use iroh::endpoint::transports;
 
 /// A handle to a gossip transport. Clone-cheap. Register `custom_transport()` on
 /// the endpoint builder, and `attach` a sink once the topic is joined.
+///
+/// # Examples
+///
+/// A handle is made for one application id, which it reports back.
+///
+/// ```
+/// use habilis_network_iroh_gossip_transport::GossipHandle;
+/// use iroh::SecretKey;
+///
+/// let app_id = SecretKey::from_bytes(&[2u8; 32]).public();
+/// let handle = GossipHandle::new(app_id);
+/// assert_eq!(handle.app_id(), app_id);
+/// ```
 #[derive(Debug, Clone)]
 pub struct GossipHandle {
     // the handle and its transport share one state, cloned into each

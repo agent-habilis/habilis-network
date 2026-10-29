@@ -9,6 +9,17 @@ use bytes::Bytes;
 use crate::{FrameSink, GossipHandle, shared};
 
 /// The members that share one flood.
+///
+/// # Examples
+///
+/// A new hub has sent no frame.
+///
+/// ```
+/// use habilis_network_iroh_gossip_transport::hub::Hub;
+///
+/// let hub = Hub::new();
+/// assert_eq!(hub.sent().count(), 0);
+/// ```
 #[derive(Debug, Default, Clone)]
 pub struct Hub {
     // each handle that joins the hub keeps a clone of the member list
