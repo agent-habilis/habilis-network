@@ -541,7 +541,7 @@ impl MultihopHandle {
     /// the vectors it sent before.
     #[must_use]
     pub fn link_vector(&self, mut links: Vec<(AppId, u32)>) -> LinkVector {
-        let stuck = self.stuck_hops().collect::<Vec<_>>();
+        let stuck: Vec<_> = self.stuck_hops().collect();
         links.retain(|(neighbour, _)| !stuck.contains(neighbour));
         let now = topology::wall_clock_ms();
         let mut seq = now;
@@ -770,14 +770,11 @@ mod tests {
 
     /// An underlay on loopback only, bound to the derived key of `secret`.
     async fn loopback_underlay(secret: &SecretKey) -> Endpoint {
+        let loopback_addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("loopback");
         let underlay = Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(secret))
             .relay_mode(RelayMode::Disabled)
-            .bind_addr(
-                "127.0.0.1:0"
-                    .parse::<std::net::SocketAddr>()
-                    .expect("loopback"),
-            )
+            .bind_addr(loopback_addr)
             .expect("valid bind addr")
             .bind()
             .await
@@ -818,13 +815,10 @@ mod tests {
         )
         .expect("an extra ALPN is allowed");
 
+        let loopback_addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("loopback");
         let client = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
-            .bind_addr(
-                "127.0.0.1:0"
-                    .parse::<std::net::SocketAddr>()
-                    .expect("loopback"),
-            )
+            .bind_addr(loopback_addr)
             .expect("valid bind addr")
             .bind()
             .await

@@ -54,11 +54,12 @@ impl Route {
     /// The hops as short ids for a log line: the application id of each, then the id
     /// of its underlay, which differ because the underlay has a key of its own.
     pub(crate) fn describe(&self) -> String {
-        self.0
+        let hops: Vec<String> = self
+            .0
             .iter()
             .map(|hop| format!("{}/{}", hop.app_id.fmt_short(), hop.underlay_id.fmt_short()))
-            .collect::<Vec<_>>()
-            .join(">")
+            .collect();
+        hops.join(">")
     }
 
     pub(crate) fn singleton(hop: RouteHop) -> Self {

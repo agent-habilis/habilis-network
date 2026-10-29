@@ -154,11 +154,11 @@ enum GateRole {
 
 /// The paths of a connection as text, a star on the selected one.
 fn path_list(paths: impl IntoIterator<Item = (TransportAddr, bool)>) -> String {
-    paths
+    let parts: Vec<String> = paths
         .into_iter()
         .map(|(addr, selected)| format!("{addr:?}{}", if selected { "*" } else { "" }))
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect();
+    parts.join(" ")
 }
 
 /// What the relay may do for cells, set by the mesh policy.
@@ -1361,12 +1361,8 @@ mod tests {
     #[test]
     fn a_path_that_no_test_blocked_is_kept() {
         let paths = vec![(ip(9), true), (relay(), false)];
-        assert_eq!(
-            super::unblocked(&paths, |_| false)
-                .cloned()
-                .collect::<Vec<_>>(),
-            paths
-        );
+        let kept: Vec<_> = super::unblocked(&paths, |_| false).cloned().collect();
+        assert_eq!(kept, paths);
     }
 
     #[test]
