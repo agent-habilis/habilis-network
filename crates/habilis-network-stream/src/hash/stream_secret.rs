@@ -12,23 +12,25 @@ use zeroize::Zeroizing;
 #[derive(Clone)]
 pub struct StreamSecret(pub(super) Zeroizing<[u8; SECRET_LEN]>);
 
-impl StreamSecret {
-    /// Wrap the 32 bytes of a secret. The array passed in is a copy that the
-    /// caller still holds: keep it in a [`Zeroizing`] when it is a secret.
-    #[must_use]
-    pub fn from_bytes(bytes: [u8; SECRET_LEN]) -> Self {
+/// Wrap the 32 bytes of a secret. The array passed in is a copy that the
+/// caller still holds: keep it in a [`Zeroizing`] when it is a secret.
+impl From<[u8; SECRET_LEN]> for StreamSecret {
+    fn from(bytes: [u8; SECRET_LEN]) -> Self {
         Self(Zeroizing::new(bytes))
     }
+}
 
-    /// Take a buffer that is already wiped on drop, whole, so that the code
-    /// makes no plain copy of the secret on the way in. This is the constructor
-    /// for a secret that is already in a [`Zeroizing`] (bytes read off a stream,
-    /// a random draw). [`Self::from_bytes`] stays for raw input at an edge.
-    #[must_use]
-    pub fn from_zeroizing(bytes: Zeroizing<[u8; SECRET_LEN]>) -> Self {
+/// Take a buffer that is already wiped on drop, whole, so that the code
+/// makes no plain copy of the secret on the way in. This is the conversion
+/// for a secret that is already in a [`Zeroizing`] (bytes read off a stream,
+/// a random draw). The `[u8; SECRET_LEN]` conversion stays for raw input at an edge.
+impl From<Zeroizing<[u8; SECRET_LEN]>> for StreamSecret {
+    fn from(bytes: Zeroizing<[u8; SECRET_LEN]>) -> Self {
         Self(bytes)
     }
+}
 
+impl StreamSecret {
     /// The raw bytes, borrowed.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; SECRET_LEN] {

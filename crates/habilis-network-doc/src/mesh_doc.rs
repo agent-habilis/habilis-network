@@ -966,7 +966,7 @@ mod tests {
             r#"{"k":"enc","d":"418rHy72Zv4wKRPXd4ff7MKEgNVoG1qe7RD94gp7a97VTVc5B4bEXa"#,
             r#"qCBUwXKpBHZmAAM8zFEEiGKEzMZY7dcnQnuXjCcerUr3F"}"#,
         );
-        let key = SymmetricKey::from_bytes([3u8; 32]);
+        let key = SymmetricKey::from([3u8; 32]);
         let recovered = decrypt_body(enc, Some(&key)).expect("the key opens the body");
         assert_eq!(
             recovered, plain,
@@ -1705,7 +1705,7 @@ mod tests {
         let key = [42u8; 32];
         // Author builds the change and seals the wire body, as the daemon does.
         let merge = json!({"secret": "value"});
-        let author_doc = MeshDoc::new_ungated().with_key(Some(SymmetricKey::from_bytes(key)));
+        let author_doc = MeshDoc::new_ungated().with_key(Some(SymmetricKey::from(key)));
         let bytes: Vec<u8> = author_doc
             .build_change(&merge, &pad_seed(alice.as_str().as_bytes()))
             .expect("builds")
@@ -1726,7 +1726,7 @@ mod tests {
 
         // A peer holding the key applies it and converges; surface_body recovers
         // the plaintext for the delta.
-        let mut with_key = MeshDoc::new_ungated().with_key(Some(SymmetricKey::from_bytes(key)));
+        let mut with_key = MeshDoc::new_ungated().with_key(Some(SymmetricKey::from(key)));
         assert!(
             matches!(with_key.ingest(&carrier), Ingested::Applied { .. }),
             "an encrypted change converges with the key"
@@ -1753,8 +1753,7 @@ mod tests {
             json!({}),
             "the no-key sink holds no change json"
         );
-        let mut wrong_key =
-            MeshDoc::new_ungated().with_key(Some(SymmetricKey::from_bytes([7u8; 32])));
+        let mut wrong_key = MeshDoc::new_ungated().with_key(Some(SymmetricKey::from([7u8; 32])));
         assert!(
             matches!(wrong_key.ingest(&carrier), Ingested::Ignored),
             "an encrypted change is buffered with the wrong key"

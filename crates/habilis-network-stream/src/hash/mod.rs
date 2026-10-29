@@ -61,7 +61,7 @@ mod tests {
             lookups: LookupOpts::loopback(),
             transport,
             id: StreamId::from([1; ID_LEN]),
-            secret: StreamSecret::from_bytes([2; SECRET_LEN]),
+            secret: StreamSecret::from([2; SECRET_LEN]),
         }
     }
 
@@ -120,13 +120,13 @@ mod tests {
     // type of the field instead. A `Zeroizing` buffer wipes on drop.
     #[test]
     fn the_secret_is_held_in_a_wiped_buffer() {
-        let secret = StreamSecret::from_bytes([9; SECRET_LEN]);
+        let secret = StreamSecret::from([9; SECRET_LEN]);
         let _: &Zeroizing<[u8; SECRET_LEN]> = &secret.0;
     }
 
     #[test]
     fn from_zeroizing_keeps_the_bytes() {
-        let secret = StreamSecret::from_zeroizing(Zeroizing::new([4; SECRET_LEN]));
+        let secret = StreamSecret::from(Zeroizing::new([4; SECRET_LEN]));
         assert_eq!(
             secret.as_bytes(),
             &[4; SECRET_LEN],
@@ -208,7 +208,7 @@ mod tests {
         assert_eq!(hash, other, "equal inputs give equal hashes");
         let mut bytes = *other.secret.as_bytes();
         bytes[SECRET_LEN - 1] ^= 1;
-        other.secret = StreamSecret::from_bytes(bytes);
+        other.secret = StreamSecret::from(bytes);
         assert_ne!(
             hash, other,
             "one byte of difference makes two hashes differ"

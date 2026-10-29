@@ -281,7 +281,7 @@ mod tests {
     use x25519_dalek::{PublicKey, StaticSecret};
 
     fn key(byte: u8) -> SymmetricKey {
-        SymmetricKey::from_bytes([byte; 32])
+        SymmetricKey::from([byte; 32])
     }
 
     #[test]

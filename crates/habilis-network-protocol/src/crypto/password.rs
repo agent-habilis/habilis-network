@@ -91,7 +91,7 @@ pub(super) fn stretch_password(
 /// holding the mesh id without the password computes nothing reachable.
 #[must_use]
 pub(crate) fn stretch_mesh_password(password: &Password, seed: &Seed) -> SymmetricKey {
-    SymmetricKey::from_zeroizing(stretch_password(password, seed.as_bytes(), b"password"))
+    SymmetricKey::from(stretch_password(password, seed.as_bytes(), b"password"))
 }
 
 /// The 32-byte key that wraps an invite ticket's root secret when the mesh's
@@ -104,7 +104,7 @@ pub(crate) fn stretch_mesh_password(password: &Password, seed: &Seed) -> Symmetr
 /// recover it — bullet: a leaked invite still needs the password.
 #[must_use]
 pub(crate) fn invite_wrap_key(password: &Password, salt: &Seed) -> SymmetricKey {
-    SymmetricKey::from_zeroizing(stretch_password(
+    SymmetricKey::from(stretch_password(
         password,
         salt.as_bytes(),
         b"invite-ticket",
@@ -219,7 +219,7 @@ mod password_tests {
     #[test]
     fn derive_token_matches_the_golden_bytes() {
         use crate::crypto::{TicketAuth, TicketSecret};
-        let secret = TicketSecret::from_bytes([3u8; 32]);
+        let secret = TicketSecret::from([3u8; 32]);
         let auth = TicketAuth::derive(&secret, Some(&pw("hunter2")), b"blob-ticket");
         assert!(
             auth.password_protected,
@@ -246,8 +246,8 @@ mod password_tests {
         let stretched: Zeroizing<[u8; 32]> =
             super::stretch_password(&pw("hunter2"), &SEED_A, b"password");
         assert_ne!(*stretched, [0u8; 32], "the stretch fills the buffer");
-        let key = SymmetricKey::from_zeroizing(stretched.clone());
-        let secret = TicketSecret::from_zeroizing(stretched.clone());
+        let key = SymmetricKey::from(stretched.clone());
+        let secret = TicketSecret::from(stretched.clone());
         assert_eq!(
             key.as_bytes(),
             &*stretched,
@@ -271,7 +271,7 @@ mod password_tests {
     #[test]
     fn ticket_secret_debug_never_prints_a_byte() {
         use crate::crypto::TicketSecret;
-        let secret = TicketSecret::from_bytes([9u8; 32]);
+        let secret = TicketSecret::from([9u8; 32]);
         assert_eq!(
             format!("{secret:?}"),
             "TicketSecret(***)",
@@ -293,14 +293,14 @@ mod password_tests {
     fn the_secret_types_hold_their_bytes_in_a_zeroizing_buffer() {
         use zeroize::Zeroizing;
 
-        let _: &Zeroizing<[u8; 32]> = &crate::crypto::TicketSecret::from_bytes([0; 32]).0;
-        let _: &Zeroizing<[u8; 32]> = &crate::crypto::SymmetricKey::from_bytes([0; 32]).0;
+        let _: &Zeroizing<[u8; 32]> = &crate::crypto::TicketSecret::from([0; 32]).0;
+        let _: &Zeroizing<[u8; 32]> = &crate::crypto::SymmetricKey::from([0; 32]).0;
     }
 
     #[test]
     fn ticket_tokens_are_domain_separated_by_label() {
         use crate::crypto::{TicketAuth, TicketSecret};
-        let secret = TicketSecret::from_bytes([3u8; 32]);
+        let secret = TicketSecret::from([3u8; 32]);
         let password = pw("hunter2");
         let blob = TicketAuth::blob(&secret, Some(&password)).token;
         // Stands in for any application-minted kind (the application's bridge passes

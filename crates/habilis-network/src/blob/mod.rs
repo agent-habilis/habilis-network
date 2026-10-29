@@ -69,13 +69,13 @@ mod tests {
         use crate::protocol::crypto::{SymmetricKey, TicketSecret};
         use zeroize::Zeroizing;
 
-        let secret = TicketSecret::from_zeroizing(Zeroizing::new([5u8; super::SECRET_LEN]));
+        let secret = TicketSecret::from(Zeroizing::new([5u8; super::SECRET_LEN]));
         assert_eq!(
             secret.as_bytes(),
             &[5u8; super::SECRET_LEN],
             "a secret moves into its type whole"
         );
-        let key = SymmetricKey::from_zeroizing(Zeroizing::new([6u8; 32]));
+        let key = SymmetricKey::from(Zeroizing::new([6u8; 32]));
         assert_eq!(
             key.as_bytes(),
             &[6u8; 32],
@@ -455,7 +455,7 @@ mod tests {
             .register(&src, ContentId::new("blob-test-content"))
             .await
             .unwrap();
-        ticket.secret = crypto::TicketSecret::from_bytes([0u8; super::SECRET_LEN]);
+        ticket.secret = crypto::TicketSecret::from([0u8; super::SECRET_LEN]);
         let mut out = Vec::new();
         assert!(
             fetch(&ticket, &mut out, None).await.is_err(),

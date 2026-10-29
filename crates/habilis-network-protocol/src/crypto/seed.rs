@@ -32,7 +32,7 @@ impl Seed {
     /// If `label` exceeds 255 bytes; labels are short internal constants.
     #[must_use]
     pub fn derive(&self, label: &[u8]) -> SymmetricKey {
-        SymmetricKey::from_zeroizing(derive::derive_secret(&self.0, label))
+        SymmetricKey::from(derive::derive_secret(&self.0, label))
     }
 }
 
@@ -105,7 +105,7 @@ mod golden_tests {
 
     #[test]
     fn golden_derivations_keyed_by_a_secret() {
-        let root = SymmetricKey::from_bytes(ROOT);
+        let root = SymmetricKey::from(ROOT);
         let name = MeshName::try_new("test").unwrap();
         assert_eq!(
             format!(
@@ -132,7 +132,7 @@ mod golden_tests {
         let old_wire = [5931, 48242, 42909, 64096, 38056, 45299, 54555, 32776];
         let old_secret = [64619, 51235, 41400, 1621, 17345, 37799, 35331, 60865];
         let wire = rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED)));
-        let secret = rendezvous_ports(Keying::Secret(&SymmetricKey::from_bytes(ROOT)));
+        let secret = rendezvous_ports(Keying::Secret(&SymmetricKey::from(ROOT)));
         assert_ne!(wire, old_wire, "the old wire ladder is no longer derived");
         assert_ne!(
             secret, old_secret,

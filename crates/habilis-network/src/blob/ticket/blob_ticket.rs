@@ -126,7 +126,7 @@ impl BlobTicket {
         }
         let payload = &framed[2..];
         let mut position = 0;
-        let secret = TicketSecret::from_bytes(
+        let secret = TicketSecret::from(
             take_array::<SECRET_LEN>(payload, &mut position).context("ticket missing secret")?,
         );
         let flags = *payload.get(position).context("ticket missing flags")?;

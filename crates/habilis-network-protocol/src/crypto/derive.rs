@@ -124,7 +124,7 @@ mod derive_secret_tests {
             "derive hashes the same bytes as derive_secret for a seed"
         );
         // A key derives from the same bytes the way a seed does.
-        let key = SymmetricKey::from_bytes(SEED_A);
+        let key = SymmetricKey::from(SEED_A);
         assert_eq!(
             key.derive(b"broadcast").as_bytes(),
             seed.derive(b"broadcast").as_bytes(),
@@ -141,7 +141,7 @@ mod derive_secret_tests {
             "a seed prints no byte"
         );
         assert_eq!(
-            format!("{:?}", SymmetricKey::from_bytes(SEED_A)),
+            format!("{:?}", SymmetricKey::from(SEED_A)),
             "SymmetricKey(***)",
             "a symmetric key prints no byte"
         );

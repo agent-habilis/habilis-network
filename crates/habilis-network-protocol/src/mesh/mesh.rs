@@ -210,7 +210,7 @@ impl Mesh {
         let issuer = SecretKey::from_bytes(&issuer_bytes);
         self.config.issuer_pubkey = Some(*issuer.public().as_bytes());
         self.secret = MeshSecret::Invite {
-            root: SymmetricKey::from_zeroizing(root),
+            root: SymmetricKey::from(root),
             issuer: Some(Box::new(issuer)),
         };
     }

@@ -79,8 +79,5 @@ async fn read_header(
     let mut secret = Zeroizing::new([0; SECRET_LEN]);
     recv.read_exact(&mut id).await?;
     recv.read_exact(&mut *secret).await?;
-    Ok((
-        send,
-        (StreamId::from(id), StreamSecret::from_zeroizing(secret)),
-    ))
+    Ok((send, (StreamId::from(id), StreamSecret::from(secret))))
 }

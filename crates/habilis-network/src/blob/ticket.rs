@@ -50,7 +50,7 @@ mod tests {
     fn sample(password: bool) -> BlobTicket {
         BlobTicket {
             address: sample_addr(3),
-            secret: TicketSecret::from_bytes([9u8; SECRET_LEN]),
+            secret: TicketSecret::from([9u8; SECRET_LEN]),
             sha256: BlobDigest::from([7u8; HASH_LEN]),
             size: 1_234_567,
             lookups: LookupOpts::public_preset(),

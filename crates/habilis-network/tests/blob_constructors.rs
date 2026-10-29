@@ -28,7 +28,7 @@ fn a_blob_ticket_is_built_from_outside_the_crate() {
     let address = EndpointAddr::new(SecretKey::from_bytes(&[1; 32]).public());
     let ticket = BlobTicket::new(
         address.clone(),
-        TicketSecret::from_bytes([2; 32]),
+        TicketSecret::from([2; 32]),
         BlobDigest::from([3; 32]),
         42,
         LookupOpts::loopback(),

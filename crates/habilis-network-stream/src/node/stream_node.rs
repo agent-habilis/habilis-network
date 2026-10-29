@@ -154,7 +154,7 @@ impl StreamNode {
             lookups: self.lookups.clone(),
             transport: self.transport,
             id: StreamId::from(id),
-            secret: StreamSecret::from_zeroizing(secret),
+            secret: StreamSecret::from(secret),
         };
         Producer::new(hash, Arc::clone(&self.registry))
     }

@@ -75,8 +75,7 @@ impl Identity {
         // Two bare arrays on the stack are not wiped, and we do not control either: the one that
         // iroh's `to_bytes()` returns, and the one that `StaticSecret::from` takes by value below.
         // Between them the bytes sit in a buffer that wipes itself on drop.
-        let identity_seed =
-            SymmetricKey::from_zeroizing(zeroize::Zeroizing::new(self.secret.to_bytes()));
+        let identity_seed = SymmetricKey::from(zeroize::Zeroizing::new(self.secret.to_bytes()));
         x25519_dalek::StaticSecret::from(*identity_seed.derive(SEAL_ENC_LABEL).as_bytes())
     }
 

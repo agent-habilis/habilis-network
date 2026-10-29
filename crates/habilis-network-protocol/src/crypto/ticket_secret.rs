@@ -20,23 +20,25 @@ use zeroize::Zeroizing;
 #[derive(Clone)]
 pub struct TicketSecret(pub(super) Zeroizing<[u8; 32]>);
 
-impl TicketSecret {
-    /// Wrap 32 raw bytes. The array passed in is a copy that the caller still
-    /// holds: keep it in a [`Zeroizing`] when it is a secret.
-    #[must_use]
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+/// Wrap 32 raw bytes. The array passed in is a copy that the caller still
+/// holds: keep it in a [`Zeroizing`] when it is a secret.
+impl From<[u8; 32]> for TicketSecret {
+    fn from(bytes: [u8; 32]) -> Self {
         Self(Zeroizing::new(bytes))
     }
+}
 
-    /// Take a buffer that is already wiped on drop, whole, so that no plain
-    /// copy of the secret exists on the way in. This is the constructor for a
-    /// secret that is already in a [`Zeroizing`] (a stretch, a salt or a token
-    /// read off a stream). [`Self::from_bytes`] stays for raw input at an edge.
-    #[must_use]
-    pub fn from_zeroizing(bytes: Zeroizing<[u8; 32]>) -> Self {
+/// Take a buffer that is already wiped on drop, whole, so that no plain
+/// copy of the secret exists on the way in. This is the conversion for a
+/// secret that is already in a [`Zeroizing`] (a stretch, a salt or a token
+/// read off a stream). The `[u8; 32]` conversion stays for raw input at an edge.
+impl From<Zeroizing<[u8; 32]>> for TicketSecret {
+    fn from(bytes: Zeroizing<[u8; 32]>) -> Self {
         Self(bytes)
     }
+}
 
+impl TicketSecret {
     /// The raw bytes, borrowed.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {

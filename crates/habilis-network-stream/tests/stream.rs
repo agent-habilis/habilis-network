@@ -198,7 +198,7 @@ fn a_wrong_secret_reads_nothing() {
         let mut forged: StreamHash = producer.hash().clone();
         let mut wrong = *forged.secret.as_bytes();
         wrong[0] ^= 1;
-        forged.secret = StreamSecret::from_bytes(wrong);
+        forged.secret = StreamSecret::from(wrong);
         let mut reader = consumer_node.open(&forged).await.expect("open");
         let error = read_all(&mut reader).await.expect_err("forged hash");
         assert_eq!(refusal(&error), Some(Refused::Unknown), "{error:#}");

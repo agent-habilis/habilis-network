@@ -36,7 +36,7 @@ impl TicketAuth {
     pub fn derive(secret: &TicketSecret, password: Option<&Password>, label: &[u8]) -> Self {
         match password {
             Some(password) => Self {
-                token: TicketSecret::from_zeroizing(super::password::stretch_password(
+                token: TicketSecret::from(super::password::stretch_password(
                     password,
                     secret.as_bytes(),
                     label,

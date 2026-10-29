@@ -129,7 +129,7 @@ mod tests {
     use habilis_network_test_tracing::test;
 
     fn key(byte: u8) -> SymmetricKey {
-        SymmetricKey::from_bytes([byte; 32])
+        SymmetricKey::from([byte; 32])
     }
 
     #[test]

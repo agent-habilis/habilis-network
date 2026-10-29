@@ -285,7 +285,7 @@ impl InviteTicket {
             return Err(InviteError::Refused("invite root is not 32 bytes"));
         }
         bytes.copy_from_slice(&raw);
-        Ok(SymmetricKey::from_zeroizing(bytes))
+        Ok(SymmetricKey::from(bytes))
     }
 }
 

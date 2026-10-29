@@ -138,7 +138,7 @@ impl StreamHash {
             take_array::<ID_LEN>(payload, &mut position)
                 .ok_or(HashError::Truncated("stream hash missing id"))?,
         );
-        let secret = StreamSecret::from_bytes(
+        let secret = StreamSecret::from(
             take_array::<SECRET_LEN>(payload, &mut position)
                 .ok_or(HashError::Truncated("stream hash missing secret"))?,
         );

@@ -73,8 +73,8 @@ mod tests {
     /// A passwordless capability: the ticket secret is also the compare secret.
     fn plain_secret(secret: [u8; SECRET_LEN]) -> super::NewSecret {
         super::NewSecret {
-            ticket_secret: TicketSecret::from_bytes(secret),
-            compare_secret: TicketSecret::from_bytes(secret),
+            ticket_secret: TicketSecret::from(secret),
+            compare_secret: TicketSecret::from(secret),
             password: false,
         }
     }

@@ -11,23 +11,25 @@ use super::derive;
 #[derive(Clone)]
 pub struct SymmetricKey(pub(super) Zeroizing<[u8; 32]>);
 
-impl SymmetricKey {
-    /// Wrap 32 raw bytes. The array passed in is a copy that the caller still
-    /// holds: keep it in a [`Zeroizing`] when it is a secret.
-    #[must_use]
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+/// Wrap 32 raw bytes. The array passed in is a copy that the caller still
+/// holds: keep it in a [`Zeroizing`] when it is a secret.
+impl From<[u8; 32]> for SymmetricKey {
+    fn from(bytes: [u8; 32]) -> Self {
         Self(Zeroizing::new(bytes))
     }
+}
 
-    /// Take a buffer that is already wiped on drop, whole, so that no plain
-    /// copy of the secret exists on the way in. This is the constructor for a
-    /// secret that is already in a [`Zeroizing`] (a derivation, a stretch, bytes
-    /// read off a stream). [`Self::from_bytes`] stays for raw input at an edge.
-    #[must_use]
-    pub fn from_zeroizing(bytes: Zeroizing<[u8; 32]>) -> Self {
+/// Take a buffer that is already wiped on drop, whole, so that no plain
+/// copy of the secret exists on the way in. This is the conversion for a
+/// secret that is already in a [`Zeroizing`] (a derivation, a stretch, bytes
+/// read off a stream). The `[u8; 32]` conversion stays for raw input at an edge.
+impl From<Zeroizing<[u8; 32]>> for SymmetricKey {
+    fn from(bytes: Zeroizing<[u8; 32]>) -> Self {
         Self(bytes)
     }
+}
 
+impl SymmetricKey {
     /// The raw bytes, borrowed.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -41,7 +43,7 @@ impl SymmetricKey {
     /// If `label` exceeds 255 bytes; labels are short internal constants.
     #[must_use]
     pub fn derive(&self, label: &[u8]) -> Self {
-        Self::from_zeroizing(derive::derive_secret(&self.0, label))
+        Self::from(derive::derive_secret(&self.0, label))
     }
 }
 
