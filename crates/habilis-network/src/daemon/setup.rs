@@ -1332,7 +1332,7 @@ mod tests {
         use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
         use iroh::endpoint::presets;
 
-        let underlay = iroh::Endpoint::builder(presets::Minimal)
+        let underlay: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(secret))
             .relay_mode(iroh::RelayMode::Disabled)
             .bind()
@@ -1444,7 +1444,7 @@ mod tests {
         // Only the unicast ALPN counts against the ceiling; every connection still lands in the slot table.
         const ALPN: &[u8] = crate::transport::UNICAST_ALPN;
         let secret = iroh::SecretKey::from_bytes(&[92; 32]);
-        let injected = super::InjectedEndpoint::bind(
+        let injected: super::InjectedEndpoint = super::InjectedEndpoint::bind(
             &LookupOpts::loopback(),
             secret.clone(),
             vec![ALPN.to_vec()],

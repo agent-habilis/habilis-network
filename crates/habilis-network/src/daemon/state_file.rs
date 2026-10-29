@@ -299,9 +299,10 @@ pub fn read_identity(path: &Path) -> SessionIdentity {
 /// fallback here when the compat window closes.
 fn mesh_field(doc: &serde_json::Value) -> Option<String> {
     let keys = ["gossip", "room"];
-    let spelling = keys
-        .iter()
-        .find_map(|key| doc.get(key).and_then(serde_json::Value::as_str));
+    let spelling = keys.iter().find_map(|key| {
+        let field = doc.get(key);
+        field.and_then(serde_json::Value::as_str)
+    });
     spelling.map(str::to_owned)
 }
 
@@ -344,10 +345,8 @@ pub fn read_session_entry(path: &Path) -> Option<SessionEntry> {
             .map(str::to_owned)
     };
     let pid_field = |key: &str| {
-        parsed
-            .get(key)
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|pid| u32::try_from(pid).ok())
+        let value = parsed.get(key).and_then(serde_json::Value::as_u64);
+        value.and_then(|pid| u32::try_from(pid).ok())
     };
     Some(SessionEntry {
         mesh: mesh_field(&parsed),

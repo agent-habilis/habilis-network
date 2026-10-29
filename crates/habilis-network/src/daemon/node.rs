@@ -98,7 +98,7 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
         let name = config.name.clone();
         let nickname = config.author.clone();
         #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-        let bound_ports = config
+        let bound_ports: Vec<u16> = config
             .endpoint
             .bound_sockets()
             .iter()
@@ -109,7 +109,13 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
             feature = "host",
             not(target_arch = "wasm32")
         ))]
-        let underlay = config.multihop.as_ref().map(|handle| {
+        let multihop = config.multihop.as_ref();
+        #[cfg(all(
+            feature = "iroh-test-utils",
+            feature = "host",
+            not(target_arch = "wasm32")
+        ))]
+        let underlay = multihop.map(|handle| {
             let ports: Vec<_> = handle.underlay_ports().collect();
             (handle.underlay_id().get(), ports)
         });

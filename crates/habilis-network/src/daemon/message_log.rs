@@ -134,11 +134,8 @@ impl MessageLog {
             })
             .map(|(author, _)| *author)
             .expect("over-capacity log is non-empty");
-        let candidates = self
-            .messages
-            .iter()
-            .enumerate()
-            .filter(|(_, message)| message.key() == fullest);
+        let indexed = self.messages.iter().enumerate();
+        let candidates = indexed.filter(|(_, message)| message.key() == fullest);
         candidates
             .min_by(|(_, lhs), (_, rhs)| eviction_key(lhs).cmp(&eviction_key(rhs)))
             .map(|(index, _)| index)
@@ -986,11 +983,11 @@ mod tests {
         }
 
         let kept = |log: &MessageLog| -> HashSet<String> {
-            let bodies = log
-                .messages
+            let messages = &log.messages;
+            messages
                 .iter()
-                .map(|message| message.body.as_str().to_owned());
-            bodies.collect()
+                .map(|message| message.body.as_str().to_owned())
+                .collect()
         };
         assert_eq!(
             kept(&forward),

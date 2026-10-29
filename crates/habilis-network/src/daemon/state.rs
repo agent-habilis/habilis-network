@@ -1409,10 +1409,11 @@ mod tests {
 
         let snapshot = state.roster_snapshot();
         let reach = |name: &str| {
-            snapshot
+            let found = snapshot
                 .peers
                 .iter()
-                .find(|entry| entry.nickname.as_str() == name)
+                .find(|entry| entry.nickname.as_str() == name);
+            found
                 .unwrap_or_else(|| panic!("{name} missing from roster"))
                 .reach
         };

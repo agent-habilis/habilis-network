@@ -576,17 +576,16 @@ async fn advertise_links(
         return;
     }
     state.last_advertised = Some(links.clone());
-    let vector = handle.link_vector(
-        links
-            .iter()
-            .map(|&(id, cost)| {
-                (
-                    habilis_network_iroh_multihop_transport::AppId::new(id),
-                    cost,
-                )
-            })
-            .collect(),
-    );
+    let edges: Vec<_> = links
+        .iter()
+        .map(|&(id, cost)| {
+            (
+                habilis_network_iroh_multihop_transport::AppId::new(id),
+                cost,
+            )
+        })
+        .collect();
+    let vector = handle.link_vector(edges);
     // Fold our own vector into our own routing table: gossip never loops a
     // broadcast back, and without our outbound edges the local graph can't
     // source a route (`route_to(self, …)` would always be empty).

@@ -922,7 +922,7 @@ mod tests {
         use crate::transport::MeshSender;
         use crate::util::clock::Instant;
 
-        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        let port: u16 = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .and_then(|socket| socket.local_addr())
             .expect("a free loopback port")
             .port();
@@ -1018,7 +1018,7 @@ mod tests {
         use crate::transport::MeshSender;
         use crate::util::clock::Instant;
 
-        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        let port: u16 = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .and_then(|socket| socket.local_addr())
             .expect("a free loopback port")
             .port();
@@ -1203,7 +1203,7 @@ mod tests {
             "no rendezvous port is free: other processes hold every port of this room",
         );
 
-        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        let port: u16 = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .and_then(|socket| socket.local_addr())
             .expect("a free loopback port")
             .port();
@@ -1327,10 +1327,9 @@ mod tests {
     impl HolderOnTheSecondRung {
         async fn new() -> Self {
             let free_port = || {
-                std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-                    .and_then(|socket| socket.local_addr())
-                    .expect("a free loopback port")
-                    .port()
+                let socket = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                    .expect("a free loopback port");
+                socket.local_addr().expect("a free loopback port").port()
             };
             let (first_port, second_port) = (free_port(), free_port());
             let secret = iroh::SecretKey::generate();
@@ -1722,7 +1721,7 @@ mod tests {
         use crate::transport::MeshSender;
         use crate::util::clock::Instant;
 
-        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        let port: u16 = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .and_then(|socket| socket.local_addr())
             .expect("a free loopback port")
             .port();
@@ -1825,7 +1824,7 @@ mod tests {
         use crate::testing::{fresh_state, nick};
         use crate::transport::MeshSender;
 
-        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        let port: u16 = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .and_then(|socket| socket.local_addr())
             .expect("a free loopback port")
             .port();
@@ -2072,8 +2071,9 @@ mod tests {
         // and their same-id split is what the cap is priced for.
         for roster in 1..=RIVAL_RECHECK_SMALL_ROSTER {
             for round in 1..=10u32 {
+                let doublings = round.saturating_sub(1).min(7);
                 let base = RIVAL_RECHECK
-                    .saturating_mul(1u32 << round.saturating_sub(1).min(7))
+                    .saturating_mul(1u32 << doublings)
                     .min(RIVAL_RECHECK_MESHED);
                 for _ in 0..4 {
                     let delay = next_recheck_delay(round, roster, id);
@@ -2105,8 +2105,9 @@ mod tests {
         let id = iroh::SecretKey::from_bytes(&[9; 32]).public();
 
         for round in 1..=12u32 {
+            let doublings = round.saturating_sub(1).min(7);
             let base = RIVAL_RECHECK
-                .saturating_mul(1u32 << round.saturating_sub(1).min(7))
+                .saturating_mul(1u32 << doublings)
                 .min(RIVAL_RECHECK_ALONE);
             for _ in 0..4 {
                 let delay = next_recheck_delay(round, 0, id);
