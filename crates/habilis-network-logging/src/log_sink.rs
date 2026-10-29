@@ -93,6 +93,7 @@ fn maybe_rotate_with(
 
 /// A handle to the log file. Clones write to the same file.
 #[derive(Clone)]
+// the clones of the sink write to one state, and the global sink holds one
 pub struct LogSink(Arc<Mutex<State>>);
 
 impl std::fmt::Debug for LogSink {
@@ -106,6 +107,7 @@ static SINK: OnceLock<LogSink> = OnceLock::new();
 /// Build the sink and register it process-globally. Called once by
 /// `main` before subscriber init.
 pub fn install() -> LogSink {
+    // the global sink and the caller share one state
     let sink = LogSink(Arc::new(Mutex::new(State::Pending(Vec::new()))));
     let _ = SINK.set(sink.clone());
     sink
@@ -336,6 +338,7 @@ mod tests {
         options.create(true).write(true).truncate(true);
         let file: fs::File = options.open(&path).expect("open test log");
         let max = 100u64;
+        // the sink clones share its state, as in production
         let mut sink = LogSink(Arc::new(Mutex::new(State::Attached {
             file,
             path: path.clone(),
