@@ -27,7 +27,6 @@ export const FULL_WORDS: Record<string, string> = {
   prev: "previous",
   req: "request",
   resp: "response",
-  rng: "generator",
   sig: "signature",
   tmp: "temporary",
 };
@@ -93,6 +92,9 @@ export function renameInFile(file: string, src: string): { text: string; hits: H
     const full = FULL_WORDS[word];
     if (!full || mask.slice(offset, offset + word.length) !== word) return word;
     if (src[offset + word.length] === "!") return word; // a macro, such as cfg!
+    // A method call on a value, such as endpoint.addr(): the method may be a foreign API's.
+    // It is reported, not renamed (the caller sends the site to the rule owner).
+    if (src[offset - 1] === "." && src[offset + word.length] === "(") return word;
     const line = src.slice(0, offset).split("\n").length;
     hits.push({ file, line, from: word, to: full });
     return full;
@@ -119,7 +121,7 @@ if (import.meta.main) {
   }
   const write = process.argv.includes("--write");
   const allHits: Hit[] = [];
-  for (const file of rustFiles(path.join(crateDir, "src"))) {
+  for (const file of rustFiles(crateDir)) {
     const src = readFileSync(file, "utf8");
     const { text, hits } = renameInFile(file, src);
     allHits.push(...hits);
