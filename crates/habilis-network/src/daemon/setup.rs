@@ -884,8 +884,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
     // The creator alone retains its full mesh (issuer key + root) to mint from.
     let mint_mesh = mesh.requires_invite().then(|| mesh.clone());
     let id_str = mesh.to_string();
-    let mesh_id =
-        MeshId::try_new(&id_str.clone()).expect("Mesh::to_string always produces a valid MeshId");
+    let mesh_id = MeshId::try_new(&id_str).expect("Mesh::to_string always produces a valid MeshId");
 
     sink.emit(NodeEvent::Info(format!(
         "created #{name} and joined as <{author}>"
@@ -970,8 +969,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     };
     let mesh_key = mesh.mesh_key();
     let id_str = mesh.to_string();
-    let mesh_id =
-        MeshId::try_new(&id_str.clone()).expect("Mesh::to_string always produces a valid MeshId");
+    let mesh_id = MeshId::try_new(&id_str).expect("Mesh::to_string always produces a valid MeshId");
     // The one place the protocol's byte-shaped TopicId becomes iroh-gossip's.
     // Keeping the conversion here is what lets habilis-network-protocol build
     // without iroh-gossip at all (see habilis_network_protocol::topic).

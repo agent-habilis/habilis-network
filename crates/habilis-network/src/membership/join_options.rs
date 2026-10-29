@@ -347,13 +347,8 @@ pub fn resolve_kind(
                 &opts.transport,
             )
             .map_err(SetupError::Config)?;
-            let name = MeshName::try_new(
-                &opts
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| "habilis-network".to_string()),
-            )
-            .map_err(|error| SetupError::internal(anyhow::anyhow!("{error}")))?;
+            let name = MeshName::try_new(opts.name.as_deref().unwrap_or("habilis-network"))
+                .map_err(|error| SetupError::internal(anyhow::anyhow!("{error}")))?;
             let Resolved { kind, author, .. } =
                 CreateParams::new(name, nickname, config, DirectorySelection::Unset)
                     .with_password(None)
