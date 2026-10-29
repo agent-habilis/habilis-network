@@ -984,9 +984,8 @@ mod tests {
 
         let kept = |log: &MessageLog| -> HashSet<String> {
             let messages = &log.messages;
-            let bodies = messages
-                .iter()
-                .map(|message| message.body.as_str().to_owned());
+            let to_body = |message: &Verified| message.body.as_str().to_owned();
+            let bodies = messages.iter().map(to_body);
             bodies.collect()
         };
         assert_eq!(
