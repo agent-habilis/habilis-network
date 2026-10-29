@@ -160,8 +160,8 @@ fn the_rendezvous_link_stays_up_when_ip_is_lost() {
         // The roster is presence, not a gossip link. Cut IP only once the member pair is a
         // neighbor on both ends, or the test cuts a link that was never up.
         let member_gossip_links = || {
-            logs()
-                .lines()
+            let text = logs();
+            text.lines()
                 .filter(|line| {
                     line.contains("gossip neighbor up") && line.contains("is_rendezvous=false")
                 })

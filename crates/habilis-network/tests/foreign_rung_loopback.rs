@@ -37,7 +37,7 @@ fn fresh_seed() -> Seed {
 /// A listener on `port` that serves one ALPN, so it answers a gossip dial with a TLS alert. It is a
 /// plain accept loop: an iroh `Router` would log every failed accept as a warning of its own.
 async fn foreign_on(port: u16) -> (Endpoint, tokio::task::JoinHandle<()>) {
-    let endpoint = Endpoint::builder(presets::Minimal)
+    let endpoint: Endpoint = Endpoint::builder(presets::Minimal)
         .alpns(vec![b"foreign".to_vec()])
         .clear_ip_transports()
         .bind_addr(format!("127.0.0.1:{port}").as_str())

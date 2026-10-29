@@ -244,7 +244,7 @@ impl Member {
     /// A creator when `mesh` is `None`, a joiner by id otherwise. No lookup: a loopback room.
     async fn open(nick: &str, mesh: Option<&str>) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(
+        let membership: Membership = membership::join(
             &membership::JoinOptions::default()
                 .with_nick(Some(nick.to_owned()))
                 .with_mesh(mesh.map(str::to_owned)),
@@ -715,7 +715,7 @@ async fn holder_whose_beacon_stops_answering(
 /// A joiner by id whose sink is read by the caller. The one case that reads what the app is told.
 async fn open_watched(nick: &str, mesh: &str) -> (Member, UnboundedReceiver<String>) {
     let (sink, events) = membership::json_sink();
-    let membership = membership::join(
+    let membership: Membership = membership::join(
         &membership::JoinOptions::default()
             .with_nick(Some(nick.to_owned()))
             .with_mesh(Some(mesh.to_owned())),
@@ -787,7 +787,7 @@ async fn ladder_held_by_other_processes(
     members.push(member);
     let started = Instant::now();
     let mut seen = Vec::new();
-    let first = loop {
+    let first: String = loop {
         match tokio::time::timeout(
             NO_RUNG_DEADLINE.saturating_sub(started.elapsed()),
             events.recv(),
@@ -818,7 +818,7 @@ async fn ladder_held_by_other_processes(
             again += 1;
         }
     }
-    let warns = round
+    let warns: usize = round
         .log()
         .lines()
         .filter(|line| line.contains("WARN") && line.contains("no rendezvous port is free"))

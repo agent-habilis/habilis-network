@@ -119,7 +119,7 @@ async fn roster(sender: &mpsc::Sender<Request>) -> Option<(Vec<String>, usize)> 
         .iter()
         .filter(|peer| peer["reach"].as_str() == Some("direct"))
         .count();
-    let nicks = peers
+    let nicks: Vec<String> = peers
         .iter()
         .filter_map(|peer| peer["nickname"].as_str().map(str::to_owned))
         .collect();
@@ -258,7 +258,7 @@ async fn main() -> anyhow::Result<()> {
     let (kind, author) = resolve_kind(&options, None)?;
 
     let (inbound_tx, mut inbound) = mpsc::channel(INBOUND_CAP);
-    let config = setup_mesh(
+    let config: habilis_network::runtime::EventLoopConfig = setup_mesh(
         kind,
         SetupParams::new(author.clone(), SilentSink::default())
             .with_max_peers(usize::try_from(env_number("MESH_MAX_PEERS")).unwrap_or(0))

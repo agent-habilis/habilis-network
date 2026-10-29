@@ -98,19 +98,21 @@ async fn main() -> anyhow::Result<()> {
             }
             None => habilis_network::protocol::RelayChoice::Pinned,
         };
-        let mesh = habilis_network::runtime::derive_topic_mesh_config(
-            &topic,
-            MeshConfig::new(
-                LookupOpts::new(ladder).with_mdns(true).with_dht(true),
-                None,
-                None,
-                TransportPolicy::default()
-                    .with_relay_transport(
-                        std::env::var_os("MESH_RELAY_TRANSPORT").is_some_and(|value| value == "on"),
-                    )
-                    .with_udp(udp),
-            ),
-        )?;
+        let mesh: habilis_network::protocol::Mesh =
+            habilis_network::runtime::derive_topic_mesh_config(
+                &topic,
+                MeshConfig::new(
+                    LookupOpts::new(ladder).with_mdns(true).with_dht(true),
+                    None,
+                    None,
+                    TransportPolicy::default()
+                        .with_relay_transport(
+                            std::env::var_os("MESH_RELAY_TRANSPORT")
+                                .is_some_and(|value| value == "on"),
+                        )
+                        .with_udp(udp),
+                ),
+            )?;
         return run_peer(
             habilis_network::runtime::SetupKind::Topic {
                 mesh,

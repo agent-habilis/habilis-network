@@ -78,7 +78,7 @@ long_chain|crates/habilis-network/tests/rendezvous_link_loses_ip_loopback.rs|4|k
 long_chain|crates/habilis-network/tests/rendezvous_release_loopback.rs|6|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/tests/resend_after_loss_loopback.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/tests/resend_dedup_loopback.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/tests/send_ladder_matrix.rs|8|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network/tests/send_ladder_matrix.rs|7|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/tests/simultaneous_topic_start.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/tests/underlay_above_cap_loopback.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/tests/underlay_survives_link_loss_loopback.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -97,19 +97,8 @@ untyped_long_chain_let|crates/habilis-network-iroh-webrtc-transport/examples/ses
 untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/native/game/src/app.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/web/wasm/src/app.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/web/wasm/src/lib.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/examples/mesh_peer.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/examples/mesh_peer_load.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/transport/admission.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 
-untyped_long_chain_let|crates/habilis-network/tests/foreign_rung_loopback.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/tests/loopback_room_split.rs|4|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/tests/relay_lookup_only_refusal.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/tests/rendezvous_link_loses_ip_loopback.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/tests/rendezvous_release_loopback.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/tests/send_ladder_matrix.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/tests/underlay_above_cap_loopback.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/tests/underlay_survives_link_loss_loopback.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/tests/unknown_peer_requests_loopback.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 # pub_vec_return: a public function returns a Vec. The guide prefers an iterator. These keep a Vec:
 # each one returns an owned byte buffer or an owned list that the caller keeps.
 

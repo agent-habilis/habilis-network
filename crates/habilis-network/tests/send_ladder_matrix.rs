@@ -592,13 +592,14 @@ fn block_underlay_rung(
 }
 
 async fn apply(cut: Cut, alice: &Member, bob: &Member, carol: &Member) {
-    let underlays = [(alice, bob), (bob, alice)].map(|(from, to)| {
-        (
-            from.membership.node.underlay_id(),
-            to.membership.node.underlay_id(),
-            to.membership.node.underlay_ports().to_vec(),
-        )
-    });
+    let underlays: [(Option<iroh::PublicKey>, Option<iroh::PublicKey>, Vec<u16>); 2] =
+        [(alice, bob), (bob, alice)].map(|(from, to)| {
+            (
+                from.membership.node.underlay_id(),
+                to.membership.node.underlay_id(),
+                to.membership.node.underlay_ports().to_vec(),
+            )
+        });
     match cut {
         Cut::IpApp => {
             alice.block_ip_to(bob.ports()).await;
@@ -2013,8 +2014,9 @@ fn the_cells_cover_every_valid_transport_list_and_no_other() {
     use Transport::{Multihop, Relay, Udp, WebRtc};
     let all = [Udp, WebRtc, Multihop, Relay];
     let in_cells = |list: &[Transport]| {
+        let same_len = |len: usize| len == list.len();
         CELLS.iter().any(|(_, cell)| {
-            cell.transports.len() == list.len() && list.iter().all(|wanted| cell.has(*wanted))
+            same_len(cell.transports.len()) && list.iter().all(|wanted| cell.has(*wanted))
         })
     };
     for mask in 1u8..16 {

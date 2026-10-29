@@ -115,7 +115,7 @@ async fn spawn(
     )
     .expect("derive a relay-only mesh");
     let author = Nickname::try_new(nick).expect("valid nickname");
-    let config = setup_mesh(
+    let config: habilis_network::runtime::EventLoopConfig = setup_mesh(
         SetupKind::Topic {
             mesh,
             topic_string: topic.to_owned(),

@@ -72,7 +72,7 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let (sink_a, _events_a) = membership::json_sink();
-        let alice = membership::join(
+        let alice: Membership = membership::join(
             &membership::JoinOptions::default()
                 .with_nick(Some("alice".to_owned()))
                 .with_lookup(vec![Lookup::Relay])
@@ -87,7 +87,7 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
         .await
         .expect("open alice");
         let (sink_b, _events_b) = membership::json_sink();
-        let bob = membership::join(
+        let bob: Membership = membership::join(
             &membership::JoinOptions::default()
                 .with_nick(Some("bob".to_owned()))
                 .with_mesh(Some(alice.node.mesh_id().to_string())),

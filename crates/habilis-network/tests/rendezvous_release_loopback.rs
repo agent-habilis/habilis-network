@@ -86,12 +86,12 @@ fn ladder_lines(since: usize, local: &EndpointId, remote_ports: &[u16]) -> Strin
 /// of any other member, the rendezvous host included, does not count.
 fn pair_link_closed(since: usize, one: &EndpointId, two: &EndpointId) -> bool {
     let log = logs_since(since);
-    let closed = log.lines().any(|line| {
+    let closed: bool = log.lines().any(|line| {
         line.contains("gossip link on the relay path past the deadline: closing it")
             && (line.contains(&format!("remote={one} "))
                 || line.contains(&format!("remote={two} ")))
     });
-    let down = log.lines().any(|line| {
+    let down: bool = log.lines().any(|line| {
         line.contains("gossip neighbor down")
             && ((line.contains(&format!("local={} ", one.fmt_short()))
                 && line.contains(&format!("endpoint_id={two} ")))
