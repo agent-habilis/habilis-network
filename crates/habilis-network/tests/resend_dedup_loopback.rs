@@ -69,6 +69,7 @@ enum Request {
 
 /// An app that logs every frame it reads and keeps what it read.
 struct Chat {
+    // the app writes what it reads here, and the test reads it after the run
     read: Arc<Mutex<Vec<String>>>,
 }
 
@@ -86,10 +87,8 @@ impl NodeApp for Chat {
         _state: &mut EventLoopState,
         _ctx: &HandlerCtx<'_>,
     ) -> bool {
-        self.read
-            .lock()
-            .expect("no poison")
-            .push(frame.message.body.as_str().to_owned());
+        let body = frame.message.body.as_str().to_owned();
+        self.read.lock().expect("no poison").push(body);
         true
     }
 }
@@ -161,7 +160,9 @@ fn nick(name: &str) -> Nickname {
     Nickname::try_new(name).expect("valid nickname")
 }
 
+// the app writes what it reads here, and the test reads it after the run
 async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Arc<Mutex<Vec<String>>>) {
+    // the app writes what it reads here, and the test reads it after the run
     let read = Arc::new(Mutex::new(Vec::new()));
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
@@ -246,6 +247,7 @@ async fn state_has(node: &Node<Chat>, key: &str) -> bool {
     document.await.expect("the loop answers").get(key).is_some()
 }
 
+// the app writes what it reads here, and the test reads it after the run
 fn has_read(read: &Arc<Mutex<Vec<String>>>, text: &str) -> bool {
     read.lock()
         .expect("no poison")
@@ -255,6 +257,7 @@ fn has_read(read: &Arc<Mutex<Vec<String>>>, text: &str) -> bool {
 
 /// Wait until `text` is in `read`; the time it took, or `None`.
 async fn waits_for(
+    // the app writes what it reads here, and the test reads it after the run
     read: &Arc<Mutex<Vec<String>>>,
     text: &str,
     deadline: Duration,
@@ -370,11 +373,11 @@ fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
             "the dropped state change reached the app after: {:?}",
             started.elapsed()
         );
-        let answers: Vec<String> = lines_since(before)
+        let lines = lines_since(before);
+        let matching = lines
             .lines()
-            .filter(|line| line.contains("state anti-entropy: resent frames a peer lacked"))
-            .map(str::to_owned)
-            .collect();
+            .filter(|line| line.contains("state anti-entropy: resent frames a peer lacked"));
+        let answers: Vec<String> = matching.map(str::to_owned).collect();
         for line in &answers {
             eprintln!("state digest answer: {line}");
         }
