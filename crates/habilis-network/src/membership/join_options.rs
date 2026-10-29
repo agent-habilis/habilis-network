@@ -372,7 +372,7 @@ mod tests {
     use crate::runtime::derive_topic_mesh_with;
     use habilis_network_test_tracing::test;
 
-    use super::{Lookup, MeshConfig, JoinOptions, SetupKind, Transport, resolve_kind};
+    use super::{JoinOptions, Lookup, MeshConfig, SetupKind, Transport, resolve_kind};
     fn opts() -> JoinOptions {
         JoinOptions::default()
     }
@@ -412,7 +412,10 @@ mod tests {
             r#"{"transports":{}}"#,
             r#"{"lookup":["public"]}"#,
         ] {
-            assert!(serde_json::from_str::<JoinOptions>(stale).is_err(), "{stale}");
+            assert!(
+                serde_json::from_str::<JoinOptions>(stale).is_err(),
+                "{stale}"
+            );
         }
     }
 

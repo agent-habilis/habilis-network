@@ -15,7 +15,7 @@
 
 use anyhow::{Context as _, Result, bail};
 use habilis_network::membership::{
-    Inbound, Membership, JoinOptions, Request, depart, join, json_sink, msg_body, parse_to,
+    Inbound, JoinOptions, Membership, Request, depart, join, json_sink, msg_body, parse_to,
 };
 use tokio::sync::oneshot;
 

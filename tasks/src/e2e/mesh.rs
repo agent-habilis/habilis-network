@@ -307,7 +307,11 @@ impl fmt::Display for CellFailure {
     }
 }
 
-fn native_opts(cell: &Cell, relay_url: &str, selector: NativeSelector<'_>) -> membership::JoinOptions {
+fn native_opts(
+    cell: &Cell,
+    relay_url: &str,
+    selector: NativeSelector<'_>,
+) -> membership::JoinOptions {
     let mut opts = membership::JoinOptions::default();
     match selector {
         NativeSelector::Topic(topic) => opts.topic = Some(topic.to_owned()),

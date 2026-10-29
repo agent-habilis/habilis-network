@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, oneshot};
 
 // Re-exported rather than re-imported at every use site, so the C shim next
 // door names `crate::mesh::…` only.
-pub(crate) use habilis_network::membership::{Inbound, MAX_MSG, JoinOptions};
+pub(crate) use habilis_network::membership::{Inbound, JoinOptions, MAX_MSG};
 
 /// A live mesh membership, driven synchronously from a foreign caller's thread.
 /// Owns the tokio runtime the event loop runs on.

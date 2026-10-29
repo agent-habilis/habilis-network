@@ -45,7 +45,7 @@ use std::time::{Duration, Instant};
 
 use habilis_network::embed::SilentSink;
 use habilis_network::membership::{
-    INBOUND_CAP, MembershipApp, JoinOptions, Request, msg_body, resolve_kind,
+    INBOUND_CAP, JoinOptions, MembershipApp, Request, msg_body, resolve_kind,
 };
 use habilis_network::protocol::{Lookup, Nickname, Transport};
 use habilis_network::runtime::{Node, SetupParams, SignalHandling, setup_mesh};

@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 
-use habilis_network::membership::{Inbound, MAX_MSG, MembershipApp, JoinOptions, Request, json_sink};
+use habilis_network::membership::{
+    Inbound, JoinOptions, MAX_MSG, MembershipApp, Request, json_sink,
+};
 use habilis_network::runtime::Node;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};

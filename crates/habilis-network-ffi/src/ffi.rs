@@ -26,7 +26,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::mesh::{Inbound, MAX_MSG, Mesh, JoinOptions};
+use crate::mesh::{Inbound, JoinOptions, MAX_MSG, Mesh};
 use crate::streams::{Read, Streams};
 
 pub use habilis_network_mesh::HabilisNetworkMesh;
