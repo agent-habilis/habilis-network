@@ -26,6 +26,26 @@ pub const LOBBY_TAG: &str = "rb_lobby";
 /// Construct one with [`RollbackDriver::new`], keep the returned
 /// [`MeshTransport`](super::MeshTransport) handle for the session, and give
 /// the driver to the node.
+///
+/// # Examples
+///
+/// A driver is made together with the pending transport that its node connects.
+///
+/// ```
+/// use habilis_network_netplay::RollbackDriver;
+///
+/// use habilis_network_netplay::Config;
+///
+/// struct Game;
+///
+/// impl Config for Game {
+///     type Input = u8;
+///     type State = u32;
+///     type Address = u8;
+/// }
+///
+/// let (_driver, _pending) = RollbackDriver::<Game>::new();
+/// ```
 pub struct RollbackDriver<T: Config> {
     // the driver shares the mailboxes with the transports it hands out
     mailboxes: Arc<Mailboxes<T>>,

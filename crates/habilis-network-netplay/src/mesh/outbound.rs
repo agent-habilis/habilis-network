@@ -7,6 +7,17 @@ use habilis_network::protocol::AuthorKey;
 /// Pushed through `Node::sender()`; drained by
 /// [`handle_session`](super::RollbackDriver), which is where `&mut EventLoopState`
 /// finally exists.
+///
+/// # Examples
+///
+/// A lobby packet is queued with its payload, and no recipient is named.
+///
+/// ```
+/// use habilis_network_netplay::Outbound;
+///
+/// let packet = Outbound::Lobby { payload: "present".to_owned() };
+/// assert!(matches!(packet, Outbound::Lobby { .. }));
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Outbound {

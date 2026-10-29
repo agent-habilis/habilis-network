@@ -15,6 +15,29 @@ use crate::transport::{Message, Transport};
 ///
 /// Addresses are peers' public keys — the signed identity on every frame,
 /// not the cosmetic nickname.
+///
+/// # Examples
+///
+/// A transport is made when its pending half connects to the outbound channel, and it has no key until its node sets one.
+///
+/// ```
+/// use habilis_network_netplay::{Outbound, RollbackDriver};
+///
+/// use habilis_network_netplay::Config;
+///
+/// struct Game;
+///
+/// impl Config for Game {
+///     type Input = u8;
+///     type State = u32;
+///     type Address = u8;
+/// }
+///
+/// let (_driver, pending) = RollbackDriver::<Game>::new();
+/// let (outbox, _inbox) = tokio::sync::mpsc::channel::<Outbound>(8);
+/// let transport = pending.connect(outbox);
+/// assert!(transport.local_pubkey().is_none());
+/// ```
 pub struct MeshTransport<T: Config> {
     // the transport shares the mailboxes with the driver and the pending transport
     mailboxes: Arc<Mailboxes<T>>,

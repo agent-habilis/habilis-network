@@ -39,6 +39,17 @@ use crate::player_handle::PlayerHandle;
 ///
 /// Monotonic, so a rematch always supersedes the match before it and a
 /// straggler from that older match never resurrects it.
+///
+/// # Examples
+///
+/// An epoch counts matches, and the next epoch is one more than the last.
+///
+/// ```
+/// use habilis_network_netplay::Epoch;
+///
+/// assert_eq!(Epoch::ZERO.next().get(), 1);
+/// assert_eq!(Epoch::new(4).get(), 4);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Epoch(u64);
@@ -75,6 +86,16 @@ impl std::fmt::Display for Epoch {
 /// The id of one proposal for a match: the tie-breaker between two proposals
 /// for the same [`Epoch`], where the lower one wins, and the scope of one
 /// match's packets.
+///
+/// # Examples
+///
+/// A session id keeps the number it was made with.
+///
+/// ```
+/// use habilis_network_netplay::SessionId;
+///
+/// assert_eq!(SessionId::new(9).get(), 9);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SessionId(u64);
@@ -101,6 +122,16 @@ impl std::fmt::Display for SessionId {
 
 /// A point in time, in the caller's own tick unit. The lobby reads no clock:
 /// the caller says what "now" is each time it hands a packet in.
+///
+/// # Examples
+///
+/// A tick is a point on the lobby clock, and the span since an earlier tick is their difference.
+///
+/// ```
+/// use habilis_network_netplay::{Tick, TickSpan};
+///
+/// assert_eq!(Tick::new(10).since(Tick::new(4)), TickSpan::new(6));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Tick(u64);
 
@@ -119,6 +150,16 @@ impl Tick {
 }
 
 /// A length of time, in the same tick unit as [`Tick`].
+///
+/// # Examples
+///
+/// A span of ticks is the distance between two points on the lobby clock.
+///
+/// ```
+/// use habilis_network_netplay::{Tick, TickSpan};
+///
+/// assert_eq!(TickSpan::new(6), Tick::new(10).since(Tick::new(4)));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TickSpan(u64);
 
@@ -131,6 +172,25 @@ impl TickSpan {
 }
 
 /// A lobby packet.
+///
+/// # Examples
+///
+/// A lobby announces the presence of its member with a presence message. `LobbyMessage` is in the private lobby module, so this is not compiled.
+///
+/// ```ignore
+/// use habilis_network_netplay::LobbyMessage;
+///
+/// use habilis_network::protocol::Nickname;
+/// use habilis_network_netplay::Lobby;
+/// use habilis_network::protocol::identity::Identity;
+///
+/// let key = Identity::generate().author_key();
+/// let nick = Nickname::try_new("alice").expect("a nickname");
+/// let mut lobby = Lobby::new(key, nick);
+///
+/// let message = lobby.presence();
+/// assert!(matches!(message, LobbyMessage::Present { .. }));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LobbyMessage {
     /// "I am here, and this is what to call me."
@@ -183,6 +243,25 @@ mod key_list {
 }
 
 /// Why a match could not be started.
+///
+/// # Examples
+///
+/// A match cannot be proposed while the lobby holds one player.
+///
+/// ```
+/// use habilis_network_netplay::{LobbyError};
+///
+/// use habilis_network::protocol::Nickname;
+/// use habilis_network_netplay::Lobby;
+/// use habilis_network::protocol::identity::Identity;
+///
+/// let key = Identity::generate().author_key();
+/// let nick = Nickname::try_new("alice").expect("a nickname");
+/// let mut lobby = Lobby::new(key, nick);
+///
+/// let error = lobby.propose().unwrap_err();
+/// assert!(matches!(error, LobbyError::NotEnoughPlayers));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 #[must_use]
@@ -213,6 +292,22 @@ impl std::fmt::Display for LobbyError {
 impl std::error::Error for LobbyError {}
 
 /// The agreed shape of a match.
+///
+/// # Examples
+///
+/// No match has started until the members agree on one.
+///
+/// ```
+/// use habilis_network::protocol::Nickname;
+/// use habilis_network_netplay::Lobby;
+/// use habilis_network::protocol::identity::Identity;
+///
+/// let key = Identity::generate().author_key();
+/// let nick = Nickname::try_new("alice").expect("a nickname");
+/// let mut lobby = Lobby::new(key, nick);
+///
+/// assert!(lobby.started().is_none());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct StartedMatch {
@@ -236,6 +331,23 @@ struct Presence {
 }
 
 /// Tracks who is present and whether a match has started.
+///
+/// # Examples
+///
+/// A lobby tracks the members it has seen and the match, once one starts.
+///
+/// ```
+/// use habilis_network::protocol::Nickname;
+/// use habilis_network_netplay::Lobby;
+/// use habilis_network::protocol::identity::Identity;
+///
+/// let key = Identity::generate().author_key();
+/// let nick = Nickname::try_new("alice").expect("a nickname");
+/// let mut lobby = Lobby::new(key, nick);
+///
+/// assert_eq!(lobby.present().count(), 1);
+/// assert!(lobby.started().is_none());
+/// ```
 #[derive(Debug)]
 pub struct Lobby {
     my_pubkey: AuthorKey,
