@@ -6,6 +6,16 @@ use crate::ChunkError;
 ///
 /// Position-independent on purpose. Two files holding the same 64 `KiB` at any
 /// offset, in any share, produce the same address and share one stored copy.
+///
+/// # Example
+///
+/// ```
+/// use habilis_network_chunks::{ChunkHash, chunk_hash};
+///
+/// let address: ChunkHash = chunk_hash(b"hello");
+/// assert_eq!(address.to_hex().len(), 64);
+/// assert_eq!(address, chunk_hash(b"hello"));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChunkHash(pub(crate) [u8; 32]);
 
@@ -14,6 +24,15 @@ pub struct ChunkHash(pub(crate) [u8; 32]);
 /// A distinct type from [`ChunkHash`] rather than a bare `[u8; 32]`, because
 /// the two are asked for in adjacent calls and swapping them would be a silent
 /// bug — `get(root)` would simply find nothing rather than fail loudly.
+///
+/// # Example
+///
+/// ```
+/// use habilis_network_chunks::ChunkMap;
+///
+/// let root = ChunkMap::build(b"a file").root();
+/// assert_eq!(root.to_hex().len(), 64);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Root(pub(crate) [u8; 32]);
 
@@ -139,6 +158,16 @@ impl fmt::Display for Root {
 }
 
 /// Address one chunk's bytes.
+///
+/// # Example
+///
+/// ```
+/// use habilis_network_chunks::chunk_hash;
+///
+/// let a = chunk_hash(b"same bytes");
+/// let b = chunk_hash(b"same bytes");
+/// assert_eq!(a, b);
+/// ```
 #[must_use]
 pub fn chunk_hash(bytes: &[u8]) -> ChunkHash {
     ChunkHash(*blake3::hash(bytes).as_bytes())

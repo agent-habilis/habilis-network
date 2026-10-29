@@ -9,6 +9,15 @@ const ROOT_CONTEXT: &[u8] = b"habilis-network-chunks/root/v1";
 ///
 /// Zero for an empty file, which is a real case rather than an error: an empty
 /// file has a root, holds no chunks, and is complete the moment it is known.
+///
+/// # Example
+///
+/// ```
+/// use habilis_network_chunks::{CHUNK_BYTES, chunk_count};
+///
+/// assert_eq!(chunk_count(0), 0);
+/// assert_eq!(chunk_count(CHUNK_BYTES + 1), 2);
+/// ```
 #[must_use]
 pub fn chunk_count(size: u64) -> usize {
     usize::try_from(size.div_ceil(CHUNK_BYTES)).unwrap_or(usize::MAX)
@@ -19,6 +28,17 @@ pub fn chunk_count(size: u64) -> usize {
 /// This is the whole merkle structure. The row proves placement — leaf *k*
 /// belongs at offset *k* × [`CHUNK_BYTES`] — and each leaf proves its own bytes,
 /// so verifying a chunk needs the row and nothing else.
+///
+/// # Example
+///
+/// ```
+/// use habilis_network_chunks::{CHUNK_BYTES_USIZE, ChunkMap};
+///
+/// let bytes = vec![7u8; CHUNK_BYTES_USIZE + 10];
+/// let map = ChunkMap::build(&bytes);
+/// assert_eq!(map.len(), 2);
+/// assert!(map.verify(0, &bytes[..CHUNK_BYTES_USIZE]));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkMap {
     root: Root,
@@ -163,6 +183,18 @@ fn root_of(leaves: &[ChunkHash], size: u64) -> Root {
 ///
 /// The shape an origin needs: read [`CHUNK_BYTES`] at a time, hash, discard.
 /// Peak memory is one chunk plus the row, and the row is ~0.05 % of the file.
+///
+/// # Example
+///
+/// ```
+/// use habilis_network_chunks::{CHUNK_BYTES_USIZE, ChunkMap, ChunkMapBuilder};
+///
+/// let mut builder = ChunkMapBuilder::new();
+/// builder.push(&vec![1u8; CHUNK_BYTES_USIZE]);
+/// builder.push(&vec![2u8; 10]);
+/// let map: ChunkMap = builder.finish();
+/// assert_eq!(map.len(), 2);
+/// ```
 #[derive(Debug, Default)]
 #[must_use]
 pub struct ChunkMapBuilder {
