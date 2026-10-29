@@ -17,7 +17,9 @@ fn named<T: Send + 'static>(
 
 #[test]
 fn an_event_of_a_worker_thread_names_every_live_sync_test() {
+    // the barrier is shared by the three threads
     let live = Arc::new(Barrier::new(3));
+    // the second barrier is shared by the three threads
     let emitted = Arc::new(Barrier::new(3));
     let tests: Vec<_> = ["sync_a", "sync_b"]
         .into_iter()

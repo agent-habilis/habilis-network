@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 mod support;
 
 #[derive(Clone, Default)]
+// each clone of the sink writes into the buffer that the test reads
 struct Sink(Arc<Mutex<String>>);
 
 impl io::Write for Sink {

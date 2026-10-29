@@ -16,6 +16,7 @@ use tracing_subscriber::layer::{Context, SubscriberExt as _};
 use tracing_subscriber::{Layer, fmt as tracing_fmt};
 
 static INSTALLED: OnceLock<Mode> = OnceLock::new();
+// the live list holds a handle to each slot, and its guard holds the same handle
 static LIVE: Mutex<Vec<Arc<Slot>>> = Mutex::new(Vec::new());
 static LATE: Mutex<Late> = Mutex::new(Late {
     ended: None,
@@ -309,6 +310,7 @@ fn build_guard() -> Guard {
         thread.is_empty() || !LIVE.lock().iter().any(|slot| slot.thread == thread),
         "init() twice in one test (thread {thread}): a test has one guard"
     );
+    // the live list and the guard share the slot
     let slot = Arc::new(Slot {
         thread,
         events: Mutex::new(Vec::new()),
@@ -348,6 +350,7 @@ impl io::Write for CaptureWriter {
 #[derive(Debug, Clone)]
 #[must_use]
 pub struct Guard {
+    // the guard shares the slot with the live list
     slot: Arc<Slot>,
 }
 
