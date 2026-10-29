@@ -23,9 +23,9 @@ impl Streams {
     ///
     /// # Errors
     /// Invalid options, or an endpoint that fails to bind.
-    pub(crate) fn bind(opts: &StreamOpts) -> Result<Self> {
+    pub(crate) fn bind(options: &StreamOpts) -> Result<Self> {
         let runtime = runtime()?;
-        let node = runtime.block_on(StreamNode::bind(opts))?;
+        let node = runtime.block_on(StreamNode::bind(options))?;
         Ok(Self {
             runtime: Arc::new(runtime),
             node: Some(node),
@@ -165,7 +165,7 @@ impl ReadEnd {
     ///
     /// # Errors
     /// The producer refused or abandoned the stream, or the link was lost.
-    pub(crate) fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<Read> {
+    pub(crate) fn read(&mut self, buffer: &mut [u8], timeout: Duration) -> Result<Read> {
         if self.leftover.is_empty() && !self.ended {
             let reader = &mut self.reader;
             // Inside `block_on`: the timer registers with the runtime's reactor
@@ -184,8 +184,8 @@ impl ReadEnd {
         if self.leftover.is_empty() {
             return Ok(Read::End);
         }
-        let taken = self.leftover.len().min(buf.len());
-        buf[..taken].copy_from_slice(&self.leftover.split_to(taken));
+        let taken = self.leftover.len().min(buffer.len());
+        buffer[..taken].copy_from_slice(&self.leftover.split_to(taken));
         Ok(Read::Bytes(taken))
     }
 }

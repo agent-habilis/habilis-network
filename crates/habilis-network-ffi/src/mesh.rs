@@ -40,7 +40,7 @@ impl Mesh {
     /// # Errors
     /// An unparseable id/topic/nickname, conflicting selectors, or a failure
     /// standing up the endpoint and gossip overlay.
-    pub(crate) fn open(opts: &JoinOptions) -> Result<Self> {
+    pub(crate) fn open(options: &JoinOptions) -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -51,7 +51,7 @@ impl Mesh {
         // the document. The browser peer passes `json_sink()`'s here instead,
         // which is the one thing that differs between the two.
         let Membership { node, inbound, .. } = runtime.block_on(
-            habilis_network::membership::join(opts, Arc::new(SilentSink::default())),
+            habilis_network::membership::join(options, Arc::new(SilentSink::default())),
         )?;
 
         Ok(Self {
@@ -111,7 +111,7 @@ impl Mesh {
         self.runtime.block_on(async move {
             match tokio::time::timeout(timeout, inbound.recv()).await {
                 Err(_elapsed) => Ok(None),
-                Ok(Some(msg)) => Ok(Some(msg)),
+                Ok(Some(message)) => Ok(Some(message)),
                 Ok(None) => Err(anyhow::anyhow!("mesh event loop has stopped")),
             }
         })
@@ -119,8 +119,8 @@ impl Mesh {
 
     /// Put back a message the caller could not take, so the next
     /// [`recv`](Self::recv) returns it first.
-    pub(crate) fn keep(&mut self, msg: Inbound) {
-        self.pending = Some(msg);
+    pub(crate) fn keep(&mut self, message: Inbound) {
+        self.pending = Some(message);
     }
 
     /// Apply an RFC 7386 merge document to the shared `state` channel and gossip

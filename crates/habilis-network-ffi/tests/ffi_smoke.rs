@@ -28,9 +28,9 @@ use habilis_network_ffi::ffi::{
 /// Zeroed selectors: no id and no topic, so [`habilis_network_mesh_open`] mints a private
 /// loopback mesh — no discovery, no network, nothing to clean up but the handle.
 fn create_opts(nick: &CStr) -> HabilisNetworkOpts {
-    let mut opts = HabilisNetworkOpts::empty();
-    opts.nick = nick.as_ptr();
-    opts
+    let mut options = HabilisNetworkOpts::empty();
+    options.nick = nick.as_ptr();
+    options
 }
 
 /// The error slot's current contents, as an owned string.
@@ -49,10 +49,10 @@ fn last_error() -> Option<String> {
     )
 }
 
-fn open(opts: &HabilisNetworkOpts) -> *mut HabilisNetworkMesh {
+fn open(options: &HabilisNetworkOpts) -> *mut HabilisNetworkMesh {
     // SAFETY: `opts` is a live, fully-initialized `HabilisNetworkOpts` whose string fields
     // are NULL or point at `CStr`s that outlive the call.
-    unsafe { habilis_network_mesh_open(opts) }
+    unsafe { habilis_network_mesh_open(options) }
 }
 
 /// Read a JSON document out through the two-call convention: ask for the length,
@@ -65,12 +65,12 @@ fn read_json(
     // it?" query — the callee writes nothing.
     let needed = unsafe { reader(handle, std::ptr::null_mut(), 0) };
     assert!(needed >= 0, "length query failed: {:?}", last_error());
-    let mut buf = vec![0_u8; usize::try_from(needed).expect("a sane length") + 1];
+    let mut buffer = vec![0_u8; usize::try_from(needed).expect("a sane length") + 1];
     // SAFETY: the buffer is writable for exactly the capacity being passed.
-    let written = unsafe { reader(handle, buf.as_mut_ptr().cast::<c_char>(), buf.len()) };
+    let written = unsafe { reader(handle, buffer.as_mut_ptr().cast::<c_char>(), buffer.len()) };
     assert_eq!(written, needed, "the second call must agree on the length");
-    buf.truncate(usize::try_from(written).expect("a sane length"));
-    String::from_utf8(buf).expect("the document is UTF-8")
+    buffer.truncate(usize::try_from(written).expect("a sane length"));
+    String::from_utf8(buffer).expect("the document is UTF-8")
 }
 
 #[test]
@@ -93,10 +93,10 @@ fn version_and_max_msg_are_reported() {
 fn a_bad_mesh_id_fails_with_a_reason() {
     let nick = CString::new("solo").expect("no interior NUL");
     let bogus = CString::new("not-a-mesh-id").expect("no interior NUL");
-    let mut opts = create_opts(&nick);
-    opts.mesh = bogus.as_ptr();
+    let mut options = create_opts(&nick);
+    options.mesh = bogus.as_ptr();
 
-    let handle = open(&opts);
+    let handle = open(&options);
     assert!(handle.is_null(), "an unparseable id must not open a handle");
     let error = last_error().expect("a failure must leave a reason in the error slot");
     assert!(
@@ -168,8 +168,8 @@ fn null_arguments_are_errors_not_crashes() {
 #[test]
 fn a_handle_serves_identity_state_and_roster() {
     let nick = CString::new("solo").expect("no interior NUL");
-    let opts = create_opts(&nick);
-    let handle = open(&opts);
+    let options = create_opts(&nick);
+    let handle = open(&options);
     assert!(
         !handle.is_null(),
         "habilis_network_mesh_open failed: {:?}",
@@ -247,16 +247,16 @@ fn a_handle_serves_identity_state_and_roster() {
     );
 
     // Nobody else is here, so a receive can only time out.
-    let mut msg = empty_msg();
-    let mut buf = vec![0_u8; 64];
+    let mut message = empty_msg();
+    let mut buffer = vec![0_u8; 64];
     // SAFETY: live handle, buffer writable for the capacity passed, `out` writable.
     let got = unsafe {
         habilis_network_msg_recv(
             handle,
-            buf.as_mut_ptr().cast::<c_char>(),
-            buf.len(),
+            buffer.as_mut_ptr().cast::<c_char>(),
+            buffer.len(),
             200,
-            &raw mut msg,
+            &raw mut message,
         )
     };
     assert_eq!(got, 0, "expected a timeout, got {got}: {:?}", last_error());
@@ -352,32 +352,32 @@ fn empty_msg() -> HabilisNetworkMsg {
 /// Receive one message into a buffer of `cap` bytes, waiting up to 20 s.
 /// Returns the call's result, the metadata, and the text when it was written.
 fn recv(handle: *mut HabilisNetworkMesh, cap: usize) -> (c_long, HabilisNetworkMsg, String) {
-    let mut msg = empty_msg();
-    let mut buf = vec![0_u8; cap];
+    let mut message = empty_msg();
+    let mut buffer = vec![0_u8; cap];
     // SAFETY: live handle, buffer writable for `cap` bytes, `out` writable.
     let got = unsafe {
         habilis_network_msg_recv(
             handle,
-            buf.as_mut_ptr().cast::<c_char>(),
+            buffer.as_mut_ptr().cast::<c_char>(),
             cap,
             20_000,
-            &raw mut msg,
+            &raw mut message,
         )
     };
     let text = if got == 1 {
         // SAFETY: a result of 1 means `buf` holds a NUL-terminated text.
-        unsafe { CStr::from_ptr(buf.as_ptr().cast::<c_char>()) }
+        unsafe { CStr::from_ptr(buffer.as_ptr().cast::<c_char>()) }
             .to_string_lossy()
             .into_owned()
     } else {
         String::new()
     };
-    (got, msg, text)
+    (got, message, text)
 }
 
-fn nick_of(msg: &HabilisNetworkMsg) -> String {
+fn nick_of(message: &HabilisNetworkMsg) -> String {
     // SAFETY: `write_nick` always NUL-terminates inside the array.
-    unsafe { CStr::from_ptr(msg.nick.as_ptr()) }
+    unsafe { CStr::from_ptr(message.nick.as_ptr()) }
         .to_string_lossy()
         .into_owned()
 }
@@ -475,22 +475,22 @@ fn two_handles_exchange_messages() {
 /// Zeroed selectors except `mesh`, so [`habilis_network_mesh_open`] joins the given id rather
 /// than creating a fresh mesh.
 fn create_opts_for_join(id: &CStr, nick: &CStr) -> HabilisNetworkOpts {
-    let mut opts = HabilisNetworkOpts::empty();
-    opts.mesh = id.as_ptr();
-    opts.nick = nick.as_ptr();
-    opts
+    let mut options = HabilisNetworkOpts::empty();
+    options.mesh = id.as_ptr();
+    options.nick = nick.as_ptr();
+    options
 }
 
 /// Four peers (creator + 3 joiners) must each see the other three.
 /// Regression for rooms that stalled at 3 total participants.
 fn four_peers_converge(public: bool) {
     let creator_nick = CString::new("p0").expect("no interior NUL");
-    let mut opts = create_opts(&creator_nick);
+    let mut options = create_opts(&creator_nick);
     if public {
         // Match a typical consumer's default create-room lookups.
-        opts.lookup = c"mdns,dht,relay".as_ptr();
+        options.lookup = c"mdns,dht,relay".as_ptr();
     }
-    let creator = open(&opts);
+    let creator = open(&options);
     assert!(
         !creator.is_null(),
         "habilis_network_mesh_open (create) failed: {:?}",
@@ -523,9 +523,9 @@ fn four_peers_converge(public: bool) {
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut counts = vec![0_i64; handles.len()];
     while Instant::now() < deadline {
-        for (idx, &handle) in handles.iter().enumerate() {
+        for (index, &handle) in handles.iter().enumerate() {
             // SAFETY: each handle came from habilis_network_mesh_open and is still open.
-            counts[idx] = unsafe { habilis_network_mesh_peer_count(handle) };
+            counts[index] = unsafe { habilis_network_mesh_peer_count(handle) };
         }
         if counts.iter().all(|&count| count >= 3) {
             break;
@@ -563,9 +563,9 @@ fn four_peers_converge_on_public() {
 }
 
 fn loopback_streams() -> *mut HabilisNetworkStreams {
-    let opts = HabilisNetworkStreamOpts::empty();
+    let options = HabilisNetworkStreamOpts::empty();
     // SAFETY: a fully-initialized struct with NULL strings.
-    let streams = unsafe { habilis_network_streams_bind(&raw const opts) };
+    let streams = unsafe { habilis_network_streams_bind(&raw const options) };
     assert!(
         !streams.is_null(),
         "habilis_network_streams_bind failed: {:?}",
