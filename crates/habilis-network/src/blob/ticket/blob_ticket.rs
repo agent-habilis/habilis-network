@@ -11,6 +11,18 @@ use crate::transport::PayloadPath;
 use crate::blob::{BlobDigest, HASH_LEN, SECRET_LEN};
 
 /// A decoded blob ticket.
+///
+/// # Examples
+///
+/// A blob ticket names the address, the secret, the hash and the size of a blob, and it encodes to text. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::ops::blob::BlobTicket;
+///
+/// # fn demo(ticket: &BlobTicket) -> (String, String) {
+/// (ticket.encode(), ticket.sha256_hex())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct BlobTicket {

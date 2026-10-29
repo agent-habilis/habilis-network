@@ -4,6 +4,18 @@ use super::HASH_LEN;
 
 /// The SHA-256 of a blob's bytes: the name it is stored, ticketed and fetched
 /// under. Prints as lowercase hex, the same text as its spool file name.
+///
+/// # Examples
+///
+/// A blob digest is the SHA-256 of a blob, and it reads back as bytes. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::ops::blob::BlobDigest;
+///
+/// # fn demo(digest: &BlobDigest) -> usize {
+/// digest.as_bytes().len()
+/// # }
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlobDigest([u8; HASH_LEN]);
 

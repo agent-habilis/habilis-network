@@ -12,6 +12,18 @@ use crate::blob::store::BlobStore;
 
 /// The producer side of the blob channel. Owns the serving endpoint and the
 /// content-addressed store; both live for the daemon's process lifetime.
+///
+/// # Examples
+///
+/// A blob server serves the blobs that a node offers, from its spool. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::ops::blob::BlobServer;
+///
+/// # fn demo(server: BlobServer) {
+/// drop(server);
+/// # }
+/// ```
 pub struct BlobServer {
     pub(super) endpoint: Endpoint,
     // the server and the accept loop share the store

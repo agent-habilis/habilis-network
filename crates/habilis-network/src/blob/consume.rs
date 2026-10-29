@@ -35,6 +35,19 @@ const CHUNK: usize = 64 * 1024;
 /// A password mismatch with the ticket, dial/handshake failure, the producer
 /// refusing (bad secret / unknown blob), a size disagreement, a truncated
 /// stream, or a final digest that does not match the ticket.
+///
+/// # Examples
+///
+/// It fetches a blob from its ticket and writes its bytes to the output. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::ops::blob::{BlobTicket, fetch};
+/// use tokio::io::AsyncWrite;
+///
+/// # async fn demo<Writer: AsyncWrite + Unpin>(ticket: &BlobTicket, out: &mut Writer) {
+/// let _ = fetch(ticket, out, None).await;
+/// # }
+/// ```
 pub async fn fetch<Writer>(
     ticket: &BlobTicket,
     out: &mut Writer,

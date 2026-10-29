@@ -6,6 +6,16 @@ use std::fmt;
 /// [`BlobError::PasswordRequired`] and [`BlobError::PasswordNotNeeded`] are the causes a
 /// frontend acts on: it prompts for the password, or it drops the flag.
 /// [`BlobError::Internal`] holds the other causes, which no caller acts on.
+///
+/// # Examples
+///
+/// A blob that is protected by a password returns this error without one.
+///
+/// ```
+/// use habilis_network::ops::blob::BlobError;
+///
+/// assert!(matches!(BlobError::PasswordRequired, BlobError::PasswordRequired));
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]
