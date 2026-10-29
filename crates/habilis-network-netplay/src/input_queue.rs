@@ -312,9 +312,14 @@ mod tests {
         queue.add_input(Frame::new(0), TestInput(7));
         assert_eq!(
             queue.input(Frame::new(0)),
-            (TestInput(7), InputStatus::Confirmed)
+            (TestInput(7), InputStatus::Confirmed),
+            "a known input comes back confirmed"
         );
-        assert_eq!(queue.first_incorrect_frame(), Frame::NULL);
+        assert_eq!(
+            queue.first_incorrect_frame(),
+            Frame::NULL,
+            "a known input leaves no misprediction"
+        );
     }
 
     #[test]
@@ -325,7 +330,8 @@ mod tests {
         // Frame 1 hasn't arrived; the guess is "same as frame 0".
         assert_eq!(
             queue.input(Frame::new(1)),
-            (TestInput(7), InputStatus::Predicted)
+            (TestInput(7), InputStatus::Predicted),
+            "an unknown input is predicted by repeating the last one"
         );
     }
 
@@ -334,7 +340,8 @@ mod tests {
         let mut queue = queue();
         assert_eq!(
             queue.input(Frame::new(0)),
-            (TestInput::default(), InputStatus::Predicted)
+            (TestInput::default(), InputStatus::Predicted),
+            "the very first frame predicts the default input"
         );
     }
 
@@ -345,7 +352,11 @@ mod tests {
         let _ = queue.input(Frame::new(0));
         let _ = queue.input(Frame::new(1)); // predicts 7
         queue.add_input(Frame::new(1), TestInput(7)); // and 7 is what actually happened
-        assert_eq!(queue.first_incorrect_frame(), Frame::NULL);
+        assert_eq!(
+            queue.first_incorrect_frame(),
+            Frame::NULL,
+            "a right prediction reports no misprediction"
+        );
     }
 
     #[test]
@@ -355,7 +366,11 @@ mod tests {
         let _ = queue.input(Frame::new(0));
         let _ = queue.input(Frame::new(1)); // predicts 7
         queue.add_input(Frame::new(1), TestInput(9)); // but the player did something else
-        assert_eq!(queue.first_incorrect_frame(), Frame::new(1));
+        assert_eq!(
+            queue.first_incorrect_frame(),
+            Frame::new(1),
+            "a wrong prediction reports the frame it broke at"
+        );
     }
 
     #[test]
@@ -367,7 +382,11 @@ mod tests {
         let _ = queue.input(Frame::new(2));
         queue.add_input(Frame::new(1), TestInput(2)); // wrong here
         queue.add_input(Frame::new(2), TestInput(3)); // and here, but 1 is what we roll back to
-        assert_eq!(queue.first_incorrect_frame(), Frame::new(1));
+        assert_eq!(
+            queue.first_incorrect_frame(),
+            Frame::new(1),
+            "only the earliest misprediction is reported"
+        );
     }
 
     #[test]
@@ -377,14 +396,23 @@ mod tests {
         let _ = queue.input(Frame::new(0));
         let _ = queue.input(Frame::new(1));
         queue.add_input(Frame::new(1), TestInput(2));
-        assert_eq!(queue.first_incorrect_frame(), Frame::new(1));
+        assert_eq!(
+            queue.first_incorrect_frame(),
+            Frame::new(1),
+            "resetting prediction clears the misprediction"
+        );
 
         queue.reset_prediction(Frame::new(1));
-        assert_eq!(queue.first_incorrect_frame(), Frame::NULL);
+        assert_eq!(
+            queue.first_incorrect_frame(),
+            Frame::NULL,
+            "after the reset no frame is reported as incorrect"
+        );
         // The real input is still there — the rollback re-reads it as truth.
         assert_eq!(
             queue.input(Frame::new(1)),
-            (TestInput(2), InputStatus::Confirmed)
+            (TestInput(2), InputStatus::Confirmed),
+            "after the reset the frame reads its real input"
         );
     }
 
@@ -392,20 +420,30 @@ mod tests {
     fn frame_delay_files_an_input_later_than_it_was_made() {
         let mut queue = queue();
         queue.set_frame_delay(3);
-        assert_eq!(queue.add_input(Frame::new(0), TestInput(5)), Frame::new(3));
+        assert_eq!(
+            queue.add_input(Frame::new(0), TestInput(5)),
+            Frame::new(3),
+            "frame delay files an input later than it was made"
+        );
         // A second add must be accepted too: the caller counts from 0 while
         // the ring counts from 0 + delay, and conflating the two rejects
         // every input after the first.
-        assert_eq!(queue.add_input(Frame::new(1), TestInput(6)), Frame::new(4));
+        assert_eq!(
+            queue.add_input(Frame::new(1), TestInput(6)),
+            Frame::new(4),
+            "the second delayed input is filed one frame later"
+        );
         // The delayed frames before it are filled so the queue stays
         // contiguous, and they read as the default input.
         assert_eq!(
             queue.input(Frame::new(0)),
-            (TestInput::default(), InputStatus::Confirmed)
+            (TestInput::default(), InputStatus::Confirmed),
+            "the frame before the delay reads the default input"
         );
         assert_eq!(
             queue.input(Frame::new(3)),
-            (TestInput(5), InputStatus::Confirmed)
+            (TestInput(5), InputStatus::Confirmed),
+            "the delayed input is readable at its filed frame"
         );
     }
 
@@ -418,13 +456,21 @@ mod tests {
             queue.add_input(Frame::new(number), TestInput(number));
         }
         let newest = Frame::new(span - 1);
-        assert_eq!(queue.last_added_frame(), newest);
+        assert_eq!(
+            queue.last_added_frame(),
+            newest,
+            "the ring ages out old frames"
+        );
         // Recent frames survive intact...
         assert_eq!(
             queue.input(newest),
-            (TestInput(newest.get()), InputStatus::Confirmed)
+            (TestInput(newest.get()), InputStatus::Confirmed),
+            "the newest frame reads back its input"
         );
         // ...and an ancient one is simply gone, not silently wrong.
-        assert!(queue.confirmed(Frame::ZERO).is_none());
+        assert!(
+            queue.confirmed(Frame::ZERO).is_none(),
+            "the oldest frame is no longer confirmed"
+        );
     }
 }

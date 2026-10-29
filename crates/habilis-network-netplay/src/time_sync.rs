@@ -113,7 +113,11 @@ mod tests {
         for _ in 0..super::WINDOW {
             sync.advance(0, 0);
         }
-        assert_eq!(sync.recommend_skip(), 0);
+        assert_eq!(
+            sync.recommend_skip(),
+            0,
+            "a steady state recommends no correction"
+        );
     }
 
     #[test]
@@ -123,7 +127,11 @@ mod tests {
             sync.advance(2, 0);
         }
         // Lead of 1 after halving — below the correction floor.
-        assert_eq!(sync.recommend_skip(), 0);
+        assert_eq!(
+            sync.recommend_skip(),
+            0,
+            "a small lead is jitter, so no correction is recommended"
+        );
     }
 
     #[test]
@@ -132,7 +140,11 @@ mod tests {
         for _ in 0..super::WINDOW {
             sync.advance(10, 0);
         }
-        assert_eq!(sync.recommend_skip(), 5);
+        assert_eq!(
+            sync.recommend_skip(),
+            5,
+            "a persistent lead recommends yielding five frames"
+        );
     }
 
     #[test]
@@ -154,6 +166,10 @@ mod tests {
         for _ in 0..super::WINDOW {
             sync.advance(1000, 0);
         }
-        assert_eq!(sync.recommend_skip(), super::MAX_SKIP);
+        assert_eq!(
+            sync.recommend_skip(),
+            super::MAX_SKIP,
+            "the correction is capped at the drift"
+        );
     }
 }

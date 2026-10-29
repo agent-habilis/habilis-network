@@ -149,11 +149,13 @@ mod tests {
     fn a_frame_that_is_a_real_frame_serializes_as_its_number() {
         assert_eq!(
             serde_json::to_string(&Frame::new(7)).expect("serializes"),
-            "7"
+            "7",
+            "a real frame serializes as its number"
         );
         assert_eq!(
             serde_json::to_string(&Frame::ZERO).expect("serializes"),
-            "0"
+            "0",
+            "the zero frame serializes as its number"
         );
     }
 
@@ -161,6 +163,9 @@ mod tests {
     /// packet as `-1`.
     #[test]
     fn the_null_frame_does_not_serialize() {
-        assert!(serde_json::to_string(&Frame::NULL).is_err());
+        assert!(
+            serde_json::to_string(&Frame::NULL).is_err(),
+            "the null frame does not serialize"
+        );
     }
 }

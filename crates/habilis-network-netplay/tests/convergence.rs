@@ -93,12 +93,19 @@ fn a_long_run_stays_stable() {
             runner.handle(request);
         }
     }
-    assert_eq!(runner.state.frame, Frame::new(400));
+    assert_eq!(
+        runner.state.frame,
+        Frame::new(400),
+        "the long run reaches frame 400"
+    );
     let expected: i64 = script
         .iter()
         .map(|(left, right)| i64::from(*left) + i64::from(*right))
         .sum();
-    assert_eq!(runner.state.value, expected);
+    assert_eq!(
+        runner.state.value, expected,
+        "the long run keeps the expected state value"
+    );
 }
 
 /// Pins the shape of a rollback cycle: load the state, then re-save and

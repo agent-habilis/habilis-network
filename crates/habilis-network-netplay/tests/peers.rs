@@ -244,7 +244,8 @@ fn two_peers_synchronize_before_either_starts() {
     assert!(
         peers
             .iter()
-            .all(|peer| peer.session.state() == SessionState::Synchronizing)
+            .all(|peer| peer.session.state() == SessionState::Synchronizing),
+        "two peers synchronize before either starts"
     );
 
     run(&net, &mut peers, 40);

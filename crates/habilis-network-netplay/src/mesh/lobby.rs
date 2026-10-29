@@ -536,7 +536,8 @@ mod tests {
                 r#"{"Start":{"epoch":2,"session_id":12345,"players":["#,
                 r#""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","#,
                 r#""bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]}}"#,
-            )
+            ),
+            "the start message keeps its golden json"
         );
     }
 
@@ -545,7 +546,8 @@ mod tests {
         let players = vec![key(0xaa), key(0xbb)];
         assert_eq!(
             session_id_for(&players, &key(0xaa), Epoch::new(2)),
-            SessionId::new(8_136_736_511_243_102_950)
+            SessionId::new(8_136_736_511_243_102_950),
+            "the session id is pinned for fixed players and proposer"
         );
     }
 
@@ -561,7 +563,10 @@ mod tests {
             texts
         };
         let sorted_text: Vec<String> = keys.iter().map(ToString::to_string).collect();
-        assert_eq!(sorted_text, by_text);
+        assert_eq!(
+            sorted_text, by_text,
+            "the key order is the order of their hex text"
+        );
     }
 
     #[test]
@@ -573,7 +578,10 @@ mod tests {
             key(0xbb)
         );
         lobby.on_message(&key(0xbb), &raw, Tick::new(0));
-        assert!(lobby.started().is_none());
+        assert!(
+            lobby.started().is_none(),
+            "a start with a key that is not lowercase hex is ignored"
+        );
     }
 
     /// The literal that the lobby wrote before its players were keys. A new peer refuses
@@ -589,7 +597,10 @@ mod tests {
         );
         let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         lobby.on_message(&key(0xbb), old, Tick::new(0));
-        assert!(lobby.started().is_none());
+        assert!(
+            lobby.started().is_none(),
+            "the old start literal with text players is refused"
+        );
     }
 
     /// A nickname that `Nickname::try_new` refuses is not a presence.
@@ -598,14 +609,22 @@ mod tests {
         let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         lobby.on_message(&key(0xbb), r#"{"Present":{"nick":""}}"#, Tick::new(0));
         let present: Vec<_> = lobby.present().collect();
-        assert_eq!(present, vec![(key(0xaa), nick("alice"))]);
+        assert_eq!(
+            present,
+            vec![(key(0xaa), nick("alice"))],
+            "a presence with a nickname the wire refuses is dropped"
+        );
     }
 
     #[test]
     fn a_peer_is_present_in_its_own_lobby() {
         let lobby = Lobby::new(key(0xaa), nick("alice"));
         let present: Vec<_> = lobby.present().collect();
-        assert_eq!(present, vec![(key(0xaa), nick("alice"))]);
+        assert_eq!(
+            present,
+            vec![(key(0xaa), nick("alice"))],
+            "a peer is present in its own lobby"
+        );
     }
 
     #[test]
@@ -616,13 +635,21 @@ mod tests {
             &raw(&LobbyMessage::Present { nick: nick("bob") }),
             Tick::new(0),
         );
-        assert_eq!(lobby.present().count(), 2);
+        assert_eq!(
+            lobby.present().count(),
+            2,
+            "a presence from a peer is recorded"
+        );
     }
 
     #[test]
     fn starting_alone_is_refused() {
         let mut lobby = Lobby::new(key(0xaa), nick("alice"));
-        assert_eq!(lobby.propose(), Err(LobbyError::NotEnoughPlayers));
+        assert_eq!(
+            lobby.propose(),
+            Err(LobbyError::NotEnoughPlayers),
+            "starting alone is refused with not enough players"
+        );
     }
 
     #[test]
@@ -665,14 +692,24 @@ mod tests {
 
         let alice_match = alice.started().expect("proposer joins its own match");
         let bob_match = bob.started().expect("bob adopted it");
-        assert_eq!(alice_match.players, bob_match.players);
-        assert_eq!(alice_match.session_id, bob_match.session_id);
+        assert_eq!(
+            alice_match.players, bob_match.players,
+            "both peers derive the same players"
+        );
+        assert_eq!(
+            alice_match.session_id, bob_match.session_id,
+            "both peers derive the same session id"
+        );
         assert_eq!(
             alice_match.local_handle,
             PlayerHandle::new(0),
             "aaa sorts first"
         );
-        assert_eq!(bob_match.local_handle, PlayerHandle::new(1));
+        assert_eq!(
+            bob_match.local_handle,
+            PlayerHandle::new(1),
+            "bob's local handle is player one"
+        );
     }
 
     #[test]
@@ -704,7 +741,10 @@ mod tests {
             alice_match.session_id, bob_match.session_id,
             "both must land on the same match, or they play different games"
         );
-        assert_eq!(alice_match.players, bob_match.players);
+        assert_eq!(
+            alice_match.players, bob_match.players,
+            "simultaneous proposals converge on the same players"
+        );
     }
 
     /// The single `Start` packet crosses a lossy path, so the lobby has to
@@ -728,20 +768,28 @@ mod tests {
 
         // Alice starts, and the packet is dropped on the way to Bob.
         alice.propose().expect("two distinct players");
-        assert!(bob.started().is_none());
+        assert!(
+            bob.started().is_none(),
+            "bob has no match before the announcement"
+        );
 
         let again = alice.announcement().expect("alice is in a match");
         bob.on_message(&key(0xaa), &raw(&again), Tick::new(0));
         assert_eq!(
             bob.started().map(|current| current.session_id),
             alice.started().map(|current| current.session_id),
+            "a peer that missed the start catches up on the announcement",
         );
     }
 
     #[test]
     fn a_lobby_with_no_match_has_nothing_to_announce() {
         let lobby = Lobby::new(key(0xaa), nick("alice"));
-        assert_eq!(lobby.announcement(), None);
+        assert_eq!(
+            lobby.announcement(),
+            None,
+            "a lobby with no match has nothing to announce"
+        );
     }
 
     /// Regression for a pair that could only be unwedged by restarting
@@ -764,7 +812,8 @@ mod tests {
         );
         assert_eq!(
             lobby.blocker(),
-            Some(LobbyError::DuplicateNickname(nick("alice")))
+            Some(LobbyError::DuplicateNickname(nick("alice"))),
+            "a duplicate nickname is reported as the blocker without a proposal"
         );
     }
 
@@ -776,7 +825,11 @@ mod tests {
             &raw(&LobbyMessage::Present { nick: nick("bob") }),
             Tick::new(100),
         );
-        assert_eq!(lobby.present().count(), 2);
+        assert_eq!(
+            lobby.present().count(),
+            2,
+            "a peer that stops announcing is dropped"
+        );
 
         lobby.expire(Tick::new(160), TickSpan::new(50));
         let present: Vec<_> = lobby.present().collect();
@@ -798,13 +851,21 @@ mod tests {
             );
             lobby.expire(now, TickSpan::new(50));
         }
-        assert_eq!(lobby.present().count(), 2);
+        assert_eq!(
+            lobby.present().count(),
+            2,
+            "a peer that keeps announcing is kept"
+        );
 
         // We never receive our own presence, so our stamp stays at 0 —
         // expiring on that would delete the one peer that is certainly here.
         lobby.expire(Tick::new(10_000), TickSpan::new(50));
         let present: Vec<_> = lobby.present().collect();
-        assert_eq!(present, vec![(key(0xaa), nick("alice"))]);
+        assert_eq!(
+            present,
+            vec![(key(0xaa), nick("alice"))],
+            "the peer that keeps announcing stays present"
+        );
     }
 
     #[test]
@@ -839,7 +900,10 @@ mod tests {
             }),
             Tick::new(0),
         );
-        assert!(lobby.started().is_none());
+        assert!(
+            lobby.started().is_none(),
+            "a match between other people is ignored"
+        );
     }
 
     /// Rematch. The point of the epoch: the second match's id may well be
@@ -870,7 +934,11 @@ mod tests {
 
         for lobby in [&alice, &bob] {
             let current = lobby.started().expect("started");
-            assert_eq!(current.epoch, Epoch::new(2));
+            assert_eq!(
+                current.epoch,
+                Epoch::new(2),
+                "a second proposal supersedes the first with the newer epoch"
+            );
             assert_ne!(
                 current.session_id, first_id,
                 "a rematch must not reuse the previous match's id, or its \
@@ -879,7 +947,8 @@ mod tests {
         }
         assert_eq!(
             alice.started().expect("started").session_id,
-            bob.started().expect("started").session_id
+            bob.started().expect("started").session_id,
+            "both peers hold the session of the second proposal"
         );
     }
 

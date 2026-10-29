@@ -133,23 +133,40 @@ mod tests {
         let mut layout_state = LayoutState::new();
         let (first_bytes, first_buffer) =
             super::render_frame(&mut app, &mut layout_state, None, 20, 1);
-        assert!(first_bytes.contains("count is 0"));
-        assert_eq!(row_text(&first_buffer).trim_end(), "count is 0");
+        assert!(
+            first_bytes.contains("count is 0"),
+            "the first frame shows the initial count"
+        );
+        assert_eq!(
+            row_text(&first_buffer).trim_end(),
+            "count is 0",
+            "the first buffer reads count is 0"
+        );
 
         // No signal change: tick reports nothing to repaint.
-        assert!(!app.tick());
+        assert!(!app.tick(), "no repaint happens before a signal changes");
 
         count.set(9);
-        assert!(app.tick());
+        assert!(app.tick(), "a repaint happens after a signal changes");
         // The diff against `first_buffer` is deliberately minimal — only
         // the changed digit is re-emitted, not the whole string — so the
         // real assertion is against the freshly painted buffer, not the
         // diff bytes.
         let (second_bytes, second_buffer) =
             super::render_frame(&mut app, &mut layout_state, Some(&first_buffer), 20, 1);
-        assert!(second_bytes.contains('9'));
-        assert!(!second_bytes.contains("count is 9")); // the unchanged prefix is not re-emitted
-        assert_eq!(row_text(&second_buffer).trim_end(), "count is 9");
+        assert!(
+            second_bytes.contains('9'),
+            "the second frame shows the changed digit"
+        );
+        assert!(
+            !second_bytes.contains("count is 9"),
+            "the second frame does not show the old count"
+        ); // the unchanged prefix is not re-emitted
+        assert_eq!(
+            row_text(&second_buffer).trim_end(),
+            "count is 9",
+            "the second buffer reads the new count"
+        );
     }
 
     #[test]
@@ -178,13 +195,21 @@ mod tests {
 
         let mut layout_state = LayoutState::new();
         let (_bytes, buffer) = super::render_frame(&mut app, &mut layout_state, None, 20, 1);
-        assert_eq!(*parent_renders.borrow(), 1);
-        assert_eq!(row_text(&buffer).trim_end(), "child sees 0");
+        assert_eq!(
+            *parent_renders.borrow(),
+            1,
+            "the parent renders only on the first frame"
+        );
+        assert_eq!(
+            row_text(&buffer).trim_end(),
+            "child sees 0",
+            "the nested buffer shows the updated child text"
+        );
 
         // The CHILD's own signal changes — the parent's coroutine must
         // not be resumed again; only the child re-renders.
         child_count.set(7);
-        assert!(app.tick());
+        assert!(app.tick(), "the tick after the child change repaints");
         assert_eq!(
             *parent_renders.borrow(),
             1,
@@ -193,7 +218,11 @@ mod tests {
 
         let (_bytes, new_buffer) =
             super::render_frame(&mut app, &mut layout_state, Some(&buffer), 20, 1);
-        assert_eq!(row_text(&new_buffer).trim_end(), "child sees 7");
+        assert_eq!(
+            row_text(&new_buffer).trim_end(),
+            "child sees 7",
+            "the new buffer shows the updated text"
+        );
     }
 
     fn child_component(

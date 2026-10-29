@@ -313,7 +313,11 @@ mod tests {
         let mut host = TuiHost::new();
         let root = host.create_root();
         let mounted = mount(&mut host, root, None, View::text("hi"));
-        assert_eq!(host.arena.children(root).count(), 1);
+        assert_eq!(
+            host.arena.children(root).count(),
+            1,
+            "mounting a text view creates one text node"
+        );
         let _ = mounted;
     }
 
@@ -327,9 +331,16 @@ mod tests {
         let mounted = patch(&mut host, root, mounted, View::text("second"));
         let after_ids: Vec<_> = host.arena.children(root).collect();
 
-        assert_eq!(before_ids, after_ids); // same node reused
+        assert_eq!(
+            before_ids, after_ids,
+            "patching the same shape reuses the node"
+        ); // same node reused
         let text_node = after_ids[0];
-        assert_eq!(host.arena.get(text_node).text.as_deref(), Some("second"));
+        assert_eq!(
+            host.arena.get(text_node).text.as_deref(),
+            Some("second"),
+            "patching the same shape updates the text content"
+        );
         let _ = mounted;
     }
 
@@ -348,7 +359,10 @@ mod tests {
         );
         let box_node = host.arena.children(root).next().unwrap();
 
-        assert_ne!(text_node, box_node);
+        assert_ne!(
+            text_node, box_node,
+            "patching a different shape replaces the node"
+        );
         let _ = mounted;
     }
 
@@ -368,7 +382,11 @@ mod tests {
         let Mounted::Box(box_node, _, _) = &mounted else {
             panic!("expected a box");
         };
-        assert_eq!(host.arena.children(*box_node).count(), 1);
+        assert_eq!(
+            host.arena.children(*box_node).count(),
+            1,
+            "a shorter child list unmounts the tail"
+        );
     }
 
     #[test]
@@ -384,7 +402,11 @@ mod tests {
         let Mounted::Box(box_node, _, _) = &mounted else {
             panic!("expected a box");
         };
-        assert_eq!(host.arena.children(*box_node).count(), 2);
+        assert_eq!(
+            host.arena.children(*box_node).count(),
+            2,
+            "a longer child list mounts the extra tail"
+        );
     }
 
     #[test]
@@ -412,6 +434,10 @@ mod tests {
         let Mounted::Box(box_node, _, _) = &mounted else {
             panic!("expected a box");
         };
-        assert_eq!(host.arena.children(*box_node).count(), 1);
+        assert_eq!(
+            host.arena.children(*box_node).count(),
+            1,
+            "the box keeps one child"
+        );
     }
 }

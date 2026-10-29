@@ -417,9 +417,9 @@ mod tests {
         }
         let mut buffer = ScreenBuffer::new(5, 1);
         paint(&mut buffer, &arena, root);
-        assert_eq!(buffer.chars[0], "h");
-        assert_eq!(buffer.chars[1], "i");
-        assert_eq!(buffer.chars[2], " ");
+        assert_eq!(buffer.chars[0], "h", "the first cell holds h");
+        assert_eq!(buffer.chars[1], "i", "the second cell holds i");
+        assert_eq!(buffer.chars[2], " ", "the third cell holds a space");
     }
 
     #[test]
@@ -437,7 +437,11 @@ mod tests {
         let mut buffer = ScreenBuffer::new(3, 2);
         paint(&mut buffer, &arena, root);
         for bg in &buffer.bg {
-            assert_eq!(*bg, crate::tui::color::palette(1));
+            assert_eq!(
+                *bg,
+                crate::tui::color::palette(1),
+                "a background fills the whole border box with palette one"
+            );
         }
     }
 
@@ -456,9 +460,19 @@ mod tests {
         }
         let mut buffer = ScreenBuffer::new(5, 1);
         paint(&mut buffer, &arena, root);
-        assert_eq!(width::string_width(&buffer.chars[0]), 2);
-        assert_eq!(buffer.chars[1], ""); // continuation
-        assert_eq!(buffer.chars[2], "a");
+        assert_eq!(
+            width::string_width(&buffer.chars[0]),
+            2,
+            "a wide glyph is two cells wide"
+        );
+        assert_eq!(
+            buffer.chars[1], "",
+            "a wide glyph leaves a continuation cell"
+        ); // continuation
+        assert_eq!(
+            buffer.chars[2], "a",
+            "the cell after the continuation holds a"
+        );
     }
 
     #[test]
@@ -477,6 +491,10 @@ mod tests {
         }
         let mut buffer = ScreenBuffer::new(3, 1);
         paint(&mut buffer, &arena, root);
-        assert_eq!(buffer.chars, vec!["t", "o", "o"]);
+        assert_eq!(
+            buffer.chars,
+            vec!["t", "o", "o"],
+            "clipped text still advances by its full width"
+        );
     }
 }

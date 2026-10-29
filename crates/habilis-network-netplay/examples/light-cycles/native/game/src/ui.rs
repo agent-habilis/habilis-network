@@ -357,7 +357,15 @@ mod tests {
     /// forever. The label may shout; the code may not.
     #[test]
     fn the_room_code_is_shown_exactly_as_given() {
-        assert_eq!(super::room_label("Gadget-Plover"), "ROOM Gadget-Plover");
-        assert_eq!(super::room_label("volt-paddle"), "ROOM volt-paddle");
+        assert_eq!(
+            super::room_label("Gadget-Plover"),
+            "ROOM Gadget-Plover",
+            "the room code is shown exactly as given, with its case"
+        );
+        assert_eq!(
+            super::room_label("volt-paddle"),
+            "ROOM volt-paddle",
+            "a lower-case room code is shown as given"
+        );
     }
 }

@@ -508,7 +508,8 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&message).expect("a packet serializes"),
-            r#"{"magic":2882343476,"body":{"Input":{"start_frame":5,"inputs":[7]}}}"#
+            r#"{"magic":2882343476,"body":{"Input":{"start_frame":5,"inputs":[7]}}}"#,
+            "an input packet with no ack frame keeps its golden json"
         );
     }
 
@@ -530,16 +531,23 @@ mod tests {
             body: Body::InputAck { ack_frame },
         };
         let none = serde_json::to_string(&packet(None)).expect("serializes");
-        assert_eq!(none, r#"{"magic":2882343476,"body":{"InputAck":{}}}"#);
+        assert_eq!(
+            none, r#"{"magic":2882343476,"body":{"InputAck":{}}}"#,
+            "no ack frame is left off the wire"
+        );
         let some = serde_json::to_string(&packet(Some(Frame::new(4)))).expect("serializes");
         assert_eq!(
-            some,
-            r#"{"magic":2882343476,"body":{"InputAck":{"ack_frame":4}}}"#
+            some, r#"{"magic":2882343476,"body":{"InputAck":{"ack_frame":4}}}"#,
+            "an ack frame is on the wire"
         );
         for json in [none, some] {
             let back: Message<crate::test_game::TestInput> =
                 serde_json::from_str(&json).expect("round trips");
-            assert_eq!(serde_json::to_string(&back).expect("serializes"), json);
+            assert_eq!(
+                serde_json::to_string(&back).expect("serializes"),
+                json,
+                "the packet with an ack frame round trips"
+            );
         }
     }
 
@@ -586,7 +594,11 @@ mod tests {
         };
 
         // Silent while the request is outstanding.
-        assert_eq!(requests(&mut peer), 0);
+        assert_eq!(
+            requests(&mut peer),
+            0,
+            "no extra request is sent after the answer"
+        );
 
         let mut replies = Vec::new();
         peer.on_message(
@@ -659,7 +671,11 @@ mod tests {
         for _ in 0..=super::DISCONNECT_TIMEOUT_TICKS {
             peer.tick(Frame::NULL);
         }
-        assert_eq!(peer.state(), PeerState::Disconnected);
+        assert_eq!(
+            peer.state(),
+            PeerState::Disconnected,
+            "a peer that never latched is disconnected"
+        );
 
         let mut replies = Vec::new();
         peer.on_message(
@@ -689,6 +705,9 @@ mod tests {
             &mut replies,
         );
 
-        assert_eq!(peer.stale_token_drops, 1);
+        assert_eq!(
+            peer.stale_token_drops, 1,
+            "a stale reply before the latch is counted as a stale drop"
+        );
     }
 }

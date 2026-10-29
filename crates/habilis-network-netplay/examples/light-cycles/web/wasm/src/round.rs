@@ -170,14 +170,17 @@ mod tests {
         let roster = vec!["bob".to_string(), "alice".to_string()];
         let a = RoundDescriptor::derive(3, roster.clone());
         let b = RoundDescriptor::derive(3, roster);
-        assert_eq!(a, b);
+        assert_eq!(
+            a, b,
+            "deriving twice with the same inputs is byte identical"
+        );
     }
 
     #[test]
     fn roster_order_does_not_affect_the_result() {
         let a = RoundDescriptor::derive(1, vec!["a".into(), "b".into(), "c".into()]);
         let b = RoundDescriptor::derive(1, vec!["c".into(), "a".into(), "b".into()]);
-        assert_eq!(a, b);
+        assert_eq!(a, b, "the roster order does not change the result");
     }
 
     /// A rematch gets a fresh session id, and this is what makes that
@@ -187,14 +190,17 @@ mod tests {
         let roster = vec!["a".to_string(), "b".to_string()];
         let a = RoundDescriptor::derive(1, roster.clone());
         let b = RoundDescriptor::derive(2, roster);
-        assert_ne!(a.spawns, b.spawns);
+        assert_ne!(
+            a.spawns, b.spawns,
+            "a different session id gives a different layout"
+        );
     }
 
     #[test]
     fn a_different_roster_gives_a_different_descriptor() {
         let a = RoundDescriptor::derive(1, vec!["a".into(), "b".into()]);
         let b = RoundDescriptor::derive(1, vec!["a".into(), "c".into()]);
-        assert_ne!(a, b);
+        assert_ne!(a, b, "a different roster gives a different descriptor");
     }
 
     #[test]
@@ -204,6 +210,10 @@ mod tests {
         let mut points: Vec<(u8, u8)> = desc.spawns.iter().map(|s| (s.x, s.y)).collect();
         points.sort_unstable();
         points.dedup();
-        assert_eq!(points.len(), desc.spawns.len());
+        assert_eq!(
+            points.len(),
+            desc.spawns.len(),
+            "every roster member gets a distinct spawn"
+        );
     }
 }

@@ -396,8 +396,16 @@ mod tests {
 
         LayoutState::new().layout(&mut arena, root, 20, 10);
 
-        assert_eq!((arena.get(a).lx, arena.get(a).lw), (0, 5));
-        assert_eq!((arena.get(b).lx, arena.get(b).lw), (5, 7));
+        assert_eq!(
+            (arena.get(a).lx, arena.get(a).lw),
+            (0, 5),
+            "the first fixed child is placed at the left edge with its width"
+        );
+        assert_eq!(
+            (arena.get(b).lx, arena.get(b).lw),
+            (5, 7),
+            "the second fixed child is placed after the first"
+        );
     }
 
     #[test]
@@ -414,8 +422,12 @@ mod tests {
 
         LayoutState::new().layout(&mut arena, root, 30, 5);
 
-        assert_eq!(arena.get(fixed).lw, 10);
-        assert_eq!(arena.get(flexed).lw, 20);
+        assert_eq!(arena.get(fixed).lw, 10, "the fixed child keeps its width");
+        assert_eq!(
+            arena.get(flexed).lw,
+            20,
+            "the flexed child absorbs the leftover width"
+        );
     }
 
     #[test]
@@ -433,7 +445,11 @@ mod tests {
 
         LayoutState::new().layout(&mut arena, root, 10, 3);
 
-        assert_eq!(arena.get(a).lx, 6);
+        assert_eq!(
+            arena.get(a).lx,
+            6,
+            "justify end pushes the child to the far edge"
+        );
     }
 
     #[test]
@@ -452,8 +468,16 @@ mod tests {
         LayoutState::new().layout(&mut arena, root, 10, 10);
 
         // 1 cell of border + 1 cell of padding on each side.
-        assert_eq!((arena.get(child).lx, arena.get(child).ly), (2, 2));
-        assert_eq!((arena.get(child).lw, arena.get(child).lh), (6, 6));
+        assert_eq!(
+            (arena.get(child).lx, arena.get(child).ly),
+            (2, 2),
+            "padding and border place the child inside the box"
+        );
+        assert_eq!(
+            (arena.get(child).lw, arena.get(child).lh),
+            (6, 6),
+            "padding and border shrink the child's box"
+        );
     }
 
     #[test]
@@ -469,7 +493,11 @@ mod tests {
 
         LayoutState::new().layout(&mut arena, root, 20, 5);
 
-        assert_eq!(arena.get(a).lx, 0); // the hole claimed no space before it
-        assert_eq!((arena.get(hole).lw, arena.get(hole).lh), (0, 0));
+        assert_eq!(arena.get(a).lx, 0, "a hole child is skipped at the start"); // the hole claimed no space before it
+        assert_eq!(
+            (arena.get(hole).lw, arena.get(hole).lh),
+            (0, 0),
+            "a hole child occupies no space"
+        );
     }
 }

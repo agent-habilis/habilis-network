@@ -274,8 +274,16 @@ mod tests {
         arena.append(parent, b);
         arena.append(parent, c);
         let kids_1: Vec<_> = arena.children(parent).collect();
-        assert_eq!(kids_1, vec![a, b, c]);
-        assert_eq!(arena.get(parent).child_count, 3);
+        assert_eq!(
+            kids_1,
+            vec![a, b, c],
+            "appended children stay in front-to-back order"
+        );
+        assert_eq!(
+            arena.get(parent).child_count,
+            3,
+            "the parent counts three children after appends"
+        );
     }
 
     #[test]
@@ -289,7 +297,11 @@ mod tests {
         arena.append(parent, c);
         arena.insert_before(parent, b, Some(c));
         let kids_1: Vec<_> = arena.children(parent).collect();
-        assert_eq!(kids_1, vec![a, b, c]);
+        assert_eq!(
+            kids_1,
+            vec![a, b, c],
+            "insert before splices a child into the middle"
+        );
     }
 
     #[test]
@@ -304,9 +316,13 @@ mod tests {
         arena.append(parent, c);
         arena.detach(b);
         let kids_1: Vec<_> = arena.children(parent).collect();
-        assert_eq!(kids_1, vec![a, c]);
-        assert_eq!(arena.get(parent).child_count, 2);
-        assert_eq!(arena.get(b).parent, None);
+        assert_eq!(kids_1, vec![a, c], "detach removes a child from the middle");
+        assert_eq!(
+            arena.get(parent).child_count,
+            2,
+            "the parent counts two children after the detach"
+        );
+        assert_eq!(arena.get(b).parent, None, "a detached child has no parent");
     }
 
     #[test]
@@ -320,7 +336,7 @@ mod tests {
         // Move `a` to the end.
         arena.insert_before(parent, a, None);
         let kids_1: Vec<_> = arena.children(parent).collect();
-        assert_eq!(kids_1, vec![b, a]);
+        assert_eq!(kids_1, vec![b, a], "insert before a child moves it");
     }
 
     #[test]
@@ -333,7 +349,7 @@ mod tests {
         arena.append(parent, b);
         arena.insert_before(parent, a, Some(a));
         let kids_1: Vec<_> = arena.children(parent).collect();
-        assert_eq!(kids_1, vec![a, b]);
+        assert_eq!(kids_1, vec![a, b], "insert before itself changes nothing");
     }
 
     #[test]
@@ -345,8 +361,16 @@ mod tests {
         arena.append(parent, a);
         arena.append(parent, b);
         arena.clear_children(parent);
-        assert_eq!(arena.children(parent).count(), 0);
-        assert_eq!(arena.get(parent).child_count, 0);
-        assert_eq!(arena.get(a).parent, None);
+        assert_eq!(
+            arena.children(parent).count(),
+            0,
+            "clear children leaves the parent with no children"
+        );
+        assert_eq!(
+            arena.get(parent).child_count,
+            0,
+            "the parent's child count is zero after clear"
+        );
+        assert_eq!(arena.get(a).parent, None, "a cleared child has no parent");
     }
 }

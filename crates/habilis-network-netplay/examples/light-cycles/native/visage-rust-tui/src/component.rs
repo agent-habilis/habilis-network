@@ -202,13 +202,19 @@ mod tests {
         let View::Text(first) = instance.mount().unwrap() else {
             panic!("expected text");
         };
-        assert_eq!(&*first, "count is 0");
+        assert_eq!(
+            &*first, "count is 0",
+            "the first render of a loop component shows count 0"
+        );
 
         count.set(5);
         let View::Text(second) = instance.render().unwrap() else {
             panic!("expected text");
         };
-        assert_eq!(&*second, "count is 5");
+        assert_eq!(
+            &*second, "count is 5",
+            "a resumed loop component renders count 5"
+        );
     }
 
     #[test]
@@ -234,15 +240,29 @@ mod tests {
         let View::Text(first) = instance.mount().unwrap() else {
             panic!("expected text");
         };
-        assert_eq!(&*first, "count is 0");
-        assert_eq!(*resumes.borrow(), 1);
+        assert_eq!(
+            &*first, "count is 0",
+            "the first render of a thunk component shows count 0"
+        );
+        assert_eq!(
+            *resumes.borrow(),
+            1,
+            "the thunk component resumes once on the first render"
+        );
 
         count.set(1);
         let View::Text(second) = instance.render().unwrap() else {
             panic!("expected text");
         };
-        assert_eq!(&*second, "count is 1");
+        assert_eq!(
+            &*second, "count is 1",
+            "the rerender of the thunk component shows count 1"
+        );
         // Setup never ran again — the coroutine itself was never resumed.
-        assert_eq!(*resumes.borrow(), 1);
+        assert_eq!(
+            *resumes.borrow(),
+            1,
+            "the thunk component still resumed only once after rerender"
+        );
     }
 }

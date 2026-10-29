@@ -242,13 +242,21 @@ mod tests {
     #[test]
     fn two_players_driving_straight_at_each_other_end_in_a_draw_or_a_winner() {
         let desc = RoundDescriptor::derive(7, vec!["a".into(), "b".into()]);
-        assert_ne!(outcome(&coast(&desc, 200)), Outcome::InProgress);
+        assert_ne!(
+            outcome(&coast(&desc, 200)),
+            Outcome::InProgress,
+            "the head-on round reaches an outcome"
+        );
     }
 
     #[test]
     fn a_solo_round_never_ends_by_elimination() {
         let desc = RoundDescriptor::derive(7, vec!["solo".into()]);
-        assert_eq!(outcome(&coast(&desc, 50)), Outcome::InProgress);
+        assert_eq!(
+            outcome(&coast(&desc, 50)),
+            Outcome::InProgress,
+            "a solo round never ends by elimination"
+        );
     }
 
     #[test]

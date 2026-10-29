@@ -296,7 +296,11 @@ mod tests {
         let prev = open_tracking(HashSet::new());
         let _ = signal.get();
         let deps = close_tracking(prev);
-        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps.len(),
+            1,
+            "a signal read in a tracking window is recorded once"
+        );
     }
 
     #[test]
@@ -306,7 +310,11 @@ mod tests {
         // Nothing to assert on directly here beyond "it doesn't panic" —
         // the real behavioral check is in the subscription test below,
         // where an untracked read never gets a subscriber queued.
-        assert_eq!(signal.peek(), 1);
+        assert_eq!(
+            signal.peek(),
+            1,
+            "a signal read outside a window records nothing and keeps its value"
+        );
     }
 
     #[test]
@@ -315,7 +323,10 @@ mod tests {
         let prev = open_tracking(HashSet::new());
         let _ = signal.peek();
         let deps = close_tracking(prev);
-        assert!(deps.is_empty());
+        assert!(
+            deps.is_empty(),
+            "peek records no dependency even inside a window"
+        );
     }
 
     #[test]
@@ -329,7 +340,11 @@ mod tests {
         resubscribe(sub, &HashSet::new(), &deps);
 
         signal.set(2);
-        assert_eq!(take_queue(), vec![sub]);
+        assert_eq!(
+            take_queue(),
+            vec![sub],
+            "a subscribed signal queues its subscriber on change"
+        );
     }
 
     #[test]
@@ -342,7 +357,10 @@ mod tests {
         resubscribe(sub, &HashSet::new(), &deps);
 
         signal.set(1); // same value — no-op per the `Object.is` bail
-        assert!(take_queue().is_empty());
+        assert!(
+            take_queue().is_empty(),
+            "setting an equal value schedules nothing"
+        );
     }
 
     #[test]
@@ -365,10 +383,17 @@ mod tests {
         resubscribe(sub, &first_deps, &second_deps);
 
         a.set(2); // no longer subscribed
-        assert!(take_queue().is_empty());
+        assert!(
+            take_queue().is_empty(),
+            "a smaller dependency set drops the stale subscription without a queue entry"
+        );
 
         b.set(2); // still subscribed
-        assert_eq!(take_queue(), vec![sub]);
+        assert_eq!(
+            take_queue(),
+            vec![sub],
+            "the remaining subscription still queues the subscriber"
+        );
     }
 
     #[test]
@@ -376,6 +401,10 @@ mod tests {
         let sub = next_subscriber_id();
         schedule_update(sub);
         schedule_update(sub);
-        assert_eq!(take_queue(), vec![sub]);
+        assert_eq!(
+            take_queue(),
+            vec![sub],
+            "scheduling the same subscriber twice queues it once"
+        );
     }
 }

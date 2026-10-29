@@ -109,62 +109,92 @@ mod tests {
     fn default_color_pushes_the_reset_code() {
         let mut out = Vec::new();
         push_fg(&mut out, DEFAULT_COLOR);
-        assert_eq!(out, vec!["39"]);
+        assert_eq!(
+            out,
+            vec!["39"],
+            "the default foreground pushes the reset code 39"
+        );
         let mut out = Vec::new();
         push_bg(&mut out, DEFAULT_COLOR);
-        assert_eq!(out, vec!["49"]);
+        assert_eq!(
+            out,
+            vec!["49"],
+            "the default background pushes the reset code 49"
+        );
     }
 
     #[test]
     fn low_palette_indices_use_the_classic_codes() {
         let mut out = Vec::new();
         push_fg(&mut out, palette(1)); // red
-        assert_eq!(out, vec!["31"]);
+        assert_eq!(
+            out,
+            vec!["31"],
+            "a low palette index uses the classic code 31"
+        );
     }
 
     #[test]
     fn bright_palette_indices_use_9x_and_10x() {
         let mut out = Vec::new();
         push_fg(&mut out, palette(9)); // bright red: 30 + 60 + (9-8) = 91
-        assert_eq!(out, vec!["91"]);
+        assert_eq!(out, vec!["91"], "a bright palette index uses code 91");
         let mut out = Vec::new();
         push_bg(&mut out, palette(9)); // 40 + 60 + (9-8) = 101
-        assert_eq!(out, vec!["101"]);
+        assert_eq!(out, vec!["101"], "a bright background index uses code 101");
     }
 
     #[test]
     fn high_palette_indices_use_extended_syntax() {
         let mut out = Vec::new();
         push_fg(&mut out, palette(200));
-        assert_eq!(out, vec!["38;5;200"]);
+        assert_eq!(
+            out,
+            vec!["38;5;200"],
+            "a high palette index uses the extended syntax"
+        );
     }
 
     #[test]
     fn truecolor_uses_the_24_bit_syntax() {
         let mut out = Vec::new();
         push_fg(&mut out, truecolor(0x0000_ff80));
-        assert_eq!(out, vec!["38;2;0;255;128"]);
+        assert_eq!(
+            out,
+            vec!["38;2;0;255;128"],
+            "truecolor uses the 24-bit syntax"
+        );
     }
 
     #[test]
     fn identical_attrs_emit_nothing() {
         let mut out = Vec::new();
-        assert!(!push_attrs(&mut out, UNDERLINE, UNDERLINE));
-        assert!(out.is_empty());
+        assert!(
+            !push_attrs(&mut out, UNDERLINE, UNDERLINE),
+            "identical attributes emit no change"
+        );
+        assert!(out.is_empty(), "identical attributes write nothing");
     }
 
     #[test]
     fn turning_a_bit_on_emits_only_that_code() {
         let mut out = Vec::new();
-        assert!(!push_attrs(&mut out, 0, UNDERLINE));
-        assert_eq!(out, vec!["4"]);
+        assert!(
+            !push_attrs(&mut out, 0, UNDERLINE),
+            "turning a bit on emits only its code"
+        );
+        assert_eq!(out, vec!["4"], "turning a bit on writes code 4 alone");
     }
 
     #[test]
     fn turning_a_bit_off_resets_everything_and_reapplies_the_rest() {
         let mut out = Vec::new();
         let reset = push_attrs(&mut out, UNDERLINE | INVERSE, INVERSE);
-        assert!(reset);
-        assert_eq!(out, vec!["0", "7"]); // SGR 0, then re-apply inverse (7)
+        assert!(reset, "turning a bit off resets and reapplies the rest");
+        assert_eq!(
+            out,
+            vec!["0", "7"],
+            "turning a bit off writes reset then the rest"
+        ); // SGR 0, then re-apply inverse (7)
     }
 }

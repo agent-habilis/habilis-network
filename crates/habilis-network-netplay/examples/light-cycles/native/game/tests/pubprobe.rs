@@ -156,7 +156,10 @@ fn public_path_probe() {
                     "the match decided at tick {} — too early to have been played",
                     snapshot.world.tick
                 );
-                assert_eq!(snapshot.match_number, 1);
+                assert_eq!(
+                    snapshot.match_number, 1,
+                    "the public probe reads match number one"
+                );
             }
 
             assert!(

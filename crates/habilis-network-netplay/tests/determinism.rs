@@ -123,17 +123,23 @@ fn a_missing_input_is_reported_rather_than_silently_defaulted() {
         .add_input(PlayerHandle::new(0), Input(1))
         .expect("valid handle");
     // Player 1's input was never supplied.
-    assert!(matches!(
-        session.advance_frame(),
-        Err(RollbackError::InvalidPlayer(missing)) if missing == PlayerHandle::new(1)
-    ));
+    assert!(
+        matches!(
+            session.advance_frame(),
+            Err(RollbackError::InvalidPlayer(missing)) if missing == PlayerHandle::new(1)
+        ),
+        "a missing input is reported, not silently defaulted"
+    );
 }
 
 #[test]
 fn an_out_of_range_handle_is_rejected() {
     let mut session = SyncTestSession::<Game>::new(2, 4);
-    assert!(matches!(
-        session.add_input(PlayerHandle::new(7), Input(1)),
-        Err(RollbackError::InvalidPlayer(unknown)) if unknown == PlayerHandle::new(7)
-    ));
+    assert!(
+        matches!(
+            session.add_input(PlayerHandle::new(7), Input(1)),
+            Err(RollbackError::InvalidPlayer(unknown)) if unknown == PlayerHandle::new(7)
+        ),
+        "an out-of-range handle is rejected"
+    );
 }

@@ -202,7 +202,11 @@ mod tests {
     fn a_blank_first_frame_is_just_reset_plus_clear_screen() {
         let buffer = ScreenBuffer::new(10, 3);
         let out = diff(None, &buffer);
-        assert_eq!(out, format!("{RESET}{ESC}H{ESC}2J", ESC = "\u{1b}["));
+        assert_eq!(
+            out,
+            format!("{RESET}{ESC}H{ESC}2J", ESC = "\u{1b}["),
+            "a blank first frame is a reset plus clear screen"
+        );
     }
 
     #[test]
@@ -210,7 +214,11 @@ mod tests {
         let mut a = ScreenBuffer::new(5, 1);
         set(&mut a, 0, 0, "x");
         let b = a.clone();
-        assert_eq!(diff(Some(&a), &b), "");
+        assert_eq!(
+            diff(Some(&a), &b),
+            "",
+            "two identical frames produce no bytes"
+        );
     }
 
     #[test]
@@ -219,8 +227,11 @@ mod tests {
         let mut b = ScreenBuffer::new(5, 1);
         set(&mut b, 2, 0, "x");
         let out = diff(Some(&a), &b);
-        assert!(out.starts_with("\u{1b}[1;3H")); // row 1, col 3 (1-based)
-        assert!(out.contains('x'));
+        assert!(
+            out.starts_with("\u{1b}[1;3H"),
+            "a changed row moves the cursor absolutely"
+        ); // row 1, col 3 (1-based)
+        assert!(out.contains('x'), "a changed row writes its changed cell");
     }
 
     #[test]
@@ -237,9 +248,15 @@ mod tests {
         // Cells 2..5 are blank in `b`: the tail scan should cover them
         // with one `EL0` instead of three literal space-overwrites.
         let out = diff(Some(&a), &b);
-        assert!(out.contains("xy"));
-        assert!(out.contains(CLEAR_LINE));
-        assert!(!out.contains('l')); // never emitted as a replacement write
+        assert!(out.contains("xy"), "a shortened line writes its new tail");
+        assert!(
+            out.contains(CLEAR_LINE),
+            "a shortened line erases the tail with clear line"
+        );
+        assert!(
+            !out.contains('l'),
+            "a shortened line does not write the old tail"
+        ); // never emitted as a replacement write
     }
 
     #[test]
@@ -255,8 +272,11 @@ mod tests {
         set(&mut b, 0, 0, "h");
         set(&mut b, 1, 0, "o");
         let out = diff(Some(&a), &b);
-        assert!(out.contains('o'));
-        assert!(!out.contains('h')); // unchanged cell, never rewritten
+        assert!(out.contains('o'), "an unchanged prefix is not re-emitted");
+        assert!(
+            !out.contains('h'),
+            "an unchanged prefix does not write the old head"
+        ); // unchanged cell, never rewritten
     }
 
     #[test]
@@ -270,8 +290,16 @@ mod tests {
         let out = diff(Some(&a), &b);
         // Exactly one `38...m`-shaped SGR sequence, i.e. one occurrence of
         // the palette-1 foreground code, even though three cells changed.
-        assert_eq!(out.matches("31m").count(), 1);
-        assert_eq!(out.matches('x').count(), 3);
+        assert_eq!(
+            out.matches("31m").count(),
+            1,
+            "a run of same-styled cells emits one sgr sequence"
+        );
+        assert_eq!(
+            out.matches('x').count(),
+            3,
+            "a run of same-styled cells writes three cells"
+        );
     }
 
     #[test]
@@ -279,6 +307,9 @@ mod tests {
         let a = ScreenBuffer::new(5, 1);
         let b = ScreenBuffer::new(6, 1); // wider — same logical content, different size
         let out = diff(Some(&a), &b);
-        assert!(out.starts_with(&format!("{RESET}\u{1b}[H\u{1b}[2J")));
+        assert!(
+            out.starts_with(&format!("{RESET}\u{1b}[H\u{1b}[2J")),
+            "a resize forces a full repaint"
+        );
     }
 }

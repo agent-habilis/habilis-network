@@ -293,7 +293,11 @@ mod tests {
             vec![Frame::new(0), Frame::new(1), Frame::new(2), Frame::new(3)],
             "each frame ran once"
         );
-        assert_eq!(runner.state.value, 4 * (1 + 2));
+        assert_eq!(
+            runner.state.value,
+            4 * (1 + 2),
+            "a correct prediction never rolls back the state"
+        );
     }
 
     #[test]
@@ -314,10 +318,15 @@ mod tests {
                 .expect("under the limit");
             step(&mut sync, &mut runner);
         }
-        assert_eq!(runner.state.value, 11 + 11 + 11);
+        assert_eq!(
+            runner.state.value,
+            11 + 11 + 11,
+            "a wrong prediction rolls back and re-simulates with the truth"
+        );
         assert_eq!(
             runner.advanced,
-            vec![Frame::new(0), Frame::new(1), Frame::new(2)]
+            vec![Frame::new(0), Frame::new(1), Frame::new(2)],
+            "the rollback re-simulates the frames from the wrong one"
         );
 
         // Player 1's real frame-1 input turns out different.
@@ -337,9 +346,14 @@ mod tests {
                 Frame::new(2),
                 Frame::new(1),
                 Frame::new(2)
-            ]
+            ],
+            "the re-simulated frames are the ones after the rollback"
         );
-        assert_eq!(runner.state.value, 11 + 21 + 21);
+        assert_eq!(
+            runner.state.value,
+            11 + 21 + 21,
+            "the re-simulated state uses the true input"
+        );
         assert_eq!(
             sync.current_frame(),
             Frame::new(3),
@@ -372,7 +386,11 @@ mod tests {
         runner.handle_all(requests);
 
         // frame 0 = 1 (real), frame 1 = 5 (real), frame 2 = 5 (predicted from 1)
-        assert_eq!(runner.state.value, 1 + 5 + 5);
+        assert_eq!(
+            runner.state.value,
+            1 + 5 + 5,
+            "re-simulation uses a fresh prediction for frames still unknown"
+        );
     }
 
     #[test]
@@ -405,12 +423,21 @@ mod tests {
         }
         assert!(
             sync.add_local_input(PlayerHandle::new(0), TestInput(1))
-                .is_err()
+                .is_err(),
+            "confirming frames reopens the prediction window"
         );
 
         sync.confirm_through(Frame::new(1));
-        assert_eq!(sync.last_confirmed_frame(), Frame::new(1));
-        assert_eq!(sync.frames_ahead(), 2);
+        assert_eq!(
+            sync.last_confirmed_frame(),
+            Frame::new(1),
+            "the last confirmed frame is one"
+        );
+        assert_eq!(
+            sync.frames_ahead(),
+            2,
+            "two frames are ahead after the confirm"
+        );
         sync.add_local_input(PlayerHandle::new(0), TestInput(1))
             .expect("confirmation made room again");
     }
@@ -420,11 +447,13 @@ mod tests {
         let mut sync = session();
         assert_eq!(
             sync.add_local_input(PlayerHandle::new(9), TestInput(0)),
-            Err(RollbackError::InvalidPlayer(PlayerHandle::new(9)))
+            Err(RollbackError::InvalidPlayer(PlayerHandle::new(9))),
+            "an unknown local player handle is an error, not a panic"
         );
         assert_eq!(
             sync.add_remote_input(PlayerHandle::new(9), Frame::new(0), TestInput(0)),
-            Err(RollbackError::InvalidPlayer(PlayerHandle::new(9)))
+            Err(RollbackError::InvalidPlayer(PlayerHandle::new(9))),
+            "an unknown remote player handle is an error, not a panic"
         );
     }
 
@@ -441,6 +470,10 @@ mod tests {
             "the absent peer's is a guess"
         );
         let added: Vec<_> = sync.last_added_frames().collect();
-        assert_eq!(added, vec![Frame::new(0), Frame::NULL]);
+        assert_eq!(
+            added,
+            vec![Frame::new(0), Frame::NULL],
+            "inputs are reported as confirmed or predicted honestly"
+        );
     }
 }
