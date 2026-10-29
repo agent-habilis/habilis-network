@@ -45,13 +45,12 @@ impl fmt::Debug for Mesh {
     // invite root / issuer secret gate an invite-only mesh — so a stray `{:?}`
     // in a log can never leak them (mirrors `crypto::Password`).
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Mesh")
+        let mut debug = formatter.debug_struct("Mesh");
+        debug
             .field("name", &self.name)
             .field("seed", &"***")
-            .field("secret", &self.secret)
-            .field("config", &self.config)
-            .finish()
+            .field("secret", &self.secret);
+        debug.field("config", &self.config).finish()
     }
 }
 

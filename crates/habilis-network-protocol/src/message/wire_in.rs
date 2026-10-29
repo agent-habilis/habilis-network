@@ -108,8 +108,8 @@ impl TryFrom<WireIn> for Message {
 /// Is `value` exactly `bytes * 2` lowercase-hex characters — the canonical
 /// wire form of a fixed-width binary field (pubkey / signature / hash)?
 fn is_lower_hex(value: &str, bytes: usize) -> bool {
-    value.len() == bytes * 2
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    let lower = value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    value.len() == bytes * 2 && lower
 }

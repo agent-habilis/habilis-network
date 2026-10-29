@@ -139,16 +139,15 @@ mod js_copy {
     /// rather than scanned for quotes — the prose above it contains
     /// apostrophes, which a quote scanner would read as entries.
     fn transcribed() -> Vec<&'static str> {
-        SOURCE
+        let body = SOURCE
             .lines()
             .skip_while(|line| !line.ends_with("= ["))
-            .skip(1)
+            .skip(1);
+        let entries = body
             .take_while(|line| *line != "]")
-            .flat_map(|line| line.split(','))
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(|entry| entry.trim_matches('\''))
-            .collect()
+            .flat_map(|line| line.split(','));
+        let trimmed = entries.map(str::trim).filter(|entry| !entry.is_empty());
+        trimmed.map(|entry| entry.trim_matches('\'')).collect()
     }
 
     /// Reports the first divergence rather than asserting the two lists are

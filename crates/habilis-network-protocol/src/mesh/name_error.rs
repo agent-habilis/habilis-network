@@ -79,12 +79,12 @@ impl std::error::Error for NameError {}
 /// Whether `input` starts with the `http://` or `https://` scheme
 /// (case-insensitive, per RFC 3986 — schemes are case-insensitive).
 fn is_http_url(input: &str) -> bool {
-    input
+    let http = input
         .get(..7)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
-        || input
-            .get(..8)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"));
+    http || input
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
 }
 
 /// Reduce a topic string to the source for its display name: drop a leading URL
@@ -109,10 +109,11 @@ fn strip_url_scheme(input: &str) -> &str {
     if let Some(index) = input.find("://") {
         let scheme = &input[..index];
         let mut chars = scheme.chars();
-        let valid: bool = chars
+        let first_ok = chars
             .next()
-            .is_some_and(|first| first.is_ascii_alphabetic())
-            && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '.' | '-'));
+            .is_some_and(|first| first.is_ascii_alphabetic());
+        let valid: bool =
+            first_ok && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '.' | '-'));
         if valid {
             return &input[index + 3..];
         }

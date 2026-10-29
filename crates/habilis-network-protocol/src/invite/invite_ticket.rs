@@ -55,13 +55,13 @@ impl fmt::Debug for InviteTicket {
     // Redact the root — for a passwordless invite it is the mesh's join key in
     // the clear, so a stray `{:?}` must never leak it.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("InviteTicket")
+        let mut debug = formatter.debug_struct("InviteTicket");
+        debug
             .field("mesh_hash", &self.mesh_hash)
             .field("expiry", &self.expiry)
             .field("password", &self.password)
-            .field("root_field", &"***")
-            .finish_non_exhaustive()
+            .field("root_field", &"***");
+        debug.finish_non_exhaustive()
     }
 }
 
@@ -513,13 +513,14 @@ mod tests {
         let root = mesh.invite_key().unwrap().clone();
         let expiry = UnixSecs::now() + Duration::from_hours(1);
         let attacker = SecretKey::from_bytes(&[9u8; 32]);
+        let signature = attacker
+            .sign(&signing_bytes(&hash, &root, expiry))
+            .to_bytes();
         let forged: InviteTicket = InviteTicket {
-            mesh_hash: hash.clone(),
+            mesh_hash: hash,
             expiry,
             password: false,
-            signature: attacker
-                .sign(&signing_bytes(&hash, &root, expiry))
-                .to_bytes(),
+            signature,
             root_field: root.as_bytes().to_vec(),
         };
         assert!(
@@ -563,11 +564,12 @@ mod tests {
         let root = mesh.invite_key().unwrap().clone();
         let past = UnixSecs::now() - Duration::from_secs(100);
         let issuer = mesh.issuer_secret().unwrap().clone();
+        let signature = issuer.sign(&signing_bytes(&hash, &root, past)).to_bytes();
         let expired: InviteTicket = InviteTicket {
-            mesh_hash: hash.clone(),
+            mesh_hash: hash,
             expiry: past,
             password: false,
-            signature: issuer.sign(&signing_bytes(&hash, &root, past)).to_bytes(),
+            signature,
             root_field: root.as_bytes().to_vec(),
         };
         let error = expired.redeem(None).unwrap_err().to_string();

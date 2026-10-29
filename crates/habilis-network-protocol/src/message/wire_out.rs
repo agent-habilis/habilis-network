@@ -61,15 +61,17 @@ impl Serialize for Wire<'_> {
         let message = self.0;
         let signer = message.signer.as_ref();
         let sig_bytes = signer.map(|signed| signed.signature.to_bytes());
+        let timestamp = message.timestamp.as_secs();
+        let pubkey = signer.map(|signed| HexOut(signed.key.as_bytes()));
         WireOut {
             version: &message.version,
             id: &message.id,
             kind: &message.kind,
             mesh: &message.mesh,
             author: &message.author,
-            timestamp: message.timestamp.as_secs(),
+            timestamp,
             body: &message.body,
-            pubkey: signer.map(|signed| HexOut(signed.key.as_bytes())),
+            pubkey,
             signature: sig_bytes.as_ref().map(|bytes| HexOut(bytes)),
             seq: message.seq,
             previous: &message.previous,

@@ -210,9 +210,11 @@ impl ReassemblyStore {
 
     /// The author's least-recently-touched group other than `except`.
     fn stalest_group_of(&self, author: &AuthorKey, except: &GroupKey) -> Option<GroupKey> {
-        self.groups
+        let candidates = self
+            .groups
             .iter()
-            .filter(|(key, _)| key.0 == *author && *key != except)
+            .filter(|(key, _)| key.0 == *author && *key != except);
+        candidates
             .min_by_key(|(_, group)| group.last_seen)
             .map(|(key, _)| key.clone())
     }
@@ -222,8 +224,9 @@ impl ReassemblyStore {
     #[cfg(feature = "adversarial")]
     #[must_use]
     pub fn stats(&self) -> (usize, usize, usize) {
+        let groups = self.groups.len();
         (
-            self.groups.len(),
+            groups,
             self.total_bytes,
             self.author_bytes.values().copied().max().unwrap_or(0),
         )

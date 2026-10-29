@@ -61,22 +61,26 @@ impl Listings {
         }
 
         // New mesh. Bound the map by evicting the stalest entry.
+        let stalest = self
+            .entries
+            .iter()
+            .min_by_key(|(_, listing)| listing.last_seen)
+            .map(|(id, _)| id.clone());
         if self.entries.len() >= MAX_LISTINGS
-            && let Some(stalest) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, listing)| listing.last_seen)
-                .map(|(id, _)| id.clone())
+            && let Some(stalest) = stalest
         {
             self.entries.remove(&stalest);
         }
+        let public = !mesh.is_loopback();
+        let password = mesh.requires_password();
+        let name = mesh.name().clone();
         self.entries.insert(
             mesh_id.clone(),
             Listing {
                 mesh: mesh_id.clone(),
-                public: !mesh.is_loopback(),
-                password: mesh.requires_password(),
-                name: mesh.name().clone(),
+                public,
+                password,
+                name,
                 peers: ad.peers,
                 last_seen: now,
                 first_seen_unix: UnixSecs::now(),
@@ -104,10 +108,8 @@ impl Listings {
     pub fn snapshot(&self) -> impl Iterator<Item = Listing> {
         let mut listings: Vec<Listing> = self.entries.values().cloned().collect();
         listings.sort_by(|left, right| {
-            left.name
-                .as_str()
-                .cmp(right.name.as_str())
-                .then_with(|| left.mesh.as_str().cmp(right.mesh.as_str()))
+            let by_name = left.name.as_str().cmp(right.name.as_str());
+            by_name.then_with(|| left.mesh.as_str().cmp(right.mesh.as_str()))
         });
         listings.into_iter()
     }

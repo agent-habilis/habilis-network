@@ -194,12 +194,13 @@ impl TransportPolicy {
         if transports.is_empty() {
             return Ok(Self::default());
         }
+        let has = |transport: Transport| transports.contains(&transport);
         let policy: Self = Self {
-            udp: transports.contains(&Transport::Udp),
-            webrtc: transports.contains(&Transport::WebRtc),
-            multihop: transports.contains(&Transport::Multihop),
-            gossip: transports.contains(&Transport::Gossip),
-            relay_transport: transports.contains(&Transport::Relay),
+            udp: has(Transport::Udp),
+            webrtc: has(Transport::WebRtc),
+            multihop: has(Transport::Multihop),
+            gossip: has(Transport::Gossip),
+            relay_transport: has(Transport::Relay),
         };
         if policy.multihop_has_no_direct_path() {
             return Err(ConfigError::Invalid(MULTIHOP_ALONE.to_owned()));

@@ -72,12 +72,12 @@ impl std::error::Error for UnlockError {}
 impl fmt::Debug for LockedMesh {
     // The seed is the join capability, so it is redacted as it is on `Mesh`.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("LockedMesh")
+        let mut debug = formatter.debug_struct("LockedMesh");
+        debug
             .field("name", &self.name)
             .field("seed", &"***")
-            .field("config", &self.config)
-            .finish()
+            .field("config", &self.config);
+        debug.finish()
     }
 }
 

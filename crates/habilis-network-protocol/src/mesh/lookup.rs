@@ -1413,11 +1413,10 @@ mod lookup_tests {
             (&[Udp, WebRtc, Multihop, Relay, Gossip], Ok(())),
         ];
         let mask: fn(&[Transport]) -> u8 = |list| {
-            [Udp, WebRtc, Multihop, Gossip, Relay]
-                .iter()
-                .enumerate()
-                .filter(|(_, transport)| list.contains(transport))
-                .fold(0u8, |mask, (bit, _)| mask | 1 << bit)
+            let transports = [Udp, WebRtc, Multihop, Gossip, Relay];
+            let bits = transports.iter().enumerate();
+            let present = bits.filter(|(_, transport)| list.contains(transport));
+            present.fold(0u8, |mask, (bit, _)| mask | 1 << bit)
         };
         let covered: HashSet<u8> = rows.iter().map(|(list, _)| mask(list)).collect();
         assert_eq!(covered.len(), 32, "the table names every subset once");

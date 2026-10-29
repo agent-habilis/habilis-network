@@ -54,14 +54,6 @@ long_chain|crates/habilis-network-netplay/src/saved_states.rs|1|kept: statements
 long_chain|crates/habilis-network-netplay/src/p2p_session.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-netplay/src/sync.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-netplay/src/sync_test_session.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-protocol/src/directory/listings.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-protocol/src/invite/invite_ticket.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-protocol/src/mesh/lookup.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-protocol/src/mesh/name_error.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-protocol/src/mesh/transport.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-protocol/src/message/app_tag.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-protocol/src/reassembly/reassembly_store.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-protocol/src/wordlist.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream-cli/src/args.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream-cli/src/main.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-stream-cli/tests/binary.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -221,11 +213,7 @@ long_chain|crates/habilis-network-stream/src/produce/registry.rs|1|kept: stateme
 
 
 # trait_import_scope: a top-level `use ... as _;` (O22). Each row is a count that may only go down.
-long_chain|crates/habilis-network-protocol/src/mesh/locked_mesh.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-protocol/src/mesh/mesh.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/beacon/dependents.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-protocol/src/message/wire_in.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network-protocol/src/message/wire_out.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/beacon/rung_watch.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 untyped_long_chain_let|crates/habilis-network/src/beacon/rung_watch.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 long_chain|crates/habilis-network/src/beacon/rung_ladder.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)

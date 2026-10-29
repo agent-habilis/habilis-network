@@ -38,11 +38,10 @@ impl<'de> ::serde::Deserialize<'de> for AppTag {
 
 impl AppTag {
     fn validate(raw: &str) -> bool {
-        !raw.is_empty()
-            && raw.len() <= 32
-            && raw
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        let bytes_ok = raw
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        !raw.is_empty() && raw.len() <= 32 && bytes_ok
     }
 
     /// There is no `From<&str>`: a bad literal would panic, so every caller handles the error.
