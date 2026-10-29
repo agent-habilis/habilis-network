@@ -168,7 +168,7 @@ fn version_of(db: &IdbDatabase) -> u32 {
 ///
 /// # Examples
 ///
-/// A browser store keeps chunks in IndexedDB under a name. This item exists only on wasm32, so the doc test is not collected on other targets.
+/// A browser store keeps chunks in `IndexedDB` under a name. This item exists only on wasm32, so the doc test is not collected on other targets.
 ///
 /// ```no_run
 /// use habilis_network_chunks::{ChunkError, IdbStore};
