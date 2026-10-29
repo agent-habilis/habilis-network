@@ -188,12 +188,11 @@ impl ChunkStore for InMemoryStore {
     }
 
     async fn sweep(&self) -> Result<u64, ChunkError> {
-        let live = self
+        let mut marks = self
             .marks
             .lock()
-            .map_err(|_| ChunkError::Poisoned("mark"))?
-            .take()
-            .unwrap_or_default();
+            .map_err(|_| ChunkError::Poisoned("mark"))?;
+        let live = marks.take().unwrap_or_default();
         let mut chunks = self
             .chunks
             .lock()

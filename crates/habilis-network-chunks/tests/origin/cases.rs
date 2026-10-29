@@ -204,11 +204,9 @@ fn bytes_that_changed_under_a_stable_stat_are_still_caught() {
 /// changed. Uses `touch -t`, which is portable enough for the platforms this
 /// runs on and avoids a dependency for one syscall.
 fn set_mtime(path: &Path, mtime: i64) {
-    let stamp = std::process::Command::new("touch")
-        .arg("-t")
-        .arg(format_stamp(mtime))
-        .arg(path)
-        .status();
+    let mut command = std::process::Command::new("touch");
+    command.arg("-t").arg(format_stamp(mtime)).arg(path);
+    let stamp = command.status();
     assert!(stamp.is_ok_and(|status| status.success()), "touch");
 }
 

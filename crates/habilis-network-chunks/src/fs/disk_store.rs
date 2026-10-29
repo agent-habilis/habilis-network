@@ -33,7 +33,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ChunkError> {
         .parent()
         .ok_or_else(|| ChunkError::Malformed("a chunk path has a parent".to_owned()))?;
     fs::create_dir_all(parent).map_err(store(|| format!("creating {}", parent.display())))?;
-    let stem = path
+    let stem: &str = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("chunk");
@@ -137,14 +137,11 @@ impl DiskStore {
             // A key with a tab or newline in it would corrupt the table; paths
             // can contain both, so they are escaped rather than trusted.
             use std::fmt::Write as _;
-            let _ = writeln!(
-                text,
-                "{}\t{size}\t{mtime}\t{}",
-                key.replace('\\', "\\\\")
-                    .replace('\t', "\\t")
-                    .replace('\n', "\\n"),
-                root.to_hex()
-            );
+            let escaped = key
+                .replace('\\', "\\\\")
+                .replace('\t', "\\t")
+                .replace('\n', "\\n");
+            let _ = writeln!(text, "{}\t{size}\t{mtime}\t{}", escaped, root.to_hex());
         }
         write_atomic(&self.root.join("binds.tsv"), text.as_bytes())
     }
@@ -343,12 +340,11 @@ impl ChunkStore for DiskStore {
     }
 
     async fn sweep(&self) -> Result<u64, ChunkError> {
-        let live = self
+        let mut marks = self
             .marks
             .lock()
-            .map_err(|_| ChunkError::Poisoned("mark"))?
-            .take()
-            .unwrap_or_default();
+            .map_err(|_| ChunkError::Poisoned("mark"))?;
+        let live = marks.take().unwrap_or_default();
         let mut dropped = 0u64;
         for hash in self.stored_chunks() {
             if live.contains(&hash) {

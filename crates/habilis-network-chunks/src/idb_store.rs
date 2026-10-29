@@ -82,11 +82,8 @@ fn watch(request: &IdbRequest) -> impl Future<Output = Result<JsValue, ChunkErro
         });
         let bad_request = request.clone();
         let bad = Closure::<dyn FnMut()>::new(move || {
-            let error = bad_request
-                .error()
-                .ok()
-                .flatten()
-                .map_or_else(|| JsValue::from_str("request failed"), JsValue::from);
+            let failure = bad_request.error().ok().flatten();
+            let error = failure.map_or_else(|| JsValue::from_str("request failed"), JsValue::from);
             let _ = reject.call1(&JsValue::NULL, &error);
         });
         request.set_onsuccess(Some(ok.as_ref().unchecked_ref()));

@@ -186,8 +186,8 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let bytes = body(CHUNK_BYTES_USIZE * 3 + 11, 3);
         let built = ChunkMap::build(&bytes);
-        let rebuilt =
-            ChunkMap::build_tree(built.leaves().to_vec(), built.size()).expect("same row");
+        let leaves = built.leaves().to_vec();
+        let rebuilt: ChunkMap = ChunkMap::build_tree(leaves, built.size()).expect("same row");
         assert_eq!(
             built, rebuilt,
             "a rebuilt map equals the one that was built"
