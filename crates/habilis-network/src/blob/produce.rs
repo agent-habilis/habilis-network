@@ -24,6 +24,7 @@ use zeroize::Zeroizing;
 pub use blob_server::BlobServer;
 pub(crate) use serve_limits::ServeLimits;
 
+use crate::lookup;
 use crate::protocol::crypto::{Password, TicketAuth, TicketSecret, ct_eq};
 use crate::protocol::mesh::LookupOpts;
 use crate::transport::PayloadPath;
@@ -87,12 +88,12 @@ impl BlobServer {
             // `TransportHandles::default()` — IP and relay only. The blob
             // server is a side-channel endpoint of its own; the mesh's custom
             // transports belong to the mesh endpoint, not to this one.
-            crate::lookup::build_endpoint(
+            lookup::build_endpoint(
                 &lookups,
                 None,
                 None,
                 vec![super::BLOB_ALPN.to_vec()],
-                crate::lookup::TransportHandles::default(),
+                lookup::TransportHandles::default(),
             )
             .await?;
         if !lookups.is_loopback() {
