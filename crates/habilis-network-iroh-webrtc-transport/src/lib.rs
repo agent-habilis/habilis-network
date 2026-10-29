@@ -123,6 +123,10 @@ pub use iroh_base;
 
 #[cfg(all(feature = "bench", any(feature = "native", feature = "web")))]
 pub mod bench;
+#[cfg(all(feature = "bench", any(feature = "native", feature = "web")))]
+mod bench_error;
+#[cfg(all(feature = "bench", any(feature = "native", feature = "web")))]
+pub use bench_error::BenchError;
 
 #[cfg(any(feature = "native", feature = "web"))]
 mod attach_error;

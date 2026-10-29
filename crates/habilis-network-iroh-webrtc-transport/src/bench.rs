@@ -7,7 +7,7 @@
 //! Behind the `bench` feature so a consumer that only wants the transport does
 //! not link a protocol handler it never registers.
 
-use crate::WEBRTC_TRANSPORT_ID;
+use crate::{BenchError, WEBRTC_TRANSPORT_ID};
 use iroh::TransportAddr;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
@@ -227,7 +227,7 @@ pub fn on_webrtc(connection: &Connection) -> bool {
 pub async fn browser_endpoint(
     key: iroh::SecretKey,
     hub: &crate::WebRtcHandle,
-) -> anyhow::Result<iroh::Endpoint> {
+) -> Result<iroh::Endpoint, BenchError> {
     Ok(iroh::Endpoint::builder(presets::Minimal)
         .secret_key(key)
         .relay_mode(iroh::RelayMode::Disabled)
@@ -253,16 +253,15 @@ pub async fn exchange(
     connection: &Connection,
     direction: Direction,
     bulk: usize,
-) -> anyhow::Result<usize> {
+) -> Result<usize, BenchError> {
     // A token reply, small enough that the `Upload` case is unambiguously
     // measuring one direction. Not zero: a reply of nothing would let a
     // completely dead return path pass.
     const TOKEN: usize = 32;
 
-    anyhow::ensure!(
-        bulk <= MAX_TRANSFER_BYTES,
-        "{bulk} bytes is past the {MAX_TRANSFER_BYTES}-byte transfer ceiling"
-    );
+    if bulk > MAX_TRANSFER_BYTES {
+        return Err(BenchError::TooLarge { bulk });
+    }
     let reply = match direction {
         Direction::Download | Direction::Both => bulk,
         Direction::Upload => TOKEN,
@@ -281,12 +280,15 @@ pub async fn exchange(
     send.finish()?;
     let body = recv.read_to_end(reply + 64).await?;
 
-    anyhow::ensure!(
-        body.len() == reply,
-        "short reply: wanted {reply} bytes, got {}",
-        body.len()
-    );
-    anyhow::ensure!(is_payload(&body), "reply body did not match");
+    if body.len() != reply {
+        return Err(BenchError::ShortReply {
+            wanted: reply,
+            got: body.len(),
+        });
+    }
+    if !is_payload(&body) {
+        return Err(BenchError::ReplyMismatch);
+    }
     Ok(direction.bytes_for(bulk))
 }
 
@@ -302,7 +304,7 @@ pub async fn rtt_samples(
     connection: &Connection,
     warmup: usize,
     rounds: usize,
-) -> anyhow::Result<impl Iterator<Item = std::time::Duration>> {
+) -> Result<impl Iterator<Item = std::time::Duration>, BenchError> {
     let probe = payload(RTT_PROBE_BYTES);
     let head = header_with_mode(MODE_ECHO, u32::try_from(RTT_PROBE_BYTES)?);
     let mut samples = Vec::with_capacity(rounds);
@@ -314,7 +316,9 @@ pub async fn rtt_samples(
         send.finish()?;
         let echo = recv.read_to_end(RTT_PROBE_BYTES + 64).await?;
         let elapsed = started.elapsed();
-        anyhow::ensure!(echo == probe, "the echo is not the probe");
+        if echo != probe {
+            return Err(BenchError::EchoMismatch);
+        }
         if round >= warmup {
             samples.push(elapsed);
         }

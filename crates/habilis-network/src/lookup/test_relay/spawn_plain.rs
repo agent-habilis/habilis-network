@@ -1,3 +1,5 @@
+use super::TestRelayError;
+
 /// Spawn the relay; the URL is `http://127.0.0.1:<port>/`. Dropping the
 /// server stops it.
 ///
@@ -10,9 +12,7 @@
         reason = "`net` re-exports it only with `iroh-test-utils`"
     )
 )]
-pub async fn spawn_plain() -> anyhow::Result<(iroh::RelayUrl, iroh_relay::server::Server)> {
-    use anyhow::Context as _;
-
+pub async fn spawn_plain() -> Result<(iroh::RelayUrl, iroh_relay::server::Server), TestRelayError> {
     let mut config = iroh_relay::server::ServerConfig::default();
     config.relay = Some(iroh_relay::server::RelayConfig::new((
         std::net::Ipv4Addr::LOCALHOST,
@@ -21,12 +21,10 @@ pub async fn spawn_plain() -> anyhow::Result<(iroh::RelayUrl, iroh_relay::server
     config.quic = None;
     let server = iroh_relay::server::Server::spawn(config)
         .await
-        .context("spawning the local relay server")?;
-    let addr = server
-        .http_addr()
-        .context("the local relay server bound no HTTP address")?;
-    let url = format!("http://{addr}/")
+        .map_err(TestRelayError::Spawn)?;
+    let address = server.http_addr().ok_or(TestRelayError::NoHttpAddr)?;
+    let url = format!("http://{address}/")
         .parse()
-        .context("the local relay address is not a relay URL")?;
+        .map_err(TestRelayError::BadUrl)?;
     Ok((url, server))
 }

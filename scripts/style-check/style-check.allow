@@ -17,7 +17,6 @@ catch_unwind|crates/habilis-network-test-tracing/src/guard.rs|1|catch_panic, the
 
 # anyhow_pub: a public signature returns anyhow. Exceptions: test and benchmark helpers behind a
 # feature, not library API.
-anyhow_pub|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|3|benchmark harness behind the bench feature, not library API
 
 # glob: every glob import still to be replaced with explicit imports (tracker items G2 and G3). The rows go away with the fix.
 
@@ -547,10 +546,8 @@ assert_no_message|crates/habilis-network/src/lookup/tests.rs|20|kept: assert wit
 long_chain|crates/habilis-network/src/lookup/tests.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 untyped_long_chain_let|crates/habilis-network/src/lookup/tests.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 
-abbrev_name|crates/habilis-network/src/lookup/test_relay.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/transport_handles.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/transport_opts.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-anyhow_pub|crates/habilis-network/src/lookup/test_relay.rs|1|the test relay helper spawn_plain, behind the iroh-test-utils feature (a test helper, not library API)
 abbrev_name|crates/habilis-network/src/gossip/lan/lan_grafts.rs|7|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network-iroh-multihop-transport/src/underlay/forwarder.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 assert_no_message|crates/habilis-network-util/src/clock.rs|6|kept: assert without a message, to be given one (P13 rollout)
