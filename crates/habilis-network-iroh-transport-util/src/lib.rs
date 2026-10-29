@@ -41,11 +41,11 @@ mod tests {
         block_rung, block_rung_to, custom_rung, expected_rung, is_blocked, is_blocked_to,
         remote_id_of, split_segments,
     };
-    use habilis_network_test_tracing::test;
     use iroh::endpoint::transports::Addr;
 
     #[test]
     fn the_ladder_runs_from_ip_to_the_relay() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             Rung::LADDER.is_sorted(),
             "the declaration order is the ladder"
@@ -87,11 +87,14 @@ mod tests {
                 );
             }
         }
+
+        let _guard = ::habilis_network_test_tracing::init();
     }
 
     /// One function names the rung of a custom transport id, for every selector.
     #[test]
     fn a_custom_transport_id_names_its_rung() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             custom_rung(WEBRTC_TRANSPORT_ID),
             Rung::WebRtc,
@@ -112,6 +115,7 @@ mod tests {
 
     #[test]
     fn the_expected_rung_reads_as_the_ladder_does() {
+        let _guard = ::habilis_network_test_tracing::init();
         let all = |_: Rung| true;
         let only = |rungs: &'static [Rung]| move |rung: Rung| rungs.contains(&rung);
         assert_eq!(
@@ -149,6 +153,7 @@ mod tests {
     /// address; an IP path and the custom path of another transport do not.
     #[test]
     fn a_relay_or_webrtc_path_names_its_remote_and_no_other_does() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id = iroh::SecretKey::from_bytes(&[31; 32]).public();
         let relay: iroh::RelayUrl = "https://relay.example".parse().expect("a relay url");
         assert_eq!(
@@ -181,6 +186,7 @@ mod tests {
     #[cfg(feature = "test-hooks")]
     #[test]
     fn a_relay_block_takes_the_relay_rung_to_one_remote_only() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (local, remote, other) = (node(32), node(33), node(34));
         let relay: iroh::RelayUrl = "https://relay.example".parse().expect("a relay url");
         let to = |id| remote_id_of(&Addr::Relay(relay.clone(), id));
@@ -214,6 +220,7 @@ mod tests {
     #[cfg(feature = "test-hooks")]
     #[test]
     fn an_ip_port_block_takes_one_port_of_the_ip_rung_from_one_node() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (blocked, other) = (node(11), node(12));
         let at = |port: u16| Some(std::net::SocketAddr::from(([127, 0, 0, 1], port)));
         block_ip_to(blocked, [4000, 4001]);
@@ -238,6 +245,7 @@ mod tests {
     #[cfg(feature = "test-hooks")]
     #[test]
     fn a_rung_block_takes_one_whole_rung_from_one_node() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (blocked, other) = (node(13), node(14));
         block_rung(blocked, Rung::Multihop, true);
         assert!(
@@ -259,6 +267,7 @@ mod tests {
     #[cfg(feature = "test-hooks")]
     #[test]
     fn a_remote_block_takes_a_rung_from_one_remote_only() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (local, other_node) = (node(15), node(16));
         let (cut, kept) = (node(17), node(18));
         block_rung_to(local, Rung::WebRtc, cut, true);
@@ -297,6 +306,7 @@ mod tests {
     #[cfg(feature = "test-hooks")]
     #[test]
     fn a_whole_rung_block_still_takes_the_rung_from_every_remote() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (local, remote) = (node(19), node(20));
         block_rung(local, Rung::WebRtc, true);
         assert!(
@@ -313,6 +323,7 @@ mod tests {
     /// The property the three copies disagreed on.
     #[test]
     fn an_empty_transmit_still_yields_one_datagram() {
+        let _guard = ::habilis_network_test_tracing::init();
         let out: Vec<&[u8]> = split_segments(&[], None).collect();
         assert_eq!(out.len(), 1, "a keep-alive must not be dropped");
         assert!(
@@ -323,6 +334,7 @@ mod tests {
 
     #[test]
     fn a_batched_transmit_splits_on_the_segment_size() {
+        let _guard = ::habilis_network_test_tracing::init();
         let out: Vec<&[u8]> = split_segments(&[1, 2, 3, 4, 5], Some(2)).collect();
         assert_eq!(
             out,
@@ -333,6 +345,7 @@ mod tests {
 
     #[test]
     fn an_unbatched_transmit_is_one_datagram() {
+        let _guard = ::habilis_network_test_tracing::init();
         let out: Vec<&[u8]> = split_segments(&[1, 2, 3], None).collect();
         assert_eq!(
             out,
@@ -344,6 +357,7 @@ mod tests {
     /// A zero segment size must not divide by zero or spin.
     #[test]
     fn a_zero_segment_size_is_clamped() {
+        let _guard = ::habilis_network_test_tracing::init();
         let out: Vec<&[u8]> = split_segments(&[1, 2], Some(0)).collect();
         assert_eq!(
             out,
