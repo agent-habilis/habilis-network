@@ -102,6 +102,7 @@ async fn spawn(
     nick: &str,
     relay: &RelayUrl,
     relay_transport: bool,
+    // each member's sink is shared with the node that writes to it, and the test reads it
     sink: Arc<Joined>,
 ) -> Node<Probe> {
     let mesh = derive_topic_mesh_config(
@@ -115,20 +116,20 @@ async fn spawn(
     )
     .expect("derive a relay-only mesh");
     let author = Nickname::try_new(nick).expect("valid nickname");
+    let transports = TransportOpts::default()
+        .with_udp(false)
+        .with_relay(true)
+        .with_webrtc(false)
+        .with_gossip(false);
+    let params = SetupParams::new(author, sink)
+        .with_max_peers(16)
+        .with_transports(transports);
     let config: habilis_network::runtime::EventLoopConfig = setup_mesh(
         SetupKind::Topic {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams::new(author, sink)
-            .with_max_peers(16)
-            .with_transports(
-                TransportOpts::default()
-                    .with_udp(false)
-                    .with_relay(true)
-                    .with_webrtc(false)
-                    .with_gossip(false),
-            ),
+        params,
     )
     .await
     .expect("setup_mesh against a local relay");
@@ -138,7 +139,9 @@ async fn spawn(
 /// Whether two relay-only nodes see each other join within `deadline`.
 async fn pair_links(relay: &RelayUrl, relay_transport: bool, deadline: Duration) -> bool {
     let topic = format!("relay-refusal-{relay_transport}-{}", rand::random::<u64>());
+    // each member's sink is shared with the node that writes to it, and the test reads it
     let alice_saw = Arc::new(Joined::default());
+    // each member's sink is shared with the node that writes to it, and the test reads it
     let bob_saw = Arc::new(Joined::default());
     let alice = spawn(
         &topic,

@@ -51,7 +51,8 @@ fn rendezvous_trace() -> String {
             .any(|needle| line.contains(needle))
         })
         .collect();
-    let recent: Vec<_> = lines.into_iter().rev().take(120).rev().collect();
+    let newest = lines.into_iter().rev().take(120);
+    let recent: Vec<_> = newest.rev().collect();
     recent.join("\n")
 }
 
