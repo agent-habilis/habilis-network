@@ -112,7 +112,11 @@ mod tests {
     /// crate is off by whatever the difference is.
     #[test]
     fn chunk_bytes_agree() {
-        assert_eq!(u64::try_from(CHUNK_BYTES_USIZE).expect("fits"), CHUNK_BYTES);
+        assert_eq!(
+            u64::try_from(CHUNK_BYTES_USIZE).expect("fits"),
+            CHUNK_BYTES,
+            "the chunk size agrees between the usize and u64 constants"
+        );
     }
 
     /// The crate's premise in one assertion: the same bytes at different
@@ -132,10 +136,22 @@ mod tests {
         let early_map = ChunkMap::build(&early);
         let late_map = ChunkMap::build(&late);
 
-        assert_eq!(early_map.leaf(0), late_map.leaf(1));
-        assert_eq!(early_map.leaf(1), late_map.leaf(0));
+        assert_eq!(
+            early_map.leaf(0),
+            late_map.leaf(1),
+            "the same bytes address the same leaf at the early offset"
+        );
+        assert_eq!(
+            early_map.leaf(1),
+            late_map.leaf(0),
+            "the same bytes address the same leaf at the late offset"
+        );
         // Same leaves, different order, so the files are not the same file.
-        assert_ne!(early_map.root(), late_map.root());
+        assert_ne!(
+            early_map.root(),
+            late_map.root(),
+            "the root moves when the bytes sit at a different offset"
+        );
     }
 
     #[test]
@@ -144,7 +160,11 @@ mod tests {
         let forward = ChunkMap::from_leaves(leaves.clone(), CHUNK_BYTES + 1).expect("two chunks");
         let reversed: Vec<ChunkHash> = leaves.into_iter().rev().collect();
         let backward = ChunkMap::from_leaves(reversed, CHUNK_BYTES + 1).expect("two chunks");
-        assert_ne!(forward.root(), backward.root());
+        assert_ne!(
+            forward.root(),
+            backward.root(),
+            "a root commits to the order of the chunks"
+        );
     }
 
     /// A row that does not describe the size it claims is refused, rather than
@@ -152,7 +172,10 @@ mod tests {
     #[test]
     fn a_row_that_disagrees_with_its_size_is_refused() {
         let leaves = vec![chunk_hash(b"only one")];
-        assert!(ChunkMap::from_leaves(leaves, CHUNK_BYTES * 4).is_err());
+        assert!(
+            ChunkMap::from_leaves(leaves, CHUNK_BYTES * 4).is_err(),
+            "a row that disagrees with its size is refused"
+        );
     }
 
     #[test]
@@ -161,8 +184,15 @@ mod tests {
         let built = ChunkMap::build(&bytes);
         let rebuilt =
             ChunkMap::from_leaves(built.leaves().to_vec(), built.size()).expect("same row");
-        assert_eq!(built, rebuilt);
-        assert_eq!(built.root(), rebuilt.root());
+        assert_eq!(
+            built, rebuilt,
+            "a rebuilt map equals the one that was built"
+        );
+        assert_eq!(
+            built.root(),
+            rebuilt.root(),
+            "a rebuilt map has the same root"
+        );
     }
 
     /// The streaming builder is what an origin uses on a file it will not hold
@@ -174,27 +204,47 @@ mod tests {
         for chunk in bytes.chunks(CHUNK_BYTES_USIZE) {
             builder.push(chunk);
         }
-        assert_eq!(builder.finish(), ChunkMap::build(&bytes));
+        assert_eq!(
+            builder.finish(),
+            ChunkMap::build(&bytes),
+            "the streaming builder agrees with the whole-file path"
+        );
     }
 
     #[test]
     fn an_empty_file_has_a_root_and_no_chunks() {
         let map = ChunkMap::build(b"");
-        assert_eq!(map.len(), 0);
-        assert!(map.is_empty());
-        assert_eq!(chunk_count(0), 0);
+        assert_eq!(map.len(), 0, "an empty file has no chunks");
+        assert!(map.is_empty(), "an empty file's map is empty");
+        assert_eq!(chunk_count(0), 0, "an empty file has no chunk count");
         // Complete, because there is nothing left to want.
-        assert!(Coverage::empty(0).is_complete());
-        assert!((Coverage::empty(0).fraction() - 1.0).abs() < f64::EPSILON);
+        assert!(
+            Coverage::empty(0).is_complete(),
+            "an empty file's coverage is complete"
+        );
+        assert!(
+            (Coverage::empty(0).fraction() - 1.0).abs() < f64::EPSILON,
+            "an empty file's coverage fraction is one"
+        );
     }
 
     #[test]
     fn a_file_shorter_than_one_chunk_is_one_chunk() {
         let map = ChunkMap::build(b"short");
-        assert_eq!(map.len(), 1);
-        assert_eq!(map.range_of(0), 0..5);
-        assert!(map.verify(0, b"short"));
-        assert!(!map.verify(0, b"other"));
+        assert_eq!(map.len(), 1, "a file shorter than one chunk is one chunk");
+        assert_eq!(
+            map.range_of(0),
+            0..5,
+            "the single chunk spans bytes zero to five"
+        );
+        assert!(
+            map.verify(0, b"short"),
+            "the short chunk verifies against its bytes"
+        );
+        assert!(
+            !map.verify(0, b"other"),
+            "the short chunk does not verify against other bytes"
+        );
     }
 
     /// The last chunk's shortness is part of what it hashes, so a padded
@@ -205,29 +255,67 @@ mod tests {
         let map = ChunkMap::build(&bytes);
         let mut padded = bytes[CHUNK_BYTES_USIZE..].to_vec();
         padded.resize(CHUNK_BYTES_USIZE, 0);
-        assert!(map.verify(1, &bytes[CHUNK_BYTES_USIZE..]));
-        assert!(!map.verify(1, &padded));
+        assert!(
+            map.verify(1, &bytes[CHUNK_BYTES_USIZE..]),
+            "the final chunk verifies against its bytes"
+        );
+        assert!(
+            !map.verify(1, &padded),
+            "a padded last chunk does not verify"
+        );
     }
 
     #[test]
     fn exact_multiples_do_not_gain_an_empty_trailing_chunk() {
         let map = ChunkMap::build(&body(CHUNK_BYTES_USIZE * 2, 1));
-        assert_eq!(map.len(), 2);
-        assert_eq!(map.range_of(1), CHUNK_BYTES..CHUNK_BYTES * 2);
+        assert_eq!(
+            map.len(),
+            2,
+            "an exact multiple has no empty trailing chunk"
+        );
+        assert_eq!(
+            map.range_of(1),
+            CHUNK_BYTES..CHUNK_BYTES * 2,
+            "the second chunk spans one full chunk"
+        );
     }
 
     #[test]
     fn byte_ranges_map_onto_chunk_indices() {
         let map = ChunkMap::build(&body(CHUNK_BYTES_USIZE * 4, 2));
-        assert_eq!(map.indices_for(0, CHUNK_BYTES), 0..1);
+        assert_eq!(
+            map.indices_for(0, CHUNK_BYTES),
+            0..1,
+            "a byte range maps onto the first chunk"
+        );
         // A window straddling a boundary needs both chunks.
-        assert_eq!(map.indices_for(CHUNK_BYTES - 1, 2), 0..2);
-        assert_eq!(map.indices_for(0, CHUNK_BYTES * 4), 0..4);
+        assert_eq!(
+            map.indices_for(CHUNK_BYTES - 1, 2),
+            0..2,
+            "a range that straddles a boundary maps onto two chunks"
+        );
+        assert_eq!(
+            map.indices_for(0, CHUNK_BYTES * 4),
+            0..4,
+            "a range of four chunks maps onto four indices"
+        );
         // Past the end, and zero length, both want nothing.
-        assert_eq!(map.indices_for(CHUNK_BYTES * 9, 10), 0..0);
-        assert_eq!(map.indices_for(0, 0), 0..0);
+        assert_eq!(
+            map.indices_for(CHUNK_BYTES * 9, 10),
+            0..0,
+            "a range past the end maps onto no chunks"
+        );
+        assert_eq!(
+            map.indices_for(0, 0),
+            0..0,
+            "an empty range maps onto no chunks"
+        );
         // A read running past the end is clamped rather than refused.
-        assert_eq!(map.indices_for(CHUNK_BYTES * 3, CHUNK_BYTES * 99), 3..4);
+        assert_eq!(
+            map.indices_for(CHUNK_BYTES * 3, CHUNK_BYTES * 99),
+            3..4,
+            "a range in the third chunk maps onto that index"
+        );
     }
 
     /// The invariant a caller narrowing a full-row scan down to this range is
@@ -262,26 +350,45 @@ mod tests {
     #[test]
     fn verifying_past_the_end_is_false_not_a_panic() {
         let map = ChunkMap::build(b"tiny");
-        assert!(!map.verify(9, b"tiny"));
-        assert_eq!(map.leaf(9), None);
+        assert!(
+            !map.verify(9, b"tiny"),
+            "verifying past the end is false, not a panic"
+        );
+        assert_eq!(map.leaf(9), None, "a leaf past the end is none");
     }
 
     #[test]
     fn coverage_tracks_what_is_held() {
         let mut coverage = Coverage::empty(10);
-        assert!(!coverage.is_complete());
-        assert_eq!(coverage.count(), 0);
+        assert!(!coverage.is_complete(), "coverage starts incomplete");
+        assert_eq!(coverage.count(), 0, "coverage starts with no chunks held");
         coverage.insert(0);
         coverage.insert(9);
-        assert!(coverage.contains(0));
-        assert!(coverage.contains(9));
-        assert!(!coverage.contains(5));
-        assert_eq!(coverage.count(), 2);
-        assert_eq!(coverage.missing().count(), 8);
+        assert!(
+            coverage.contains(0),
+            "chunk zero is held after it is marked"
+        );
+        assert!(
+            coverage.contains(9),
+            "chunk nine is held after it is marked"
+        );
+        assert!(!coverage.contains(5), "chunk five is not held");
+        assert_eq!(coverage.count(), 2, "coverage counts the two held chunks");
+        assert_eq!(coverage.missing().count(), 8, "eight chunks are missing");
         coverage.remove(0);
-        assert!(!coverage.contains(0));
-        assert_eq!(Coverage::complete(10).count(), 10);
-        assert!(Coverage::complete(10).is_complete());
+        assert!(
+            !coverage.contains(0),
+            "chunk zero is no longer held after it is cleared"
+        );
+        assert_eq!(
+            Coverage::complete(10).count(),
+            10,
+            "a complete coverage of ten chunks counts ten"
+        );
+        assert!(
+            Coverage::complete(10).is_complete(),
+            "a complete coverage is complete"
+        );
     }
 
     /// Out-of-range writes are ignored rather than panicking or growing the
@@ -291,9 +398,9 @@ mod tests {
         let mut coverage = Coverage::empty(4);
         coverage.insert(99);
         coverage.remove(99);
-        assert!(!coverage.contains(99));
-        assert_eq!(coverage.len(), 4);
-        assert_eq!(coverage.count(), 0);
+        assert!(!coverage.contains(99), "out-of-range coverage is not held");
+        assert_eq!(coverage.len(), 4, "out-of-range coverage keeps the length");
+        assert_eq!(coverage.count(), 0, "out-of-range coverage holds no chunks");
     }
 
     #[test]
@@ -303,8 +410,14 @@ mod tests {
             coverage.insert(index);
         }
         let restored = Coverage::from_bits(coverage.as_bits(), 20).expect("round trip");
-        assert_eq!(restored, coverage);
-        assert!(Coverage::from_bits(&[0u8; 1], 20).is_err());
+        assert_eq!(
+            restored, coverage,
+            "coverage survives a round trip through bits"
+        );
+        assert!(
+            Coverage::from_bits(&[0u8; 1], 20).is_err(),
+            "coverage bits of the wrong length are refused"
+        );
     }
 
     #[test]
@@ -314,8 +427,11 @@ mod tests {
         let mut theirs = Coverage::empty(8);
         theirs.insert(6);
         ours.union(&theirs);
-        assert!(ours.contains(1) && ours.contains(6));
-        assert_eq!(ours.count(), 2);
+        assert!(
+            ours.contains(1) && ours.contains(6),
+            "coverage unions across peers keeps both chunks"
+        );
+        assert_eq!(ours.count(), 2, "the union holds two chunks");
     }
 
     #[test]
@@ -325,7 +441,10 @@ mod tests {
             size: 10,
             mtime: 100,
         };
-        assert!(file.same_version(&file.clone()));
+        assert!(
+            file.same_version(&file.clone()),
+            "a file is the same version as its clone"
+        );
         let touched = FileId {
             mtime: 101,
             ..file.clone()
@@ -334,19 +453,39 @@ mod tests {
             size: 11,
             ..file.clone()
         };
-        assert!(!file.same_version(&touched));
-        assert!(!file.same_version(&grown));
+        assert!(
+            !file.same_version(&touched),
+            "a touched file is a different version"
+        );
+        assert!(
+            !file.same_version(&grown),
+            "a grown file is a different version"
+        );
     }
 
     #[test]
     fn digests_round_trip_through_hex() {
         let hash = chunk_hash(b"payload");
-        assert_eq!(ChunkHash::from_hex(&hash.to_hex()).expect("hex"), hash);
+        assert_eq!(
+            ChunkHash::from_hex(&hash.to_hex()).expect("hex"),
+            hash,
+            "a chunk hash round trips through hex"
+        );
         let root = ChunkMap::build(b"payload").root();
-        assert_eq!(Root::from_hex(&root.to_hex()).expect("hex"), root);
-        assert_eq!(hash.to_hex().len(), 64);
-        assert!(ChunkHash::from_hex("nope").is_err());
-        assert!(ChunkHash::from_hex(&"z".repeat(64)).is_err());
+        assert_eq!(
+            Root::from_hex(&root.to_hex()).expect("hex"),
+            root,
+            "a root round trips through hex"
+        );
+        assert_eq!(hash.to_hex().len(), 64, "a hex digest is 64 characters");
+        assert!(
+            ChunkHash::from_hex("nope").is_err(),
+            "a short hex string is refused"
+        );
+        assert!(
+            ChunkHash::from_hex(&"z".repeat(64)).is_err(),
+            "a non-hex string is refused"
+        );
     }
 
     /// The length guard counts bytes but the old decoder sliced the `&str`,
@@ -356,9 +495,19 @@ mod tests {
     #[test]
     fn non_ascii_hex_of_the_right_byte_length_errors_rather_than_panics() {
         let text = format!("{}a", "€".repeat(21));
-        assert_eq!(text.len(), 64);
-        assert!(ChunkHash::from_hex(&text).is_err());
-        assert!(Root::from_hex(&text).is_err());
+        assert_eq!(
+            text.len(),
+            64,
+            "non-ascii hex of the right byte length has 64 bytes"
+        );
+        assert!(
+            ChunkHash::from_hex(&text).is_err(),
+            "non-ascii hex is refused for a chunk hash"
+        );
+        assert!(
+            Root::from_hex(&text).is_err(),
+            "non-ascii hex is refused for a root"
+        );
     }
 
     /// A root and a chunk hash are different types *and* different values, even
@@ -366,7 +515,11 @@ mod tests {
     #[test]
     fn a_root_is_not_its_own_leaf() {
         let map = ChunkMap::build(b"single chunk");
-        assert_ne!(map.root().as_bytes(), map.leaf(0).expect("one").as_bytes());
+        assert_ne!(
+            map.root().as_bytes(),
+            map.leaf(0).expect("one").as_bytes(),
+            "a root is not its own leaf"
+        );
     }
 
     #[test]

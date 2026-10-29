@@ -81,8 +81,12 @@ fn an_origin_serves_by_address_without_copying() {
     block_on(async {
         let root = origin.adopt(&describe(&path), &path).expect("adopt");
         let map = origin.map(root).await.expect("map").expect("adopted");
-        assert_eq!(map.size(), bytes.len() as u64);
-        assert_eq!(map.len(), 4);
+        assert_eq!(
+            map.size(),
+            bytes.len() as u64,
+            "the origin size matches the file size"
+        );
+        assert_eq!(map.len(), 4, "the origin map has four chunks");
 
         // Reassemble the file purely by asking for addresses, the way a peer
         // would, and confirm it is byte-for-byte what is on disk.
@@ -90,10 +94,13 @@ fn an_origin_serves_by_address_without_copying() {
         for index in 0..map.len() {
             let leaf = map.leaf(index).expect("in range");
             let chunk = origin.get(leaf).await.expect("get").expect("held");
-            assert!(map.verify(index, &chunk));
+            assert!(
+                map.verify(index, &chunk),
+                "the served chunk verifies against its address"
+            );
             rebuilt.extend_from_slice(&chunk);
         }
-        assert_eq!(rebuilt, bytes);
+        assert_eq!(rebuilt, bytes, "the rebuilt file equals the original bytes");
 
         // Nothing was written anywhere: the only file in the directory is the
         // one the user put there.
@@ -117,7 +124,10 @@ fn coverage_is_all_or_nothing_and_follows_the_file() {
 
     block_on(async {
         let root = origin.adopt(&describe(&path), &path).expect("adopt");
-        assert!(origin.coverage(root).await.expect("cov").is_complete());
+        assert!(
+            origin.coverage(root).await.expect("cov").is_complete(),
+            "the coverage of the whole file is all or nothing"
+        );
 
         // Replace the contents with something a different length.
         std::fs::write(&path, body(CHUNK_BYTES_USIZE, 3)).expect("rewrite");
@@ -139,7 +149,10 @@ fn a_changed_file_stops_answering_for_its_old_addresses() {
         let root = origin.adopt(&describe(&path), &path).expect("adopt");
         let map = origin.map(root).await.expect("map").expect("adopted");
         let leaf = map.leaf(0).expect("first");
-        assert!(origin.get(leaf).await.expect("get").is_some());
+        assert!(
+            origin.get(leaf).await.expect("get").is_some(),
+            "a changed file stops answering for its old addresses"
+        );
 
         // A save that changes the length is caught by size alone.
         std::fs::write(&path, body(CHUNK_BYTES_USIZE * 2 + 1, 4)).expect("rewrite");
@@ -177,7 +190,11 @@ fn bytes_that_changed_under_a_stable_stat_are_still_caught() {
         altered[0] ^= 0xff;
         std::fs::write(&path, &altered).expect("rewrite");
         set_mtime(&path, described.mtime);
-        assert_eq!(describe(&path).size, described.size);
+        assert_eq!(
+            describe(&path).size,
+            described.size,
+            "a changed size under a stable stat is still caught"
+        );
 
         assert_eq!(
             origin.get(leaf).await.expect("get"),
@@ -257,11 +274,20 @@ fn a_shared_chunk_answers_from_whichever_file_was_adopted_first() {
 
         let shared_hash = chunk_hash(&shared);
         let served = origin.get(shared_hash).await.expect("get").expect("held");
-        assert_eq!(served, shared);
+        assert_eq!(
+            served, shared,
+            "a shared chunk is served as the bytes first adopted"
+        );
 
         // And both files report holding it.
-        assert!(origin.coverage(first_root).await.expect("cov").contains(0));
-        assert!(origin.coverage(second_root).await.expect("cov").contains(0));
+        assert!(
+            origin.coverage(first_root).await.expect("cov").contains(0),
+            "the first root keeps coverage of the shared chunk"
+        );
+        assert!(
+            origin.coverage(second_root).await.expect("cov").contains(0),
+            "the second root keeps coverage of the shared chunk"
+        );
     });
 }
 
@@ -277,12 +303,26 @@ fn forgetting_a_root_drops_its_addresses() {
     block_on(async {
         let root = origin.adopt(&describe(&path), &path).expect("adopt");
         let leaf = chunk_hash(&bytes);
-        assert!(origin.get(leaf).await.expect("get").is_some());
+        assert!(
+            origin.get(leaf).await.expect("get").is_some(),
+            "a forgotten root's address still answers before the drop"
+        );
 
         origin.forget(root).expect("forget");
-        assert_eq!(origin.get(leaf).await.expect("get"), None);
-        assert!(origin.map(root).await.expect("map").is_none());
-        assert_eq!(origin.coverage(root).await.expect("cov").len(), 0);
+        assert_eq!(
+            origin.get(leaf).await.expect("get"),
+            None,
+            "a forgotten root's address is gone"
+        );
+        assert!(
+            origin.map(root).await.expect("map").is_none(),
+            "a forgotten root has no map"
+        );
+        assert_eq!(
+            origin.coverage(root).await.expect("cov").len(),
+            0,
+            "a forgotten root has no coverage"
+        );
     });
 }
 
@@ -294,9 +334,13 @@ fn an_unadopted_address_is_absent() {
     block_on(async {
         assert_eq!(
             origin.get(chunk_hash(b"never adopted")).await.expect("get"),
-            None
+            None,
+            "an unadopted address is absent"
         );
-        assert!(!origin.has(chunk_hash(b"never adopted")).await.expect("has"));
+        assert!(
+            !origin.has(chunk_hash(b"never adopted")).await.expect("has"),
+            "an unadopted address is not held"
+        );
     });
 }
 
@@ -309,7 +353,10 @@ fn adopting_a_file_that_disagrees_with_its_description_fails() {
     let origin = DiskOrigin::new();
     let mut described = describe(&path);
     described.size += 1;
-    assert!(origin.adopt(&described, &path).is_err());
+    assert!(
+        origin.adopt(&described, &path).is_err(),
+        "adopting a file that disagrees with its description fails"
+    );
 }
 
 /// Empty and sub-chunk files are ordinary, not edge cases to be refused.
@@ -323,22 +370,24 @@ fn tiny_and_empty_files_adopt_cleanly() {
     block_on(async {
         let empty_root = origin.adopt(&describe(&empty), &empty).expect("adopt");
         let empty_map = origin.map(empty_root).await.expect("map").expect("adopted");
-        assert_eq!(empty_map.len(), 0);
+        assert_eq!(empty_map.len(), 0, "an empty file adopts with no chunks");
         assert!(
             origin
                 .coverage(empty_root)
                 .await
                 .expect("cov")
-                .is_complete()
+                .is_complete(),
+            "an empty file's coverage is complete"
         );
 
         let tiny_root = origin.adopt(&describe(&tiny), &tiny).expect("adopt");
         let tiny_map = origin.map(tiny_root).await.expect("map").expect("adopted");
-        assert_eq!(tiny_map.len(), 1);
+        assert_eq!(tiny_map.len(), 1, "a tiny file adopts with one chunk");
         let leaf = tiny_map.leaf(0).expect("one");
         assert_eq!(
             origin.get(leaf).await.expect("get"),
-            Some(b"hello".to_vec())
+            Some(b"hello".to_vec()),
+            "a tiny file's leaf is served"
         );
     });
 }
@@ -355,10 +404,14 @@ fn a_file_on_an_exact_chunk_boundary_has_no_trailing_chunk() {
     block_on(async {
         let root = origin.adopt(&describe(&path), &path).expect("adopt");
         let map = origin.map(root).await.expect("map").expect("adopted");
-        assert_eq!(map.len(), 2);
+        assert_eq!(map.len(), 2, "a file on an exact boundary has two chunks");
         // And it agrees with the in-memory path, which is what every other peer
         // computes.
-        assert_eq!(map, habilis_network_chunks::ChunkMap::build(&bytes));
+        assert_eq!(
+            map,
+            habilis_network_chunks::ChunkMap::build(&bytes),
+            "the boundary map equals the built map"
+        );
     });
 }
 
@@ -374,9 +427,17 @@ fn adopting_records_a_binding_that_a_version_change_breaks() {
     block_on(async {
         let described = describe(&path);
         let root = origin.adopt(&described, &path).expect("adopt");
-        assert_eq!(origin.bind(&described).await.expect("bind"), Some(root));
+        assert_eq!(
+            origin.bind(&described).await.expect("bind"),
+            Some(root),
+            "the first binding is recorded"
+        );
 
         let moved = FileId::new(described.key.clone(), described.size + 1, described.mtime);
-        assert_eq!(origin.bind(&moved).await.expect("bind"), None);
+        assert_eq!(
+            origin.bind(&moved).await.expect("bind"),
+            None,
+            "the moved file no longer binds"
+        );
     });
 }

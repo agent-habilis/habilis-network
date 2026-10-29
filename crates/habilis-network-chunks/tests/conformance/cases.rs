@@ -1122,6 +1122,10 @@ fn mem_stores_a_shared_chunk_exactly_once() {
         let hash = chunk_hash(&shared);
         store.put(hash, &shared).await.expect("put");
         store.put(hash, &shared).await.expect("put again");
-        assert_eq!(store.stored_chunks(), 1);
+        assert_eq!(
+            store.stored_chunks(),
+            1,
+            "a shared chunk is stored once in memory"
+        );
     });
 }
