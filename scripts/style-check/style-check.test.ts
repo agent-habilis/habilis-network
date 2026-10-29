@@ -534,6 +534,12 @@ test("abbrev_name: a local named ctx counts", () => {
 test("abbrev_name: the word in a string or a comment is clean", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f() -> &'static str {\n    // ctx is a comment\n    \"ctx\"\n}", 0);
 });
+test("abbrev_name: a method call or a field access after a dot is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(endpoint: &Endpoint) {\n    let _ = endpoint.addr();\n    let _ = endpoint.cfg;\n}", 0);
+});
+test("abbrev_name: a declared name still counts after the dot rule", () => {
+  expectExit("crates/demo/src/lib.rs", "pub struct S {\n    ctx: u8,\n}\npub fn addr() {}", 1);
+});
 test("abbrev_name: a path such as rand::rng is clean", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f() {\n    let _ = rand::rng();\n}", 0);
 });

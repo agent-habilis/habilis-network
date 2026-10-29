@@ -342,7 +342,9 @@ function countAbbrevNames(raw: string): number {
     .filter((line) => !/^\s*#\[/.test(line))
     .join("\n");
   let count = 0;
-  for (const m of text.matchAll(/(?<!::)(?<!:)\b([A-Za-z_]\w*)\b/g)) {
+  // A name after a dot is a method call or a field access: the name is declared elsewhere, where it counts,
+  // or it belongs to a foreign API (`endpoint.addr()`) that this crate cannot rename.
+  for (const m of text.matchAll(/(?<!::)(?<!:)(?<!\.)\b([A-Za-z_]\w*)\b/g)) {
     if (ABBREVIATIONS.has(m[1]!)) count++;
   }
   return count;

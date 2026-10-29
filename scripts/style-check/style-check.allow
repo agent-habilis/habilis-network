@@ -560,7 +560,6 @@ abbrev_name|crates/habilis-network-iroh-gossip-transport/src/gossip_ladder.rs|2|
 abbrev_name|crates/habilis-network-iroh-gossip-transport/src/gossip_handle.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-multihop-transport/src/route.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-multihop-transport/src/graph.rs|7|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-multihop-transport/src/lib.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-multihop-transport/src/multihop_ladder.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-multihop-transport/src/test_support.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-multihop-transport/src/multihop_transport.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
@@ -570,7 +569,7 @@ abbrev_name|crates/habilis-network-iroh-transport-util/src/rung.rs|4|existing le
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/addr.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/lib.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/native/driver.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/native/driver.rs|7|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/native/web_rtc_sender.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/native/stun.rs|7|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_preferred.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
@@ -578,13 +577,13 @@ abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|2|
 abbrev_name|crates/habilis-network-logging/src/filter.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/mesh/rollback_driver.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/mesh/mesh_transport.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-netplay/src/peer_protocol.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-netplay/src/p2p_session.rs|27|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-netplay/src/peer_protocol.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-netplay/src/p2p_session.rs|24|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/event.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/transport.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/lib.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/mesh/lookup.rs|12|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/mesh/name_error.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-protocol/src/mesh/name_error.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/message/build_msg_bytes.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/message/message.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/message/shard.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
@@ -592,57 +591,56 @@ abbrev_name|crates/habilis-network-protocol/src/message/tests.rs|94|existing let
 abbrev_name|crates/habilis-network-protocol/src/peer_addr_error.rs|10|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/seal_error.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream-cli/src/args.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream-cli/src/main.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream/src/hash/stream_hash.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream/src/read/reader.rs|5|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-stream-cli/src/main.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-stream/src/hash/stream_hash.rs|5|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-stream/src/read/reader.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream/src/read/refused.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-test-tracing-macros/src/expand.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-wasm/src/mesh_peer.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-wasm/src/stream_node.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-wasm/src/tracing_console.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/blob/consume.rs|14|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/blob/produce.rs|17|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/blob/produce.rs|15|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/daemon/app/node_driver.rs|12|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/daemon/cohost_arm.rs|19|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/daemon/event_loop.rs|105|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/daemon/event_loop.rs|102|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/daemon/heal.rs|14|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/daemon/message_log.rs|30|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/daemon/setup.rs|19|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/daemon/setup.rs|18|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/daemon/shutdown.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/daemon/state/event_loop_state.rs|18|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/daemon/timers.rs|5|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/antientropy.rs|24|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/app/node_app.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/gossip/merge_ctx.rs|60|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/gossip/merge_ctx.rs|59|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/heal.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/lan.rs|18|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/gossip/recv.rs|138|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/gossip/recv.rs|137|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lifecycle/heartbeat.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lifecycle/mod.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/capability.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/mdns.rs|6|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/lookup/peer.rs|18|moved from mod.rs with the peer builders; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/lookup/peer.rs|17|moved from mod.rs with the peer builders; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/address_book.rs|8|moved from mod.rs with the address book; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/probe_answer.rs|8|moved from mod.rs with the probe code; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/lookup/lan.rs|5|moved from mod.rs with the LAN code; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/lookup/endpoint.rs|2|moved from mod.rs with the endpoint builders; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/lookup/lan.rs|4|moved from mod.rs with the LAN code; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/lookup/endpoint.rs|1|moved from mod.rs with the endpoint builders; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/membership_app.rs|60|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/join_options.rs|15|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/testing/log_capture.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/testing/lane_node.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/transport/unicast_acceptor.rs|23|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/unicast_acceptor.rs|22|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/admission/connection_hook.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/admission/inner.rs|14|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/admission/signal_admission.rs|19|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/transport/admission.rs|18|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/transport/direct_only_gossip.rs|24|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/admission.rs|17|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/direct_only_gossip.rs|23|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/ipc/json_reply.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/payload_path.rs|36|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/transport/pool/unicast_pool.rs|56|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/pool/unicast_pool.rs|46|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 
-abbrev_name|crates/habilis-network/src/transport/probe/grafts.rs|33|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/probe/grafts.rs|32|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/probe/kinds.rs|6|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/transport/probe/lanes.rs|25|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/probe/lanes.rs|24|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/probe/regraft.rs|62|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/probe/watchers.rs|49|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/send/deliver.rs|13|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
@@ -650,14 +648,14 @@ abbrev_name|crates/habilis-network/src/transport/send/route.rs|2|existing letter
 
 abbrev_name|crates/habilis-network/src/transport/underlay_webrtc/plan.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/underlay_webrtc/tick.rs|16|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/transport/webrtc.rs|90|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/webrtc.rs|67|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/webrtc/dial_signal.rs|6|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/webrtc/lane_needs.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/webrtc/negotiate_session.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/transport/webrtc/nudge_acceptor.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/webrtc/nudge_acceptor.rs|7|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/webrtc/offer.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/webrtc/rendezvous.rs|12|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/transport/webrtc/retry.rs|30|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/transport/webrtc/retry.rs|29|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/webrtc/session_policy.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/transport/webrtc/web_rtc_signal_acceptor.rs|21|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network-chunks/src/fs/disk_store.rs|2|kept: statements with a chain of five or more calls, moved with fs.rs (P15 rollout)
@@ -668,14 +666,13 @@ untyped_long_chain_let|crates/habilis-network-chunks/src/fs/disk_store.rs|1|kept
 long_chain|crates/habilis-network-stream/src/hash/mod.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 abbrev_name|crates/habilis-network/src/lifecycle/observed.rs|5|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lifecycle/presence_event.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/net.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream/src/node/stream_node.rs|19|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/net.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-stream/src/node/stream_node.rs|13|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream/src/node/tests.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 assert_no_message|crates/habilis-network-stream/src/node/tests.rs|2|kept: assert without a message, to be given one (P13 rollout)
 long_chain|crates/habilis-network-stream/src/node/stream_node.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 turbofish_collect_parse|crates/habilis-network-stream/src/node/stream_node.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-abbrev_name|crates/habilis-network-stream/src/produce/producer.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream/src/produce/registry.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-stream/src/produce/registry.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream/src/produce/stream_acceptor.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network-stream/src/produce/registry.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 
@@ -713,8 +710,7 @@ long_chain|crates/habilis-network/src/beacon/rung_ladder.rs|1|kept: statements w
 untyped_long_chain_let|crates/habilis-network/src/beacon/rung_ladder.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 abbrev_name|crates/habilis-network/src/beacon/held.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 
-abbrev_name|crates/habilis-network/src/beacon/claim.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/beacon/tests.rs|14|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/beacon/tests.rs|13|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 assert_no_message|crates/habilis-network/src/beacon/tests.rs|19|kept: assert without a message, to be given one (P13 rollout)
 long_chain|crates/habilis-network/src/beacon/tests.rs|5|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 turbofish_collect_parse|crates/habilis-network/src/beacon/claim.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
@@ -725,13 +721,12 @@ assert_no_message|crates/habilis-network/src/lookup/tests.rs|20|kept: assert wit
 long_chain|crates/habilis-network/src/lookup/tests.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 turbofish_collect_parse|crates/habilis-network/src/lookup/tests.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 untyped_long_chain_let|crates/habilis-network/src/lookup/tests.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-abbrev_name|crates/habilis-network/src/lookup/tests.rs|3|kept: calls of the iroh method Endpoint::addr(), a foreign name that this crate cannot rename (N13)
 
 abbrev_name|crates/habilis-network/src/lookup/test_relay.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/transport_handles.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/transport_opts.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 anyhow_pub|crates/habilis-network/src/lookup/test_relay.rs|1|the test relay helper spawn_plain, behind the iroh-test-utils feature (a test helper, not library API)
-abbrev_name|crates/habilis-network/src/gossip/lan/lan_grafts.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/gossip/lan/lan_grafts.rs|7|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-multihop-transport/src/underlay/forwarder.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network-iroh-multihop-transport/src/underlay/forwarder.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 assert_no_message|crates/habilis-network-util/src/clock.rs|6|kept: assert without a message, to be given one (P13 rollout)
