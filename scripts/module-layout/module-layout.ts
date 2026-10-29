@@ -1,16 +1,15 @@
 #!/usr/bin/env bun
 // Module layout (issue #29, O9). A leaf source file is named after its primary public type: the
 // file `frame_cache.rs` holds `FrameCache`. A leaf file with public types, none of which is named
-// after the file, is a hit. A hit needs a counted row in `module-layout.allow` with its reason. A
-// leaf with no public type is fine. `module-layout.test.ts` plants one file of each kind.
+// after the file, is a hit. A leaf with no public type is fine. `module-layout.test.ts` plants one
+// file of each kind.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const allowFile = process.env.MODULE_LAYOUT_ALLOW || "scripts/module-layout/module-layout.allow";
 
 const SCOPE = /\.rs$/;
 const SKIP = /\/(tests|benches|examples)\/|\/build\.rs$/;
@@ -62,47 +61,14 @@ function nonLeafHit(file: string, src: string): string | undefined {
   return lines.length > GLUE_LINES ? "mod.rs or lib.rs defines items. Move them into a leaf file" : undefined;
 }
 
-function readAllow(): { allowed: Map<string, number>; problems: string[] } {
-  const allowed = new Map<string, number>();
-  const problems: string[] = [];
-  const file = path.join(ROOT, allowFile);
-  if (!existsSync(file)) return { allowed, problems };
-  for (const line of readFileSync(file, "utf8").split("\n")) {
-    if (/^\s*(#|$)/.test(line)) continue;
-    const [target = "", count = "", reason = ""] = line.split("|");
-    if (reason.trim() === "") {
-      problems.push(`module-layout: ${allowFile} has a row for ${target} with no reason.`);
-    }
-    if (allowed.has(target)) {
-      problems.push(`module-layout: ${allowFile} has two rows for ${target}. Merge them.`);
-    }
-    allowed.set(target, Number(count));
-  }
-  return { allowed, problems };
-}
-
 async function main(): Promise<number> {
-  const { allowed, problems } = readAllow();
-  const found = new Map<string, string>();
+  const problems: string[] = [];
   for (const file of listFiles()) {
     const src = readFileSync(path.join(ROOT, file), "utf8");
     const hit = leafHit(file, src) ?? nonLeafHit(file, src);
-    if (hit !== undefined) found.set(file, hit);
+    if (hit !== undefined) problems.push(`module-layout: ${file}: ${hit}.`);
   }
-  for (const [file, reason] of [...found].sort()) {
-    const expected = allowed.get(file);
-    if (expected === undefined) {
-      problems.push(`module-layout: ${file}: ${reason}. Or add a row to ${allowFile} with the reason.`);
-    } else if (expected !== 1) {
-      problems.push(`module-layout: ${file}: 1 hit found, ${expected} allowed. Set the count in ${allowFile}.`);
-    }
-  }
-  for (const file of [...allowed.keys()].sort()) {
-    if (!found.has(file)) {
-      problems.push(`module-layout: ${file}: stale row. The file is fine now. Remove it from ${allowFile}.`);
-    }
-  }
-  for (const problem of problems) console.log(problem);
+  for (const problem of problems.sort()) console.log(problem);
   return problems.length > 0 ? 1 : 0;
 }
 

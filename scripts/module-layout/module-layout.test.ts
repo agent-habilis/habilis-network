@@ -1,5 +1,5 @@
 // Tests of scripts/module-layout/module-layout.ts. Each case plants files in a scratch git
-// repository, with its own allow list, and runs the check there. A layout the check misses, or a
+// repository, and runs the check there. A row in a leftover allow file must not change the result. A layout the check misses, or a
 // clean file it refuses, fails here.
 
 import { spawnSync } from "node:child_process";
@@ -13,7 +13,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const work = mkdtempSync(path.join(tmpdir(), "module-layout-"));
 afterAll(() => rmSync(work, { recursive: true, force: true }));
 
-// Plant each file in a fresh repository with `allow` as its allow list, then run the check.
+// Plant each file in a fresh repository and then run the check. `allow` is a file the check must ignore; it is written only when a test passes one.
 function check(files: Record<string, string>, allow = ""): { status: number; out: string } {
   const repo = mkdtempSync(path.join(work, "repo-"));
   mkdirSync(path.join(repo, "scripts", "module-layout"), { recursive: true });
@@ -21,7 +21,7 @@ function check(files: Record<string, string>, allow = ""): { status: number; out
     path.join(here, "module-layout.ts"),
     path.join(repo, "scripts", "module-layout", "module-layout.ts"),
   );
-  writeFileSync(path.join(repo, "scripts", "module-layout", "module-layout.allow"), `${allow}\n`);
+  if (allow) writeFileSync(path.join(repo, "scripts", "module-layout", "module-layout.allow"), `${allow}\n`);
   for (const [file, content] of Object.entries(files)) {
     mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
     writeFileSync(path.join(repo, file), `${content}\n`);
@@ -87,24 +87,16 @@ test("a mod.rs with 21 lines of items is refused (O13)", () => {
   expectExit({ "crates/x/src/mod.rs": `pub mod inner;\n${constLines(21)}` }, 1);
 });
 
-test("a counted mod.rs passes", () => {
-  expectExit({ "crates/x/src/mod.rs": constLines(21) }, 0, "crates/x/src/mod.rs|1|items to move");
+test("no allow lookup: a counted mod.rs still fails", () => {
+  expectExit({ "crates/x/src/mod.rs": constLines(21) }, 1, "crates/x/src/mod.rs|1|items to move");
 });
 
 test("a file with a child module is not a leaf", () => {
   expectExit({ [leaf]: "pub mod inner;\npub struct Other;" }, 0);
 });
 
-test("a counted mismatch passes", () => {
-  expectExit({ [leaf]: "pub struct Other;" }, 0, `${leaf}|1|renaming pending`);
-});
-
-test("a row with no reason is refused", () => {
-  expectExit({ [leaf]: "pub struct Other;" }, 1, `${leaf}|1|`);
-});
-
-test("a row for a file that is fine now is stale", () => {
-  expectExit({ [leaf]: "pub struct FrameCache;" }, 1, `${leaf}|1|renaming pending`);
+test("no allow lookup: a counted mismatch still fails", () => {
+  expectExit({ [leaf]: "pub struct Other;" }, 1, `${leaf}|1|renaming pending`);
 });
 
 test("tests are not scanned", () => {
