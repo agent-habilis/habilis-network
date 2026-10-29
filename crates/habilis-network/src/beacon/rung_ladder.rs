@@ -92,7 +92,7 @@ pub(crate) async fn forget_rungs(
     peer_book: &memory::MemoryLookup,
     forget: impl Fn(u16) -> bool,
 ) {
-    let forgotten = params
+    let forgotten: EndpointAddr = params
         .bind_ports
         .iter()
         .copied()
@@ -133,7 +133,7 @@ pub(crate) async fn admit_rung(
     peer_book: &memory::MemoryLookup,
     port: u16,
 ) {
-    let held = peer_book
+    let held: bool = peer_book
         .get_endpoint_info(params.id)
         .is_some_and(|info| info.ip_addrs().any(|socket| socket.port() == port));
     if held {

@@ -1177,7 +1177,7 @@ async fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
     let mut rungs_watch = super::RungWatch::new(reports);
     for _ in 0..3 {
         super::refresh_holder_rung(&params, &member, &book, &mut rungs_watch).await;
-        let ours = book
+        let ours: bool = book
             .get_endpoint_info(params.id)
             .is_some_and(|info| info.into_endpoint_addr().ip_addrs().count() == 1)
             && book.get_endpoint_info(params.id).is_some_and(|info| {

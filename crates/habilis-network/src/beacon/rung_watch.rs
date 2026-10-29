@@ -176,7 +176,7 @@ impl RungWatch {
             return;
         }
         let gap = heal_interval().saturating_mul(3);
-        let silent_since = match report.answer {
+        let silent_since: Option<Instant> = match report.answer {
             ProbeAnswer::NoAnswer | ProbeAnswer::Refused => Some(
                 self.readings
                     .get(&report.port)
