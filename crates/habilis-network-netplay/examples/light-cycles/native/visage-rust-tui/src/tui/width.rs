@@ -11,6 +11,7 @@
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use std::mem;
 /// Splits `text` into extended grapheme clusters (UAX #29) — a ZWJ emoji
 /// family, a flag, a base+combining-mark sequence, each one unit.
 #[must_use]
@@ -131,7 +132,7 @@ fn break_anywhere(line: &str, cells: usize) -> Vec<String> {
     for part in graphemes(line) {
         let width = char_width(part);
         if used + width > cells {
-            out.push(std::mem::take(&mut current));
+            out.push(mem::take(&mut current));
             used = 0;
         }
         current.push_str(part);
@@ -157,7 +158,7 @@ fn break_at_words(line: &str, cells: usize) -> Vec<String> {
             continue;
         }
         if !current.is_empty() {
-            out.push(std::mem::take(&mut current));
+            out.push(mem::take(&mut current));
         }
         if width <= cells {
             current = word.to_string();

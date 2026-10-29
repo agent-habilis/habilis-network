@@ -27,6 +27,7 @@ use crate::host::Host;
 use crate::reactive::SubscriberId;
 use crate::view::{BoxProps, ComponentView, View};
 
+use std::fmt;
 /// One mounted component: its own running [`Instance`], and the subtree
 /// its own last render produced. Components introduce no host node of
 /// their own — `child` is what actually occupies this position in the
@@ -43,8 +44,8 @@ pub struct ComponentMount<N> {
 // bound this type otherwise has no reason to carry (a `Host::Node` like
 // `NodeId` happens to implement it, but nothing here should depend on
 // that).
-impl<N> std::fmt::Debug for ComponentMount<N> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<N> fmt::Debug for ComponentMount<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ComponentMount")
             .field("id", &self.id)
             .finish_non_exhaustive()
@@ -64,8 +65,8 @@ pub enum Mounted<N> {
 
 // Hand-written for the same reason as `ComponentMount`'s: no need to
 // require `N: Debug` just for a trace.
-impl<N> std::fmt::Debug for Mounted<N> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<N> fmt::Debug for Mounted<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Mounted::Text(_, text) => f.debug_tuple("Text").field(text).finish(),
             Mounted::Box(_, props, children) => {

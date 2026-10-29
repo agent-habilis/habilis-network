@@ -26,6 +26,8 @@ use light_cycles_native::app::{Game, LightCycles};
 use light_cycles_native::grid::Dir;
 use light_cycles_native::sim::Outcome;
 
+use std::{process, thread};
+use tokio::time::{self, Instant};
 struct Bot {
     node: Node<RollbackDriver<LightCycles>>,
     game: Game,
@@ -63,7 +65,7 @@ async fn drive(
     timeout: Duration,
     mut condition: impl FnMut(&[Bot]) -> bool,
 ) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = Instant::now() + timeout;
     let mut tick: usize = 0;
     loop {
         for (index, bot) in bots.iter_mut().enumerate() {
@@ -77,10 +79,10 @@ async fn drive(
         if condition(bots) {
             return true;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -90,9 +92,9 @@ fn public_path_probe() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(
         guard,
-        std::thread::available_parallelism().map_or(1, usize::from),
+        thread::available_parallelism().map_or(1, usize::from),
         async {
-            let topic = format!("light-cycles-two-bots-test-{}", std::process::id());
+            let topic = format!("light-cycles-two-bots-test-{}", process::id());
 
             let mut bots = vec![
                 spawn_bot(&topic, "alice").await,

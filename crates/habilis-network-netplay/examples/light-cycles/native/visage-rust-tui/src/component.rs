@@ -35,6 +35,7 @@ use std::rc::Rc;
 use crate::reactive::{self, SignalId, SubscriberId};
 use crate::view::View;
 
+use std::{fmt, mem};
 /// What a component produces. Mirrors `#adopt`'s `typeof yielded ===
 /// 'function'` classification — Rust has no such runtime check on an
 /// arbitrary value, so the two shapes are explicit variants instead of one
@@ -50,8 +51,8 @@ pub enum Step {
 }
 
 // Hand-written: `Rc<dyn Fn() -> View>` has no `Debug` impl to derive from.
-impl std::fmt::Debug for Step {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Step {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Step::View(view) => {
                 let mut tuple = f.debug_tuple("View");
@@ -130,7 +131,7 @@ impl Instance {
     }
 
     fn resume_sync(&mut self) -> Option<View> {
-        let mut deps = std::mem::take(&mut self.deps_alt);
+        let mut deps = mem::take(&mut self.deps_alt);
         deps.clear();
         let prev = reactive::open_tracking(deps);
 
@@ -143,7 +144,7 @@ impl Instance {
 
         let deps = reactive::close_tracking(prev);
         reactive::resubscribe(self.id, &self.deps, &deps);
-        self.deps_alt = std::mem::replace(&mut self.deps, deps);
+        self.deps_alt = mem::replace(&mut self.deps, deps);
 
         if view.is_none() {
             self.finished = true;
@@ -171,8 +172,8 @@ impl Instance {
     }
 }
 
-impl std::fmt::Debug for Instance {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Instance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = f.debug_struct("Instance");
         debug
             .field("id", &self.id)
@@ -189,6 +190,7 @@ mod tests {
     use crate::reactive::Signal;
     use crate::view::View;
 
+    use std::{cell, rc};
     struct Shown(Signal<i32>);
 
     impl Component for Shown {
@@ -228,7 +230,7 @@ mod tests {
 
     struct Parked {
         count: Signal<i32>,
-        resumes: std::rc::Rc<std::cell::RefCell<i32>>,
+        resumes: rc::Rc<cell::RefCell<i32>>,
         phase: ParkedPhase,
     }
 
@@ -239,7 +241,7 @@ mod tests {
                     *self.resumes.borrow_mut() += 1; // setup: runs once
                     self.phase = ParkedPhase::Parked;
                     let count = self.count.clone();
-                    Some(Step::Thunk(std::rc::Rc::new(move || {
+                    Some(Step::Thunk(rc::Rc::new(move || {
                         View::text(format!("count is {}", count.get()))
                     })))
                 }

@@ -33,6 +33,8 @@ use visage_rust_tui::reactive::Signal;
 use visage_rust_tui::runtime::{Runtime, render_frame};
 use visage_rust_tui::tui::layout::LayoutState;
 
+use std::fs;
+use tokio::{signal, time};
 #[derive(Parser)]
 #[command(
     name = "light-cycles",
@@ -108,7 +110,7 @@ async fn main() -> Result<()> {
 /// all `MakeWriter` asks for — no logging side-crate needed. `with_ansi`
 /// off: this is a file, and colour codes in it only make it harder to read.
 fn start_logging(path: &Path) -> Result<()> {
-    let file = std::fs::File::create(path)?;
+    let file = fs::File::create(path)?;
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         // the subscriber calls the writer from each thread, so the file is shared
@@ -291,7 +293,7 @@ async fn render_loop(game: &mut Game) -> Result<()> {
     let mut needs_full_redraw = true;
 
     // One render tick is one simulation frame — see `Game::tick`.
-    let mut ticker = tokio::time::interval(Duration::from_millis(u64::from(TICK_MS)));
+    let mut ticker = time::interval(Duration::from_millis(u64::from(TICK_MS)));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
@@ -340,7 +342,7 @@ async fn render_loop(game: &mut Game) -> Result<()> {
                     previous = Some(buffer);
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
+            _ = signal::ctrl_c() => {
                 return Ok(());
             }
         }

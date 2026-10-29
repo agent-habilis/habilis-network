@@ -378,6 +378,8 @@ mod tests {
     use crate::tui::node::{Arena, Tag};
     use crate::view::{Direction, Justify};
 
+    use crate::view;
+    use crate::view::Border;
     #[test]
     fn a_row_of_two_fixed_children_places_them_side_by_side() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -460,8 +462,8 @@ mod tests {
         let root = arena.create(Tag::Box);
         {
             let n = arena.get_mut(root);
-            n.border = crate::view::Border::Single;
-            n.padding = crate::view::Padding::all(1);
+            n.border = Border::Single;
+            n.padding = view::Padding::all(1);
         }
         let child = arena.create(Tag::Box);
         arena.get_mut(child).flex = 1;

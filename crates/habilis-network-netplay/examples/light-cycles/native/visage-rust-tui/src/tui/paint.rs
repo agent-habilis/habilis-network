@@ -401,6 +401,8 @@ mod tests {
     use crate::tui::node::{Arena, Tag};
     use crate::tui::width;
 
+    use crate::tui::color;
+    use crate::tui::width::Truncate;
     #[test]
     fn a_text_node_writes_its_content_into_the_buffer() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -429,7 +431,7 @@ mod tests {
         let root = arena.create(Tag::Box);
         {
             let n = arena.get_mut(root);
-            n.bg = crate::tui::color::palette(1);
+            n.bg = color::palette(1);
             n.lx = 0;
             n.ly = 0;
             n.lw = 3;
@@ -440,7 +442,7 @@ mod tests {
         for bg in &buffer.bg {
             assert_eq!(
                 *bg,
-                crate::tui::color::palette(1),
+                color::palette(1),
                 "a background fills the whole border box with palette one"
             );
         }
@@ -489,7 +491,7 @@ mod tests {
             n.ly = 0;
             n.lw = 3;
             n.lh = 1;
-            n.truncate = crate::tui::width::Truncate::None;
+            n.truncate = Truncate::None;
             n.lines = Some(vec!["toolong".to_string()]);
         }
         let mut buffer = ScreenBuffer::new(3, 1);

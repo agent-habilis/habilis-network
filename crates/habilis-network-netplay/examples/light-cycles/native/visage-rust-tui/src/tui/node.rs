@@ -14,6 +14,7 @@ use crate::tui::color::DEFAULT_COLOR;
 use crate::tui::width::{Truncate, Wrap};
 use crate::view::{Align, Border, Direction, Justify, Padding};
 
+use std::iter;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(u32);
 
@@ -254,7 +255,7 @@ impl Arena {
 
     /// Iterates `parent`'s children in order, front to back.
     pub fn children(&self, parent: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        std::iter::successors(self.get(parent).first_child, |id| self.get(*id).next)
+        iter::successors(self.get(parent).first_child, |id| self.get(*id).next)
     }
 }
 

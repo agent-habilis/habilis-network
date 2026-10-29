@@ -10,6 +10,7 @@ use std::rc::Rc;
 use crate::component::ComponentBox;
 use crate::tui::color::DEFAULT_COLOR;
 
+use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Direction {
     #[default]
@@ -134,8 +135,8 @@ pub enum View {
     Component(ComponentView),
 }
 
-impl std::fmt::Debug for ComponentView {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for ComponentView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ComponentView")
             .field("type_key", &self.type_key)
             .finish_non_exhaustive()

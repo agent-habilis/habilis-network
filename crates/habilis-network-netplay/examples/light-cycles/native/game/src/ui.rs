@@ -26,6 +26,8 @@ use crate::app::Snapshot;
 use crate::grid::{GRID_H, GRID_W};
 use crate::sim::Outcome;
 
+use crate::sim;
+use std::{fmt, mem};
 /// Named ANSI colors usable as a player color, in assignment order.
 /// `0` (black) and the near-background/foreground indices are skipped —
 /// indistinguishable from "empty" or the terminal's own default text on
@@ -84,8 +86,8 @@ impl Component for UiComponent {
     }
 }
 
-impl std::fmt::Debug for UiComponent {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for UiComponent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("UiComponent")
             .finish_non_exhaustive()
@@ -167,7 +169,7 @@ pub fn status_line(s: &Snapshot) -> String {
     if s.syncing {
         return "SYNCING".to_owned();
     }
-    match crate::sim::outcome(&s.world) {
+    match sim::outcome(&s.world) {
         Outcome::InProgress => String::new(),
         Outcome::Winner(i) => {
             format!(
@@ -338,7 +340,7 @@ fn flush_run(owner: Option<u8>, run: &mut String, spans: &mut Vec<View>) {
     if run.is_empty() {
         return;
     }
-    let text = View::text(std::mem::take(run));
+    let text = View::text(mem::take(run));
     spans.push(match owner {
         Some(o) if o > 0 => View::boxed(
             BoxProps {

@@ -16,6 +16,7 @@ use std::collections::HashSet;
 // No `Debug` derive: it would force a `H: Debug` bound onto every `Host`
 // backend for a trace nobody's asked for yet. Add one (manual, printing
 // the instance and node count) if a debugging need actually shows up.
+use std::mem;
 #[allow(missing_debug_implementations)]
 pub struct Runtime<H: Host> {
     host: H,
@@ -61,7 +62,7 @@ impl<H: Host> Runtime<H> {
         // `Mounted` has no `Default`/empty state to swap in temporarily,
         // so this exists to move it out of `&mut self` for `patch_dirty`'s
         // by-value signature without a placeholder allocation.
-        std::mem::replace(&mut self.mounted, Mounted::Hole(self.root))
+        mem::replace(&mut self.mounted, Mounted::Hole(self.root))
     }
 }
 
@@ -106,6 +107,9 @@ mod tests {
     use crate::tui::layout::LayoutState;
     use crate::view::{BoxProps, View};
 
+    use crate::component;
+    use crate::tui::paint;
+    use std::{cell, rc};
     struct Counter(Signal<i32>);
 
     impl Component for Counter {
@@ -164,7 +168,7 @@ mod tests {
     }
 
     struct Parent {
-        renders: std::rc::Rc<std::cell::RefCell<i32>>,
+        renders: rc::Rc<cell::RefCell<i32>>,
         child_count: Signal<i32>,
     }
 
@@ -236,11 +240,11 @@ mod tests {
         }
     }
 
-    fn child_component(count: Signal<i32>) -> crate::component::ComponentBox {
+    fn child_component(count: Signal<i32>) -> component::ComponentBox {
         Box::new(Child(count))
     }
 
-    fn row_text(buffer: &crate::tui::paint::ScreenBuffer) -> String {
+    fn row_text(buffer: &paint::ScreenBuffer) -> String {
         buffer
             .chars
             .iter()

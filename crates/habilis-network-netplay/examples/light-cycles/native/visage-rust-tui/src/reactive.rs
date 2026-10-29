@@ -16,6 +16,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use std::{fmt, mem};
 /// Identifies a [`Signal`] for dependency bookkeeping. Newtype-over-`u32`
 /// rather than an `Rc`-based identity: `Instance -> deps -> Signal -> subs ->
 /// Instance` is a reference cycle the original relies on JS's GC to collect.
@@ -137,8 +138,8 @@ pub struct Signal<T>(Rc<SignalInner<T>>);
 // print the value, which needs a borrow this type otherwise never exposes
 // by reference (`get`/`peek` both return owned clones). Printing the id is
 // enough to distinguish signals in a debug trace.
-impl<T> std::fmt::Debug for Signal<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<T> fmt::Debug for Signal<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Signal")
             .field("id", &self.0.id)
             .finish_non_exhaustive()
@@ -239,7 +240,7 @@ pub fn schedule_update(sub: SubscriberId) {
 pub fn take_queue() -> Vec<SubscriberId> {
     REGISTRY.with(|r| {
         r.queue_set.borrow_mut().clear();
-        std::mem::take(&mut *r.queue.borrow_mut())
+        mem::take(&mut *r.queue.borrow_mut())
     })
 }
 
