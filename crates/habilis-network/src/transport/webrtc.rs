@@ -1247,14 +1247,10 @@ mod tests {
         );
     }
 
-    /// The real join order: the graft is attempted *before* any session
-    /// exists — the gate holds the relayed connection for its deadline and
-    /// closes it — and only then does the session attach. The re-graft after
-    /// the refusal must still link; if a refused connection poisons later
-    /// dials to the same peer, this is the test that says so.
     /// An endpoint on the local relay, with its transports from `handle`. A browser-shaped one has
     /// no IP stack: without `clear_ip_transports`, localhost punches a UDP path inside the held
     /// connection and the gate passes on a path a tab could never have.
+    #[cfg(feature = "iroh-test-utils")]
     async fn bind_with_relay(
         relay_url: iroh::RelayUrl,
         key: SecretKey,
@@ -1277,6 +1273,11 @@ mod tests {
         builder.bind().await.expect("bind endpoint with relay")
     }
 
+    /// The real join order: the graft is attempted *before* any session
+    /// exists — the gate holds the relayed connection for its deadline and
+    /// closes it — and only then does the session attach. The re-graft after
+    /// the refusal must still link; if a refused connection poisons later
+    /// dials to the same peer, this is the test that says so.
     #[cfg(feature = "iroh-test-utils")]
     #[test]
     fn a_graft_recovers_after_a_refused_relay_attempt() {
