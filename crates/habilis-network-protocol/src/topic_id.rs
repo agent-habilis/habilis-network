@@ -11,6 +11,7 @@
 
 /// A gossip topic: the 32 bytes derived from a mesh's seed, name and config by
 /// `crypto::derive_topic_id`.
+///
 /// # Examples
 ///
 /// A topic keeps its 32 bytes, and the bytes come back unchanged.

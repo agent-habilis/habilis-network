@@ -58,6 +58,7 @@ struct Envelope {
 }
 
 /// Why a seal does not open, or a sealed body does not decode.
+///
 /// # Examples
 ///
 /// A blob opened with another key returns this error.
@@ -184,6 +185,7 @@ fn unseal(our_secret: &StaticSecret, sealed: &Sealed) -> Result<Vec<u8>, SealErr
 /// # Panics
 /// If `Envelope` fails to serialize. Its fields are `String`s and a version
 /// tag, so serialization cannot fail short of an allocator failure.
+///
 /// # Examples
 ///
 /// Only the holder of the matching secret can open the body.
@@ -217,6 +219,7 @@ pub fn seal_to_body(recipient_pub: &PublicKey, plaintext: &str) -> Result<Messag
 /// A [`SealError::Source`] when the body is not a sealed envelope or a field does
 /// not decode, [`SealError::UnsupportedVersion`] for another envelope version, or
 /// [`SealError::Failed`] when the seal does not open.
+///
 /// # Examples
 ///
 /// ```
@@ -266,6 +269,7 @@ fn decode_array<const N: usize>(encoded: &str) -> Result<[u8; N], SealError> {
 /// # Panics
 /// Never in practice: ChaCha20-Poly1305 encryption cannot fail for a valid
 /// key/nonce pair, and both are constructed here.
+///
 /// # Examples
 ///
 /// Every holder of the key can open the blob.
@@ -303,6 +307,7 @@ pub fn seal_symmetric(key: &SymmetricKey, plaintext: &[u8]) -> Vec<u8> {
 /// # Errors
 /// [`SealError::Failed`] when the blob is too short to carry a nonce, or the AEAD
 /// fails to authenticate (a wrong key or tampered bytes).
+///
 /// # Examples
 ///
 /// ```

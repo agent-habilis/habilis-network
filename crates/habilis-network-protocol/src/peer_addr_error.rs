@@ -14,6 +14,7 @@ use std::fmt;
 use iroh_base::{EndpointAddr, EndpointId, RelayUrl};
 
 /// Serialize an `EndpointAddr` to a JSON value for `PeerInfo` messages.
+///
 /// # Examples
 ///
 /// The JSON that this writes reads back to the same endpoint id.
@@ -38,6 +39,7 @@ pub fn endpoint_addr_to_json(address: &EndpointAddr) -> serde_json::Value {
 }
 
 /// Why a JSON value does not decode to an endpoint address.
+///
 /// # Examples
 ///
 /// JSON with no endpoint id returns this error.
@@ -86,6 +88,7 @@ impl Error for PeerAddrError {
 /// # Errors
 /// [`PeerAddrError::Missing`] when the JSON has no endpoint id, or
 /// [`PeerAddrError::Source`] when the id does not parse.
+///
 /// # Examples
 ///
 /// ```

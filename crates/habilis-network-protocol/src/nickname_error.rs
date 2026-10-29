@@ -14,6 +14,7 @@ use std::fmt;
 /// over-length nickname is rejected at `Message::parse` instead of reaching
 /// the surfaced display string (terminal-injection / `<nick>`/`#mesh`
 /// spoofing).
+///
 /// # Examples
 ///
 /// A nickname checks its text on the way in, and a random one always passes the check.
@@ -86,6 +87,7 @@ impl ::std::convert::From<&str> for Nickname {
 }
 
 /// Why a nickname was refused: its length, or a character outside the allowed set.
+///
 /// # Examples
 ///
 /// A rejected nickname returns an error that says why.

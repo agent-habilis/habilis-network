@@ -8,6 +8,7 @@ use super::derive;
 /// the invite root, and each key derived from them. Its bytes are wiped on
 /// drop, `Debug` prints no byte, and the type has no `PartialEq`: compare two
 /// with [`super::ct_eq`] on [`Self::as_bytes`].
+///
 /// # Examples
 ///
 /// A key derives a child key for each label, and the child differs from its parent.

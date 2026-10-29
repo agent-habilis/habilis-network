@@ -9,6 +9,7 @@ use super::derive;
 /// byte; unlike [`SymmetricKey`] it is `Copy` and comparable, because it is
 /// public material of the id and not a key. It is not wiped on drop: the id
 /// carries these bytes in plain text, so a wipe would protect nothing.
+///
 /// # Examples
 ///
 /// A seed holds 32 bytes, and each label derives its own key from it.

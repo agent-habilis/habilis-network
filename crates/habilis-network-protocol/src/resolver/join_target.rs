@@ -12,6 +12,7 @@ use crate::mesh::MeshIdError;
 /// target — it derives its own mesh through the topic path. Classified and
 /// validated **once**, at the boundary (clap `FromStr` / MCP entry), so
 /// `resolve` matches the variant instead of re-sniffing a `String`.
+///
 /// # Examples
 ///
 /// Text that is neither a mesh id nor an invite does not parse.

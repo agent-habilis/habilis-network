@@ -18,6 +18,7 @@ use sha2::Sha256;
 /// The double-SHA-256 checksum, truncated to its first 4 bytes.
 /// Why a Base58Check text does not decode. `what` names the text, for example
 /// `mesh identifier`.
+///
 /// # Examples
 ///
 /// A character outside the Base58 alphabet fails before the checksum is read.
@@ -61,6 +62,7 @@ fn checksum(bytes: &[u8]) -> [u8; 4] {
 }
 
 /// Encode `payload` with its checksum appended.
+///
 /// # Examples
 ///
 /// The text is the payload and a 4-byte checksum, in Base58.
@@ -89,6 +91,7 @@ pub fn encode(payload: &[u8]) -> String {
 /// [`Base58Error::Alphabet`] when `encoded` is not Base58, [`Base58Error::Short`]
 /// when it is too short to carry a checksum, or [`Base58Error::Checksum`] when the
 /// checksum does not match the payload.
+///
 /// # Examples
 ///
 /// A text with a changed character fails its checksum, so a mistyped id is an error.
@@ -121,6 +124,7 @@ pub fn decode(encoded: &str, what: &str) -> Result<Vec<u8>, Base58Error> {
 ///
 /// The cursor half of the same wire vocabulary: every ticket body here is a
 /// sequence of fixed-width fields read in order.
+///
 /// # Examples
 ///
 /// Each call reads the next fixed-width field and moves the cursor past it.

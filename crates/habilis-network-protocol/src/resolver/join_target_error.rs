@@ -11,6 +11,7 @@ use crate::mesh::MeshIdError;
 /// the trimmed input for exactly that.
 ///
 /// [`Unrecognized`]: JoinTargetError::Unrecognized
+///
 /// # Examples
 ///
 /// A rejected join target returns an error that says why.

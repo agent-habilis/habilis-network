@@ -29,6 +29,7 @@ use crate::{AuthorKey, DedupKey, SymmetricKey};
 /// A per-peer signing identity — just the secret key. The nickname
 /// it speaks under is carried by the message `author` field and bound to
 /// this key trust-on-first-use by receivers, so it is not stored here.
+///
 /// # Examples
 ///
 /// A fresh identity has a public key, and the key encodes to 64 hex characters.
@@ -138,6 +139,7 @@ pub(crate) fn dedup_key16(author: Option<&AuthorKey>, id_bytes: &[u8; 16]) -> De
 // inspectable and does not depend on iroh's serde representation.
 
 /// The public key as lowercase hex, 64 characters.
+///
 /// # Examples
 ///
 /// ```
@@ -160,6 +162,7 @@ pub(crate) fn decode_sig(hex: &str) -> Result<Signature> {
 }
 
 /// Lowercase hex of `bytes`, the spelling the wire uses for keys and signatures.
+///
 /// # Examples
 ///
 /// ```
@@ -177,6 +180,7 @@ pub fn encode_hex(bytes: &[u8]) -> String {
 ///
 /// # Errors
 /// The formatter fails.
+///
 /// # Examples
 ///
 /// A caller writes the hex of bytes into any formatter, such as a Display impl.
@@ -234,6 +238,7 @@ pub(crate) fn encode_lower_hex_32(bytes: &[u8; 32]) -> [u8; 64] {
 
 /// The bytes of a hex string, either case; `None` for odd length or a non-hex
 /// digit.
+///
 /// # Examples
 ///
 /// A text that is not hex decodes to None.

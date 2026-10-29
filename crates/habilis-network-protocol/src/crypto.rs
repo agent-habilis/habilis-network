@@ -47,6 +47,7 @@ pub use ticket_secret::TicketSecret;
 /// Constant-time equality for 32-byte auth tokens: XOR-fold the full pair so
 /// the cost never depends on where the first mismatch lies (a short-circuit
 /// `==` is a timing oracle on the secret).
+///
 /// # Examples
 ///
 /// Two tokens compare equal only when all 32 bytes match.
