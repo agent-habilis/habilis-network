@@ -231,15 +231,16 @@ impl Cell {
         reason = "the named variants are listed on purpose, so a new variant stays visible"
     )]
     fn allows(self, rung: Rung) -> bool {
-        match rung {
-            Rung::Ip => self.has(Transport::Udp),
-            Rung::WebRtc => self.has(Transport::WebRtc),
-            Rung::Multihop => self.has(Transport::Multihop),
-            Rung::Gossip => self.has(Transport::Gossip),
-            Rung::Relay => self.has(Transport::Relay),
-            Rung::Other => false,
-            _ => false,
-        }
+        let transport = match rung {
+            Rung::Ip => Some(Transport::Udp),
+            Rung::WebRtc => Some(Transport::WebRtc),
+            Rung::Multihop => Some(Transport::Multihop),
+            Rung::Gossip => Some(Transport::Gossip),
+            Rung::Relay => Some(Transport::Relay),
+            Rung::Other => None,
+            _ => None,
+        };
+        transport.is_some_and(|transport| self.has(transport))
     }
 
     /// The rung of the ladder, as a pure function: the highest rung that the
@@ -355,11 +356,9 @@ impl Member {
             .await
             .expect("the loop answers");
         let roster = serde_json::from_str::<serde_json::Value>(&json).ok()?;
-        roster["peers"]
-            .as_array()?
-            .iter()
-            .find(|entry| entry["nickname"] == peer)
-            .and_then(|entry| entry["transport"].as_str().map(str::to_owned))
+        let mut entries = roster["peers"].as_array()?.iter();
+        let found = entries.find(|entry| entry["nickname"] == peer);
+        found.and_then(|entry| entry["transport"].as_str().map(str::to_owned))
     }
 
     fn ports(&self) -> Vec<u16> {
@@ -973,12 +972,13 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_parks_a_frame() {
             }
             late = late.max(on_the_rung.elapsed());
         }
+        let first_parked = parked.first().map(|probe| probe.2.duration_since(started));
         eprintln!(
             "DIAG {NAME}: {} probes, {} sent while the lane read relay-only (first after {:?}), \
          the last one reached bob {:?} after the rung was first read",
             sent.len(),
             parked.len(),
-            parked.first().map(|probe| probe.2.duration_since(started)),
+            first_parked,
             late,
         );
         for member in [alice, bob, carol] {
@@ -2018,12 +2018,11 @@ fn the_cells_cover_every_valid_transport_list_and_no_other() {
         })
     };
     for mask in 1u8..16 {
-        let list: Vec<Transport> = all
+        let picked = all
             .iter()
             .enumerate()
-            .filter(|(bit, _)| mask >> bit & 1 == 1)
-            .map(|(_, transport)| *transport)
-            .collect();
+            .filter(|(bit, _)| mask >> bit & 1 == 1);
+        let list: Vec<Transport> = picked.map(|(_, transport)| *transport).collect();
         let valid = MeshConfig::resolve(&[Lookup::Relay], None, &list).is_ok();
         assert_eq!(in_cells(&list), valid, "the transport list {list:?}");
     }

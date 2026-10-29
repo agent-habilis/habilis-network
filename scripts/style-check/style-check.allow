@@ -37,10 +37,6 @@ long_chain|crates/habilis-network/tests/first_broadcast_after_join_loopback.rs|1
 long_chain|crates/habilis-network/tests/foreign_rung_loopback.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/tests/late_joiner_after_release_loopback.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/tests/mesh_transport_lists.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/tests/periodic_return_loopback.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/tests/relay_lookup_only_refusal.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/tests/resend_dedup_loopback.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/tests/send_ladder_matrix.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 
 
 # dyn_param: a public fn takes a trait object. Each row is a trait object that stays, with its reason.
