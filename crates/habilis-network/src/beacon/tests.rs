@@ -1,6 +1,7 @@
 use crate::protocol::mesh::LookupOpts;
 
 use iroh::Endpoint;
+use iroh::address_lookup::EndpointInfo;
 
 use super::{
     Contest, Rendezvous, RendezvousParams, RivalProbe, claim, dependents, probe_verdict,
@@ -1078,10 +1079,10 @@ async fn a_claim_leaves_the_endpoint_knowing_only_the_rung_it_bound() {
                 .expect("a free loopback port")
         })
         .collect();
-    let rungs: Vec<u16> = sockets
+    let addrs = sockets
         .iter()
-        .map(|socket| socket.local_addr().expect("its address").port())
-        .collect();
+        .map(|socket| socket.local_addr().expect("its address"));
+    let rungs: Vec<u16> = addrs.map(|address| address.port()).collect();
     drop(sockets);
     let mut params = public_params();
     params.bind_ports = rungs.clone();
@@ -1114,13 +1115,11 @@ async fn a_claim_leaves_the_endpoint_knowing_only_the_rung_it_bound() {
                 .collect()
         })
         .unwrap_or_default();
-    let booked: Vec<u16> = book
+    let entry = book
         .get_endpoint_info(params.id)
         .expect("an entry")
-        .into_endpoint_addr()
-        .ip_addrs()
-        .map(std::net::SocketAddr::port)
-        .collect();
+        .into_endpoint_addr();
+    let booked: Vec<u16> = entry.ip_addrs().map(std::net::SocketAddr::port).collect();
     if let Some(held) = beacon.take() {
         held.shed_and_wait().await;
     }
@@ -1150,10 +1149,10 @@ async fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
                 .expect("a free loopback port")
         })
         .collect();
-    let rungs: Vec<u16> = sockets
+    let addrs = sockets
         .iter()
-        .map(|socket| socket.local_addr().expect("its address").port())
-        .collect();
+        .map(|socket| socket.local_addr().expect("its address"));
+    let rungs: Vec<u16> = addrs.map(|address| address.port()).collect();
     drop(sockets);
     let mut params = public_params();
     params.bind_ports = rungs.clone();
@@ -1177,14 +1176,17 @@ async fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
     let mut rungs_watch = super::RungWatch::new(reports);
     for _ in 0..3 {
         super::refresh_holder_rung(&params, &member, &book, &mut rungs_watch).await;
-        let ours: bool = book
+        let held = book
             .get_endpoint_info(params.id)
-            .is_some_and(|info| info.into_endpoint_addr().ip_addrs().count() == 1)
-            && book.get_endpoint_info(params.id).is_some_and(|info| {
-                info.into_endpoint_addr()
-                    .ip_addrs()
-                    .all(|socket| socket.port() == rungs[on])
-            });
+            .map(EndpointInfo::into_endpoint_addr);
+        let single = held
+            .as_ref()
+            .is_some_and(|address| address.ip_addrs().count() == 1);
+        let on_rung = |socket: &std::net::SocketAddr| socket.port() == rungs[on];
+        let ours: bool = single
+            && held
+                .as_ref()
+                .is_some_and(|address| address.ip_addrs().all(on_rung));
         if ours {
             break;
         }
@@ -1196,13 +1198,11 @@ async fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
     }
     rungs_watch.finish().await;
 
-    let kept: Vec<u16> = book
+    let entry = book
         .get_endpoint_info(params.id)
         .expect("an entry")
-        .into_endpoint_addr()
-        .ip_addrs()
-        .map(std::net::SocketAddr::port)
-        .collect();
+        .into_endpoint_addr();
+    let kept: Vec<u16> = entry.ip_addrs().map(std::net::SocketAddr::port).collect();
     if let Some(held) = beacon.take() {
         held.shed_and_wait().await;
     }

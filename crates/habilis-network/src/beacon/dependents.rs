@@ -4,10 +4,8 @@ use iroh::EndpointId;
 /// attach to its beacon's answerer as well, and no other peer hangs off the beacon
 /// through them: counted, they made each split holder defer its shed for the full wait.
 pub(crate) fn foreign_sessions(live: &[EndpointId], own: &[EndpointId]) -> Vec<EndpointId> {
-    live.iter()
-        .copied()
-        .filter(|id| !own.contains(id))
-        .collect()
+    let remote = live.iter().copied().filter(|id| !own.contains(id));
+    remote.collect()
 }
 
 /// Who hangs off a beacon's data channel: the sessions on its answerer, the endpoints that
@@ -38,5 +36,6 @@ impl Dependents {
 }
 
 pub(crate) fn short_ids(ids: &[EndpointId]) -> Vec<String> {
-    ids.iter().map(|id| id.fmt_short().to_string()).collect()
+    let short = ids.iter().map(|id| id.fmt_short().to_string());
+    short.collect()
 }

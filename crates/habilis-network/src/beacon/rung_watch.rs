@@ -177,13 +177,17 @@ impl RungWatch {
         }
         let gap = heal_interval().saturating_mul(3);
         let silent_since: Option<Instant> = match report.answer {
-            ProbeAnswer::NoAnswer | ProbeAnswer::Refused => Some(
-                self.readings
+            ProbeAnswer::NoAnswer | ProbeAnswer::Refused => {
+                let reading = self
+                    .readings
                     .get(&report.port)
-                    .filter(|before| now.saturating_duration_since(before.read_at) < gap)
-                    .and_then(|before| before.silent_since)
-                    .unwrap_or(now),
-            ),
+                    .filter(|before| now.saturating_duration_since(before.read_at) < gap);
+                Some(
+                    reading
+                        .and_then(|before| before.silent_since)
+                        .unwrap_or(now),
+                )
+            }
             ProbeAnswer::Ours | ProbeAnswer::Foreign => None,
         };
         if report.answer == ProbeAnswer::Refused {

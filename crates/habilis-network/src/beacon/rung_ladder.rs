@@ -133,9 +133,8 @@ pub(crate) async fn admit_rung(
     peer_book: &memory::MemoryLookup,
     port: u16,
 ) {
-    let held: bool = peer_book
-        .get_endpoint_info(params.id)
-        .is_some_and(|info| info.ip_addrs().any(|socket| socket.port() == port));
+    let entry = peer_book.get_endpoint_info(params.id);
+    let held: bool = entry.is_some_and(|info| info.ip_addrs().any(|socket| socket.port() == port));
     if held {
         return;
     }
