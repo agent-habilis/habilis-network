@@ -6,6 +6,19 @@ use crate::daemon::setup::SetupKind;
 /// A resolved create/join, ready to hand to
 /// [`setup_mesh`](crate::daemon::setup::setup_mesh). `advertise_directory` is the
 /// directory to re-broadcast into (`create --advertise`), or `None`.
+///
+/// # Examples
+///
+/// A resolved request holds the mesh and the settings that a node starts with. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::membership::SetupError;
+/// use habilis_network::runtime::{Resolved, TopicParams};
+///
+/// # fn demo(params: TopicParams) -> Result<Resolved, SetupError> {
+/// params.resolve()
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Resolved {

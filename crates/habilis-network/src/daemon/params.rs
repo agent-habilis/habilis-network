@@ -34,6 +34,17 @@ pub use topic_params::TopicParams;
 /// parse-time usage error.)
 /// # Errors
 /// The topic string sanitizes to an empty mesh name.
+///
+/// # Examples
+///
+/// The same topic string always derives the same mesh.
+///
+/// ```
+/// use habilis_network::runtime::derive_topic_mesh;
+///
+/// let mesh = derive_topic_mesh("chat").expect("a topic mesh");
+/// assert_eq!(derive_topic_mesh("chat").expect("a topic mesh").to_string(), mesh.to_string());
+/// ```
 pub fn derive_topic_mesh(string: &str) -> Result<Mesh, SetupError> {
     // `--topic-mdns-only` (test-only): keep the mesh *public-shaped* (an
     // ephemeral, address-lookup-discoverable rendezvous — the beacon-claim
@@ -74,6 +85,17 @@ pub fn derive_topic_mesh(string: &str) -> Result<Mesh, SetupError> {
 ///
 /// # Errors
 /// The string is empty or whitespace.
+///
+/// # Examples
+///
+/// A topic mesh can be derived with the lookups the caller gives.
+///
+/// ```
+/// use habilis_network::protocol::mesh::LookupOpts;
+/// use habilis_network::runtime::derive_topic_mesh_with;
+///
+/// assert!(derive_topic_mesh_with("chat", LookupOpts::loopback()).is_ok());
+/// ```
 pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh, SetupError> {
     derive_topic_mesh_config(
         string,
@@ -89,6 +111,18 @@ pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh,
 /// # Errors
 /// The string is empty or whitespace, or `config` fails
 /// [`MeshConfig::validate`].
+///
+/// # Examples
+///
+/// A topic mesh can be derived with a whole config the caller gives.
+///
+/// ```
+/// use habilis_network::protocol::mesh::MeshConfig;
+/// use habilis_network::runtime::derive_topic_mesh_config;
+///
+/// let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback config");
+/// assert!(derive_topic_mesh_config("chat", config).is_ok());
+/// ```
 pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh, SetupError> {
     if string.trim().is_empty() {
         return Err(SetupError::EmptyTopic);

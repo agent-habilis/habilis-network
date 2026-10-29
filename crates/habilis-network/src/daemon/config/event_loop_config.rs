@@ -34,6 +34,19 @@ use iroh::address_lookup::memory;
 /// fields are crate-private both because most are `iroh` types the surface must
 /// not expose, and because three of them used to be patched in after
 /// construction — a window in which the value was knowingly wrong.
+///
+/// # Examples
+///
+/// An event loop config names the owner process and the author of the node. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::runtime::EventLoopConfig;
+///
+/// # fn demo(config: &EventLoopConfig) {
+/// let _owner = config.owner_pid();
+/// let _author = config.author();
+/// # }
+/// ```
 pub struct EventLoopConfig {
     pub(crate) topic: GossipTopic,
     /// The gossip frontend the topic was subscribed on. Held by the

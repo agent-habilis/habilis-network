@@ -8,6 +8,18 @@ use crate::daemon::setup::SetupKind;
 /// The topic intent: a mesh derived deterministically from a shared string,
 /// always public. Name + config are derived, not supplied — the string alone
 /// determines the mesh.
+///
+/// # Examples
+///
+/// A topic request derives the mesh from a string. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::runtime::TopicParams;
+///
+/// # fn demo(params: TopicParams) {
+/// let _ = params.resolve();
+/// # }
+/// ```
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct TopicParams {

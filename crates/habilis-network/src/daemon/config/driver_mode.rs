@@ -10,6 +10,17 @@ use crate::daemon::node::SignalHandling;
 /// combinations unrepresentable and let the loop *derive* both "exit the
 /// process on quit?" and "spawn the unix-socket listener?" instead of
 /// carrying them as independent, drift-prone bools.
+///
+/// # Examples
+///
+/// A command-line driver ends its loop when the command ends.
+///
+/// ```
+/// use habilis_network::runtime::DriverMode;
+///
+/// let mode = DriverMode::Cli;
+/// assert!(matches!(mode, DriverMode::Cli));
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum DriverMode {

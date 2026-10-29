@@ -9,6 +9,20 @@ use crate::resolver::{self, JoinTarget};
 use crate::daemon::setup::SetupKind;
 
 /// The join intent, before resolution.
+///
+/// # Examples
+///
+/// A join request names the target to join, and an optional nickname and password. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::protocol::JoinTarget;
+/// use habilis_network::runtime::JoinParams;
+///
+/// # fn demo(target: JoinTarget) {
+/// let params = JoinParams::new(target, None, None);
+/// let _ = params.resolve();
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct JoinParams {

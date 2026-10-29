@@ -6,6 +6,16 @@
 /// and can capture the member's own bootstrap dial → isolation; the
 /// policy plus the public probe-before-claim (`beacon::ensure`) keep
 /// that from happening.
+///
+/// # Examples
+///
+/// An eager policy and a never policy are different choices.
+///
+/// ```
+/// use habilis_network::runtime::CoHostPolicy;
+///
+/// assert_ne!(CoHostPolicy::Eager, CoHostPolicy::Never);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CoHostPolicy {

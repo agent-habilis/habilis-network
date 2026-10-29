@@ -10,6 +10,21 @@ use crate::daemon::setup::SetupKind;
 
 /// The create intent, before resolution. Each frontend builds this from its
 /// own input struct (the lookups are already resolved into `config`).
+///
+/// # Examples
+///
+/// A create request names the mesh, and it resolves when its advertising is allowed.
+///
+/// ```
+/// use habilis_network::protocol::MeshName;
+/// use habilis_network::protocol::mesh::{DirectorySelection, MeshConfig};
+/// use habilis_network::runtime::CreateParams;
+///
+/// let name = MeshName::try_new("chat").expect("a name");
+/// let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback config");
+/// let params = CreateParams::new(name, None, config, DirectorySelection::Unset);
+/// assert!(params.resolve().is_ok());
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CreateParams {
