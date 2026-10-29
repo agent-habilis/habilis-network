@@ -13,6 +13,15 @@ use crate::message::WireFrame;
 /// must not evict the anti-entropy history), so without this cache a lost
 /// gossip frame would make the whole body unrecoverable. Byte-budgeted with
 /// whole-group FIFO eviction — the bounded-everything discipline.
+///
+/// # Examples
+///
+/// It keeps the frames of recent groups for repair. It takes a `ShardGroup`, which is in the private shard module, so this is not compiled.
+///
+/// ```ignore
+/// let mut cache = ShardCache::default();
+/// cache.insert(group, frames);
+/// ```
 #[derive(Debug, Default)]
 pub struct ShardCache {
     groups: VecDeque<CachedGroup>,

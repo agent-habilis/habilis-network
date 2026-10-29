@@ -3,6 +3,16 @@
 use crate::message::Authored;
 
 /// What became of one ingested shard.
+///
+/// # Examples
+///
+/// A shard whose group is still incomplete is buffered.
+///
+/// ```
+/// use habilis_network_protocol::reassembly::ShardIngest;
+///
+/// assert!(matches!(ShardIngest::Buffered, ShardIngest::Buffered));
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ShardIngest {

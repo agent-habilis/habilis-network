@@ -17,6 +17,17 @@ use habilis_network_util::consts::{
 /// What one buffered shard costs against the byte budgets: its body plus the
 /// per-slot overhead (map nodes, keys, the shard-0 envelope clone), floored so
 /// a 1-byte crafted shard still pays for the ~KB of state it occupies.
+///
+/// # Examples
+///
+/// Every slot pays a floor charge, and a larger body pays more.
+///
+/// ```
+/// use habilis_network_protocol::reassembly::slot_charge;
+///
+/// assert!(slot_charge(0) > 0);
+/// assert!(slot_charge(4096) > slot_charge(1));
+/// ```
 #[must_use]
 pub fn slot_charge(body_len: usize) -> usize {
     (body_len + REASSEMBLY_SLOT_OVERHEAD_BYTES).max(REASSEMBLY_SLOT_MIN_CHARGE_BYTES)
@@ -68,6 +79,19 @@ type GroupKey = (AuthorKey, ShardGroup);
 /// bounded by **byte budgets** (per group, per author, global) plus a
 /// stale-group TTL instead of a shard-count cap. "Unbounded message size" is
 /// achieved by budgeted, evictable buffering, never an unbounded collection.
+///
+/// # Examples
+///
+/// A new store holds no group.
+///
+/// ```
+/// use std::time::Instant;
+///
+/// use habilis_network_protocol::reassembly::ReassemblyStore;
+///
+/// let mut store = ReassemblyStore::default();
+/// assert_eq!(store.sweep_stale(Instant::now()), 0);
+/// ```
 #[derive(Debug, Default)]
 pub struct ReassemblyStore {
     pub(super) groups: HashMap<GroupKey, PartialGroup>,
@@ -312,6 +336,34 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Auth
 #[must_use]
 /// # Panics
 /// If the envelope carries no shard header; callers only pass shard messages.
+///
+/// # Examples
+///
+/// It builds the logical message of a completed group. `ShardGroup` is in the private shard module, so this is not compiled.
+///
+/// ```ignore
+/// use habilis_network_protocol::identity::Identity;
+/// use habilis_network_protocol::message::{AppTag, BuildMsgParams, ChainCtx, MessageBody, build_msg_bytes};
+/// use habilis_network_protocol::mesh::MeshId;
+/// use habilis_network_protocol::Nickname;
+///
+/// use habilis_network_protocol::{Mesh, MeshConfig, MeshName, Seed};
+///
+/// let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
+/// let mesh = Mesh::try_new(Seed::new([4u8; 32]), MeshName::try_new("chat").expect("a name"), config)
+///     .expect("a mesh");
+///
+/// let id = MeshId::try_new(&mesh.to_string()).expect("a valid id");
+/// let identity = Identity::generate();
+/// let author = Nickname::try_new("alice").expect("a nickname");
+/// let tag = AppTag::try_new("chat").expect("a tag");
+/// let body = MessageBody::try_new("hello").expect("a body");
+/// let params = BuildMsgParams::new(tag, &id, &author, body, ChainCtx::genesis());
+/// let (_frame, verified) = build_msg_bytes(params, &identity).expect("a message builds");
+///
+/// // The ShardGroup of the shard header.
+/// let authored = synthesize_from(&verified, MessageBody::try_new("hello").expect("a body"), &group);
+/// ```
 pub fn synthesize_from(header: &Verified, body: MessageBody, group_id: &ShardGroup) -> Authored {
     let mut envelope = Message::clone(header);
     envelope.id =

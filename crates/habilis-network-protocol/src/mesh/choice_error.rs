@@ -5,6 +5,17 @@ use std::fmt;
 /// A name that is not one of a list's choices — a `lookup` or `transport`
 /// entry with a typo. Names the list and the choices, so the message stands
 /// on its own wherever it surfaces (a CLI, a JSON error, a C error slot).
+///
+/// # Examples
+///
+/// A name that is not one of the choices returns this error.
+///
+/// ```
+/// use habilis_network_protocol::mesh::Lookup;
+///
+/// let error = "bogus".parse::<Lookup>().unwrap_err();
+/// assert!(!error.to_string().is_empty());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
 pub struct ChoiceError {
