@@ -9,6 +9,17 @@ use zeroize::Zeroizing;
 /// so `Debug` prints no byte, and the type has no `PartialEq`: compare two with
 /// [`habilis_network::protocol::ct_eq`] on [`Self::as_bytes`]. Its bytes are wiped on drop (best-effort: a
 /// copy that a caller made from [`Self::as_bytes`] is not tracked).
+///
+/// # Examples
+///
+/// A stream secret keeps the bytes it was made from.
+///
+/// ```
+/// use habilis_network_stream::{SECRET_LEN, StreamSecret};
+///
+/// let secret = StreamSecret::from([3u8; SECRET_LEN]);
+/// assert_eq!(secret.as_bytes(), &[3u8; SECRET_LEN]);
+/// ```
 #[derive(Clone)]
 pub struct StreamSecret(pub(super) Zeroizing<[u8; SECRET_LEN]>);
 

@@ -8,6 +8,17 @@ use serde::Deserialize;
 ///
 /// `Deserialize` so a browser hands its constructor a plain object;
 /// `deny_unknown_fields` so a typo is an error, not a silent loopback node.
+///
+/// # Examples
+///
+/// The default options can be changed one value at a time.
+///
+/// ```
+/// use habilis_network_stream::StreamOpts;
+///
+/// let opts = StreamOpts::default().with_relay_urls(Vec::<String>::new());
+/// assert!(!format!("{opts:?}").is_empty());
+/// ```
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 #[non_exhaustive]

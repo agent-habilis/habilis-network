@@ -8,6 +8,17 @@ use crate::read::Refused;
 /// The source of a failed step. A lower layer's error goes in whole.
 type BoxedError = Box<dyn Error + Send + Sync>;
 /// Why a stream call failed.
+///
+/// # Examples
+///
+/// A stream on a node that has closed returns this error.
+///
+/// ```
+/// use habilis_network_stream::StreamError;
+///
+/// let error = StreamError::NodeClosed;
+/// assert!(matches!(error, StreamError::NodeClosed));
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]

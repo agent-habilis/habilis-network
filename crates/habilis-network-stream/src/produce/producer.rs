@@ -19,6 +19,22 @@ const DRAIN: Duration = Duration::from_secs(5);
 /// Dropped without [`close`](Self::close), the stream is abandoned: a consumer
 /// not yet attached is refused as unknown, and one already reading gets an
 /// error instead of an end of stream.
+///
+/// # Examples
+///
+/// A producer writes bytes to its stream, and it closes the stream when it is done. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_stream::{StreamError, StreamNode, StreamOpts};
+///
+/// # async fn demo(node: &StreamNode) -> Result<(), StreamError> {
+/// let mut producer = node.create().await;
+/// let hash = producer.hash().encode();
+/// producer.write(hash.as_bytes()).await?;
+/// producer.close().await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
 pub struct Producer {
     hash: StreamHash,

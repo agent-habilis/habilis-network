@@ -6,6 +6,17 @@ use std::fmt;
 /// The source of a failed step. A lower layer's error goes in whole.
 type BoxedError = Box<dyn Error + Send + Sync>;
 /// Why a stream hash token does not decode.
+///
+/// # Examples
+///
+/// A text that is not a stream hash returns this error.
+///
+/// ```
+/// use habilis_network_stream::{HashError, StreamHash};
+///
+/// let error: HashError = StreamHash::decode("not a hash").unwrap_err();
+/// assert!(!format!("{error:?}").is_empty());
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]

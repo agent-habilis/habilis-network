@@ -12,6 +12,22 @@ use crate::error::StreamError;
 const CHUNK: usize = 64 * 1024;
 
 /// One stream's reading end.
+///
+/// # Examples
+///
+/// A reader yields the bytes of a stream until the stream ends. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_stream::{StreamError, StreamHash, StreamNode};
+///
+/// # async fn demo(node: &StreamNode, hash: &StreamHash) -> Result<(), StreamError> {
+/// let mut reader = node.open(hash).await?;
+/// while let Some(chunk) = reader.read().await? {
+///     println!("{} bytes", chunk.len());
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
 pub struct Reader {
     connection: Connection,

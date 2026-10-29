@@ -7,6 +7,17 @@ use habilis_network::protocol::identity;
 
 /// The public id a producer files a stream under. It names the stream and
 /// opens nothing: [`super::StreamSecret`] does that.
+///
+/// # Examples
+///
+/// A stream id keeps the bytes it was made from.
+///
+/// ```
+/// use habilis_network_stream::{ID_LEN, StreamId};
+///
+/// let id = StreamId::from([7u8; ID_LEN]);
+/// assert_eq!(id.as_bytes(), &[7u8; ID_LEN]);
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StreamId([u8; ID_LEN]);
 

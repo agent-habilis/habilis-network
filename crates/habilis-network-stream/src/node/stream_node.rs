@@ -24,6 +24,23 @@ use crate::produce::{Producer, Registry, StreamAcceptor};
 use crate::read::{Reader, Refused};
 
 /// One endpoint serving and opening streams. It never joins a gossip mesh.
+///
+/// # Examples
+///
+/// A node binds an endpoint, and it creates the streams that it serves. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_stream::{StreamError, StreamNode, StreamOpts};
+///
+/// # async fn demo() -> Result<(), StreamError> {
+/// let node = StreamNode::bind(&StreamOpts::default()).await?;
+/// let mut producer = node.create().await;
+/// producer.write(b"hello").await?;
+/// producer.close().await?;
+/// node.close().await;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct StreamNode {
     pub(super) endpoint: Endpoint,

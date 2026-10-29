@@ -8,6 +8,16 @@ use crate::code;
 /// Why a producer would not, or no longer will, give this consumer its stream.
 /// Reached as [`crate::error::StreamError::Refused`], so a caller can tell a refusal from a
 /// lost link.
+///
+/// # Examples
+///
+/// Two refusals with different causes are different values.
+///
+/// ```
+/// use habilis_network_stream::Refused;
+///
+/// assert_ne!(Refused::Taken, Refused::AtCap);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Refused {
