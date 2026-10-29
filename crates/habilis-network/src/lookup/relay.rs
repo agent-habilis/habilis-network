@@ -88,6 +88,17 @@ static RENDEZVOUS_RELAY_LADDER_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| 
 /// first reachable rung (`select_bootstrap_rung`) — the beacon leg of
 /// `relay_mode` and `daemon::setup::register_rendezvous` must agree or
 /// the relay-direct bootstrap dial finds nothing.
+///
+/// # Examples
+///
+/// A disabled relay choice has no relay on its ladder.
+///
+/// ```
+/// use habilis_network::net::relay_ladder;
+/// use habilis_network::protocol::mesh::RelayChoice;
+///
+/// assert_eq!(relay_ladder(&RelayChoice::Disabled).count(), 0);
+/// ```
 #[expect(
     clippy::match_same_arms,
     reason = "the named variants are listed on purpose, so a new variant stays visible"
@@ -210,6 +221,21 @@ where
 /// rung's online status. Unlike `select_bootstrap_rung` this does **not**
 /// short-circuit at the first reachable rung — `doctor --mesh` shows the full
 /// ladder's health, not just the bootstrap pick.
+///
+/// # Examples
+///
+/// It probes each relay of a ladder and reports which ones answer. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use std::time::Duration;
+///
+/// use habilis_network::iroh::RelayUrl;
+/// use habilis_network::net::probe_ladder;
+///
+/// # async fn demo(ladder: &[RelayUrl]) -> usize {
+/// probe_ladder(ladder, Duration::from_secs(1)).await.count()
+/// # }
+/// ```
 pub async fn probe_ladder(
     ladder: &[RelayUrl],
     per_rung: Duration,

@@ -8,6 +8,18 @@ use iroh::EndpointId;
 /// caller acts on: the peer is at its direct-peer cap, or it is not yet a neighbor of
 /// the multihop underlay. [`EndpointError::Internal`] holds the other causes, which no
 /// caller acts on; it keeps their text and their chain.
+///
+/// # Examples
+///
+/// A peer at its direct-peer cap turns the offer away with this error. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::net::EndpointError;
+///
+/// # fn demo(error: &EndpointError) -> bool {
+/// matches!(error, EndpointError::CapRefused { .. })
+/// # }
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]

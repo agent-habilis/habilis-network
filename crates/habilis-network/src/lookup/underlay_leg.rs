@@ -17,6 +17,17 @@ use std::sync::atomic::Ordering;
 static UNDERLAY_LEG_OFF: atomic::AtomicBool = atomic::AtomicBool::new(false);
 
 /// Tests only: see `UNDERLAY_LEG_OFF`.
+///
+/// # Examples
+///
+/// It turns the underlay leg of the multihop transport off or back on.
+///
+/// ```
+/// use habilis_network::net::set_underlay_leg_off;
+///
+/// set_underlay_leg_off(true);
+/// set_underlay_leg_off(false);
+/// ```
 #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
 pub fn set_underlay_leg_off(
     // true turns the underlay leg off, false turns it back on

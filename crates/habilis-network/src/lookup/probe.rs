@@ -13,6 +13,21 @@ use iroh::{Endpoint, EndpointAddr};
 /// effect. `true` iff a connection was established within `timeout`
 /// (a foreign / dead / unreachable target yields `false`); callers
 /// wanting only the resolution side effect ignore the bool.
+///
+/// # Examples
+///
+/// It checks whether a peer answers a probe within the timeout. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use std::time::Duration;
+///
+/// use habilis_network::iroh::{Endpoint, EndpointAddr};
+/// use habilis_network::net::probe_connect;
+///
+/// # async fn demo(endpoint: &Endpoint, target: EndpointAddr) -> bool {
+/// probe_connect(endpoint, target, Duration::from_secs(1)).await
+/// # }
+/// ```
 pub async fn probe_connect(endpoint: &Endpoint, target: EndpointAddr, timeout: Duration) -> bool {
     super::probe_answer::probe_answer(endpoint, target, timeout).await
         == super::probe_answer::ProbeAnswer::Ours

@@ -7,6 +7,18 @@ use serde::Serialize;
 /// net-report fields are `Option` because the endpoint can bind locally even
 /// when no report completes (offline / slow): then only `node_id` /
 /// `local_addrs` are known and the rest stay `None`.
+///
+/// # Examples
+///
+/// A network capability names the node and the addresses that it can be reached at. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::net::NetworkCapability;
+///
+/// # fn demo(capability: NetworkCapability) -> String {
+/// capability.node_id
+/// # }
+/// ```
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct NetworkCapability {

@@ -11,6 +11,18 @@ use crate::protocol::mesh::TransportPolicy;
 /// per pair by ICE and iroh's own path selection.
 ///
 /// `Default` is "everything this target has".
+///
+/// # Examples
+///
+/// The transport options say which transports a node turns on. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::net::TransportOpts;
+///
+/// # fn demo(opts: TransportOpts) -> bool {
+/// opts.udp
+/// # }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,

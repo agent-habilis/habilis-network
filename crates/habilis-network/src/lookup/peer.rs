@@ -19,6 +19,20 @@ use crate::transport::PayloadPath;
 /// so call sites don't carry the rendezvous-only `None, None`.
 /// # Errors
 /// Binding the socket fails, or an address-lookup service cannot be wired.
+///
+/// # Examples
+///
+/// It builds the endpoint of a peer with the given lookups. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::iroh::Endpoint;
+/// use habilis_network::net::{EndpointError, build_peer_endpoint};
+/// use habilis_network::protocol::mesh::LookupOpts;
+///
+/// # async fn demo(lookups: &LookupOpts) -> Result<Endpoint, EndpointError> {
+/// build_peer_endpoint(lookups).await
+/// # }
+/// ```
 pub async fn build_peer_endpoint(lookups: &LookupOpts) -> Result<Endpoint, super::EndpointError> {
     super::build_endpoint(
         lookups,
@@ -33,6 +47,19 @@ pub async fn build_peer_endpoint(lookups: &LookupOpts) -> Result<Endpoint, super
 /// The multi-hop handle configuration this engine uses for a mesh: whether the
 /// relay may carry cells is the mesh's `relay` rule, the other numbers are the
 /// engine's. A caller that builds its own handle to inject uses this.
+///
+/// # Examples
+///
+/// It builds the configuration of the multihop handle for a payload path. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::net::direct::PayloadPath;
+/// use habilis_network::net::multihop_handle_config;
+///
+/// # fn demo(relay: PayloadPath) {
+/// let _config = multihop_handle_config(relay);
+/// # }
+/// ```
 #[cfg(feature = "multihop")]
 #[must_use]
 pub fn multihop_handle_config(
@@ -136,6 +163,20 @@ pub(crate) fn check_injected_against_mesh(
 ///
 /// # Errors
 /// Returns an error if the endpoint fails to bind.
+///
+/// # Examples
+///
+/// It builds the WebRTC transport of a peer with the given lookups and options. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::net::TransportOpts;
+/// use habilis_network::net::direct::build_peer_webrtc;
+/// use habilis_network::protocol::mesh::LookupOpts;
+///
+/// # async fn demo(lookups: &LookupOpts, options: TransportOpts) {
+/// let _ = build_peer_webrtc(lookups, options).await;
+/// # }
+/// ```
 pub async fn build_peer_webrtc(
     lookups: &LookupOpts,
     options: super::TransportOpts,

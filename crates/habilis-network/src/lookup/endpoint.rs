@@ -97,6 +97,20 @@ pub(crate) fn quic_limits() -> iroh::endpoint::QuicTransportConfig {
 
 /// # Errors
 /// Returns an error if the inputs are invalid or the operation fails.
+///
+/// # Examples
+///
+/// It builds an endpoint with the lookups and the transports that a node asks for. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::net::{EndpointError, TransportHandles, build_endpoint};
+/// use habilis_network::iroh::Endpoint;
+/// use habilis_network::protocol::mesh::LookupOpts;
+///
+/// # async fn demo(lookups: &LookupOpts, transports: TransportHandles) -> Result<Endpoint, EndpointError> {
+/// build_endpoint(lookups, None, None, Vec::new(), transports).await
+/// # }
+/// ```
 pub async fn build_endpoint(
     lookups: &LookupOpts,
     secret_key: Option<SecretKey>,

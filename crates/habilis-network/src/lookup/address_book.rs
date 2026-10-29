@@ -12,6 +12,19 @@ use iroh::{Endpoint, EndpointAddr};
 ///
 /// An endpoint that exposes no lookup services gets a book that nothing reads, as a call of
 /// `add_peer_addr` used to fail and be ignored.
+///
+/// # Examples
+///
+/// It makes the address book of an endpoint, which keeps the addresses of its peers. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::iroh::Endpoint;
+/// use habilis_network::net::address_book;
+///
+/// # fn demo(endpoint: &Endpoint) {
+/// let _book = address_book(endpoint);
+/// # }
+/// ```
 pub fn address_book(endpoint: &Endpoint) -> MemoryLookup {
     let book = MemoryLookup::new();
     match endpoint.address_lookup() {
@@ -25,6 +38,20 @@ pub fn address_book(endpoint: &Endpoint) -> MemoryLookup {
 
 /// Register a peer's address in the address book of the endpoint, so that the endpoint can
 /// connect to it by its id. The book is made by [`address_book`].
+///
+/// # Examples
+///
+/// It adds the addresses of a peer to the address book, so the endpoint can dial it. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::iroh::{Endpoint, EndpointAddr};
+/// use habilis_network::net::{add_peer_addr, address_book};
+///
+/// # fn demo(endpoint: &Endpoint, address: EndpointAddr) {
+/// let book = address_book(endpoint);
+/// add_peer_addr(&book, address);
+/// # }
+/// ```
 pub fn add_peer_addr(book: &MemoryLookup, address: EndpointAddr) {
     let node = address.id.fmt_short();
     let ip_addrs: Vec<_> = address.ip_addrs().copied().collect();

@@ -23,6 +23,18 @@ use super::transport_opts::TransportOpts;
 /// transport is independently optional, and several are host-only (they own
 /// UDP sockets), so the field list itself differs per target. `Default` is
 /// "IP and relay only".
+///
+/// # Examples
+///
+/// The transport handles are the handles to each transport that a node builds its endpoint from. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::net::TransportHandles;
+///
+/// # fn demo(handles: TransportHandles) {
+/// let _ = handles;
+/// # }
+/// ```
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct TransportHandles {
