@@ -61,20 +61,19 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl, max_peers: usize) -> Self {
-        Self::open(
-            &membership::JoinOptions::default()
-                .with_nick(Some(nick.to_owned()))
-                .with_lookup(vec![Lookup::Relay])
-                .with_transport(vec![
-                    Transport::Udp,
-                    Transport::WebRtc,
-                    Transport::Multihop,
-                    Transport::Relay,
-                ])
-                .with_relay_urls(vec![relay.to_string()])
-                .with_max_peers(max_peers),
-        )
-        .await
+        let options = membership::JoinOptions::default()
+            .with_nick(Some(nick.to_owned()))
+            .with_lookup(vec![Lookup::Relay]);
+        let options = options
+            .with_transport(vec![
+                Transport::Udp,
+                Transport::WebRtc,
+                Transport::Multihop,
+                Transport::Relay,
+            ])
+            .with_relay_urls(vec![relay.to_string()])
+            .with_max_peers(max_peers);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self, max_peers: usize) -> Self {
@@ -94,12 +93,11 @@ impl Member {
             .await
             .unwrap_or_default();
         let roster: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
-        roster["peers"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
+        let peers = roster["peers"].as_array().cloned().unwrap_or_default();
+        let direct = peers
             .iter()
-            .filter(|peer| peer["reach"].as_str() == Some("direct"))
+            .filter(|peer| peer["reach"].as_str() == Some("direct"));
+        direct
             .filter_map(|peer| peer["nickname"].as_str().map(str::to_owned))
             .collect()
     }

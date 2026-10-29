@@ -257,10 +257,8 @@ impl NodeApp for Chat {
         _ctx: &HandlerCtx<'_>,
     ) -> bool {
         if frame.surfaceable {
-            self.received
-                .lock()
-                .expect("no poison")
-                .push(frame.message.body.as_str().to_owned());
+            let text = frame.message.body.as_str().to_owned();
+            self.received.lock().expect("no poison").push(text);
         }
         true
     }

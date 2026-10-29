@@ -43,14 +43,14 @@ async fn roster(member: &Membership) -> Vec<String> {
         .request(|reply| Request::Peers { reply })
         .await
         .unwrap_or_default();
-    serde_json::from_str::<serde_json::Value>(&json)
-        .ok()
+    let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
+    roster
         .and_then(|roster| {
             roster["peers"].as_array().map(|peers| {
-                peers
+                let live = peers
                     .iter()
-                    .filter(|peer| peer["quiet"] != serde_json::Value::Bool(true))
-                    .filter_map(|peer| peer["nickname"].as_str().map(str::to_owned))
+                    .filter(|peer| peer["quiet"] != serde_json::Value::Bool(true));
+                live.filter_map(|peer| peer["nickname"].as_str().map(str::to_owned))
                     .collect()
             })
         })
@@ -65,10 +65,9 @@ fn members_released_with_enough_links() -> usize {
         .lines()
         .filter(|line| line.contains("released the rendezvous"))
         .filter(|line| {
-            line.split("links=")
-                .nth(1)
-                .and_then(|rest| rest.split_whitespace().next())
-                .and_then(|count| -> Option<usize> { count.parse().ok() })
+            let field = line.split("links=").nth(1);
+            let word = field.and_then(|rest| rest.split_whitespace().next());
+            word.and_then(|count| -> Option<usize> { count.parse().ok() })
                 .is_some_and(|count| count >= RELEASE_LINKS)
         })
         .filter_map(|line| line.split("local=").nth(1)?.split_whitespace().next())

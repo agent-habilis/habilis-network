@@ -37,11 +37,14 @@ fn fresh_seed() -> Seed {
 /// A listener on `port` that serves one ALPN, so it answers a gossip dial with a TLS alert. It is a
 /// plain accept loop: an iroh `Router` would log every failed accept as a warning of its own.
 async fn foreign_on(port: u16) -> (Endpoint, tokio::task::JoinHandle<()>) {
-    let endpoint: Endpoint = Endpoint::builder(presets::Minimal)
+    let builder = Endpoint::builder(presets::Minimal)
         .alpns(vec![b"foreign".to_vec()])
-        .clear_ip_transports()
-        .bind_addr(format!("127.0.0.1:{port}").as_str())
-        .expect("a valid address")
+        .clear_ip_transports();
+    let address = format!("127.0.0.1:{port}");
+    let bound = builder
+        .bind_addr(address.as_str())
+        .expect("a valid address");
+    let endpoint: Endpoint = bound
         .bind()
         .await
         .expect("bind the foreign endpoint on the rung");
@@ -61,8 +64,8 @@ async fn roster_len(member: &Membership) -> usize {
         .request(|reply| Request::Peers { reply })
         .await
         .unwrap_or_default();
-    serde_json::from_str::<serde_json::Value>(&json)
-        .ok()
+    let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
+    roster
         .and_then(|roster| roster["peers"].as_array().map(Vec::len))
         .unwrap_or(0)
 }

@@ -337,12 +337,12 @@ fn a_udp_and_webrtc_mesh_races_and_keeps_no_session_once_udp_wins() {
         // round to end one way or the other.
         let raced = eventually(Duration::from_secs(30), || {
             let logs = logs();
+            let offers = logs.matches("webrtc session attached (offerer)").count();
+            let wins = logs
+                .matches("udp won the race; webrtc session detached")
+                .count();
             logs.contains("udp already selected")
-                || logs.matches("webrtc session attached (offerer)").count()
-                    == logs
-                        .matches("udp won the race; webrtc session detached")
-                        .count()
-                    && logs.contains("webrtc session attached (offerer)")
+                || offers == wins && logs.contains("webrtc session attached (offerer)")
         })
         .await;
 
