@@ -256,7 +256,7 @@ pub fn is_blocked_to(
     remote: Option<std::net::SocketAddr>,
     remote_id: Option<iroh::EndpointId>,
 ) -> bool {
-    let rung_blocked = RUNGS_BLOCKED
+    let rung_blocked: bool = RUNGS_BLOCKED
         .lock()
         .expect("rung blocks")
         .as_ref()
