@@ -72,6 +72,17 @@ pub use handle_error::HandleError;
 pub use route::{Route, RouteHop};
 
 /// What the data path of a node counted: a test reads them to tell where cells go.
+///
+/// # Examples
+///
+/// New counters start at zero.
+///
+/// ```
+/// use habilis_network_iroh_multihop_transport::MultihopCounters;
+///
+/// let counters = MultihopCounters::default();
+/// assert_eq!(counters.forwarded, 0);
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MultihopCounters {
@@ -107,6 +118,18 @@ pub use habilis_network_iroh_transport_util::MULTIHOP_TRANSPORT_ID;
 /// underlay id across restarts, and no two peers share one. The link-vector the
 /// peer advertises names this id and is signed by `app`, which is what binds the
 /// underlay to the peer for everyone else.
+///
+/// # Examples
+///
+/// The underlay key is derived from the application key, and it differs from it.
+///
+/// ```
+/// use habilis_network_iroh_multihop_transport::underlay_secret;
+/// use iroh_base::SecretKey;
+///
+/// let app = SecretKey::from_bytes(&[1u8; 32]);
+/// assert_ne!(underlay_secret(&app).public(), app.public());
+/// ```
 #[must_use]
 pub fn underlay_secret(app: &SecretKey) -> SecretKey {
     SecretKey::from_bytes(&blake3::derive_key(UNDERLAY_KEY_DOMAIN, &app.to_bytes()))
@@ -127,6 +150,17 @@ pub const BROWSER_HOP_FACTOR: u32 = 10;
 /// How a [`MultihopHandle`] behaves. The mesh policy and the caller decide it;
 /// an endpoint that is injected into a mesh must be built with the values that
 /// mesh's policy implies (see `InjectedEndpoint::bind` in the engine).
+///
+/// # Examples
+///
+/// By default the relay does not carry payload.
+///
+/// ```
+/// use habilis_network_iroh_multihop_transport::HandleConfig;
+///
+/// let config = HandleConfig::default();
+/// assert!(!config.relay_payload);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HandleConfig {
@@ -218,6 +252,14 @@ impl HandleConfig {
 /// as our hop identity in every cell we originate, and it signs the link-vectors
 /// we advertise. The handle therefore **holds that key**, and so does every clone
 /// of it. Its `Debug` output shows no key material.
+///
+/// # Examples
+///
+/// A handle runs on a live endpoint, so this is not compiled.
+///
+/// ```ignore
+/// let handle = MultihopHandle::bind(endpoint, config).await?;
+/// ```
 #[derive(Clone, Debug)]
 pub struct MultihopHandle {
     // every clone of the handle shares one inner state
@@ -634,6 +676,18 @@ impl MultihopHandle {
 /// (`habilis-network-iroh-transport-util`'s tables) needs a selector that reads
 /// them. The handle does not exist yet when the underlay is built, hence a free
 /// function. For `Builder::path_selector`.
+///
+/// # Examples
+///
+/// It builds a path selector for one underlay endpoint.
+///
+/// ```
+/// use habilis_network_iroh_multihop_transport::{UnderlayId, underlay_path_selector};
+/// use iroh_base::SecretKey;
+///
+/// let id = SecretKey::from_bytes(&[1u8; 32]).public();
+/// let _selector = underlay_path_selector(UnderlayId::new(id));
+/// ```
 #[must_use]
 // trait object: the endpoint builder takes the selector by Arc
 pub fn underlay_path_selector(underlay_id: UnderlayId) -> Arc<dyn PathSelector> {

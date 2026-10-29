@@ -23,6 +23,14 @@ pub(crate) struct Graph {
 ///
 /// One struct for the pair, because both are an `AppId` and a call that swaps
 /// them compiles and routes the wrong way.
+///
+/// # Examples
+///
+/// A Leg is built by the routing code, and a caller outside the crate cannot build one, so this is not compiled.
+///
+/// ```ignore
+/// let leg = Leg { src, dst };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Leg {

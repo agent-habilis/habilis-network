@@ -52,6 +52,18 @@ impl fmt::Display for AppId {
 }
 
 /// The id of the underlay endpoint of a node.
+///
+/// # Examples
+///
+/// An underlay id keeps the endpoint id it was made from.
+///
+/// ```
+/// use habilis_network_iroh_multihop_transport::UnderlayId;
+/// use iroh_base::SecretKey;
+///
+/// let id = SecretKey::from_bytes(&[1u8; 32]).public();
+/// assert_eq!(UnderlayId::new(id).get(), id);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct UnderlayId(EndpointId);

@@ -9,6 +9,17 @@
 /// [`LinkMetric::INFINITE`] marks an unusable link, and any path crossing one
 /// is itself unusable. Addition **saturates** so an unusable path can never wrap
 /// around to a cheap one.
+///
+/// # Examples
+///
+/// A link metric keeps its cost, and every cost is below the infinite cost.
+///
+/// ```
+/// use habilis_network_iroh_multihop_transport::LinkMetric;
+///
+/// assert_eq!(LinkMetric::new(5).get(), 5);
+/// assert!(LinkMetric::new(5) < LinkMetric::INFINITE);
+/// ```
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]

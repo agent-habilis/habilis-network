@@ -3,6 +3,16 @@
 use std::fmt;
 
 /// Why a multihop handle could not be built over its underlay.
+///
+/// # Examples
+///
+/// The two handle errors name two different faults.
+///
+/// ```
+/// use habilis_network_iroh_multihop_transport::HandleError;
+///
+/// assert_ne!(HandleError::ForwarderAlpn, HandleError::UnderlayKey);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[must_use]

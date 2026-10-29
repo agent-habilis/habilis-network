@@ -32,6 +32,16 @@ pub(crate) const MAX_ROUTE_HOPS: usize = 8;
 /// One hop in a source route: which node it is (its [`AppId`])
 /// and which multihop **underlay** endpoint carries its cells. Two ids, 64 bytes,
 /// and no address: see the module note.
+///
+/// # Examples
+///
+/// The routing code builds a hop, and a caller outside the crate cannot build one, so this is not compiled.
+///
+/// ```ignore
+/// for hop in route.hops() {
+///     println!("{:?}", hop);
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy)]
 pub struct RouteHop {
     pub(crate) app_id: AppId,
@@ -47,6 +57,14 @@ pub struct RouteHop {
 /// visits each node once. That last property is what stops a relay being used as
 /// an amplifier: a route cannot revisit a hop, so no node forwards a given cell
 /// more than once.
+///
+/// # Examples
+///
+/// The topology builds a route from a Leg, which a caller outside the crate cannot build, so this is not compiled.
+///
+/// ```ignore
+/// let routes: Vec<Route> = topology.route_to(leg, 2).collect();
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Route(Vec<RouteHop>);
 

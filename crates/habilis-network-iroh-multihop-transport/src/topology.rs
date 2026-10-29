@@ -44,6 +44,19 @@ const LINK_VECTOR_DOMAIN: &[u8] = b"habilis-network-iroh-multihop-transport link
 /// Signed by the origin's own key. The `origin` field is the verifying key, so
 /// the proof needs nothing else: a node cannot advertise an underlay address, or
 /// a link, in another peer's name.
+///
+/// # Examples
+///
+/// A link vector is signed by its origin, and its origin is the key that signed it.
+///
+/// ```
+/// use habilis_network_iroh_multihop_transport::{AppId, LinkVector};
+/// use iroh_base::{EndpointAddr, SecretKey};
+///
+/// let secret = SecretKey::from_bytes(&[1u8; 32]);
+/// let vector = LinkVector::signed(&secret, 1, EndpointAddr::new(secret.public()), Vec::new());
+/// assert_eq!(vector.origin(), AppId::new(secret.public()));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkVector {
     pub(crate) origin: AppId,
@@ -113,6 +126,22 @@ impl LinkVector {
 
 /// The received link-vectors, kept freshest-per-origin — the routing table's raw
 /// material. [`route_to`](Topology::route_to) folds them into the graph on demand.
+///
+/// # Examples
+///
+/// A topology accepts a signed link vector from a member.
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use habilis_network_iroh_multihop_transport::{LinkVector, Topology};
+/// use iroh_base::{EndpointAddr, SecretKey};
+///
+/// let secret = SecretKey::from_bytes(&[1u8; 32]);
+/// let vector = LinkVector::signed(&secret, 1, EndpointAddr::new(secret.public()), Vec::new());
+/// let mut topology = Topology::with_max_age(Duration::from_secs(60));
+/// assert!(topology.ingest_at(vector, tokio::time::Instant::now(), 1));
+/// ```
 #[derive(Debug)]
 pub struct Topology {
     vectors: HashMap<AppId, Held>,
@@ -383,6 +412,22 @@ impl Topology {
 
 /// A node's-eye view of the routing graph, ready to serialize to JSON for the
 /// `topology` IPC query.
+///
+/// # Examples
+///
+/// A view of the topology serializes for a caller that prints it.
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use habilis_network_iroh_multihop_transport::{AppId, Topology};
+/// use iroh_base::SecretKey;
+///
+/// let topology = Topology::with_max_age(Duration::from_secs(60));
+/// let view = topology.view(AppId::new(SecretKey::from_bytes(&[1u8; 32]).public()));
+/// fn assert_serialize<T: serde::Serialize>(_: &T) {}
+/// assert_serialize(&view);
+/// ```
 #[derive(Debug, Clone, serde::Serialize)]
 #[non_exhaustive]
 pub struct TopologyView {
@@ -393,6 +438,14 @@ pub struct TopologyView {
 }
 
 /// One directed, metric-labelled edge in a [`TopologyView`].
+///
+/// # Examples
+///
+/// The topology view builds an edge, and a caller outside the crate has no other way to make one, so this is not compiled.
+///
+/// ```ignore
+/// let edges = view.edges;
+/// ```
 #[derive(Debug, Clone, serde::Serialize)]
 #[non_exhaustive]
 pub struct TopologyEdge {
