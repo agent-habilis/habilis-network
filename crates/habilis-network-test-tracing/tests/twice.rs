@@ -16,9 +16,8 @@ fn a_second_live_guard_on_one_thread_panics() {
                 let _first = habilis_network_test_tracing::init();
                 let _second = habilis_network_test_tracing::init();
             }));
-            let message = outcome
-                .err()
-                .and_then(|err| err.downcast_ref::<String>().cloned());
+            let failure = outcome.err();
+            let message = failure.and_then(|err| err.downcast_ref::<String>().cloned());
             let _: Result<(), _> = done.send(message);
         })
         .expect("spawn");

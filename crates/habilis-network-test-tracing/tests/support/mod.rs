@@ -12,11 +12,11 @@ pub(crate) fn without_rust_log(name: &str, body: impl FnOnce()) {
         return;
     }
     let exe = std::env::current_exe().expect("the path of the test binary");
-    let child = Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .args(["--exact", name, "--test-threads=1"])
-        .env_remove("RUST_LOG")
-        .output()
-        .expect("the child test process starts");
+        .env_remove("RUST_LOG");
+    let child = command.output().expect("the child test process starts");
     assert!(
         child.status.success(),
         "{name} failed without RUST_LOG:\n{}\n{}",

@@ -216,11 +216,9 @@ async fn finish<Reply>(output: Reply) -> Reply {
 /// Panics if the runtime cannot be built.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run<F: Future>(guard: Guard, future: F) -> F::Output {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .thread_name(worker_name())
-        .enable_all()
-        .build()
-        .expect("runtime");
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    builder.thread_name(worker_name()).enable_all();
+    let runtime = builder.build().expect("runtime");
     let output = runtime.block_on(async { finish(future.await).await });
     drop(runtime);
     drop(guard);
