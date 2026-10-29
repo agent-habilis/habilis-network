@@ -223,10 +223,10 @@ impl MeshName {
 #[cfg(test)]
 mod tests {
     use super::{MeshName, identifier};
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn sanitize_topic_passes_through_and_keeps_case() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             MeshName::sanitize_topic("habilis-network").as_str(),
             "habilis-network",
@@ -241,6 +241,7 @@ mod tests {
 
     #[test]
     fn url_scheme_stripped_and_slashes_kept() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The scheme is stripped and the `/`s kept; this URL also exceeds the
         // 32-char name cap, so the tail truncates to `…` (see `MAX_CHARS`).
         assert_eq!(
@@ -263,6 +264,7 @@ mod tests {
 
     #[test]
     fn http_url_drops_query_and_fragment() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             MeshName::sanitize_topic(
                 "https://github.com/example-org/example-project?tab=readme#install"
@@ -303,6 +305,7 @@ mod tests {
 
     #[test]
     fn forbidden_runs_collapse_to_single_dash() {
+        let _guard = ::habilis_network_test_tracing::init();
         // whitespace, `#`, `<>`, and control collapse to one `-`; leading and
         // trailing suppressed. `/` is NOT forbidden and survives verbatim.
         assert_eq!(
@@ -329,6 +332,7 @@ mod tests {
 
     #[test]
     fn overlong_name_truncates_with_ellipsis() {
+        let _guard = ::habilis_network_test_tracing::init();
         let name = MeshName::sanitize_topic(&"x".repeat(100));
         assert_eq!(
             name.as_str().chars().count(),
@@ -342,6 +346,7 @@ mod tests {
 
     #[test]
     fn empty_after_filtering_falls_back_to_topic() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             MeshName::sanitize_topic("###  <>").as_str(),
             "topic",
@@ -356,6 +361,7 @@ mod tests {
 
     #[test]
     fn all_url_rfc_chars_except_hash_are_valid_names() {
+        let _guard = ::habilis_network_test_tracing::init();
         // RFC 3986 sub/gen-delims + unreserved punctuation, minus `#`.
         // (Letters/digits are obviously valid.)
         let url_specials = "-._~:/?[]@!$&'()*+,;=%";

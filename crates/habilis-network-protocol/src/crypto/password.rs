@@ -133,7 +133,6 @@ mod password_tests {
     use super::derive;
 
     use crate::crypto::{Password, Seed, password_verifier, stretch_mesh_password};
-    use habilis_network_test_tracing::test;
 
     const SEED_A: [u8; 32] = [7u8; 32];
     const SEED_B: [u8; 32] = [9u8; 32];
@@ -144,6 +143,7 @@ mod password_tests {
 
     #[test]
     fn stretch_is_deterministic_and_separates_by_password_and_seed() {
+        let _guard = ::habilis_network_test_tracing::init();
         let seed_a = Seed::new(SEED_A);
         let seed_b = Seed::new(SEED_B);
         let key = stretch_mesh_password(&pw("hunter2"), &seed_a);
@@ -169,6 +169,7 @@ mod password_tests {
 
     #[test]
     fn verifier_is_not_the_key_and_not_a_topic_or_rendezvous_input() {
+        let _guard = ::habilis_network_test_tracing::init();
         let key = stretch_mesh_password(&pw("hunter2"), &Seed::new(SEED_A));
         let verifier = password_verifier(&key);
         assert_ne!(
@@ -185,6 +186,7 @@ mod password_tests {
 
     #[test]
     fn password_never_leaks_through_debug_or_display() {
+        let _guard = ::habilis_network_test_tracing::init();
         let secret = pw("hunter2");
         assert_eq!(
             format!("{secret:?}"),
@@ -200,6 +202,7 @@ mod password_tests {
 
     #[test]
     fn channel_keys_are_domain_separated() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The state/meta/broadcast content keys are all derived from the same
         // stretched mesh key but must never collide.
         let mesh_key = stretch_mesh_password(&pw("hunter2"), &Seed::new(SEED_A));
@@ -219,6 +222,7 @@ mod password_tests {
     #[test]
     fn derive_token_matches_the_golden_bytes() {
         use crate::crypto::{TicketAuth, TicketSecret};
+        let _guard = ::habilis_network_test_tracing::init();
         let secret = TicketSecret::from([3u8; 32]);
         let auth = TicketAuth::derive(&secret, Some(&pw("hunter2")), b"blob-ticket");
         assert!(
@@ -243,6 +247,7 @@ mod password_tests {
         use crate::crypto::{SymmetricKey, TicketSecret};
         use zeroize::Zeroizing;
 
+        let _guard = ::habilis_network_test_tracing::init();
         let stretched: Zeroizing<[u8; 32]> =
             super::stretch_password(&pw("hunter2"), &SEED_A, b"password");
         assert_ne!(*stretched, [0u8; 32], "the stretch fills the buffer");
@@ -271,6 +276,7 @@ mod password_tests {
     #[test]
     fn ticket_secret_debug_never_prints_a_byte() {
         use crate::crypto::TicketSecret;
+        let _guard = ::habilis_network_test_tracing::init();
         let secret = TicketSecret::from([9u8; 32]);
         assert_eq!(
             format!("{secret:?}"),
@@ -293,6 +299,7 @@ mod password_tests {
     fn the_secret_types_hold_their_bytes_in_a_zeroizing_buffer() {
         use zeroize::Zeroizing;
 
+        let _guard = ::habilis_network_test_tracing::init();
         let _: &Zeroizing<[u8; 32]> = &crate::crypto::TicketSecret::from([0; 32]).0;
         let _: &Zeroizing<[u8; 32]> = &crate::crypto::SymmetricKey::from([0; 32]).0;
     }
@@ -300,6 +307,7 @@ mod password_tests {
     #[test]
     fn ticket_tokens_are_domain_separated_by_label() {
         use crate::crypto::{TicketAuth, TicketSecret};
+        let _guard = ::habilis_network_test_tracing::init();
         let secret = TicketSecret::from([3u8; 32]);
         let password = pw("hunter2");
         let blob = TicketAuth::blob(&secret, Some(&password)).token;

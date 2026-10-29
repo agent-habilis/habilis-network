@@ -233,10 +233,10 @@ fn hex_nibble(byte: u8) -> Result<u8> {
 mod tests {
     use super::{Identity, decode_sig, dedup_key16, encode_hex, encode_pubkey, verify};
     use crate::AuthorKey;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn sign_verify_round_trip() {
+        let _guard = ::habilis_network_test_tracing::init();
         let identity = Identity::generate();
         let bytes = b"canonical message bytes";
         let signature = identity.sign(bytes);
@@ -248,6 +248,7 @@ mod tests {
 
     #[test]
     fn tampered_bytes_fail_verification() {
+        let _guard = ::habilis_network_test_tracing::init();
         let identity = Identity::generate();
         let signature = identity.sign(b"original");
         assert!(
@@ -258,6 +259,7 @@ mod tests {
 
     #[test]
     fn wrong_key_fails_verification() {
+        let _guard = ::habilis_network_test_tracing::init();
         let signer = Identity::generate();
         let other = Identity::generate();
         let bytes = b"hello";
@@ -270,6 +272,7 @@ mod tests {
 
     #[test]
     fn pubkey_hex_round_trip() {
+        let _guard = ::habilis_network_test_tracing::init();
         let identity = Identity::generate();
         let hex = encode_pubkey(&identity.public());
         assert_eq!(hex.len(), 64, "a public key hex is 64 characters");
@@ -283,6 +286,7 @@ mod tests {
 
     #[test]
     fn sig_hex_round_trip() {
+        let _guard = ::habilis_network_test_tracing::init();
         let identity = Identity::generate();
         let signature = identity.sign(b"x");
         let hex = encode_hex(&signature.to_bytes());
@@ -297,6 +301,7 @@ mod tests {
     /// empty pubkey text. The values were captured at the base commit.
     #[test]
     fn dedup_key16_is_pinned_for_a_fixed_pubkey_and_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let pubkey = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
         let mut id = [0u8; 16];
         id[15] = 1;
@@ -316,6 +321,7 @@ mod tests {
     /// derivation of the plain bytes under the same label.
     #[test]
     fn the_seal_secret_is_the_derivation_of_the_identity_seed() {
+        let _guard = ::habilis_network_test_tracing::init();
         let identity = Identity::generate();
         let by_hand = x25519_dalek::StaticSecret::from(*crate::crypto::derive_secret(
             &identity.secret.to_bytes(),
@@ -341,6 +347,7 @@ mod tests {
                 super::write_hex(f, self.0)
             }
         }
+        let _guard = ::habilis_network_test_tracing::init();
         let bytes = [0x00, 0x0f, 0xa5, 0xff];
         assert_eq!(
             Hex(&bytes).to_string(),
@@ -356,6 +363,7 @@ mod tests {
 
     #[test]
     fn decode_rejects_bad_hex() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             AuthorKey::decode_hex("zz").is_none(),
             "a hex string with non-hex characters is refused as an author key"
@@ -372,6 +380,7 @@ mod tests {
 
     #[test]
     fn decode_rejects_non_ascii_hex_without_panicking() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Regression: an inbound `pubkey`/`sig` is arbitrary UTF-8. A
         // multibyte char of even *byte* length (here `aéa` = 0x61 C3 A9 0x61,
         // 4 bytes) positioned so a 2-byte slice splits it used to panic on a

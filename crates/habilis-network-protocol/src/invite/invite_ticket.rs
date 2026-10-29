@@ -293,7 +293,6 @@ impl InviteTicket {
 /// slice is too short.
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::{InviteTicket, mint, signing_bytes};
@@ -310,6 +309,7 @@ mod tests {
     // old ticket must tell the member to upgrade, not fail as a malformed token.
     #[test]
     fn a_ticket_of_version_1_fails_with_the_upgrade_text() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = creator();
         let mut framed =
             crate::base58check::decode(&minted(&mesh, None, None).encode(), "invite ticket")
@@ -358,6 +358,7 @@ mod tests {
 
     #[test]
     fn encode_matches_the_golden_string() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             fixed_ticket().encode(),
             GOLDEN,
@@ -367,6 +368,7 @@ mod tests {
 
     #[test]
     fn decode_of_the_golden_string_gives_the_same_fields() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             InviteTicket::decode(GOLDEN).expect("decode"),
             fixed_ticket(),
@@ -378,6 +380,7 @@ mod tests {
 
     #[test]
     fn minted_invite_is_bare_base58() {
+        let _guard = ::habilis_network_test_tracing::init();
         let token = mint(&creator(), Some(Duration::from_hours(1)), None).unwrap();
         assert!(token.is_ascii(), "a minted invite is ascii");
         assert!(
@@ -388,6 +391,7 @@ mod tests {
 
     #[test]
     fn redeemed_invite_derives_the_creators_topic() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = creator();
         let redeemed = minted(&mesh, Some(Duration::from_hours(1)), None)
             .redeem(None)
@@ -406,6 +410,7 @@ mod tests {
 
     #[test]
     fn no_expiry_invite_round_trips() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = creator();
         for ttl in [None, Some(Duration::ZERO)] {
             let ticket = minted(&mesh, ttl, None);
@@ -417,6 +422,7 @@ mod tests {
     /// valid, and its signed bytes carry that point.
     #[test]
     fn a_ttl_past_the_range_saturates_the_expiry() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = creator();
         let ticket = minted(&mesh, Some(Duration::from_secs(u64::MAX)), None);
         assert_eq!(
@@ -434,6 +440,7 @@ mod tests {
     /// of one millisecond is no invite that is spent at once (`redeem` refuses `now >= expiry`).
     #[test]
     fn a_sub_second_ttl_rounds_up_to_a_whole_second() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = creator();
         for (ttl, secs) in [
             (Duration::from_millis(1), 1),
@@ -462,6 +469,7 @@ mod tests {
 
     #[test]
     fn a_redeemer_holds_the_root_but_cannot_mint() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = creator();
         let redeemed = minted(&mesh, Some(Duration::from_hours(1)), None)
             .redeem(None)
@@ -480,6 +488,7 @@ mod tests {
 
     #[test]
     fn mint_refuses_a_non_invite_only_mesh() {
+        let _guard = ::habilis_network_test_tracing::init();
         let plain = Mesh::try_new(
             Seed::new([2u8; 32]),
             MeshName::try_new("t").unwrap(),
@@ -496,6 +505,7 @@ mod tests {
 
     #[test]
     fn rejects_a_zeroed_or_garbage_signature() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = creator();
         let mut ticket = minted(&mesh, Some(Duration::from_hours(1)), None);
         ticket.signature = [0u8; 64];
@@ -504,6 +514,7 @@ mod tests {
 
     #[test]
     fn rejects_an_invite_signed_by_a_non_issuer_key() {
+        let _guard = ::habilis_network_test_tracing::init();
         // An attacker who knows the mesh hash + root (a member) signs an
         // otherwise-valid invite with their OWN key. It must fail against the
         // issuer pubkey baked into the hash — this is what makes minting
@@ -531,6 +542,7 @@ mod tests {
 
     #[test]
     fn rejects_a_tampered_expiry() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Extending the window by editing `expiry` invalidates the signature,
         // which covers it — so a bearer can't lengthen their own invite.
         let mesh = creator();
@@ -544,6 +556,7 @@ mod tests {
 
     #[test]
     fn rejects_a_tampered_root() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = creator();
         let mut ticket = minted(&mesh, Some(Duration::from_hours(1)), None);
         ticket.root_field[0] ^= 0xff;
@@ -557,6 +570,7 @@ mod tests {
 
     #[test]
     fn rejects_an_expired_invite_even_with_a_valid_signature() {
+        let _guard = ::habilis_network_test_tracing::init();
         // A genuinely creator-signed invite whose window has passed: the
         // signature is valid, but the local-clock check still refuses it.
         let mesh = creator();
@@ -580,6 +594,7 @@ mod tests {
 
     #[test]
     fn a_password_wrapped_invite_needs_the_right_password() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = creator();
         let ticket = minted(&mesh, Some(Duration::from_hours(1)), Some(&pw("hunter2")));
         assert!(
@@ -601,6 +616,7 @@ mod tests {
 
     #[test]
     fn a_plain_invite_rejects_a_stray_password() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = creator();
         assert!(
             minted(&mesh, Some(Duration::from_hours(1)), None)
@@ -614,6 +630,7 @@ mod tests {
 
     #[test]
     fn a_mesh_id_is_not_an_invite() {
+        let _guard = ::habilis_network_test_tracing::init();
         // A bare mesh id is not an invite ticket (different framing).
         let plain = Mesh::try_new(
             Seed::new([3u8; 32]),
@@ -629,6 +646,7 @@ mod tests {
 
     #[test]
     fn rejects_a_bad_checksum() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut token = mint(&creator(), Some(Duration::from_hours(1)), None).unwrap();
         let last = token.pop().unwrap();
         token.push(if last == '1' { '2' } else { '1' });
@@ -640,6 +658,7 @@ mod tests {
 
     #[test]
     fn mints_bare_ascii_base58() {
+        let _guard = ::habilis_network_test_tracing::init();
         // No glyph, no variation selector, no `://`: an invite pastes into a
         // URL or a shell word untouched.
         let token = mint(&creator(), Some(Duration::from_hours(1)), None).unwrap();

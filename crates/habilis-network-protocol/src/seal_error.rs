@@ -277,7 +277,6 @@ pub fn open_symmetric(key: &SymmetricKey, blob: &[u8]) -> Result<Vec<u8>, SealEr
 mod tests {
     use super::{open_symmetric, seal_symmetric, seal_to_body, unseal_from_body};
     use crate::crypto::SymmetricKey;
-    use habilis_network_test_tracing::test;
     use x25519_dalek::{PublicKey, StaticSecret};
 
     fn key(byte: u8) -> SymmetricKey {
@@ -286,6 +285,7 @@ mod tests {
 
     #[test]
     fn symmetric_round_trips() {
+        let _guard = ::habilis_network_test_tracing::init();
         let key = key(7);
         for plaintext in [b"".as_slice(), b"hello state doc", &[0u8; 5000]] {
             let blob = seal_symmetric(&key, plaintext);
@@ -304,6 +304,7 @@ mod tests {
 
     #[test]
     fn symmetric_wrong_key_or_tamper_fails() {
+        let _guard = ::habilis_network_test_tracing::init();
         let blob = seal_symmetric(&key(1), b"the shared state");
         assert!(
             open_symmetric(&key(2), &blob).is_err(),
@@ -329,6 +330,7 @@ mod tests {
 
     #[test]
     fn round_trips_to_the_recipient() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (secret, public) = keypair(1);
         let plaintext = r#"{"kind":"status-update","taskId":"7f3e"}"#;
         let body = seal_to_body(&public, plaintext).unwrap();
@@ -344,6 +346,7 @@ mod tests {
     /// there is no golden for the seal path.
     #[test]
     fn a_fixed_envelope_opens_to_its_plaintext() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (secret, _public) = keypair(1);
         let body = crate::MessageBody::try_new(
             concat!(
@@ -363,6 +366,7 @@ mod tests {
 
     #[test]
     fn a_wrong_recipient_cannot_open_it() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (_recipient, recipient_pub) = keypair(1);
         let (eavesdropper, _) = keypair(2);
         let body = seal_to_body(&recipient_pub, "secret").unwrap();
@@ -374,6 +378,7 @@ mod tests {
 
     #[test]
     fn a_tampered_ciphertext_fails() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (secret, public) = keypair(3);
         let body = seal_to_body(&public, "the quick brown fox").unwrap();
         // Flip the last Base58 char of the `ct` field.
@@ -392,6 +397,7 @@ mod tests {
 
     #[test]
     fn seals_empty_and_large_payloads() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (secret, public) = keypair(4);
         for plaintext in ["", &"x".repeat(40_000)] {
             let body = seal_to_body(&public, plaintext).unwrap();
@@ -405,6 +411,7 @@ mod tests {
 
     #[test]
     fn a_plaintext_body_does_not_open_as_sealed() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (secret, _) = keypair(5);
         let body = crate::MessageBody::try_new(r#"{"kind":"message"}"#).unwrap();
         assert!(

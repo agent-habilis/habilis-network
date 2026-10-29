@@ -5,7 +5,6 @@ mod tests {
     use crate::mesh::{MeshId, MeshName};
     use crate::message::{AppTag, CorrId, MessageBody, MessageId, ShardGroup};
     use crate::nickname_error::Nickname;
-    use habilis_network_test_tracing::test;
 
     /// Assert that a value serializes as the bare JSON string `raw`.
     fn assert_transparent<T: serde::Serialize>(value: &T, raw: &str) {
@@ -18,6 +17,7 @@ mod tests {
     /// and round-trips through its own validating `Deserialize`.
     #[test]
     fn every_newtype_is_transparent_on_the_wire() {
+        let _guard = ::habilis_network_test_tracing::init();
         let uuid = "b3f1c2d4-5e6a-4b8c-9d0e-1f2a3b4c5d6e";
         assert_transparent(
             &Nickname::try_new("lotus-anvil").expect("nick"),
@@ -39,6 +39,7 @@ mod tests {
     /// have silently dropped.
     #[test]
     fn deserialization_still_rejects_what_new_rejects() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             serde_json::from_str::<Nickname>("\"has space\"").is_err(),
             "a json nickname with a space is refused"

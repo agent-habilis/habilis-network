@@ -146,12 +146,12 @@ impl<'de> Deserialize<'de> for Shard {
 #[cfg(test)]
 mod shard_tests {
     use super::{Shard, ShardGroup};
-    use habilis_network_test_tracing::test;
 
     const GROUP: &str = "550e8400-e29b-41d4-a716-446655440000";
 
     #[test]
     fn group_deserialize_rejects_non_uuid() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             serde_json::from_str::<ShardGroup>("\"not-a-uuid\"").is_err(),
             "a non-uuid shard group is refused on deserialize"
@@ -164,6 +164,7 @@ mod shard_tests {
 
     #[test]
     fn shard_rejects_out_of_range_total_and_idx() {
+        let _guard = ::habilis_network_test_tracing::init();
         let group = ShardGroup::parse_uuid(GROUP).expect("valid group");
         let group = group.as_str();
         // total < 2 (a single shard is never multipart).
@@ -199,6 +200,7 @@ mod shard_tests {
 
     #[test]
     fn shard_total_tripwire_clears_the_reassembly_budget() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The tripwire must never reject a body the byte budgets allow: even
         // at a pessimistic ~2 KiB of body per shard, a group at the byte
         // ceiling needs fewer shards than the header bound admits.
@@ -213,6 +215,7 @@ mod shard_tests {
 
     #[test]
     fn shard_accepts_valid_header() {
+        let _guard = ::habilis_network_test_tracing::init();
         let group = ShardGroup::parse_uuid(GROUP).expect("valid group");
         let group = group.as_str();
         let shard: Shard =

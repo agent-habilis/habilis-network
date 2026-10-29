@@ -1,6 +1,5 @@
 //! Tests of the directory.
 
-use habilis_network_test_tracing::test;
 use habilis_network_util::clock::Instant;
 use std::time::Duration;
 
@@ -23,6 +22,7 @@ fn advertised_id(name: &str) -> MeshId {
 // topic differs, because only the topic mixes in the config.
 #[test]
 fn golden_global_directory_is_pinned() {
+    let _guard = ::habilis_network_test_tracing::init();
     let name = directory("global");
     let public = directory_mesh(&name, LookupOpts::public_preset());
     let loopback = directory_mesh(&name, LookupOpts::loopback());
@@ -57,6 +57,7 @@ fn golden_global_directory_is_pinned() {
 
 #[test]
 fn directory_is_deterministic_per_name() {
+    let _guard = ::habilis_network_test_tracing::init();
     let one = directory_mesh(&directory("global"), LookupOpts::public_preset());
     let two = directory_mesh(&directory("global"), LookupOpts::public_preset());
     assert_eq!(
@@ -68,6 +69,7 @@ fn directory_is_deterministic_per_name() {
 
 #[test]
 fn distinct_names_are_distinct_directories() {
+    let _guard = ::habilis_network_test_tracing::init();
     assert_ne!(
         directory_mesh(&directory("global"), LookupOpts::public_preset()).to_string(),
         directory_mesh(&directory("gamedev"), LookupOpts::public_preset()).to_string(),
@@ -77,6 +79,7 @@ fn distinct_names_are_distinct_directories() {
 
 #[test]
 fn directory_is_public_with_public_lookups() {
+    let _guard = ::habilis_network_test_tracing::init();
     assert!(
         !directory_mesh(&directory("global"), LookupOpts::public_preset()).is_loopback(),
         "a directory over public lookups is not loopback"
@@ -85,6 +88,7 @@ fn directory_is_public_with_public_lookups() {
 
 #[test]
 fn directory_topic_couples_to_lookups() {
+    let _guard = ::habilis_network_test_tracing::init();
     // The symmetry rule: same name but different lookups ⇒ a different
     // directory mesh (id encodes config_bytes, and the topic derives
     // from those same bytes), so an advertiser and a discoverer meet only
@@ -105,6 +109,7 @@ fn directory_topic_couples_to_lookups() {
 
 #[test]
 fn ad_round_trips_through_body() {
+    let _guard = ::habilis_network_test_tracing::init();
     // Build a real advertised id so `observe` can decode it.
     let advertised = advertised_id("demo");
     let ad = Ad {
@@ -125,6 +130,7 @@ fn ad_round_trips_through_body() {
 
 #[test]
 fn parse_rejects_non_ad_bodies() {
+    let _guard = ::habilis_network_test_tracing::init();
     assert!(Ad::parse("").is_none(), "an empty body is not an ad");
     assert!(
         Ad::parse("not json").is_none(),
@@ -139,6 +145,7 @@ fn parse_rejects_non_ad_bodies() {
 
 #[test]
 fn note_found_then_updated_then_expire_lost() {
+    let _guard = ::habilis_network_test_tracing::init();
     let advertised = advertised_id("demo");
     let body = Ad {
         id: advertised.clone(),
@@ -194,6 +201,7 @@ fn note_found_then_updated_then_expire_lost() {
 
 #[test]
 fn unchanged_re_ad_refreshes_liveness_without_an_event() {
+    let _guard = ::habilis_network_test_tracing::init();
     let body = Ad {
         id: advertised_id("demo"),
         peers: 3,
@@ -231,6 +239,7 @@ fn unchanged_re_ad_refreshes_liveness_without_an_event() {
 
 #[test]
 fn junk_directory_traffic_is_ignored() {
+    let _guard = ::habilis_network_test_tracing::init();
     let mut dir = Listings::new();
     assert!(
         dir.note("", Instant::now()).is_none(),

@@ -87,12 +87,12 @@ impl std::fmt::Display for AuthorKey {
 #[cfg(test)]
 mod tests {
     use super::AuthorKey;
-    use habilis_network_test_tracing::test;
 
     const HEX: &str = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
 
     #[test]
     fn it_round_trips_through_its_hex_text() {
+        let _guard = ::habilis_network_test_tracing::init();
         let key = AuthorKey::decode_hex(HEX).expect("a lowercase 64-char string");
         assert_eq!(key.to_string(), HEX, "the author key displays its hex text");
         assert_eq!(
@@ -114,6 +114,7 @@ mod tests {
 
     #[test]
     fn it_rejects_what_the_wire_rejects() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             AuthorKey::decode_hex("").is_none(),
             "an empty hex string is refused as an author key"
@@ -133,6 +134,7 @@ mod tests {
 
     #[test]
     fn hex_is_the_display_text_as_bytes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let key = AuthorKey::decode_hex(HEX).unwrap();
         assert_eq!(
             key.hex().as_slice(),
@@ -148,6 +150,7 @@ mod tests {
 
     #[test]
     fn matches_hex_agrees_with_display() {
+        let _guard = ::habilis_network_test_tracing::init();
         let key = AuthorKey::decode_hex(HEX).unwrap();
         assert!(key.matches_hex(HEX), "matches_hex accepts the display text");
         assert!(
@@ -167,6 +170,7 @@ mod tests {
 
     #[test]
     fn it_orders_by_its_bytes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let low = AuthorKey::from([1; 32]);
         let high = AuthorKey::from([2; 32]);
         assert!(low < high, "author keys order by their bytes");
@@ -174,6 +178,7 @@ mod tests {
 
     #[test]
     fn a_string_that_is_not_a_curve_point_is_a_key_but_not_a_public_key() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut bytes = [0u8; 32];
         bytes[0] = 2;
         assert!(

@@ -110,10 +110,10 @@ impl AsRef<[u8]> for MessageBody {
 #[cfg(test)]
 mod body_tests {
     use super::MessageBody;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn accepts_ascii() {
+        let _guard = ::habilis_network_test_tracing::init();
         MessageBody::try_new("hello world").unwrap();
         MessageBody::try_new("").unwrap();
         MessageBody::try_new("special chars: !@#$%^&*()").unwrap();
@@ -121,6 +121,7 @@ mod body_tests {
 
     #[test]
     fn accepts_unicode() {
+        let _guard = ::habilis_network_test_tracing::init();
         MessageBody::try_new("héllo").unwrap();
         MessageBody::try_new("emoji 🎉").unwrap();
         MessageBody::try_new("日本語のメッセージ").unwrap();
@@ -128,6 +129,7 @@ mod body_tests {
 
     #[test]
     fn accepts_newline_and_tab() {
+        let _guard = ::habilis_network_test_tracing::init();
         MessageBody::try_new("line one\nline two").unwrap();
         MessageBody::try_new("col1\tcol2").unwrap();
         MessageBody::try_new("crlf\r\nline").unwrap();
@@ -135,6 +137,7 @@ mod body_tests {
 
     #[test]
     fn rejects_control_chars() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             MessageBody::try_new("nul\0byte").is_err(),
             "a body with a nul byte is refused"
@@ -147,6 +150,7 @@ mod body_tests {
 
     #[test]
     fn serde_transparent_round_trip() {
+        let _guard = ::habilis_network_test_tracing::init();
         let body = MessageBody::from("hello");
         let json = serde_json::to_string(&body).unwrap();
         assert_eq!(
@@ -159,6 +163,7 @@ mod body_tests {
 
     #[test]
     fn deserialize_rejects_control_chars() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The validating Deserialize rejects a body a crafted wire message
         // could otherwise smuggle past `new` (e.g. a NUL or an ANSI escape).
         assert!(

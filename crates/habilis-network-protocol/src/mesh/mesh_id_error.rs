@@ -140,7 +140,6 @@ impl From<&str> for MeshId {
 #[cfg(test)]
 mod mesh_id_tests {
     use super::{LockedMesh, MeshId, MeshIdError};
-    use habilis_network_test_tracing::test;
 
     fn valid_id() -> String {
         use super::super::{Mesh, MeshConfig, MeshName};
@@ -155,11 +154,13 @@ mod mesh_id_tests {
 
     #[test]
     fn accepts_well_formed_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         MeshId::try_new(&valid_id()).unwrap();
     }
 
     #[test]
     fn rejects_too_short() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             matches!(MeshId::try_new("a"), Err(MeshIdError::Length(_))),
             "a one-character mesh id is a length error"
@@ -168,6 +169,7 @@ mod mesh_id_tests {
 
     #[test]
     fn rejects_invalid_base58_chars() {
+        let _guard = ::habilis_network_test_tracing::init();
         // `0`, `O`, `I`, `l` are not in the Base58 alphabet — and neither is
         // the glyph prefix ids used to carry, so a stale paste lands here too.
         assert!(
@@ -185,6 +187,7 @@ mod mesh_id_tests {
 
     #[test]
     fn serde_transparent_round_trip() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id_str = valid_id();
         let id = MeshId::try_new(&id_str).unwrap();
         let json = serde_json::to_string(&id).unwrap();
@@ -199,6 +202,7 @@ mod mesh_id_tests {
 
     #[test]
     fn rejects_a_mistyped_hash() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut mistyped = valid_id();
         let replacement = if mistyped.ends_with('1') { "2" } else { "1" };
         mistyped.replace_range(mistyped.len() - 1.., replacement);
@@ -211,6 +215,7 @@ mod mesh_id_tests {
 
     #[test]
     fn serde_rejects_an_invalid_hash() {
+        let _guard = ::habilis_network_test_tracing::init();
         let invalid = serde_json::to_string("AbCdEf1234567").unwrap();
         let error = serde_json::from_str::<MeshId>(&invalid).unwrap_err();
         assert!(
@@ -221,12 +226,14 @@ mod mesh_id_tests {
 
     #[test]
     fn every_mesh_id_decodes_as_a_mesh() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id = MeshId::try_new(&valid_id()).unwrap();
         let _: LockedMesh = id.as_str().parse().unwrap();
     }
 
     #[test]
     fn canonical_form_has_no_uri_wrapping() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id = valid_id();
         assert!(!id.contains("://"), "got {id}");
         assert!(!id.contains('💬'), "got {id}");

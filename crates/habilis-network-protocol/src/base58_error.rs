@@ -98,10 +98,10 @@ pub fn take_array<const N: usize>(bytes: &[u8], position: &mut usize) -> Option<
 #[cfg(test)]
 mod tests {
     use super::{decode, encode, take_array};
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn round_trips_a_payload() {
+        let _guard = ::habilis_network_test_tracing::init();
         let payload = b"the quick brown fox";
         let encoded = encode(payload);
         assert_eq!(
@@ -113,6 +113,7 @@ mod tests {
 
     #[test]
     fn round_trips_an_empty_payload() {
+        let _guard = ::habilis_network_test_tracing::init();
         let encoded = encode(b"");
         assert_eq!(
             decode(&encoded, "test value").unwrap(),
@@ -123,6 +124,7 @@ mod tests {
 
     #[test]
     fn rejects_a_flipped_payload_byte() {
+        let _guard = ::habilis_network_test_tracing::init();
         let encoded = encode(b"the quick brown fox");
         // Swap one character for another valid Base58 one, so the failure is the
         // checksum rather than the alphabet.
@@ -139,6 +141,7 @@ mod tests {
 
     #[test]
     fn rejects_non_base58() {
+        let _guard = ::habilis_network_test_tracing::init();
         // `0`, `O`, `I` and `l` are the four characters Base58 omits.
         let error = decode("0OIl", "test value").unwrap_err().to_string();
         assert!(
@@ -149,6 +152,7 @@ mod tests {
 
     #[test]
     fn rejects_a_string_too_short_to_hold_a_checksum() {
+        let _guard = ::habilis_network_test_tracing::init();
         // "2" decodes to a single byte, fewer than the 4 a checksum needs.
         let error = decode("2", "test value").unwrap_err().to_string();
         assert!(error.contains("too short"), "unexpected error: {error}");
@@ -156,12 +160,14 @@ mod tests {
 
     #[test]
     fn the_error_names_what_failed() {
+        let _guard = ::habilis_network_test_tracing::init();
         let error = decode("0OIl", "invite ticket").unwrap_err().to_string();
         assert!(error.contains("invite ticket"), "unexpected error: {error}");
     }
 
     #[test]
     fn take_array_walks_a_cursor() {
+        let _guard = ::habilis_network_test_tracing::init();
         let bytes = [1u8, 2, 3, 4, 5];
         let mut position = 0;
         assert_eq!(
@@ -185,6 +191,7 @@ mod tests {
 
     #[test]
     fn take_array_does_not_overflow_on_a_huge_cursor() {
+        let _guard = ::habilis_network_test_tracing::init();
         let bytes = [1u8, 2, 3];
         let mut position = usize::MAX;
         assert_eq!(

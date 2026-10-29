@@ -78,13 +78,13 @@ impl serde::Serialize for ContentHash {
 #[cfg(test)]
 mod tests {
     use super::ContentHash;
-    use habilis_network_test_tracing::test;
 
     /// SHA-256 of the empty string.
     const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
     #[test]
     fn it_hashes_with_sha256_and_prints_its_hex() {
+        let _guard = ::habilis_network_test_tracing::init();
         let hash = ContentHash::of(b"");
         assert_eq!(
             hash.to_string(),
@@ -105,6 +105,7 @@ mod tests {
 
     #[test]
     fn it_reads_only_lowercase_64_char_hex() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             ContentHash::decode_hex(EMPTY),
             Some(ContentHash::of(b"")),
@@ -130,6 +131,7 @@ mod tests {
 
     #[test]
     fn it_orders_by_its_bytes() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             ContentHash::from([1; 32]) < ContentHash::from([2; 32]),
             "content hashes order by their bytes"

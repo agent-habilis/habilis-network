@@ -931,7 +931,6 @@ mod lookup_tests {
         Lookup, LookupOpts, LookupSet, MeshConfig, RelayChoice, RelayLadder, RelaySelection,
         Transport, TransportPolicy, resolve_lookups,
     };
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     fn lookups(mdns: bool, dht: bool, relay_lookup: RelaySelection) -> LookupSet {
@@ -944,6 +943,7 @@ mod lookup_tests {
 
     #[test]
     fn relay_ladder_parses_ordered_rungs() {
+        let _guard = ::habilis_network_test_tracing::init();
         let one: RelayLadder = "https://a.example".parse().unwrap();
         assert_eq!(one.len(), 1, "a single rung parses to one rung");
         assert!(!one.is_empty(), "a single rung is not an empty ladder");
@@ -959,6 +959,7 @@ mod lookup_tests {
 
     #[test]
     fn relay_ladder_rejects_empty_and_empty_entries() {
+        let _guard = ::habilis_network_test_tracing::init();
         let empty: Result<RelayLadder, _> = "".parse();
         assert!(
             empty.is_err(),
@@ -973,6 +974,7 @@ mod lookup_tests {
 
     #[test]
     fn naming_relay_alone_is_reachable() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Naming any lookup uses only those. A relay alone yields a reachable
         // (non-loopback) mesh.
         let ladder: RelayLadder = "https://a.example".parse().unwrap();
@@ -993,6 +995,7 @@ mod lookup_tests {
 
     #[test]
     fn mdns_alone_disables_dht_and_relay() {
+        let _guard = ::habilis_network_test_tracing::init();
         let options = resolve_lookups(lookups(true, false, RelaySelection::Unset));
         assert!(
             options.mdns && !options.dht,
@@ -1008,6 +1011,7 @@ mod lookup_tests {
 
     #[test]
     fn bare_relay_is_pinned_and_suppresses_lookups() {
+        let _guard = ::habilis_network_test_tracing::init();
         let options = resolve_lookups(lookups(false, false, RelaySelection::Default));
         assert!(
             !options.mdns && !options.dht,
@@ -1022,6 +1026,7 @@ mod lookup_tests {
 
     #[test]
     fn valued_relay_preserves_ladder_order() {
+        let _guard = ::habilis_network_test_tracing::init();
         let rung0: iroh_base::RelayUrl = "https://a.example".parse().unwrap();
         let rung1: iroh_base::RelayUrl = "https://b.example".parse().unwrap();
         let ladder: RelayLadder = "https://a.example,https://b.example".parse().unwrap();
@@ -1035,6 +1040,7 @@ mod lookup_tests {
 
     #[test]
     fn config_round_trips_loopback() {
+        let _guard = ::habilis_network_test_tracing::init();
         let config = MeshConfig::loopback();
         let decoded = MeshConfig::try_from(config.to_bytes().as_slice()).unwrap();
         assert_eq!(decoded, config, "a loopback config survives a round trip");
@@ -1042,6 +1048,7 @@ mod lookup_tests {
 
     #[test]
     fn config_round_trips_public_preset() {
+        let _guard = ::habilis_network_test_tracing::init();
         let config = MeshConfig::public_preset();
         let decoded = MeshConfig::try_from(config.to_bytes().as_slice()).unwrap();
         assert_eq!(
@@ -1052,6 +1059,7 @@ mod lookup_tests {
 
     #[test]
     fn config_round_trips_custom_relay_ladder() {
+        let _guard = ::habilis_network_test_tracing::init();
         let config = MeshConfig {
             lookups: LookupOpts {
                 mdns: true,
@@ -1074,6 +1082,7 @@ mod lookup_tests {
 
     #[test]
     fn config_rejects_trailing_bytes() {
+        let _guard = ::habilis_network_test_tracing::init();
         // A lone trailing 0x00 is now the non-canonical zero feature byte;
         // either way it must be rejected, never silently absorbed.
         let mut bytes = MeshConfig::loopback().to_bytes();
@@ -1086,6 +1095,7 @@ mod lookup_tests {
 
     #[test]
     fn config_rejects_custom_flag_without_enabled() {
+        let _guard = ::habilis_network_test_tracing::init();
         // flags with custom(0b1000) but not enabled(0b0100).
         let bytes = [0b1000];
         assert!(
@@ -1096,6 +1106,7 @@ mod lookup_tests {
 
     #[test]
     fn config_round_trips_password_verifier() {
+        let _guard = ::habilis_network_test_tracing::init();
         let config = MeshConfig {
             lookups: LookupOpts::public_preset(),
             password: Some([0xA5u8; 16]),
@@ -1108,6 +1119,7 @@ mod lookup_tests {
 
     #[test]
     fn a_passwordless_config_has_no_feature_byte() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The lookups byte, the policy byte, and nothing else: the feature
         // byte only exists for a password or an invite.
         assert_eq!(
@@ -1124,6 +1136,7 @@ mod lookup_tests {
 
     #[test]
     fn config_rejects_unknown_feature_flags() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut bytes = MeshConfig::public_preset().to_bytes();
         bytes.push(0b10_0000); // an undefined feature bit (1 to 16 are taken)
         bytes.extend_from_slice(&[0u8; 16]);
@@ -1136,6 +1149,7 @@ mod lookup_tests {
 
     #[test]
     fn config_round_trips_relay_as_transport() {
+        let _guard = ::habilis_network_test_tracing::init();
         let config = MeshConfig {
             transport: TransportPolicy {
                 relay_transport: true,
@@ -1165,6 +1179,7 @@ mod lookup_tests {
 
     #[test]
     fn relay_is_lookup_only_by_default() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             !MeshConfig::public_preset().transport.relay_transport,
             "the public preset keeps the relay lookup only"
@@ -1180,6 +1195,7 @@ mod lookup_tests {
 
     #[test]
     fn udp_webrtc_multihop_and_gossip_are_on_by_default() {
+        let _guard = ::habilis_network_test_tracing::init();
         let default = TransportPolicy::default();
         assert!(
             default.udp && default.webrtc && default.multihop && !default.relay_transport,
@@ -1208,6 +1224,7 @@ mod lookup_tests {
 
     #[test]
     fn the_transport_policy_is_always_one_explicit_byte() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Lookups byte, then the policy byte. Nothing is left implicit: a
         // config without the policy byte is not a version 2 config.
         assert_eq!(
@@ -1223,6 +1240,7 @@ mod lookup_tests {
 
     #[test]
     fn a_transport_list_turns_on_exactly_the_paths_it_names() {
+        let _guard = ::habilis_network_test_tracing::init();
         let policy = |list: &[Transport]| TransportPolicy::try_from(list).unwrap();
         assert_eq!(
             policy(&[]),
@@ -1258,6 +1276,7 @@ mod lookup_tests {
 
     #[test]
     fn config_round_trips_every_transport_list() {
+        let _guard = ::habilis_network_test_tracing::init();
         let lists: [&[Transport]; 8] = [
             &[Transport::Udp],
             &[Transport::WebRtc],
@@ -1284,6 +1303,7 @@ mod lookup_tests {
 
     #[test]
     fn a_mesh_without_udp_needs_the_relay_lookup() {
+        let _guard = ::habilis_network_test_tracing::init();
         let error = MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::WebRtc])
             .unwrap_err()
             .to_string();
@@ -1302,6 +1322,7 @@ mod lookup_tests {
     /// over, with no `udp`: the case of a browser, and of a native member run without IP.
     #[test]
     fn multihop_with_webrtc_and_no_udp_resolves() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             MeshConfig::resolve(
                 &[Lookup::Relay],
@@ -1327,6 +1348,7 @@ mod lookup_tests {
     /// so a default mesh made now has another id than one made before.
     #[test]
     fn the_gossip_bit_is_the_fifth_and_an_older_id_reads_as_gossip_off() {
+        let _guard = ::habilis_network_test_tracing::init();
         let default = MeshConfig::public_preset();
         let bytes = default.to_bytes();
         assert_eq!(
@@ -1373,6 +1395,7 @@ mod lookup_tests {
     /// is refused the same way, whatever else the byte names.
     #[test]
     fn an_id_with_gossip_and_no_direct_path_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         let gossip_only = MeshConfig::try_from(&[0b0111, super::TRANSPORT_GOSSIP])
             .unwrap_err()
             .to_string();
@@ -1392,6 +1415,7 @@ mod lookup_tests {
     #[test]
     fn every_subset_of_the_transports_resolves_or_names_its_error() {
         use Transport::{Gossip, Multihop, Relay, Udp, WebRtc};
+        let _guard = ::habilis_network_test_tracing::init();
         let rows: [(&[Transport], Result<(), &str>); 32] = [
             (&[], Ok(())),
             (&[Udp], Ok(())),
@@ -1451,6 +1475,7 @@ mod lookup_tests {
     /// `validate` names the same mistake.
     #[test]
     fn an_id_with_multihop_alone_names_that_mistake() {
+        let _guard = ::habilis_network_test_tracing::init();
         let alone = MeshConfig::try_from(&[0b0111, super::TRANSPORT_MULTIHOP])
             .unwrap_err()
             .to_string();
@@ -1472,6 +1497,7 @@ mod lookup_tests {
     /// still multihop with no direct transport, and says so as a list of one.
     #[test]
     fn multihop_named_twice_is_still_multihop_alone() {
+        let _guard = ::habilis_network_test_tracing::init();
         for list in [
             &[Transport::Multihop, Transport::Multihop][..],
             &[Transport::Multihop, Transport::Relay, Transport::Multihop][..],
@@ -1485,6 +1511,7 @@ mod lookup_tests {
 
     #[test]
     fn a_policy_byte_with_an_unknown_bit_asks_for_an_upgrade() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Bit 4 is gossip now: the next one is the first unknown.
         let error = MeshConfig::try_from(&[0b0111, 0b10_0111])
             .unwrap_err()
@@ -1494,6 +1521,7 @@ mod lookup_tests {
 
     #[test]
     fn an_id_with_neither_udp_nor_webrtc_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         for byte in [0b0000, super::TRANSPORT_MULTIHOP, super::TRANSPORT_RELAY] {
             assert!(
                 MeshConfig::try_from(&[0b0111, byte]).is_err(),
@@ -1504,6 +1532,7 @@ mod lookup_tests {
 
     #[test]
     fn config_round_trips_relay_as_transport_with_password() {
+        let _guard = ::habilis_network_test_tracing::init();
         let config = MeshConfig {
             lookups: LookupOpts::public_preset(),
             password: Some([0xA5u8; 16]),
@@ -1522,6 +1551,7 @@ mod lookup_tests {
 
     #[test]
     fn config_rejects_relay_transport_on_without_a_relay_lookup() {
+        let _guard = ::habilis_network_test_tracing::init();
         let config = MeshConfig {
             transport: TransportPolicy {
                 relay_transport: true,
@@ -1540,6 +1570,7 @@ mod lookup_tests {
 
     #[test]
     fn config_round_trips_issuer_pubkey() {
+        let _guard = ::habilis_network_test_tracing::init();
         let config = MeshConfig {
             lookups: LookupOpts::public_preset(),
             password: None,
@@ -1555,6 +1586,7 @@ mod lookup_tests {
 
     #[test]
     fn config_round_trips_password_and_invite_together() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Both feature bits set: the fixed field order (verifier, then issuer
         // pubkey) must round-trip.
         let config = MeshConfig {
@@ -1572,6 +1604,7 @@ mod lookup_tests {
 
     #[test]
     fn config_rejects_truncated_issuer_pubkey() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut bytes = MeshConfig::public_preset().to_bytes();
         bytes.push(0b0010); // invite-only bit
         bytes.extend_from_slice(&[0u8; 16]); // half a pubkey
@@ -1583,6 +1616,7 @@ mod lookup_tests {
 
     #[test]
     fn config_rejects_truncated_verifier() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut bytes = MeshConfig::public_preset().to_bytes();
         bytes.push(0b0001);
         bytes.extend_from_slice(&[0u8; 8]); // half a verifier
@@ -1594,6 +1628,7 @@ mod lookup_tests {
 
     #[test]
     fn config_rejects_verifier_with_trailing_slack() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut bytes = MeshConfig::public_preset().to_bytes();
         bytes.push(0b0001);
         bytes.extend_from_slice(&[0u8; 17]); // verifier + one extra byte
@@ -1614,10 +1649,10 @@ mod choice_tests {
         Lookup, LookupSet, MeshConfig, RelayChoice, RelayLadder, RelaySelection, Transport,
         TransportPolicy, resolve_lookups,
     };
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn a_lookup_and_a_transport_parse_from_their_names() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mdns: Lookup = "mdns".parse().unwrap();
         assert_eq!(
             mdns,
@@ -1683,6 +1718,7 @@ mod choice_tests {
 
     #[test]
     fn the_direct_transport_is_named_udp_not_p2p() {
+        let _guard = ::habilis_network_test_tracing::init();
         let udp: Transport = "udp".parse().unwrap();
         assert_eq!(udp.to_string(), "udp", "the direct transport is named udp");
         let p2p: Result<Transport, _> = "p2p".parse();
@@ -1691,6 +1727,7 @@ mod choice_tests {
 
     #[test]
     fn an_unknown_name_is_an_error_that_lists_the_choices() {
+        let _guard = ::habilis_network_test_tracing::init();
         let misspelt: Result<Lookup, _> = "relai".parse();
         let error = misspelt.unwrap_err().to_string();
         assert!(
@@ -1708,6 +1745,7 @@ mod choice_tests {
 
     #[test]
     fn the_lists_deserialize_from_json_names() {
+        let _guard = ::habilis_network_test_tracing::init();
         let lookups: Vec<Lookup> = serde_json::from_str(r#"["mdns","relay"]"#).unwrap();
         assert_eq!(
             lookups,
@@ -1728,6 +1766,7 @@ mod choice_tests {
 
     #[test]
     fn a_lookup_list_becomes_the_set_of_exactly_those() {
+        let _guard = ::habilis_network_test_tracing::init();
         let set = LookupSet::choose(&[Lookup::Mdns], None).unwrap();
         assert!(
             set.mdns && !set.dht,
@@ -1752,6 +1791,7 @@ mod choice_tests {
 
     #[test]
     fn a_set_names_a_lookup_when_any_field_is_set() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             !LookupSet::default().any(),
             "an empty lookup set names no lookup"
@@ -1764,6 +1804,7 @@ mod choice_tests {
 
     #[test]
     fn naming_relay_takes_the_default_ladder_unless_one_is_given() {
+        let _guard = ::habilis_network_test_tracing::init();
         let bare = LookupSet::choose(&[Lookup::Relay], None).unwrap();
         assert_eq!(
             bare.relay_lookup,
@@ -1781,6 +1822,7 @@ mod choice_tests {
 
     #[test]
     fn a_ladder_without_the_relay_lookup_is_an_error() {
+        let _guard = ::habilis_network_test_tracing::init();
         let ladder: RelayLadder = "https://a.example".parse().unwrap();
         let error = LookupSet::choose(&[Lookup::Mdns], Some(ladder))
             .unwrap_err()
@@ -1790,6 +1832,7 @@ mod choice_tests {
 
     #[test]
     fn an_empty_transport_list_and_udp_alone_keep_the_relay_off_payload() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             TransportPolicy::try_from(&[]).unwrap(),
             TransportPolicy::default(),
@@ -1811,6 +1854,7 @@ mod choice_tests {
 
     #[test]
     fn udp_cannot_be_disabled() {
+        let _guard = ::habilis_network_test_tracing::init();
         let error = TransportPolicy::try_from(&[Transport::Relay])
             .unwrap_err()
             .to_string();
@@ -1819,6 +1863,7 @@ mod choice_tests {
 
     #[test]
     fn a_config_resolves_from_the_three_choices() {
+        let _guard = ::habilis_network_test_tracing::init();
         let config =
             MeshConfig::resolve(&[Lookup::Relay], None, &[Transport::Udp, Transport::Relay])
                 .unwrap();
@@ -1849,6 +1894,7 @@ mod choice_tests {
     /// and carries no payload. That is also what an empty `transport` means.
     #[test]
     fn relay_can_be_a_lookup_and_nothing_more() {
+        let _guard = ::habilis_network_test_tracing::init();
         for transports in [&[][..], &[Transport::Udp][..]] {
             let config = MeshConfig::resolve(&[Lookup::Relay], None, transports).unwrap();
             assert_eq!(
@@ -1867,6 +1913,7 @@ mod choice_tests {
 
     #[test]
     fn relay_transport_needs_the_relay_lookup() {
+        let _guard = ::habilis_network_test_tracing::init();
         let error = MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::Udp, Transport::Relay])
             .unwrap_err()
             .to_string();
@@ -1875,6 +1922,7 @@ mod choice_tests {
 
     #[test]
     fn no_lookups_is_loopback_without_a_preset_switch() {
+        let _guard = ::habilis_network_test_tracing::init();
         let options = resolve_lookups(LookupSet::default());
         assert!(
             options.is_loopback(),

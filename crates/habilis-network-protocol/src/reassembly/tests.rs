@@ -1,6 +1,5 @@
 //! Tests of the multipart reassembly.
 
-use habilis_network_test_tracing::{expect_warn, test};
 use habilis_network_util::clock::Instant;
 use std::time::Duration;
 
@@ -49,6 +48,7 @@ fn ingest(store: &mut ReassemblyStore, message: &Verified, now: Instant) -> Shar
 
 #[test]
 fn isolates_by_author() {
+    let _guard = ::habilis_network_test_tracing::init();
     // Two authors reuse the SAME group id. Each forms its own set; one
     // author's shard never fills another's slot, so a crafted cross-author
     // shard can't inject a slice into the victim's reassembled body.
@@ -117,6 +117,7 @@ fn isolates_by_author() {
 
 #[test]
 fn slots_by_idx_not_arrival() {
+    let _guard = ::habilis_network_test_tracing::init();
     let now = Instant::now();
     let mut store = ReassemblyStore::default();
     ingest(
@@ -167,6 +168,7 @@ fn slots_by_idx_not_arrival() {
 
 #[test]
 fn header_mismatch_is_dropped() {
+    let _guard = ::habilis_network_test_tracing::init();
     let now = Instant::now();
     let mut store = ReassemblyStore::default();
     ingest(
@@ -225,6 +227,7 @@ fn header_mismatch_is_dropped() {
 
 #[test]
 fn duplicate_idx_is_dropped_first_seen_wins() {
+    let _guard = ::habilis_network_test_tracing::init();
     let now = Instant::now();
     let mut store = ReassemblyStore::default();
     ingest(
@@ -279,7 +282,8 @@ fn duplicate_idx_is_dropped_first_seen_wins() {
 
 #[test]
 fn group_budget_breach_drops_the_group() {
-    expect_warn(
+    let _guard = ::habilis_network_test_tracing::init();
+    ::habilis_network_test_tracing::expect_warn(
         "habilis_network::gossip",
         "partial shard group exceeded its byte budget; dropped",
     );
@@ -329,7 +333,8 @@ fn group_budget_breach_drops_the_group() {
 
 #[test]
 fn author_budget_evicts_the_stalest_group() {
-    expect_warn(
+    let _guard = ::habilis_network_test_tracing::init();
+    ::habilis_network_test_tracing::expect_warn(
         "habilis_network::gossip",
         "author reassembly budget breached; stalest partial group evicted",
     );
@@ -403,7 +408,8 @@ fn author_budget_evicts_the_stalest_group() {
 
 #[test]
 fn global_budget_refuses_the_newcomer() {
-    expect_warn(
+    let _guard = ::habilis_network_test_tracing::init();
+    ::habilis_network_test_tracing::expect_warn(
         "habilis_network::gossip",
         "global reassembly budget breached; incoming shard group dropped",
     );
@@ -453,7 +459,8 @@ fn global_budget_refuses_the_newcomer() {
 /// states the same rule over the other store.
 #[test]
 fn a_floods_groups_do_not_evict_another_authors() {
-    expect_warn(
+    let _guard = ::habilis_network_test_tracing::init();
+    ::habilis_network_test_tracing::expect_warn(
         "habilis_network::gossip",
         "author reassembly budget breached; stalest partial group evicted",
     );
@@ -518,6 +525,7 @@ fn a_floods_groups_do_not_evict_another_authors() {
 
 #[test]
 fn stale_groups_are_swept_and_release_budget() {
+    let _guard = ::habilis_network_test_tracing::init();
     let start = Instant::now();
     let mut store = ReassemblyStore::default();
     ingest(
@@ -598,6 +606,7 @@ fn stale_groups_are_swept_and_release_budget() {
 #[test]
 fn a_trickling_group_is_reaped_at_the_lifetime_ceiling() {
     use habilis_network_util::consts::REASSEMBLY_MAX_GROUP_LIFETIME;
+    let _guard = ::habilis_network_test_tracing::init();
     let start = Instant::now();
     let mut store = ReassemblyStore::default();
     // One new shard per idle window keeps the group alive under the idle
@@ -636,6 +645,7 @@ fn a_trickling_group_is_reaped_at_the_lifetime_ceiling() {
 
 #[test]
 fn completion_releases_the_budget() {
+    let _guard = ::habilis_network_test_tracing::init();
     let now = Instant::now();
     let mut store = ReassemblyStore::default();
     ingest(
@@ -688,6 +698,7 @@ fn completion_releases_the_budget() {
 #[test]
 fn repair_tickets_target_stalled_big_groups_once_per_window() {
     use habilis_network_util::consts::{LOGGED_SHARD_GROUP_MAX_TOTAL, REASSEMBLY_REPAIR_IDLE};
+    let _guard = ::habilis_network_test_tracing::init();
     let start = Instant::now();
     let mut store = ReassemblyStore::default();
     // A small group (logged, heals via anti-entropy) and a big one.
@@ -785,6 +796,7 @@ fn repair_tickets_target_stalled_big_groups_once_per_window() {
 #[test]
 fn shard_cache_serves_requested_frames_and_evicts_whole_groups() {
     use habilis_network_util::consts::SHARD_CACHE_BUDGET_BYTES;
+    let _guard = ::habilis_network_test_tracing::init();
     let mut cache = super::ShardCache::default();
     let first = group("00000000-0000-4000-8000-0000000000c1");
     let frame =
@@ -809,6 +821,7 @@ fn shard_cache_serves_requested_frames_and_evicts_whole_groups() {
 
 #[test]
 fn author_budget_never_exceeded_under_random_streams() {
+    let _guard = ::habilis_network_test_tracing::init();
     // Property-ish sweep: many interleaved groups from two authors, with
     // crafted totals; whatever the interleaving, the store's accounting
     // never exceeds the budgets.

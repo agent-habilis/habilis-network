@@ -99,7 +99,6 @@ mod derive_secret_tests {
         Keying, RENDEZVOUS_LADDER, Seed, derive_secret, rendezvous_id, rendezvous_ports,
         rendezvous_secret, topic_seed,
     };
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     const SEED_A: [u8; 32] = [7u8; 32];
@@ -107,6 +106,7 @@ mod derive_secret_tests {
 
     #[test]
     fn derive_secret_is_deterministic() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             derive_secret(&SEED_A, b"rendezvous"),
             derive_secret(&SEED_A, b"rendezvous"),
@@ -117,6 +117,7 @@ mod derive_secret_tests {
     #[test]
     fn derive_hashes_the_same_bytes_as_derive_secret() {
         use crate::crypto::{Seed, SymmetricKey};
+        let _guard = ::habilis_network_test_tracing::init();
         let seed = Seed::new(SEED_A);
         assert_eq!(
             seed.derive(b"state-doc").as_bytes(),
@@ -135,6 +136,7 @@ mod derive_secret_tests {
     #[test]
     fn a_seed_and_a_symmetric_key_print_no_byte() {
         use crate::crypto::{Seed, SymmetricKey};
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             format!("{:?}", Seed::new(SEED_A)),
             "Seed(***)",
@@ -149,6 +151,7 @@ mod derive_secret_tests {
 
     #[test]
     fn derive_secret_domain_separates_by_label() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_ne!(
             derive_secret(&SEED_A, b"rendezvous"),
             derive_secret(&SEED_A, b"port"),
@@ -158,6 +161,7 @@ mod derive_secret_tests {
 
     #[test]
     fn derive_secret_domain_separates_by_seed() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_ne!(
             derive_secret(&SEED_A, b"rendezvous"),
             derive_secret(&SEED_B, b"rendezvous"),
@@ -167,6 +171,7 @@ mod derive_secret_tests {
 
     #[test]
     fn label_length_prefix_prevents_collision() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Without the length prefix ("rd"+"vx") and ("rdv"+"x") would
         // hash the same stream. The prefix must keep them distinct.
         assert_ne!(
@@ -178,6 +183,7 @@ mod derive_secret_tests {
 
     #[test]
     fn rendezvous_id_is_stable_for_a_seed() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             rendezvous_id(Keying::Wire(&Seed::new(SEED_A))),
             rendezvous_id(Keying::Wire(&Seed::new(SEED_A))),
@@ -192,6 +198,7 @@ mod derive_secret_tests {
 
     #[test]
     fn rendezvous_id_matches_secret_public() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             rendezvous_id(Keying::Wire(&Seed::new(SEED_A))),
             rendezvous_secret(Keying::Wire(&Seed::new(SEED_A))).public(),
@@ -201,6 +208,7 @@ mod derive_secret_tests {
 
     #[test]
     fn rendezvous_ports_are_in_range_stable_and_seed_specific() {
+        let _guard = ::habilis_network_test_tracing::init();
         let ladder = rendezvous_ports(Keying::Wire(&Seed::new(SEED_A)));
         assert_eq!(
             ladder.len(),
@@ -225,6 +233,7 @@ mod derive_secret_tests {
 
     #[test]
     fn rendezvous_ports_stay_below_every_ephemeral_range() {
+        let _guard = ::habilis_network_test_tracing::init();
         for seed in 0..2000_u32 {
             let mut bytes = [0_u8; 32];
             bytes[..4].copy_from_slice(&seed.to_le_bytes());
@@ -238,6 +247,7 @@ mod derive_secret_tests {
 
     #[test]
     fn topic_seed_is_deterministic() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             topic_seed("agent-habilis"),
             topic_seed("agent-habilis"),
@@ -247,6 +257,7 @@ mod derive_secret_tests {
 
     #[test]
     fn topic_seed_differs_by_string() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_ne!(
             topic_seed("alpha"),
             topic_seed("beta"),
@@ -256,6 +267,7 @@ mod derive_secret_tests {
 
     #[test]
     fn topic_seed_trims_surrounding_whitespace() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             topic_seed("  x\n"),
             topic_seed("x"),
@@ -265,6 +277,7 @@ mod derive_secret_tests {
 
     #[test]
     fn topic_seed_is_case_sensitive() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_ne!(
             topic_seed("Repo"),
             topic_seed("repo"),
@@ -274,6 +287,7 @@ mod derive_secret_tests {
 
     #[test]
     fn topic_seed_domain_separated_from_derive_secret() {
+        let _guard = ::habilis_network_test_tracing::init();
         // A topic seed lives under TOPIC_DOMAIN; it must not coincide with a
         // labelled derivation off some other seed for any plausible collision.
         assert_ne!(
@@ -285,6 +299,7 @@ mod derive_secret_tests {
 
     #[test]
     fn rendezvous_ports_rungs_are_near_certainly_distinct() {
+        let _guard = ::habilis_network_test_tracing::init();
         let ladder = rendezvous_ports(Keying::Wire(&Seed::new(SEED_A)));
         let unique: HashSet<_> = ladder.iter().collect();
         // A rare in-ladder dup is harmless, but the fixed test seed
@@ -300,7 +315,6 @@ mod derive_secret_tests {
 mod topic_tests {
     use crate::crypto::{Keying, Seed, derive_topic_id};
     use crate::mesh::MeshName;
-    use habilis_network_test_tracing::test;
 
     fn name(text: &str) -> MeshName {
         MeshName::try_new(text).unwrap()
@@ -311,6 +325,7 @@ mod topic_tests {
 
     #[test]
     fn deterministic_for_same_input() {
+        let _guard = ::habilis_network_test_tracing::init();
         let seed = [42u8; 32];
         let first = derive_topic_id(Keying::Wire(&Seed::new(seed)), &name("team"), CFG_A);
         let second = derive_topic_id(Keying::Wire(&Seed::new(seed)), &name("team"), CFG_A);
@@ -319,6 +334,7 @@ mod topic_tests {
 
     #[test]
     fn different_seeds_produce_different_topics() {
+        let _guard = ::habilis_network_test_tracing::init();
         let seed_a = [1u8; 32];
         let seed_b = [42u8; 32];
         assert_ne!(
@@ -330,6 +346,7 @@ mod topic_tests {
 
     #[test]
     fn different_names_produce_different_topics() {
+        let _guard = ::habilis_network_test_tracing::init();
         let seed = [1u8; 32];
         assert_ne!(
             derive_topic_id(Keying::Wire(&Seed::new(seed)), &name("alpha"), CFG_A),
@@ -340,6 +357,7 @@ mod topic_tests {
 
     #[test]
     fn different_config_produces_different_topics() {
+        let _guard = ::habilis_network_test_tracing::init();
         let seed = [1u8; 32];
         assert_ne!(
             derive_topic_id(Keying::Wire(&Seed::new(seed)), &name("team"), CFG_A),

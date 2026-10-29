@@ -1,8 +1,8 @@
 use super::{DEFAULT_DIRECTORY, DirectorySelection, LookupOpts, MeshName, validate_advertise};
-use habilis_network_test_tracing::test;
 
 #[test]
 fn unset_is_not_advertising() {
+    let _guard = ::habilis_network_test_tracing::init();
     let sel = DirectorySelection::Unset;
     assert!(!sel.is_set(), "an unset selection is not advertising");
     assert!(
@@ -13,6 +13,7 @@ fn unset_is_not_advertising() {
 
 #[test]
 fn bare_resolves_to_default_directory() {
+    let _guard = ::habilis_network_test_tracing::init();
     let sel = DirectorySelection::Default;
     assert!(
         sel.is_set(),
@@ -27,6 +28,7 @@ fn bare_resolves_to_default_directory() {
 
 #[test]
 fn named_resolves_to_that_directory() {
+    let _guard = ::habilis_network_test_tracing::init();
     let sel = DirectorySelection::Named(MeshName::try_new("gamedev").unwrap());
     assert_eq!(
         sel.directory().unwrap().as_str(),
@@ -37,6 +39,7 @@ fn named_resolves_to_that_directory() {
 
 #[test]
 fn advertise_requires_reachable_mesh() {
+    let _guard = ::habilis_network_test_tracing::init();
     // Loopback-only + advertising is rejected.
     let error =
         validate_advertise(&DirectorySelection::Default, &LookupOpts::loopback()).unwrap_err();

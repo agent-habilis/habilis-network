@@ -141,10 +141,10 @@ impl Nickname {
 #[cfg(test)]
 mod tests {
     use super::Nickname;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn accepts_valid_nicknames() {
+        let _guard = ::habilis_network_test_tracing::init();
         for ok in [
             "a",
             "alice",
@@ -166,6 +166,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_and_overlong() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             Nickname::try_new("").is_err(),
             "an empty nickname is refused"
@@ -179,6 +180,7 @@ mod tests {
 
     #[test]
     fn length_cap_counts_characters_not_bytes() {
+        let _guard = ::habilis_network_test_tracing::init();
         // 32 multibyte chars (96 bytes) is fine; 33 is not.
         assert!(
             Nickname::try_new(&"あ".repeat(32)).is_ok(),
@@ -192,6 +194,7 @@ mod tests {
 
     #[test]
     fn rejects_unsafe_chars() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             Nickname::try_new("alice bot").is_err(),
             "a space in a nickname is refused"
@@ -244,6 +247,7 @@ mod tests {
 
     #[test]
     fn random_always_validates() {
+        let _guard = ::habilis_network_test_tracing::init();
         for _ in 0..20 {
             let nickname = Nickname::random();
             Nickname::try_new(nickname.as_str()).expect("random must round-trip");
@@ -252,6 +256,7 @@ mod tests {
 
     #[test]
     fn serde_transparent_round_trip() {
+        let _guard = ::habilis_network_test_tracing::init();
         let nickname = Nickname::from("swift-cedar");
         let json = serde_json::to_string(&nickname).unwrap();
         assert_eq!(
@@ -264,6 +269,7 @@ mod tests {
 
     #[test]
     fn deserialize_rejects_unsafe_nicknames() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The validating Deserialize rejects what `new` rejects, so a crafted
         // wire nickname can't bypass the charset/length rules.
         assert!(

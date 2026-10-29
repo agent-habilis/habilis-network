@@ -53,7 +53,6 @@ mod golden_tests {
         rendezvous_id, rendezvous_ports, stretch_mesh_password,
     };
     use crate::mesh::MeshName;
-    use habilis_network_test_tracing::test;
 
     const SEED: [u8; 32] = [7u8; 32];
     const ROOT: [u8; 32] = [5u8; 32];
@@ -68,6 +67,7 @@ mod golden_tests {
 
     #[test]
     fn golden_rendezvous_of_a_wire_seed() {
+        let _guard = ::habilis_network_test_tracing::init();
         let seed = Seed::new(SEED);
         assert_eq!(
             rendezvous_id(Keying::Wire(&seed)).to_string(),
@@ -83,6 +83,7 @@ mod golden_tests {
 
     #[test]
     fn golden_password_stretch_and_verifier() {
+        let _guard = ::habilis_network_test_tracing::init();
         let seed = Seed::new(SEED);
         let password = Password::new("hunter2".to_owned());
         let key = stretch_mesh_password(&password, &seed);
@@ -105,6 +106,7 @@ mod golden_tests {
 
     #[test]
     fn golden_derivations_keyed_by_a_secret() {
+        let _guard = ::habilis_network_test_tracing::init();
         let root = SymmetricKey::from(ROOT);
         let name = MeshName::try_new("test").unwrap();
         assert_eq!(
@@ -129,6 +131,7 @@ mod golden_tests {
 
     #[test]
     fn the_ladders_of_the_old_range_are_no_longer_derived() {
+        let _guard = ::habilis_network_test_tracing::init();
         let old_wire = [5931, 48242, 42909, 64096, 38056, 45299, 54555, 32776];
         let old_secret = [64619, 51235, 41400, 1621, 17345, 37799, 35331, 60865];
         let wire = rendezvous_ports(Keying::Wire(&Seed::new(SEED)));

@@ -64,10 +64,10 @@ impl std::fmt::Display for DedupKey {
 #[cfg(test)]
 mod tests {
     use super::DedupKey;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn the_bounds_take_in_every_key() {
+        let _guard = ::habilis_network_test_tracing::init();
         let key = DedupKey::from([7; 16]);
         assert!(
             DedupKey::MIN < key && key < DedupKey::MAX,
@@ -87,6 +87,7 @@ mod tests {
 
     #[test]
     fn it_orders_by_its_bytes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut low = [0u8; 16];
         low[15] = 1;
         let mut high = [0u8; 16];
@@ -99,6 +100,7 @@ mod tests {
 
     #[test]
     fn it_prints_as_hex() {
+        let _guard = ::habilis_network_test_tracing::init();
         let key = DedupKey::from([0xab; 16]);
         assert_eq!(
             key.to_string(),

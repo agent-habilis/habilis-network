@@ -115,10 +115,10 @@ impl MessageId {
 #[cfg(test)]
 mod id_tests {
     use super::MessageId;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn accepts_uuid_v4() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id = MessageId::try_new("550e8400-e29b-41d4-a716-446655440000").unwrap();
         assert_eq!(
             id.as_str(),
@@ -129,6 +129,7 @@ mod id_tests {
 
     #[test]
     fn rejects_garbage() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             MessageId::try_new("not-a-uuid").is_err(),
             "a non-uuid is refused"
@@ -142,6 +143,7 @@ mod id_tests {
 
     #[test]
     fn random_produces_valid_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let first = MessageId::random();
         let second = MessageId::random();
         assert_ne!(first, second, "two random ids differ");
@@ -150,6 +152,7 @@ mod id_tests {
 
     #[test]
     fn from_str_works_for_clap() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id: MessageId = "550e8400-e29b-41d4-a716-446655440000".parse().unwrap();
         assert_eq!(
             id.as_str(),
@@ -160,6 +163,7 @@ mod id_tests {
 
     #[test]
     fn serde_transparent_round_trip() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id = MessageId::random();
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(
@@ -173,6 +177,7 @@ mod id_tests {
 
     #[test]
     fn deserialize_rejects_non_uuid() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The derived transparent Deserialize would accept any string and let
         // `as_uuid_bytes` panic later; the validating impl rejects it here.
         assert!(

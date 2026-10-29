@@ -13,12 +13,12 @@ pub use resolve_error::ResolveError;
 #[cfg(test)]
 mod tests {
     use super::{JoinTarget, JoinTargetError, resolve};
-    use habilis_network_test_tracing::test;
 
     // The consumer builds its own "use the topic command instead" hint off this
     // variant, so the trimmed input has to survive classification verbatim.
     #[test]
     fn a_non_token_string_is_unrecognized_and_echoes_its_input() {
+        let _guard = ::habilis_network_test_tracing::init();
         let parsed: Result<JoinTarget, _> = "  github.com/alice/proj ".parse();
         let error = parsed.unwrap_err();
         assert_eq!(
@@ -45,6 +45,7 @@ mod tests {
 
     #[test]
     fn resolve_passthrough_for_valid_mesh_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id = known_mesh_id();
         let target: JoinTarget = id.parse().unwrap();
         let mesh = resolve(&target).unwrap();
@@ -53,6 +54,7 @@ mod tests {
 
     #[test]
     fn mistyped_mesh_id_reports_an_invalid_gossip_hash() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut mistyped = known_mesh_id();
         let replacement = if mistyped.ends_with('1') { "2" } else { "1" };
         mistyped.replace_range(mistyped.len() - 1.., replacement);
@@ -67,6 +69,7 @@ mod tests {
 
     #[test]
     fn join_target_classifies_valid_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id = known_mesh_id();
         let parsed: Result<JoinTarget, _> = id.parse();
         assert!(
@@ -89,6 +92,7 @@ mod tests {
 
     #[test]
     fn a_bare_invite_only_hash_is_refused_at_unlock_with_a_pointer() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The attack: skip the invite and join with the raw hash. `unlock` must
         // refuse, so no mesh is ever derived without its root.
         let id = invite_only_mesh().to_string();
@@ -103,6 +107,7 @@ mod tests {
 
     #[test]
     fn a_minted_invite_classifies_as_invite() {
+        let _guard = ::habilis_network_test_tracing::init();
         let token = crate::invite::mint(
             &invite_only_mesh(),
             Some(std::time::Duration::from_hours(1)),

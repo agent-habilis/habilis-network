@@ -131,7 +131,6 @@ pub(super) fn random_pair() -> String {
 #[cfg(test)]
 mod js_copy {
     use super::WORDS;
-    use habilis_network_test_tracing::test;
 
     const SOURCE: &str = include_str!("../../../packages/habilis-network-api/src/wordlist.ts");
 
@@ -155,6 +154,7 @@ mod js_copy {
     /// one word that moved under two screens of the ones that did not.
     #[test]
     fn the_typescript_copy_is_word_for_word_the_same() {
+        let _guard = ::habilis_network_test_tracing::init();
         let copy = transcribed();
         for (index, (mine, theirs)) in WORDS.iter().zip(&copy).enumerate() {
             assert_eq!(
