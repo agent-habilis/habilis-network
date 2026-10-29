@@ -27,11 +27,11 @@ mod drop_policy_tests {
     /// as it does on any lossy path. A lane that keeps dropping warns, from the 256th drop on.
     #[test]
     fn a_first_drop_is_no_warning_and_a_sustained_one_is() {
-        assert!(should_log_drop(1));
-        assert!(!drops_are_sustained(1));
-        assert!(!drops_are_sustained(255));
-        assert!(should_log_drop(256));
-        assert!(drops_are_sustained(256));
-        assert!(drops_are_sustained(512));
+        assert!(should_log_drop(1), "the first drop is logged");
+        assert!(!drops_are_sustained(1), "the first drop is not sustained");
+        assert!(!drops_are_sustained(255), "255 drops are not sustained");
+        assert!(should_log_drop(256), "256 drops are logged again");
+        assert!(drops_are_sustained(256), "256 drops are sustained");
+        assert!(drops_are_sustained(512), "512 drops are sustained");
     }
 }

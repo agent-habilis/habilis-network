@@ -40,16 +40,30 @@ fn quic_echo_over_webrtc() -> anyhow::Result<()> {
         let (pending_offer, offer_env) = offer_with(id_client, &IceConfig::host_only()).await?;
         let (pending_answer, answer_env) =
             answer_with(id_server, &offer_env, &IceConfig::host_only()).await?;
-        assert_eq!(offer_env.claimed_endpoint()?, id_client);
-        assert_eq!(answer_env.claimed_endpoint()?, id_server);
+        assert_eq!(
+            offer_env.claimed_endpoint()?,
+            id_client,
+            "the offer is claimed by the client endpoint"
+        );
+        assert_eq!(
+            answer_env.claimed_endpoint()?,
+            id_server,
+            "the answer is claimed by the server endpoint"
+        );
         let (client_session, server_session) = tokio::join!(
             pending_offer.complete(&answer_env, JSEP_DEADLINE),
             pending_answer.complete(JSEP_DEADLINE),
         );
         transport_client.attach(id_server, client_session?)?;
         transport_server.attach(id_client, server_session?)?;
-        assert!(transport_client.has_session(&id_server));
-        assert!(transport_server.has_session(&id_client));
+        assert!(
+            transport_client.has_session(&id_server),
+            "the client has a session with the server"
+        );
+        assert!(
+            transport_server.has_session(&id_client),
+            "the server has a session with the client"
+        );
 
         let endpoint_server = Endpoint::builder(transport_server.preset())
             .secret_key(key_server)
@@ -83,7 +97,10 @@ fn quic_echo_over_webrtc() -> anyhow::Result<()> {
         send.write_all(b"hello over webrtc").await?;
         send.finish()?;
         let echoed = recv.read_to_end(64).await?;
-        assert_eq!(echoed, b"hello over webrtc");
+        assert_eq!(
+            echoed, b"hello over webrtc",
+            "the echo returns the hello bytes over webrtc"
+        );
 
         connection.close(0u32.into(), b"done");
         router.shutdown().await?;
@@ -115,7 +132,10 @@ fn a_detach_ends_the_far_sides_session_too() -> anyhow::Result<()> {
         transport_client.attach(id_server, client_session?)?;
         transport_server.attach(id_client, server_session?)?;
 
-        assert!(transport_client.detach(&id_server));
+        assert!(
+            transport_client.detach(&id_server),
+            "a detach ends the far side's session too"
+        );
         let started = std::time::Instant::now();
         while transport_server.has_session(&id_client) {
             assert!(
@@ -148,7 +168,10 @@ fn detach_then_reattach() -> anyhow::Result<()> {
         drop(server_session?);
 
         transport_client.attach(id_server, client_session?)?;
-        assert!(transport_client.has_session(&id_server));
+        assert!(
+            transport_client.has_session(&id_server),
+            "the client keeps its session after the reattach"
+        );
 
         // Second attach while live must fail.
         let (second_offer, second_env) = offer_with(id_client, &IceConfig::host_only()).await?;
@@ -160,11 +183,24 @@ fn detach_then_reattach() -> anyhow::Result<()> {
         );
         drop(second_server?);
         let second_session = second_client?;
-        assert!(transport_client.attach(id_server, second_session).is_err());
+        assert!(
+            transport_client.attach(id_server, second_session).is_err(),
+            "a second attach of the same peer is refused"
+        );
 
-        assert!(transport_client.detach(&id_server));
-        assert!(!transport_client.has_session(&id_server));
-        assert_eq!(transport_client.session_count(), 0);
+        assert!(
+            transport_client.detach(&id_server),
+            "the reattached session detaches"
+        );
+        assert!(
+            !transport_client.has_session(&id_server),
+            "the detached session is gone"
+        );
+        assert_eq!(
+            transport_client.session_count(),
+            0,
+            "the client holds no session after the detach"
+        );
         Ok(())
     })
 }
@@ -237,8 +273,15 @@ fn a_refused_duplicate_leaves_the_live_session_working() -> anyhow::Result<()> {
             "and refused from the other side too"
         );
 
-        assert!(transport_client.has_session(&id_server));
-        assert_eq!(transport_client.session_count(), 1);
+        assert!(
+            transport_client.has_session(&id_server),
+            "a refused duplicate leaves the live session working"
+        );
+        assert_eq!(
+            transport_client.session_count(),
+            1,
+            "the client keeps exactly one session after the refused duplicate"
+        );
         // The assertion this test exists for: the surviving session still carries
         // traffic. A duplicate that installed its handlers before checking would
         // have left an orphan channel whose `onclose` later removed this very

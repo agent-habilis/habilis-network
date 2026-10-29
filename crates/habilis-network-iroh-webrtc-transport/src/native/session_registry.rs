@@ -88,7 +88,10 @@ mod tests {
             ))
             .expect("a fresh remote attaches")
             .commit();
-        assert!(registry.is_live(&remote));
+        assert!(
+            registry.is_live(&remote),
+            "a session that attaches normally is live"
+        );
 
         registry.remove_if_generation(&remote, generation);
         assert!(!registry.is_live(&remote), "its own driver may retire it");

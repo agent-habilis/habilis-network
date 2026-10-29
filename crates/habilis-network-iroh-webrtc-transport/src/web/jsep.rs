@@ -514,7 +514,11 @@ mod tests {
             "the earliest datagrams win"
         );
         // Taken means gone: a second take delivers nothing twice.
-        assert_eq!(backlog.take().0.len(), 0);
+        assert_eq!(
+            backlog.take().0.len(),
+            0,
+            "the pre-attach backlog is bounded at the inbound queue"
+        );
     }
 
     #[test]
@@ -525,44 +529,76 @@ mod tests {
         // gathering ladder on every offer and answer.
         let sdp =
             "a=candidate:1 1 udp 1686052607 1.2.3.4 50000 typ srflx raddr abc.local rport 9\r\n";
-        assert_eq!(count_candidates(sdp), (0, 0, 1, 0, 0));
+        assert_eq!(
+            count_candidates(sdp),
+            (0, 0, 1, 0, 0),
+            "a srflx candidate with an mdns raddr counts as srflx"
+        );
     }
 
     #[test]
     fn an_mdns_obfuscated_host_still_counts_as_mdns() {
         let sdp = "a=candidate:1 1 udp 2113937151 abcd1234.local 54321 typ host generation 0\r\n";
-        assert_eq!(count_candidates(sdp), (0, 1, 0, 0, 0));
+        assert_eq!(
+            count_candidates(sdp),
+            (0, 1, 0, 0, 0),
+            "an mdns obfuscated host still counts as mdns"
+        );
     }
 
     #[test]
     fn no_candidates_never_settles() {
-        assert!(!gathering_settled(0, 0, QUIET * 100.0, true));
-        assert!(!gathering_settled(0, 0, QUIET * 100.0, false));
+        assert!(
+            !gathering_settled(0, 0, QUIET * 100.0, true),
+            "no candidates never settles at a long quiet period"
+        );
+        assert!(
+            !gathering_settled(0, 0, QUIET * 100.0, false),
+            "no candidates never settles without a srflx wait"
+        );
     }
 
     #[test]
     fn srflx_is_required_when_stun_servers_are_configured() {
         // Host-only in hand: keep waiting — srflx is the only NAT rung.
-        assert!(!gathering_settled(2, 0, QUIET, true));
-        assert!(gathering_settled(2, 1, QUIET, true));
+        assert!(
+            !gathering_settled(2, 0, QUIET, true),
+            "srflx is required when stun servers are configured"
+        );
+        assert!(
+            gathering_settled(2, 1, QUIET, true),
+            "one srflx candidate settles when stun servers are configured"
+        );
     }
 
     #[test]
     fn srflx_is_waived_without_stun_servers() {
         // host_only() / degraded config: srflx can never arrive.
-        assert!(gathering_settled(1, 0, QUIET, false));
+        assert!(
+            gathering_settled(1, 0, QUIET, false),
+            "srflx is waived without stun servers"
+        );
     }
 
     #[test]
     fn a_fresh_candidate_resets_the_quiet_period() {
-        assert!(!gathering_settled(1, 1, QUIET - 1.0, true));
-        assert!(gathering_settled(1, 1, QUIET, true));
+        assert!(
+            !gathering_settled(1, 1, QUIET - 1.0, true),
+            "a fresh candidate resets the quiet period"
+        );
+        assert!(
+            gathering_settled(1, 1, QUIET, true),
+            "a candidate after the quiet period settles"
+        );
     }
 
     #[test]
     fn srflx_alone_is_not_enough() {
         // No host/mdns line yet means gathering only just started; the local
         // candidates are instant, so their absence says "keep waiting".
-        assert!(!gathering_settled(0, 1, QUIET, true));
+        assert!(
+            !gathering_settled(0, 1, QUIET, true),
+            "srflx alone is not enough to settle"
+        );
     }
 }

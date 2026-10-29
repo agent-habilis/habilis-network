@@ -273,8 +273,14 @@ mod tests {
             relay: Some("https://relay.example/".parse().expect("a valid relay URL")),
         };
         let decoded = Ticket::decode(&ticket.encode()).expect("round trip");
-        assert_eq!(decoded.id, ticket.id);
-        assert_eq!(decoded.relay, ticket.relay);
+        assert_eq!(
+            decoded.id, ticket.id,
+            "a ticket round trips its id with a relay"
+        );
+        assert_eq!(
+            decoded.relay, ticket.relay,
+            "a ticket round trips its relay"
+        );
     }
 
     #[test]
@@ -284,8 +290,14 @@ mod tests {
             relay: None,
         };
         let decoded = Ticket::decode(&ticket.encode()).expect("round trip");
-        assert_eq!(decoded.id, ticket.id);
-        assert!(decoded.relay.is_none());
+        assert_eq!(
+            decoded.id, ticket.id,
+            "a ticket round trips its id without a relay"
+        );
+        assert!(
+            decoded.relay.is_none(),
+            "a ticket without a relay decodes with no relay"
+        );
     }
 
     /// Base58Check's checksum is the point: a ticket loses a character to a
@@ -310,7 +322,10 @@ mod tests {
                 }
             })
             .collect();
-        assert!(Ticket::decode(&mangled).is_err());
+        assert!(
+            Ticket::decode(&mangled).is_err(),
+            "a mistyped ticket is rejected rather than dialled"
+        );
     }
 
     #[test]
@@ -322,29 +337,48 @@ mod tests {
         let frame = encode_frame(&message).expect("encode");
         let header: [u8; FRAME_HEADER_LEN] = frame[..FRAME_HEADER_LEN].try_into().expect("header");
         let len = decode_frame_len(header).expect("length");
-        assert_eq!(len, frame.len() - FRAME_HEADER_LEN);
+        assert_eq!(
+            len,
+            frame.len() - FRAME_HEADER_LEN,
+            "a frame round trips at its body length"
+        );
         let decoded: ServerMsg = decode_body(&frame[FRAME_HEADER_LEN..]).expect("body");
-        assert!(matches!(decoded, ServerMsg::Said { nick, text } if nick == "bob" && text == "hi"));
+        assert!(
+            matches!(decoded, ServerMsg::Said { nick, text } if nick == "bob" && text == "hi"),
+            "a frame round trips to the same said message"
+        );
     }
 
     /// The bound is checked before the reader allocates, so a peer cannot make
     /// us reserve `4 GiB` by sending four bytes.
     #[test]
     fn an_oversized_length_prefix_is_refused_before_allocating() {
-        assert!(decode_frame_len(u32::MAX.to_le_bytes()).is_err());
+        assert!(
+            decode_frame_len(u32::MAX.to_le_bytes()).is_err(),
+            "an oversized length prefix is refused before allocating"
+        );
     }
 
     #[test]
     fn a_nick_is_measured_in_chars_not_bytes() {
         // 24 multi-byte chars is 72 bytes; a byte cap would reject it.
         let nick = "ぁ".repeat(MAX_NICK_CHARS);
-        assert!(ClientMsg::Join { nick }.validate().is_ok());
+        assert!(
+            ClientMsg::Join { nick }.validate().is_ok(),
+            "a nick of the maximum chars is valid"
+        );
         let too_long = "ぁ".repeat(MAX_NICK_CHARS + 1);
-        assert!(ClientMsg::Join { nick: too_long }.validate().is_err());
+        assert!(
+            ClientMsg::Join { nick: too_long }.validate().is_err(),
+            "a nick over the maximum chars is refused"
+        );
     }
 
     #[test]
     fn an_empty_message_is_refused() {
-        assert!(ClientMsg::Say { text: "   ".into() }.validate().is_err());
+        assert!(
+            ClientMsg::Say { text: "   ".into() }.validate().is_err(),
+            "an empty message is refused"
+        );
     }
 }

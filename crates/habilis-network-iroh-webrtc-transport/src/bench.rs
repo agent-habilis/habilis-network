@@ -373,8 +373,11 @@ mod tests {
             .expect("rtt samples")
             .collect();
 
-        assert_eq!(samples.len(), 20);
-        assert!(samples.iter().all(|sample| !sample.is_zero()));
+        assert_eq!(samples.len(), 20, "one timed probe is returned per round");
+        assert!(
+            samples.iter().all(|sample| !sample.is_zero()),
+            "every probe sample is nonzero"
+        );
         connection.close(0u32.into(), b"done");
         // Both endpoints are closed in order: an endpoint that is dropped open makes iroh log an
         // ERROR, which the guard of the test turns into a failure.

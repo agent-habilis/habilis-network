@@ -224,9 +224,13 @@ mod tests {
         let room = Room::new();
         let first = room.join("bob");
         let second = room.join("bob");
-        assert_eq!(first.nick, "bob");
-        assert_eq!(second.nick, "bob#2");
-        assert_eq!(room.len(), 2);
+        assert_eq!(first.nick, "bob", "the first bob keeps his nick");
+        assert_eq!(second.nick, "bob#2", "a second bob is renamed to bob#2");
+        assert_eq!(
+            room.len(),
+            2,
+            "the room holds two members after the second bob joins"
+        );
     }
 
     /// The regression this guards: a client that renders its own line locally
@@ -239,18 +243,25 @@ mod tests {
 
         // alice's own Joined is filtered; bob's is not.
         let seen = alice.next_broadcast().await.expect("bob joined");
-        assert!(matches!(seen.message, ServerMsg::Joined { ref nick } if nick == "bob"));
+        assert!(
+            matches!(seen.message, ServerMsg::Joined { ref nick } if nick == "bob"),
+            "the sender sees its own join first"
+        );
 
         room.say(alice.id, "hi".to_owned());
         let heard = bob.next_broadcast().await.expect("bob hears alice");
         assert!(
-            matches!(heard.message, ServerMsg::Said { ref nick, ref text } if nick == "alice" && text == "hi")
+            matches!(heard.message, ServerMsg::Said { ref nick, ref text } if nick == "alice" && text == "hi"),
+            "the other member hears the message"
         );
 
         // And alice hears nothing further of her own.
         room.say(bob.id, "hello".to_owned());
         let next = alice.next_broadcast().await.expect("alice hears bob");
-        assert!(matches!(next.message, ServerMsg::Said { ref nick, .. } if nick == "bob"));
+        assert!(
+            matches!(next.message, ServerMsg::Said { ref nick, .. } if nick == "bob"),
+            "the next message is the one said"
+        );
     }
 
     /// Leaving is a `Drop`, so a handler that unwinds still cleans up. If this
@@ -262,12 +273,23 @@ mod tests {
         let mut alice = room.join("alice");
         let bob = room.join("bob");
         let _ = alice.next_broadcast().await; // bob joined
-        assert_eq!(room.len(), 2);
+        assert_eq!(
+            room.len(),
+            2,
+            "the room holds two members before the departure"
+        );
 
         drop(bob);
         let seen = alice.next_broadcast().await.expect("bob left");
-        assert!(matches!(seen.message, ServerMsg::Left { ref nick } if nick == "bob"));
-        assert_eq!(room.len(), 1);
+        assert!(
+            matches!(seen.message, ServerMsg::Left { ref nick } if nick == "bob"),
+            "a departure is announced to the remaining member"
+        );
+        assert_eq!(
+            room.len(),
+            1,
+            "the room holds one member after the departure"
+        );
     }
 
     /// And the name comes free again, so a reconnecting tab is `bob`, not
@@ -277,6 +299,10 @@ mod tests {
         let room = Room::new();
         let _alice = room.join("alice");
         drop(room.join("bob"));
-        assert_eq!(room.join("bob").nick, "bob");
+        assert_eq!(
+            room.join("bob").nick,
+            "bob",
+            "a departed nick is free to join again"
+        );
     }
 }

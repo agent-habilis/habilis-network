@@ -93,7 +93,8 @@ mod tests {
         // than merely redundant — stripping recovers the intended server.
         assert_eq!(
             super::accept_ice_uri("stun:example.com:3478?transport=udp").as_deref(),
-            Some("stun:example.com:3478")
+            Some("stun:example.com:3478"),
+            "a query that safari would reject is stripped from the stun uri"
         );
     }
 

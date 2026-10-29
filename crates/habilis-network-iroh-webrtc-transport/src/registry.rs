@@ -300,8 +300,12 @@ mod tests {
     fn a_reservation_is_not_live() {
         let registry = Registry::<Probe>::new();
         let reservation = registry.reserve(peer(1)).expect("first reserve");
-        assert!(!registry.is_live(&peer(1)));
-        assert_eq!(registry.live_len(), 0);
+        assert!(!registry.is_live(&peer(1)), "a reservation is not live");
+        assert_eq!(
+            registry.live_len(),
+            0,
+            "no live session is counted for a reservation"
+        );
         drop(reservation);
     }
 
@@ -337,7 +341,10 @@ mod tests {
             .fulfil(payload)
             .expect("slot is ours");
 
-        assert!(registry.is_live(&peer(1)));
+        assert!(
+            registry.is_live(&peer(1)),
+            "the peer reads live after dropping an uncommitted guard"
+        );
         drop(guard);
 
         assert!(!registry.is_live(&peer(1)), "the slot must be gone");
@@ -355,8 +362,15 @@ mod tests {
             .expect("slot is ours")
             .commit();
 
-        assert!(registry.is_live(&peer(1)));
-        assert_eq!(registry.live_len(), 1);
+        assert!(
+            registry.is_live(&peer(1)),
+            "a committed guard leaves the session live"
+        );
+        assert_eq!(
+            registry.live_len(),
+            1,
+            "one live session is counted after the commit"
+        );
         assert!(!dropped.get(), "committing must not tear the session down");
     }
 
@@ -373,7 +387,10 @@ mod tests {
             .fulfil(first)
             .expect("slot is ours");
         registry.remove(&peer(1));
-        assert!(first_dropped.get());
+        assert!(
+            first_dropped.get(),
+            "the first session is dropped when its guard goes stale"
+        );
 
         let (second, second_dropped) = probe();
         registry
@@ -386,7 +403,10 @@ mod tests {
         drop(stale);
 
         assert!(registry.is_live(&peer(1)), "the newer session must survive");
-        assert!(!second_dropped.get());
+        assert!(
+            !second_dropped.get(),
+            "a stale guard does not evict the newer session"
+        );
     }
 
     /// The same guarantee for the close/error hook a session installs on its
@@ -412,7 +432,10 @@ mod tests {
             .expect("slot is ours")
             .commit();
 
-        assert!(!registry.remove_if_generation(&peer(1), stale_generation));
+        assert!(
+            !registry.remove_if_generation(&peer(1), stale_generation),
+            "a stale close hook is a no-op"
+        );
         assert!(registry.is_live(&peer(1)), "the newer session must survive");
     }
 
@@ -420,10 +443,16 @@ mod tests {
     fn with_live_skips_a_reservation() {
         let registry = Registry::<Probe>::new();
         let reservation = registry.reserve(peer(1)).expect("first reserve");
-        assert!(registry.with_live(&peer(1), |_| ()).is_none());
+        assert!(
+            registry.with_live(&peer(1), |_| ()).is_none(),
+            "with_live skips a reservation"
+        );
 
         let guard = reservation.fulfil(probe().0).expect("slot is ours");
-        assert!(registry.with_live(&peer(1), |_| ()).is_some());
+        assert!(
+            registry.with_live(&peer(1), |_| ()).is_some(),
+            "with_live reaches a committed session"
+        );
         guard.commit();
     }
 

@@ -456,17 +456,25 @@ mod tests {
 
     #[test]
     fn the_median_of_an_odd_set_is_its_middle_value() {
-        assert_eq!(median(&[9, 1, 5]), 5);
+        assert_eq!(
+            median(&[9, 1, 5]),
+            5,
+            "the median of an odd set is its middle value"
+        );
     }
 
     #[test]
     fn the_median_of_an_even_set_is_the_mean_of_the_two_middle_values() {
-        assert_eq!(median(&[10, 2, 8, 4]), 6);
+        assert_eq!(
+            median(&[10, 2, 8, 4]),
+            6,
+            "the median of an even set is the mean of the two middle values"
+        );
     }
 
     #[test]
     fn the_median_of_nothing_is_zero() {
-        assert_eq!(median(&[]), 0);
+        assert_eq!(median(&[]), 0, "the median of nothing is zero");
     }
 
     #[test]
@@ -478,7 +486,10 @@ mod tests {
         let line = fit(&points).expect("a line");
         assert!((line.slope - 0.25).abs() < 1e-9, "{line:?}");
         assert!((line.intercept - 3.0).abs() < 1e-9, "{line:?}");
-        assert!(line.slope_stderr.expect("a stderr") < 1e-9);
+        assert!(
+            line.slope_stderr.expect("a stderr") < 1e-9,
+            "a fit through points on a line finds its slope"
+        );
     }
 
     #[test]
@@ -497,35 +508,71 @@ mod tests {
 
     #[test]
     fn a_fit_needs_two_different_x_values() {
-        assert_eq!(fit(&[(3.0, 1.0), (3.0, 2.0)]), None);
-        assert_eq!(fit(&[(3.0, 1.0)]), None);
+        assert_eq!(
+            fit(&[(3.0, 1.0), (3.0, 2.0)]),
+            None,
+            "a fit with one x value has no result"
+        );
+        assert_eq!(
+            fit(&[(3.0, 1.0)]),
+            None,
+            "a fit with a single point has no result"
+        );
     }
 
     #[test]
     fn the_standard_deviation_is_the_sample_one() {
         let spread = std_dev(&[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]).expect("a spread");
         assert!((spread - 2.138_089_935).abs() < 1e-6, "{spread}");
-        assert_eq!(std_dev(&[1.0]), None);
+        assert_eq!(
+            std_dev(&[1.0]),
+            None,
+            "the sample standard deviation needs two values"
+        );
     }
 
     #[test]
     fn a_verdict_needs_both_the_noise_floor_and_the_standard_error_to_be_small() {
         // The effect at k = 32 is 6.4 MiB (slope 0.2). A floor of 0.5 and an error of 0.01 pass.
-        assert!(verdict(Some(0.5), Some((0.2, Some(0.01)))).starts_with("a result"));
+        assert!(
+            verdict(Some(0.5), Some((0.2, Some(0.01)))).starts_with("a result"),
+            "a verdict needs the noise floor and the standard error to be small"
+        );
         // A floor of 1.0 is over 10 percent of 6.4.
-        assert!(verdict(Some(1.0), Some((0.2, Some(0.01)))).starts_with("NO RESULT"));
+        assert!(
+            verdict(Some(1.0), Some((0.2, Some(0.01)))).starts_with("NO RESULT"),
+            "a small noise floor and a small standard error give a verdict"
+        );
         // An error of 0.05 is over 10 percent of the slope.
-        assert!(verdict(Some(0.5), Some((0.2, Some(0.05)))).starts_with("NO RESULT"));
+        assert!(
+            verdict(Some(0.5), Some((0.2, Some(0.05)))).starts_with("NO RESULT"),
+            "a large noise floor gives no verdict"
+        );
         // Nothing to compare: no result.
-        assert!(verdict(None, Some((0.2, Some(0.01)))).starts_with("NO RESULT"));
-        assert!(verdict(Some(0.5), Some((0.2, None))).starts_with("NO RESULT"));
-        assert!(verdict(Some(0.5), None).starts_with("NO RESULT"));
+        assert!(
+            verdict(None, Some((0.2, Some(0.01)))).starts_with("NO RESULT"),
+            "a missing noise floor gives no verdict"
+        );
+        assert!(
+            verdict(Some(0.5), Some((0.2, None))).starts_with("NO RESULT"),
+            "a large standard error gives no verdict"
+        );
+        assert!(
+            verdict(Some(0.5), None).starts_with("NO RESULT"),
+            "a missing standard error gives no verdict"
+        );
     }
 
     #[test]
     fn a_negative_slope_is_never_a_result() {
         // A session that frees memory is a flaw of the run, not a cost, however small the noise.
-        assert!(verdict(Some(0.5), Some((-0.2, Some(0.01)))).starts_with("NO RESULT"));
-        assert!(verdict(Some(0.0), Some((0.0, Some(0.0)))).starts_with("NO RESULT"));
+        assert!(
+            verdict(Some(0.5), Some((-0.2, Some(0.01)))).starts_with("NO RESULT"),
+            "a negative slope is never a result"
+        );
+        assert!(
+            verdict(Some(0.0), Some((0.0, Some(0.0)))).starts_with("NO RESULT"),
+            "a zero slope with zero error is not a negative result"
+        );
     }
 }

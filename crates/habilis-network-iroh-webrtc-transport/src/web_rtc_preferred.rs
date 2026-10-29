@@ -110,6 +110,10 @@ mod tests {
     /// one; this is the guard that they stay equal. It was green on its first run.
     #[test]
     fn the_ladder_knows_the_webrtc_transport_id_of_this_crate() {
-        assert_eq!(custom_rung(crate::WEBRTC_TRANSPORT_ID), Rung::WebRtc);
+        assert_eq!(
+            custom_rung(crate::WEBRTC_TRANSPORT_ID),
+            Rung::WebRtc,
+            "the ladder knows the webrtc transport id of this crate"
+        );
     }
 }

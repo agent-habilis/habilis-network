@@ -403,18 +403,42 @@ mod tests {
     #[test]
     fn request_is_a_well_formed_binding_request() {
         let request = binding_request(TXID);
-        assert_eq!(request.len(), HEADER_LEN);
-        assert_eq!(u16::from_be_bytes([request[0], request[1]]), 0x0001);
-        assert_eq!(u16::from_be_bytes([request[2], request[3]]), 0);
-        assert_eq!(&request[4..8], &MAGIC_COOKIE.to_be_bytes());
-        assert_eq!(&request[8..], &TXID);
+        assert_eq!(
+            request.len(),
+            HEADER_LEN,
+            "a binding request has the expected length"
+        );
+        assert_eq!(
+            u16::from_be_bytes([request[0], request[1]]),
+            0x0001,
+            "the binding request has the binding method"
+        );
+        assert_eq!(
+            u16::from_be_bytes([request[2], request[3]]),
+            0,
+            "the binding request has a body length of zero"
+        );
+        assert_eq!(
+            &request[4..8],
+            &MAGIC_COOKIE.to_be_bytes(),
+            "the binding request carries the magic cookie"
+        );
+        assert_eq!(
+            &request[8..],
+            &TXID,
+            "the binding request carries the transaction id"
+        );
     }
 
     #[test]
     fn xor_mapped_ipv4_is_unmasked() {
         let message = response(ATTR_XOR_MAPPED_ADDRESS, &xor_ipv4_value(), TXID);
         let address = parse_binding_response(&message, &TXID).expect("parse");
-        assert_eq!(address, SocketAddr::from(([203, 0, 113, 7], 41234)));
+        assert_eq!(
+            address,
+            SocketAddr::from(([203, 0, 113, 7], 41234)),
+            "an xor-mapped ipv4 address is unmasked"
+        );
     }
 
     #[test]
@@ -425,7 +449,11 @@ mod tests {
         value.extend_from_slice(&[203, 0, 113, 7]);
         let message = response(ATTR_MAPPED_ADDRESS, &value, TXID);
         let address = parse_binding_response(&message, &TXID).expect("parse");
-        assert_eq!(address, SocketAddr::from(([203, 0, 113, 7], 41234)));
+        assert_eq!(
+            address,
+            SocketAddr::from(([203, 0, 113, 7], 41234)),
+            "a plain mapped address is accepted as a fallback"
+        );
     }
 
     #[test]
@@ -446,34 +474,59 @@ mod tests {
         );
         let message = response(ATTR_XOR_MAPPED_ADDRESS, &value, TXID);
         let parsed = parse_binding_response(&message, &TXID).expect("parse");
-        assert_eq!(parsed, SocketAddr::new(address.into(), 5000));
+        assert_eq!(
+            parsed,
+            SocketAddr::new(address.into(), 5000),
+            "an xor-mapped ipv6 address masks with the transaction id"
+        );
     }
 
     #[test]
     fn plain_stun_responses_are_recognized_and_peer_traffic_is_not() {
         // A gather straggler: a well-formed Binding Success.
         let success = response(ATTR_XOR_MAPPED_ADDRESS, &xor_ipv4_value(), TXID);
-        assert!(super::is_plain_stun_response(&success));
+        assert!(
+            super::is_plain_stun_response(&success),
+            "a plain stun response is recognized"
+        );
 
         // A Binding Error Response counts too — a losing server can refuse.
         let mut error = success.clone();
         error[0..2].copy_from_slice(&0x0111u16.to_be_bytes());
-        assert!(super::is_plain_stun_response(&error));
+        assert!(
+            super::is_plain_stun_response(&error),
+            "a second plain stun response is recognized"
+        );
 
         // A Binding *Request* is not a response; neither is a wrong cookie.
         let request = binding_request(TXID);
-        assert!(!super::is_plain_stun_response(&request));
+        assert!(
+            !super::is_plain_stun_response(&request),
+            "peer traffic is not a plain stun response"
+        );
         let mut bad_cookie = success.clone();
         bad_cookie[4] ^= 0xFF;
-        assert!(!super::is_plain_stun_response(&bad_cookie));
+        assert!(
+            !super::is_plain_stun_response(&bad_cookie),
+            "a short packet is not a plain stun response"
+        );
 
         // Truncated garbage and DTLS-shaped bytes are peer traffic, not
         // gather residue.
-        assert!(!super::is_plain_stun_response(&[]));
-        assert!(!super::is_plain_stun_response(&success[..HEADER_LEN - 1]));
-        assert!(!super::is_plain_stun_response(&[
-            0x16, 0xFE, 0xFD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-        ]));
+        assert!(
+            !super::is_plain_stun_response(&[]),
+            "a packet without the magic cookie is not a plain stun response"
+        );
+        assert!(
+            !super::is_plain_stun_response(&success[..HEADER_LEN - 1]),
+            "a packet with the wrong method is not a plain stun response"
+        );
+        assert!(
+            !super::is_plain_stun_response(&[
+                0x16, 0xFE, 0xFD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            ]),
+            "a packet with a bad length is not a plain stun response"
+        );
     }
 
     #[test]
@@ -485,7 +538,10 @@ mod tests {
             &xor_ipv4_value(),
             [1u8; TRANSACTION_ID_LEN],
         );
-        assert!(parse_binding_response(&message, &TXID).is_err());
+        assert!(
+            parse_binding_response(&message, &TXID).is_err(),
+            "a reply for another transaction is rejected"
+        );
     }
 
     #[test]
@@ -592,7 +648,11 @@ mod tests {
         let elapsed = start.elapsed();
         server.abort();
 
-        assert_eq!(reflexive, Some("203.0.113.7:41234".parse().expect("addr")));
+        assert_eq!(
+            reflexive,
+            Some("203.0.113.7:41234".parse().expect("addr")),
+            "a hung resolver does not delay a live answer"
+        );
         assert!(
             elapsed < Duration::from_millis(500),
             "gather took {elapsed:?}: the hung resolver parked the receive loop"
@@ -735,6 +795,9 @@ mod tests {
         };
         let reflexive = gather_reflexive(&client, &config).await;
         drop(silent);
-        assert_eq!(reflexive, None);
+        assert_eq!(
+            reflexive, None,
+            "gathering gives no reflexive address when no server answers"
+        );
     }
 }

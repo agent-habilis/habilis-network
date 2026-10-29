@@ -40,21 +40,31 @@ mod tests {
 
     #[test]
     fn a_dead_connection_is_removed_at_once() {
-        assert_eq!(judge_state(ConnectionPhase::Dead, None), Verdict::Remove);
+        assert_eq!(
+            judge_state(ConnectionPhase::Dead, None),
+            Verdict::Remove,
+            "a dead connection is removed at once"
+        );
         assert_eq!(
             judge_state(ConnectionPhase::Dead, Some(0.0)),
-            Verdict::Remove
+            Verdict::Remove,
+            "a dead connection is removed even with a zero rtt"
         );
     }
 
     #[test]
     fn a_healthy_connection_is_kept_whatever_its_history() {
-        assert_eq!(judge_state(ConnectionPhase::Healthy, None), Verdict::Keep);
+        assert_eq!(
+            judge_state(ConnectionPhase::Healthy, None),
+            Verdict::Keep,
+            "a healthy connection is kept"
+        );
         // Recovered inside the grace window: the elapsed figure is stale and
         // must not count against it.
         assert_eq!(
             judge_state(ConnectionPhase::Healthy, Some(DISCONNECT_GRACE_MS * 2.0)),
-            Verdict::Keep
+            Verdict::Keep,
+            "a healthy connection is kept with a bad history"
         );
     }
 
@@ -62,14 +72,16 @@ mod tests {
     fn a_fresh_disconnect_waits_for_the_grace_window() {
         assert_eq!(
             judge_state(ConnectionPhase::Disconnected, None),
-            Verdict::Wait
+            Verdict::Wait,
+            "a fresh disconnect waits for the grace window"
         );
         assert_eq!(
             judge_state(
                 ConnectionPhase::Disconnected,
                 Some(DISCONNECT_GRACE_MS / 2.0)
             ),
-            Verdict::Wait
+            Verdict::Wait,
+            "a fresh disconnect with a sample still waits"
         );
     }
 
@@ -77,14 +89,16 @@ mod tests {
     fn a_disconnect_that_outlives_the_grace_window_is_removed() {
         assert_eq!(
             judge_state(ConnectionPhase::Disconnected, Some(DISCONNECT_GRACE_MS)),
-            Verdict::Remove
+            Verdict::Remove,
+            "a disconnect past the grace window is removed"
         );
         assert_eq!(
             judge_state(
                 ConnectionPhase::Disconnected,
                 Some(DISCONNECT_GRACE_MS + 1.0)
             ),
-            Verdict::Remove
+            Verdict::Remove,
+            "a disconnect past the grace window with a sample is removed"
         );
     }
 }
