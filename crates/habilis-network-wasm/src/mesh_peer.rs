@@ -1,9 +1,11 @@
 use std::cell::RefCell;
 
+use habilis_network::membership;
 use habilis_network::membership::{
     Inbound, JoinOptions, MAX_MSG, MembershipApp, Request, json_sink,
 };
 use habilis_network::runtime::Node;
+use std::fmt;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 /// One mesh membership, held by a tab.
@@ -37,7 +39,7 @@ impl MeshPeer {
         let options: JoinOptions = serde_json::from_str(&opts_json)
             .map_err(|error| to_js_error(&format!("invalid options: {error}")))?;
         let (sink, events) = json_sink();
-        let membership = habilis_network::membership::join(&options, sink)
+        let membership = membership::join(&options, sink)
             .await
             .map_err(|error| to_js_error(&format!("{error:#}")))?;
         let node = membership.node;
@@ -90,10 +92,8 @@ impl MeshPeer {
     /// nickname, the event loop has stopped, or the engine refused the frame
     /// (a directed frame held for a direct path, say).
     pub async fn send(&self, to: Option<String>, text: String) -> Result<(), JsValue> {
-        let to = habilis_network::membership::parse_to(to.as_deref())
-            .map_err(|error| to_js_error(&error))?;
-        let body =
-            habilis_network::membership::msg_body(&text).map_err(|error| to_js_error(&error))?;
+        let to = membership::parse_to(to.as_deref()).map_err(|error| to_js_error(&error))?;
+        let body = membership::msg_body(&text).map_err(|error| to_js_error(&error))?;
         let (reply, answer) = oneshot::channel();
         self.request(Request::Send { to, body, reply }).await?;
         answer
@@ -188,7 +188,7 @@ impl MeshPeer {
         let Some(node) = node else {
             return Ok(());
         };
-        habilis_network::membership::depart(node)
+        membership::depart(node)
             .await
             .map_err(|error| to_js_error(&format!("{error:#}")))
     }
@@ -210,6 +210,6 @@ fn msg_json(message: &Inbound) -> String {
     .to_string()
 }
 
-pub(crate) fn to_js_error(message: &(impl std::fmt::Display + ?Sized)) -> JsValue {
+pub(crate) fn to_js_error(message: &(impl fmt::Display + ?Sized)) -> JsValue {
     JsValue::from_str(&message.to_string())
 }

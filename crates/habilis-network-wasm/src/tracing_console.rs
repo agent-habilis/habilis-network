@@ -26,9 +26,11 @@ pub fn init_tracing(filter: &str) {
 mod console_writer {
     use std::io;
 
+    use tracing_subscriber::fmt;
+    use web_sys::console;
     pub(crate) struct MakeConsoleWriter;
 
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for MakeConsoleWriter {
+    impl<'a> fmt::MakeWriter<'a> for MakeConsoleWriter {
         type Writer = ConsoleWriter;
 
         fn make_writer(&'a self) -> Self::Writer {
@@ -51,7 +53,7 @@ mod console_writer {
                 return Ok(());
             }
             let text = String::from_utf8_lossy(&self.0);
-            web_sys::console::log_1(&text.trim_end().into());
+            console::log_1(&text.trim_end().into());
             self.0.clear();
             Ok(())
         }

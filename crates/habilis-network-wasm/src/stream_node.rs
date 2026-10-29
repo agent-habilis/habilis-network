@@ -9,6 +9,7 @@ use n0_future::future::or;
 use tokio::sync::{Mutex, watch};
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
+use std::error;
 /// The node, shared with every producer and reader it hands out. JS frees a
 /// handle it no longer refers to, and a page keeps its producer but not the
 /// node that made it: without these clones the node, and its endpoint, went
@@ -147,7 +148,7 @@ async fn reached(ending: &watch::Sender<Ending>, at: Ending) {
     let _ = ending.subscribe().wait_for(|now| *now >= at).await;
 }
 
-fn js(error: &(dyn std::error::Error + 'static)) -> JsValue {
+fn js(error: &(dyn error::Error + 'static)) -> JsValue {
     let mut text = error.to_string();
     let mut cause = error.source();
     while let Some(source) = cause {
