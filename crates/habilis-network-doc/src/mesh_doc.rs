@@ -1469,10 +1469,8 @@ mod tests {
             assert!(matches!(sink.ingest(frame), Ingested::Buffered));
         }
         assert!(matches!(sink.ingest(&rival), Ingested::Ignored));
-        assert_eq!(
-            sink.take_dropped().collect::<Vec<_>>(),
-            vec![rival.dedup_key()]
-        );
+        let dropped_keys: Vec<_> = sink.take_dropped().collect();
+        assert_eq!(dropped_keys, vec![rival.dedup_key()]);
     }
 
     /// automerge takes one change per `(actor, seq)`. A frame whose signer does
@@ -1548,34 +1546,25 @@ mod tests {
         let alice = nick("alice");
         let mut source = MeshDoc::new_ungated();
         author(&mut source, &alice, &json!({"a": 1}));
-        let earlier = source.heads().collect::<Vec<_>>();
+        let earlier: Vec<_> = source.heads().collect();
         author(&mut source, &alice, &json!({"b": 2}));
         let mut joiner = MeshDoc::new_ungated();
 
-        assert!(
-            source.holds_heads(&source.heads().collect::<Vec<_>>()),
-            "its own heads"
-        );
+        let own_heads: Vec<_> = source.heads().collect();
+        let fresh_heads: Vec<_> = joiner.heads().collect();
+        assert!(source.holds_heads(&own_heads), "its own heads");
         assert!(source.holds_heads(&earlier), "heads it has moved past");
-        assert!(
-            source.holds_heads(&joiner.heads().collect::<Vec<_>>()),
-            "a fresh doc's genesis"
-        );
-        assert!(
-            !joiner.holds_heads(&source.heads().collect::<Vec<_>>()),
-            "heads it never saw"
-        );
+        assert!(source.holds_heads(&fresh_heads), "a fresh doc's genesis");
+        assert!(!joiner.holds_heads(&own_heads), "heads it never saw");
         assert!(
             !source.holds_heads(&["not-a-hash".to_owned()]),
             "a head that does not decode"
         );
-        for carrier in source.changes_since(&joiner.heads().collect::<Vec<_>>(), 100) {
+        for carrier in source.changes_since(&fresh_heads, 100) {
             joiner.ingest(&carrier);
         }
-        assert!(
-            joiner.holds_heads(&source.heads().collect::<Vec<_>>()),
-            "after the backfill"
-        );
+        let backfilled: Vec<_> = source.heads().collect();
+        assert!(joiner.holds_heads(&backfilled), "after the backfill");
     }
 
     #[test]
@@ -1588,21 +1577,16 @@ mod tests {
         author(&mut source, &alice, &json!({"b": 2}));
 
         let mut joiner = MeshDoc::new_ungated();
-        let missing = source
-            .changes_since(&joiner.heads().collect::<Vec<_>>(), 100)
-            .collect::<Vec<_>>();
+        let joiner_heads: Vec<_> = joiner.heads().collect();
+        let missing: Vec<_> = source.changes_since(&joiner_heads, 100).collect();
         assert_eq!(missing.len(), 2, "joiner lacks both changes");
         for carrier in &missing {
             joiner.ingest(carrier);
         }
         assert_eq!(joiner.to_json(), json!({"a": 1, "b": 2}));
         // Now converged, the source has nothing more to offer.
-        assert!(
-            source
-                .changes_since(&joiner.heads().collect::<Vec<_>>(), 100)
-                .next()
-                .is_none()
-        );
+        let converged: Vec<_> = joiner.heads().collect();
+        assert!(source.changes_since(&converged, 100).next().is_none());
     }
 
     #[test]
