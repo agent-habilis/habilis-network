@@ -3,6 +3,7 @@
 use super::co_host_policy::CoHostPolicy;
 use super::driver_mode::DriverMode;
 use super::endpoint_owner::EndpointOwner;
+use crate::daemon::setup::LiveCount;
 #[cfg(feature = "host")]
 use crate::daemon::shutdown::{Owner, OwnerPidError};
 
@@ -24,7 +25,6 @@ use crate::protocol::{crypto, identity};
 #[cfg(feature = "multihop")]
 use crate::transport::underlay_webrtc;
 use iroh::address_lookup::memory;
-use std::sync::atomic;
 
 /// Configuration for the event loop, shared by `create` and `join`.
 /// The driver-specific channels live in [`DriverMode`].
@@ -158,7 +158,7 @@ pub struct EventLoopConfig {
     /// directory re-broadcast task reads the live peer count from. Supplied
     /// up front through `SetupParams::live_count`, so the config is complete
     /// when it is built; `run` stores it before the first advertisement.
-    pub(crate) live_count: Option<std::sync::Arc<atomic::AtomicUsize>>,
+    pub(crate) live_count: Option<LiveCount>,
     /// `TransportPolicy::relay`, read from the mesh config — never from a
     /// per-node option, so every member agrees.
     pub(crate) relay_transport: crate::transport::PayloadPath,

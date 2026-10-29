@@ -183,7 +183,7 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
 
     let config = setup_mesh(
         kind,
-        SetupParams::new(author, Arc::new(SilentSink::default())).with_max_peers(16),
+        SetupParams::new(author, SilentSink::default()).with_max_peers(16),
     )
     .await?;
 

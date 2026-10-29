@@ -38,7 +38,7 @@ use iroh::address_lookup::memory;
 
 pub use injected_endpoint::InjectedEndpoint;
 pub use setup_kind::SetupKind;
-pub use setup_params::SetupParams;
+pub use setup_params::{LiveCount, SetupParams};
 /// Build the `RendezvousParams` for a mesh. `id` is the well-known
 /// rendezvous `EndpointId`; `bind_port` is `Some` only for private
 /// meshes (the deterministic loopback port — public is ephemeral and
@@ -1180,8 +1180,7 @@ mod tests {
             let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
             let config = super::setup_mesh(
                 kind,
-                super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
-                    .with_max_peers(8),
+                super::SetupParams::new(author, crate::embed::SilentSink).with_max_peers(8),
             )
             .await
             .expect("a loopback mesh sets up");
@@ -1228,7 +1227,7 @@ mod tests {
             let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
             let config = super::setup_mesh(
                 kind,
-                super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
+                super::SetupParams::new(author, crate::embed::SilentSink)
                     .with_max_peers(8)
                     .with_transports(transports),
             )
@@ -1257,7 +1256,7 @@ mod tests {
         let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
         let config = super::setup_mesh(
             kind,
-            super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
+            super::SetupParams::new(author, crate::embed::SilentSink)
                 .with_max_peers(8)
                 .with_transports(crate::lookup::TransportOpts {
                     udp: false,
@@ -1295,7 +1294,7 @@ mod tests {
             let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
             let config = super::setup_mesh(
                 kind,
-                super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
+                super::SetupParams::new(author, crate::embed::SilentSink)
                     .with_max_peers(max_peers)
                     .with_max_direct(max_direct),
             )
@@ -1504,7 +1503,7 @@ mod tests {
         let (kind, author) = crate::membership::resolve_kind(&options, None)?;
         super::setup_mesh(
             kind,
-            super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
+            super::SetupParams::new(author, crate::embed::SilentSink)
                 .with_max_peers(8)
                 .with_endpoint(injected),
         )
@@ -1613,8 +1612,7 @@ mod tests {
         let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
         let config = super::setup_mesh(
             kind,
-            super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
-                .with_max_peers(8),
+            super::SetupParams::new(author, crate::embed::SilentSink).with_max_peers(8),
         )
         .await
         .expect("a loopback mesh sets up");
@@ -1663,7 +1661,7 @@ mod browser_tests {
         let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
         let mut config = super::setup_mesh(
             kind,
-            super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
+            super::SetupParams::new(author, crate::embed::SilentSink)
                 .with_max_peers(8)
                 .with_transports(crate::lookup::TransportOpts {
                     udp: false,

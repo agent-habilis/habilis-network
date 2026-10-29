@@ -21,8 +21,7 @@
 //! Everything else on `NodeDriver` has a default.
 
 use habilis_network::protocol::message::Authored;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SilentSink,
@@ -31,7 +30,7 @@ use habilis_network::protocol::{
     DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, TransportPolicy,
 };
 use habilis_network::runtime::{
-    CreateParams, JoinParams, Node, Resolved, SetupParams, SignalHandling, setup_mesh,
+    CreateParams, JoinParams, LiveCount, Node, Resolved, SetupParams, SignalHandling, setup_mesh,
 };
 
 /// The do-nothing application. A peer that only carries presence still forms a
@@ -169,12 +168,12 @@ async fn run_peer(
     // The live peer count, mirrored out of the loop on every roster change and
     // on the periodic refresh. Lock-free, so reading it per second costs
     // nothing and needs no request/response hop into the loop.
-    let live = Arc::new(AtomicUsize::new(0));
+    let live = LiveCount::default();
     let config = setup_mesh(
         kind,
-        SetupParams::new(author.clone(), Arc::new(SilentSink::default()))
+        SetupParams::new(author.clone(), SilentSink::default())
             .with_max_peers(16)
-            .with_live_count(Arc::clone(&live)),
+            .with_live_count(live.clone()),
     )
     .await?;
 

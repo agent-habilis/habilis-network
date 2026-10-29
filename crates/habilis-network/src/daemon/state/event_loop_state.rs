@@ -10,11 +10,12 @@ use crate::daemon::cohost_arm;
 use crate::daemon::doc::MeshDoc;
 use crate::daemon::probe_backoff::ProbeBackoff;
 use crate::daemon::reassembly::{self, ReassemblyStore, ShardCache, ShardIngest};
+use crate::daemon::setup::LiveCount;
 
 use crate::transport::UdpTransport;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use iroh::{EndpointAddr, EndpointId};
@@ -500,7 +501,7 @@ pub struct EventLoopState {
     /// Mirrors `peer_count` (`peers.len() + 1`), refreshed
     /// alongside every `write_peer_count`. `None` for the common
     /// non-advertising case (no shared counter to maintain).
-    pub(crate) live_count: Option<Arc<AtomicUsize>>,
+    pub(crate) live_count: Option<LiveCount>,
     pub(crate) message_log: MessageLog,
     /// Shard groups already reassembled + surfaced, so a body is surfaced
     /// once even if a shard is re-fetched (via anti-entropy) after its id aged
@@ -1695,7 +1696,7 @@ impl EventLoopState {
 
     /// This member's signing identity.
     #[must_use]
-    pub fn identity(&self) -> &Arc<Identity> {
+    pub fn identity(&self) -> &Identity {
         &self.identity
     }
 

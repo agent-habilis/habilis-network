@@ -15,8 +15,8 @@ pub use crate::daemon::params::{
     derive_topic_mesh_with,
 };
 pub use crate::daemon::setup::{
-    BROWSER_HAS_NO_PATH, BROWSER_NEEDS_RELAY_LOOKUP, InjectedEndpoint, SetupKind, SetupParams,
-    refuse_in_browser, setup_mesh,
+    BROWSER_HAS_NO_PATH, BROWSER_NEEDS_RELAY_LOOKUP, InjectedEndpoint, LiveCount, SetupKind,
+    SetupParams, refuse_in_browser, setup_mesh,
 };
 #[cfg(feature = "host")]
 pub use crate::daemon::{OwnerPidError, validate_owner_pid};

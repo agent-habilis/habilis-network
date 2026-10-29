@@ -95,6 +95,12 @@ pub trait NodeSink: Send + Sync {
     fn emit(&self, event: NodeEvent);
 }
 
+impl<T: NodeSink + ?Sized> NodeSink for std::sync::Arc<T> {
+    fn emit(&self, event: NodeEvent) {
+        (**self).emit(event);
+    }
+}
+
 /// A sink that drops every [`NodeEvent`]. The no-op emitter for an embedder that
 /// renders nothing from the engine's transport/membership surfacings (e.g. a
 /// bytes-piping consumer that only reacts to its own `App` frames), and for

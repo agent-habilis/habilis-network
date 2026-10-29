@@ -40,7 +40,6 @@
 //! pclose <closes of the pooled unicast connections that a send used> predial <of them followed
 //! by one within 300 s>`.
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use habilis_network::embed::SilentSink;
@@ -261,7 +260,7 @@ async fn main() -> anyhow::Result<()> {
     let (inbound_tx, mut inbound) = mpsc::channel(INBOUND_CAP);
     let config = setup_mesh(
         kind,
-        SetupParams::new(author.clone(), Arc::new(SilentSink::default()))
+        SetupParams::new(author.clone(), SilentSink::default())
             .with_max_peers(usize::try_from(env_number("MESH_MAX_PEERS")).unwrap_or(0))
             .with_max_direct(usize::try_from(env_number("MESH_MAX_DIRECT")).unwrap_or(0)),
     )

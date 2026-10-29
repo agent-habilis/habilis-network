@@ -32,7 +32,6 @@ use habilis_network::runtime::{
 use habilis_network::util::clock::Instant;
 use habilis_network_netplay::RollbackDriver;
 use serde::Serialize;
-use std::sync::Arc;
 use std::time::Duration;
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
@@ -173,7 +172,7 @@ impl LightCyclesPeer {
 
         let config = setup_mesh(
             kind,
-            SetupParams::new(author.clone(), Arc::new(SilentSink::default())).with_max_peers(16),
+            SetupParams::new(author.clone(), SilentSink::default()).with_max_peers(16),
         )
         .await
         .map_err(to_js_error)?;

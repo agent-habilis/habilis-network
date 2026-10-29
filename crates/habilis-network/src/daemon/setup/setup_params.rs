@@ -58,21 +58,21 @@ pub struct SetupParams {
     /// The shared live-peer counter a directory advertiser re-broadcasts from.
     /// Supplied up front rather than patched onto the returned config, so the
     /// config is complete the moment it exists.
-    pub live_count: Option<std::sync::Arc<atomic::AtomicUsize>>,
+    pub live_count: Option<LiveCount>,
 }
 
 impl SetupParams {
     /// The params of one member with every other field at its default: the engine's own caps, no
     /// runtime files, no shared endpoint, no ALPNs, and the default transports.
     #[must_use]
-    pub fn new<S: NodeSink + 'static>(author: Nickname, sink: std::sync::Arc<S>) -> Self {
+    pub fn new<S: NodeSink + 'static>(author: Nickname, sink: S) -> Self {
         Self {
             author,
             max_peers: 0,
             max_direct: 0,
             runtime_base: None,
             state_file: None,
-            sink,
+            sink: std::sync::Arc::new(sink),
             endpoint: None,
             protocols: habilis_network_iroh_transport_util::ProtocolSet::default(),
             transports: crate::lookup::TransportOpts::default(),
@@ -156,7 +156,7 @@ impl SetupParams {
 
     /// Set the shared live-peer counter a directory advertiser re-broadcasts from.
     #[must_use]
-    pub fn with_live_count(self, live_count: std::sync::Arc<atomic::AtomicUsize>) -> Self {
+    pub fn with_live_count(self, live_count: LiveCount) -> Self {
         Self {
             live_count: Some(live_count),
             ..self
@@ -167,5 +167,24 @@ impl SetupParams {
 impl std::fmt::Debug for SetupParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SetupParams").finish_non_exhaustive()
+    }
+}
+
+/// The shared live-peer count. The loop mirrors its roster size into it, and a directory advertiser
+/// re-broadcasts from it. Clones share one counter.
+#[derive(Debug, Default)]
+pub struct LiveCount(std::sync::Arc<atomic::AtomicUsize>);
+
+impl Clone for LiveCount {
+    fn clone(&self) -> Self {
+        Self(std::sync::Arc::clone(&self.0))
+    }
+}
+
+impl std::ops::Deref for LiveCount {
+    type Target = atomic::AtomicUsize;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
