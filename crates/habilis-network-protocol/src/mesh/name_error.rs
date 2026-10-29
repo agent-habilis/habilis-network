@@ -17,6 +17,20 @@ use crate::{identifier, wordlist};
 /// separators `/ \`** — it is never used in a filesystem path — so a mesh name
 /// can be a URL. The newtype is the single validation point — every
 /// construction path goes through `new`.
+///
+/// # Examples
+///
+/// A mesh name checks its text on the way in, and a random one always passes the check.
+///
+/// ```
+/// use habilis_network_protocol::MeshName;
+///
+/// let name = MeshName::try_new("chat").expect("a valid name");
+/// assert_eq!(name.as_str(), "chat");
+///
+/// let random = MeshName::random();
+/// assert!(MeshName::try_new(random.as_str()).is_ok());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
 #[serde(transparent)]
 pub struct MeshName(String);
@@ -43,6 +57,17 @@ impl ::std::str::FromStr for MeshName {
 }
 
 /// Why a mesh name was refused: its length, or a character outside the allowed set.
+///
+/// # Examples
+///
+/// A rejected mesh name returns an error that says why.
+///
+/// ```
+/// use habilis_network_protocol::MeshName;
+///
+/// let error = MeshName::try_new("").unwrap_err();
+/// assert!(!error.to_string().is_empty());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 #[must_use]

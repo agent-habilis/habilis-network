@@ -4,6 +4,17 @@ use std::error::Error;
 use std::fmt;
 
 /// Why a join target does not resolve to a locked mesh.
+///
+/// # Examples
+///
+/// A mesh id that does not decode returns this error with the reason.
+///
+/// ```
+/// use habilis_network_protocol::resolver::ResolveError;
+///
+/// let error = ResolveError::InvalidId("not a mesh id".to_owned());
+/// assert!(!error.to_string().is_empty());
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 #[must_use]

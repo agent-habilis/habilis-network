@@ -14,6 +14,17 @@ use super::{ChoiceError, ConfigError};
 /// One path a mesh's members may carry payload over — an entry of the
 /// `transport` list a create names. Mesh-wide: every joiner inherits it from
 /// the mesh id.
+///
+/// # Examples
+///
+/// Each transport has the name that the wire and the config use.
+///
+/// ```
+/// use habilis_network_protocol::mesh::Transport;
+///
+/// assert_eq!(Transport::WebRtc.as_str(), "webrtc");
+/// assert_eq!(Transport::Udp.as_str(), "udp");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
@@ -80,6 +91,18 @@ impl fmt::Display for Transport {
 /// [`LookupOpts`](crate::LookupOpts). Lookups say how members find each
 /// other; this says what their traffic may ride once they have. Mesh-wide, so
 /// every member runs the same paths; the engine's `TransportOpts` follows it.
+///
+/// # Examples
+///
+/// A policy turns each transport on or off, and the default keeps the usual ones on.
+///
+/// ```
+/// use habilis_network_protocol::mesh::TransportPolicy;
+///
+/// let policy = TransportPolicy::default().with_udp(false);
+/// assert!(!policy.udp);
+/// assert!(policy.webrtc);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,

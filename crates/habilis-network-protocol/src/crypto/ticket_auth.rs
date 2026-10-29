@@ -7,6 +7,22 @@ use super::{Password, TicketSecret};
 /// salted by the secret (passworded) — same wire size either way, so a
 /// directory ad (which carries the secret) is not enough to redeem a
 /// passworded ticket.
+///
+/// # Examples
+///
+/// A ticket with a password derives a different token from the same secret.
+///
+/// ```
+/// use habilis_network_protocol::{Password, TicketAuth, TicketSecret};
+///
+/// let secret = TicketSecret::from([4u8; 32]);
+/// let open = TicketAuth::blob(&secret, None);
+/// assert!(!open.password_protected);
+///
+/// let guarded = TicketAuth::blob(&secret, Some(&Password::new("pw".to_owned())));
+/// assert!(guarded.password_protected);
+/// assert_ne!(open.token.as_bytes(), guarded.token.as_bytes());
+/// ```
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct TicketAuth {

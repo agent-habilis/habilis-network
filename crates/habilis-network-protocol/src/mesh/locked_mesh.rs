@@ -40,6 +40,25 @@ pub struct LockedMesh {
 }
 
 /// Why a [`LockedMesh`] would not unlock. The messages are the operator's text.
+///
+/// # Examples
+///
+/// A password-protected mesh does not unlock without its password.
+///
+/// ```
+/// use habilis_network_protocol::Password;
+/// use habilis_network_protocol::mesh::UnlockError;
+///
+/// use habilis_network_protocol::{Mesh, MeshConfig, MeshName, Seed};
+///
+/// let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
+/// let mut mesh = Mesh::try_new(Seed::new([4u8; 32]), MeshName::try_new("chat").expect("a name"), config)
+///     .expect("a mesh");
+///
+/// mesh.set_password(Password::new("pw".to_owned()));
+/// let error = mesh.locked().unlock(None).unwrap_err();
+/// assert!(matches!(error, UnlockError::PasswordRequired));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[must_use]

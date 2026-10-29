@@ -13,6 +13,24 @@ const MAX_LEN: usize = 512;
 ///
 /// Construction validates the length, Base58 charset, checksum, version, and
 /// complete payload. Consequently every `MeshId` can be decoded as a [`LockedMesh`](super::LockedMesh).
+///
+/// # Examples
+///
+/// The text of a mesh is a mesh id, and the id reads back to the same text.
+///
+/// ```
+/// use habilis_network_protocol::mesh::MeshId;
+///
+/// use habilis_network_protocol::{Mesh, MeshConfig, MeshName, Seed};
+///
+/// let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
+/// let mesh = Mesh::try_new(Seed::new([4u8; 32]), MeshName::try_new("chat").expect("a name"), config)
+///     .expect("a mesh");
+///
+/// let text = mesh.to_string();
+/// let id = MeshId::try_new(&text).expect("a valid id");
+/// assert_eq!(id.as_str(), text);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
 #[serde(transparent)]
 pub struct MeshId(String);
@@ -61,6 +79,17 @@ impl ::std::borrow::Borrow<str> for MeshId {
 }
 
 /// Why a mesh id text was refused: its length, a character outside the alphabet, or a bad hash.
+///
+/// # Examples
+///
+/// Text that is not a mesh id returns an error that says why.
+///
+/// ```
+/// use habilis_network_protocol::mesh::MeshId;
+///
+/// let error = MeshId::try_new("not a mesh id").unwrap_err();
+/// assert!(!error.to_string().is_empty());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 #[must_use]

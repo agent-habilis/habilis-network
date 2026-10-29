@@ -8,6 +8,17 @@ use std::fmt;
 type BoxedError = Box<dyn Error + Send + Sync>;
 
 /// Why a mesh config is refused, or a mesh identifier does not decode.
+///
+/// # Examples
+///
+/// A config that ends too soon returns an error that names the missing field.
+///
+/// ```
+/// use habilis_network_protocol::ConfigError;
+///
+/// let error = ConfigError::Truncated("mesh name");
+/// assert!(!error.to_string().is_empty());
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]
