@@ -1728,14 +1728,20 @@ mod arms_reclaim_tests {
 
     #[test]
     fn the_beacon_link_dropping_arms_it() {
-        assert!(super::arms_reclaim(true, 3, false));
+        assert!(
+            super::arms_reclaim(true, 3, false),
+            "the beacon link dropping arms the reclaim"
+        );
     }
 
     #[test]
     fn losing_the_last_peer_arms_it() {
         // Isolated: nobody left to mesh through, so a beacon may be ours to
         // stand up even if we never held a link to the old one.
-        assert!(super::arms_reclaim(false, 0, false));
+        assert!(
+            super::arms_reclaim(false, 0, false),
+            "losing the last peer arms the reclaim"
+        );
     }
 
     #[test]
@@ -1744,7 +1750,10 @@ mod arms_reclaim_tests {
         // dies, each tab still linked to the other. Not the rendezvous, not
         // isolation — and before this the tab armed nothing and waited out the
         // heal cadence.
-        assert!(super::arms_reclaim(false, 1, true));
+        assert!(
+            super::arms_reclaim(false, 1, true),
+            "any loss while beaconless arms the reclaim"
+        );
     }
 
     #[test]
@@ -1752,33 +1761,51 @@ mod arms_reclaim_tests {
         // A peer flapping while the beacon link is live is HyParView doing its
         // job. Arming here is what would make initial convergence pay a bind
         // storm on every non-beacon node.
-        assert!(!super::arms_reclaim(false, 1, false));
-        assert!(!super::arms_reclaim(false, 64, false));
+        assert!(
+            !super::arms_reclaim(false, 1, false),
+            "a shuffle under a healthy beacon arms nothing"
+        );
+        assert!(
+            !super::arms_reclaim(false, 64, false),
+            "a large shuffle under a healthy beacon arms nothing"
+        );
     }
 
     #[test]
     fn a_rendezvous_released_on_purpose_arms_nothing() {
         // Enough links to others, the beacon let go of by choice: the
         // `NeighborDown` it causes is not a loss, and nothing may come back.
-        assert!(!super::arms_reclaim(false, 3, false));
+        assert!(
+            !super::arms_reclaim(false, 3, false),
+            "a rendezvous released on purpose arms nothing"
+        );
     }
 
     #[test]
     fn a_lost_rendezvous_arms_even_when_the_node_wants_none() {
         // It may be dead, and failover needs someone to notice.
-        assert!(super::arms_reclaim(true, 5, false));
+        assert!(
+            super::arms_reclaim(true, 5, false),
+            "a lost rendezvous arms the reclaim even when the node wants none"
+        );
     }
 
     #[test]
     fn a_node_with_enough_links_does_not_arm_for_a_beacon_it_does_not_hold() {
         // Released earlier, and a plain neighbour drops: still no reason to
         // go back to the rendezvous.
-        assert!(!super::arms_reclaim(false, 3, false));
+        assert!(
+            !super::arms_reclaim(false, 3, false),
+            "a node with enough links does not arm for a beacon it does not hold"
+        );
     }
 
     #[test]
     fn a_node_below_the_release_count_wants_the_beacon_back() {
-        assert!(super::arms_reclaim(false, 2, true));
+        assert!(
+            super::arms_reclaim(false, 2, true),
+            "a node below the release count arms the reclaim for the beacon"
+        );
     }
 }
 
@@ -1809,37 +1836,58 @@ mod is_loggable_tests {
         let alive = MessageKind::Presence {
             subtype: PresenceSubtype::Alive,
         };
-        assert!(!retained_after_lifecycle(&stale, &joined));
-        assert!(!retained_after_lifecycle(&stale, &alive));
-        assert!(retained_after_lifecycle(
-            &stale,
-            &MessageKind::app_broadcast("app_msg")
-        ));
-        assert!(retained_after_lifecycle(&fresh, &joined));
+        assert!(
+            !retained_after_lifecycle(&stale, &joined),
+            "a stale presence frame is not retained beside a joined frame"
+        );
+        assert!(
+            !retained_after_lifecycle(&stale, &alive),
+            "a stale presence frame is not retained beside an alive frame"
+        );
+        assert!(
+            retained_after_lifecycle(&stale, &MessageKind::app_broadcast("app_msg")),
+            "a stale presence frame is still retained beside an app broadcast"
+        );
+        assert!(
+            retained_after_lifecycle(&fresh, &joined),
+            "a fresh presence frame is retained beside a joined frame"
+        );
     }
 
     #[test]
     fn alive_presence_is_not_loggable() {
-        assert!(!is_loggable(&MessageKind::Presence {
-            subtype: PresenceSubtype::Alive
-        }));
+        assert!(
+            !is_loggable(&MessageKind::Presence {
+                subtype: PresenceSubtype::Alive
+            }),
+            "alive presence is not loggable"
+        );
     }
 
     #[test]
     fn joined_and_left_presence_are_loggable() {
-        assert!(is_loggable(&MessageKind::Presence {
-            subtype: PresenceSubtype::Joined
-        }));
-        assert!(is_loggable(&MessageKind::Presence {
-            subtype: PresenceSubtype::Left
-        }));
+        assert!(
+            is_loggable(&MessageKind::Presence {
+                subtype: PresenceSubtype::Joined
+            }),
+            "joined presence is loggable"
+        );
+        assert!(
+            is_loggable(&MessageKind::Presence {
+                subtype: PresenceSubtype::Left
+            }),
+            "left presence is loggable"
+        );
     }
 
     #[test]
     fn peerinfo_is_not_loggable() {
         // PeerInfo is endpoint plumbing — never logged/surfaced, and the
         // classifier (not just its early-return) says so.
-        assert!(!is_loggable(&MessageKind::PeerInfo));
+        assert!(
+            !is_loggable(&MessageKind::PeerInfo),
+            "peer info is not loggable"
+        );
     }
 }
 
@@ -1927,7 +1975,11 @@ mod retain_own_broadcast_tests {
         let mut state = testing::fresh_state();
         let frame = app_frame(&state, None);
         super::retain_own_app_broadcast(&mut state, &frame, class(true));
-        assert_eq!(state.message_log.len(), 1);
+        assert_eq!(
+            state.message_log.len(),
+            1,
+            "an own app broadcast that the app logs is retained"
+        );
     }
 
     /// The class is the app's, not the kind's: an app that does not log its frames keeps none, and a
@@ -1940,7 +1992,11 @@ mod retain_own_broadcast_tests {
         super::retain_own_app_broadcast(&mut state, &broadcast, class(false));
         let directed = app_frame(&state, Some("you"));
         super::retain_own_app_broadcast(&mut state, &directed, class(true));
-        assert_eq!(state.message_log.len(), 0);
+        assert_eq!(
+            state.message_log.len(),
+            0,
+            "an own frame that is directed or unlogged is not retained"
+        );
     }
 
     /// The end-to-end property, as the two peers actually exchange it: a holder
@@ -2044,10 +2100,13 @@ mod evicted_orphan_tests {
                     .expect("compose the wire body");
                 let frame = Message::new_channel_event(mesh, author, wire, Channel::State)
                     .sign(&writer.identity);
-                assert!(matches!(
-                    writer.doc_mut(Channel::State).ingest(&frame),
-                    Ingested::Applied { .. }
-                ));
+                assert!(
+                    matches!(
+                        writer.doc_mut(Channel::State).ingest(&frame),
+                        Ingested::Applied { .. }
+                    ),
+                    "the state document applies the frame"
+                );
                 frame
             })
             .collect()
@@ -2288,7 +2347,10 @@ mod first_contact_tests {
         )
         .sign(&Identity::generate());
         let bytes = frame.serialize().expect("serialize");
-        assert!(state.pending_outbound.push((frame.clone(), bytes)));
+        assert!(
+            state.pending_outbound.push((frame.clone(), bytes)),
+            "a pending frame is parked again after a failed dial"
+        );
 
         let started = std::time::Instant::now();
         super::flush_pending(&mut state, &context, "test").await;
@@ -2332,7 +2394,10 @@ mod first_contact_tests {
         assert!(state.meshed, "the gap does not clear meshed");
         let frame = Message::new_joined(&node.mesh, &node.author).sign(&Identity::generate());
         let bytes = frame.serialize().expect("serialize");
-        assert!(state.pending_outbound.push((frame, bytes)));
+        assert!(
+            state.pending_outbound.push((frame, bytes)),
+            "a frame parked across a gap is queued for the next neighbor up"
+        );
 
         feed(Event::NeighborUp(endpoint_id(2)), &mut state, &context).await;
 
@@ -2485,7 +2550,10 @@ mod first_contact_tests {
         let frame = Message::new_pong(&node.mesh, &node.author, nick("bob"), &MessageId::random())
             .sign(&Identity::generate());
         let bytes = frame.serialize().expect("serialize");
-        assert!(state.pending_outbound.push((frame, bytes.clone())));
+        assert!(
+            state.pending_outbound.push((frame, bytes.clone())),
+            "a directed frame parked across a gap is queued"
+        );
 
         feed(Event::NeighborUp(bob.id()), &mut state, &context).await;
 
@@ -2496,7 +2564,10 @@ mod first_contact_tests {
             Some(bytes.into_bytes()),
             "bob never got the parked frame"
         );
-        assert!(state.pending_outbound.is_empty());
+        assert!(
+            state.pending_outbound.is_empty(),
+            "the directed frame stays parked across a second gap"
+        );
         router.shutdown().await.expect("shutdown");
         node.endpoint.close().await;
     }
@@ -2520,7 +2591,10 @@ mod first_contact_tests {
             &context,
         )
         .await;
-        assert!(state.rendezvous_linked);
+        assert!(
+            state.rendezvous_linked,
+            "the rendezvous is marked linked after the release"
+        );
         assert!(
             !state.rendezvous_released,
             "below the count: still a visitor"
@@ -2568,7 +2642,10 @@ mod first_contact_tests {
         )
         .await;
 
-        assert!(!state.rendezvous_linked);
+        assert!(
+            !state.rendezvous_linked,
+            "the neighbor down after a release leaves the rendezvous unlinked"
+        );
         assert!(state.reclaim_until.is_none(), "no loss, no reclaim");
         assert!(!state.rendezvous_wanted(), "no graft, no offer");
         node.endpoint.close().await;
@@ -2602,7 +2679,11 @@ mod first_contact_tests {
             &context,
         )
         .await;
-        assert_eq!(state.webrtc_admission.in_flight(), 1);
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            1,
+            "one slot is in flight while the round is dialling"
+        );
 
         feed(
             Event::NeighborDown(context.rendezvous_id),
@@ -2642,7 +2723,10 @@ mod first_contact_tests {
         )
         .await;
 
-        assert!(state.reclaim_until.is_some());
+        assert!(
+            state.reclaim_until.is_some(),
+            "losing a rendezvous that was not released arms the reclaim"
+        );
         assert!(state.rendezvous_wanted(), "below the count: come back");
         node.endpoint.close().await;
     }
@@ -2665,8 +2749,14 @@ mod first_contact_tests {
         )
         .await;
 
-        assert!(state.rendezvous_linked);
-        assert!(!state.rendezvous_released);
+        assert!(
+            state.rendezvous_linked,
+            "the link coming back restores the rendezvous link"
+        );
+        assert!(
+            !state.rendezvous_released,
+            "the link coming back clears the released mark"
+        );
         assert!(
             state.rendezvous_comeback_until.is_none(),
             "the debt is paid"
@@ -2706,7 +2796,10 @@ mod first_contact_tests {
         )
         .await;
         assert!(!state.rendezvous_wanted(), "an island of its own, content");
-        assert!(!webrtc::rendezvous::rendezvous_graftable(&state));
+        assert!(
+            !webrtc::rendezvous::rendezvous_graftable(&state),
+            "an island whose peers went silent is not graftable to the rendezvous"
+        );
 
         let silent = clock::Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
@@ -2825,7 +2918,10 @@ mod first_contact_tests {
             !super::handle_link_state(&vector, &mut state),
             "no binding yet: nothing is fed"
         );
-        assert!(ours.topology_view().edges.is_empty());
+        assert!(
+            ours.topology_view().edges.is_empty(),
+            "a node with no peers has no topology edges"
+        );
 
         let address =
             peer_addr_error::endpoint_addr_to_json(&EndpointAddr::new(author_key.public()));
@@ -2947,13 +3043,17 @@ mod first_contact_tests {
         .serialize()
         .expect("serialize");
         let (parsed, nonce) = Message::parse_wire(inbound.as_bytes()).expect("parses");
-        assert!(nonce.is_none());
+        assert!(nonce.is_none(), "a relayed peer info carries no nonce");
         let relayed = parsed
             .verify()
             .expect("verifies")
             .serialize()
             .expect("serialize");
-        assert_eq!(relayed.as_bytes(), inbound.as_bytes());
+        assert_eq!(
+            relayed.as_bytes(),
+            inbound.as_bytes(),
+            "a relayed peer info keeps the inbound bytes"
+        );
     }
 
     /// The tie-break defers the first dial to the lower endpoint id. A second
@@ -3557,21 +3657,26 @@ mod requeue_tests {
             crate::transport::resolve(&frame, bytes.clone(), &state)
                 .expect_err("no endpoint is known for bob yet"),
         );
-        assert!(super::requeue(
-            &mut state,
-            &context,
-            frame.clone(),
-            bytes.clone()
-        ));
+        assert!(
+            super::requeue(&mut state, &context, frame.clone(), bytes.clone()),
+            "a frame parked before its peer is known is requeued"
+        );
         assert!(!state.lane_session_wanted(node.bob, now), "bob is unknown");
-        assert_eq!(state.webrtc_admission.in_flight(), 0);
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            0,
+            "one admission slot is in flight after the requeue"
+        );
 
         state.note_peer_endpoint(nick("bob"), address);
         drop(
             crate::transport::resolve(&frame, bytes.clone(), &state)
                 .expect_err("a lookup-only relay holds the frame"),
         );
-        assert!(super::requeue(&mut state, &context, frame, bytes));
+        assert!(
+            super::requeue(&mut state, &context, frame, bytes),
+            "a second requeue is accepted"
+        );
 
         assert!(
             state.lane_session_wanted(node.bob, now),
@@ -3694,8 +3799,14 @@ mod parked_link_state_tests {
         let vector = theirs.link_vector(Vec::new());
         let mut parked = ParkedLinkStates::new(2);
 
-        assert!(parked.park(nick("alice-aa"), vector.clone()));
-        assert!(parked.park(nick("bobby-bb"), vector.clone()));
+        assert!(
+            parked.park(nick("alice-aa"), vector.clone()),
+            "the first vector for alice is parked"
+        );
+        assert!(
+            parked.park(nick("bobby-bb"), vector.clone()),
+            "the first vector for bobby is parked beside alice's"
+        );
         assert!(
             !parked.park(nick("carol-cc"), vector.clone()),
             "a third author is refused at the cap"
@@ -3704,7 +3815,10 @@ mod parked_link_state_tests {
             parked.park(nick("alice-aa"), vector.clone()),
             "an author that waits is replaced at the cap"
         );
-        assert!(parked.take(&nick("alice-aa")).is_some());
+        assert!(
+            parked.take(&nick("alice-aa")).is_some(),
+            "alice's vector is taken from the park"
+        );
         assert!(parked.take(&nick("alice-aa")).is_none(), "taken once");
         assert!(
             parked.park(nick("carol-cc"), vector),

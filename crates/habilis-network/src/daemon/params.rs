@@ -116,7 +116,11 @@ mod topic_derivation_tests {
         let bare = derive_topic_mesh("standup").expect("derive");
         let explicit =
             derive_topic_mesh_with("standup", LookupOpts::public_preset()).expect("derive");
-        assert_eq!(bare.to_string(), explicit.to_string());
+        assert_eq!(
+            bare.to_string(),
+            explicit.to_string(),
+            "the bare form and the explicit public form give the same string"
+        );
     }
 
     /// Reach is part of the mesh id, and that is the point: peers on one mesh
@@ -144,11 +148,15 @@ mod topic_derivation_tests {
     #[test]
     fn a_loopback_reach_derives_a_loopback_mesh() {
         let mesh = derive_topic_mesh_with("standup", LookupOpts::loopback()).expect("derive");
-        assert!(mesh.is_loopback());
+        assert!(
+            mesh.is_loopback(),
+            "a loopback reach derives a loopback mesh"
+        );
         assert!(
             !derive_topic_mesh_with("standup", LookupOpts::public_preset())
                 .expect("derive")
-                .is_loopback()
+                .is_loopback(),
+            "a loopback reach does not derive a public mesh"
         );
     }
 
@@ -157,8 +165,14 @@ mod topic_derivation_tests {
     /// in.
     #[test]
     fn both_forms_reject_an_empty_string() {
-        assert!(derive_topic_mesh("   ").is_err());
-        assert!(derive_topic_mesh_with("   ", LookupOpts::loopback()).is_err());
+        assert!(
+            derive_topic_mesh("   ").is_err(),
+            "an empty topic is refused in the public form"
+        );
+        assert!(
+            derive_topic_mesh_with("   ", LookupOpts::loopback()).is_err(),
+            "an empty topic is refused in the loopback form"
+        );
     }
 
     /// The relay's transport role is part of the id: two meshes that differ
@@ -177,9 +191,19 @@ mod topic_derivation_tests {
             ),
         )
         .expect("derive");
-        assert_ne!(lookup_only.to_string(), relayed.to_string());
-        assert!(!lookup_only.transport().relay_transport);
-        assert!(relayed.transport().relay_transport);
+        assert_ne!(
+            lookup_only.to_string(),
+            relayed.to_string(),
+            "the relay transport changes the id"
+        );
+        assert!(
+            !lookup_only.transport().relay_transport,
+            "the lookup-only mesh has the relay transport off"
+        );
+        assert!(
+            relayed.transport().relay_transport,
+            "the relayed mesh has the relay transport on"
+        );
     }
 
     /// A minted config gets the same cross-field check a decoded id gets;
@@ -192,7 +216,10 @@ mod topic_derivation_tests {
             None,
             TransportPolicy::default().with_relay_transport(true),
         );
-        assert!(derive_topic_mesh_config("standup", config).is_err());
+        assert!(
+            derive_topic_mesh_config("standup", config).is_err(),
+            "a relay transport without a relay lookup is rejected on mint"
+        );
     }
 }
 

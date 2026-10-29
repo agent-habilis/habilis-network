@@ -61,6 +61,10 @@ mod tests {
             EVICTED,
         ];
         let distinct: HashSet<_> = all.into_iter().collect();
-        assert_eq!(distinct.len(), all.len());
+        assert_eq!(
+            distinct.len(),
+            all.len(),
+            "every close code has its own number"
+        );
     }
 }

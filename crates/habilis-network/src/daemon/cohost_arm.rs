@@ -710,12 +710,15 @@ mod tests {
         let (mut rendezvous, _round) =
             beacon_with_a_negotiating_tab(&params, loopback_endpoint().await);
 
-        assert!(!super::shed_rival_beacon_if_due(
-            &mut state,
-            &arm,
-            &mut rendezvous,
-            iroh::SecretKey::generate().public(),
-        ));
+        assert!(
+            !super::shed_rival_beacon_if_due(
+                &mut state,
+                &arm,
+                &mut rendezvous,
+                iroh::SecretKey::generate().public(),
+            ),
+            "a due shed waits while a tab negotiates with the beacon"
+        );
         assert!(rendezvous.is_some(), "the beacon is still held");
     }
 
@@ -762,7 +765,10 @@ mod tests {
         let mut state = crate::testing::fresh_state();
         let own = iroh::SecretKey::generate().public();
         let holder = iroh::SecretKey::generate().public();
-        assert!(!super::verdict_after_known_holders(false, &state));
+        assert!(
+            !super::verdict_after_known_holders(false, &state),
+            "a probe that reads free does not claim while a holder is known"
+        );
 
         state.note_rival_beacon_flag(
             own,
@@ -779,7 +785,10 @@ mod tests {
             super::verdict_after_known_holders(false, &state),
             "free is read as held"
         );
-        assert!(super::verdict_after_known_holders(true, &state));
+        assert!(
+            super::verdict_after_known_holders(true, &state),
+            "the verdict after a known holder is still taken"
+        );
     }
 
     /// A lower holder in our overlay already settled who keeps the rendezvous, so a tab on this
@@ -799,12 +808,15 @@ mod tests {
         let (mut rendezvous, _round) =
             beacon_with_a_negotiating_tab(&params, loopback_endpoint().await);
 
-        assert!(super::shed_rival_beacon_if_due(
-            &mut state,
-            &arm,
-            &mut rendezvous,
-            iroh::SecretKey::generate().public(),
-        ));
+        assert!(
+            super::shed_rival_beacon_if_due(
+                &mut state,
+                &arm,
+                &mut rendezvous,
+                iroh::SecretKey::generate().public(),
+            ),
+            "a due shed does not wait when a lower holder was seen"
+        );
         assert!(rendezvous.is_none(), "the beacon was released");
         assert!(!state.yield_to_lower, "the release uses the request up");
     }
@@ -819,7 +831,7 @@ mod tests {
 
         super::schedule_rival_recheck(&mut state, CoHostPolicy::EagerProbed, &params, &endpoint);
 
-        assert!(!state.yield_to_lower);
+        assert!(!state.yield_to_lower, "a new claim forgets a yield request");
     }
 
     /// A beacon claimed after another went without a shed (a co-host task
@@ -858,7 +870,10 @@ mod tests {
     /// other and the overlays would stay split for good.
     #[test]
     fn the_wait_runs_out() {
-        assert!(defer_shed(2, MAX_SHED_DEFERRALS - 1));
+        assert!(
+            defer_shed(2, MAX_SHED_DEFERRALS - 1),
+            "the deferral wait runs out at its last deferral"
+        );
         assert!(
             !defer_shed(2, MAX_SHED_DEFERRALS),
             "past the limit the shed happens anyway, so split holders still merge"
@@ -1137,9 +1152,15 @@ mod tests {
         }))
         .await;
 
-        assert!(holds_nothing);
-        assert!(state.rendezvous_comeback_until.is_none());
-        assert!(!state.rendezvous_wanted());
+        assert!(holds_nothing, "the released member holds nothing");
+        assert!(
+            state.rendezvous_comeback_until.is_none(),
+            "the released member has no comeback window"
+        );
+        assert!(
+            !state.rendezvous_wanted(),
+            "the released member does not want the rendezvous"
+        );
     }
 
     /// A joiner that has fewer links than the release count wants the rendezvous anyway. It owes
@@ -1148,8 +1169,14 @@ mod tests {
     async fn a_joiner_under_the_release_count_owes_no_return() {
         let (state, holds_nothing) = Box::pin(heal_tick_beside_a_foreign_holder(|_| {})).await;
 
-        assert!(holds_nothing);
-        assert!(state.rendezvous_comeback_until.is_none());
+        assert!(
+            holds_nothing,
+            "a joiner under the release count holds nothing"
+        );
+        assert!(
+            state.rendezvous_comeback_until.is_none(),
+            "a joiner under the release count owes no return"
+        );
     }
 
     /// Every rung of the ladder is held by another process: nobody can serve the rendezvous and
@@ -1621,12 +1648,15 @@ mod tests {
         crate::lookup::add_peer_addr(&state.address_book, old_beacon);
         let mut rendezvous = Some(crate::beacon::Rendezvous::for_test(endpoint, None));
 
-        assert!(super::shed_rival_beacon_if_due(
-            &mut state,
-            &arm,
-            &mut rendezvous,
-            iroh::SecretKey::generate().public(),
-        ));
+        assert!(
+            super::shed_rival_beacon_if_due(
+                &mut state,
+                &arm,
+                &mut rendezvous,
+                iroh::SecretKey::generate().public(),
+            ),
+            "a shed takes the address of the shed beacon out of the book"
+        );
 
         assert!(
             state.address_book.get_endpoint_info(params.id).is_none(),
@@ -1656,7 +1686,11 @@ mod tests {
         state
             .webrtc_admission
             .track(params.id, epoch, task.abort_handle());
-        assert_eq!(state.webrtc_admission.in_flight(), 1);
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            1,
+            "one admission slot is in flight after the claim funnel"
+        );
 
         super::schedule_rival_recheck(&mut state, CoHostPolicy::EagerProbed, &params, &endpoint);
 
@@ -1854,7 +1888,11 @@ mod tests {
         state
             .webrtc_admission
             .track(params.id, epoch, task.abort_handle());
-        assert_eq!(state.webrtc_admission.in_flight(), 1);
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            1,
+            "one admission slot is in flight after the held verdict"
+        );
 
         super::note_rival_holds(&mut state, &context);
 
@@ -1883,10 +1921,22 @@ mod tests {
 
         // The mesh origin (`create`) claims at startup but skips the probe;
         // joiners and consumers don't claim at startup at all.
-        assert!(claims_at_startup(CoHostPolicy::Eager));
-        assert!(!probes_before_claim(CoHostPolicy::Eager));
-        assert!(!claims_at_startup(CoHostPolicy::Deferred));
-        assert!(!claims_at_startup(CoHostPolicy::Never));
+        assert!(
+            claims_at_startup(CoHostPolicy::Eager),
+            "an eager directory advertiser claims at startup"
+        );
+        assert!(
+            !probes_before_claim(CoHostPolicy::Eager),
+            "an eager policy does not probe before the claim"
+        );
+        assert!(
+            !claims_at_startup(CoHostPolicy::Deferred),
+            "a deferred policy does not claim at startup"
+        );
+        assert!(
+            !claims_at_startup(CoHostPolicy::Never),
+            "a never policy does not claim at startup"
+        );
     }
 
     #[test]
@@ -1894,20 +1944,38 @@ mod tests {
         // The shed exists for claimants that took the identity on the word of
         // a probe and can therefore have raced each other into a same-id
         // split: directory advertisers and topic joiners (`EagerProbed`)…
-        assert!(rival_recheck_applies(CoHostPolicy::EagerProbed, true));
+        assert!(
+            rival_recheck_applies(CoHostPolicy::EagerProbed, true),
+            "an eager-probe policy with probed claims applies the rival recheck"
+        );
         // …and ordinary joiners (`Deferred`), which this used to exclude.
         // Regression: a survivor of a departed origin claims on a probe like
         // anyone else, and with the shed off there was nothing to re-arbitrate
         // the duplicate beacons that followed. See `rival_recheck_applies`.
-        assert!(rival_recheck_applies(CoHostPolicy::Deferred, true));
+        assert!(
+            rival_recheck_applies(CoHostPolicy::Deferred, true),
+            "a deferred policy applies the rival recheck when public"
+        );
         // The loopback ladder has no timed re-check: a second beacon on a loopback
         // mesh is repaired by the lower-rung check and the own-rung check of the
         // holder (`maybe_cohost`), not by a shed on a timer.
-        assert!(!rival_recheck_applies(CoHostPolicy::EagerProbed, false));
-        assert!(!rival_recheck_applies(CoHostPolicy::Deferred, false));
+        assert!(
+            !rival_recheck_applies(CoHostPolicy::EagerProbed, false),
+            "the rival recheck is off for an eager-probe policy without probed claims"
+        );
+        assert!(
+            !rival_recheck_applies(CoHostPolicy::Deferred, false),
+            "the rival recheck is off for a deferred policy that is not public"
+        );
         // The origin owns the identity from t=0 and a consumer claims nothing.
-        assert!(!rival_recheck_applies(CoHostPolicy::Eager, true));
-        assert!(!rival_recheck_applies(CoHostPolicy::Never, true));
+        assert!(
+            !rival_recheck_applies(CoHostPolicy::Eager, true),
+            "the rival recheck is off for an eager policy"
+        );
+        assert!(
+            !rival_recheck_applies(CoHostPolicy::Never, true),
+            "the rival recheck is off for a never policy"
+        );
     }
 
     #[test]
@@ -1921,7 +1989,8 @@ mod tests {
         // randomness would defeat it.
         assert_eq!(
             next_recheck_delay(0, 0, id(1)),
-            next_recheck_delay(0, 0, id(1))
+            next_recheck_delay(0, 0, id(1)),
+            "the first recheck delay is the same for the same inputs"
         );
 
         // Base + phase offset, offset strictly inside the span.
@@ -1955,9 +2024,15 @@ mod tests {
         let meshed_base = RIVAL_RECHECK_MESHED;
         for _ in 0..8 {
             let lone = next_recheck_delay(1, 0, id);
-            assert!(lone >= lone_base && lone <= lone_base * 2);
+            assert!(
+                lone >= lone_base && lone <= lone_base * 2,
+                "the lone steady recheck delay is within its jitter bounds"
+            );
             let meshed = next_recheck_delay(1, RIVAL_RECHECK_SMALL_ROSTER + 1, id);
-            assert!(meshed >= meshed_base && meshed <= meshed_base * 2);
+            assert!(
+                meshed >= meshed_base && meshed <= meshed_base * 2,
+                "the meshed steady recheck delay is within its jitter bounds"
+            );
         }
     }
 
@@ -2011,7 +2086,10 @@ mod tests {
         // A large roster pays the backstop from round one, backoff or not.
         let backstop = RIVAL_RECHECK_MESHED;
         let delay = next_recheck_delay(1, 20, id);
-        assert!(delay >= backstop && delay <= backstop * 2);
+        assert!(
+            delay >= backstop && delay <= backstop * 2,
+            "a rival-free round's delay stays between the backstop bounds"
+        );
     }
 
     /// Regression for a permanently-alone public topic peer that rebound its
@@ -2057,7 +2135,10 @@ mod tests {
             settled > island_cap,
             "a settled lone holder must idle past the island cap: {settled:?}"
         );
-        assert!(settled >= RIVAL_RECHECK_ALONE);
+        assert!(
+            settled >= RIVAL_RECHECK_ALONE,
+            "the settled delay reaches the alone ceiling"
+        );
     }
 
     /// A rehome is a fresh arbitration epoch, so the backoff restarts with it.

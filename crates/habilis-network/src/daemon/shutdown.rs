@@ -274,7 +274,10 @@ mod tests {
     async fn owner_watch_stays_while_the_owner_lives() {
         let mut child = spawn_owner();
         let owner = Owner::try_new(child.id()).expect("live owner accepted");
-        assert!(!watch_quits(owner, Duration::from_millis(300)).await);
+        assert!(
+            !watch_quits(owner, Duration::from_millis(300)).await,
+            "an owner watch stays while the owner lives"
+        );
         child.kill().unwrap();
         child.wait().unwrap();
     }
@@ -285,7 +288,10 @@ mod tests {
         let owner = Owner::try_new(child.id()).expect("live owner accepted");
         child.kill().unwrap();
         child.wait().unwrap();
-        assert!(watch_quits(owner, Duration::from_secs(2)).await);
+        assert!(
+            watch_quits(owner, Duration::from_secs(2)).await,
+            "an owner watch quits when the owner exits"
+        );
     }
 
     #[test]
@@ -293,7 +299,10 @@ mod tests {
         let mut child = spawn_owner();
         let owner = Owner::try_new(child.id()).expect("live owner accepted");
         child.kill().unwrap();
-        assert!(watch_quits(owner, Duration::from_secs(2)).await);
+        assert!(
+            watch_quits(owner, Duration::from_secs(2)).await,
+            "an owner watch quits for an unreaped zombie owner"
+        );
         child.wait().unwrap();
     }
 
@@ -307,7 +316,10 @@ mod tests {
             start: owner.start + 1,
             ..owner
         };
-        assert!(watch_quits(reissued, Duration::from_secs(2)).await);
+        assert!(
+            watch_quits(reissued, Duration::from_secs(2)).await,
+            "an owner watch quits when the pid is reissued"
+        );
         child.kill().unwrap();
         child.wait().unwrap();
     }
@@ -316,7 +328,10 @@ mod tests {
     fn validate_owner_pid_accepts_only_a_live_other_process() {
         let mut child = spawn_owner();
         let pid = child.id();
-        assert!(validate_owner_pid(pid).is_ok());
+        assert!(
+            validate_owner_pid(pid).is_ok(),
+            "a live other process is an accepted owner pid"
+        );
         for refused in [0, 1, std::process::id()] {
             let error = validate_owner_pid(refused)
                 .expect_err("refused")
@@ -337,7 +352,7 @@ mod tests {
 
     #[test]
     fn owner_refuses_init_self_and_a_dead_pid() {
-        assert!(Owner::try_new(0).is_err());
+        assert!(Owner::try_new(0).is_err(), "pid 0 is refused as an owner");
         assert!(
             Owner::try_new(std::process::id()).is_err(),
             "self is no owner"
@@ -349,25 +364,40 @@ mod tests {
         let pid = child.id();
         child.kill().unwrap();
         child.wait().unwrap();
-        assert!(Owner::try_new(pid).is_err());
+        assert!(
+            Owner::try_new(pid).is_err(),
+            "a dead pid is refused as an owner"
+        );
     }
 
     #[test]
     fn orphan_watch_fires_only_on_a_parent_change() {
         // The agent that spawned us is alive ⇒ same ppid ⇒ stay running.
-        assert!(!parent_lost(4242, 4242));
+        assert!(!parent_lost(4242, 4242), "an unchanged parent is not lost");
         // The agent died ⇒ reparented to launchd (1) ⇒ orphaned, quit.
-        assert!(parent_lost(4242, 1));
+        assert!(
+            parent_lost(4242, 1),
+            "a parent change to init counts as lost"
+        );
         // …or, under a systemd subreaper, to some other pid ⇒ still orphaned.
-        assert!(parent_lost(4242, 990));
+        assert!(
+            parent_lost(4242, 990),
+            "a parent change to another pid counts as lost"
+        );
     }
 
     #[test]
     fn orphan_watch_skips_an_already_detached_daemon() {
         // Spawned by a normal agent ⇒ worth watching.
-        assert!(orphan_watch_warranted(4242));
+        assert!(
+            orphan_watch_warranted(4242),
+            "a daemon attached to a parent warrants the orphan watch"
+        );
         // Launched detached straight from init/launchd ⇒ no parent to lose.
-        assert!(!orphan_watch_warranted(1));
+        assert!(
+            !orphan_watch_warranted(1),
+            "a detached daemon under init does not warrant the orphan watch"
+        );
     }
 
     /// The test binary runs this test again, in a process of its own, with this variable set.

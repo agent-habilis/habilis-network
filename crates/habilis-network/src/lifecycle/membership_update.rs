@@ -145,8 +145,14 @@ mod tests {
             UnixSecs::from_secs(0),
             &state,
         );
-        assert!(update.joined_new);
-        assert!(!update.returned);
+        assert!(
+            update.joined_new,
+            "a first message from a new author is joined_new"
+        );
+        assert!(
+            !update.returned,
+            "a first message from a new author is not a return"
+        );
     }
 
     #[test]
@@ -159,8 +165,8 @@ mod tests {
             UnixSecs::from_secs(0),
             &state,
         );
-        assert!(!update.joined_new);
-        assert!(!update.returned);
+        assert!(!update.joined_new, "a known author is not joined_new");
+        assert!(!update.returned, "a known author is not a return");
     }
 
     #[test]
@@ -174,7 +180,7 @@ mod tests {
             UnixSecs::from_secs(0),
             &state,
         );
-        assert!(!update.joined_new);
+        assert!(!update.joined_new, "a left message is never joined_new");
     }
 
     #[test]
@@ -187,8 +193,14 @@ mod tests {
             UnixSecs::from_secs(0),
             &state,
         );
-        assert!(update.returned);
-        assert!(update.joined_new); // not in peers yet
+        assert!(
+            update.returned,
+            "a message from a quiet peer marks it returned"
+        );
+        assert!(
+            update.joined_new,
+            "a message from a quiet peer is joined_new too"
+        ); // not in peers yet
     }
 
     #[test]
@@ -203,7 +215,10 @@ mod tests {
             UnixSecs::from_secs(0),
             &state,
         );
-        assert!(update.joined_new);
+        assert!(
+            update.joined_new,
+            "an alive frame from an unknown author is joined_new"
+        );
     }
 
     #[test]
@@ -215,7 +230,10 @@ mod tests {
             stale: false,
         };
         apply(&update, &nick("swift-cedar"), &mut state);
-        assert!(state.peers.contains("swift-cedar"));
+        assert!(
+            state.peers.contains("swift-cedar"),
+            "applying a joined_new update inserts the peer"
+        );
     }
 
     #[test]
@@ -228,8 +246,14 @@ mod tests {
             stale: false,
         };
         apply(&update, &nick("swift-cedar"), &mut state);
-        assert!(!state.quiet.contains("swift-cedar"));
-        assert!(state.peers.contains("swift-cedar"));
+        assert!(
+            !state.quiet.contains("swift-cedar"),
+            "applying a returned update removes the peer from quiet"
+        );
+        assert!(
+            state.peers.contains("swift-cedar"),
+            "applying a returned update puts the peer in the roster"
+        );
     }
 
     /// A goodbye is final for every message that was sent before it. A re-announce of `joined` that
@@ -282,7 +306,10 @@ mod tests {
             UnixSecs::from_secs(1_001),
             &state,
         );
-        assert!(!back.stale);
+        assert!(
+            !back.stale,
+            "a message stamped after a goodbye is not stale"
+        );
         assert!(back.joined_new, "a later joined is a new arrival");
         let other = compute(&joined, &nick("lost-heron"), at, &state);
         assert!(
@@ -307,18 +334,30 @@ mod tests {
             AuthorKey::from_bytes([1; 32]),
             UnixSecs::from_secs(900),
         );
-        assert!(state.sent_before_goodbye(&who, UnixSecs::from_secs(1_000)));
+        assert!(
+            state.sent_before_goodbye(&who, UnixSecs::from_secs(1_000)),
+            "a goodbye marks the messages sent before it"
+        );
         state.note_left(
             &who,
             AuthorKey::from_bytes([1; 32]),
             UnixSecs::from_secs(1_200),
         );
-        assert!(state.sent_before_goodbye(&who, UnixSecs::from_secs(1_100)));
-        assert!(!state.sent_before_goodbye(&who, UnixSecs::from_secs(1_201)));
+        assert!(
+            state.sent_before_goodbye(&who, UnixSecs::from_secs(1_100)),
+            "messages sent just before the goodbye mark still count"
+        );
+        assert!(
+            !state.sent_before_goodbye(&who, UnixSecs::from_secs(1_201)),
+            "a message sent after the goodbye is not marked"
+        );
         let left = MessageKind::Presence {
             subtype: PresenceSubtype::Left,
         };
-        assert!(!compute(&left, &who, UnixSecs::from_secs(1_200), &state).stale);
+        assert!(
+            !compute(&left, &who, UnixSecs::from_secs(1_200), &state).stale,
+            "a left message stamped after the goodbye is not stale"
+        );
     }
 
     /// A key is minted per run, so once it has said goodbye nothing it signs is a presence, even

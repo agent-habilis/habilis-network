@@ -141,10 +141,22 @@ mod tests {
 
         tick_sweep(&mut state, &SilentSink);
 
-        assert!(!state.last_seen.contains_key("swift-cedar"));
-        assert!(!state.peers.contains("swift-cedar"));
-        assert!(state.quiet.contains("swift-cedar"));
-        assert!(!state.surfaced.contains("swift-cedar"));
+        assert!(
+            !state.last_seen.contains_key("swift-cedar"),
+            "a swept surfaced peer leaves the last-seen map"
+        );
+        assert!(
+            !state.peers.contains("swift-cedar"),
+            "a swept surfaced peer leaves the roster"
+        );
+        assert!(
+            state.quiet.contains("swift-cedar"),
+            "a swept surfaced peer goes quiet"
+        );
+        assert!(
+            !state.surfaced.contains("swift-cedar"),
+            "a swept surfaced peer is no longer surfaced"
+        );
     }
 
     /// A node that let go of the rendezvous, whose silent neighbour is swept,
@@ -189,7 +201,10 @@ mod tests {
 
         tick_sweep(&mut state, &SilentSink);
 
-        assert!(state.rendezvous_comeback_until.is_none());
+        assert!(
+            state.rendezvous_comeback_until.is_none(),
+            "a node still linked to the rendezvous owes no return"
+        );
     }
 
     /// A holder that crashed or was killed never sends a `PeerInfo` without the flag. The sweep
@@ -205,7 +220,10 @@ mod tests {
         state
             .rival_holders
             .insert(crate::protocol::AuthorKey::from_bytes([4u8; 32]), holder);
-        assert!(state.rival_holder_known());
+        assert!(
+            state.rival_holder_known(),
+            "the evicted holder's flag is known before the sweep"
+        );
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
             .unwrap();
@@ -293,7 +311,10 @@ mod tests {
 
         tick_sweep(&mut state, &SilentSink);
 
-        assert!(state.quiet.contains("swift-cedar"));
+        assert!(
+            state.quiet.contains("swift-cedar"),
+            "a sweep keeps a quiet peer's name in quiet for its return"
+        );
         assert_eq!(
             state.peer_endpoints.get("swift-cedar"),
             Some(&iroh::EndpointAddr::new(endpoint)),
@@ -313,7 +334,10 @@ mod tests {
 
         tick_sweep(&mut state, &SilentSink);
 
-        assert!(!state.peer_endpoints.contains_key("gone-fern"));
+        assert!(
+            !state.peer_endpoints.contains_key("gone-fern"),
+            "a sweep prunes endpoints of names that are neither active nor quiet"
+        );
     }
 
     #[test]
@@ -329,10 +353,19 @@ mod tests {
         tick_sweep(&mut state, &SilentSink);
 
         // Still evicted from the roster (hygiene preserved)...
-        assert!(!state.last_seen.contains_key("ghost-elm"));
-        assert!(!state.peers.contains("ghost-elm"));
+        assert!(
+            !state.last_seen.contains_key("ghost-elm"),
+            "a sweep evicts an unsurfaced peer from last-seen"
+        );
+        assert!(
+            !state.peers.contains("ghost-elm"),
+            "a sweep evicts an unsurfaced peer from the roster"
+        );
         // ...but never parked in `quiet` => no `went quiet` emitted.
-        assert!(!state.quiet.contains("ghost-elm"));
+        assert!(
+            !state.quiet.contains("ghost-elm"),
+            "a sweep never puts an unsurfaced peer in quiet"
+        );
     }
 
     #[test]
@@ -343,17 +376,32 @@ mod tests {
 
         tick_sweep(&mut state, &SilentSink);
 
-        assert!(state.last_seen.contains_key("swift-cedar"));
-        assert!(state.peers.contains("swift-cedar"));
-        assert!(!state.quiet.contains("swift-cedar"));
+        assert!(
+            state.last_seen.contains_key("swift-cedar"),
+            "a recent peer stays in last-seen"
+        );
+        assert!(
+            state.peers.contains("swift-cedar"),
+            "a recent peer stays in the roster"
+        );
+        assert!(
+            !state.quiet.contains("swift-cedar"),
+            "a recent peer is not quiet"
+        );
     }
 
     #[test]
     fn sweep_noop_on_empty_last_seen() {
         let mut state = fresh_state();
         tick_sweep(&mut state, &SilentSink);
-        assert!(state.peers.is_empty());
-        assert!(state.quiet.is_empty());
+        assert!(
+            state.peers.is_empty(),
+            "a sweep on empty last-seen keeps the roster empty"
+        );
+        assert!(
+            state.quiet.is_empty(),
+            "a sweep on empty last-seen keeps quiet empty"
+        );
     }
 
     #[test]
@@ -370,6 +418,9 @@ mod tests {
         tick_sweep(&mut state, &SilentSink);
 
         let expected_peers: HashSet<Nickname> = [nick("fresh-nick")].into_iter().collect();
-        assert_eq!(state.peers, expected_peers);
+        assert_eq!(
+            state.peers, expected_peers,
+            "a sweep preserves the other peers"
+        );
     }
 }

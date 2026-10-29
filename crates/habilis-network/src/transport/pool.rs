@@ -32,9 +32,15 @@ mod tests {
         let bob = testing::endpoint_id(1);
         let now = Instant::now();
         failures.note(bob, now);
-        assert!(failures.on_cooldown(&bob, now));
+        assert!(
+            failures.on_cooldown(&bob, now),
+            "a fresh failure puts the endpoint on cooldown"
+        );
         // Another endpoint is unaffected.
-        assert!(!failures.on_cooldown(&testing::endpoint_id(2), now));
+        assert!(
+            !failures.on_cooldown(&testing::endpoint_id(2), now),
+            "another endpoint is not on cooldown"
+        );
     }
 
     #[test]
@@ -44,7 +50,10 @@ mod tests {
         let failed_at = Instant::now();
         failures.note(bob, failed_at);
         let later = failed_at + DIAL_FAILURE_COOLDOWN + Duration::from_millis(1);
-        assert!(!failures.on_cooldown(&bob, later));
+        assert!(
+            !failures.on_cooldown(&bob, later),
+            "an expired failure allows the dial again"
+        );
         // Pruning happens on the next write rather than on the read, so the
         // table still cannot grow without bound.
         failures.note(testing::endpoint_id(2), later);
@@ -337,7 +346,8 @@ mod tests {
             let pool = super::UnicastPool::new(endpoint.clone(), false);
             assert!(
                 pool.dial_and_send_in_background(bob, bytes::Bytes::new())
-                    .await
+                    .await,
+                "a background send is accepted after the dropped dial"
             );
             tokio::task::yield_now().await;
             pool
@@ -459,7 +469,11 @@ mod tests {
         assert_eq!(pool.dial_attempts(), 1, "the second send dialed again");
         let mut got = vec![next_frame(&mut frames).await, next_frame(&mut frames).await];
         got.sort();
-        assert_eq!(got, vec![b"one".to_vec(), b"two".to_vec()]);
+        assert_eq!(
+            got,
+            vec![b"one".to_vec(), b"two".to_vec()],
+            "two sends during a dial arrive in order and warm the pool"
+        );
 
         router.shutdown().await.expect("shutdown");
         client.close().await;
@@ -513,7 +527,11 @@ mod tests {
 
         let mut got = vec![next_frame(&mut frames).await, next_frame(&mut frames).await];
         got.sort();
-        assert_eq!(got, vec![b"one".to_vec(), b"two".to_vec()]);
+        assert_eq!(
+            got,
+            vec![b"one".to_vec(), b"two".to_vec()],
+            "a background frame during a dial is delivered after the earlier frame"
+        );
         assert_eq!(pool.dial_attempts(), 1, "the second frame dialed again");
 
         router.shutdown().await.expect("shutdown");
@@ -571,7 +589,11 @@ mod tests {
         pool.dial_or_warm_send(server, bytes::Bytes::from_static(b"one"))
             .await
             .expect("a cold send dials");
-        assert_eq!(next_frame(&mut frames).await, b"one".to_vec());
+        assert_eq!(
+            next_frame(&mut frames).await,
+            b"one".to_vec(),
+            "the first frame after dropping the pooled connection arrives"
+        );
         pool.note_dial_failure(server).await;
         assert!(
             pool.is_cooling(server).await,
@@ -591,7 +613,11 @@ mod tests {
         pool.dial_or_warm_send(server, bytes::Bytes::from_static(b"two"))
             .await
             .expect("the address stays, so the send dials again");
-        assert_eq!(next_frame(&mut frames).await, b"two".to_vec());
+        assert_eq!(
+            next_frame(&mut frames).await,
+            b"two".to_vec(),
+            "the next frame after the drop arrives too"
+        );
         assert_eq!(pool.dial_attempts(), 2, "the second send was cold");
 
         router.shutdown().await.expect("shutdown");
@@ -614,8 +640,14 @@ mod tests {
 
         pool.forget(bob).await;
 
-        assert!(pool.inner.dial_failures.lock().await.is_empty());
-        assert!(pool.inner.conns.lock().await.is_empty());
+        assert!(
+            pool.inner.dial_failures.lock().await.is_empty(),
+            "forget clears the dial failures"
+        );
+        assert!(
+            pool.inner.conns.lock().await.is_empty(),
+            "forget clears the pooled connections"
+        );
         // Absent endpoint: nothing to drop, nothing panics.
         pool.forget(testing::endpoint_id(2)).await;
     }
@@ -722,7 +754,8 @@ mod tests {
     fn a_pool_closes_an_idle_connection_after_the_one_backstop() {
         assert_eq!(
             super::UnicastPool::disconnected().inner.idle,
-            tuning::DIRECT_IDLE_BACKSTOP
+            tuning::DIRECT_IDLE_BACKSTOP,
+            "the idle backstop is the one set on a disconnected pool"
         );
     }
 

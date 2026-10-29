@@ -2047,7 +2047,10 @@ fn a_send_with_gossip_off_and_no_direct_path_fails_with_a_clear_error() {
             .find(|(cell, _)| *cell == "udp_ip_direct")
             .expect("the cell is in the table");
 
-        assert!(!cell.has(Transport::Gossip) && cell.expected().is_none());
+        assert!(
+            !cell.has(Transport::Gossip) && cell.expected().is_none(),
+            "that cell has no gossip rung and expects the clear error"
+        );
         let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let (alice, mut bob, carol) = members(&relay, cell.transports, SenderId::Any).await;
         assert!(
@@ -2110,7 +2113,11 @@ fn the_gossip_cells_use_valid_lists_and_the_ladder_orders_gossip_between_multiho
             .find(|(cell, _)| *cell == name)
             .and_then(|(_, cell)| cell.expected())
     };
-    assert_eq!(expected("udp_gossip_ip_direct"), Some(Rung::Gossip));
+    assert_eq!(
+        expected("udp_gossip_ip_direct"),
+        Some(Rung::Gossip),
+        "the udp gossip cell expects its valid list"
+    );
     assert_eq!(
         expected("udp_multihop_gossip_ip_webrtc_via_third"),
         Some(Rung::Multihop),
@@ -2126,7 +2133,11 @@ fn the_gossip_cells_use_valid_lists_and_the_ladder_orders_gossip_between_multiho
         Some(Rung::Relay),
         "the relay is what is left when gossip is blocked"
     );
-    assert_eq!(expected("udp_gossip_all_blocked"), None);
+    assert_eq!(
+        expected("udp_gossip_all_blocked"),
+        None,
+        "the relay gossip cell expects gossip ordered after multihop"
+    );
 }
 
 /// The cuts of a cell that goes through a third member close every rung of the

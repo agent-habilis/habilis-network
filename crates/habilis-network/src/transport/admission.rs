@@ -147,7 +147,10 @@ mod tests {
     fn a_session_with_the_peer_starts_the_row_of_turn_aways_over() {
         let admission = SignalAdmission::new(4);
         let stranger = peer(32);
-        assert!(admission.note_not_a_neighbor(stranger));
+        assert!(
+            admission.note_not_a_neighbor(stranger),
+            "a stranger's first turn-away starts the row"
+        );
         admission.note_success(stranger);
         assert!(
             admission.note_not_a_neighbor(stranger),
@@ -161,8 +164,14 @@ mod tests {
     fn a_vector_that_this_node_sent_ends_the_wait_that_two_turn_aways_earned() {
         let admission = SignalAdmission::new(4);
         let stranger = peer(33);
-        assert!(admission.note_not_a_neighbor(stranger));
-        assert!(!admission.note_not_a_neighbor(stranger));
+        assert!(
+            admission.note_not_a_neighbor(stranger),
+            "the vector sent by this node ends the wait the turn-aways earned"
+        );
+        assert!(
+            !admission.note_not_a_neighbor(stranger),
+            "the stranger's next turn-away does not start a new row"
+        );
         assert!(
             admission
                 .lock()
@@ -231,10 +240,10 @@ mod tests {
         });
         admission.track(peer(1), epoch, task.abort_handle());
         admission.note_refused(peer(1));
-        assert!(matches!(
-            admission.try_admit(peer(1), &hub),
-            Err(Refusal::InFlight)
-        ));
+        assert!(
+            matches!(admission.try_admit(peer(1), &hub), Err(Refusal::InFlight)),
+            "the peer is refused while its round is in flight"
+        );
 
         assert!(admission.cancel_round(peer(1)), "a round was ended");
 
@@ -249,15 +258,21 @@ mod tests {
         let admission = SignalAdmission::new(16);
         let hub = hub();
         admission.deny(peer(1), true);
-        assert!(matches!(
-            admission.try_admit(peer(1), &hub),
-            Err(Refusal::Denied)
-        ));
-        assert!(matches!(
-            admission.try_admit_offer(peer(1), &hub),
-            Err(Refusal::Denied)
-        ));
-        assert!(admission.is_denied(peer(1)));
+        assert!(
+            matches!(admission.try_admit(peer(1), &hub), Err(Refusal::Denied)),
+            "a denied peer is refused as a dialler"
+        );
+        assert!(
+            matches!(
+                admission.try_admit_offer(peer(1), &hub),
+                Err(Refusal::Denied)
+            ),
+            "a denied peer is refused as an offer"
+        );
+        assert!(
+            admission.is_denied(peer(1)),
+            "the peer is recorded as denied"
+        );
     }
 
     /// A guard, not a red test: it cannot fail on a stub that denies nothing. It keeps `deny` from
@@ -267,10 +282,19 @@ mod tests {
         let admission = SignalAdmission::new(16);
         let hub = hub();
         admission.deny(peer(1), true);
-        assert!(admission.try_admit(peer(2), &hub).is_ok());
+        assert!(
+            admission.try_admit(peer(2), &hub).is_ok(),
+            "peer 2 is admitted while peer 1 is denied"
+        );
         admission.deny(peer(1), false);
-        assert!(!admission.is_denied(peer(1)));
-        assert!(admission.try_admit(peer(1), &hub).is_ok());
+        assert!(
+            !admission.is_denied(peer(1)),
+            "lifting the deny clears peer 1's denial"
+        );
+        assert!(
+            admission.try_admit(peer(1), &hub).is_ok(),
+            "peer 1 is admitted once the denial is lifted"
+        );
     }
 
     #[test]
@@ -280,7 +304,8 @@ mod tests {
         let _guard = admission.try_admit(peer(1), &hub).expect("first admit");
         assert_eq!(
             admission.try_admit(peer(1), &hub).unwrap_err(),
-            Refusal::InFlight
+            Refusal::InFlight,
+            "the second admit for a dialled peer is refused as in flight"
         );
     }
 
@@ -289,8 +314,15 @@ mod tests {
         let admission = SignalAdmission::new(16);
         let hub = hub();
         drop(admission.try_admit(peer(1), &hub).expect("first admit"));
-        assert_eq!(admission.in_flight(), 0);
-        assert!(admission.try_admit(peer(1), &hub).is_ok());
+        assert_eq!(
+            admission.in_flight(),
+            0,
+            "dropping the guard leaves no slot in flight"
+        );
+        assert!(
+            admission.try_admit(peer(1), &hub).is_ok(),
+            "the dropped slot can be taken again"
+        );
     }
 
     /// Rounds in flight are not a count against a cap: the ceiling acts when a session
@@ -301,7 +333,10 @@ mod tests {
         let hub = hub();
         let _one = admission.try_admit(peer(1), &hub).expect("first admit");
         let _two = admission.try_admit(peer(2), &hub).expect("second admit");
-        assert!(admission.try_admit(peer(3), &hub).is_ok());
+        assert!(
+            admission.try_admit(peer(3), &hub).is_ok(),
+            "peer 3 is admitted while rounds are in flight"
+        );
     }
 
     /// The table of the underlay is a route table: at its cap it refuses and evicts nobody.
@@ -309,13 +344,18 @@ mod tests {
     fn a_route_table_refuses_at_its_cap_and_evicts_nobody() {
         let admission = SignalAdmission::new_route_table(2);
         let hub = hub();
-        assert_eq!(admission.room(), 2);
+        assert_eq!(
+            admission.room(),
+            2,
+            "the table has room for two routes at its cap"
+        );
         let one = admission.try_admit(peer(1), &hub).expect("first admit");
         let two = admission.try_admit(peer(2), &hub).expect("second admit");
         assert_eq!(admission.room(), 0, "the rounds in flight count");
         assert_eq!(
             admission.try_admit(peer(3), &hub).unwrap_err(),
-            Refusal::AtCapacity
+            Refusal::AtCapacity,
+            "a route at the cap is refused and no one is evicted"
         );
         // The first round ends in a session: its unit counts, and the third peer is still refused.
         admission.note_success(peer(1));
@@ -323,15 +363,21 @@ mod tests {
         assert_eq!(admission.room(), 0, "one unit and one round in flight");
         assert_eq!(
             admission.try_admit(peer(3), &hub).unwrap_err(),
-            Refusal::AtCapacity
+            Refusal::AtCapacity,
+            "the refusal at the cap holds on a second try"
         );
         // The second round fails: its room is free again, and nobody was evicted.
         drop(two);
-        assert_eq!(admission.room(), 1);
+        assert_eq!(
+            admission.room(),
+            1,
+            "one route of room is left after one admit"
+        );
         let _three = admission.try_admit(peer(3), &hub).expect("room again");
         assert_eq!(
             admission.try_admit(peer(4), &hub).unwrap_err(),
-            Refusal::AtCapacity
+            Refusal::AtCapacity,
+            "peer 4 is refused once the table is full"
         );
         assert_eq!(admission.direct_units(), 1, "nothing was evicted");
     }
@@ -343,10 +389,14 @@ mod tests {
         admission.note_refused(peer(1));
         assert_eq!(
             admission.try_admit(peer(1), &hub).unwrap_err(),
-            Refusal::Cooling
+            Refusal::Cooling,
+            "a refused peer waits out its cooldown"
         );
         // Unrelated peers are unaffected.
-        assert!(admission.try_admit(peer(2), &hub).is_ok());
+        assert!(
+            admission.try_admit(peer(2), &hub).is_ok(),
+            "peer 2 is admitted while peer 1 cools down"
+        );
     }
 
     #[test]
@@ -356,7 +406,8 @@ mod tests {
         admission.close();
         assert_eq!(
             admission.try_admit(peer(1), &hub).unwrap_err(),
-            Refusal::ShuttingDown
+            Refusal::ShuttingDown,
+            "a closed table refuses every peer as shutting down"
         );
     }
 
@@ -375,7 +426,11 @@ mod tests {
             std::future::pending::<()>().await;
         });
         admission.track(peer(1), epoch, task.abort_handle());
-        assert_eq!(admission.in_flight(), 1);
+        assert_eq!(
+            admission.in_flight(),
+            1,
+            "one slot is still held before the task is aborted"
+        );
 
         admission.close();
         // Let the aborted task's drop glue run.
@@ -434,8 +489,15 @@ mod tests {
         }
 
         assert!(!hub.has_session(&peer(1)), "the least recently used goes");
-        assert!(hub.has_session(&peer(2)) && hub.has_session(&peer(3)));
-        assert_eq!(admission.direct_units(), 2);
+        assert!(
+            hub.has_session(&peer(2)) && hub.has_session(&peer(3)),
+            "peers 2 and 3 keep their sessions and the least recently used one goes"
+        );
+        assert_eq!(
+            admission.direct_units(),
+            2,
+            "two direct units remain after the third session"
+        );
     }
 
     /// The ledger of the underlay leg has G as its ceiling, and the leg holds a session only
@@ -454,8 +516,16 @@ mod tests {
         admission.lock().sample();
 
         assert_eq!(hub.live_peers().len(), ceiling, "every session stays");
-        assert_eq!(admission.direct_units(), ceiling);
-        assert_eq!(admission.over_ceiling(), 0);
+        assert_eq!(
+            admission.direct_units(),
+            ceiling,
+            "the direct units stay at the ceiling"
+        );
+        assert_eq!(
+            admission.over_ceiling(),
+            0,
+            "no session is over the ceiling"
+        );
     }
 
     /// Glare: our offer to a peer is given up for the offer of that peer. The guard of the offer
@@ -466,7 +536,11 @@ mod tests {
         let hub = FakeHub::default();
         let offer = admission.try_admit_offer(peer(1), &hub).expect("offer");
         assert!(admission.preempt_offer(peer(1)), "our offer is given up");
-        assert_eq!(admission.in_flight(), 0);
+        assert_eq!(
+            admission.in_flight(),
+            0,
+            "the slot taken by the replacing round stays in flight"
+        );
 
         let answer = admission
             .try_admit(peer(1), &hub)
@@ -474,7 +548,11 @@ mod tests {
         drop(offer);
         assert_eq!(admission.in_flight(), 1, "the answer keeps its slot");
         drop(answer);
-        assert_eq!(admission.in_flight(), 0);
+        assert_eq!(
+            admission.in_flight(),
+            0,
+            "no slot is in flight after the preempted offer is released"
+        );
     }
 
     /// A round that answers an offer is never given up for another offer of the same peer.
@@ -483,11 +561,19 @@ mod tests {
         let admission = SignalAdmission::new(8);
         let hub = FakeHub::default();
         let _answer = admission.try_admit(peer(1), &hub).expect("answer");
-        assert!(!admission.preempt_offer(peer(1)));
-        assert_eq!(admission.in_flight(), 1);
+        assert!(
+            !admission.preempt_offer(peer(1)),
+            "an answered round is not preempted"
+        );
+        assert_eq!(
+            admission.in_flight(),
+            1,
+            "one slot is still in flight after the round answers"
+        );
         assert_eq!(
             admission.try_admit(peer(1), &hub).unwrap_err(),
-            Refusal::InFlight
+            Refusal::InFlight,
+            "a peer with an answered round is refused as in flight"
         );
     }
 
@@ -540,7 +626,10 @@ mod tests {
 
         admission.lock().sample();
 
-        assert!(admission.lock().slots.is_empty());
+        assert!(
+            admission.lock().slots.is_empty(),
+            "the table holds no slot after the drop"
+        );
     }
 
     /// A session that nobody used for the window is idle, and is handed back once it has been
@@ -566,7 +655,11 @@ mod tests {
                 .is_empty(),
             "one second short of the window"
         );
-        assert_eq!(inner.take_idle(start + window, window), vec![peer(1)]);
+        assert_eq!(
+            inner.take_idle(start + window, window),
+            vec![peer(1)],
+            "peer 1 is the only idle session after the window"
+        );
         assert!(
             inner.take_idle(start + window, window).is_empty(),
             "handed back once"
@@ -611,8 +704,14 @@ mod tests {
         let start = Instant::now();
 
         let mut inner = admission.lock();
-        assert!(inner.take_idle(start, window).is_empty());
-        assert!(inner.take_idle(start + window * 3, window).is_empty());
+        assert!(
+            inner.take_idle(start, window).is_empty(),
+            "no session idles while a round is in flight"
+        );
+        assert!(
+            inner.take_idle(start + window * 3, window).is_empty(),
+            "a round in flight still keeps the session from idling after three windows"
+        );
     }
 
     /// Only a peer with a session can idle out.
@@ -625,8 +724,14 @@ mod tests {
         let start = Instant::now();
 
         let mut inner = admission.lock();
-        assert!(inner.take_idle(start, window).is_empty());
-        assert!(inner.take_idle(start + window * 3, window).is_empty());
+        assert!(
+            inner.take_idle(start, window).is_empty(),
+            "a peer with no session is never idle"
+        );
+        assert!(
+            inner.take_idle(start + window * 3, window).is_empty(),
+            "a peer with no session is not idle after three windows"
+        );
     }
 
     /// The wait after a refusal doubles with each one in a row, stops at the
@@ -640,8 +745,14 @@ mod tests {
         let longest = tuning::CAP_REFUSAL_COOLDOWN_MAX;
 
         backoff.note(bob, start);
-        assert!(backoff.on_cooldown(&bob, start + first.saturating_sub(Duration::from_secs(1))));
-        assert!(!backoff.on_cooldown(&bob, start + first));
+        assert!(
+            backoff.on_cooldown(&bob, start + first.saturating_sub(Duration::from_secs(1))),
+            "the cooldown is still on one second before its length ends"
+        );
+        assert!(
+            !backoff.on_cooldown(&bob, start + first),
+            "the cooldown is over at its length"
+        );
 
         let mut now = start + first;
         let mut window = first;
@@ -658,7 +769,10 @@ mod tests {
             );
             now += window;
         }
-        assert_eq!(window, longest);
+        assert_eq!(
+            window, longest,
+            "the wait reaches the longest window after the doubling"
+        );
 
         backoff.note(bob, now);
         assert!(
@@ -680,8 +794,14 @@ mod tests {
         let mut backoff = RefusalBackoff::default();
         let now = Instant::now();
         backoff.note(peer(1), now);
-        assert!(backoff.on_cooldown(&peer(1), now));
-        assert!(!backoff.on_cooldown(&peer(2), now));
+        assert!(
+            backoff.on_cooldown(&peer(1), now),
+            "a refused peer waits on its own cooldown"
+        );
+        assert!(
+            !backoff.on_cooldown(&peer(2), now),
+            "a refusal does not make peer 2 wait"
+        );
     }
 
     /// A live gossip connection to the peer holds its session: a gossip neighbor never idles out.
@@ -732,7 +852,10 @@ mod tests {
         let window = tuning::DIRECT_IDLE_BACKSTOP;
         let start = Instant::now();
 
-        assert!(admission.lock().take_idle(start, window).is_empty());
+        assert!(
+            admission.lock().take_idle(start, window).is_empty(),
+            "no session is idle on a fresh table"
+        );
         assert!(
             admission
                 .lock()
@@ -958,7 +1081,11 @@ mod tests {
         let iroh::endpoint::ConnectionError::ApplicationClosed(close) = &reason else {
             panic!("expected the EVICTED code, got {reason:?}");
         };
-        assert_eq!(close.error_code.into_inner(), u64::from(EVICTED));
+        assert_eq!(
+            close.error_code.into_inner(),
+            u64::from(EVICTED),
+            "the least recently used connection is closed with the evicted code"
+        );
         assert!(
             fixture
                 .next_closed(Duration::from_millis(500))
@@ -1017,7 +1144,11 @@ mod tests {
         for _ in 0..4 {
             conns.push(fixture.dial().await);
         }
-        assert_eq!(fixture.admission.direct_units(), 4);
+        assert_eq!(
+            fixture.admission.direct_units(),
+            4,
+            "a closed connection leaves the ledger at four units"
+        );
 
         conns[0].1.close(0u32.into(), b"idle");
         for _ in 0..40 {
@@ -1094,7 +1225,11 @@ mod tests {
                 .is_none(),
             "nobody is evicted while the only candidate is busy"
         );
-        assert_eq!(fixture.admission.over_ceiling(), 1);
+        assert_eq!(
+            fixture.admission.over_ceiling(),
+            1,
+            "the newcomer is over the ceiling by one"
+        );
 
         drop(busy);
         let _third = fixture.dial().await;
@@ -1213,16 +1348,36 @@ mod tests {
             (false, true),
             "no connection: a handshake"
         );
-        assert_eq!(sampler::gossip_view(&[Relay]), (true, true));
-        assert_eq!(sampler::gossip_view(&[Gossip]), (true, true));
+        assert_eq!(
+            sampler::gossip_view(&[Relay]),
+            (true, true),
+            "a relay link reads as gossip view (true, true)"
+        );
+        assert_eq!(
+            sampler::gossip_view(&[Gossip]),
+            (true, true),
+            "a gossip link reads as gossip view (true, true)"
+        );
         assert_eq!(
             sampler::gossip_view(&[PathKind::None]),
             (true, true),
             "no path selected yet"
         );
-        assert_eq!(sampler::gossip_view(&[Ip]), (true, false));
-        assert_eq!(sampler::gossip_view(&[WebRtc]), (true, false));
-        assert_eq!(sampler::gossip_view(&[Multihop, Gossip]), (true, false));
+        assert_eq!(
+            sampler::gossip_view(&[Ip]),
+            (true, false),
+            "an ip link reads as gossip view (true, false)"
+        );
+        assert_eq!(
+            sampler::gossip_view(&[WebRtc]),
+            (true, false),
+            "a webrtc link reads as gossip view (true, false)"
+        );
+        assert_eq!(
+            sampler::gossip_view(&[Multihop, Gossip]),
+            (true, false),
+            "a multihop link beside gossip reads as gossip view (true, false)"
+        );
         assert_eq!(
             sampler::gossip_view(&[Relay, Ip]),
             (true, false),
@@ -1354,7 +1509,10 @@ mod tests {
             .expect("connect over gossip");
 
         alice_table.sync_gossip();
-        assert!(alice_handle.is_established(bob.id()));
+        assert!(
+            alice_handle.is_established(bob.id()),
+            "a pair on gossip is allowed to establish and the gone peer is forgotten"
+        );
         assert!(alice_handle.is_allowed(bob.id()), "gossip carries the pair");
 
         alice_handle.allow(bob.id(), false);

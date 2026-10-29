@@ -1460,7 +1460,10 @@ mod tests {
 
     #[test]
     async fn no_shed_does_not_wake_the_loop() {
-        assert!(!wakes_within_a_moment(&mut None).await);
+        assert!(
+            !wakes_within_a_moment(&mut None).await,
+            "no shed does not wake the loop"
+        );
     }
 
     #[test]
@@ -1474,7 +1477,10 @@ mod tests {
 
         done.send(()).expect("the receiver is held");
 
-        assert!(wakes_within_a_moment(&mut closing).await);
+        assert!(
+            wakes_within_a_moment(&mut closing).await,
+            "the close of the shed beacon wakes the loop"
+        );
     }
 
     #[test]
@@ -1484,7 +1490,10 @@ mod tests {
 
         drop(done);
 
-        assert!(wakes_within_a_moment(&mut closing).await);
+        assert!(
+            wakes_within_a_moment(&mut closing).await,
+            "a lost close task does not hold the re-probe back"
+        );
     }
 }
 
@@ -1610,9 +1619,18 @@ mod route_wake_tests {
             multihop_handle().await,
             multihop_handle().await,
         );
-        assert!(me.feed_topology(via.link_vector(vec![(dst.app_id(), 1)])));
-        assert!(me.feed_topology(dst.link_vector(vec![])));
-        assert!(me.feed_topology(me.link_vector(vec![(dst.app_id(), 1), (via.app_id(), 1)])));
+        assert!(
+            me.feed_topology(via.link_vector(vec![(dst.app_id(), 1)])),
+            "a refused first hop moves the relay dial to a route through a third peer"
+        );
+        assert!(
+            me.feed_topology(dst.link_vector(vec![])),
+            "the route through the third peer is fed to the topology"
+        );
+        assert!(
+            me.feed_topology(me.link_vector(vec![(dst.app_id(), 1), (via.app_id(), 1)])),
+            "the topology carries the route through the third peer"
+        );
         state.multihop = Some(me.clone());
         state.note_peer_endpoint(nick("dst"), EndpointAddr::new(dst.app_id().get()));
         state.path_kinds.insert(dst.app_id().get(), PathKind::Relay);
@@ -1661,7 +1679,10 @@ mod advertised_changed_tests {
 
     #[test]
     fn a_node_that_advertised_nothing_yet_has_a_new_set() {
-        assert!(advertised_changed(None, &[(id(1), 10)]));
+        assert!(
+            advertised_changed(None, &[(id(1), 10)]),
+            "a node that advertised nothing has a new set"
+        );
     }
 
     /// The links of a node come up 0.1 to 0.4 s apart. The vector of the second one must go
@@ -1670,7 +1691,10 @@ mod advertised_changed_tests {
     fn a_second_link_that_comes_up_is_a_new_set() {
         let first = [(id(1), 10)];
         let both = [(id(1), 10), (id(2), 10)];
-        assert!(advertised_changed(Some(&first), &both));
+        assert!(
+            advertised_changed(Some(&first), &both),
+            "a second link that comes up is a new set"
+        );
     }
 
     /// A round of the underlay that attached a session adds an edge without a gossip link: the
@@ -1680,15 +1704,24 @@ mod advertised_changed_tests {
         let linked = HashSet::from([id(1)]);
         let before = advertised_links(&linked, &[], 10);
         let after = advertised_links(&linked, &[id(2)], 10);
-        assert!(advertised_changed(Some(&before), &after));
-        assert!(!advertised_changed(Some(&after), &after));
+        assert!(
+            advertised_changed(Some(&before), &after),
+            "a session that attached is a new set"
+        );
+        assert!(
+            !advertised_changed(Some(&after), &after),
+            "the same set after the attach is not new"
+        );
     }
 
     /// A link that flaps and comes back leaves the set that went out: no second broadcast.
     #[test]
     fn a_link_that_comes_back_is_the_set_that_went_out() {
         let both = [(id(1), 10), (id(2), 10)];
-        assert!(!advertised_changed(Some(&both), &both));
+        assert!(
+            !advertised_changed(Some(&both), &both),
+            "a link that comes back does not change the set"
+        );
     }
 }
 
@@ -1716,21 +1749,33 @@ mod advertised_links_tests {
     fn a_member_with_a_held_session_and_no_gossip_link_is_an_edge() {
         let linked = HashSet::from([id(1)]);
         let links = super::advertised_links(&linked, &[id(2)], 10);
-        assert_eq!(sorted(links), sorted(vec![(id(1), 10), (id(2), 10)]));
+        assert_eq!(
+            sorted(links),
+            sorted(vec![(id(1), 10), (id(2), 10)]),
+            "a held session with no gossip link is an edge"
+        );
     }
 
     #[test]
     fn a_member_that_is_linked_and_held_is_one_edge() {
         let linked = HashSet::from([id(1)]);
         let links = super::advertised_links(&linked, &[id(1)], 10);
-        assert_eq!(links, vec![(id(1), 10)]);
+        assert_eq!(
+            links,
+            vec![(id(1), 10)],
+            "a linked and held member is one edge"
+        );
     }
 
     #[test]
     fn with_no_held_session_the_edges_are_the_gossip_links() {
         let linked = HashSet::from([id(1), id(2)]);
         let links = super::advertised_links(&linked, &[], 100);
-        assert_eq!(sorted(links), sorted(vec![(id(1), 100), (id(2), 100)]));
+        assert_eq!(
+            sorted(links),
+            sorted(vec![(id(1), 100), (id(2), 100)]),
+            "with no held session the edges are the gossip links"
+        );
     }
 }
 

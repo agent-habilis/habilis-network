@@ -142,7 +142,10 @@ mod tests {
         .expect_err("a lookup-only relay holds the frame");
         note_held(&mut state, &error);
 
-        assert!(!state.lane_session_wanted(bob, clock::Instant::now()));
+        assert!(
+            !state.lane_session_wanted(bob, clock::Instant::now()),
+            "a held frame for a peer on an ip path wants no session"
+        );
     }
 
     /// A pair that had a direct path and lost it reads as the relay. Its parked frame asks for a
@@ -170,7 +173,10 @@ mod tests {
         .expect_err("a lookup-only relay holds the frame");
         note_held(&mut state, &error);
 
-        assert!(state.lane_session_wanted(bob, clock::Instant::now()));
+        assert!(
+            state.lane_session_wanted(bob, clock::Instant::now()),
+            "a held frame for a relay pair wants a session"
+        );
     }
 
     /// On a mesh whose relay carries payload, the cold send to a lane peer is not held: it goes
@@ -180,7 +186,11 @@ mod tests {
         let (mut state, bob) = state_knowing_a_lane_bob();
         state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
 
-        assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
+        assert_eq!(
+            route(&directed_msg(), &state),
+            Route::Unicast(bob),
+            "a cold send to a lane peer is routed unicast, not held"
+        );
     }
 
     // ── the p2p path ──────────────────────────────────────────────────
@@ -340,7 +350,11 @@ mod tests {
             "the cooldown refuses the dial, so nothing was started"
         );
         tokio::task::yield_now().await;
-        assert_eq!(state.unicast_pool.dial_attempts(), 0);
+        assert_eq!(
+            state.unicast_pool.dial_attempts(),
+            0,
+            "a background send on dial cooldown makes no dial"
+        );
         endpoint.close().await;
     }
 
@@ -360,7 +374,11 @@ mod tests {
 
         assert!(first, "the first send starts the dial");
         assert!(second, "the second send waits for the dial in flight");
-        assert_eq!(state.unicast_pool.dial_attempts(), 1);
+        assert_eq!(
+            state.unicast_pool.dial_attempts(),
+            1,
+            "two background sends to one cold peer make one dial"
+        );
         endpoint.close().await;
     }
 
@@ -380,7 +398,11 @@ mod tests {
 
         assert!(sent, "the background send starts the dial");
         assert!(replied, "the reply waits for the dial in flight");
-        assert_eq!(state.unicast_pool.dial_attempts(), 1);
+        assert_eq!(
+            state.unicast_pool.dial_attempts(),
+            1,
+            "a courtesy reply shares the background dial in flight"
+        );
         endpoint.close().await;
     }
 
@@ -397,7 +419,11 @@ mod tests {
 
         assert!(!sent, "bob has no known endpoint");
         tokio::task::yield_now().await;
-        assert_eq!(state.unicast_pool.dial_attempts(), 0);
+        assert_eq!(
+            state.unicast_pool.dial_attempts(),
+            0,
+            "a background send to an unknown peer makes no dial"
+        );
         endpoint.close().await;
     }
 
@@ -438,7 +464,11 @@ mod tests {
                 .await
                 .expect("bob reads the frame in time")
                 .expect("reader task");
-        assert_eq!(got, bytes.as_bytes().to_vec());
+        assert_eq!(
+            got,
+            bytes.as_bytes().to_vec(),
+            "a background send to a warm peer delivers the bytes"
+        );
         assert_eq!(
             state.unicast_pool.dial_attempts(),
             0,
@@ -459,7 +489,11 @@ mod tests {
     #[test]
     fn directed_message_with_known_endpoint_takes_unicast() {
         let (state, bob) = state_knowing_bob();
-        assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
+        assert_eq!(
+            route(&directed_msg(), &state),
+            Route::Unicast(bob),
+            "a directed message with a known endpoint takes unicast"
+        );
     }
 
     #[test]
@@ -481,8 +515,16 @@ mod tests {
         .sign(&Identity::generate());
         let pong = Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random())
             .sign(&Identity::generate());
-        assert_eq!(route(&request, &state), Route::Unicast(bob));
-        assert_eq!(route(&pong, &state), Route::Unicast(bob));
+        assert_eq!(
+            route(&request, &state),
+            Route::Unicast(bob),
+            "a directed request takes unicast"
+        );
+        assert_eq!(
+            route(&pong, &state),
+            Route::Unicast(bob),
+            "a directed pong takes unicast"
+        );
     }
 
     /// A known peer we're not yet meshed with is still reached by a unicast
@@ -492,7 +534,11 @@ mod tests {
     fn known_peer_while_unmeshed_still_takes_unicast() {
         let (mut state, bob) = state_knowing_bob();
         state.meshed = false;
-        assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
+        assert_eq!(
+            route(&directed_msg(), &state),
+            Route::Unicast(bob),
+            "a known peer takes unicast even while unmeshed"
+        );
     }
 
     // ── the gossip plane (broadcasts only) ────────────────────────────
@@ -501,7 +547,11 @@ mod tests {
     fn broadcast_message_always_takes_gossip() {
         let (state, _) = state_knowing_bob();
         // Even with a known peer, a non-directed kind is a broadcast.
-        assert_eq!(route(&open_broadcast(), &state), Route::Broadcast);
+        assert_eq!(
+            route(&open_broadcast(), &state),
+            Route::Broadcast,
+            "a broadcast message takes the gossip route"
+        );
     }
 
     // ── undeliverable ─────────────────────────────────────────────────
@@ -510,7 +560,11 @@ mod tests {
     fn directed_message_with_unknown_endpoint_is_undeliverable() {
         let mut state = fresh_state();
         state.meshed = true; // meshed, but we hold no endpoint for bob
-        assert_eq!(route(&directed_msg(), &state), Route::Undeliverable);
+        assert_eq!(
+            route(&directed_msg(), &state),
+            Route::Undeliverable,
+            "a directed message to an unknown endpoint is undeliverable"
+        );
     }
 
     #[test]
@@ -523,7 +577,11 @@ mod tests {
         state
             .peer_endpoints
             .insert(nick("bob"), iroh::EndpointAddr::new(rendezvous));
-        assert_eq!(route(&directed_msg(), &state), Route::Undeliverable);
+        assert_eq!(
+            route(&directed_msg(), &state),
+            Route::Undeliverable,
+            "the rendezvous addressee is never a directed target"
+        );
     }
 
     /// With the relay lookup only, a directed frame is parked until a direct
@@ -535,7 +593,11 @@ mod tests {
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
         state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
-        assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
+        assert_eq!(
+            route(&directed_msg(), &state),
+            Route::Unicast(bob),
+            "a directed frame is held while the relay is lookup-only and no direct path is proven"
+        );
         state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         for unproven in [
             None,
@@ -557,7 +619,11 @@ mod tests {
             );
         }
         state.direct.insert(bob, DirectState::Direct);
-        assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
+        assert_eq!(
+            route(&directed_msg(), &state),
+            Route::Unicast(bob),
+            "the held directed frame is delivered once a direct path is proven"
+        );
     }
 
     // ── the roster lane ───────────────────────────────────────────────
@@ -565,14 +631,22 @@ mod tests {
     #[test]
     fn lane_is_unicast_for_a_meshed_known_peer() {
         let (state, _) = state_knowing_bob();
-        assert_eq!(lane_for(&nick("bob"), &state), Lane::Unicast);
+        assert_eq!(
+            lane_for(&nick("bob"), &state),
+            Lane::Unicast,
+            "a meshed known peer takes the unicast lane"
+        );
     }
 
     #[test]
     fn lane_is_multihop_for_a_known_but_unmeshed_peer() {
         let (mut state, _) = state_knowing_bob();
         state.meshed = false;
-        assert_eq!(lane_for(&nick("bob"), &state), Lane::Multihop);
+        assert_eq!(
+            lane_for(&nick("bob"), &state),
+            Lane::Multihop,
+            "a known but unmeshed peer takes the multihop lane"
+        );
     }
 
     /// When the relay is lookup only, a link whose only path is the relay
@@ -584,17 +658,33 @@ mod tests {
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
         state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
-        assert_eq!(lane_for(&nick("bob"), &state), Lane::Unicast);
+        assert_eq!(
+            lane_for(&nick("bob"), &state),
+            Lane::Unicast,
+            "a peer on a lookup-only relay starts on the unicast lane"
+        );
         state.relay_transport = crate::transport::PayloadPath::DirectOnly;
-        assert_eq!(lane_for(&nick("bob"), &state), Lane::RelayOnly);
+        assert_eq!(
+            lane_for(&nick("bob"), &state),
+            Lane::RelayOnly,
+            "a lookup-only relay peer takes the relay-only lane"
+        );
         state.direct.insert(bob, DirectState::Direct);
-        assert_eq!(lane_for(&nick("bob"), &state), Lane::Unicast);
+        assert_eq!(
+            lane_for(&nick("bob"), &state),
+            Lane::Unicast,
+            "a peer that proves a direct path returns to the unicast lane"
+        );
     }
 
     #[test]
     fn lane_is_unreachable_for_an_unknown_peer() {
         let (state, _) = state_knowing_bob();
-        assert_eq!(lane_for(&nick("carol"), &state), Lane::Unreachable);
+        assert_eq!(
+            lane_for(&nick("carol"), &state),
+            Lane::Unreachable,
+            "an unknown peer is unreachable"
+        );
     }
 
     /// Linked with a usable path: the answer goes point-to-point. Every other
@@ -616,7 +706,8 @@ mod tests {
 
         assert_eq!(
             super::unicast_answer_target(&bob_signer, &linked()),
-            Some(bob)
+            Some(bob),
+            "a digest answer goes to the linked neighbor only"
         );
         assert_eq!(
             super::unicast_answer_target(&carol_signer, &linked()),
@@ -785,7 +876,10 @@ mod tests {
                 .await;
 
         assert_eq!(answered.broadcast, 0, "nothing went on gossip");
-        assert_eq!(answered.unicast, 3);
+        assert_eq!(
+            answered.unicast, 3,
+            "all three answers to the linked neighbor go point to point"
+        );
         let (got, returned_endpoint, _conn) =
             tokio::time::timeout(std::time::Duration::from_secs(5), received)
                 .await
@@ -890,7 +984,11 @@ mod tests {
         let answered =
             antientropy::handle_state_digest(Channel::State, &request, &mut state, &net.context())
                 .await;
-        assert_eq!(answered.unicast + answered.broadcast, 3);
+        assert_eq!(
+            answered.unicast + answered.broadcast,
+            3,
+            "three answers reach the third peer"
+        );
         bob_endpoint.close().await;
         net.endpoint.close().await;
     }
@@ -917,7 +1015,8 @@ mod tests {
             Answered {
                 unicast: 0,
                 broadcast: 3
-            }
+            },
+            "a digest from a key with no proven endpoint is answered on gossip"
         );
         bob_endpoint.close().await;
         net.endpoint.close().await;
@@ -1023,7 +1122,8 @@ mod tests {
             state
                 .unicast_pool
                 .send_batch_in_background(bob_addr.id, Vec::new())
-                .await
+                .await,
+            "a partial answer does not ask the round peer again at once"
         );
         tokio::time::timeout(std::time::Duration::from_secs(5), connected_rx)
             .await
@@ -1214,7 +1314,10 @@ mod tests {
             .map(|frame| frame.as_bytes().to_vec())
             .collect();
         expected.sort();
-        assert_eq!(got, expected);
+        assert_eq!(
+            got, expected,
+            "both batches to the warm peer are delivered in order"
+        );
         returned_endpoint.close().await;
         endpoint.close().await;
     }
@@ -1328,10 +1431,15 @@ mod tests {
                 .expect("bob reads the ask in time")
                 .expect("reader task");
         let ask = Message::parse(&got[0]).expect("the ask parses");
-        assert_eq!(ask.kind, MessageKind::StateDigest);
+        assert_eq!(
+            ask.kind,
+            MessageKind::StateDigest,
+            "the neighbor that is ahead is asked back directly"
+        );
         assert_eq!(
             ask.body.as_str(),
-            serde_json::json!({ "heads": own }).to_string()
+            serde_json::json!({ "heads": own }).to_string(),
+            "the ask carries the digest body the neighbor needs"
         );
         other_endpoint.close().await;
         returned_endpoint.close().await;

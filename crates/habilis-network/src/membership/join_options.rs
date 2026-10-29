@@ -398,9 +398,21 @@ mod tests {
                 "relayUrls":["http://127.0.0.1:3340/"]}"#,
         )
         .expect("the documented shape parses");
-        assert_eq!(parsed.lookup, vec![Lookup::Mdns, Lookup::Relay]);
-        assert_eq!(parsed.transport, vec![Transport::WebRtc, Transport::Relay]);
-        assert_eq!(parsed.relay_urls, vec!["http://127.0.0.1:3340/".to_owned()]);
+        assert_eq!(
+            parsed.lookup,
+            vec![Lookup::Mdns, Lookup::Relay],
+            "the lookup list keeps mdns and relay in order"
+        );
+        assert_eq!(
+            parsed.transport,
+            vec![Transport::WebRtc, Transport::Relay],
+            "the transport list keeps webrtc and relay in order"
+        );
+        assert_eq!(
+            parsed.relay_urls,
+            vec!["http://127.0.0.1:3340/".to_owned()],
+            "the relay urls keep the loopback relay address"
+        );
         for stale in [
             r#"{"paths":{"webrtc":false}}"#,
             r#"{"public":true}"#,
@@ -436,9 +448,17 @@ mod tests {
                 // Both, because they are what a peer meets another peer on: the
                 // gossip topic it subscribes to, and the pseudo-node it dials to
                 // find the swarm in the first place.
-                assert_eq!(mesh.topic_id(), expected.topic_id());
-                assert_eq!(mesh.rendezvous_id(), expected.rendezvous_id());
-                assert_eq!(topic_string, "standup");
+                assert_eq!(
+                    mesh.topic_id(),
+                    expected.topic_id(),
+                    "a topic derives the same topic id as the public preset"
+                );
+                assert_eq!(
+                    mesh.rendezvous_id(),
+                    expected.rendezvous_id(),
+                    "a topic derives the same rendezvous id as the public preset"
+                );
+                assert_eq!(topic_string, "standup", "the topic string is kept as given");
             }
             SetupKind::Create { .. } | SetupKind::Join { .. } => {
                 panic!("a topic string must resolve to SetupKind::Topic")
@@ -462,13 +482,20 @@ mod tests {
 
     #[test]
     fn a_bare_create_is_loopback_and_naming_lookups_is_not() {
-        assert!(create_config(&options()).lookups.is_loopback());
+        assert!(
+            create_config(&options()).lookups.is_loopback(),
+            "a bare create uses loopback lookups"
+        );
         let all = create_config(&JoinOptions {
             lookup: all_lookups(),
             ..options()
         });
-        assert!(!all.lookups.is_loopback());
-        assert_eq!(all.lookups, LookupOpts::public_preset());
+        assert!(!all.lookups.is_loopback(), "naming lookups is not loopback");
+        assert_eq!(
+            all.lookups,
+            LookupOpts::public_preset(),
+            "naming lookups selects the public preset"
+        );
     }
 
     /// The relay's two roles are two lists: `relay` in `lookup` finds peers
@@ -480,14 +507,20 @@ mod tests {
             lookup: all_lookups(),
             ..options()
         });
-        assert!(!lookup_only.transport.relay_transport);
+        assert!(
+            !lookup_only.transport.relay_transport,
+            "the relay transport stays off when only the relay lookup is named"
+        );
 
         let relayed = create_config(&JoinOptions {
             lookup: vec![Lookup::Relay],
             transport: vec![Transport::Udp, Transport::Relay],
             ..options()
         });
-        assert!(relayed.transport.relay_transport);
+        assert!(
+            relayed.transport.relay_transport,
+            "the relay transport is on when it is named"
+        );
 
         assert!(
             resolve_kind(
@@ -512,8 +545,15 @@ mod tests {
             transport: vec![Transport::Udp],
             ..options()
         });
-        assert_eq!(create.lookups.relay_lookup, RelayChoice::Pinned);
-        assert!(!create.transport.relay_transport);
+        assert_eq!(
+            create.lookups.relay_lookup,
+            RelayChoice::Pinned,
+            "the relay serves lookup alone as a pinned relay"
+        );
+        assert!(
+            !create.transport.relay_transport,
+            "the relay lookup alone leaves the relay transport off"
+        );
 
         let (topic, _) = resolve_kind(
             &JoinOptions {
@@ -528,7 +568,10 @@ mod tests {
         let SetupKind::Topic { mesh, .. } = topic else {
             panic!("a topic selector must resolve to SetupKind::Topic")
         };
-        assert!(!mesh.transport().relay_transport);
+        assert!(
+            !mesh.transport().relay_transport,
+            "the mesh transport has the relay transport off"
+        );
         assert!(!mesh.is_loopback(), "the relay lookup is on");
     }
 
@@ -561,7 +604,11 @@ mod tests {
         let RelayChoice::Custom(ladder) = &config.lookups.relay_lookup else {
             panic!("relayUrls must resolve to a custom ladder")
         };
-        assert_eq!(ladder.len(), 1);
+        assert_eq!(
+            ladder.len(),
+            1,
+            "one relay url replaces the ladder with one rung"
+        );
         assert!(
             resolve_kind(
                 &JoinOptions {
@@ -672,9 +719,19 @@ mod tests {
         else {
             panic!("a topic selector must resolve to SetupKind::Topic")
         };
-        assert_ne!(plain.to_string(), relayed.to_string());
-        assert!(relayed.transport().relay_transport);
-        assert!(!plain.transport().relay_transport);
+        assert_ne!(
+            plain.to_string(),
+            relayed.to_string(),
+            "the relay transport changes the topic string"
+        );
+        assert!(
+            relayed.transport().relay_transport,
+            "the relayed mesh has the relay transport on"
+        );
+        assert!(
+            !plain.transport().relay_transport,
+            "the plain mesh has the relay transport off"
+        );
     }
 
     #[test]
@@ -683,10 +740,17 @@ mod tests {
             lookup: vec![Lookup::Mdns],
             ..options()
         });
-        assert!(config.lookups.mdns);
-        assert!(!config.lookups.dht);
-        assert_eq!(config.lookups.relay_lookup, RelayChoice::Disabled);
-        assert!(!config.lookups.is_loopback());
+        assert!(config.lookups.mdns, "naming one lookup selects mdns");
+        assert!(!config.lookups.dht, "naming one lookup leaves dht off");
+        assert_eq!(
+            config.lookups.relay_lookup,
+            RelayChoice::Disabled,
+            "naming one lookup leaves the relay lookup disabled"
+        );
+        assert!(
+            !config.lookups.is_loopback(),
+            "naming one lookup is not loopback"
+        );
     }
 }
 
@@ -718,6 +782,10 @@ mod resolve_tests {
         let SetupKind::Topic { mesh: expected, .. } = baseline else {
             panic!("the baseline is a topic kind");
         };
-        assert_eq!(mesh.to_string(), expected.to_string());
+        assert_eq!(
+            mesh.to_string(),
+            expected.to_string(),
+            "a bare topic derives the same mesh as the public preset"
+        );
     }
 }

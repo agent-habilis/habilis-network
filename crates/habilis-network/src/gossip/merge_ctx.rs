@@ -514,8 +514,15 @@ mod tests {
         let holding = peer_info_json(&address, "proof".to_owned(), true);
         let idle = peer_info_json(&address, "proof".to_owned(), false);
 
-        assert_eq!(holding["beacon"], serde_json::Value::Bool(true));
-        assert_eq!(holding["proof"], "proof");
+        assert_eq!(
+            holding["beacon"],
+            serde_json::Value::Bool(true),
+            "our peer info says the beacon is held while we hold the rendezvous"
+        );
+        assert_eq!(
+            holding["proof"], "proof",
+            "our peer info carries the proof while we hold the rendezvous"
+        );
         assert!(
             idle.get("beacon").is_none(),
             "no key while we do not hold it"
@@ -531,7 +538,10 @@ mod tests {
 
         let (read, _) = peer_addr_error::endpoint_addr_from_json(&json).expect("the address reads");
 
-        assert_eq!(read, id);
+        assert_eq!(
+            read, id,
+            "a reader that predates the flag still reads the address"
+        );
     }
 
     /// A node that is not meshed parks a directed frame to a lane peer, and the park asks for the
@@ -587,7 +597,10 @@ mod tests {
         )
         .sign(&crate::protocol::Identity::generate());
         mark_parked(&mut state, &frame, &frame.serialize().expect("serialize"));
-        assert!(!state.lane_session_wanted(bob, clock::Instant::now()));
+        assert!(
+            !state.lane_session_wanted(bob, clock::Instant::now()),
+            "an unmeshed broadcast asks for no session"
+        );
     }
 
     /// The offer goes out at once for a peer that is wanted, and a second call does not start a
@@ -599,7 +612,11 @@ mod tests {
         let context = node.context();
         let mut state = node.state();
         let frame = node.frame_to_bob();
-        assert_eq!(state.webrtc_admission.in_flight(), 0);
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            0,
+            "no admission slot is in flight after the offer for a parked frame"
+        );
 
         state.want_lane_session(node.bob, clock::Instant::now());
         super::offer_for_parked(&mut state, &context, &frame);
@@ -619,7 +636,11 @@ mod tests {
         let context = node.context();
         let mut state = node.state();
         super::offer_for_parked(&mut state, &context, &node.frame_to_bob());
-        assert_eq!(state.webrtc_admission.in_flight(), 0);
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            0,
+            "no admission slot is in flight when nothing is offered"
+        );
         node.endpoint.close().await;
     }
 }

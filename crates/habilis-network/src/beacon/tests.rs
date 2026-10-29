@@ -179,7 +179,7 @@ async fn a_probe_tells_ours_from_foreign_from_no_answer() {
         held.shed_and_wait().await;
     }
     holder.close().await;
-    assert_eq!(ours, ProbeAnswer::Ours);
+    assert_eq!(ours, ProbeAnswer::Ours, "the asked probe answers ours");
     assert_eq!(
         foreign,
         ProbeAnswer::Foreign,
@@ -265,13 +265,13 @@ async fn a_rung_that_stays_silent_for_the_whole_window_is_bound_at_a_later_walk(
         "one walk binds nothing on a rung it has not read"
     );
     assert_eq!(waited, Held::Idle, "a silence binds nothing at once");
-    assert!(kept_free);
+    assert!(kept_free, "a silent rung stays free for the whole window");
     assert_eq!(
         later,
         Held::Claimed,
         "a rung silent for the whole window is bound"
     );
-    assert!(bound);
+    assert!(bound, "a rung that stays silent is bound at a later walk");
 }
 
 /// Two silent rungs, and a free one after them: both are asked at once, both are passed when
@@ -338,7 +338,7 @@ async fn two_silent_rungs_are_asked_at_once_and_passed_and_the_free_one_after_th
     rungs.finish().await;
     peer.close().await;
     drop((first_socket, second_socket));
-    assert_eq!(asked, Held::Idle);
+    assert_eq!(asked, Held::Idle, "both silent rungs are asked at once");
     assert!(
         both_asked_at_once,
         "the two rungs were asked one after the other"
@@ -348,7 +348,7 @@ async fn two_silent_rungs_are_asked_at_once_and_passed_and_the_free_one_after_th
         Held::Claimed,
         "both silent rungs are passed and the free one is bound"
     );
-    assert!(bound);
+    assert!(bound, "the free rung after the two silent ones is bound");
 }
 
 /// One report of silence is one sample. A rung is passed as silent when two reports a window
@@ -424,7 +424,11 @@ async fn the_late_report_of_a_probe_that_was_given_up_does_not_stop_its_replacem
         !waiting_after,
         "the report of the second probe ends its wait"
     );
-    assert_eq!(read_after, RungRead::Silent);
+    assert_eq!(
+        read_after,
+        RungRead::Silent,
+        "a late report of a given-up probe does not stop its replacement"
+    );
 }
 
 /// A rung whose listener answered and gave no identity stays out of the book until it answers
@@ -452,10 +456,26 @@ fn a_refused_rung_is_withheld_until_it_answers_as_ours() {
         watch.withheld_rungs()
     };
 
-    assert_eq!(note(&mut rungs, ProbeAnswer::Refused), vec![port]);
-    assert_eq!(note(&mut rungs, ProbeAnswer::NoAnswer), Vec::<u16>::new());
-    assert_eq!(note(&mut rungs, ProbeAnswer::Refused), vec![port]);
-    assert_eq!(note(&mut rungs, ProbeAnswer::Ours), Vec::<u16>::new());
+    assert_eq!(
+        note(&mut rungs, ProbeAnswer::Refused),
+        vec![port],
+        "a refused rung is withheld after the first refusal"
+    );
+    assert_eq!(
+        note(&mut rungs, ProbeAnswer::NoAnswer),
+        Vec::<u16>::new(),
+        "a no-answer report keeps the rung withheld"
+    );
+    assert_eq!(
+        note(&mut rungs, ProbeAnswer::Refused),
+        vec![port],
+        "a second refusal keeps the rung withheld"
+    );
+    assert_eq!(
+        note(&mut rungs, ProbeAnswer::Ours),
+        Vec::<u16>::new(),
+        "the rung is released once it answers as ours"
+    );
 }
 
 /// A report that comes after the report of a newer probe of the same rung says nothing new, and
@@ -549,7 +569,11 @@ fn two_silent_reports_a_window_apart_pass_the_rung() {
     let again = then + RECLAIM_WINDOW + std::time::Duration::from_secs(1);
     rungs.note(report, again);
 
-    assert_eq!(rungs.reading(4242, again), RungRead::SilentLongEnough);
+    assert_eq!(
+        rungs.reading(4242, again),
+        RungRead::SilentLongEnough,
+        "two silent reports a window apart pass the rung"
+    );
 }
 
 /// A reading in the map is used, not asked for again: a rung that answered as ours is a
@@ -675,7 +699,7 @@ async fn a_walk_that_reads_every_rung_as_taken_says_so() {
         Held::NoRung,
         "a ladder that is taken whole is not a walk that waits for a probe"
     );
-    assert!(!bound);
+    assert!(!bound, "the walk is not bound when every rung is taken");
 }
 
 /// The walk of a claim tick does not wait for a rung that does not answer. The caller is the
@@ -807,8 +831,16 @@ fn a_session_of_our_own_endpoints_is_no_dependent() {
     let tab = SecretKey::generate().public();
     let own = [peer, beacon];
 
-    assert_eq!(dependents::foreign_sessions(&[peer, beacon], &own).len(), 0);
-    assert_eq!(dependents::foreign_sessions(&[peer, tab], &own), [tab]);
+    assert_eq!(
+        dependents::foreign_sessions(&[peer, beacon], &own).len(),
+        0,
+        "a session of our own endpoints is no dependent"
+    );
+    assert_eq!(
+        dependents::foreign_sessions(&[peer, tab], &own),
+        [tab],
+        "a tab session counts as one foreign session"
+    );
 }
 
 /// A real endpoint that touches nothing: `LookupOpts::loopback` binds
@@ -1128,7 +1160,10 @@ async fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
     let holder_peer = loopback_endpoint().await;
     let holder_book = crate::lookup::address_book(&holder_peer);
     let mut beacon = None;
-    assert!(claim::claim(&params, &holder_peer, &holder_book, &mut beacon).await);
+    assert!(
+        claim::claim(&params, &holder_peer, &holder_book, &mut beacon).await,
+        "a member that knows a holder finds the rung it moved to"
+    );
     let on = beacon
         .as_ref()
         .and_then(|held| held.rung_in(&rungs))
@@ -1246,7 +1281,10 @@ fn a_public_rendezvous_is_named_at_its_relay_rung() {
 
     let address = rendezvous_addr(&params).expect("a public rendezvous has a rung to name");
 
-    assert_eq!(address.id, params.id);
+    assert_eq!(
+        address.id, params.id,
+        "a public rendezvous is named at its relay rung"
+    );
     assert!(
         address
             .addrs
@@ -1280,9 +1318,15 @@ fn nothing_to_name_is_none_not_a_bare_id() {
     // channel, and handing back a bare id would look like an address the
     // caller could dial when it is not one.
     let params = public_params();
-    assert!(params.bootstrap_relay.is_none() && params.bind_ports.is_empty());
+    assert!(
+        params.bootstrap_relay.is_none() && params.bind_ports.is_empty(),
+        "nothing to name yields no address"
+    );
 
-    assert!(rendezvous_addr(&params).is_none());
+    assert!(
+        rendezvous_addr(&params).is_none(),
+        "nothing to name yields no rendezvous address"
+    );
 }
 
 #[test]
@@ -1666,7 +1710,10 @@ async fn ensure_starts_the_probe_instead_of_waiting_for_it() {
     // A second call must not stack a second probe answering the same
     // question at the same cost.
     let before = Instant::now();
-    assert!(!claim::ensure(&params, &peer, &book, &mut beacon, true, &mut probe).await);
+    assert!(
+        !claim::ensure(&params, &peer, &book, &mut beacon, true, &mut probe).await,
+        "ensure starts the probe instead of waiting for it"
+    );
     assert!(
         before.elapsed() < std::time::Duration::from_secs(1),
         "and neither must the next tick"

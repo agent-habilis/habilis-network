@@ -483,11 +483,17 @@ mod tests {
             pinned, *RENDEZVOUS_RELAY_LADDER_URLS,
             "Pinned ⇒ the full n0 prod ladder"
         );
-        assert!(relay_ladder(&RelayChoice::Disabled).next().is_none());
+        assert!(
+            relay_ladder(&RelayChoice::Disabled).next().is_none(),
+            "a disabled choice has an empty ladder"
+        );
         let url: RelayUrl = "https://a.example./".parse().unwrap();
         let custom = vec![url];
         let ladder: Vec<_> = relay_ladder(&RelayChoice::Custom(custom.clone())).collect();
-        assert_eq!(ladder, custom);
+        assert_eq!(
+            ladder, custom,
+            "a pinned ladder resolves to the given rungs"
+        );
     }
 
     #[test]
@@ -499,7 +505,8 @@ mod tests {
         assert!(
             select_bootstrap_rung(&[], std::time::Duration::from_secs(1), None)
                 .await
-                .is_none()
+                .is_none(),
+            "an empty ladder selects no bootstrap rung"
         );
     }
 
@@ -530,14 +537,23 @@ mod tests {
 
     #[test]
     fn one_failed_poll_does_not_evict() {
-        assert!(!should_evict_rung(0));
+        assert!(
+            !should_evict_rung(0),
+            "one failed poll does not evict a rung"
+        );
         assert!(!should_evict_rung(1), "a single blip must not re-home");
     }
 
     #[test]
     fn sustained_failures_evict() {
-        assert!(should_evict_rung(RELAY_LIVENESS_FAILS_TO_EVICT));
-        assert!(should_evict_rung(RELAY_LIVENESS_FAILS_TO_EVICT + 5));
+        assert!(
+            should_evict_rung(RELAY_LIVENESS_FAILS_TO_EVICT),
+            "sustained failures evict a rung"
+        );
+        assert!(
+            should_evict_rung(RELAY_LIVENESS_FAILS_TO_EVICT + 5),
+            "failures beyond the eviction count still evict"
+        );
     }
 
     #[test]
@@ -597,7 +613,11 @@ mod tests {
     async fn ladder_picks_first_when_all_reachable() {
         let ladder = rungs(&["a", "b", "c"]);
         let (selected, probed) = walk(&ladder, &[]).await;
-        assert_eq!(host_of(selected.as_ref()).as_deref(), Some("a"));
+        assert_eq!(
+            host_of(selected.as_ref()).as_deref(),
+            Some("a"),
+            "the first rung is picked when all are reachable"
+        );
         assert_eq!(probed, vec!["a"], "stops at the first reachable rung");
     }
 
@@ -606,16 +626,32 @@ mod tests {
         let ladder = rungs(&["a", "b", "c"]);
         // rung 0 down → rung 1 wins, having probed a then b.
         let (selected, probed) = walk(&ladder, &["a"]).await;
-        assert_eq!(host_of(selected.as_ref()).as_deref(), Some("b"));
-        assert_eq!(probed, vec!["a", "b"]);
+        assert_eq!(
+            host_of(selected.as_ref()).as_deref(),
+            Some("b"),
+            "the ladder falls through to the next reachable rung"
+        );
+        assert_eq!(
+            probed,
+            vec!["a", "b"],
+            "the ladder probes the dead first rung and then the second"
+        );
     }
 
     #[test]
     async fn ladder_skips_multiple_dead_prefix_rungs() {
         let ladder = rungs(&["a", "b", "c"]);
         let (selected, probed) = walk(&ladder, &["a", "b"]).await;
-        assert_eq!(host_of(selected.as_ref()).as_deref(), Some("c"));
-        assert_eq!(probed, vec!["a", "b", "c"]);
+        assert_eq!(
+            host_of(selected.as_ref()).as_deref(),
+            Some("c"),
+            "the ladder skips multiple dead prefix rungs"
+        );
+        assert_eq!(
+            probed,
+            vec!["a", "b", "c"],
+            "the ladder probes each dead rung in order"
+        );
     }
 
     #[test]
@@ -625,7 +661,11 @@ mod tests {
         // still-up rung 1.
         let ladder = rungs(&["a", "b", "c"]);
         let (selected, _) = walk(&ladder, &[]).await;
-        assert_eq!(host_of(selected.as_ref()).as_deref(), Some("a"));
+        assert_eq!(
+            host_of(selected.as_ref()).as_deref(),
+            Some("a"),
+            "the first rung is preferred again once it recovers"
+        );
     }
 
     #[test]
@@ -639,8 +679,8 @@ mod tests {
     #[test]
     async fn ladder_empty_is_none_without_probing() {
         let (selected, probed) = walk(&[], &[]).await;
-        assert!(selected.is_none());
-        assert!(probed.is_empty());
+        assert!(selected.is_none(), "an empty ladder selects nothing");
+        assert!(probed.is_empty(), "an empty ladder probes nothing");
     }
 
     // --- steady-state failover decision (`plan_rung_refresh`) -------
@@ -655,7 +695,11 @@ mod tests {
     #[test]
     fn refresh_no_op_when_current_rung_still_first_reachable() {
         let action = plan_rung_refresh(Some(rung("a")).as_ref(), Some(rung("a")));
-        assert_eq!(action, RungRefresh::NoChange);
+        assert_eq!(
+            action,
+            RungRefresh::NoChange,
+            "no change when the current rung is still the first reachable"
+        );
     }
 
     /// A rung over plain `http://` has no TLS, and QUIC needs TLS, so it cannot serve QUIC
@@ -686,27 +730,43 @@ mod tests {
     fn refresh_rehomes_when_current_rung_died() {
         // current rung a is gone; the walk now returns b → re-home to b.
         let action = plan_rung_refresh(Some(rung("a")).as_ref(), Some(rung("b")));
-        assert_eq!(action, RungRefresh::Rehome(Some(rung("b"))));
+        assert_eq!(
+            action,
+            RungRefresh::Rehome(Some(rung("b"))),
+            "the refresh rehomes when the current rung died"
+        );
     }
 
     #[test]
     fn refresh_rehomes_back_to_earlier_recovered_rung() {
         // we were on b (a had been down); a recovered → reset to a.
         let action = plan_rung_refresh(Some(rung("b")).as_ref(), Some(rung("a")));
-        assert_eq!(action, RungRefresh::Rehome(Some(rung("a"))));
+        assert_eq!(
+            action,
+            RungRefresh::Rehome(Some(rung("a"))),
+            "the refresh rehomes back to the recovered earlier rung"
+        );
     }
 
     #[test]
     fn refresh_rehomes_to_none_when_all_rungs_die() {
         // every rung unreachable → drop the relay, lean on mDNS/DHT.
         let action = plan_rung_refresh(Some(rung("a")).as_ref(), None);
-        assert_eq!(action, RungRefresh::Rehome(None));
+        assert_eq!(
+            action,
+            RungRefresh::Rehome(None),
+            "the refresh rehomes to no rung when all rungs die"
+        );
     }
 
     #[test]
     fn refresh_rehomes_when_relay_recovers_from_none() {
         // we had no rung (all were down); one came back → adopt it.
         let action = plan_rung_refresh(None, Some(rung("a")));
-        assert_eq!(action, RungRefresh::Rehome(Some(rung("a"))));
+        assert_eq!(
+            action,
+            RungRefresh::Rehome(Some(rung("a"))),
+            "the refresh rehomes from none when the relay recovers"
+        );
     }
 }

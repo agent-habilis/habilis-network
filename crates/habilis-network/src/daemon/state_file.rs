@@ -434,8 +434,14 @@ mod tests {
             path: PathBuf::from("state.json"),
             source: Box::new(io),
         };
-        assert!(std::error::Error::source(&unparsable).is_some());
-        assert!(std::error::Error::source(&unreadable).is_some());
+        assert!(
+            std::error::Error::source(&unparsable).is_some(),
+            "an unparsable state file keeps its parse source"
+        );
+        assert!(
+            std::error::Error::source(&unreadable).is_some(),
+            "an unreadable state file keeps its io source"
+        );
     }
 
     use super::{MeshId, MeshName, Nickname, StateFile};
@@ -498,12 +504,20 @@ mod tests {
         );
         state_file.write(1, true);
         let unowned = super::read_session_entry(&path).expect("entry");
-        assert_eq!(unowned.owner_pid, None);
+        assert_eq!(unowned.owner_pid, None, "an unowned entry has no owner pid");
         let state_file = state_file.with_owner_pid(Some(4242));
         state_file.write(1, true);
         let owned = super::read_session_entry(&path).expect("entry");
-        assert_eq!(owned.owner_pid, Some(4242));
-        assert_eq!(owned.pid, Some(std::process::id()));
+        assert_eq!(
+            owned.owner_pid,
+            Some(4242),
+            "an owned entry keeps its owner pid"
+        );
+        assert_eq!(
+            owned.pid,
+            Some(std::process::id()),
+            "the entry records this process's pid"
+        );
     }
 
     #[test]
@@ -519,13 +533,33 @@ mod tests {
         state_file.write(3, true);
         let contents = std::fs::read_to_string(&path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
-        assert_eq!(parsed["gossip"], mesh.as_str());
-        assert_eq!(parsed["name"], "cool-team");
-        assert_eq!(parsed["nickname"], "treat-empire");
-        assert_eq!(parsed["ready"], true);
-        assert_eq!(parsed["peer_count"], 3);
-        assert_eq!(parsed["pid"], std::process::id());
-        assert!(parsed["last_updated"].is_number());
+        assert_eq!(
+            parsed["gossip"],
+            mesh.as_str(),
+            "the written file names the gossip"
+        );
+        assert_eq!(
+            parsed["name"], "cool-team",
+            "the written file names the team"
+        );
+        assert_eq!(
+            parsed["nickname"], "treat-empire",
+            "the written file names the nickname"
+        );
+        assert_eq!(parsed["ready"], true, "the written file is marked ready");
+        assert_eq!(
+            parsed["peer_count"], 3,
+            "the written file counts three peers"
+        );
+        assert_eq!(
+            parsed["pid"],
+            std::process::id(),
+            "the written file records this process's pid"
+        );
+        assert!(
+            parsed["last_updated"].is_number(),
+            "the written file stamps the last update time"
+        );
         assert!(
             parsed.get("topic").is_none(),
             "non-topic gossips carry no topic key"
@@ -549,10 +583,21 @@ mod tests {
         state_file.write(1, true);
         let parsed: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(parsed["topic"], raw);
-        assert_eq!(super::read_identity(&path).topic.as_deref(), Some(raw));
+        assert_eq!(
+            parsed["topic"], raw,
+            "the topic is written whole to the file"
+        );
+        assert_eq!(
+            super::read_identity(&path).topic.as_deref(),
+            Some(raw),
+            "the topic is read back whole from the identity"
+        );
         let entry = super::read_session_entry(&path).expect("present");
-        assert_eq!(entry.topic.as_deref(), Some(raw));
+        assert_eq!(
+            entry.topic.as_deref(),
+            Some(raw),
+            "the topic is read back whole from the entry"
+        );
         state_file.remove();
     }
 
@@ -570,8 +615,11 @@ mod tests {
         state_file.write(7, true);
         let parsed: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(parsed["peer_count"], 7);
-        assert_eq!(parsed["ready"], true);
+        assert_eq!(
+            parsed["peer_count"], 7,
+            "a second write updates the peer count to seven"
+        );
+        assert_eq!(parsed["ready"], true, "a second write keeps the file ready");
         state_file.remove();
     }
 
@@ -585,9 +633,9 @@ mod tests {
             &name("cool-team"),
         );
         state_file.write(0, false);
-        assert!(path.exists());
+        assert!(path.exists(), "the file exists before remove is called");
         state_file.remove();
-        assert!(!path.exists());
+        assert!(!path.exists(), "remove deletes the file");
     }
 
     #[test]
@@ -601,9 +649,9 @@ mod tests {
                 &name("cool-team"),
             );
             state_file.write(0, false);
-            assert!(path.exists());
+            assert!(path.exists(), "the file exists before drop");
         }
-        assert!(!path.exists());
+        assert!(!path.exists(), "drop deletes the file");
     }
 
     #[test]
@@ -623,7 +671,10 @@ mod tests {
             &name("cool-team"),
         );
         state_file.write(2, true);
-        assert!(path.exists());
+        assert!(
+            path.exists(),
+            "the file is written inside the new directory"
+        );
         state_file.remove();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -645,13 +696,35 @@ mod tests {
         state_file.write(3, true);
         let parsed: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(parsed["gossip"], mesh.as_str());
-        assert_eq!(parsed["name"], "cool-team");
-        assert_eq!(parsed["nickname"], "swift-cedar");
-        assert_eq!(parsed["peer_count"], 3);
-        assert!(parsed["last_updated"].is_number());
-        assert!(parsed.get("auto_reply").is_none());
-        assert!(parsed.get("junk").is_none());
+        assert_eq!(
+            parsed["gossip"],
+            mesh.as_str(),
+            "the replacing write names the gossip"
+        );
+        assert_eq!(
+            parsed["name"], "cool-team",
+            "the replacing write names the team"
+        );
+        assert_eq!(
+            parsed["nickname"], "swift-cedar",
+            "the replacing write sets the nickname"
+        );
+        assert_eq!(
+            parsed["peer_count"], 3,
+            "the replacing write counts three peers"
+        );
+        assert!(
+            parsed["last_updated"].is_number(),
+            "the replacing write stamps the last update time"
+        );
+        assert!(
+            parsed.get("auto_reply").is_none(),
+            "the replacing write drops the auto-reply key"
+        );
+        assert!(
+            parsed.get("junk").is_none(),
+            "the replacing write drops the junk key"
+        );
         state_file.remove();
     }
 
@@ -665,7 +738,10 @@ mod tests {
             &name("cool-team"),
         );
         // Missing file → None (the caller polls and retries).
-        assert!(super::read_snapshot(&path).unwrap().is_none());
+        assert!(
+            super::read_snapshot(&path).unwrap().is_none(),
+            "a missing file reads as no snapshot"
+        );
 
         state_file.write(1, false);
         let snap = super::read_snapshot(&path).unwrap().expect("present");
@@ -692,9 +768,21 @@ mod tests {
         );
         state_file.write(2, true);
         let identity = super::read_identity(&path);
-        assert_eq!(identity.mesh.as_deref(), Some(mesh.as_str()));
-        assert_eq!(identity.name.as_deref(), Some("cool-team"));
-        assert_eq!(identity.nickname.as_deref(), Some("treat-empire"));
+        assert_eq!(
+            identity.mesh.as_deref(),
+            Some(mesh.as_str()),
+            "the identity carries the mesh"
+        );
+        assert_eq!(
+            identity.name.as_deref(),
+            Some("cool-team"),
+            "the identity carries the team name"
+        );
+        assert_eq!(
+            identity.nickname.as_deref(),
+            Some("treat-empire"),
+            "the identity carries the nickname"
+        );
         state_file.remove();
     }
 
@@ -710,10 +798,26 @@ mod tests {
         );
         state_file.write(2, true);
         let entry = super::read_session_entry(&path).expect("present");
-        assert_eq!(entry.mesh.as_deref(), Some(mesh.as_str()));
-        assert_eq!(entry.name.as_deref(), Some("cool-team"));
-        assert_eq!(entry.nickname.as_deref(), Some("treat-empire"));
-        assert_eq!(entry.pid, Some(std::process::id()));
+        assert_eq!(
+            entry.mesh.as_deref(),
+            Some(mesh.as_str()),
+            "the entry carries the mesh"
+        );
+        assert_eq!(
+            entry.name.as_deref(),
+            Some("cool-team"),
+            "the entry carries the team name"
+        );
+        assert_eq!(
+            entry.nickname.as_deref(),
+            Some("treat-empire"),
+            "the entry carries the nickname"
+        );
+        assert_eq!(
+            entry.pid,
+            Some(std::process::id()),
+            "the entry carries this process's pid"
+        );
         state_file.remove();
     }
 
@@ -727,8 +831,12 @@ mod tests {
         )
         .unwrap();
         let entry = super::read_session_entry(&path).expect("present");
-        assert_eq!(entry.mesh.as_deref(), Some("old"));
-        assert_eq!(entry.pid, None);
+        assert_eq!(
+            entry.mesh.as_deref(),
+            Some("old"),
+            "an old entry without a pid still reads its mesh"
+        );
+        assert_eq!(entry.pid, None, "an old entry without a pid has no pid");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -746,20 +854,34 @@ mod tests {
         )
         .unwrap();
         let entry = super::read_session_entry(&path).expect("present");
-        assert_eq!(entry.mesh.as_deref(), Some("legacy"));
+        assert_eq!(
+            entry.mesh.as_deref(),
+            Some("legacy"),
+            "a room-keyed file maps its mesh in the entry"
+        );
         let identity = super::read_identity(&path);
-        assert_eq!(identity.mesh.as_deref(), Some("legacy"));
+        assert_eq!(
+            identity.mesh.as_deref(),
+            Some("legacy"),
+            "a room-keyed file maps its mesh in the identity"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn read_session_entry_is_none_on_missing_or_malformed() {
         let missing = unique_path("session-entry-missing");
-        assert!(super::read_session_entry(&missing).is_none());
+        assert!(
+            super::read_session_entry(&missing).is_none(),
+            "a missing session file reads as no entry"
+        );
         let malformed = unique_path("session-entry-malformed");
         std::fs::create_dir_all(malformed.parent().unwrap()).unwrap();
         std::fs::write(&malformed, b"not json").unwrap();
-        assert!(super::read_session_entry(&malformed).is_none());
+        assert!(
+            super::read_session_entry(&malformed).is_none(),
+            "a malformed session file reads as no entry"
+        );
         let _ = std::fs::remove_file(&malformed);
     }
 
@@ -769,9 +891,18 @@ mod tests {
         // gate's JSON omits the keys rather than printing nulls.
         let path = unique_path("identity-missing");
         let identity = super::read_identity(&path);
-        assert!(identity.mesh.is_none());
-        assert!(identity.name.is_none());
-        assert!(identity.nickname.is_none());
+        assert!(
+            identity.mesh.is_none(),
+            "a missing file gives an identity with no mesh"
+        );
+        assert!(
+            identity.name.is_none(),
+            "a missing file gives an identity with no name"
+        );
+        assert!(
+            identity.nickname.is_none(),
+            "a missing file gives an identity with no nickname"
+        );
     }
 
     #[test]
@@ -780,13 +911,22 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         // Not JSON.
         std::fs::write(&path, b"not json").unwrap();
-        assert!(super::read_snapshot(&path).is_err());
+        assert!(
+            super::read_snapshot(&path).is_err(),
+            "a malformed snapshot reads as an error"
+        );
         // JSON object missing the `ready` / `last_updated` fields the gate needs.
         std::fs::write(&path, r#"{"gossip":"x","name":"n"}"#).unwrap();
-        assert!(super::read_snapshot(&path).is_err());
+        assert!(
+            super::read_snapshot(&path).is_err(),
+            "a malformed snapshot reads as an error"
+        );
         // Has `ready` but still missing `last_updated`.
         std::fs::write(&path, r#"{"ready":true,"gossip":"round"}"#).unwrap();
-        assert!(super::read_snapshot(&path).is_err());
+        assert!(
+            super::read_snapshot(&path).is_err(),
+            "a malformed snapshot reads as an error"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

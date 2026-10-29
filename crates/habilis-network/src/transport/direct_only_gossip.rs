@@ -281,8 +281,12 @@ mod watcher_tests {
             .expect("no report inside 5 s: the watch waits for the deadline")
             .expect("the sink stays open");
 
-        assert_eq!(report.kind, PathKind::Relay);
-        assert_eq!(report.peer, client.id());
+        assert_eq!(
+            report.kind,
+            PathKind::Relay,
+            "the report names the relay path kind"
+        );
+        assert_eq!(report.peer, client.id(), "the report names the client peer");
         router.shutdown().await.expect("shutdown");
         client.close().await;
     }

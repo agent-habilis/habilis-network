@@ -531,11 +531,21 @@ mod tests {
     fn a_frame_pushed_twice_is_held_once() {
         let mut log = MessageLog::new(10);
         let frame = msg_at("once", 10);
-        assert!(log.push(frame.clone()).is_none());
-        assert!(log.push(frame.clone()).is_none());
-        assert_eq!(log.len(), 1);
+        assert!(
+            log.push(frame.clone()).is_none(),
+            "the first push of a frame holds it"
+        );
+        assert!(
+            log.push(frame.clone()).is_none(),
+            "the second push of a held frame is not held again"
+        );
+        assert_eq!(log.len(), 1, "the log holds one frame after two pushes");
         let window = log.window_at(0, 1).expect("one message");
-        assert_eq!(window.ids, vec![frame.dedup_key()]);
+        assert_eq!(
+            window.ids,
+            vec![frame.dedup_key()],
+            "the window lists the one held frame"
+        );
     }
 
     /// A key leaves the index with its message: a frame that was evicted can be held again.
@@ -546,9 +556,18 @@ mod tests {
         let mut log = MessageLog::new(2);
         let first = message("m1");
         let second = message("m2");
-        assert!(log.push(first.clone()).is_none());
-        assert!(log.push(second.clone()).is_none());
-        assert!(log.contains(&first.dedup_key()) && log.contains(&second.dedup_key()));
+        assert!(
+            log.push(first.clone()).is_none(),
+            "the first frame is pushed into the log"
+        );
+        assert!(
+            log.push(second.clone()).is_none(),
+            "the second frame is pushed into the log"
+        );
+        assert!(
+            log.contains(&first.dedup_key()) && log.contains(&second.dedup_key()),
+            "both frames are contained before eviction"
+        );
         let gone = log.push(message("m3")).expect("a third frame evicts one");
         assert!(
             !log.contains(&gone.dedup_key()),
@@ -568,13 +587,16 @@ mod tests {
     #[test]
     fn an_evicted_frame_can_be_held_again() {
         let mut log = MessageLog::new(1);
-        assert!(log.push(msg_at("first", 10)).is_none());
+        assert!(
+            log.push(msg_at("first", 10)).is_none(),
+            "an evicted frame is held again when pushed"
+        );
         let evicted = log.push(msg_at("second", 20)).expect("the log is full");
         assert!(
             log.push(evicted).is_some(),
             "the evicted frame is new again, so the push evicts one of the two"
         );
-        assert_eq!(log.len(), 1);
+        assert_eq!(log.len(), 1, "the log holds one frame after the re-push");
     }
 
     /// A message tagged with an explicit timestamp, for window tests.
@@ -625,14 +647,25 @@ mod tests {
         }
         // A middle slice of 2, starting at index 1 (ts=20).
         let window = log.window_at(1, 2).expect("non-empty window");
-        assert_eq!((window.lo.0.as_secs(), window.hi.0.as_secs()), (20, 30));
-        assert_eq!(window.ids.len(), 2);
+        assert_eq!(
+            (window.lo.0.as_secs(), window.hi.0.as_secs()),
+            (20, 30),
+            "the window bounds are the slice's first and last timestamps"
+        );
+        assert_eq!(window.ids.len(), 2, "the window holds two frames");
         // A max wider than the log starting at 0 covers everything.
         let full = log.window_at(0, 100).expect("non-empty window");
-        assert_eq!((full.lo.0.as_secs(), full.hi.0.as_secs()), (10, 50));
-        assert_eq!(full.ids.len(), 5);
+        assert_eq!(
+            (full.lo.0.as_secs(), full.hi.0.as_secs()),
+            (10, 50),
+            "the full window bounds run from the first to the last timestamp"
+        );
+        assert_eq!(full.ids.len(), 5, "the full window holds five frames");
         // Past the end ⇒ None.
-        assert!(log.window_at(5, 2).is_none());
+        assert!(
+            log.window_at(5, 2).is_none(),
+            "no window is returned for an empty range"
+        );
     }
 
     /// The log keeps arrival order, and gossip does not deliver in timestamp
@@ -658,7 +691,11 @@ mod tests {
             advertiser.push(frames[index].clone());
         }
         let window = advertiser.window_at(0, 10).expect("non-empty window");
-        assert_eq!((window.lo.0.as_secs(), window.hi.0.as_secs()), (10, 50));
+        assert_eq!(
+            (window.lo.0.as_secs(), window.hi.0.as_secs()),
+            (10, 50),
+            "the window bounds are the extent of the slice"
+        );
 
         // The holder answers that window with the gap.
         let have: HashSet<DedupKey> = window.ids.into_iter().collect();
@@ -672,7 +709,11 @@ mod tests {
             requester: &nick(ANYONE),
         });
         let bodies: Vec<&str> = gap.iter().map(|message| message.body.as_str()).collect();
-        assert_eq!(bodies, ["20"]);
+        assert_eq!(
+            bodies,
+            ["20"],
+            "only the frame inside the slice is in the window"
+        );
     }
 
     #[test]
@@ -720,7 +761,11 @@ mod tests {
         let bodies: HashSet<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         // ts 20 and 40 are in-window and missing; 30 is in `have`; 10 and 50
         // are out of window — never re-sent.
-        assert_eq!(bodies, HashSet::from(["20", "40"]));
+        assert_eq!(
+            bodies,
+            HashSet::from(["20", "40"]),
+            "missing_in_window leaves out frames outside the window and the have set"
+        );
     }
 
     // ── the addressee gate ─────────────────────────────────────────
@@ -749,7 +794,11 @@ mod tests {
         log.push(msg_to("private", 20, "bob"));
         let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 10, &nick("bob")));
         let bodies: HashSet<&str> = gap.iter().map(|message| message.body.as_str()).collect();
-        assert_eq!(bodies, HashSet::from(["public", "private"]));
+        assert_eq!(
+            bodies,
+            HashSet::from(["public", "private"]),
+            "a directed frame is offered to its own addressee"
+        );
     }
 
     #[test]
@@ -775,8 +824,16 @@ mod tests {
         let mut log = MessageLog::new(10);
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob"));
-        assert_eq!(log.window_at(0, 10).expect("non-empty").ids.len(), 2);
-        assert_eq!(log.recent_window(10).expect("non-empty").ids.len(), 2);
+        assert_eq!(
+            log.window_at(0, 10).expect("non-empty").ids.len(),
+            2,
+            "the window at zero still advertises the directed ids"
+        );
+        assert_eq!(
+            log.recent_window(10).expect("non-empty").ids.len(),
+            2,
+            "the recent window still advertises the directed ids"
+        );
     }
 
     #[test]
@@ -883,7 +940,10 @@ mod tests {
         }
         // A dropped author leaves no zero entry behind, or it would win the
         // lowest-author-key tie-break while holding nothing.
-        assert!(log.per_author.values().all(|count| *count > 0));
+        assert!(
+            log.per_author.values().all(|count| *count > 0),
+            "every author count is positive after churn"
+        );
     }
 
     /// **Retention must not depend on arrival order**, across authors too.
@@ -945,7 +1005,11 @@ mod tests {
         log.push(msg_at("c", 30));
         log.push(msg_at("a", 10));
         log.push(msg_at("b", 20)); // over cap → evicts "a" (ts=10), the oldest
-        assert_eq!(log.messages.len(), 2);
+        assert_eq!(
+            log.messages.len(),
+            2,
+            "the log keeps the two highest keys when full"
+        );
         let bodies: HashSet<&str> = log
             .messages
             .iter()

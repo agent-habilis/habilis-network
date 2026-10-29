@@ -1248,20 +1248,39 @@ mod tests {
             "a".repeat(ESCAPED_BUDGET),
             "\u{1F980}".repeat(ESCAPED_BUDGET / 4),
         ] {
-            assert!(msg_fits(&text));
+            assert!(
+                msg_fits(&text),
+                "a text message of signs fits within one frame"
+            );
             let len = signed_len(&text);
             assert!(len <= MAX_MESSAGE_SIZE, "{len} bytes");
         }
-        assert!(!msg_fits(&"\"".repeat(MAX_MSG + 1)));
-        assert!(!msg_fits(&"a".repeat(ESCAPED_BUDGET + 1)));
+        assert!(
+            !msg_fits(&"\"".repeat(MAX_MSG + 1)),
+            "a message of quotes past the budget does not fit"
+        );
+        assert!(
+            !msg_fits(&"a".repeat(ESCAPED_BUDGET + 1)),
+            "an escaped message past its budget does not fit"
+        );
     }
 
     #[test]
     fn a_body_round_trips_and_refuses_what_it_cannot_carry() {
         let text = "ol\u{e1}, \"mesh\"\n\ttab";
-        assert_eq!(msg_body(text).expect("body").as_str(), text);
-        assert!(msg_body("bell\u{7}").is_err());
-        assert!(msg_body(&"\"".repeat(MAX_MSG + ESCAPED_BUDGET)).is_err());
+        assert_eq!(
+            msg_body(text).expect("body").as_str(),
+            text,
+            "a body round trips to the same text"
+        );
+        assert!(
+            msg_body("bell\u{7}").is_err(),
+            "a bell character is refused in a body"
+        );
+        assert!(
+            msg_body(&"\"".repeat(MAX_MSG + ESCAPED_BUDGET)).is_err(),
+            "a body of quotes past the budget is refused"
+        );
     }
 
     #[test]
@@ -1272,6 +1291,10 @@ mod tests {
             .into_iter()
             .map(|queued| app.stall_began(queued))
             .collect();
-        assert_eq!(surfaced, [false, true, false, false, false, true]);
+        assert_eq!(
+            surfaced,
+            [false, true, false, false, false, true],
+            "a stall surfaces once until the queue drains"
+        );
     }
 }

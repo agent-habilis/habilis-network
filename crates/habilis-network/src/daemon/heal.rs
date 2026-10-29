@@ -423,14 +423,32 @@ mod tests {
     fn is_resume_only_past_threshold() {
         let threshold = Duration::from_mins(1);
         // A normal heal cadence (≤ ~15s) is never a resume.
-        assert!(!is_resume(Duration::from_secs(0), threshold));
-        assert!(!is_resume(Duration::from_secs(15), threshold));
-        assert!(!is_resume(Duration::from_secs(59), threshold));
+        assert!(
+            !is_resume(Duration::from_secs(0), threshold),
+            "a zero gap is no resume"
+        );
+        assert!(
+            !is_resume(Duration::from_secs(15), threshold),
+            "a 15 s gap is no resume"
+        );
+        assert!(
+            !is_resume(Duration::from_secs(59), threshold),
+            "a 59 s gap is no resume"
+        );
         // Exactly at the threshold is not yet a stall (strictly `>`).
-        assert!(!is_resume(Duration::from_mins(1), threshold));
+        assert!(
+            !is_resume(Duration::from_mins(1), threshold),
+            "a one minute gap is still below the threshold"
+        );
         // A multi-minute gap = the process was frozen → hard re-bootstrap.
-        assert!(is_resume(Duration::from_secs(61), threshold));
-        assert!(is_resume(Duration::from_hours(1), threshold));
+        assert!(
+            is_resume(Duration::from_secs(61), threshold),
+            "a 61 s gap is a resume"
+        );
+        assert!(
+            is_resume(Duration::from_hours(1), threshold),
+            "a one hour gap is a resume"
+        );
     }
 
     #[test]
@@ -438,8 +456,14 @@ mod tests {
         // The subprocess stall regression shortens the threshold via
         // the env knob; the comparison must track whatever is passed.
         let short = Duration::from_secs(4);
-        assert!(!is_resume(Duration::from_secs(3), short));
-        assert!(is_resume(Duration::from_secs(5), short));
+        assert!(
+            !is_resume(Duration::from_secs(3), short),
+            "a 3 s gap is no resume under the injected threshold"
+        );
+        assert!(
+            is_resume(Duration::from_secs(5), short),
+            "a 5 s gap is a resume under the injected threshold"
+        );
     }
 
     #[test]
@@ -450,8 +474,14 @@ mod tests {
         // The monotonic gap alone misses it; the divergence catches it.
         let mono_gap = Duration::from_secs(3);
         let wall_gap = Duration::from_hours(24);
-        assert!(!is_resume(mono_gap, threshold));
-        assert!(is_wall_resume(wall_gap, mono_gap, threshold));
+        assert!(
+            !is_resume(mono_gap, threshold),
+            "a gap with no wall signature is no resume"
+        );
+        assert!(
+            is_wall_resume(wall_gap, mono_gap, threshold),
+            "a wall gap beside a monotonic gap is a wall resume"
+        );
     }
 
     #[test]
@@ -459,17 +489,15 @@ mod tests {
         let threshold = Duration::from_mins(1);
         // Steady operation: wall and monotonic advance in lockstep, so
         // their divergence is ~0 — never a resume, whatever the cadence.
-        assert!(!is_wall_resume(
-            Duration::from_secs(15),
-            Duration::from_secs(15),
-            threshold
-        ));
+        assert!(
+            !is_wall_resume(Duration::from_secs(15), Duration::from_secs(15), threshold),
+            "clocks that advance together are no wall resume"
+        );
         // A wall clock running slightly behind monotonic (NTP step
         // back) saturates to 0 divergence, not a spurious resume.
-        assert!(!is_wall_resume(
-            Duration::from_secs(10),
-            Duration::from_secs(15),
-            threshold
-        ));
+        assert!(
+            !is_wall_resume(Duration::from_secs(10), Duration::from_secs(15), threshold),
+            "a short gap pair is no wall resume"
+        );
     }
 }

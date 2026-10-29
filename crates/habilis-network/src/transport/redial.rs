@@ -28,7 +28,11 @@ mod tests {
         track.observe(start, peer, true);
         track.observe(after(start, 130), peer, false);
         track.observe(after(start, 190), peer, true);
-        assert_eq!((track.closes(), track.redials()), (1, 1));
+        assert_eq!(
+            (track.closes(), track.redials()),
+            (1, 1),
+            "a quick return after a close is one redial"
+        );
     }
 
     #[test]
@@ -37,7 +41,11 @@ mod tests {
         track.observe(start, peer, true);
         track.observe(after(start, 130), peer, false);
         track.observe(after(start, 130 + 301), peer, true);
-        assert_eq!((track.closes(), track.redials()), (1, 0));
+        assert_eq!(
+            (track.closes(), track.redials()),
+            (1, 0),
+            "a return after the window is not a redial"
+        );
     }
 
     #[test]
@@ -45,7 +53,11 @@ mod tests {
         let (mut track, peer, start) = (Track::default(), testing::endpoint_id(1), Instant::now());
         track.observe(start, peer, true);
         track.observe(after(start, 1), peer, true);
-        assert_eq!((track.closes(), track.redials()), (0, 0));
+        assert_eq!(
+            (track.closes(), track.redials()),
+            (0, 0),
+            "the first connection of a peer is not a redial"
+        );
     }
 
     #[test]
@@ -57,6 +69,10 @@ mod tests {
         track.observe(after(start, 10), one, false);
         track.observe(after(start, 20), one, true);
         track.observe(after(start, 30), two, false);
-        assert_eq!((track.closes(), track.redials()), (2, 1));
+        assert_eq!(
+            (track.closes(), track.redials()),
+            (2, 1),
+            "each peer is counted on its own"
+        );
     }
 }

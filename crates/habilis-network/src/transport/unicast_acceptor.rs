@@ -256,7 +256,8 @@ mod tests {
         let (tx, _frames) = mpsc::channel(1);
         assert_eq!(
             UnicastAcceptor::new(tx, PayloadPath::RelayAllowed).idle,
-            DIRECT_IDLE_BACKSTOP
+            DIRECT_IDLE_BACKSTOP,
+            "an idle acceptor connection is closed after the one backstop"
         );
     }
 }

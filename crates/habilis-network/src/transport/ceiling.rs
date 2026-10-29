@@ -382,8 +382,14 @@ mod tests {
                 "nothing is held before an eviction"
             );
             backoff.note(peer, start, spread);
-            assert!(backoff.holds(&peer, at(start, secs - 1)));
-            assert!(!backoff.holds(&peer, at(start, secs + 1)));
+            assert!(
+                backoff.holds(&peer, at(start, secs - 1)),
+                "an eviction holds proactive dials for a minute within the jitter"
+            );
+            assert!(
+                !backoff.holds(&peer, at(start, secs + 1)),
+                "the eviction hold ends after the jitter window"
+            );
             assert!(
                 !backoff.holds(&testing::endpoint_id(2), start),
                 "only that peer is held"
@@ -397,7 +403,11 @@ mod tests {
         let mut backoff = EvictionBackoff::default();
         backoff.note(testing::endpoint_id(1), start, 0.0);
         backoff.note(testing::endpoint_id(2), at(start, 100), 0.0);
-        assert_eq!(backoff.until.len(), 1);
+        assert_eq!(
+            backoff.until.len(),
+            1,
+            "a noted eviction forgets the expired ones and keeps one"
+        );
     }
 
     fn at(start: Instant, secs: u64) -> Instant {
@@ -409,7 +419,10 @@ mod tests {
         let mut ceiling = Ceiling::new(cap);
         for index in 0..cap {
             let peer = testing::endpoint_id(u8::try_from(index).unwrap());
-            assert!(ceiling.register_quic(peer, start).evict.is_empty());
+            assert!(
+                ceiling.register_quic(peer, start).evict.is_empty(),
+                "a full ceiling evicts nobody for the first quic peer"
+            );
             // The lower the index, the older the last use.
             ceiling.touch(peer, at(start, 10 + u64::try_from(index).unwrap()));
         }
@@ -434,8 +447,14 @@ mod tests {
             "the LRU goes first"
         );
         apply(&mut ceiling, &admission);
-        assert!(ceiling.units() <= 4);
-        assert_eq!(admission.over_ceiling, 0);
+        assert!(
+            ceiling.units() <= 4,
+            "the ceiling holds at most four units after the newcomer"
+        );
+        assert_eq!(
+            admission.over_ceiling, 0,
+            "no unit is over the ceiling after the eviction"
+        );
     }
 
     #[test]
@@ -447,10 +466,15 @@ mod tests {
                 ceiling
                     .register_quic(testing::endpoint_id(index), start)
                     .evict
-                    .is_empty()
+                    .is_empty(),
+                "a peer under the ceiling evicts nobody"
             );
         }
-        assert_eq!(ceiling.units(), 4);
+        assert_eq!(
+            ceiling.units(),
+            4,
+            "the ceiling holds four units when no one is evicted"
+        );
     }
 
     #[test]
@@ -478,7 +502,11 @@ mod tests {
         ceiling.register_quic(testing::endpoint_id(2), at(start, 1));
         ceiling.touch(testing::endpoint_id(2), at(start, 5));
         let admission = ceiling.register_quic(testing::endpoint_id(3), at(start, 10));
-        assert_eq!(admission.evict.first(), Some(&testing::endpoint_id(1)));
+        assert_eq!(
+            admission.evict.first(),
+            Some(&testing::endpoint_id(1)),
+            "the least recently used young peer is the one evicted"
+        );
         assert_eq!(admission.over_ceiling, 0, "the ceiling holds");
     }
 
@@ -490,13 +518,20 @@ mod tests {
         ceiling.busy_begin(testing::endpoint_id(1));
         let admission = ceiling.register_quic(testing::endpoint_id(9), at(start, 200));
         assert!(admission.evict.is_empty(), "nobody is idle");
-        assert_eq!(admission.over_ceiling, 1);
-        assert_eq!(ceiling.over_ceiling(), 1);
+        assert_eq!(admission.over_ceiling, 1, "a busy peer is never evicted");
+        assert_eq!(
+            ceiling.over_ceiling(),
+            1,
+            "the newcomer overruns a ceiling of busy peers by one"
+        );
         // The sends end: the next admission evicts down.
         ceiling.busy_end(testing::endpoint_id(0), at(start, 201));
         ceiling.busy_end(testing::endpoint_id(1), at(start, 201));
         let later = ceiling.register_quic(testing::endpoint_id(10), at(start, 400));
-        assert!(!later.evict.is_empty());
+        assert!(
+            !later.evict.is_empty(),
+            "the later newcomer evicts nobody once the ceiling is overrun"
+        );
     }
 
     #[test]
@@ -505,9 +540,13 @@ mod tests {
         let mut ceiling = full(10, start);
         let first = ceiling.register_quic(testing::endpoint_id(100), at(start, 200));
         // 10 + 1 - 9 = 2 victims: one that is needed, one for the batch.
-        assert_eq!(first.evict.len(), 2);
+        assert_eq!(
+            first.evict.len(),
+            2,
+            "the first batch evicts two peers down to ninety percent"
+        );
         apply(&mut ceiling, &first);
-        assert_eq!(ceiling.units(), 9);
+        assert_eq!(ceiling.units(), 9, "nine units remain after the batch");
         // Two seconds later: only what is needed.
         let second = ceiling.register_quic(testing::endpoint_id(101), at(start, 202));
         assert!(second.evict.is_empty(), "9 + 1 fits");
@@ -520,7 +559,11 @@ mod tests {
         apply(&mut ceiling, &third);
         // Five seconds after the first batch: a batch again.
         let fourth = ceiling.register_quic(testing::endpoint_id(103), at(start, 206));
-        assert_eq!(fourth.evict.len(), 2);
+        assert_eq!(
+            fourth.evict.len(),
+            2,
+            "the next batch waits out its five seconds and evicts two more"
+        );
     }
 
     #[test]
@@ -557,9 +600,18 @@ mod tests {
             );
         }
         assert_eq!(ceiling.units(), 4, "the count passes the cap, no victim");
-        assert!(ceiling.refuses());
-        assert!(ceiling.holds(testing::endpoint_id(1)));
-        assert!(!ceiling.holds(testing::endpoint_id(9)));
+        assert!(
+            ceiling.refuses(),
+            "a refusing ceiling refuses newcomers above its cap"
+        );
+        assert!(
+            ceiling.holds(testing::endpoint_id(1)),
+            "peer 1 is still held by the refusing ceiling"
+        );
+        assert!(
+            !ceiling.holds(testing::endpoint_id(9)),
+            "peer 9 is not held by the refusing ceiling"
+        );
         let mut cache = Ceiling::new(2);
         cache.register_session(testing::endpoint_id(1), start);
         cache.register_session(testing::endpoint_id(2), start);
@@ -577,7 +629,11 @@ mod tests {
         assert_eq!(ceiling.units(), 0, "a gossip link is outside the ceiling");
         ceiling.register_quic(testing::endpoint_id(2), start);
         ceiling.register_quic(testing::endpoint_id(3), start);
-        assert_eq!(ceiling.units(), 2);
+        assert_eq!(
+            ceiling.units(),
+            2,
+            "a session to a neighbor does not count until the peer stops being one"
+        );
         // It stops being a neighbor: its session counts from now on, and the ceiling holds.
         let admission = ceiling.set_neighbors(&HashSet::new(), at(start, 200));
         assert_eq!(admission.evict.len(), 1, "one for the ceiling");
@@ -594,7 +650,11 @@ mod tests {
         ceiling.register_quic(testing::endpoint_id(1), start);
         ceiling.register_quic(testing::endpoint_id(2), start);
         let admission = ceiling.register_quic(testing::endpoint_id(3), at(start, 100));
-        assert_eq!(admission.evict.len(), 1);
+        assert_eq!(
+            admission.evict.len(),
+            1,
+            "the newcomer evicts exactly one peer at a ceiling of two"
+        );
         apply(&mut ceiling, &admission);
         // Touching, a second look at a held peer, a close: no eviction.
         ceiling.touch(testing::endpoint_id(3), at(start, 101));
@@ -602,7 +662,8 @@ mod tests {
             ceiling
                 .register_quic(testing::endpoint_id(3), at(start, 102))
                 .evict
-                .is_empty()
+                .is_empty(),
+            "the next newcomer evicts nobody after the eviction"
         );
         let survivor = if admission.evict[0] == testing::endpoint_id(1) {
             testing::endpoint_id(2)
@@ -610,7 +671,11 @@ mod tests {
             testing::endpoint_id(1)
         };
         ceiling.unregister_quic(survivor);
-        assert_eq!(ceiling.units(), 1);
+        assert_eq!(
+            ceiling.units(),
+            1,
+            "one unit remains after the second eviction"
+        );
     }
 
     #[test]
@@ -619,10 +684,18 @@ mod tests {
         let mut ceiling = Ceiling::new(1);
         ceiling.register_session(testing::endpoint_id(1), start);
         ceiling.register_quic(testing::endpoint_id(1), at(start, 1));
-        assert_eq!(ceiling.units(), 1);
+        assert_eq!(
+            ceiling.units(),
+            1,
+            "a session and its connection count as one unit"
+        );
         ceiling.unregister_session(testing::endpoint_id(1));
         assert_eq!(ceiling.units(), 1, "the connection still counts");
         ceiling.unregister_quic(testing::endpoint_id(1));
-        assert_eq!(ceiling.units(), 0);
+        assert_eq!(
+            ceiling.units(),
+            0,
+            "no unit remains after the session and its connection close"
+        );
     }
 }

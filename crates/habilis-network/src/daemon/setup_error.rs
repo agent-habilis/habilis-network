@@ -96,11 +96,13 @@ mod tests {
     fn the_grepped_texts_are_pinned() {
         assert_eq!(
             SetupError::PasswordRequired.to_string(),
-            "this mesh is password-protected — pass --password"
+            "this mesh is password-protected — pass --password",
+            "the password-required text is pinned"
         );
         assert_eq!(
             SetupError::Unlock(UnlockError::WrongPassword).to_string(),
-            "wrong password"
+            "wrong password",
+            "the wrong password text is pinned"
         );
     }
 }

@@ -98,12 +98,23 @@ mod tests {
                 &plain_secret([9u8; SECRET_LEN]),
             )
             .unwrap();
-        assert_eq!(registered.ticket_secret.as_bytes(), &[9u8; SECRET_LEN]);
-        assert!(!registered.password);
+        assert_eq!(
+            registered.ticket_secret.as_bytes(),
+            &[9u8; SECRET_LEN],
+            "the snapshot keeps the ticket secret"
+        );
+        assert!(
+            !registered.password,
+            "the snapshot is not password protected"
+        );
 
         let entry = store.get(&hash).expect("entry present");
-        assert_eq!(entry.size, 4096);
-        assert_eq!(fs::read(&entry.path).unwrap(), vec![7u8; 4096]);
+        assert_eq!(entry.size, 4096, "the spool entry has the snapshot size");
+        assert_eq!(
+            fs::read(&entry.path).unwrap(),
+            vec![7u8; 4096],
+            "the spool file holds the snapshot bytes"
+        );
 
         fs::remove_dir_all(&src_dir).ok();
     }
@@ -138,7 +149,11 @@ mod tests {
                 &plain_secret([2u8; SECRET_LEN]),
             )
             .unwrap();
-        assert_eq!(first.ticket_secret.as_bytes(), &[1u8; SECRET_LEN]);
+        assert_eq!(
+            first.ticket_secret.as_bytes(),
+            &[1u8; SECRET_LEN],
+            "dedup keeps the first ticket secret"
+        );
         assert_eq!(
             second.ticket_secret.as_bytes(),
             first.ticket_secret.as_bytes(),
@@ -159,7 +174,10 @@ mod tests {
         super::snapshot_file(&src, &dest).expect("snapshot");
         let got = fs::read(&dest).unwrap();
         let _ = fs::remove_dir_all(&dir);
-        assert_eq!(got, b"whole content");
+        assert_eq!(
+            got, b"whole content",
+            "a partial destination is replaced by the whole content"
+        );
     }
 
     fn snapshot_as(store: &mut BlobStore, src: &Path, hash: BlobDigest, group: &ContentId) {
@@ -194,10 +212,13 @@ mod tests {
 
         store.evict_content(&group_a);
         assert!(store.get(&hash).is_some(), "group B still owns the blob");
-        assert!(path.exists());
+        assert!(path.exists(), "the spool file exists after a snapshot race");
 
         store.evict_content(&group_b);
-        assert!(store.get(&hash).is_none());
+        assert!(
+            store.get(&hash).is_none(),
+            "the racing group is not yet in the store"
+        );
         assert!(
             !path.exists(),
             "the last owner's evict unlinks the spool file"
@@ -217,13 +238,19 @@ mod tests {
         let group = ContentId::new("blob-test-group");
         snapshot_as(&mut store, &src, hash, &group);
         snapshot_as(&mut store, &src, hash, &group);
-        assert!(store.claim(&hash, &group).is_some());
+        assert!(
+            store.claim(&hash, &group).is_some(),
+            "the same group claimed twice is one owner"
+        );
         assert_eq!(store.total_bytes, 5, "a dedup hit adds no bytes");
         let path = store.get(&hash).unwrap().path.clone();
 
         store.evict_content(&group);
-        assert!(store.get(&hash).is_none());
-        assert!(!path.exists());
+        assert!(
+            store.get(&hash).is_none(),
+            "the store drops the blob for the claimed group"
+        );
+        assert!(!path.exists(), "the spool file is removed with the blob");
 
         fs::remove_dir_all(&src_dir).ok();
     }
@@ -256,7 +283,10 @@ mod tests {
                 .snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))
                 .unwrap();
         }
-        assert!(store.claim(&oldest, &group_b).is_some());
+        assert!(
+            store.claim(&oldest, &group_b).is_some(),
+            "a claim makes the blob the newest under disk pressure"
+        );
 
         // One byte over the budget: exactly one blob has to go.
         let meta = ContentMeta {
@@ -295,10 +325,16 @@ mod tests {
             )
             .unwrap();
         let path = store.get(&hash).unwrap().path.clone();
-        assert!(path.exists());
+        assert!(
+            path.exists(),
+            "the spool file exists before the evict task runs"
+        );
 
         store.evict_content(&task);
-        assert!(store.get(&hash).is_none());
+        assert!(
+            store.get(&hash).is_none(),
+            "the evict task removes the blob from the store"
+        );
         assert!(!path.exists(), "spool file must be unlinked on evict");
 
         fs::remove_dir_all(&src_dir).ok();

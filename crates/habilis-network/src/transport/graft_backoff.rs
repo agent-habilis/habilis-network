@@ -149,8 +149,14 @@ mod tests {
         );
 
         backoff.settle(at(start, 21), unlinked, 0.0);
-        assert!(backoff.is_blocked(&peer, at(start, 21 + 59)));
-        assert!(!backoff.is_blocked(&peer, at(start, 21 + 61)));
+        assert!(
+            backoff.is_blocked(&peer, at(start, 21 + 59)),
+            "a refused request blocks the peer for a minute"
+        );
+        assert!(
+            !backoff.is_blocked(&peer, at(start, 21 + 61)),
+            "the block lifts after a minute"
+        );
         assert!(
             !backoff.is_blocked(&testing::endpoint_id(2), at(start, 22)),
             "only that peer"
@@ -175,7 +181,11 @@ mod tests {
             waits.push(wait);
             now = at(now, wait);
         }
-        assert_eq!(waits, [60, 120, 240, 480, 900, 900, 900]);
+        assert_eq!(
+            waits,
+            [60, 120, 240, 480, 900, 900, 900],
+            "each refusal in a row doubles the wait up to fifteen minutes"
+        );
     }
 
     /// A link that comes up, even 15 s after the request, is not a refusal: the wait starts over.
@@ -187,7 +197,10 @@ mod tests {
         backoff.reset(peer);
 
         backoff.settle(at(start, 40), unlinked, 0.0);
-        assert!(!backoff.is_blocked(&peer, at(start, 40)));
+        assert!(
+            !backoff.is_blocked(&peer, at(start, 40)),
+            "a link that comes up after the request is not backed off"
+        );
     }
 
     /// A peer that is linked when the answers are read did not refuse, whatever order the events
@@ -200,7 +213,10 @@ mod tests {
         backoff.asked(peer, start);
 
         backoff.settle(at(start, 30), |id| linked.contains(id), 0.0);
-        assert!(!backoff.is_blocked(&peer, at(start, 30)));
+        assert!(
+            !backoff.is_blocked(&peer, at(start, 30)),
+            "a linked peer is not read as a refusal"
+        );
     }
 
     /// The link coming up, or a new address, takes the doubled wait back to a minute.
@@ -218,10 +234,16 @@ mod tests {
         );
 
         backoff.reset(peer);
-        assert!(!backoff.is_blocked(&peer, at(start, 111 + 100)));
+        assert!(
+            !backoff.is_blocked(&peer, at(start, 111 + 100)),
+            "a reset lifts the block at once"
+        );
         backoff.asked(peer, at(start, 300));
         backoff.settle(at(start, 321), unlinked, 0.0);
-        assert!(backoff.is_blocked(&peer, at(start, 321 + 59)));
+        assert!(
+            backoff.is_blocked(&peer, at(start, 321 + 59)),
+            "a reset starts a new wait from its first step"
+        );
         assert!(
             !backoff.is_blocked(&peer, at(start, 321 + 61)),
             "back to 60 s"
@@ -263,7 +285,10 @@ mod tests {
             backoff.is_blocked(&peer, at(start, 21 + 61 + 21 + 100)),
             "the second wait is 120 s"
         );
-        assert!(!backoff.is_blocked(&peer, at(start, 21 + 61 + 21 + 121)));
+        assert!(
+            !backoff.is_blocked(&peer, at(start, 21 + 61 + 21 + 121)),
+            "an ask during the wait does not extend it"
+        );
     }
 
     /// A peer that was quiet for longer than the longest wait starts again at the first wait.
@@ -282,7 +307,10 @@ mod tests {
         now += GRAFT_BACKOFF_MAX + Duration::from_secs(1);
         backoff.asked(peer, now);
         backoff.settle(at(now, 21), unlinked, 0.0);
-        assert!(backoff.is_blocked(&peer, at(now, 21 + 59)));
+        assert!(
+            backoff.is_blocked(&peer, at(now, 21 + 59)),
+            "a step decays after a quiet time longer than the longest wait"
+        );
         assert!(!backoff.is_blocked(&peer, at(now, 21 + 61)), "back to 60 s");
     }
 
@@ -295,6 +323,9 @@ mod tests {
         backoff.settle(at(start, 21), unlinked, 0.0);
         backoff.settle(at(start, 40), unlinked, 0.0);
         backoff.settle(at(start, 70), unlinked, 0.0);
-        assert!(!backoff.is_blocked(&peer, at(start, 21 + 61)));
+        assert!(
+            !backoff.is_blocked(&peer, at(start, 21 + 61)),
+            "a refusal is read once"
+        );
     }
 }

@@ -141,7 +141,10 @@ mod tests {
         let (signer, other) = (key(1), key(2));
         let proof = sign(&endpoint_key, &mesh, &signer);
 
-        assert!(verifies(endpoint, &mesh, &signer, &proof));
+        assert!(
+            verifies(endpoint, &mesh, &signer, &proof),
+            "a proof holds only for its signer and mesh"
+        );
         assert!(!verifies(endpoint, &mesh, &other, &proof), "another signer");
         assert!(
             !verifies(endpoint, &MeshId::from("mesh-b"), &signer, &proof),
@@ -164,7 +167,11 @@ mod tests {
         for byte in 1..=u8::try_from(cap * 2).expect("small") {
             proven.insert(key(byte), SecretKey::generate().public(), &linked);
         }
-        assert_eq!(proven.len(), cap);
+        assert_eq!(
+            proven.len(),
+            cap,
+            "the proven map stays at its cap and keeps a linked endpoint"
+        );
         assert_eq!(
             proven.get(&key(0)),
             Some(linked_one),

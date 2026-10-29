@@ -23,11 +23,13 @@ fn the_lan_tag_follows_the_topic() {
 
     assert_eq!(
         super::lan::lan_member_tag(&one),
-        super::lan::lan_member_tag(&one)
+        super::lan::lan_member_tag(&one),
+        "the lan tag is the same for the same topic"
     );
     assert_ne!(
         super::lan::lan_member_tag(&one),
-        super::lan::lan_member_tag(&other)
+        super::lan::lan_member_tag(&other),
+        "the lan tag differs between topics"
     );
     let user_data: Result<iroh::endpoint_info::UserData, _> =
         super::lan::lan_member_tag(&one).parse();
@@ -42,10 +44,22 @@ fn only_our_tag_is_a_member_of_our_mesh() {
     let foreign = super::lan::lan_member_tag(&iroh_gossip::proto::TopicId::from_bytes([2u8; 32]));
     let user = |text: &str| -> iroh::endpoint_info::UserData { text.parse().expect("fits") };
 
-    assert!(super::mdns::is_member_tag(Some(&user(&ours)), &ours));
-    assert!(!super::mdns::is_member_tag(Some(&user(&foreign)), &ours));
-    assert!(!super::mdns::is_member_tag(Some(&user("hello")), &ours));
-    assert!(!super::mdns::is_member_tag(None, &ours));
+    assert!(
+        super::mdns::is_member_tag(Some(&user(&ours)), &ours),
+        "only our tag counts as a member of our mesh"
+    );
+    assert!(
+        !super::mdns::is_member_tag(Some(&user(&foreign)), &ours),
+        "a foreign tag is not a member of our mesh"
+    );
+    assert!(
+        !super::mdns::is_member_tag(Some(&user("hello")), &ours),
+        "a tag that is not a mesh tag is not a member of our mesh"
+    );
+    assert!(
+        !super::mdns::is_member_tag(None, &ours),
+        "a missing tag is not a member of our mesh"
+    );
 }
 
 /// R2 (the forwarder's filter): a new id passes, the same record again does not, a changed record
@@ -72,7 +86,10 @@ fn the_forwarder_passes_news_only() {
         None,
         "a Gone for an id never passed ends here"
     );
-    assert!(mdns::news_only(LanEvent::Seen(at(1)), &mut known).is_some());
+    assert!(
+        mdns::news_only(LanEvent::Seen(at(1)), &mut known).is_some(),
+        "the forwarder passes a newly seen peer"
+    );
     assert_eq!(
         mdns::news_only(LanEvent::Seen(at(1)), &mut known),
         None,
@@ -84,9 +101,14 @@ fn the_forwarder_passes_news_only() {
     );
     assert_eq!(
         mdns::news_only(LanEvent::Gone(id), &mut known),
-        Some(LanEvent::Gone(id))
+        Some(LanEvent::Gone(id)),
+        "the forwarder passes a peer that is gone"
     );
-    assert_eq!(mdns::news_only(LanEvent::Gone(id), &mut known), None);
+    assert_eq!(
+        mdns::news_only(LanEvent::Gone(id), &mut known),
+        None,
+        "the forwarder drops a repeated gone event"
+    );
 }
 
 /// R3: two members of one mesh and a stranger of another, all on the LAN with mDNS and no
@@ -257,11 +279,17 @@ fn replacing_a_peer_address_leaves_exactly_the_new_one() {
 fn the_mesh_policy_turns_off_the_paths_it_leaves_out() {
     let webrtc_only = TransportPolicy::default().with_udp(false);
     let on_webrtc = TransportOpts::default().within(&webrtc_only);
-    assert!(!on_webrtc.udp && on_webrtc.webrtc && on_webrtc.relay);
+    assert!(
+        !on_webrtc.udp && on_webrtc.webrtc && on_webrtc.relay,
+        "the webrtc policy turns off the paths it leaves out"
+    );
 
     let udp_only = TransportPolicy::default().with_webrtc(false);
     let on_udp = TransportOpts::default().within(&udp_only);
-    assert!(on_udp.udp && !on_udp.webrtc && on_udp.relay);
+    assert!(
+        on_udp.udp && !on_udp.webrtc && on_udp.relay,
+        "the udp policy keeps udp and relay and turns off webrtc"
+    );
 
     let narrow_node = TransportOpts::webrtc_only().within(&TransportPolicy::default());
     assert!(
@@ -491,12 +519,18 @@ fn a_handles_value_with_only_gossip_is_not_empty() {
     let handle = habilis_network_iroh_gossip_transport::GossipHandle::new(
         iroh::SecretKey::from_bytes(&[51; 32]).public(),
     );
-    assert!(super::TransportHandles::default().is_empty());
+    assert!(
+        super::TransportHandles::default().is_empty(),
+        "a default handles value is empty"
+    );
     let only_gossip = super::TransportHandles {
         gossip: Some(handle),
         ..super::TransportHandles::default()
     };
-    assert!(!only_gossip.is_empty());
+    assert!(
+        !only_gossip.is_empty(),
+        "a handles value with only gossip is not empty"
+    );
 }
 
 // Gossip is a choice of the mesh: the opts follow the policy, and it needs a direct path.
@@ -510,9 +544,15 @@ fn the_mesh_policy_decides_gossip_for_the_opts() {
     };
     let within = |mesh: TransportPolicy| TransportOpts::default().within(&mesh).gossip;
     assert!(!TransportOpts::default().gossip, "off until the mesh asks");
-    assert!(within(policy(true, true, true)));
+    assert!(
+        within(policy(true, true, true)),
+        "the mesh policy decides gossip when it is within reach"
+    );
     assert!(within(policy(true, false, true)), "webrtc is a direct path");
-    assert!(!within(policy(false, true, true)));
+    assert!(
+        !within(policy(false, true, true)),
+        "the mesh policy does not decide gossip outside reach"
+    );
     assert!(
         !within(policy(true, false, false)),
         "no direct path to ride"
@@ -562,7 +602,10 @@ async fn only_the_member_endpoint_has_the_gossip_handle() {
         table_without.gossip_handle().is_none(),
         "a mesh without gossip has none"
     );
-    assert!(super::TransportHandles::default().gossip.is_none());
+    assert!(
+        super::TransportHandles::default().gossip.is_none(),
+        "a default handles value has no gossip handle"
+    );
 }
 
 // The list `udp,gossip` has no WebRTC and no multihop, so no other selector is installed: the
@@ -651,9 +694,16 @@ async fn the_member_of_a_udp_and_gossip_list_keeps_ip_above_gossip() {
 fn the_handle_config_of_a_browser_differs_from_the_engine_s_in_the_link_cost_only() {
     let native = super::multihop_handle_config(PayloadPath::RelayAllowed);
     let browser = super::peer::browser_handle_config(PayloadPath::RelayAllowed);
-    assert_eq!(native.link_cost, 10);
-    assert_eq!(browser.link_cost, 100);
-    assert_eq!(browser.with_link_cost(native.link_cost), native);
+    assert_eq!(native.link_cost, 10, "the native link cost is the engine's");
+    assert_eq!(
+        browser.link_cost, 100,
+        "the browser link cost differs from the engine's"
+    );
+    assert_eq!(
+        browser.with_link_cost(native.link_cost),
+        native,
+        "apart from the link cost the browser config matches the engine"
+    );
 }
 
 #[cfg(feature = "host")]
@@ -679,7 +729,11 @@ async fn the_underlay_leg_takes_the_cap_it_is_given_and_needs_webrtc_on() {
         handle.underlay_id().get(),
         "the leg is on the underlay"
     );
-    assert_eq!(leg.handle.session_count(), 0);
+    assert_eq!(
+        leg.handle.session_count(),
+        0,
+        "the underlay leg starts with no sessions"
+    );
     handle.close().await;
     endpoint.close().await;
 

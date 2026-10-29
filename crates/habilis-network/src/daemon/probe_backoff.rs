@@ -91,7 +91,10 @@ mod tests {
 
     #[test]
     fn a_probe_may_start_before_any_verdict() {
-        assert!(ProbeBackoff::default().due(Instant::now()));
+        assert!(
+            ProbeBackoff::default().due(Instant::now()),
+            "a probe may start before any verdict"
+        );
     }
 
     #[test]
@@ -101,7 +104,8 @@ mod tests {
         let waits: Vec<Duration> = (0..5).map(|_| rival_at(&mut backoff, now, 0.0)).collect();
         assert_eq!(
             waits,
-            vec![secs(15), secs(30), secs(60), secs(120), secs(120)]
+            vec![secs(15), secs(30), secs(60), secs(120), secs(120)],
+            "each probe that finds the rival doubles the wait up to the longest"
         );
     }
 
@@ -114,7 +118,11 @@ mod tests {
         }
         backoff.note_verdict(false, now, 0.0);
         assert!(backoff.due(now), "the second free reading is not held back");
-        assert_eq!(rival_at(&mut backoff, now, 0.0), secs(15));
+        assert_eq!(
+            rival_at(&mut backoff, now, 0.0),
+            secs(15),
+            "a free reading lets the next probe start at the next tick"
+        );
     }
 
     #[test]
@@ -124,10 +132,14 @@ mod tests {
         for _ in 0..4 {
             rival_at(&mut backoff, now, 0.0);
         }
-        assert!(!backoff.due(now));
+        assert!(!backoff.due(now), "a reset lets a probe start at once");
         backoff.reset();
-        assert!(backoff.due(now));
-        assert_eq!(rival_at(&mut backoff, now, 0.0), secs(15));
+        assert!(backoff.due(now), "a reset makes the probe due");
+        assert_eq!(
+            rival_at(&mut backoff, now, 0.0),
+            secs(15),
+            "a reset starts the waits over at the first step"
+        );
     }
 
     #[test]
@@ -135,8 +147,16 @@ mod tests {
         let now = Instant::now();
         let mut low = ProbeBackoff::default();
         let mut high = ProbeBackoff::default();
-        assert_eq!(rival_at(&mut low, now, -1.0), secs(12));
-        assert_eq!(rival_at(&mut high, now, 1.0), secs(18));
+        assert_eq!(
+            rival_at(&mut low, now, -1.0),
+            secs(12),
+            "the low jitter stays within a fifth"
+        );
+        assert_eq!(
+            rival_at(&mut high, now, 1.0),
+            secs(18),
+            "the high jitter stays within a fifth"
+        );
         let mut beyond = ProbeBackoff::default();
         assert_eq!(
             rival_at(&mut beyond, now, 7.0),

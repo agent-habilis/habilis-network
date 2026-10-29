@@ -281,10 +281,10 @@ mod tests {
             .expect("send");
         drop(tx);
 
-        assert!(matches!(
-            next_within(&mut mesh).await,
-            Some(Ok(Event::Received(_)))
-        ));
+        assert!(
+            matches!(next_within(&mut mesh).await, Some(Ok(Event::Received(_)))),
+            "the end of the topic is forwarded and the receiver comes back"
+        );
         assert!(next_within(&mut mesh).await.is_none(), "the topic ended");
         assert!(mesh.into_dead().is_some(), "the dead receiver comes back");
     }
@@ -397,7 +397,11 @@ mod tests {
             let Some(Ok(Event::Received(item))) = next_within(&mut mesh).await else {
                 panic!("a queued mesh message was lost");
             };
-            assert_eq!(item.content, numbered(usize::from(index)));
+            assert_eq!(
+                item.content,
+                numbered(usize::from(index)),
+                "the end of the topic comes after the queued mesh messages in order"
+            );
         }
         assert!(next_within(&mut mesh).await.is_none(), "then the end");
     }
@@ -431,7 +435,10 @@ mod tests {
         for message in [answer, request] {
             let bytes = message.serialize().expect("serialize");
             assert_ne!(bytes.as_bytes().first(), Some(&FRAME_KIND), "{bytes:?}");
-            assert!(!super::is_frame(bytes.as_bytes()));
+            assert!(
+                !super::is_frame(bytes.as_bytes()),
+                "an engine message does not start with the frame kind byte"
+            );
         }
     }
 }

@@ -1071,15 +1071,18 @@ mod tests {
         ];
         assert_eq!(
             rungs_withheld_at_setup(CoHostPolicy::Never, &read),
-            vec![4161]
+            vec![4161],
+            "a never policy withholds the rungs of its walk at setup"
         );
         assert_eq!(
             rungs_withheld_at_setup(CoHostPolicy::Deferred, &read),
-            vec![4161, 5511, 8450]
+            vec![4161, 5511, 8450],
+            "a deferred policy withholds its rungs at setup"
         );
         assert_eq!(
             rungs_withheld_at_setup(CoHostPolicy::Eager, &read),
-            vec![4161, 5511, 8450]
+            vec![4161, 5511, 8450],
+            "an eager policy withholds its rungs at setup"
         );
     }
 
@@ -1105,7 +1108,11 @@ mod tests {
         let transports = crate::lookup::TransportOpts::default().within(&policy);
         let error = super::refuse_in_browser(&dht_only, policy, transports)
             .expect_err("no path to signal on");
-        assert_eq!(error.to_string(), super::BROWSER_NEEDS_RELAY_LOOKUP);
+        assert_eq!(
+            error.to_string(),
+            super::BROWSER_NEEDS_RELAY_LOOKUP,
+            "a browser refuses a mesh with no relay lookup with the browser message"
+        );
 
         let relay = LookupOpts::new(RelayChoice::Pinned)
             .with_mdns(dht_only.mdns)
@@ -1307,8 +1314,16 @@ mod tests {
     // direct peers, counting `WebRTC` sessions and unicast connections.
     #[test]
     fn the_default_bounds_are_32_neighbors_and_64_direct_peers() {
-        assert_eq!(tuning::GOSSIP_ACTIVE_VIEW_CAPACITY, 32);
-        assert_eq!(crate::transport::MAX_DIRECT_PEERS, 64);
+        assert_eq!(
+            tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
+            32,
+            "the gossip active view is capped at 32 neighbors"
+        );
+        assert_eq!(
+            crate::transport::MAX_DIRECT_PEERS,
+            64,
+            "the direct peer bound is 64"
+        );
     }
 
     /// A multihop handle on `secret`, with its underlay on the key that the handle derives.
@@ -1663,7 +1678,8 @@ mod browser_tests {
                 .as_ref()
                 .expect("a multihop handle")
                 .link_cost(),
-            100
+            100,
+            "a browser member's multihop handle carries the browser link cost"
         );
         // The router closes the endpoint that it serves on. The handle closes the underlay, the
         // WebRTC leg of the underlay has an endpoint of its own, and so has the startup rung probe.

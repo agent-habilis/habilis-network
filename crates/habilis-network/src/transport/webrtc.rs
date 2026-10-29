@@ -169,11 +169,10 @@ mod tests {
     // selected path, the proof is stale: the pair offers, as one that was never proven.
     #[test]
     fn a_proven_pair_that_reads_as_relay_is_offered_a_session() {
-        assert!(session_policy::wants_session(
-            false,
-            Some(PathKind::Relay),
-            true
-        ));
+        assert!(
+            session_policy::wants_session(false, Some(PathKind::Relay), true),
+            "a proven pair that reads as relay is offered a session"
+        );
     }
 
     // Only the lower id watches a pooled connection, so when the higher id is the one
@@ -212,18 +211,18 @@ mod tests {
     // session round reports at once, not after it judges the connection for UDP.
     #[test]
     fn a_proven_pair_on_gossip_is_demoted_as_one_on_the_relay() {
-        assert!(session_policy::reads_below_a_session(
-            Some(PathKind::Relay),
-            true
-        ));
-        assert!(session_policy::reads_below_a_session(
-            Some(PathKind::Gossip),
-            true
-        ));
-        assert!(!session_policy::reads_below_a_session(
-            Some(PathKind::Gossip),
-            false
-        ));
+        assert!(
+            session_policy::reads_below_a_session(Some(PathKind::Relay), true),
+            "a proven pair on gossip is demoted as one on the relay"
+        );
+        assert!(
+            session_policy::reads_below_a_session(Some(PathKind::Gossip), true),
+            "a proven pair on gossip reads below a session"
+        );
+        assert!(
+            !session_policy::reads_below_a_session(Some(PathKind::Gossip), false),
+            "a proven pair on gossip is not demoted further"
+        );
         for kind in [Some(PathKind::Ip), Some(PathKind::WebRtc), None] {
             assert!(
                 !session_policy::reads_below_a_session(kind, true),
@@ -236,12 +235,14 @@ mod tests {
     // stale, and it asks for a session.
     #[test]
     fn a_pair_on_gossip_is_offered_a_session_even_when_proven_direct() {
-        assert!(session_policy::proof_is_stale(Some(PathKind::Gossip), true));
-        assert!(session_policy::wants_session(
-            false,
-            Some(PathKind::Gossip),
-            true
-        ));
+        assert!(
+            session_policy::proof_is_stale(Some(PathKind::Gossip), true),
+            "the proof of a pair on gossip is stale"
+        );
+        assert!(
+            session_policy::wants_session(false, Some(PathKind::Gossip), true),
+            "a pair on gossip is offered a session even when proven direct"
+        );
     }
 
     // A pair that multihop carries is off the relay, so it is proven direct, but a
@@ -250,11 +251,10 @@ mod tests {
     // table when the pool has closed an idle connection.
     #[test]
     fn a_pair_on_multihop_is_offered_a_session_even_when_proven_direct() {
-        assert!(session_policy::wants_session(
-            false,
-            Some(PathKind::Multihop),
-            true
-        ));
+        assert!(
+            session_policy::wants_session(false, Some(PathKind::Multihop), true),
+            "a pair on multihop is offered a session even when proven direct"
+        );
         let watched_after_the_pool_closed_it = None;
         let read_from_the_admission_table = Some(PathKind::Multihop);
         let kind = probe::pair_kind(
@@ -270,8 +270,14 @@ mod tests {
     #[test]
     fn only_a_peer_without_ip_needs_the_webrtc_lane() {
         let id = SecretKey::from_bytes(&[5u8; 32]).public();
-        assert!(lane_needs::needs_webrtc_lane(&browser_shaped(id)));
-        assert!(!lane_needs::needs_webrtc_lane(&native_shaped(id)));
+        assert!(
+            lane_needs::needs_webrtc_lane(&browser_shaped(id)),
+            "a browser-shaped peer needs the webrtc lane"
+        );
+        assert!(
+            !lane_needs::needs_webrtc_lane(&native_shaped(id)),
+            "a native-shaped peer does not need the webrtc lane"
+        );
 
         // Nothing advertised at all used to be treated as browser-shaped, on
         // the grounds that a native peer with its IP transports cleared looks
@@ -280,7 +286,10 @@ mod tests {
         // ever means "not known yet", and reading it as a browser is what let
         // the retry pass open a lane with every native peer. See
         // `an_address_with_no_transports_is_unknown_not_a_browser`.
-        assert!(!lane_needs::needs_webrtc_lane(&EndpointAddr::new(id)));
+        assert!(
+            !lane_needs::needs_webrtc_lane(&EndpointAddr::new(id)),
+            "a peer with an ip address does not need the webrtc lane"
+        );
     }
 
     /// A mixed pair needs the lane **whichever end is looking**.
@@ -304,7 +313,10 @@ mod tests {
             "an address carrying no transports says nothing about the peer"
         );
         // The real relay-only shape still must.
-        assert!(lane_needs::needs_webrtc_lane(&browser_shaped(id)));
+        assert!(
+            lane_needs::needs_webrtc_lane(&browser_shaped(id)),
+            "an address with no transports is unknown, not a browser"
+        );
     }
 
     #[test]
@@ -349,7 +361,10 @@ mod tests {
             session_policy::pair_needs_lane(&native, UdpTransport::Absent),
             "a node with no IP transport must offer whatever its address says"
         );
-        assert!(lane_needs::local_needs_webrtc_lane(UdpTransport::Absent));
+        assert!(
+            lane_needs::local_needs_webrtc_lane(UdpTransport::Absent),
+            "a node without ip needs the lane even while its own address is empty"
+        );
         assert!(
             !session_policy::pair_needs_lane(&native, UdpTransport::Present),
             "two IP-capable peers stay on iroh's own transports"
@@ -454,7 +469,11 @@ mod tests {
             until(|| admission.in_flight() == 0).await,
             "a stalled offer must release its slot on the exchange deadline"
         );
-        assert_eq!(server_hub.session_count(), 0);
+        assert_eq!(
+            server_hub.session_count(),
+            0,
+            "a connection that never opens a stream holds no session"
+        );
 
         connection.close(0u32.into(), b"done");
         router.shutdown().await.expect("shutdown");
@@ -532,8 +551,14 @@ mod tests {
             until(|| !server_hub.has_session(&clients[0].0.id())).await,
             "the least recently used session is detached"
         );
-        assert!(server_hub.has_session(&clients[1].0.id()));
-        assert!(server_hub.has_session(&clients[2].0.id()));
+        assert!(
+            server_hub.has_session(&clients[1].0.id()),
+            "the first offer's session is still attached at a ceiling of two"
+        );
+        assert!(
+            server_hub.has_session(&clients[2].0.id()),
+            "the second offer's session is still attached at a ceiling of two"
+        );
         assert_eq!(server_hub.session_count(), 2, "the node holds two sessions");
 
         router.shutdown().await.expect("shutdown");
@@ -641,7 +666,10 @@ mod tests {
         )
         .await
         .expect("the signal round must attach a session");
-        assert!(client_hub.has_session(&server.id()));
+        assert!(
+            client_hub.has_session(&server.id()),
+            "a bare id dial resolves to the attached session"
+        );
 
         web_rtc_signal_acceptor::register_session_addr(
             &crate::lookup::address_book(&client),
@@ -1369,7 +1397,11 @@ mod tests {
             "the dial must give up on its own deadline, not hang: took {:?}",
             started.elapsed()
         );
-        assert_eq!(client_hub.session_count(), 0);
+        assert_eq!(
+            client_hub.session_count(),
+            0,
+            "the client hub holds no session after close"
+        );
 
         router.shutdown().await.expect("shutdown");
         client.close().await;
@@ -1399,7 +1431,10 @@ mod tests {
         crate::lookup::replace_peer_addr(&book, EndpointAddr::new(id).with_ip_addr(at(5000)));
 
         let target = rendezvous::rendezvous_dial_target(&book, id);
-        assert_eq!(target.id, id);
+        assert_eq!(
+            target.id, id,
+            "the offer to the rendezvous dials with the id from the book"
+        );
         let ips: Vec<_> = target.ip_addrs().copied().collect();
         assert_eq!(
             ips,
@@ -1884,7 +1919,11 @@ mod tests {
             0,
             "UDP is selected: no offer"
         );
-        assert_eq!(state.direct.get(&bob), Some(&DirectState::Direct));
+        assert_eq!(
+            state.direct.get(&bob),
+            Some(&DirectState::Direct),
+            "bob is direct in the state after the verdict"
+        );
 
         state.path_kinds.insert(bob, PathKind::Relay);
         retry::retry_sessions(&mut state, &context);
@@ -2565,9 +2604,20 @@ mod tests {
             until(|| higher_hub.has_session(&lower.id())).await,
             "the higher id answered"
         );
-        assert!(lower_hub.has_session(&higher.id()));
-        assert_eq!(lower_hub.session_count(), 1);
-        assert_eq!(higher_hub.session_count(), 1);
+        assert!(
+            lower_hub.has_session(&higher.id()),
+            "the lower hub keeps the session with the higher peer"
+        );
+        assert_eq!(
+            lower_hub.session_count(),
+            1,
+            "the lower hub holds exactly one session"
+        );
+        assert_eq!(
+            higher_hub.session_count(),
+            1,
+            "the higher hub holds exactly one session"
+        );
         assert!(
             offering
                 .await
@@ -2614,8 +2664,15 @@ mod tests {
             .await
             .expect("the answerer reports the attach")
             .expect("the sink stays open");
-        assert_eq!(outcome.peer, lower.id());
-        assert!(outcome.direct && outcome.answered);
+        assert_eq!(
+            outcome.peer,
+            lower.id(),
+            "the answering side reports the attach with the lower peer's id"
+        );
+        assert!(
+            outcome.direct && outcome.answered,
+            "the answering side reports a direct, answered attach"
+        );
 
         higher_router.shutdown().await.expect("shutdown");
         higher.close().await;
@@ -2685,7 +2742,11 @@ mod tests {
         .await;
 
         assert!(outcome.is_err(), "the lower id keeps its own offer");
-        assert_eq!(lower_hub.session_count(), 0);
+        assert_eq!(
+            lower_hub.session_count(),
+            0,
+            "the lower id holds no session after refusing a crossed offer"
+        );
 
         lower_router.shutdown().await.expect("shutdown");
         higher.close().await;
@@ -2700,6 +2761,9 @@ mod tests {
             "an IP-capable node grafts on its timer until it falls back"
         );
         state.rendezvous_offer_fallback = true;
-        assert!(!rendezvous::rendezvous_graftable(&state));
+        assert!(
+            !rendezvous::rendezvous_graftable(&state),
+            "the rendezvous is not graftable while the fallback holds"
+        );
     }
 }

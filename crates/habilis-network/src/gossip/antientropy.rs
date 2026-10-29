@@ -728,7 +728,10 @@ mod budget_tests {
             !budget.admits(&gossip, 2, now),
             "one gossip answer per window"
         );
-        assert!(budget.admits(&key(), 1, now));
+        assert!(
+            budget.admits(&key(), 1, now),
+            "the budget admits a new head within its count"
+        );
         budget.note(key(), 1, now);
         assert!(
             !budget.admits(&key(), 1, now),
@@ -938,7 +941,11 @@ mod budget_tests {
             author: &author,
         };
         let digest = state_digest(&state, origin, Channel::State).expect("a digest");
-        assert_eq!(heads_key_of(&state, Channel::State), heads_key(&digest));
+        assert_eq!(
+            heads_key_of(&state, Channel::State),
+            heads_key(&digest),
+            "our heads key matches the key of our digest"
+        );
     }
 
     /// Under load an answer's frames arrive over more than the wait, and an
@@ -1005,7 +1012,11 @@ mod budget_tests {
         let target = rounds
             .retry_target(state, later, 1, |_| false, |_| true)
             .map(|(key, _)| key);
-        assert_eq!(target, Some(author_of("alice")));
+        assert_eq!(
+            target,
+            Some(author_of("alice")),
+            "the wait after changes is capped for the alice author"
+        );
     }
 
     #[test]
@@ -1014,10 +1025,19 @@ mod budget_tests {
         let full = antientropy_max_resend();
         let mut rounds = FastRounds::default();
         let state = Channel::State;
-        assert!(rounds.may_ask(&author_of("holder"), state, 1, 0, now));
+        assert!(
+            rounds.may_ask(&author_of("holder"), state, 1, 0, now),
+            "a fast round may ask the holder before its answer is due"
+        );
         rounds.note_asked(author_of("holder"), state, 1, 0, now);
-        assert!(rounds.active(state, now));
-        assert!(!rounds.active(Channel::Meta, now));
+        assert!(
+            rounds.active(state, now),
+            "a fast round is active on the state channel"
+        );
+        assert!(
+            !rounds.active(Channel::Meta, now),
+            "a fast round is not active on the meta channel"
+        );
         assert!(
             !rounds.may_ask(&author_of("holder"), state, 1, 0, now),
             "the same heads at once"
@@ -1044,7 +1064,10 @@ mod budget_tests {
             "the same heads after the interval"
         );
         let quiet = now + Duration::from_secs(2);
-        assert!(!rounds.active(state, quiet));
+        assert!(
+            !rounds.active(state, quiet),
+            "a fast round is no longer active after the quiet interval"
+        );
         assert!(
             rounds.may_ask(&author_of("other"), state, 2, full, quiet),
             "another peer once the round is quiet"
@@ -1089,7 +1112,11 @@ mod tests {
             .filter(|me| *me != asker)
             .filter(|me| super::answers_digest(me, asker, "digest-1", members.iter()))
             .count();
-        assert_eq!(answering, tuning::ANTIENTROPY_ANSWERERS);
+        assert_eq!(
+            answering,
+            tuning::ANTIENTROPY_ANSWERERS,
+            "one digest is answered by the configured number of members"
+        );
     }
 
     /// The answerers change with the digest, so a message that only one member
@@ -1116,7 +1143,10 @@ mod tests {
         let members = members(3);
         let asker = &members[0];
         for me in members.iter().filter(|me| *me != asker) {
-            assert!(super::answers_digest(me, asker, "digest-1", members.iter()));
+            assert!(
+                super::answers_digest(me, asker, "digest-1", members.iter()),
+                "a small mesh answers the digest from every member"
+            );
         }
     }
 
@@ -1177,8 +1207,14 @@ mod tests {
         // A real signature: the test parses the resend and checks it verifies.
         let message = plain_chat_at("kept in the log", 1_700_000_000).sign(&Identity::generate());
 
-        assert!(super::resend_one(&message, &mut state));
-        assert!(super::resend_one(&message, &mut state));
+        assert!(
+            super::resend_one(&message, &mut state),
+            "the first broadcast resend is made"
+        );
+        assert!(
+            super::resend_one(&message, &mut state),
+            "the second broadcast resend is made too"
+        );
 
         let mut payloads = Vec::new();
         while let Ok(crate::transport::Resend::Broadcast(bytes)) = resends.try_recv() {
@@ -1188,11 +1224,18 @@ mod tests {
         let original = message.serialize().expect("serialize");
         assert_ne!(payloads[0], payloads[1], "two resends, two names");
         for payload in &payloads {
-            assert_ne!(payload.as_bytes(), original.as_bytes());
+            assert_ne!(
+                payload.as_bytes(),
+                original.as_bytes(),
+                "the resend payload differs from the original"
+            );
             let (parsed, nonce) = Message::parse_wire(payload.as_bytes()).expect("a resend parses");
-            assert!(nonce.is_some());
-            assert_eq!(parsed.id, message.id);
-            assert!(parsed.verify_signature_with(&parsed.canonical_bytes()));
+            assert!(nonce.is_some(), "the resend carries a nonce");
+            assert_eq!(parsed.id, message.id, "the resend keeps the message id");
+            assert!(
+                parsed.verify_signature_with(&parsed.canonical_bytes()),
+                "the resend keeps a valid signature"
+            );
             assert!(
                 Message::parse(payload.as_bytes()).is_err(),
                 "a reader that does not know the trailer must fail closed"
@@ -1297,12 +1340,21 @@ mod tests {
         assert_eq!(bob_after, alice_after, "converged within one round");
         assert_eq!(
             bob.doc(Channel::Meta).to_json(),
-            alice.doc(Channel::Meta).to_json()
+            alice.doc(Channel::Meta).to_json(),
+            "the late joiner converges meta to the same document"
         );
 
         // Round 2 is a no-op: nothing left to serve either way.
-        assert_eq!(round(&mut bob, &bob_nick, &alice, &mesh), Some(0));
-        assert_eq!(round(&mut alice, &alice_nick, &bob, &mesh), Some(0));
+        assert_eq!(
+            round(&mut bob, &bob_nick, &alice, &mesh),
+            Some(0),
+            "bob's round over the rendezvous answers as expected"
+        );
+        assert_eq!(
+            round(&mut alice, &alice_nick, &bob, &mesh),
+            Some(0),
+            "alice's round over the rendezvous answers as expected"
+        );
     }
 
     /// The gate itself: a digest goes out when a real peer *or* the rendezvous
@@ -1414,7 +1466,7 @@ mod tests {
         let wire = WireWindow::encode(&window);
         let decoded = wire.decode_ids().expect("valid window decodes");
         let expected: HashSet<_> = ids.into_iter().collect();
-        assert_eq!(decoded, expected);
+        assert_eq!(decoded, expected, "the window round trip keeps the ids");
     }
 
     /// The digest of the build before the window keys has no `lo_key` and
@@ -1422,7 +1474,10 @@ mod tests {
     #[test]
     fn a_digest_of_the_build_without_window_keys_does_not_decode() {
         let old = r#"{"windows":[{"lo":1,"hi":2,"ids":""}]}"#;
-        assert!(serde_json::from_str::<DigestBody>(old).is_err());
+        assert!(
+            serde_json::from_str::<DigestBody>(old).is_err(),
+            "an old digest body without window keys does not decode"
+        );
     }
 
     /// A malformed digest body must decode to `None` (so `handle_digest`
@@ -1457,7 +1512,11 @@ mod tests {
             hi_key: String::new(),
             ids: String::new(),
         };
-        assert_eq!(empty.decode_ids().map(|set| set.len()), Some(0));
+        assert_eq!(
+            empty.decode_ids().map(|set| set.len()),
+            Some(0),
+            "an empty digest body decodes to no ids"
+        );
     }
 
     /// A state/meta heads digest round-trips and stays tiny — automerge heads are
@@ -1478,7 +1537,10 @@ mod tests {
         })
         .expect("serialize heads body");
         let back: HeadsBody = serde_json::from_str(&json).expect("round-trip");
-        assert_eq!(back.heads, heads);
+        assert_eq!(
+            back.heads, heads,
+            "the state heads digest round trips to the same heads"
+        );
 
         let body = MessageBody::try_new(&json).expect("heads body has no control chars");
         let digest = Message::new_state_digest(&mesh, &author, body).sign(&Identity::generate());
@@ -1883,7 +1945,8 @@ mod tests {
             answer(&mut node, &holder),
             HashSet::from(
                 ["4 s before the first entry", "1 s before the first entry"].map(String::from)
-            )
+            ),
+            "a digest asks for everything missed since joining"
         );
     }
 
@@ -1917,10 +1980,22 @@ mod tests {
         };
         let json = serde_json::to_string(&body).unwrap();
         let back: DigestBody = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.windows.len(), 2);
+        assert_eq!(
+            back.windows.len(),
+            2,
+            "the digest body round trip keeps two windows"
+        );
         assert_eq!(back.windows[0].hi, i64::MAX, "open-ended bound preserved");
-        assert_eq!(back.windows[0].decode_ids().unwrap().len(), 1);
-        assert_eq!(back.windows[1].decode_ids().unwrap().len(), 2);
+        assert_eq!(
+            back.windows[0].decode_ids().unwrap().len(),
+            1,
+            "the first window of the round trip keeps one id"
+        );
+        assert_eq!(
+            back.windows[1].decode_ids().unwrap().len(),
+            2,
+            "the second window of the round trip keeps two ids"
+        );
     }
 
     /// Golden: the whole digest body for a fixed pair of windows, as the wire carries it. The
@@ -1961,7 +2036,7 @@ mod tests {
             r#""hi":1700000099,"hi_key":"Vm7ypzTh7eEsaRsGET44j","#,
             r#""ids":"7KhXzYt7pTgoNMDYrCyg4z"}]}"#,
         );
-        assert_eq!(body.as_str(), wire);
+        assert_eq!(body.as_str(), wire, "the digest body keeps its wire form");
 
         let back: DigestBody = serde_json::from_str(wire).expect("the literal parses");
         let open_end = back.windows[0].range().expect("the keys decode");
@@ -1970,28 +2045,36 @@ mod tests {
             (
                 UnixSecs::from_secs(1_700_000_100),
                 DedupKey::from_bytes([0x03; 16])
-            )
+            ),
+            "the open window's low bound keeps its wire form"
         );
-        assert_eq!(open_end.hi, (UnixSecs::MAX, DedupKey::MAX));
+        assert_eq!(
+            open_end.hi,
+            (UnixSecs::MAX, DedupKey::MAX),
+            "the open window's high bound is the maximum"
+        );
         let ids = back.windows[0].decode_ids().expect("the ids decode");
         assert_eq!(
             ids,
             HashSet::from([
                 DedupKey::from_bytes([0x11; 16]),
                 DedupKey::from_bytes([0x22; 16])
-            ])
+            ]),
+            "the digest body keeps its ids on the wire"
         );
         let closed = back.windows[1].range().expect("the keys decode");
         assert_eq!(
             closed.lo,
-            (UnixSecs::from_secs(1_700_000_000), DedupKey::MIN)
+            (UnixSecs::from_secs(1_700_000_000), DedupKey::MIN),
+            "the closed window's low bound keeps its wire form"
         );
         assert_eq!(
             closed.hi,
             (
                 UnixSecs::from_secs(1_700_000_099),
                 DedupKey::from_bytes([0x04; 16])
-            )
+            ),
+            "the closed window's high bound keeps its wire form"
         );
     }
 }

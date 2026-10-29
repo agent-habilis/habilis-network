@@ -322,7 +322,10 @@ mod departed_tests {
 
         let replay = Message::new_joined(&mesh, &who).sign(&departed);
         let observed = observe(&replay, &mut state, &context);
-        assert!(observed.update.stale);
+        assert!(
+            observed.update.stale,
+            "a stale frame of a departed key is stale"
+        );
         assert!(
             !state.last_seen.contains_key(who.as_str()),
             "a stale frame refreshed the nickname's liveness"

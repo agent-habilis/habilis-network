@@ -65,7 +65,8 @@ mod tests {
             Plan {
                 dial: vec![high],
                 detach: vec![]
-            }
+            },
+            "the lower id dials a wanted neighbor with no session"
         );
     }
 
@@ -74,7 +75,8 @@ mod tests {
         let (low, high) = ordered();
         assert_eq!(
             plan::plan(high, &[low], &[low], &[], usize::MAX),
-            Plan::default()
+            Plan::default(),
+            "the higher id waits to be dialed"
         );
     }
 
@@ -83,7 +85,8 @@ mod tests {
         let (low, high) = ordered();
         assert_eq!(
             plan::plan(low, &[high], &[high], &[high], usize::MAX),
-            Plan::default()
+            Plan::default(),
+            "a neighbor with a session is not dialed again"
         );
     }
 
@@ -95,7 +98,8 @@ mod tests {
             Plan {
                 dial: vec![],
                 detach: vec![high]
-            }
+            },
+            "a session with a peer that is not kept is detached"
         );
     }
 
@@ -104,7 +108,8 @@ mod tests {
         let (low, high) = ordered();
         assert_eq!(
             plan::plan(low, &[], &[high], &[high], usize::MAX),
-            Plan::default()
+            Plan::default(),
+            "a session with a kept peer stays even when it is not wanted"
         );
     }
 
@@ -138,7 +143,11 @@ mod tests {
             UdpTransport::Present,
             neighbor_kinds(webrtc, ip, relay),
         );
-        assert_eq!(wanted, vec![neighbors[0].1.clone()]);
+        assert_eq!(
+            wanted,
+            vec![neighbors[0].1.clone()],
+            "only a neighbor whose application path is webrtc is wanted"
+        );
     }
 
     /// The underlay address of a neighbor that has an IP socket.
@@ -165,7 +174,8 @@ mod tests {
         let on_relay = |_member: EndpointId| Some(PathKind::Relay);
         assert_eq!(
             plan::wanted_underlays(&neighbors, UdpTransport::Present, on_relay),
-            vec![neighbors[0].1.clone()]
+            vec![neighbors[0].1.clone()],
+            "a neighbor whose underlay has no ip is wanted by a node with udp"
         );
     }
 
@@ -176,11 +186,13 @@ mod tests {
         let (low, high) = ordered();
         assert_eq!(
             plan::plan(high, &[low], &[low], &[], usize::MAX),
-            Plan::default()
+            Plan::default(),
+            "the higher underlay id wants a session and does not dial"
         );
         assert_eq!(
             plan::plan(low, &[high], &[high], &[], usize::MAX).dial,
-            vec![high]
+            vec![high],
+            "the lower underlay id dials the higher one's neighbor"
         );
     }
 
@@ -203,7 +215,10 @@ mod tests {
             .iter()
             .map(|(_, address)| address.clone())
             .collect();
-        assert_eq!(wanted, all);
+        assert_eq!(
+            wanted, all,
+            "a node without udp wants a session to every neighbor"
+        );
     }
 
     #[test]
@@ -214,7 +229,11 @@ mod tests {
             .map(|member| (member, EndpointAddr::new(id(member.as_bytes()[0] ^ 0x55))))
             .collect();
         let left = plan::undenied(neighbors.clone(), |member| member == denied);
-        assert_eq!(left, vec![neighbors[0].clone()]);
+        assert_eq!(
+            left,
+            vec![neighbors[0].clone()],
+            "a denied member is not a neighbor of the underlay"
+        );
     }
 
     /// A neighbor whose path is not read for the moment (an idle connection of the
@@ -232,7 +251,8 @@ mod tests {
         let on_webrtc = kept_with(&neighbor_kinds(member, other, other));
         assert_eq!(
             plan::plan(low, &[], &on_webrtc, &[high], usize::MAX),
-            Plan::default()
+            Plan::default(),
+            "a session is detached only when the neighbor climbs to ip or leaves"
         );
         let unread = kept_with(&neighbor_kinds(other, other, other));
         assert_eq!(
@@ -278,9 +298,13 @@ mod tests {
         ];
         assert_eq!(
             tick::members_with_session(&neighbors, &[id(71)]),
-            vec![with_session]
+            vec![with_session],
+            "a member whose underlay holds a session is listed by its member id"
         );
-        assert!(tick::members_with_session(&neighbors, &[]).is_empty());
+        assert!(
+            tick::members_with_session(&neighbors, &[]).is_empty(),
+            "a member without a session is not listed"
+        );
     }
 
     #[test]

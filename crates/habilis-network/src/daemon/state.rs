@@ -111,8 +111,15 @@ mod tests {
             now,
         );
 
-        assert!(state.yield_to_lower);
-        assert_eq!(state.next_rival_recheck, Some(now));
+        assert!(
+            state.yield_to_lower,
+            "a lower holder's flag makes us yield at once"
+        );
+        assert_eq!(
+            state.next_rival_recheck,
+            Some(now),
+            "the re-check comes due at the current instant"
+        );
     }
 
     /// The winner keeps its beacon. Its re-check is pushed one steady round, not dropped: a
@@ -137,7 +144,10 @@ mod tests {
             now,
         );
 
-        assert!(!state.yield_to_lower);
+        assert!(
+            !state.yield_to_lower,
+            "a higher holder's flag does not make us yield"
+        );
         let next = state
             .next_rival_recheck
             .expect("the re-check is pushed out, not dropped");
@@ -191,8 +201,15 @@ mod tests {
         state.rival_recheck_rounds = 3;
         state.note_second_group_sign(endpoint_id(1), now + Duration::from_secs(10));
 
-        assert_eq!(state.next_rival_recheck, Some(far));
-        assert_eq!(state.rival_recheck_rounds, 3);
+        assert_eq!(
+            state.next_rival_recheck,
+            Some(far),
+            "a second sign inside one steady interval keeps the first re-check time"
+        );
+        assert_eq!(
+            state.rival_recheck_rounds, 3,
+            "the round count does not move on a second sign inside one interval"
+        );
     }
 
     #[test]
@@ -204,7 +221,11 @@ mod tests {
 
         state.note_second_group_sign(endpoint_id(1), now);
 
-        assert_eq!(state.next_rival_recheck, Some(far));
+        assert_eq!(
+            state.next_rival_recheck,
+            Some(far),
+            "a sign while we do not hold the beacon leaves the re-check time alone"
+        );
     }
 
     /// A loopback room has no re-check, and the creator never has one: a sign arms nothing.
@@ -216,7 +237,10 @@ mod tests {
 
         state.note_second_group_sign(endpoint_id(1), Instant::now());
 
-        assert_eq!(state.next_rival_recheck, None);
+        assert_eq!(
+            state.next_rival_recheck, None,
+            "no re-check is armed where none applies"
+        );
     }
 
     #[test]
@@ -230,8 +254,15 @@ mod tests {
 
         state.note_second_group_sign(endpoint_id(1), now);
 
-        assert_eq!(state.next_rival_recheck, Some(soon));
-        assert_eq!(state.rival_recheck_rounds, 4);
+        assert_eq!(
+            state.next_rival_recheck,
+            Some(soon),
+            "a sign does not push out a re-check that is due sooner"
+        );
+        assert_eq!(
+            state.rival_recheck_rounds, 4,
+            "the round count does not advance for a re-check that is not due"
+        );
     }
 
     /// A flag is remembered only from a proven sender that is not us, and moves our re-check
@@ -282,9 +313,18 @@ mod tests {
         );
 
         for state in [no_flag, unproven, ourselves] {
-            assert!(!state.yield_to_lower);
-            assert_eq!(state.next_rival_recheck, None);
-            assert!(!state.rival_holder_known());
+            assert!(
+                !state.yield_to_lower,
+                "a flag that does not count does not make us yield"
+            );
+            assert_eq!(
+                state.next_rival_recheck, None,
+                "a flag that does not count arms no re-check"
+            );
+            assert!(
+                !state.rival_holder_known(),
+                "a flag that does not count is not remembered as a rival holder"
+            );
         }
     }
 
@@ -306,9 +346,18 @@ mod tests {
             Instant::now(),
         );
 
-        assert!(state.rival_holder_known());
-        assert!(!state.yield_to_lower);
-        assert_eq!(state.next_rival_recheck, None);
+        assert!(
+            state.rival_holder_known(),
+            "a flag read while we do not hold the beacon is remembered"
+        );
+        assert!(
+            !state.yield_to_lower,
+            "a flag read while we do not hold the beacon does not make us yield"
+        );
+        assert_eq!(
+            state.next_rival_recheck, None,
+            "a flag read while we do not hold the beacon arms no re-check"
+        );
     }
 
     /// A member that let go of the rendezvous and reads a holder that no member of its mesh hosts
@@ -345,12 +394,21 @@ mod tests {
             },
             Instant::now(),
         );
-        assert!(state.rival_holder_known());
+        assert!(
+            state.rival_holder_known(),
+            "a holder of our own mesh still records a rival flag"
+        );
 
         state.note_holder_outside_mesh(Instant::now());
 
-        assert!(state.rendezvous_comeback_until.is_none());
-        assert!(!state.rendezvous_wanted());
+        assert!(
+            state.rendezvous_comeback_until.is_none(),
+            "no comeback window is owed on our own mesh"
+        );
+        assert!(
+            !state.rendezvous_wanted(),
+            "the rendezvous is not wanted on our own mesh"
+        );
     }
 
     /// A member that still holds the link, or hosts the beacon, or wants the rendezvous anyway
@@ -394,11 +452,14 @@ mod tests {
         let first = Instant::now();
         state.note_holder_outside_mesh(first);
         let due = state.rendezvous_comeback_until;
-        assert!(due.is_some());
+        assert!(due.is_some(), "the first read opens a comeback window");
 
         state.note_holder_outside_mesh(first + Duration::from_secs(5));
 
-        assert_eq!(state.rendezvous_comeback_until, due);
+        assert_eq!(
+            state.rendezvous_comeback_until, due,
+            "a second read keeps the deadline of the window"
+        );
     }
 
     /// A holder that crashes never says that it let go. Its flag goes with the member.
@@ -431,7 +492,10 @@ mod tests {
 
         assert!(state.rival_holder_known(), "the other holder stays");
         state.forget_rival_holder(endpoint_id(7));
-        assert!(!state.rival_holder_known());
+        assert!(
+            !state.rival_holder_known(),
+            "a forgotten member takes its rival flag with it"
+        );
     }
 
     /// A holder that sends its flag again and again must not keep our re-check away: the push
@@ -494,7 +558,11 @@ mod tests {
             now,
         );
 
-        assert_eq!(state.next_rival_recheck, Some(far));
+        assert_eq!(
+            state.next_rival_recheck,
+            Some(far),
+            "a later push never brings the re-check closer"
+        );
     }
 
     /// The holder says it let go (a `PeerInfo` without the flag), or the member leaves: the
@@ -514,7 +582,10 @@ mod tests {
             },
             Instant::now(),
         );
-        assert!(state.rival_holder_known());
+        assert!(
+            state.rival_holder_known(),
+            "a holder counts until it drops the flag or leaves"
+        );
 
         state.note_rival_beacon_flag(
             high,
@@ -590,7 +661,8 @@ mod tests {
         let mut proven = node(Some(DirectState::Direct), PathKind::Relay);
         assert_eq!(
             proven.relay_race_on_link_loss(bob, now),
-            Some(address.clone())
+            Some(address.clone()),
+            "the relay race returns the address to dial again"
         );
         assert!(
             proven.lane_session_wanted(bob, now),
@@ -632,7 +704,11 @@ mod tests {
         node.direct.insert(bob, DirectState::Direct);
         node.path_kinds.insert(bob, PathKind::Gossip);
 
-        assert_eq!(node.relay_race_on_link_loss(bob, now), Some(address));
+        assert_eq!(
+            node.relay_race_on_link_loss(bob, now),
+            Some(address),
+            "the gossip rung race returns the address to dial again"
+        );
         assert!(
             node.lane_session_wanted(bob, now),
             "the offer is not held back"
@@ -657,7 +733,10 @@ mod tests {
         };
 
         let mut centered = lost(&[], DirectState::Direct);
-        assert!(centered.plan_regraft_on_link_loss(bob, now, 0.0));
+        assert!(
+            centered.plan_regraft_on_link_loss(bob, now, 0.0),
+            "a centered jitter regrafts the peer at once"
+        );
         assert!(centered.take_regrafts_due(after(900)).is_empty(), "not yet");
         assert_eq!(centered.take_regrafts_due(after(1100)), vec![bob], "due");
         assert!(
@@ -666,16 +745,26 @@ mod tests {
         );
 
         let mut early = lost(&[], DirectState::Direct);
-        assert!(early.plan_regraft_on_link_loss(bob, now, -1.0));
+        assert!(
+            early.plan_regraft_on_link_loss(bob, now, -1.0),
+            "an early jitter does not regraft the peer yet"
+        );
         assert_eq!(
             early.take_regrafts_due(after(750)),
             vec![bob],
             "jitter down"
         );
         let mut late = lost(&[], DirectState::Direct);
-        assert!(late.plan_regraft_on_link_loss(bob, now, 1.0));
+        assert!(
+            late.plan_regraft_on_link_loss(bob, now, 1.0),
+            "a late jitter still regrafts the peer"
+        );
         assert!(late.take_regrafts_due(after(1250)).is_empty(), "jitter up");
-        assert_eq!(late.take_regrafts_due(after(1350)), vec![bob]);
+        assert_eq!(
+            late.take_regrafts_due(after(1350)),
+            vec![bob],
+            "only the peer that lost its link is due for a regraft"
+        );
 
         let mut back = lost(&[], DirectState::Direct);
         back.plan_regraft_on_link_loss(bob, now, 0.0);
@@ -736,7 +825,10 @@ mod tests {
         node.direct.insert(bob, DirectState::Direct);
         node.path_kinds.insert(bob, PathKind::Gossip);
 
-        assert!(node.rides_gossip_rung(bob));
+        assert!(
+            node.rides_gossip_rung(bob),
+            "the pair is seen to ride the gossip rung"
+        );
         assert!(
             !node.plan_regraft_on_link_loss(bob, now, 0.0),
             "no re-graft is planned for a pair on the gossip rung"
@@ -755,7 +847,10 @@ mod tests {
         let mut state = two_link_node();
         state.rendezvous_linked = true;
         state.linked_endpoints.insert(endpoint_id(1));
-        assert!(state.rendezvous_wanted());
+        assert!(
+            state.rendezvous_wanted(),
+            "a node below the release count wants the rendezvous"
+        );
         assert!(
             !state.should_release_rendezvous(Instant::now()),
             "one link is not enough"
@@ -768,7 +863,10 @@ mod tests {
         state.rendezvous_linked = true;
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
-        assert!(state.should_release_rendezvous(Instant::now()));
+        assert!(
+            state.should_release_rendezvous(Instant::now()),
+            "a node at the release count lets go of the rendezvous"
+        );
 
         state.rendezvous_linked = false;
         assert!(
@@ -790,11 +888,17 @@ mod tests {
         state.rendezvous_linked = true;
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
-        assert!(state.should_release_rendezvous(Instant::now()));
+        assert!(
+            state.should_release_rendezvous(Instant::now()),
+            "the first release is due while the link is up"
+        );
 
         state.mark_rendezvous_released(endpoint_id(9));
 
-        assert!(!state.should_release_rendezvous(Instant::now()));
+        assert!(
+            !state.should_release_rendezvous(Instant::now()),
+            "a node that released is not due again while its link stays up"
+        );
     }
 
     /// A mesh that split into islands, each with links enough, never visits the rendezvous on its
@@ -910,7 +1014,10 @@ mod tests {
             "the visit lasts its dwell time: the beacon needs it to introduce the islands"
         );
         let after_dwell = now + tuning::RENDEZVOUS_DWELL;
-        assert!(state.should_release_rendezvous(after_dwell));
+        assert!(
+            state.should_release_rendezvous(after_dwell),
+            "the node still lets go once the dwell the period asked for has passed"
+        );
     }
 
     #[test]
@@ -923,18 +1030,27 @@ mod tests {
 
         state.note_rendezvous_link_up(now);
 
-        assert!(state.should_release_rendezvous(now));
+        assert!(
+            state.should_release_rendezvous(now),
+            "the node lets go at once when no dwell is owed"
+        );
     }
 
     #[test]
     fn a_link_that_comes_back_ends_the_wait_for_the_return() {
         let mut state = two_link_node();
         state.mark_rendezvous_released(endpoint_id(9));
-        assert!(state.rendezvous_return_due.is_some());
+        assert!(
+            state.rendezvous_return_due.is_some(),
+            "the return is due while the rendezvous link is down"
+        );
 
         state.note_rendezvous_link_up(Instant::now());
 
-        assert!(state.rendezvous_return_due.is_none());
+        assert!(
+            state.rendezvous_return_due.is_none(),
+            "the link coming back clears the owed return"
+        );
     }
 
     #[test]
@@ -942,11 +1058,17 @@ mod tests {
         let mut state = two_link_node();
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
-        assert!(!state.rendezvous_wanted());
+        assert!(
+            !state.rendezvous_wanted(),
+            "a node that falls below the count stops wanting the rendezvous"
+        );
 
         state.linked_endpoints.remove(&endpoint_id(2));
 
-        assert!(state.rendezvous_wanted());
+        assert!(
+            state.rendezvous_wanted(),
+            "falling below the count makes the node want the rendezvous again"
+        );
     }
 
     #[test]
@@ -961,7 +1083,10 @@ mod tests {
             !state.should_release_rendezvous(Instant::now()),
             "its link keeps the beacon's gossip view non-empty for a joiner"
         );
-        assert!(state.rendezvous_wanted());
+        assert!(
+            state.rendezvous_wanted(),
+            "hosting the rendezvous keeps the node wanting it"
+        );
     }
 
     #[test]
@@ -970,7 +1095,10 @@ mod tests {
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
         state.owe_rendezvous_return(Instant::now());
-        assert!(state.rendezvous_wanted());
+        assert!(
+            state.rendezvous_wanted(),
+            "an owed return makes a node with enough links want the rendezvous"
+        );
     }
 
     /// A debt with an end: a node refused again and again at the rendezvous
@@ -985,7 +1113,10 @@ mod tests {
             .expect("a past instant");
         state.owe_rendezvous_return(long_ago);
 
-        assert!(!state.rendezvous_wanted());
+        assert!(
+            !state.rendezvous_wanted(),
+            "past the deadline the node no longer wants the rendezvous"
+        );
     }
 
     /// A node that came back stays its dwell time before it lets go again, and
@@ -999,7 +1130,10 @@ mod tests {
         state.owe_rendezvous_return(Instant::now());
         let now = Instant::now();
         state.note_rendezvous_link_up(now);
-        assert!(state.rendezvous_linked);
+        assert!(
+            state.rendezvous_linked,
+            "the rendezvous link stays up after the return"
+        );
         assert!(
             !state.should_release_rendezvous(now),
             "the visit has just begun"
@@ -1024,7 +1158,10 @@ mod tests {
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
         state.note_rendezvous_link_up(Instant::now());
-        assert!(state.should_release_rendezvous(Instant::now()));
+        assert!(
+            state.should_release_rendezvous(Instant::now()),
+            "a first visit has no dwell time and lets go at once"
+        );
     }
 
     /// An unsigned chat message carrying `id` — enough to exercise
@@ -1058,9 +1195,15 @@ mod tests {
         let mut state = fresh_state();
         let key = author_of("alice-key");
         // First sighting at a seq → recorded, no fork.
-        assert!(!state.note_msg_seq(&key, 0, hash_of("hashA")));
+        assert!(
+            !state.note_msg_seq(&key, 0, hash_of("hashA")),
+            "the same hash at seq 0 is no equivocation"
+        );
         // Same message again (same hash) → no fork.
-        assert!(!state.note_msg_seq(&key, 0, hash_of("hashA")));
+        assert!(
+            !state.note_msg_seq(&key, 0, hash_of("hashA")),
+            "repeating the same hash at seq 0 is still no equivocation"
+        );
         // Different hash at the SAME seq → fork, reported exactly once.
         assert!(
             state.note_msg_seq(&key, 0, hash_of("hashB")),
@@ -1075,13 +1218,25 @@ mod tests {
     #[test]
     fn note_msg_seq_is_per_key_and_per_seq() {
         let mut state = fresh_state();
-        assert!(!state.note_msg_seq(&author_of("alice"), 0, hash_of("h0")));
+        assert!(
+            !state.note_msg_seq(&author_of("alice"), 0, hash_of("h0")),
+            "alice's first message at seq 0 is no equivocation"
+        );
         // A new seq for the same author is just the next entry, not a fork.
-        assert!(!state.note_msg_seq(&author_of("alice"), 1, hash_of("h1")));
+        assert!(
+            !state.note_msg_seq(&author_of("alice"), 1, hash_of("h1")),
+            "alice's first message at seq 1 is no equivocation"
+        );
         // A different key reusing seq 0 with its own hash is independent.
-        assert!(!state.note_msg_seq(&author_of("bob"), 0, hash_of("other")));
+        assert!(
+            !state.note_msg_seq(&author_of("bob"), 0, hash_of("other")),
+            "bob's seq 0 is not alice's equivocation"
+        );
         // But a conflict on alice's seq 0 still fires.
-        assert!(state.note_msg_seq(&author_of("alice"), 0, hash_of("h0-prime")));
+        assert!(
+            state.note_msg_seq(&author_of("alice"), 0, hash_of("h0-prime")),
+            "a second hash at alice's seq 0 is equivocation"
+        );
     }
 
     #[test]
@@ -1092,10 +1247,16 @@ mod tests {
             state.note_msg_seq(&author_of("alice"), 0, hash_of("h0-prime")),
             "fork"
         );
-        assert!(state.forked.contains(&author_of("alice")));
+        assert!(
+            state.forked.contains(&author_of("alice")),
+            "alice is flagged as a fork"
+        );
         // Evicting the *recorded* twin (hash "h0") drops alice from both maps.
         state.forget_msg_seq(&author_of("alice"), 0, &hash_of("h0"));
-        assert!(!state.author_seqs.contains_key(&author_of("alice")));
+        assert!(
+            !state.author_seqs.contains_key(&author_of("alice")),
+            "forgetting alice drops her sequence state"
+        );
         assert!(
             !state.forked.contains(&author_of("alice")),
             "fork flag pruned with author"
@@ -1113,7 +1274,10 @@ mod tests {
             state.note_msg_seq(&author_of("alice"), 0, hash_of("twin")),
             "fork fires"
         );
-        assert!(state.forked.contains(&author_of("alice")));
+        assert!(
+            state.forked.contains(&author_of("alice")),
+            "alice stays flagged as a fork after one twin is evicted"
+        );
         // Evict the non-recorded twin ("twin"): the slot for "recorded" stays.
         state.forget_msg_seq(&author_of("alice"), 0, &hash_of("twin"));
         assert!(
@@ -1126,20 +1290,37 @@ mod tests {
         );
         // A resend of the recorded twin does not re-fire the fork (already
         // flagged), proving the evidence survived the eviction.
-        assert!(!state.note_msg_seq(&author_of("alice"), 0, hash_of("twin")));
+        assert!(
+            !state.note_msg_seq(&author_of("alice"), 0, hash_of("twin")),
+            "the evicted twin is not seen as a new equivocation"
+        );
     }
 
     #[test]
     fn note_dag_moves_tip_set() {
         let mut state = fresh_state();
         // First message (no parents) becomes the sole tip.
-        assert!(!state.note_dag(hash_of("h1"), &[], UnixSecs::from_secs(100)));
+        assert!(
+            !state.note_dag(hash_of("h1"), &[], UnixSecs::from_secs(100)),
+            "a root node with no parents is not flagged"
+        );
         let tips_h1: Vec<_> = state.dag_parents().collect();
-        assert_eq!(tips_h1, vec![hash_of("h1")]);
+        assert_eq!(
+            tips_h1,
+            vec![hash_of("h1")],
+            "h1 is the only tip after its first note"
+        );
         // A child referencing h1 makes h1 no longer a tip; h2 is the new one.
-        assert!(!state.note_dag(hash_of("h2"), &[hash_of("h1")], UnixSecs::from_secs(101)));
+        assert!(
+            !state.note_dag(hash_of("h2"), &[hash_of("h1")], UnixSecs::from_secs(101)),
+            "a child of h1 is not flagged"
+        );
         let tips_h2: Vec<_> = state.dag_parents().collect();
-        assert_eq!(tips_h2, vec![hash_of("h2")]);
+        assert_eq!(
+            tips_h2,
+            vec![hash_of("h2")],
+            "h2 replaces h1 as the only tip"
+        );
     }
 
     #[test]
@@ -1158,17 +1339,23 @@ mod tests {
         let mut state = fresh_state();
         state.note_dag(hash_of("parent"), &[], UnixSecs::from_secs(200));
         // Child claims an earlier timestamp than a parent it references.
-        assert!(state.note_dag(
-            hash_of("child"),
-            &[hash_of("parent")],
-            UnixSecs::from_secs(100)
-        ));
+        assert!(
+            state.note_dag(
+                hash_of("child"),
+                &[hash_of("parent")],
+                UnixSecs::from_secs(100)
+            ),
+            "a child stamped before its parent is flagged as backdated"
+        );
         // A forward timestamp is fine.
-        assert!(!state.note_dag(
-            hash_of("ok"),
-            &[hash_of("parent")],
-            UnixSecs::from_secs(300)
-        ));
+        assert!(
+            !state.note_dag(
+                hash_of("ok"),
+                &[hash_of("parent")],
+                UnixSecs::from_secs(300)
+            ),
+            "a child stamped after its parent is not flagged"
+        );
     }
 
     #[test]
@@ -1176,7 +1363,10 @@ mod tests {
         let mut state = fresh_state();
         state.note_dag(hash_of("h"), &[], UnixSecs::from_secs(1));
         state.forget_hash(&hash_of("h"));
-        assert!(state.dag_parents().next().is_none());
+        assert!(
+            state.dag_parents().next().is_none(),
+            "forgetting the hash leaves no parents in the DAG"
+        );
     }
 
     /// A valid (curve-point) `EndpointId` derived deterministically from
@@ -1194,7 +1384,10 @@ mod tests {
                 .known_endpoints
                 .insert(endpoint_id(u8::try_from(index + 1).unwrap()));
         }
-        assert!(state.known_endpoints.len() <= KNOWN_ENDPOINTS_CAP);
+        assert!(
+            state.known_endpoints.len() <= KNOWN_ENDPOINTS_CAP,
+            "the endpoints cache never grows past its cap"
+        );
         assert!(
             !state.known_endpoints.contains(&first),
             "oldest evicted past the cap"
@@ -1231,10 +1424,26 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} missing from roster"))
                 .reach
         };
-        assert_eq!(reach("linked"), Reach::Direct);
-        assert_eq!(reach("unlinked"), Reach::Gossip);
-        assert_eq!(reach("unknown"), Reach::Gossip);
-        assert_eq!(reach("quiet"), Reach::Gossip);
+        assert_eq!(
+            reach("linked"),
+            Reach::Direct,
+            "a linked peer reads as direct"
+        );
+        assert_eq!(
+            reach("unlinked"),
+            Reach::Gossip,
+            "an unlinked peer reads as gossip reach"
+        );
+        assert_eq!(
+            reach("unknown"),
+            Reach::Gossip,
+            "an unknown peer reads as gossip reach"
+        );
+        assert_eq!(
+            reach("quiet"),
+            Reach::Gossip,
+            "a quiet peer reads as gossip reach"
+        );
     }
 
     #[test]
@@ -1254,7 +1463,8 @@ mod tests {
                 direct: 1,
                 relay_only: 1,
                 pending: 1
-            }
+            },
+            "the direct counts track each path reading"
         );
     }
 
@@ -1266,19 +1476,24 @@ mod tests {
         let mut state = fresh_state();
         state.observe_path(endpoint_id(1), PathSummary::Mixed);
         state.observe_path(endpoint_id(2), PathSummary::Unknown);
-        assert!(state.direct.is_empty());
+        assert!(
+            state.direct.is_empty(),
+            "a mixed reading leaves the direct map empty"
+        );
         state.direct.insert(endpoint_id(3), DirectState::Direct);
         state.observe_path(endpoint_id(3), PathSummary::Mixed);
         state.observe_path(endpoint_id(3), PathSummary::Unknown);
         assert_eq!(
             state.direct.get(&endpoint_id(3)),
-            Some(&DirectState::Direct)
+            Some(&DirectState::Direct),
+            "peer 3 keeps its direct state through a mixed reading"
         );
         state.direct.insert(endpoint_id(4), DirectState::RelayOnly);
         state.observe_path(endpoint_id(4), PathSummary::Mixed);
         assert_eq!(
             state.direct.get(&endpoint_id(4)),
-            Some(&DirectState::RelayOnly)
+            Some(&DirectState::RelayOnly),
+            "peer 4 keeps its relay-only state through an unknown reading"
         );
     }
 
@@ -1307,7 +1522,8 @@ mod tests {
         state.observe_path(endpoint_id(1), PathSummary::Relay);
         assert_eq!(
             state.direct.get(&endpoint_id(1)),
-            Some(&DirectState::RelayOnly)
+            Some(&DirectState::RelayOnly),
+            "a relay reading does not demote a proven peer"
         );
     }
 
@@ -1365,14 +1581,26 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} missing from roster"))
                 .transport
         };
-        assert_eq!(lane(&state, "dialable"), Lane::Unicast);
-        assert_eq!(lane(&state, "unknown"), Lane::Unreachable);
+        assert_eq!(
+            lane(&state, "dialable"),
+            Lane::Unicast,
+            "a dialable peer takes the unicast lane"
+        );
+        assert_eq!(
+            lane(&state, "unknown"),
+            Lane::Unreachable,
+            "an unknown peer has no lane"
+        );
 
         // Unmeshed: the known endpoint is reached via the multihop transport (iroh
         // picks a direct path when meshed, else the multihop one), so the column
         // reads `multihop` rather than a direct `unicast`.
         state.meshed = false;
-        assert_eq!(lane(&state, "dialable"), Lane::Multihop);
+        assert_eq!(
+            lane(&state, "dialable"),
+            Lane::Multihop,
+            "the lane follows the send decision for a dialable peer"
+        );
     }
 
     #[test]
@@ -1544,7 +1772,10 @@ mod tests {
 
         // Past the window a genuine re-link is allowed again (no permanent lockout).
         let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
-        assert!(!cooled.relink_on_cooldown(peer, later));
+        assert!(
+            !cooled.relink_on_cooldown(peer, later),
+            "a cooled peer stays on cooldown at the later time"
+        );
     }
 
     // The arrival flood goes out on the first `NeighborUp`, in the same milliseconds in
@@ -1611,7 +1842,8 @@ mod tests {
                 &iroh::EndpointAddr::new(id)
                     .with_ip_addr(second)
                     .with_ip_addr(first)
-            )
+            ),
+            "reordering the addresses floods nothing new"
         );
     }
 
@@ -1653,7 +1885,10 @@ mod tests {
 
         // Past the window a neighbor up floods once more (no permanent silence).
         let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
-        assert!(state.neighbor_up_refloods_peerinfo(later));
+        assert!(
+            state.neighbor_up_refloods_peerinfo(later),
+            "the first neighbor up in a window re-floods peer info"
+        );
     }
 
     // A neighbor that comes up inside the window of a flood does not make a
@@ -1665,10 +1900,16 @@ mod tests {
         let mut state = fresh_state();
         state.peerinfo_flooded_at = Some(start);
 
-        assert!(!state.neighbor_up_refloods_peerinfo(start + Duration::from_secs(1)));
+        assert!(
+            !state.neighbor_up_refloods_peerinfo(start + Duration::from_secs(1)),
+            "a held-back neighbor up does not re-flood inside the window"
+        );
         state.defer_peerinfo();
 
-        assert!(!state.take_deferred_peerinfo(start + Duration::from_secs(1)));
+        assert!(
+            !state.take_deferred_peerinfo(start + Duration::from_secs(1)),
+            "the deferred flood is not due inside the window"
+        );
         let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
         assert!(
             state.take_deferred_peerinfo(later),
@@ -1682,7 +1923,10 @@ mod tests {
         let start = Instant::now();
         let mut state = fresh_state();
         state.peerinfo_flooded_at = Some(start);
-        assert!(!state.take_deferred_peerinfo(start + RELINK_COOLDOWN + Duration::from_secs(1)));
+        assert!(
+            !state.take_deferred_peerinfo(start + RELINK_COOLDOWN + Duration::from_secs(1)),
+            "an empty deferral yields no flood"
+        );
     }
 
     #[test]
@@ -1702,11 +1946,17 @@ mod tests {
         assert_eq!(refloods, 1, "once per window, not once per peer");
 
         // A first sighting inside the window is not throttled.
-        assert!(state.joined_refloods_peerinfo(true, start + Duration::from_secs(1)));
+        assert!(
+            state.joined_refloods_peerinfo(true, start + Duration::from_secs(1)),
+            "a newcomer's joined re-floods peer info"
+        );
 
         // Past the window a re-announce floods once more (no permanent silence).
         let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
-        assert!(state.joined_refloods_peerinfo(false, later));
+        assert!(
+            state.joined_refloods_peerinfo(false, later),
+            "a joined that is not new still re-floods once the window is open"
+        );
     }
 
     // A `NeighborDown` drops the gossip link, not the pooled unicast
@@ -1720,7 +1970,11 @@ mod tests {
         let mut state = fresh_state();
         let bob = endpoint_id(1);
         state.webrtc_admission.note_success(bob);
-        assert_eq!(state.webrtc_admission.direct_units(), 1);
+        assert_eq!(
+            state.webrtc_admission.direct_units(),
+            1,
+            "one direct unit counts against the ceiling"
+        );
 
         state.link(bob);
         assert_eq!(state.webrtc_admission.direct_units(), 0, "a neighbor");
@@ -1828,8 +2082,15 @@ mod tests {
         state.linked_endpoints.insert(bob);
         state.direct.insert(bob, DirectState::Direct);
         state.unlink(bob);
-        assert!(state.linked_endpoints.is_empty());
-        assert_eq!(state.direct.get(&bob), Some(&DirectState::Direct));
+        assert!(
+            state.linked_endpoints.is_empty(),
+            "unlinking a peer empties the linked set"
+        );
+        assert_eq!(
+            state.direct.get(&bob),
+            Some(&DirectState::Direct),
+            "unlinking a peer keeps its path verdict"
+        );
     }
 
     #[test]
@@ -1841,12 +2102,32 @@ mod tests {
         state.direct.insert(pending, DirectState::Pending);
         state.direct.insert(proven, DirectState::Direct);
 
-        assert!(state.demote_unproven(pending));
-        assert_eq!(state.direct.get(&pending), Some(&DirectState::RelayOnly));
-        assert!(!state.demote_unproven(proven));
-        assert_eq!(state.direct.get(&proven), Some(&DirectState::Direct));
-        assert!(!state.demote_unproven(gone));
-        assert!(!state.direct.contains_key(&gone));
+        assert!(
+            state.demote_unproven(pending),
+            "a late unproven verdict demotes a pending peer"
+        );
+        assert_eq!(
+            state.direct.get(&pending),
+            Some(&DirectState::RelayOnly),
+            "the pending peer reads as relay-only after the verdict"
+        );
+        assert!(
+            !state.demote_unproven(proven),
+            "a proven peer is not demoted by a late unproven verdict"
+        );
+        assert_eq!(
+            state.direct.get(&proven),
+            Some(&DirectState::Direct),
+            "the proven peer keeps its direct state"
+        );
+        assert!(
+            !state.demote_unproven(gone),
+            "an unknown peer is not demoted"
+        );
+        assert!(
+            !state.direct.contains_key(&gone),
+            "an unknown peer gets no direct entry"
+        );
     }
 
     #[test]
@@ -1859,10 +2140,17 @@ mod tests {
         state.direct.insert(bob, DirectState::Direct);
         assert_eq!(
             state.forget_peer_endpoint("bob").map(|address| address.id),
-            Some(bob)
+            Some(bob),
+            "forgetting a peer endpoint returns its address id"
         );
-        assert!(state.direct.is_empty());
-        assert!(state.forget_peer_endpoint("bob").is_none());
+        assert!(
+            state.direct.is_empty(),
+            "forgetting a peer endpoint leaves no path verdict"
+        );
+        assert!(
+            state.forget_peer_endpoint("bob").is_none(),
+            "a second forget finds nothing"
+        );
     }
 
     // After a failover the rendezvous keeps its id, but a refusal from the old
@@ -1900,8 +2188,14 @@ mod tests {
         state.path_watchers.insert(bob, Some(7));
         state.path_kinds.insert(bob, PathKind::WebRtc);
         state.forget_peer_endpoint("bob");
-        assert!(state.path_watchers.is_empty());
-        assert!(state.path_kinds.is_empty());
+        assert!(
+            state.path_watchers.is_empty(),
+            "forgetting a peer endpoint drops its path watchers"
+        );
+        assert!(
+            state.path_kinds.is_empty(),
+            "forgetting a peer endpoint drops its path kinds"
+        );
     }
 
     // `arms_reclaim` fires on any peer loss while the mesh is beaconless, and
@@ -1913,11 +2207,20 @@ mod tests {
         state.rendezvous_probe_read_free = true;
 
         state.arm_reclaim(Instant::now());
-        assert!(state.rendezvous_probe_read_free);
-        assert!(state.reclaim_until.is_some());
+        assert!(
+            state.rendezvous_probe_read_free,
+            "the free-read verdict holds before the rendezvous changes"
+        );
+        assert!(
+            state.reclaim_until.is_some(),
+            "the reclaim window is open after the rendezvous changes"
+        );
 
         state.forget_rendezvous_verdict();
-        assert!(!state.rendezvous_probe_read_free);
+        assert!(
+            !state.rendezvous_probe_read_free,
+            "the rendezvous change drops the free-read verdict"
+        );
     }
 
     // The probe wait ends at the three events that reopen the rendezvous: the reclaim window
@@ -2019,8 +2322,14 @@ mod tests {
 
         // One peer's cooldown never gates a different peer.
         state.note_relink(flapping, start);
-        assert!(state.relink_on_cooldown(flapping, start));
-        assert!(!state.relink_on_cooldown(other, start));
+        assert!(
+            state.relink_on_cooldown(flapping, start),
+            "a flapping peer is on cooldown at the start"
+        );
+        assert!(
+            !state.relink_on_cooldown(other, start),
+            "another peer is not on cooldown"
+        );
 
         // Many distinct peers re-linked across more than a full window:
         // expired entries are pruned, so the map never accumulates them all.
@@ -2042,7 +2351,10 @@ mod tests {
         // consts live; this covers the behaviour it exists for.
         let mut state = fresh_state();
         let earliest = msg_with_id(&MessageId::random());
-        assert!(!state.mark_seen(&earliest));
+        assert!(
+            !state.mark_seen(&earliest),
+            "the earliest retained message is still remembered as seen"
+        );
         // Mark a full buffer's worth of later messages.
         for _ in 1..MESSAGE_LOG_SIZE {
             state.mark_seen(&msg_with_id(&MessageId::random()));
@@ -2075,11 +2387,20 @@ mod tests {
             "no known peers => alone, not starved"
         );
         state.known_endpoints.insert(endpoint_id(1));
-        assert!(state.starvation_due(past_threshold, STARVE));
+        assert!(
+            state.starvation_due(past_threshold, STARVE),
+            "starvation is due after the threshold with known peers and silence"
+        );
         // Fresh inbound disarms it until the threshold passes again.
         state.note_inbound(past_threshold);
-        assert!(!state.starvation_due(past_threshold, STARVE));
-        assert!(state.starvation_due(past_threshold + STARVE + Duration::from_secs(1), STARVE));
+        assert!(
+            !state.starvation_due(past_threshold, STARVE),
+            "starvation is not due before the threshold"
+        );
+        assert!(
+            state.starvation_due(past_threshold + STARVE + Duration::from_secs(1), STARVE),
+            "starvation is due again past the threshold plus the window"
+        );
     }
 
     #[test]
@@ -2088,22 +2409,46 @@ mod tests {
         state.announced = true;
         state.known_endpoints.insert(endpoint_id(1));
         let first = Instant::now() + STARVE + Duration::from_secs(1);
-        assert!(state.starvation_due(first, STARVE));
+        assert!(
+            state.starvation_due(first, STARVE),
+            "starvation is due at the first silence"
+        );
         state.note_recovery(first);
         // One trip: the next attempt waits 2x the threshold, not 1x.
-        assert!(!state.starvation_due(first + STARVE + Duration::from_secs(1), STARVE));
+        assert!(
+            !state.starvation_due(first + STARVE + Duration::from_secs(1), STARVE),
+            "starvation is not due again inside the backoff"
+        );
         let second = first + (STARVE * 2) + Duration::from_secs(1);
-        assert!(state.starvation_due(second, STARVE));
+        assert!(
+            state.starvation_due(second, STARVE),
+            "the second starvation is due at its time"
+        );
         state.note_recovery(second);
         // Two trips: 4x.
-        assert!(!state.starvation_due(second + (STARVE * 2) + Duration::from_secs(1), STARVE));
-        assert!(state.starvation_due(second + (STARVE * 4) + Duration::from_secs(1), STARVE));
+        assert!(
+            !state.starvation_due(second + (STARVE * 2) + Duration::from_secs(1), STARVE),
+            "the backoff doubles after the second trip"
+        );
+        assert!(
+            state.starvation_due(second + (STARVE * 4) + Duration::from_secs(1), STARVE),
+            "the backoff quadruples after the second trip"
+        );
         // Any inbound resets the backoff to the base threshold.
         let healed = second + (STARVE * 4) + Duration::from_secs(2);
         state.note_inbound(healed);
-        assert_eq!(state.recovery_trips, 0);
-        assert!(!state.starvation_due(healed + STARVE, STARVE));
-        assert!(state.starvation_due(healed + STARVE + Duration::from_secs(1), STARVE));
+        assert_eq!(
+            state.recovery_trips, 0,
+            "an inbound message resets the recovery trips"
+        );
+        assert!(
+            !state.starvation_due(healed + STARVE, STARVE),
+            "no starvation is due right after healing"
+        );
+        assert!(
+            state.starvation_due(healed + STARVE + Duration::from_secs(1), STARVE),
+            "starvation is due again a threshold after healing"
+        );
     }
 
     #[test]
@@ -2140,18 +2485,21 @@ mod tests {
             !state.note_inbound(now),
             "pre-mesh inbound never flips meshed"
         );
-        assert!(!state.meshed);
+        assert!(!state.meshed, "meshed stays off while nothing is degraded");
         state.meshed = true;
         assert!(!state.note_inbound(now), "healthy meshed: no edge");
-        assert!(state.meshed);
+        assert!(
+            state.meshed,
+            "a degraded node is meshed again by an inbound message"
+        );
         state.note_degraded();
-        assert!(!state.meshed);
+        assert!(!state.meshed, "the degraded state drops meshed again");
         assert!(
             state.note_inbound(now),
             "degraded node heals on first inbound (caller flushes)"
         );
-        assert!(state.meshed);
-        assert!(!state.degraded);
+        assert!(state.meshed, "an inbound message restores meshed");
+        assert!(!state.degraded, "an inbound message clears degraded");
     }
 
     /// The second probe of a round is due at the middle of the window, and only once.
@@ -2161,10 +2509,18 @@ mod tests {
         let first = Message::new_ping(&MeshId::from("test"), &nick("alice"));
         let mut round = PingRound::new(&first, t1, t1 + Duration::from_secs(10), None);
 
-        assert_eq!(round.second_probe_at(), Some(t1 + Duration::from_secs(5)));
+        assert_eq!(
+            round.second_probe_at(),
+            Some(t1 + Duration::from_secs(5)),
+            "the second probe is due at the middle of the window"
+        );
         let second = Message::new_ping(&MeshId::from("test"), &nick("alice"));
         round.probes.insert(second.id, t1 + Duration::from_secs(5));
-        assert_eq!(round.second_probe_at(), None);
+        assert_eq!(
+            round.second_probe_at(),
+            None,
+            "the second probe is sent only once"
+        );
     }
 
     /// A pong reads its RTT from the probe it names, so a peer that answers only the second
@@ -2181,11 +2537,25 @@ mod tests {
             .insert(second.id.clone(), t1 + Duration::from_secs(5));
 
         let at = t1 + Duration::from_secs(5) + Duration::from_millis(30);
-        assert!(round.record_pong(nick("bob"), &second.id, at));
-        assert!(round.record_pong(nick("carol"), &first.id, t1 + Duration::from_millis(40)));
+        assert!(
+            round.record_pong(nick("bob"), &second.id, at),
+            "a pong from bob is recorded against the probe it names"
+        );
+        assert!(
+            round.record_pong(nick("carol"), &first.id, t1 + Duration::from_millis(40)),
+            "a pong from carol is recorded against the first probe"
+        );
 
-        assert_eq!(round.pongs[&nick("bob")], Duration::from_millis(30));
-        assert_eq!(round.pongs[&nick("carol")], Duration::from_millis(40));
+        assert_eq!(
+            round.pongs[&nick("bob")],
+            Duration::from_millis(30),
+            "bob's round trip reads 30 ms from its probe"
+        );
+        assert_eq!(
+            round.pongs[&nick("carol")],
+            Duration::from_millis(40),
+            "carol's round trip reads 40 ms from its probe"
+        );
     }
 
     /// The first pong of a peer is the one kept: the answer to the second probe does not replace
@@ -2208,7 +2578,11 @@ mod tests {
             t1 + Duration::from_secs(5) + Duration::from_millis(20),
         );
 
-        assert_eq!(round.pongs[&nick("bob")], Duration::from_millis(10));
+        assert_eq!(
+            round.pongs[&nick("bob")],
+            Duration::from_millis(10),
+            "the first pong from bob is kept against a later one"
+        );
     }
 
     /// A pong that names no probe of the round, such as the answer to a round that is over, is
@@ -2219,11 +2593,17 @@ mod tests {
         let first = Message::new_ping(&MeshId::from("test"), &nick("alice"));
         let mut round = PingRound::new(&first, t1, t1 + Duration::from_secs(10), None);
 
-        assert!(!round.record_pong(
-            nick("bob"),
-            &MessageId::random(),
-            t1 + Duration::from_millis(5)
-        ));
-        assert!(round.pongs.is_empty());
+        assert!(
+            !round.record_pong(
+                nick("bob"),
+                &MessageId::random(),
+                t1 + Duration::from_millis(5)
+            ),
+            "a pong naming an unknown probe is not recorded"
+        );
+        assert!(
+            round.pongs.is_empty(),
+            "no pong is recorded for an unknown probe"
+        );
     }
 }

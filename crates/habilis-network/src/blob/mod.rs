@@ -70,9 +70,17 @@ mod tests {
         use zeroize::Zeroizing;
 
         let secret = TicketSecret::from_zeroizing(Zeroizing::new([5u8; super::SECRET_LEN]));
-        assert_eq!(secret.as_bytes(), &[5u8; super::SECRET_LEN]);
+        assert_eq!(
+            secret.as_bytes(),
+            &[5u8; super::SECRET_LEN],
+            "a secret moves into its type whole"
+        );
         let key = SymmetricKey::from_zeroizing(Zeroizing::new([6u8; 32]));
-        assert_eq!(key.as_bytes(), &[6u8; 32]);
+        assert_eq!(
+            key.as_bytes(),
+            &[6u8; 32],
+            "a key moves into its type whole"
+        );
     }
 
     /// A throwaway file under the OS temp dir holding `bytes`; the caller drops it.
@@ -102,7 +110,10 @@ mod tests {
     #[test]
     fn a_blob_endpoint_is_built_with_no_custom_transport() {
         let defaults = crate::lookup::TransportHandles::default();
-        assert!(defaults.gossip.is_none() && defaults.webrtc.is_none());
+        assert!(
+            defaults.gossip.is_none() && defaults.webrtc.is_none(),
+            "a blob endpoint has no custom transport by default"
+        );
 
         let server = include_str!("produce.rs");
         let start = server
@@ -176,14 +187,25 @@ mod tests {
             .register(&src, ContentId::new("blob-test-direct"))
             .await
             .expect("register");
-        assert_eq!(ticket.relay_transport, PayloadPath::DirectOnly);
+        assert_eq!(
+            ticket.relay_transport,
+            PayloadPath::DirectOnly,
+            "a relay lookup-only ticket keeps the direct payload path"
+        );
         let decoded = super::BlobTicket::decode(&ticket.encode()).expect("ticket round-trips");
-        assert_eq!(decoded.relay_transport, PayloadPath::DirectOnly);
+        assert_eq!(
+            decoded.relay_transport,
+            PayloadPath::DirectOnly,
+            "the decoded ticket keeps the direct payload path"
+        );
         let mut out = Vec::new();
         fetch(&decoded, &mut out, None)
             .await
             .expect("fetch over a direct path");
-        assert_eq!(out, b"direct bytes");
+        assert_eq!(
+            out, b"direct bytes",
+            "the direct fetch still returns the bytes"
+        );
         fs::remove_file(&src).ok();
         server.shutdown().await;
     }
@@ -257,12 +279,20 @@ mod tests {
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn round_trips_a_blob_byte_for_byte() {
         let payload = vec![7u8; 200_000];
-        assert_eq!(round_trip(&payload).await, payload);
+        assert_eq!(
+            round_trip(&payload).await,
+            payload,
+            "a blob round trips byte for byte"
+        );
     }
 
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn round_trips_an_empty_blob() {
-        assert_eq!(round_trip(b"").await, b"");
+        assert_eq!(
+            round_trip(b"").await,
+            b"",
+            "an empty blob round trips to empty bytes"
+        );
     }
 
     /// The whole produce → reference → consume path through the **public** surface
@@ -314,7 +344,11 @@ mod tests {
         )
         .await
         .expect("second offload");
-        assert_eq!(again.sha256_hex(), ticket.sha256_hex());
+        assert_eq!(
+            again.sha256_hex(),
+            ticket.sha256_hex(),
+            "offloading to fetch needs no application type and keeps the digest"
+        );
 
         fs::remove_file(&src).ok();
         if let Some(server) = server {
@@ -359,7 +393,10 @@ mod tests {
         fetch(&ticket, &mut out, Some(password))
             .await
             .expect("fetch");
-        assert_eq!(out, b"secret bytes");
+        assert_eq!(
+            out, b"secret bytes",
+            "a passworded blob returns its bytes with the password"
+        );
 
         fs::remove_file(&src).ok();
         server.shutdown().await;
@@ -388,7 +425,10 @@ mod tests {
         fetch(&ticket_b, &mut out, None)
             .await
             .expect("group B still holds the blob");
-        assert_eq!(out, b"shared bytes");
+        assert_eq!(
+            out, b"shared bytes",
+            "evicting one group keeps the shared blob for the other group"
+        );
 
         server.evict_content(&group_b).await;
         out.clear();

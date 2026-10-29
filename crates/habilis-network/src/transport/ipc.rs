@@ -49,30 +49,45 @@ mod tests {
     fn json_ok_is_valid_json() {
         let json = json_reply::json_ok("abc-123");
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["ok"], true);
-        assert_eq!(parsed["id"], "abc-123");
+        assert_eq!(
+            parsed["ok"], true,
+            "a json ok reply is an object with ok true"
+        );
+        assert_eq!(parsed["id"], "abc-123", "a json ok reply carries the id");
     }
 
     #[test]
     fn json_error_is_valid_json() {
         let json = json_reply::json_error("something broke");
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["ok"], false);
-        assert_eq!(parsed["error"], "something broke");
+        assert_eq!(
+            parsed["ok"], false,
+            "a json error reply is an object with ok false"
+        );
+        assert_eq!(
+            parsed["error"], "something broke",
+            "a json error reply carries the error text"
+        );
     }
 
     #[test]
     fn json_ok_escapes_special_chars() {
         let json = json_reply::json_ok(r#"id"with"quotes"#);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["id"], r#"id"with"quotes"#);
+        assert_eq!(
+            parsed["id"], r#"id"with"quotes"#,
+            "an id with quotes is escaped in a json ok reply"
+        );
     }
 
     #[test]
     fn json_error_escapes_special_chars() {
         let json = json_reply::json_error(r#"error: "bad input""#);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["error"], r#"error: "bad input""#);
+        assert_eq!(
+            parsed["error"], r#"error: "bad input""#,
+            "an error with quotes is escaped in a json error reply"
+        );
     }
 
     /// A base of this suite's own, so a test that binds a real socket can never
@@ -86,9 +101,18 @@ mod tests {
         let mesh = MeshId::from("abcdefghijkmnpqr");
         let base = test_base();
         let path = listener::socket_path(&base, &mesh, &Nickname::from("my-nick"));
-        assert!(path.starts_with(&*base.to_string_lossy()));
-        assert!(path.ends_with("/my-nick.ipc.sock"));
-        assert!(path.contains(&crate::util::mesh_prefix(mesh.as_str())));
+        assert!(
+            path.starts_with(&*base.to_string_lossy()),
+            "the socket path starts in the base directory"
+        );
+        assert!(
+            path.ends_with("/my-nick.ipc.sock"),
+            "the socket path ends with the nickname socket name"
+        );
+        assert!(
+            path.contains(&crate::util::mesh_prefix(mesh.as_str())),
+            "the socket path carries the mesh prefix"
+        );
     }
 
     // ── property-based tests ───────────────────────────────────────
@@ -212,8 +236,14 @@ mod tests {
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(parsed["ok"], true);
-        assert_eq!(parsed["id"], "got: test message");
+        assert_eq!(
+            parsed["ok"], true,
+            "a message sent over ipc gets an ok reply"
+        );
+        assert_eq!(
+            parsed["id"], "got: test message",
+            "the ipc reply carries the echoed message"
+        );
 
         handler.await.unwrap();
         listener_handle.abort();

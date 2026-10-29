@@ -347,7 +347,11 @@ mod tests {
 
         let outcome = wait_selected_outcome(&accepted, Duration::from_secs(5), |_| false).await;
 
-        assert_eq!(outcome, PathWait::Closed);
+        assert_eq!(
+            outcome,
+            PathWait::Closed,
+            "a dialler that closes during the wait is a closed wait, not a timeout"
+        );
         client.close().await;
         server.close().await;
     }
@@ -358,7 +362,11 @@ mod tests {
 
         let outcome = wait_selected_outcome(&accepted, Duration::from_millis(300), |_| false).await;
 
-        assert_eq!(outcome, PathWait::TimedOut);
+        assert_eq!(
+            outcome,
+            PathWait::TimedOut,
+            "a wait with no path and no close times out"
+        );
         client.close().await;
         server.close().await;
     }
@@ -369,7 +377,11 @@ mod tests {
 
         let outcome = wait_selected_outcome(&accepted, Duration::from_secs(5), |_| true).await;
 
-        assert_eq!(outcome, PathWait::Selected);
+        assert_eq!(
+            outcome,
+            PathWait::Selected,
+            "a selected path ends the wait at once"
+        );
         client.close().await;
         server.close().await;
     }

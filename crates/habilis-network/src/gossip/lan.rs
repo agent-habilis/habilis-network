@@ -76,8 +76,14 @@ mod tests {
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
         let address = member(1);
-        assert!(grafts.plan(&address, false, now));
-        assert!(!grafts.plan(&address, false, now));
+        assert!(
+            grafts.plan(&address, false, now),
+            "a member is asked for a record the first time"
+        );
+        assert!(
+            !grafts.plan(&address, false, now),
+            "a member is not asked again for the same record at once"
+        );
     }
 
     #[test]
@@ -85,15 +91,24 @@ mod tests {
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
         let address = member(1);
-        assert!(grafts.plan(&address, false, now));
+        assert!(
+            grafts.plan(&address, false, now),
+            "a changed record is asked for again"
+        );
         let moved = address.with_ip_addr("192.0.2.1:4000".parse().expect("an address"));
-        assert!(grafts.plan(&moved, false, now));
+        assert!(
+            grafts.plan(&moved, false, now),
+            "a moved record is asked for again"
+        );
     }
 
     #[test]
     fn a_linked_member_is_not_asked() {
         let mut grafts = LanGrafts::default();
-        assert!(!grafts.plan(&member(1), true, Instant::now()));
+        assert!(
+            !grafts.plan(&member(1), true, Instant::now()),
+            "a linked member is not asked"
+        );
     }
 
     #[test]
@@ -101,9 +116,15 @@ mod tests {
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
         let address = member(1);
-        assert!(grafts.plan(&address, false, now));
+        assert!(
+            grafts.plan(&address, false, now),
+            "a member that left is asked again when it returns"
+        );
         grafts.forget(&address.id);
-        assert!(grafts.plan(&address, false, now));
+        assert!(
+            grafts.plan(&address, false, now),
+            "the returning member is asked again"
+        );
     }
 
     #[test]
@@ -111,7 +132,10 @@ mod tests {
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
         let address = member(1);
-        assert!(grafts.plan(&address, false, now));
+        assert!(
+            grafts.plan(&address, false, now),
+            "a member still not a neighbor is asked again after a wait"
+        );
         assert!(
             !grafts.plan(
                 &address,
@@ -131,14 +155,23 @@ mod tests {
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
         let address = member(1);
-        assert!(grafts.plan(&address, false, now));
+        assert!(
+            grafts.plan(&address, false, now),
+            "the first request goes out at once"
+        );
         let second = now + RETRY_FIRST;
-        assert!(grafts.plan(&address, false, second));
+        assert!(
+            grafts.plan(&address, false, second),
+            "the second request goes out at its wait"
+        );
         assert!(
             !grafts.plan(&address, false, second + RETRY_FIRST),
             "after the first wait the steady one holds"
         );
-        assert!(grafts.plan(&address, false, second + RETRY_STEADY));
+        assert!(
+            grafts.plan(&address, false, second + RETRY_STEADY),
+            "the request after the wait is steady"
+        );
     }
 
     #[test]
@@ -146,8 +179,14 @@ mod tests {
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
         let address = member(1);
-        assert!(grafts.plan(&address, false, now));
-        assert!(!grafts.plan(&address, true, now + RETRY_FIRST));
+        assert!(
+            grafts.plan(&address, false, now),
+            "the first request for a neighbor member goes out"
+        );
+        assert!(
+            !grafts.plan(&address, true, now + RETRY_FIRST),
+            "a neighbor member is not asked again after the first wait"
+        );
     }
 
     #[test]
@@ -155,11 +194,17 @@ mod tests {
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
         let first = member(1);
-        assert!(grafts.plan(&first, false, now));
+        assert!(
+            grafts.plan(&first, false, now),
+            "the first request counts against the cap"
+        );
         let later = now + RETRY_FIRST;
         for seed in 0..MAX_LAN_GRAFTS_PER_MINUTE {
             let seed = u8::try_from(seed).expect("a small count");
-            assert!(grafts.plan(&member(100 + seed), false, later));
+            assert!(
+                grafts.plan(&member(100 + seed), false, later),
+                "a second member's request is allowed under the cap"
+            );
         }
         assert!(
             !grafts.plan(&first, false, later),
@@ -256,7 +301,11 @@ mod tests {
 
         super::on_lan_event(LanEvent::Seen(address), &mut state, &context).await;
 
-        assert_eq!(state.next_rival_recheck, Some(far));
+        assert_eq!(
+            state.next_rival_recheck,
+            Some(far),
+            "the lan neighbor leaves the re-check time at its far value"
+        );
         node.stop_gossip().await;
         node.endpoint.close().await;
     }
@@ -267,9 +316,15 @@ mod tests {
         let now = Instant::now();
         for seed in 0..MAX_LAN_GRAFTS_PER_MINUTE {
             let seed = u8::try_from(seed).expect("a small count");
-            assert!(grafts.plan(&member(seed), false, now));
+            assert!(
+                grafts.plan(&member(seed), false, now),
+                "the first requests of one minute are allowed"
+            );
         }
-        assert!(!grafts.plan(&member(200), false, now));
+        assert!(
+            !grafts.plan(&member(200), false, now),
+            "requests beyond the cap of one minute are refused"
+        );
         assert!(
             grafts.plan(
                 &member(200),

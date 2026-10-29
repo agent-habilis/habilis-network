@@ -63,15 +63,39 @@ mod tests {
     fn ticket_round_trips() {
         let ticket = sample(false);
         let encoded = ticket.encode();
-        assert!(encoded.is_ascii());
-        assert!(!encoded.contains("://"));
+        assert!(encoded.is_ascii(), "an encoded ticket is ascii");
+        assert!(
+            !encoded.contains("://"),
+            "an encoded ticket carries no url scheme"
+        );
         let decoded = BlobTicket::decode(&encoded).expect("decode");
-        assert_eq!(decoded.address.id, ticket.address.id);
-        assert_eq!(decoded.secret.as_bytes(), &[9u8; SECRET_LEN]);
-        assert_eq!(decoded.sha256, BlobDigest::from_bytes([7u8; HASH_LEN]));
-        assert_eq!(decoded.size, 1_234_567);
-        assert_eq!(decoded.lookups, LookupOpts::public_preset());
-        assert!(!decoded.password);
+        assert_eq!(
+            decoded.address.id, ticket.address.id,
+            "the decoded address matches the id"
+        );
+        assert_eq!(
+            decoded.secret.as_bytes(),
+            &[9u8; SECRET_LEN],
+            "the decoded secret keeps its bytes"
+        );
+        assert_eq!(
+            decoded.sha256,
+            BlobDigest::from_bytes([7u8; HASH_LEN]),
+            "the decoded hash matches the digest"
+        );
+        assert_eq!(
+            decoded.size, 1_234_567,
+            "the decoded size is the original size"
+        );
+        assert_eq!(
+            decoded.lookups,
+            LookupOpts::public_preset(),
+            "the decoded lookups match the preset"
+        );
+        assert!(
+            !decoded.password,
+            "a ticket without a password keeps the flag off"
+        );
     }
 
     /// The bytes of a ticket minted by the code at the base commit. A change
@@ -80,27 +104,57 @@ mod tests {
 
     #[test]
     fn encode_matches_the_golden_string() {
-        assert_eq!(sample(false).encode(), GOLDEN);
+        assert_eq!(
+            sample(false).encode(),
+            GOLDEN,
+            "the encoding matches the golden string"
+        );
     }
 
     #[test]
     fn decode_of_the_golden_string_gives_the_same_fields() {
         let decoded = BlobTicket::decode(GOLDEN).expect("decode");
         let expected = sample(false);
-        assert_eq!(decoded.address, expected.address);
-        assert_eq!(decoded.secret.as_bytes(), expected.secret.as_bytes());
-        assert_eq!(decoded.sha256, expected.sha256);
-        assert_eq!(decoded.size, expected.size);
-        assert_eq!(decoded.lookups, expected.lookups);
-        assert_eq!(decoded.password, expected.password);
-        assert_eq!(decoded.relay_transport, expected.relay_transport);
+        assert_eq!(
+            decoded.address, expected.address,
+            "the decoded address matches the golden address"
+        );
+        assert_eq!(
+            decoded.secret.as_bytes(),
+            expected.secret.as_bytes(),
+            "the decoded secret matches the golden secret"
+        );
+        assert_eq!(
+            decoded.sha256, expected.sha256,
+            "the decoded hash matches the golden hash"
+        );
+        assert_eq!(
+            decoded.size, expected.size,
+            "the decoded size matches the golden size"
+        );
+        assert_eq!(
+            decoded.lookups, expected.lookups,
+            "the decoded lookups match the golden lookups"
+        );
+        assert_eq!(
+            decoded.password, expected.password,
+            "the decoded password flag matches the golden flag"
+        );
+        assert_eq!(
+            decoded.relay_transport, expected.relay_transport,
+            "the decoded relay transport matches the golden flag"
+        );
     }
 
     #[test]
     fn password_flag_round_trips() {
         let decoded = BlobTicket::decode(&sample(true).encode()).expect("decode");
-        assert!(decoded.password);
-        assert_eq!(decoded.relay_transport, PayloadPath::RelayAllowed);
+        assert!(decoded.password, "the password flag round trips as set");
+        assert_eq!(
+            decoded.relay_transport,
+            PayloadPath::RelayAllowed,
+            "the relay transport flag round trips as allowed"
+        );
     }
 
     #[test]
@@ -110,7 +164,11 @@ mod tests {
             ..sample(true)
         };
         let decoded = BlobTicket::decode(&ticket.encode()).expect("decode");
-        assert_eq!(decoded.relay_transport, PayloadPath::DirectOnly);
+        assert_eq!(
+            decoded.relay_transport,
+            PayloadPath::DirectOnly,
+            "the relay transport flag decodes as set"
+        );
         assert!(decoded.password, "the two flags share a byte");
         let on = BlobTicket {
             relay_transport: PayloadPath::RelayAllowed,
@@ -118,7 +176,8 @@ mod tests {
         };
         assert_eq!(
             BlobTicket::decode(&on.encode()).unwrap().relay_transport,
-            PayloadPath::RelayAllowed
+            PayloadPath::RelayAllowed,
+            "a ticket with the relay flag on decodes with it on"
         );
     }
 
@@ -127,7 +186,11 @@ mod tests {
         // The receiver lands the fetched bytes under this name, so it must equal
         // the producer's spool filename (lowercase hex of the SHA-256).
         let ticket = sample(false); // sha256 == [7u8; HASH_LEN]
-        assert_eq!(ticket.sha256_hex(), "07".repeat(HASH_LEN));
+        assert_eq!(
+            ticket.sha256_hex(),
+            "07".repeat(HASH_LEN),
+            "the sha256 hex is the lowercase content hash"
+        );
     }
 
     #[test]
@@ -141,7 +204,10 @@ mod tests {
         )
         .unwrap()
         .to_string();
-        assert!(BlobTicket::decode(&mesh).is_err());
+        assert!(
+            BlobTicket::decode(&mesh).is_err(),
+            "a mesh token is rejected as a blob ticket"
+        );
     }
 
     #[test]
@@ -163,8 +229,14 @@ mod tests {
             .expect("mint");
         let blob = sample(false).encode();
 
-        assert!(crate::protocol::InviteTicket::decode(&blob).is_err());
-        assert!(BlobTicket::decode(&invite).is_err());
+        assert!(
+            crate::protocol::InviteTicket::decode(&blob).is_err(),
+            "an invite does not parse as a blob ticket"
+        );
+        assert!(
+            BlobTicket::decode(&invite).is_err(),
+            "a blob ticket does not parse as an invite"
+        );
     }
 
     #[test]
@@ -191,6 +263,9 @@ mod tests {
         let mut encoded = sample(false).encode();
         let last = encoded.pop().unwrap();
         encoded.push(if last == '1' { '2' } else { '1' });
-        assert!(BlobTicket::decode(&encoded).is_err());
+        assert!(
+            BlobTicket::decode(&encoded).is_err(),
+            "a bad checksum is rejected"
+        );
     }
 }
