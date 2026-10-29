@@ -44,7 +44,6 @@ impl PathSelector for GossipLadder {
 #[cfg(test)]
 mod tests {
     use habilis_network_iroh_transport_util::Rung;
-    use habilis_network_test_tracing::test;
     use std::net::SocketAddr;
 
     /// The ladder names this crate's transport by the id that the transport uses. The id is
@@ -52,6 +51,7 @@ mod tests {
     /// that they stay equal.
     #[test]
     fn the_ladder_knows_the_gossip_transport_id_of_this_crate() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             super::custom_rung(crate::GOSSIP_TRANSPORT_ID),
             Rung::Gossip,
@@ -129,64 +129,73 @@ mod tests {
     /// The default selector of iroh treats a custom transport as primary: with IP and gossip
     /// both open, the mesh topic would carry the bytes. This is what the ladder prevents.
     #[test]
-    async fn an_endpoint_with_ip_and_gossip_selects_ip() {
-        let hub = Hub::new();
-        let (alice, bob) = (node(31, &hub, true).await, node(32, &hub, true).await);
-        assert!(
-            selects_ip(&alice, &bob).await,
-            "an endpoint with ip and gossip selects ip"
-        );
-        alice.close().await;
+    fn an_endpoint_with_ip_and_gossip_selects_ip() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let hub = Hub::new();
+            let (alice, bob) = (node(31, &hub, true).await, node(32, &hub, true).await);
+            assert!(
+                selects_ip(&alice, &bob).await,
+                "an endpoint with ip and gossip selects ip"
+            );
+            alice.close().await;
+        });
     }
 
     /// The same endpoints without the ladder: the guard that the test above can fail.
     #[test]
-    async fn without_the_ladder_an_endpoint_with_ip_and_gossip_selects_gossip() {
-        let hub = Hub::new();
-        let (alice, bob) = (node(33, &hub, false).await, node(34, &hub, false).await);
-        assert!(
-            !selects_ip(&alice, &bob).await,
-            "without the ladder an endpoint with ip and gossip selects gossip"
-        );
-        alice.close().await;
+    fn without_the_ladder_an_endpoint_with_ip_and_gossip_selects_gossip() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let hub = Hub::new();
+            let (alice, bob) = (node(33, &hub, false).await, node(34, &hub, false).await);
+            assert!(
+                !selects_ip(&alice, &bob).await,
+                "without the ladder an endpoint with ip and gossip selects gossip"
+            );
+            alice.close().await;
+        });
     }
 
     /// The ladder hides nothing: with no other path, gossip is the one that is selected.
     #[test]
-    async fn the_ladder_selects_gossip_when_it_is_the_only_path() {
-        let hub = Hub::new();
-        let key = |seed: u8| SecretKey::from_bytes(&[seed; 32]);
-        let bind = |seed: u8| {
-            let handle = GossipHandle::new(key(seed).public());
-            hub.join(&handle);
-            async move {
-                let builder = Endpoint::builder(presets::Minimal)
-                    .secret_key(key(seed))
-                    .relay_mode(RelayMode::Disabled)
-                    .add_custom_transport(handle.custom_transport());
-                let configured = builder.path_selector(handle.path_selector());
-                configured
-                    .clear_ip_transports()
-                    .clear_relay_transports()
-                    .bind()
-                    .await
-                    .expect("bind")
-            }
-        };
-        let (alice, bob) = (bind(35).await, bind(36).await);
-        let router = Router::builder(bob.clone()).accept(ALPN, Hold).spawn();
-        let connection = alice
-            .connect(
-                EndpointAddr::from_parts(bob.id(), [TransportAddr::Custom(gossip_addr(bob.id()))]),
-                ALPN,
-            )
-            .await
-            .expect("connect");
-        assert!(
-            crate::selected_is_gossip(&connection),
-            "the ladder selects gossip when it is the only path"
-        );
-        router.shutdown().await.expect("shutdown");
-        alice.close().await;
+    fn the_ladder_selects_gossip_when_it_is_the_only_path() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let hub = Hub::new();
+            let key = |seed: u8| SecretKey::from_bytes(&[seed; 32]);
+            let bind = |seed: u8| {
+                let handle = GossipHandle::new(key(seed).public());
+                hub.join(&handle);
+                async move {
+                    let builder = Endpoint::builder(presets::Minimal)
+                        .secret_key(key(seed))
+                        .relay_mode(RelayMode::Disabled)
+                        .add_custom_transport(handle.custom_transport());
+                    let configured = builder.path_selector(handle.path_selector());
+                    configured
+                        .clear_ip_transports()
+                        .clear_relay_transports()
+                        .bind()
+                        .await
+                        .expect("bind")
+                }
+            };
+            let (alice, bob) = (bind(35).await, bind(36).await);
+            let router = Router::builder(bob.clone()).accept(ALPN, Hold).spawn();
+            let connection = alice
+                .connect(
+                    EndpointAddr::from_parts(
+                        bob.id(),
+                        [TransportAddr::Custom(gossip_addr(bob.id()))],
+                    ),
+                    ALPN,
+                )
+                .await
+                .expect("connect");
+            assert!(
+                crate::selected_is_gossip(&connection),
+                "the ladder selects gossip when it is the only path"
+            );
+            router.shutdown().await.expect("shutdown");
+            alice.close().await;
+        });
     }
 }

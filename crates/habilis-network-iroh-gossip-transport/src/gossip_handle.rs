@@ -345,7 +345,6 @@ impl CustomSender for GossipSender {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::sync::atomic::AtomicUsize;
     use std::task::Wake;
     use std::time::Duration;
@@ -458,30 +457,33 @@ mod tests {
     }
 
     #[test]
-    async fn a_quic_echo_completes_with_gossip_as_the_only_transport() {
-        let (_hub, (alice, _), (bob, _), router) = pair().await;
+    fn a_quic_echo_completes_with_gossip_as_the_only_transport() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (_hub, (alice, _), (bob, _), router) = pair().await;
 
-        let connection = tokio::time::timeout(
-            Duration::from_secs(10),
-            alice.connect(dial(bob.id()), ECHO_ALPN),
-        )
-        .await
-        .expect("connect timed out")
-        .expect("connect over gossip");
+            let connection = tokio::time::timeout(
+                Duration::from_secs(10),
+                alice.connect(dial(bob.id()), ECHO_ALPN),
+            )
+            .await
+            .expect("connect timed out")
+            .expect("connect over gossip");
 
-        echo_once(&connection, b"hello over gossip").await;
-        let selected_is_gossip: bool = connection.paths().iter().any(|path| {
-            path.is_selected()
-                && matches!(path.remote_addr(), TransportAddr::Custom(address) if address.id() == GOSSIP_TRANSPORT_ID)
+            echo_once(&connection, b"hello over gossip").await;
+            let selected_is_gossip: bool = connection.paths().iter().any(|path| {
+                path.is_selected()
+                    && matches!(path.remote_addr(), TransportAddr::Custom(address) if address.id() == GOSSIP_TRANSPORT_ID)
+            });
+            assert!(selected_is_gossip, "the selected path is not gossip");
+            connection.close(0u32.into(), b"done");
+            router.shutdown().await.expect("shutdown");
+            alice.close().await;
         });
-        assert!(selected_is_gossip, "the selected path is not gossip");
-        connection.close(0u32.into(), b"done");
-        router.shutdown().await.expect("shutdown");
-        alice.close().await;
     }
 
     #[test]
     fn a_path_is_not_valid_until_a_sink_is_attached() {
+        let _guard = ::habilis_network_test_tracing::init();
         let handle = GossipHandle::new(secret(1).public());
         let endpoint = handle.transport.bind().expect("bind");
         let sender = endpoint.create_sender();
@@ -497,6 +499,7 @@ mod tests {
 
     #[test]
     fn a_panic_in_the_liveness_check_does_not_poison_the_sink_lock() {
+        let _guard = ::habilis_network_test_tracing::init();
         let handle = GossipHandle::new(secret(1).public());
         // a sink that panics, to see the handle survive it
         handle.attach(Arc::new(Panicking));
@@ -516,6 +519,7 @@ mod tests {
     /// The guard is on the frame, and the frame holds 3774 bytes of datagram.
     #[test]
     fn a_datagram_over_the_frame_budget_is_dropped_by_the_sender() {
+        let _guard = ::habilis_network_test_tracing::init();
         let handle = GossipHandle::new(secret(1).public());
         // the test reads the recorder after the handle takes a clone
         let recorder = Arc::new(Recorder::default());
@@ -546,6 +550,7 @@ mod tests {
     /// the task once and is then read. A busy loop would show as wakes with no push.
     #[test]
     fn an_empty_queue_is_pending_and_a_delivery_wakes_the_task() {
+        let _guard = ::habilis_network_test_tracing::init();
         let me = secret(1).public();
         let handle = GossipHandle::new(me);
         let mut endpoint = handle.transport.bind().expect("bind");
@@ -590,6 +595,7 @@ mod tests {
 
     #[test]
     fn a_frame_for_another_member_or_a_bad_frame_is_not_queued() {
+        let _guard = ::habilis_network_test_tracing::init();
         let handle = GossipHandle::new(secret(1).public());
         let for_carol = (Frame {
             dst: secret(3).public(),
@@ -615,89 +621,94 @@ mod tests {
     /// not move the connection or stop it: QUIC authenticates every packet. This
     /// test was green on its first run; it stays as a guard.
     #[test]
-    async fn a_forged_source_does_not_move_or_break_an_established_connection() {
-        let (hub, (alice, alice_handle), (bob, _), router) = pair().await;
-        let connection = alice
-            .connect(dial(bob.id()), ECHO_ALPN)
-            .await
-            .expect("connect over gossip");
-        echo_once(&connection, b"before").await;
+    fn a_forged_source_does_not_move_or_break_an_established_connection() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (hub, (alice, alice_handle), (bob, _), router) = pair().await;
+            let connection = alice
+                .connect(dial(bob.id()), ECHO_ALPN)
+                .await
+                .expect("connect over gossip");
+            echo_once(&connection, b"before").await;
 
-        let real = hub.sent().next().expect("a frame was sent");
-        let real = frame::decode(&real).expect("a frame");
-        let forged = (Frame {
-            dst: alice_handle.app_id(),
-            src: secret(9).public(),
-            datagram: real.datagram,
-        })
-        .encode()
-        .expect("a frame");
-        for _ in 0..5 {
-            let _ = alice_handle.deliver(&forged);
-        }
+            let real = hub.sent().next().expect("a frame was sent");
+            let real = frame::decode(&real).expect("a frame");
+            let forged = (Frame {
+                dst: alice_handle.app_id(),
+                src: secret(9).public(),
+                datagram: real.datagram,
+            })
+            .encode()
+            .expect("a frame");
+            for _ in 0..5 {
+                let _ = alice_handle.deliver(&forged);
+            }
 
-        echo_once(&connection, b"after").await;
-        assert!(connection.close_reason().is_none(), "the connection closed");
-        let open = connection.paths();
-        let chosen = open.iter().filter(iroh::endpoint::Path::is_selected);
-        let selected: Vec<_> = chosen.map(|path| path.remote_addr().clone()).collect();
-        assert_eq!(
-            selected,
-            [TransportAddr::Custom(gossip_addr(bob.id()))],
-            "the selected path moved"
-        );
-        connection.close(0u32.into(), b"done");
-        router.shutdown().await.expect("shutdown");
-        alice.close().await;
+            echo_once(&connection, b"after").await;
+            assert!(connection.close_reason().is_none(), "the connection closed");
+            let open = connection.paths();
+            let chosen = open.iter().filter(iroh::endpoint::Path::is_selected);
+            let selected: Vec<_> = chosen.map(|path| path.remote_addr().clone()).collect();
+            assert_eq!(
+                selected,
+                [TransportAddr::Custom(gossip_addr(bob.id()))],
+                "the selected path moved"
+            );
+            connection.close(0u32.into(), b"done");
+            router.shutdown().await.expect("shutdown");
+            alice.close().await;
+        });
     }
 
     /// A frame is counted where it leaves and where it arrives, and the two ends
     /// agree with what the flood carried.
     #[test]
-    async fn an_echo_moves_the_counters_of_both_ends() {
-        let (hub, (alice, alice_handle), (bob, bob_handle), router) = pair().await;
-        let connection = alice
-            .connect(dial(bob.id()), ECHO_ALPN)
-            .await
-            .expect("connect over gossip");
-        echo_once(&connection, b"count me").await;
+    fn an_echo_moves_the_counters_of_both_ends() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (hub, (alice, alice_handle), (bob, bob_handle), router) = pair().await;
+            let connection = alice
+                .connect(dial(bob.id()), ECHO_ALPN)
+                .await
+                .expect("connect over gossip");
+            echo_once(&connection, b"count me").await;
 
-        let (alice_stats, bob_stats) = (alice_handle.stats(), bob_handle.stats());
-        assert!(
-            alice_stats.frames_out > 0 && bob_stats.frames_out > 0,
-            "{alice_stats:?} {bob_stats:?}"
-        );
-        assert!(
-            alice_stats.queued > 0 && bob_stats.queued > 0,
-            "{alice_stats:?} {bob_stats:?}"
-        );
-        let sent: Vec<_> = hub.sent().collect();
-        assert_eq!(
-            alice_stats.frames_out + bob_stats.frames_out,
-            sent.len() as u64,
-            "an echo moves the frame counters of both ends"
-        );
-        let flooded: usize = sent.iter().map(Bytes::len).sum();
-        assert_eq!(
-            alice_stats.bytes_out + bob_stats.bytes_out,
-            flooded as u64,
-            "an echo moves the byte counters of both ends"
-        );
-        assert_eq!(
-            alice_stats.frames_in, bob_stats.frames_out,
-            "alice reads what bob sent"
-        );
-        assert_eq!(
-            bob_stats.frames_in, alice_stats.frames_out,
-            "bob reads what alice sent"
-        );
-        connection.close(0u32.into(), b"done");
-        router.shutdown().await.expect("shutdown");
-        alice.close().await;
+            let (alice_stats, bob_stats) = (alice_handle.stats(), bob_handle.stats());
+            assert!(
+                alice_stats.frames_out > 0 && bob_stats.frames_out > 0,
+                "{alice_stats:?} {bob_stats:?}"
+            );
+            assert!(
+                alice_stats.queued > 0 && bob_stats.queued > 0,
+                "{alice_stats:?} {bob_stats:?}"
+            );
+            let sent: Vec<_> = hub.sent().collect();
+            assert_eq!(
+                alice_stats.frames_out + bob_stats.frames_out,
+                sent.len() as u64,
+                "an echo moves the frame counters of both ends"
+            );
+            let flooded: usize = sent.iter().map(Bytes::len).sum();
+            assert_eq!(
+                alice_stats.bytes_out + bob_stats.bytes_out,
+                flooded as u64,
+                "an echo moves the byte counters of both ends"
+            );
+            assert_eq!(
+                alice_stats.frames_in, bob_stats.frames_out,
+                "alice reads what bob sent"
+            );
+            assert_eq!(
+                bob_stats.frames_in, alice_stats.frames_out,
+                "bob reads what alice sent"
+            );
+            connection.close(0u32.into(), b"done");
+            router.shutdown().await.expect("shutdown");
+            alice.close().await;
+        });
     }
 
     #[test]
     fn a_dropped_datagram_is_counted_by_its_reason() {
+        let _guard = ::habilis_network_test_tracing::init();
         let handle = GossipHandle::new(secret(1).public());
         let bob = secret(2).public();
 
@@ -733,6 +744,7 @@ mod tests {
 
     #[test]
     fn a_frame_that_arrives_is_counted_by_what_became_of_it() {
+        let _guard = ::habilis_network_test_tracing::init();
         let me = secret(1).public();
         let handle = GossipHandle::new(me);
         let for_me = (Frame {
@@ -792,6 +804,7 @@ mod tests {
     /// counted. The others are not affected, and allowing it again lets frames go.
     #[test]
     fn a_destination_that_is_not_allowed_gets_no_frame() {
+        let _guard = ::habilis_network_test_tracing::init();
         let handle = GossipHandle::new(secret(1).public());
         // the test reads the recorder after the handle takes a clone
         let recorder = Arc::new(Recorder::default());
@@ -823,6 +836,7 @@ mod tests {
     /// A destination that was never named is allowed: its handshake must pass.
     #[test]
     fn a_destination_that_was_never_named_is_allowed() {
+        let _guard = ::habilis_network_test_tracing::init();
         let handle = GossipHandle::new(secret(1).public());
         // the test reads the recorder after the handle takes a clone
         let recorder = Arc::new(Recorder::default());
@@ -844,37 +858,39 @@ mod tests {
 
     /// A dial by id alone reaches the peer: the lookup supplies the gossip address.
     #[test]
-    async fn a_dial_by_id_alone_is_resolved_by_the_gossip_lookup() {
-        let hub = Hub::new();
-        let (alice_handle, bob_handle) = (
-            GossipHandle::new(secret(1).public()),
-            GossipHandle::new(secret(2).public()),
-        );
-        hub.join(&alice_handle);
-        hub.join(&bob_handle);
-        let build = |key: SecretKey, handle: GossipHandle| async move {
-            let builder = Endpoint::builder(presets::Minimal);
-            let builder = builder.secret_key(key);
-            let builder = builder.relay_mode(RelayMode::Disabled);
-            let builder = builder.add_custom_transport(handle.custom_transport());
-            let builder = builder.address_lookup(handle.address_lookup());
-            let builder = builder.clear_ip_transports();
-            builder.clear_relay_transports().bind().await.expect("bind")
-        };
-        let alice = build(secret(1), alice_handle).await;
-        let bob = build(secret(2), bob_handle).await;
-        let router = Router::builder(bob.clone()).accept(ECHO_ALPN, Echo).spawn();
+    fn a_dial_by_id_alone_is_resolved_by_the_gossip_lookup() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let hub = Hub::new();
+            let (alice_handle, bob_handle) = (
+                GossipHandle::new(secret(1).public()),
+                GossipHandle::new(secret(2).public()),
+            );
+            hub.join(&alice_handle);
+            hub.join(&bob_handle);
+            let build = |key: SecretKey, handle: GossipHandle| async move {
+                let builder = Endpoint::builder(presets::Minimal);
+                let builder = builder.secret_key(key);
+                let builder = builder.relay_mode(RelayMode::Disabled);
+                let builder = builder.add_custom_transport(handle.custom_transport());
+                let builder = builder.address_lookup(handle.address_lookup());
+                let builder = builder.clear_ip_transports();
+                builder.clear_relay_transports().bind().await.expect("bind")
+            };
+            let alice = build(secret(1), alice_handle).await;
+            let bob = build(secret(2), bob_handle).await;
+            let router = Router::builder(bob.clone()).accept(ECHO_ALPN, Echo).spawn();
 
-        let connection =
-            tokio::time::timeout(Duration::from_secs(10), alice.connect(bob.id(), ECHO_ALPN))
-                .await
-                .expect("connect timed out")
-                .expect("connect by id");
+            let connection =
+                tokio::time::timeout(Duration::from_secs(10), alice.connect(bob.id(), ECHO_ALPN))
+                    .await
+                    .expect("connect timed out")
+                    .expect("connect by id");
 
-        echo_once(&connection, b"found by id").await;
-        connection.close(0u32.into(), b"done");
-        router.shutdown().await.expect("shutdown");
-        alice.close().await;
+            echo_once(&connection, b"found by id").await;
+            connection.close(0u32.into(), b"done");
+            router.shutdown().await.expect("shutdown");
+            alice.close().await;
+        });
     }
 
     /// A frame to a destination with an established connection is charged to the
@@ -882,6 +898,7 @@ mod tests {
     /// is a handshake: it is sent, and counted as exempt.
     #[test]
     fn an_established_destination_is_charged_and_a_handshake_is_exempt() {
+        let _guard = ::habilis_network_test_tracing::init();
         let handle = GossipHandle::new(secret(1).public());
         // the test reads the recorder after the handle takes a clone
         let recorder = Arc::new(Recorder::default());
@@ -923,6 +940,7 @@ mod tests {
 
     #[test]
     fn without_a_budget_nothing_is_dropped_for_bytes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let handle = GossipHandle::new(secret(1).public());
         // the test reads the recorder after the handle takes a clone
         let recorder = Arc::new(Recorder::default());
@@ -950,6 +968,7 @@ mod tests {
     /// not stop the next one.
     #[test]
     fn an_oversized_packet_is_counted_and_the_next_one_is_read() {
+        let _guard = ::habilis_network_test_tracing::init();
         let me = secret(1).public();
         let handle = GossipHandle::new(me);
         let mut endpoint = handle.transport.bind().expect("bind");

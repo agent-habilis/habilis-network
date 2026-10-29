@@ -143,7 +143,6 @@ pub fn decode(bytes: &[u8]) -> Result<Frame<'_>, DecodeError> {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use iroh_base::SecretKey;
 
     use super::{
@@ -156,6 +155,7 @@ mod tests {
 
     #[test]
     fn a_frame_round_trips() {
+        let _guard = ::habilis_network_test_tracing::init();
         let datagram = [7u8; 1200];
 
         let bytes = Frame {
@@ -175,6 +175,7 @@ mod tests {
     /// The layout is a wire contract: a second build must read what this one writes.
     #[test]
     fn the_header_is_kind_version_destination_source() {
+        let _guard = ::habilis_network_test_tracing::init();
         let bytes = Frame {
             dst: id(1),
             src: id(2),
@@ -208,6 +209,7 @@ mod tests {
 
     #[test]
     fn the_largest_datagram_fits_and_one_more_byte_does_not() {
+        let _guard = ::habilis_network_test_tracing::init();
         let fits = vec![1u8; MAX_DATAGRAM_LEN];
         let over = vec![1u8; MAX_DATAGRAM_LEN + 1];
 
@@ -241,6 +243,7 @@ mod tests {
 
     #[test]
     fn an_empty_datagram_is_not_framed() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             Frame {
                 dst: id(1),
@@ -255,6 +258,7 @@ mod tests {
 
     #[test]
     fn a_mesh_message_is_not_a_frame() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             decode(br#"{"kind":"chat"}"#),
             Err(DecodeError::NotAFrame),
@@ -264,6 +268,7 @@ mod tests {
 
     #[test]
     fn an_unknown_version_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut bytes = Frame {
             dst: id(1),
             src: id(2),
@@ -283,6 +288,7 @@ mod tests {
 
     #[test]
     fn a_frame_with_no_datagram_is_truncated() {
+        let _guard = ::habilis_network_test_tracing::init();
         let bytes = Frame {
             dst: id(1),
             src: id(2),
@@ -310,6 +316,7 @@ mod tests {
 
     #[test]
     fn a_frame_over_the_gossip_budget_is_refused_on_read() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut bytes = vec![0u8; MAX_FRAME_LEN + 1];
         bytes[0] = FRAME_KIND;
         bytes[1] = FRAME_VERSION;
@@ -329,6 +336,7 @@ mod tests {
     /// It was green on its first run.
     #[test]
     fn the_largest_frame_equals_the_engine_message_cap() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             MAX_FRAME_LEN,
             habilis_network_util::consts::MAX_MESSAGE_SIZE,

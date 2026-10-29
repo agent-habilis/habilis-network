@@ -49,12 +49,12 @@ fn float(count: u64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::{Budget, Instant};
     #[test]
     fn a_budget_admits_one_second_of_burst_and_then_refuses() {
+        let _guard = ::habilis_network_test_tracing::init();
         let t0 = Instant::now();
         let mut budget = Budget::new(1000, t0);
 
@@ -69,6 +69,7 @@ mod tests {
 
     #[test]
     fn a_budget_refills_with_time_up_to_the_burst_and_no_more() {
+        let _guard = ::habilis_network_test_tracing::init();
         let t0 = Instant::now();
         let mut budget = Budget::new(1000, t0);
         assert!(
@@ -92,6 +93,7 @@ mod tests {
     /// and the budget does not starve: it passes close to that much.
     #[test]
     fn under_overload_a_budget_passes_the_rate_and_no_more() {
+        let _guard = ::habilis_network_test_tracing::init();
         let t0 = Instant::now();
         let mut budget = Budget::new(1000, t0);
         let mut admitted = 0u64;

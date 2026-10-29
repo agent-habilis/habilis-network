@@ -44,7 +44,6 @@ impl AddressLookup for GossipLookup {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use iroh::{SecretKey, TransportAddr};
     use n0_future::StreamExt;
 
@@ -64,28 +63,32 @@ mod tests {
 
     /// The first dial of a peer gets the gossip address, once a sink is attached.
     #[test]
-    async fn the_lookup_answers_a_peer_with_its_gossip_address_once_attached() {
-        let handle = GossipHandle::new(id(1));
-        assert_eq!(answer(&handle, id(2)).await, None, "before attach");
+    fn the_lookup_answers_a_peer_with_its_gossip_address_once_attached() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let handle = GossipHandle::new(id(1));
+            assert_eq!(answer(&handle, id(2)).await, None, "before attach");
 
-        Hub::new().join(&handle);
+            Hub::new().join(&handle);
 
-        assert_eq!(
-            answer(&handle, id(2)).await,
-            Some(vec![TransportAddr::Custom(crate::gossip_addr(id(2)))]),
-            "the lookup answers a peer with its gossip address once attached"
-        );
+            assert_eq!(
+                answer(&handle, id(2)).await,
+                Some(vec![TransportAddr::Custom(crate::gossip_addr(id(2)))]),
+                "the lookup answers a peer with its gossip address once attached"
+            );
+        });
     }
 
     #[test]
-    async fn the_lookup_does_not_answer_for_the_node_itself() {
-        let handle = GossipHandle::new(id(1));
-        Hub::new().join(&handle);
+    fn the_lookup_does_not_answer_for_the_node_itself() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let handle = GossipHandle::new(id(1));
+            Hub::new().join(&handle);
 
-        assert_eq!(
-            answer(&handle, id(1)).await,
-            None,
-            "the lookup does not answer for the node itself"
-        );
+            assert_eq!(
+                answer(&handle, id(1)).await,
+                None,
+                "the lookup does not answer for the node itself"
+            );
+        });
     }
 }
