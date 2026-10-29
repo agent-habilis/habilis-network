@@ -96,6 +96,10 @@ export function renameInFile(file: string, src: string): { text: string; hits: H
     if (src[offset - 1] === "." && src[offset + word.length] === "(") return word;
     // A macro variable ($x) and a fragment specifier (x:ident) are the macro's syntax, not a name.
     if (src[offset - 1] === "$" || /^\s*:\s*$/.test(src.slice(Math.max(0, offset - 8), offset))) return word;
+    // A path segment, such as addr::f or crate::addr, names a module or an item of a path: the
+    // module is a file, renamed by hand with its declaration. Only a local or a field is renamed.
+    if (src.slice(offset + word.length, offset + word.length + 2) === "::") return word;
+    if (src.slice(Math.max(0, offset - 2), offset) === "::") return word;
     // A module declaration names a file: the file is renamed by hand, with the module.
     if (/\bmod\s+$/.test(src.slice(Math.max(0, offset - 16), offset))) return word;
     const line = src.slice(0, offset).split("\n").length;

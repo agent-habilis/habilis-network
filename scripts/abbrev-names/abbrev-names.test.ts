@@ -56,3 +56,10 @@ describe("macro syntax and module names", () => {
     expect(text).toBe("mod ident;\nlet ident = 2;");
   });
 });
+
+describe("path segments", () => {
+  test("keeps a module in a path, which names a file", () => {
+    const { text } = renameInFile("a.rs", "pub use addr::gossip_addr;\nlet addr = addr::x();");
+    expect(text).toBe("pub use addr::gossip_addr;\nlet address = addr::x();");
+  });
+});
