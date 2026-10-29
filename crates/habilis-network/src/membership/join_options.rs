@@ -35,6 +35,17 @@ use tokio::sync::oneshot;
 /// have it land here, which is what stops the browser and the C caller growing
 /// two different option sets. `deny_unknown_fields` so a typo is an error rather
 /// than a silently loopback mesh; `default` so every field stays optional.
+///
+/// # Examples
+///
+/// A mesh and a topic cannot both name the mesh to join.
+///
+/// ```
+/// use habilis_network::membership::{JoinOptions, resolve_kind};
+///
+/// let options = JoinOptions::default().with_mesh(Some("a".to_owned())).with_topic(Some("b".to_owned()));
+/// assert!(resolve_kind(&options, None).is_err());
+/// ```
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 #[non_exhaustive]
@@ -150,6 +161,20 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
 }
 
 /// One live membership's moving parts.
+///
+/// # Examples
+///
+/// A membership is one member of a mesh, and it leaves the mesh when it departs. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::membership::{JoinOptions, Membership, depart, join, json_sink};
+///
+/// # async fn demo() {
+/// let (sink, _events) = json_sink();
+/// let member: Membership = join(&JoinOptions::default(), sink).await.expect("a member");
+/// depart(member.node).await.expect("depart");
+/// # }
+/// ```
 #[expect(
     missing_debug_implementations,
     reason = "Node's Debug is manual and says nothing a caller wants; the identity a reader would look for is on `node` already"
@@ -169,6 +194,17 @@ static NEW_MEMBERS_ARE_BLIND: atomic::AtomicBool = atomic::AtomicBool::new(false
 
 /// Tests only: make every member that [`join`] sets up from now on blind (`blind`), or not. The
 /// dial is process-wide, so a test turns it on around the opens that it means and off again.
+///
+/// # Examples
+///
+/// It sets whether the members that join from now on are blind.
+///
+/// ```
+/// use habilis_network::membership::blind_new_members;
+///
+/// blind_new_members(true);
+/// blind_new_members(false);
+/// ```
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub fn blind_new_members(
     // true makes every member that join sets up from now on blind
@@ -189,6 +225,21 @@ pub fn blind_new_members(
 /// # Errors
 /// An unparseable id/topic/nickname, conflicting selectors, a mesh no peer on
 /// this target could reach, or a failure standing up the endpoint and overlay.
+///
+/// # Examples
+///
+/// It joins a mesh with the given options and a sink for its events. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::membership::{JoinOptions, join, json_sink};
+///
+/// # async fn demo() {
+/// let (sink, _events) = json_sink();
+/// let options = JoinOptions::default().with_nick(Some("alice".to_owned()));
+/// let member = join(&options, sink).await.expect("a member");
+/// # let _ = member;
+/// # }
+/// ```
 pub async fn join<S: NodeSink + 'static>(
     options: &JoinOptions,
     // join takes a shared sink, which the event loop keeps
@@ -288,6 +339,18 @@ impl Membership {
 ///
 /// # Errors
 /// The event loop returned an error or panicked.
+///
+/// # Examples
+///
+/// It leaves the mesh of a membership. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::membership::{Membership, depart};
+///
+/// # async fn demo(member: Membership) {
+/// depart(member.node).await.expect("depart");
+/// # }
+/// ```
 pub async fn depart(node: Node<MembershipApp>) -> Result<(), SetupError> {
     n0_future::time::sleep(DEPARTURE_GRACE).await;
     node.leave()
@@ -305,6 +368,17 @@ pub async fn depart(node: Node<MembershipApp>) -> Result<(), SetupError> {
 /// # Errors
 /// Both `mesh` and `topic` set, an unparseable id or topic, an invalid mesh
 /// name, or a create whose advertise target is unreachable.
+///
+/// # Examples
+///
+/// Naming both a mesh and a topic is refused.
+///
+/// ```
+/// use habilis_network::membership::{JoinOptions, resolve_kind};
+///
+/// let options = JoinOptions::default().with_mesh(Some("a".to_owned())).with_topic(Some("b".to_owned()));
+/// assert!(resolve_kind(&options, None).is_err());
+/// ```
 pub fn resolve_kind(
     options: &JoinOptions,
     nickname: Option<Nickname>,

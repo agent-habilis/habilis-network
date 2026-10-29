@@ -16,6 +16,21 @@ use tokio::sync::mpsc;
 /// deliberately do *not* ride this channel: base64 inside JSON for every frame
 /// would inflate every byte on the mesh by a third to hand it to a language that
 /// already has a byte array.
+///
+/// # Examples
+///
+/// A membership event says what happened to the mesh, such as the member being ready.
+///
+/// ```
+/// use habilis_network::membership::MembershipEvent;
+///
+/// let event = MembershipEvent::Ready {
+///     mesh: "chat".to_owned(),
+///     name: "chat".to_owned(),
+///     nick: "alice".to_owned(),
+/// };
+/// assert!(matches!(event, MembershipEvent::Ready { .. }));
+/// ```
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -202,6 +217,17 @@ impl NodeSink for JsonSink {
 /// Unbounded, unlike the frame queue: dropping an app frame costs one
 /// message, where dropping a `left` leaves a phantom peer in the consumer's
 /// mirror forever. Events are small and rare.
+///
+/// # Examples
+///
+/// A new JSON sink has no event waiting.
+///
+/// ```
+/// use habilis_network::membership::json_sink;
+///
+/// let (_sink, mut events) = json_sink();
+/// assert!(events.try_recv().is_err());
+/// ```
 #[must_use]
 // the caller passes this Arc to join, which takes a shared sink
 pub fn json_sink() -> (Arc<impl NodeSink>, mpsc::UnboundedReceiver<String>) {

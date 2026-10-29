@@ -65,6 +65,20 @@ pub mod direct {
 /// taken right at `NeighborUp` skews toward `relay`; the periodic census
 /// reading is the representative one. Diagnostics only; other iroh apps
 /// wanted this too (sendme #67/#112, psyche #586).
+///
+/// # Examples
+///
+/// It reads the path that a connection to a node uses. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::iroh::{Endpoint, EndpointId};
+/// use habilis_network::net::conn_path;
+///
+/// # async fn demo(endpoint: &Endpoint, node: EndpointId) {
+/// let path = conn_path(endpoint, node).await;
+/// # let _ = path;
+/// # }
+/// ```
 pub async fn conn_path(
     endpoint: &Endpoint,
     node_id: EndpointId,
@@ -104,6 +118,20 @@ pub async fn conn_path(
 
 /// The transport addresses that carry traffic to `node_id` right now, or none when the endpoint
 /// knows no such peer.
+///
+/// # Examples
+///
+/// It lists the transport addresses that a connection to a node is using. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::iroh::{Endpoint, EndpointId};
+/// use habilis_network::net::active_transport_addrs;
+///
+/// # async fn demo(endpoint: &Endpoint, node: EndpointId) {
+/// let addrs = active_transport_addrs(endpoint, node).await;
+/// # let _ = addrs;
+/// # }
+/// ```
 pub async fn active_transport_addrs(
     endpoint: &Endpoint,
     node_id: EndpointId,
@@ -120,6 +148,20 @@ pub async fn active_transport_addrs(
 }
 
 /// The address that other peers dial to reach `endpoint`.
+///
+/// # Examples
+///
+/// It gives the address of a local endpoint, which a peer can dial. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::iroh::Endpoint;
+/// use habilis_network::net::endpoint_address;
+///
+/// # fn demo(endpoint: &Endpoint) {
+/// let address = endpoint_address(endpoint);
+/// # let _ = address;
+/// # }
+/// ```
 #[must_use]
 pub fn endpoint_address(endpoint: &Endpoint) -> EndpointAddr {
     endpoint.addr()

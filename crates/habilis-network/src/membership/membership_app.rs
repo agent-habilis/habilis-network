@@ -69,6 +69,17 @@ pub const MAX_MSG: usize = ESCAPED_BUDGET / 2;
 
 /// Whether `text` fits one `msg` frame. The engine's own check in `send_app` is
 /// the final word; this answers early, without building and signing a frame.
+///
+/// # Examples
+///
+/// A short message fits in one frame, and a megabyte does not.
+///
+/// ```
+/// use habilis_network::membership::msg_fits;
+///
+/// assert!(msg_fits("hello"));
+/// assert!(!msg_fits(&"x".repeat(1 << 20)));
+/// ```
 #[must_use]
 pub fn msg_fits(text: &str) -> bool {
     escaped_len(text) <= ESCAPED_BUDGET
@@ -79,6 +90,18 @@ pub fn msg_fits(text: &str) -> bool {
 /// # Errors
 /// `text` holds a control character other than tab, newline or carriage
 /// return, or does not fit one frame (see [`msg_fits`]).
+///
+/// # Examples
+///
+/// A message becomes a body if it fits, and an oversize message is refused.
+///
+/// ```
+/// use habilis_network::membership::msg_body;
+///
+/// let body = msg_body("hello").expect("a body");
+/// assert!(!body.as_str().is_empty());
+/// assert!(msg_body(&"x".repeat(1 << 20)).is_err());
+/// ```
 pub fn msg_body(text: &str) -> Result<MessageBody, crate::transport::SendError> {
     if !msg_fits(text) {
         return Err(crate::transport::SendError::Oversize(
@@ -92,6 +115,17 @@ pub fn msg_body(text: &str) -> Result<MessageBody, crate::transport::SendError> 
 ///
 /// # Errors
 /// `to` is not a valid nickname.
+///
+/// # Examples
+///
+/// No addressee means a broadcast, and a nickname names one member.
+///
+/// ```
+/// use habilis_network::membership::parse_to;
+///
+/// assert!(parse_to(None).expect("no addressee").is_none());
+/// assert!(parse_to(Some("bob")).expect("a nickname").is_some());
+/// ```
 pub fn parse_to(to: Option<&str>) -> Result<Option<Nickname>, crate::transport::SendError> {
     to.map(Nickname::try_new)
         .transpose()
@@ -109,6 +143,22 @@ fn escaped_len(text: &str) -> usize {
 }
 
 /// One surfaced `msg`, flattened for a consumer outside the engine.
+///
+/// # Examples
+///
+/// An inbound message names its author, and it says whether it was sent to this member. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::membership::Membership;
+///
+/// # async fn demo(mut member: Membership) {
+/// while let Some(inbound) = member.inbound.recv().await {
+///     if inbound.directed {
+///         println!("{} wrote to us", inbound.nick);
+///     }
+/// }
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Inbound {
@@ -123,6 +173,19 @@ pub struct Inbound {
 /// A request pushed into the event loop from the consumer's side. Every arm
 /// carries its own reply channel: a foreign caller needs the outcome of a send
 /// as a return code, not a log line.
+///
+/// # Examples
+///
+/// A request asks the membership for something, and the reply comes back on a channel. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::membership::{Membership, Request};
+///
+/// # async fn demo(member: &Membership) {
+/// let peers = member.request(|reply| Request::Peers { reply }).await.unwrap_or_default();
+/// # let _ = peers;
+/// # }
+/// ```
 #[expect(
     missing_debug_implementations,
     reason = "the oneshot reply senders carry no Debug bound worth adding for a value that never reaches a log line"
@@ -502,6 +565,19 @@ pub use habilis_network_iroh_webrtc_transport::Rung;
 /// being written anywhere: a browser's `js_sys::Function` is neither `Send`
 /// nor `Sync`, and [`NodeApp`] is `Send`, so the driver could not keep one even
 /// if it wanted to. Consumers drain the queue on their own schedule.
+///
+/// # Examples
+///
+/// The app of a membership node serves its requests, and depart takes that node. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::membership::{Membership, depart};
+///
+/// # async fn demo(member: Membership) {
+/// // member.node is the node that runs a MembershipApp.
+/// depart(member.node).await.expect("depart");
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct MembershipApp {
     inbound: mpsc::Sender<Inbound>,
@@ -1076,6 +1152,15 @@ impl NodeDriver for MembershipApp {
 
 /// Tests only: the member that a request names is not in the book of this node. A request on it
 /// does nothing; the node says so, and the test waits for the `PeerInfo` that brings the member.
+///
+/// # Examples
+///
+/// A name that is not a member of the mesh is reported with this type.
+///
+/// ```ignore
+/// // The engine builds this value when a peer is unknown; its field is private.
+/// let peer = UnknownPeer("ghost".to_owned());
+/// ```
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
