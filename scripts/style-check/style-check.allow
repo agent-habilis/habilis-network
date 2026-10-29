@@ -454,17 +454,6 @@ untyped_long_chain_let|crates/habilis-network/tests/unknown_peer_requests_loopba
 
 # pub_vec_param: a public function takes a Vec. The guide prefers impl IntoIterator when the function
 # only iterates. These keep the list, sort it, or hand it on as an owned value.
-pub_vec_param|crates/habilis-network-chunks/src/chunk_map.rs|1|from_leaves: checks the length, then keeps the leaves in the tree
-pub_vec_param|crates/habilis-network-iroh-multihop-transport/src/lib.rs|2|with_protocols: keeps the owned protocol handlers in the config; link_vector: sorts and filters the links in place
-pub_vec_param|crates/habilis-network-iroh-multihop-transport/src/topology.rs|1|signed: keeps the links in the signed link vector
-pub_vec_param|crates/habilis-network-iroh-webrtc-transport/src/web_rtc_handle.rs|1|attach_parts: keeps the owned JavaScript callbacks of the session
-pub_vec_param|crates/habilis-network-iroh-webrtc-transport/src/web/transport/browser_hub_transport.rs|1|attach: takes the owned JavaScript callbacks, which it mutates
-pub_vec_param|crates/habilis-network-netplay/src/p2p_session.rs|1|new: keeps the owned player list of the session
-pub_vec_param|crates/habilis-network-protocol/src/reassembly/shard_cache.rs|1|insert: keeps the owned frames of the shard group in the cache
-pub_vec_param|crates/habilis-network-wasm/src/stream_node.rs|1|write: the owned bytes handed to the stream at the JavaScript edge
-pub_vec_param|crates/habilis-network/src/daemon/setup/injected_endpoint.rs|1|bind: hands the owned ALPN list to the endpoint
-pub_vec_param|crates/habilis-network/src/daemon/setup/setup_params.rs|1|with_protocols: keeps the owned protocol handlers
-pub_vec_param|crates/habilis-network/src/lookup/endpoint.rs|1|build_endpoint: hands the owned ALPN list to the endpoint
 
 # pub_impl_into: a public function takes impl Into<T>. A library may do so where call-site ergonomics
 # matter most. These are the validating constructors that take a &str or a String, and the signaling

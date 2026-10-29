@@ -370,7 +370,7 @@ function countPubVecReturn(raw: string): number {
   return count;
 }
 
-// A public fn with a Vec parameter. The guide prefers impl IntoIterator when the fn only iterates; a fn that keeps the list needs the Vec.
+// A public fn whose body only iterates a Vec parameter. A Vec that the body stores or mutates keeps its type.
 function countPubVecParam(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   let count = 0;
@@ -382,9 +382,30 @@ function countPubVecParam(raw: string): number {
       if (text[i] === "(") depth++;
       else if (text[i] === ")" && --depth === 0) break;
     }
-    if (/:\s*Vec\s*</.test(text.slice(open + 1, i))) count++;
+    const params = text.slice(open + 1, i);
+    const body = text.slice(text.indexOf("{", i), matchingBrace(text, text.indexOf("{", i)));
+    for (const p of params.matchAll(/(\w+)\s*:\s*Vec\s*</g)) {
+      if (iteratesOnly(body, p[1]!)) count++;
+    }
   }
   return count;
+}
+
+// The index just past the brace that closes the one at `open`.
+function matchingBrace(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}" && --depth === 0) return i + 1;
+  }
+  return text.length;
+}
+
+// True when every use of `name` in `body` borrows it to iterate: `name.iter()` or `for x in &name`. A by-value loop moves the items on.
+function iteratesOnly(body: string, name: string): boolean {
+  const uses = body.match(new RegExp(`\\b${name}\\b`, "g"))?.length ?? 0;
+  const iters = body.match(new RegExp(`\\b${name}\\s*\\.\\s*iter\\s*\\(|\\bin\\s+&${name}\\b`, "g"))?.length ?? 0;
+  return uses > 0 && uses === iters;
 }
 
 // A public fn with an `impl Into<...>` parameter. The guide allows it in a library when call-site ergonomics matter most.

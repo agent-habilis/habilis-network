@@ -394,20 +394,35 @@ test("pub_vec_return: an allowed row with its count passes", () => {
 });
 
 // The pub_vec_param rule: a public function takes a Vec parameter, outside tests and examples.
-test("pub_vec_param: a pub fn with a Vec parameter counts", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(xs: Vec<u8>) -> usize { xs.len() }", 1);
+test("pub_vec_param: a pub fn that only iterates a Vec parameter counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(xs: Vec<u8>) -> usize { xs.iter().count() }", 1);
 });
 test("pub_vec_param: a multi-line parameter list counts", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(\n    a: u8,\n    xs: Vec<u8>,\n) -> usize {\n    xs.len()\n}", 1);
+  expectExit("crates/demo/src/lib.rs", "pub fn f(\n    a: u8,\n    xs: Vec<u8>,\n) -> usize {\n    xs.iter().count()\n}", 1);
 });
 test("pub_vec_param: an impl IntoIterator is clean", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(xs: impl IntoIterator<Item = u8>) -> usize { xs.into_iter().count() }", 0);
 });
+test("pub_vec_param: a Vec that the body iterates counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(xs: Vec<u8>) -> usize { xs.iter().count() }", 1);
+});
+test("pub_vec_param: a for loop that borrows the Vec counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(xs: Vec<u8>) -> usize { let mut n = 0; for _ in &xs { n += 1; } n }", 1);
+});
+test("pub_vec_param: a by-value for loop moves the items on and is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(xs: Vec<u8>) -> Vec<u8> { let mut out = Vec::new(); for x in xs { out.push(x); } out }", 0);
+});
+test("pub_vec_param: a Vec that the body stores is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(xs: Vec<u8>) -> Vec<u8> { xs }", 0);
+});
+test("pub_vec_param: a Vec that the body mutates is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(mut xs: Vec<u8>) -> usize { xs.retain(|x| *x > 1); xs.len() }", 0);
+});
 test("pub_vec_param: a private fn is clean", () => {
-  expectExit("crates/demo/src/lib.rs", "fn f(xs: Vec<u8>) -> usize { xs.len() }", 0);
+  expectExit("crates/demo/src/lib.rs", "fn f(xs: Vec<u8>) -> usize { xs.iter().count() }", 0);
 });
 test("pub_vec_param: an allowed row with its count passes", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(xs: Vec<u8>) -> usize { xs.len() }", 0, "pub_vec_param|crates/demo/src/lib.rs|1|keeps the list");
+  expectExit("crates/demo/src/lib.rs", "pub fn f(xs: Vec<u8>) -> usize { xs.iter().count() }", 0, "pub_vec_param|crates/demo/src/lib.rs|1|the list is iterated");
 });
 
 // The pub_impl_into rule: a public function takes impl Into<T>, outside tests and examples.
