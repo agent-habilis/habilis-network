@@ -49,6 +49,17 @@ enum StateOp {
 ///
 /// # Errors
 /// Serialization failure or a body exceeding the size limit.
+///
+/// # Examples
+///
+/// A merge body is not a change, so it carries no change bytes.
+///
+/// ```
+/// use habilis_network_doc::wire::{merge_body, parse_change_body};
+///
+/// let body = merge_body(serde_json::json!({"title": "hi"})).expect("a merge body");
+/// assert!(parse_change_body(body.as_str()).is_none());
+/// ```
 #[cfg(any(test, feature = "adversarial"))]
 pub fn merge_body(merge: Value) -> Result<MessageBody, DocError> {
     let json = serde_json::to_string(&StateOp::Merge { merge }).map_err(DocError::encode)?;
@@ -62,6 +73,17 @@ pub fn merge_body(merge: Value) -> Result<MessageBody, DocError> {
 ///
 /// # Errors
 /// Serialization failure or a body exceeding the size limit.
+///
+/// # Examples
+///
+/// A change body carries its change bytes, and they read back unchanged.
+///
+/// ```
+/// use habilis_network_doc::wire::{change_body, parse_change_body};
+///
+/// let body = change_body(&[1, 2], None).expect("a change body");
+/// assert_eq!(parse_change_body(body.as_str()), Some(vec![1, 2]));
+/// ```
 pub fn change_body(change: &[u8], merge: Option<&Value>) -> Result<MessageBody, DocError> {
     let json = serde_json::to_string(&StateOp::Change {
         data: bs58::encode(change).into_string(),
@@ -75,6 +97,17 @@ pub fn change_body(change: &[u8], merge: Option<&Value>) -> Result<MessageBody, 
 /// non-`change` body (a legacy `merge`, an `enc` envelope, or anything that
 /// doesn't parse) — such a body is a no-op on the automerge doc. Call
 /// [`decrypt_body`] first for a passworded mesh's `enc` bodies.
+///
+/// # Examples
+///
+/// A change body reads back to the change bytes it carries.
+///
+/// ```
+/// use habilis_network_doc::wire::{change_body, parse_change_body};
+///
+/// let body = change_body(&[1, 2], None).expect("a change body");
+/// assert_eq!(parse_change_body(body.as_str()), Some(vec![1, 2]));
+/// ```
 #[must_use]
 pub fn parse_change_body(body: &str) -> Option<Vec<u8>> {
     match serde_json::from_str::<StateOp>(body).ok()? {
@@ -89,6 +122,21 @@ pub fn parse_change_body(body: &str) -> Option<Vec<u8>> {
 ///
 /// # Errors
 /// Serialization or `MessageBody` validation of the envelope fails.
+///
+/// # Examples
+///
+/// An encrypted body opens with its key, and only with its key.
+///
+/// ```
+/// use habilis_network_doc::wire::{decrypt_body, encrypt_body};
+/// use habilis_network_protocol::MessageBody;
+/// use habilis_network_protocol::SymmetricKey;
+///
+/// let key = SymmetricKey::from([9u8; 32]);
+/// let plain = MessageBody::try_new("hello").expect("a body");
+/// let sealed = encrypt_body(&plain, &key).expect("a sealed body");
+/// assert_eq!(decrypt_body(sealed.as_str(), Some(&key)).as_deref(), Some("hello"));
+/// ```
 pub fn encrypt_body(plain: &MessageBody, key: &SymmetricKey) -> Result<MessageBody, DocError> {
     let blob = habilis_network_protocol::seal_error::seal_symmetric(key, plain.as_str().as_bytes());
     let json = serde_json::to_string(&StateOp::Enc {
@@ -104,6 +152,21 @@ pub fn encrypt_body(plain: &MessageBody, key: &SymmetricKey) -> Result<MessageBo
 /// Without a key (passwordless) a body is returned unchanged. `None` also when
 /// an `enc` body can't be opened (wrong key / malformed) — the caller treats a
 /// `None` as an opaque no-op (state/meta) or a drop (chat).
+///
+/// # Examples
+///
+/// An encrypted body does not open without its key.
+///
+/// ```
+/// use habilis_network_doc::wire::{decrypt_body, encrypt_body};
+/// use habilis_network_protocol::MessageBody;
+/// use habilis_network_protocol::SymmetricKey;
+///
+/// let key = SymmetricKey::from([9u8; 32]);
+/// let plain = MessageBody::try_new("hello").expect("a body");
+/// let sealed = encrypt_body(&plain, &key).expect("a sealed body");
+/// assert!(decrypt_body(sealed.as_str(), None).is_none());
+/// ```
 #[must_use]
 pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
     match serde_json::from_str::<StateOp>(body) {

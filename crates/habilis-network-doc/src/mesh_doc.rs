@@ -30,6 +30,16 @@ struct Refusals {
 }
 
 /// The outcome of ingesting one frame into a [`MeshDoc`].
+///
+/// # Examples
+///
+/// A change that cannot apply yet is buffered until its parents arrive.
+///
+/// ```
+/// use habilis_network_doc::Ingested;
+///
+/// assert!(matches!(Ingested::Buffered, Ingested::Buffered));
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Ingested {
@@ -70,6 +80,16 @@ pub enum Ingested {
 /// gate**. Two peers with different `map` values vivify different maps, automerge
 /// discards one, and a peer's entry is silently erased. Changing either key on a
 /// live mesh is a format break.
+///
+/// # Examples
+///
+/// A gate names the map and the field whose own writes it skips.
+///
+/// ```
+/// use habilis_network_doc::SelfWriteGate;
+///
+/// let _gate = SelfWriteGate::new("state".to_owned(), "field");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SelfWriteGate {
@@ -108,6 +128,17 @@ struct Pending {
 
 /// One channel's automerge document plus the bookkeeping to apply changes in
 /// causal order and re-serve them.
+///
+/// # Examples
+///
+/// A new document holds no change.
+///
+/// ```
+/// use habilis_network_doc::MeshDoc;
+///
+/// let doc = MeshDoc::new_ungated();
+/// assert_eq!(doc.change_count(), 0);
+/// ```
 #[derive(Debug)]
 pub struct MeshDoc {
     // Boxed: an `Automerge` is large inline, and two `MeshDoc`s live in the

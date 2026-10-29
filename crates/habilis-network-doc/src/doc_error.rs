@@ -5,6 +5,17 @@ use std::fmt;
 use habilis_network_protocol::message::BodyError;
 
 /// Why a shared-state change could not be built or wrapped for the wire.
+///
+/// # Examples
+///
+/// A document body that is not a JSON object returns this error.
+///
+/// ```
+/// use habilis_network_doc::DocError;
+///
+/// let error = DocError::NotAnObject;
+/// assert!(matches!(error, DocError::NotAnObject));
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]
