@@ -38,6 +38,30 @@ use crate::rollback_error::RollbackError;
 use crate::sync::Sync;
 
 /// A local session that re-simulates every frame and compares checksums.
+///
+/// # Examples
+///
+/// A test session advances without a peer and checks that its replays match.
+///
+/// ```
+/// use habilis_network_netplay::{Frame, PlayerHandle, SyncTestSession};
+///
+/// use habilis_network_netplay::Config;
+///
+/// struct Game;
+///
+/// impl Config for Game {
+///     type Input = u8;
+///     type State = u32;
+///     type Address = u8;
+/// }
+///
+/// let mut session = SyncTestSession::<Game>::new(2, 1);
+/// session.add_input(PlayerHandle::new(0), 1).expect("player 0 exists");
+/// session.add_input(PlayerHandle::new(1), 2).expect("player 1 exists");
+/// session.advance_frame().expect("no desync");
+/// assert_eq!(session.current_frame(), Frame::new(1));
+/// ```
 pub struct SyncTestSession<T: Config> {
     sync: Sync<T>,
     num_players: usize,

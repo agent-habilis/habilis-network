@@ -20,6 +20,17 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// `Serialize` and `Deserialize` both refuse it: the `-1` that older peers
 /// sent for "no frame" is a parse error, and [`Frame::NULL`] cannot leave as
 /// `-1`.
+///
+/// # Examples
+///
+/// A frame keeps its number, and later frames sort after earlier ones.
+///
+/// ```
+/// use habilis_network_netplay::Frame;
+///
+/// assert_eq!(Frame::new(3).get(), 3);
+/// assert!(Frame::new(2) < Frame::new(3));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Frame(i32);
 
@@ -127,6 +138,16 @@ impl TryFrom<Frame> for usize {
 /// re-simulate if the guess turns out wrong. Apps mostly ignore this, but it
 /// is worth honouring for effects that shouldn't fire twice — a sound cue on
 /// a predicted input may be re-triggered after a rollback.
+///
+/// # Examples
+///
+/// A real input and a guessed input have different statuses.
+///
+/// ```
+/// use habilis_network_netplay::InputStatus;
+///
+/// assert_ne!(InputStatus::Confirmed, InputStatus::Predicted);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InputStatus {

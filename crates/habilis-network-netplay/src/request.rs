@@ -22,6 +22,19 @@ use crate::frame::{Frame, InputStatus};
 ///
 /// Cheap to clone — it is a handle to one shared slot, not a copy of the
 /// state.
+///
+/// # Examples
+///
+/// A cell keeps the state that a save request stored, with its frame.
+///
+/// ```
+/// use habilis_network_netplay::{Frame, StateCell};
+///
+/// let cell: StateCell<u32> = StateCell::default();
+/// cell.save(Frame::new(1), 7, Some(9));
+/// assert_eq!(cell.frame(), Frame::new(1));
+/// assert_eq!(cell.load(), Some(7));
+/// ```
 pub struct StateCell<S>(Arc<Mutex<CellInner<S>>>);
 
 struct CellInner<S> {
@@ -117,6 +130,34 @@ impl<S: Clone> StateCell<S> {
 /// One instruction from the session to the game.
 ///
 /// See the module docs: fulfil in order, fulfil all of them.
+///
+/// # Examples
+///
+/// The session asks for a save, which the caller fulfils, and then it advances.
+///
+/// ```
+/// use habilis_network_netplay::{Frame, PlayerHandle, Request, SyncTestSession};
+///
+/// use habilis_network_netplay::Config;
+///
+/// struct Game;
+///
+/// impl Config for Game {
+///     type Input = u8;
+///     type State = u32;
+///     type Address = u8;
+/// }
+///
+/// let mut session = SyncTestSession::<Game>::new(2, 1);
+/// session.add_input(PlayerHandle::new(0), 1).expect("player 0 exists");
+/// session.add_input(PlayerHandle::new(1), 2).expect("player 1 exists");
+/// for request in session.advance_frame().expect("no desync") {
+///     if let Request::SaveState { cell, frame } = request {
+///         cell.save(frame, 0, Some(0));
+///     }
+/// }
+/// assert_eq!(session.current_frame(), Frame::new(1));
+/// ```
 #[non_exhaustive]
 pub enum Request<T: Config> {
     /// Save the current state into `cell`, tagged with `frame`.

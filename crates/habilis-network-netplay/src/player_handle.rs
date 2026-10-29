@@ -7,6 +7,17 @@
 /// slot and the length of the roster are both `usize`, which is why a handle
 /// is not a bare `usize`: a frame count, a delay or a queue length can sit
 /// beside it in one signature.
+///
+/// # Examples
+///
+/// A handle names one roster slot, by its index.
+///
+/// ```
+/// use habilis_network_netplay::PlayerHandle;
+///
+/// let handle = PlayerHandle::new(1);
+/// assert_eq!(handle.index(), 1);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PlayerHandle(usize);
 

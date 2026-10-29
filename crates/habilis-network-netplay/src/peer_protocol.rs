@@ -47,6 +47,16 @@ const DISCONNECT_TIMEOUT_TICKS: u32 = 600;
 const QUALITY_REPORT_INTERVAL: u32 = 60;
 
 /// Where a peer is in its lifecycle.
+///
+/// # Examples
+///
+/// A peer that is handshaking has not gone silent.
+///
+/// ```
+/// use habilis_network_netplay::PeerState;
+///
+/// assert_ne!(PeerState::Syncing, PeerState::Disconnected);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PeerState {

@@ -1,6 +1,16 @@
 //! Whether a session is still handshaking or playing.
 
 /// Whether the session is still handshaking or actually playing.
+///
+/// # Examples
+///
+/// A session that waits for its peers is not yet running.
+///
+/// ```
+/// use habilis_network_netplay::SessionState;
+///
+/// assert_ne!(SessionState::Synchronizing, SessionState::Running);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SessionState {

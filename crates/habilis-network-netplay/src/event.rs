@@ -3,6 +3,17 @@
 use crate::frame::Frame;
 
 /// Something the application should know about.
+///
+/// # Examples
+///
+/// A peer that goes silent is reported by its address.
+///
+/// ```
+/// use habilis_network_netplay::Event;
+///
+/// let event = Event::Disconnected { address: "bob" };
+/// assert!(matches!(event, Event::Disconnected { address: "bob" }));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 #[non_exhaustive]
 pub enum Event<Peer> {

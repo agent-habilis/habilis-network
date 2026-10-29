@@ -30,6 +30,39 @@ use crate::sync::Sync;
 use crate::transport::{Message, Transport};
 
 /// A peer-to-peer rollback session.
+///
+/// # Examples
+///
+/// A new session waits until its peers have synchronized.
+///
+/// ```
+/// use habilis_network_netplay::{P2PSession, PlayerHandle, SessionState};
+///
+/// use habilis_network_netplay::Config;
+///
+/// struct Game;
+///
+/// impl Config for Game {
+///     type Input = u8;
+///     type State = u32;
+///     type Address = u8;
+/// }
+///
+/// use habilis_network_netplay::{Message, Transport};
+///
+/// struct Silent;
+///
+/// impl Transport<Game> for Silent {
+///     fn send_to(&mut self, _message: &Message<u8>, _address: &u8) {}
+///
+///     fn receive_all(&mut self) -> Vec<(u8, Message<u8>)> {
+///         Vec::new()
+///     }
+/// }
+///
+/// let session = P2PSession::new(vec![1, 2], PlayerHandle::new(0), Silent, 8, 0, 42).expect("a session");
+/// assert!(session.state() == SessionState::Synchronizing);
+/// ```
 pub struct P2PSession<T: Config, Link: Transport<T>> {
     sync: Sync<T>,
     peers: Vec<PeerProtocol<T>>,

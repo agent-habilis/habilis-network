@@ -4,6 +4,28 @@ use crate::frame::Frame;
 use crate::player_handle::PlayerHandle;
 
 /// Errors a rollback session can return.
+///
+/// # Examples
+///
+/// An input for a player that is not in the match returns this error.
+///
+/// ```
+/// use habilis_network_netplay::{PlayerHandle, RollbackError, SyncTestSession};
+///
+/// use habilis_network_netplay::Config;
+///
+/// struct Game;
+///
+/// impl Config for Game {
+///     type Input = u8;
+///     type State = u32;
+///     type Address = u8;
+/// }
+///
+/// let mut session = SyncTestSession::<Game>::new(2, 1);
+/// let error = session.add_input(PlayerHandle::new(9), 1).unwrap_err();
+/// assert!(matches!(error, RollbackError::InvalidPlayer(_)));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 #[non_exhaustive]
 #[must_use]
