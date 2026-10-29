@@ -38,6 +38,7 @@ impl<S> Clone for StateCell<S> {
 
 impl<S> Default for StateCell<S> {
     fn default() -> Self {
+        // each clone of the cell shares this state
         Self(Arc::new(Mutex::new(CellInner {
             frame: Frame::NULL,
             state: None,

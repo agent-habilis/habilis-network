@@ -111,6 +111,7 @@ fn start_logging(path: &Path) -> Result<()> {
     let file = std::fs::File::create(path)?;
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        // the subscriber calls the writer from each thread, so the file is shared
         .with_writer(Arc::new(file))
         .with_ansi(false)
         .init();

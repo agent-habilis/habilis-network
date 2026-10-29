@@ -13,6 +13,7 @@ use crate::mesh::outbound::Outbound;
 ///
 /// See [`RollbackDriver::new`].
 pub struct PendingTransport<T: Config> {
+    // the pending transport shares the mailboxes with the driver
     mailboxes: Arc<Mailboxes<T>>,
 }
 
@@ -25,6 +26,7 @@ impl<T: Config> std::fmt::Debug for PendingTransport<T> {
 }
 
 impl<T: Config> PendingTransport<T> {
+    // the pending transport shares the mailboxes with the driver
     pub(super) fn new(mailboxes: Arc<Mailboxes<T>>) -> Self {
         Self { mailboxes }
     }

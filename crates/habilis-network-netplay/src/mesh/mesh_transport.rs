@@ -16,6 +16,7 @@ use crate::transport::{Message, Transport};
 /// Addresses are peers' public keys — the signed identity on every frame,
 /// not the cosmetic nickname.
 pub struct MeshTransport<T: Config> {
+    // the transport shares the mailboxes with the driver and the pending transport
     mailboxes: Arc<Mailboxes<T>>,
     outbox: mpsc::Sender<Outbound>,
 }
@@ -49,6 +50,7 @@ impl<T: Config> std::fmt::Debug for MeshTransport<T> {
 }
 
 impl<T: Config> MeshTransport<T> {
+    // the transport shares the mailboxes with the driver and the pending transport
     pub(super) fn new(mailboxes: Arc<Mailboxes<T>>, outbox: mpsc::Sender<Outbound>) -> Self {
         Self { mailboxes, outbox }
     }

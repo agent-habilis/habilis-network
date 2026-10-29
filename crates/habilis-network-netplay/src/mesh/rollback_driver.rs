@@ -27,6 +27,7 @@ pub const LOBBY_TAG: &str = "rb_lobby";
 /// [`MeshTransport`](super::MeshTransport) handle for the session, and give
 /// the driver to the node.
 pub struct RollbackDriver<T: Config> {
+    // the driver shares the mailboxes with the transports it hands out
     mailboxes: Arc<Mailboxes<T>>,
 }
 
@@ -38,7 +39,9 @@ impl<T: Config> std::fmt::Debug for RollbackDriver<T> {
     }
 }
 
+// the driver takes the mailboxes that its transports share
 impl<T: Config> From<Arc<Mailboxes<T>>> for RollbackDriver<T> {
+    // the driver takes the mailboxes that its transports share
     fn from(mailboxes: Arc<Mailboxes<T>>) -> Self {
         Self { mailboxes }
     }
@@ -60,6 +63,7 @@ impl<T: Config> RollbackDriver<T> {
     /// has been spawned, and the node needs the driver to spawn.
     #[must_use]
     pub fn new() -> (Self, PendingTransport<T>) {
+        // the driver and the pending transport share the mailboxes
         let mailboxes = Arc::new(Mailboxes::new());
         (
             Self::from(Arc::clone(&mailboxes)),
