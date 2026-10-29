@@ -60,8 +60,9 @@ impl Args {
 mod tests {
     use super::{Args, Lookup, Parser, Transport};
 
+    use std::iter;
     fn parse(args: &[&str]) -> Args {
-        Args::try_parse_from(std::iter::once("habilis-network-stream").chain(args.iter().copied()))
+        Args::try_parse_from(iter::once("habilis-network-stream").chain(args.iter().copied()))
             .expect("valid args")
     }
 

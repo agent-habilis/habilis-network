@@ -9,6 +9,10 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use habilis_network::net::test_relay;
+#[cfg(unix)]
+use std::process;
+use std::thread;
+use tokio::task;
 const BINARY: &str = env!("CARGO_BIN_EXE_habilis-network-stream");
 /// A relay dial, a direct path and the whole payload on one machine.
 const BUDGET: Duration = Duration::from_mins(1);
@@ -37,7 +41,7 @@ fn producer(relay: &str) -> (Child, mpsc::Receiver<serde_json::Value>) {
     let mut child: Child = command.spawn().expect("start the producer");
     let stderr = child.stderr.take().expect("stderr");
     let (notes, received) = mpsc::channel();
-    std::thread::spawn(move || {
+    thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             if let Ok(note) = serde_json::from_str(&line)
                 && notes.send(note).is_err()
@@ -68,7 +72,7 @@ fn exit_code(child: &mut Child) -> Option<i32> {
         if let Some(status) = child.try_wait().expect("wait") {
             return status.code();
         }
-        std::thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(50));
     }
     let _ = child.kill();
     panic!("the process did not exit in time");
@@ -80,14 +84,14 @@ fn bytes_piped_in_come_out_of_another_binary_byte_exact() {
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
         let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
         let url = url.to_string();
-        tokio::task::spawn_blocking(move || {
+        task::spawn_blocking(move || {
             let sent = payload(8 * 1024 * 1024);
             let (mut producer, notes) = producer(&url);
             // Written now, before any reader exists, and closed: the producer, not
             // the caller, waits for the reader.
             let mut stdin = producer.stdin.take().expect("stdin");
             let input = sent.clone();
-            std::thread::spawn(move || stdin.write_all(&input));
+            thread::spawn(move || stdin.write_all(&input));
 
             let ready = note(&notes, "ready", "");
             let hash = ready["hash"].as_str().expect("a hash").to_owned();
@@ -128,7 +132,7 @@ fn a_producer_stopped_by_sigterm_abandons_its_reader_at_once() {
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
         let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
         let url = url.to_string();
-        tokio::task::spawn_blocking(move || {
+        task::spawn_blocking(move || {
             let (mut producer, notes) = producer(&url);
             // Held open: the input never ends by itself.
             let _stdin = producer.stdin.take().expect("stdin");
@@ -146,7 +150,7 @@ fn a_producer_stopped_by_sigterm_abandons_its_reader_at_once() {
 
             let stopped = Instant::now();
             let pid = producer.id().to_string();
-            let killed: std::process::ExitStatus = Command::new("kill")
+            let killed: process::ExitStatus = Command::new("kill")
                 .args(["-TERM", &pid])
                 .status()
                 .expect("kill");
