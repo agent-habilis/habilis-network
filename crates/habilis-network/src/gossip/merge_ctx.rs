@@ -66,7 +66,7 @@ use tokio::sync::oneshot;
 /// failure, and errors if the unmeshed buffer is full.
 pub async fn send_app(
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     frame: Verified,
     class: AppClass,
 ) -> Result<crate::transport::Delivered, crate::transport::SendError> {
@@ -85,9 +85,9 @@ pub async fn send_app(
         // `to` — the same routing the application's send path rides. A frame
         // held off a relay-only peer is parked, not failed: the proven direct
         // path flushes it (see `gossip::recv::flush_pending`).
-        match crate::transport::deliver(&frame, bytes.clone(), state, ctx.sender).await {
+        match crate::transport::deliver(&frame, bytes.clone(), state, context.sender).await {
             Err(crate::transport::SendError::Held { .. }) => {
-                park_and_offer(state, ctx, &frame, &bytes);
+                park_and_offer(state, context, &frame, &bytes);
             }
             outcome => {
                 if outcome.is_ok() {
@@ -97,7 +97,7 @@ pub async fn send_app(
             }
         }
     } else {
-        park_and_offer(state, ctx, &frame, &bytes);
+        park_and_offer(state, context, &frame, &bytes);
     }
     if state.pending_outbound.push((frame.clone(), bytes)) {
         // Buffered until the meshed edge flushes it through the same send
@@ -116,8 +116,8 @@ pub async fn send_app(
 /// across the `await` of [`send_app`]: the app is not `Sync`, and a future that holds it is not
 /// `Send`.
 #[must_use]
-pub fn app_frame(ctx: &HandlerCtx<'_>, params: AppFrameParams) -> Verified {
-    Message::new_app(ctx.mesh, ctx.author, params).sign(ctx.identity)
+pub fn app_frame(context: &HandlerCtx<'_>, params: AppFrameParams) -> Verified {
+    Message::new_app(context.mesh, context.author, params).sign(context.identity)
 }
 
 /// Fire-and-forget gossip broadcast. Serialize errors are swallowed:
@@ -125,9 +125,9 @@ pub fn app_frame(ctx: &HandlerCtx<'_>, params: AppFrameParams) -> Verified {
 /// failed serialize must not block the daemon. A failed *broadcast* is
 /// logged — it means the gossip actor refused the send (the wedge the
 /// roster-collapse soak hit silently), not a routine empty gossip.
-pub async fn broadcast_msg(sender: &MeshSender, msg: &Verified) {
-    messages::log_out(msg);
-    if let Ok(bytes) = msg.serialize()
+pub async fn broadcast_msg(sender: &MeshSender, message: &Verified) {
+    messages::log_out(message);
+    if let Ok(bytes) = message.serialize()
         && let Err(error) = sender.broadcast(bytes).await
     {
         tracing::warn!(
@@ -143,27 +143,27 @@ pub async fn broadcast_msg(sender: &MeshSender, msg: &Verified) {
 /// the first pong of each peer. This is the one place that starts a round.
 pub async fn start_ping_round(
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     response: Option<oneshot::Sender<Vec<(Nickname, u64)>>>,
 ) {
     let now = n0_future::time::Instant::now();
     let window = tuning::ping_window();
-    let probe = Message::new_ping(ctx.mesh, ctx.author).sign(ctx.identity);
+    let probe = Message::new_ping(context.mesh, context.author).sign(context.identity);
     state.arm_ping_round(PingRound::new(&probe, now, now + window, response));
-    broadcast_msg(ctx.sender, &probe).await;
+    broadcast_msg(context.sender, &probe).await;
 }
 
 /// Send the second probe of the round in flight, a fresh ping: a repeat of the first one would be
 /// dropped as a duplicate by gossip and by `ingest`, and would never reach a peer's `auto_pong`.
-pub(crate) async fn send_second_probe(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(crate) async fn send_second_probe(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let Some(round) = state.ping_round.as_mut() else {
         return;
     };
-    let probe = Message::new_ping(ctx.mesh, ctx.author).sign(ctx.identity);
+    let probe = Message::new_ping(context.mesh, context.author).sign(context.identity);
     round
         .probes
         .insert(probe.id.clone(), n0_future::time::Instant::now());
-    broadcast_msg(ctx.sender, &probe).await;
+    broadcast_msg(context.sender, &probe).await;
 }
 
 /// The four refs that a state write needs from the loop: the mesh, the author, the sender of the
@@ -184,13 +184,13 @@ pub struct MergeCtx<'mesh> {
     pub sink: &'mesh dyn NodeSink,
 }
 
-impl<'ctx> From<&HandlerCtx<'ctx>> for MergeCtx<'ctx> {
-    fn from(ctx: &HandlerCtx<'ctx>) -> Self {
+impl<'context> From<&HandlerCtx<'context>> for MergeCtx<'context> {
+    fn from(context: &HandlerCtx<'context>) -> Self {
         Self {
-            mesh: ctx.mesh,
-            author: ctx.author,
-            sender: ctx.sender,
-            sink: ctx.sink,
+            mesh: context.mesh,
+            author: context.author,
+            sender: context.sender,
+            sink: context.sink,
         }
     }
 }
@@ -204,7 +204,7 @@ impl<'ctx> From<&HandlerCtx<'ctx>> for MergeCtx<'ctx> {
 #[non_exhaustive]
 pub struct StateMergeParams<'mesh> {
     /// The context of the write.
-    pub ctx: MergeCtx<'mesh>,
+    pub context: MergeCtx<'mesh>,
     /// The channel of the write.
     pub channel: Channel,
     /// The RFC 7386 merge to apply.
@@ -216,9 +216,9 @@ pub struct StateMergeParams<'mesh> {
 impl<'mesh> StateMergeParams<'mesh> {
     /// A write on `channel` that surfaces to the operator.
     #[must_use]
-    pub fn new(ctx: MergeCtx<'mesh>, channel: Channel, merge: serde_json::Value) -> Self {
+    pub fn new(context: MergeCtx<'mesh>, channel: Channel, merge: serde_json::Value) -> Self {
         Self {
-            ctx,
+            context,
             channel,
             merge,
             surface: true,
@@ -267,7 +267,7 @@ pub async fn broadcast_state_merge(
     use crate::doc::Ingested;
 
     let StateMergeParams {
-        ctx:
+        context:
             MergeCtx {
                 mesh,
                 author,
@@ -391,11 +391,11 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &WireFrame) {
 /// The body of our `PeerInfo`: our address, the proof that we own it, and, while we hold the
 /// rendezvous, a flag that lets another holder in the same overlay order itself against us.
 pub(crate) fn peer_info_json(
-    addr: &iroh::EndpointAddr,
+    address: &iroh::EndpointAddr,
     proof: String,
     holds_beacon: bool,
 ) -> serde_json::Value {
-    let mut json = peer_addr_error::endpoint_addr_to_json(addr);
+    let mut json = peer_addr_error::endpoint_addr_to_json(address);
     json["proof"] = serde_json::Value::String(proof);
     if holds_beacon {
         json["beacon"] = serde_json::Value::Bool(true);
@@ -409,15 +409,15 @@ pub(crate) fn peer_info_json(
 /// re-sending it is invisible to `poll`/`fetch_messages` consumers —
 /// safe to repeat on every new neighbor. Stamps `peerinfo_flooded_at`, the
 /// window the `joined` re-flood gate reads.
-pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     state.peerinfo_flooded_at = Some(clock::Instant::now());
     state.peerinfo_deferred = false;
-    let our_addr = ctx.endpoint.addr();
+    let our_addr = context.endpoint.addr();
     state.last_flooded_addr = Some(our_addr.clone());
     let our_ips: Vec<_> = our_addr.ip_addrs().collect();
     tracing::debug!(
         target: "habilis_network::gossip",
-        local = %ctx.endpoint.id().fmt_short(),
+        local = %context.endpoint.id().fmt_short(),
         relay = ?our_addr.relay_urls().next(),
         addrs = our_addr.ip_addrs().count(),
         ip_addrs = ?our_ips,
@@ -427,8 +427,8 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &Handle
         .peer_info_proof
         .get_or_insert_with(|| {
             proven_endpoints::sign(
-                ctx.endpoint.secret_key(),
-                ctx.mesh,
+                context.endpoint.secret_key(),
+                context.mesh,
                 &state.identity.author_key(),
             )
         })
@@ -439,8 +439,8 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &Handle
     let addr_body =
         MessageBody::try_new(&addr_data).expect("endpoint address JSON has no control characters");
     broadcast_msg(
-        ctx.sender,
-        &Message::new_peer_info(ctx.mesh, ctx.author, addr_body).sign(ctx.identity),
+        context.sender,
+        &Message::new_peer_info(context.mesh, context.author, addr_body).sign(context.identity),
     )
     .await;
 }
@@ -452,11 +452,11 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &Handle
 /// Takes `state` only to retain the `joined` locally — see
 /// [`retain_own_broadcast`](super::recv::retain_own_broadcast) for why a node
 /// that does not hold its own presence makes anti-entropy unconvergeable.
-pub(super) async fn announce_arrival(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    let joined = Message::new_joined(ctx.mesh, ctx.author).sign(ctx.identity);
-    broadcast_msg(ctx.sender, &joined).await;
+pub(super) async fn announce_arrival(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    let joined = Message::new_joined(context.mesh, context.author).sign(context.identity);
+    broadcast_msg(context.sender, &joined).await;
     super::recv::retain_own_broadcast(state, &joined);
-    broadcast_peer_info(state, ctx).await;
+    broadcast_peer_info(state, context).await;
 }
 
 /// A directed frame that is parked because the node is not meshed yet still asks for the session
@@ -473,26 +473,26 @@ fn mark_parked(state: &mut EventLoopState, frame: &Verified, bytes: &WireFrame) 
 /// of its peer, and offer it now. One helper for both, so that the two cannot drift.
 pub(crate) fn park_and_offer(
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     frame: &Verified,
     bytes: &WireFrame,
 ) {
     mark_parked(state, frame, bytes);
-    offer_for_parked(state, ctx, frame);
+    offer_for_parked(state, context, frame);
 }
 
 /// Offer the session of the peer now, if the parked frame asked for it. Without this the offer waits
 /// for the next tick of the retry pass, up to 30 s, and a user waits with it. The peer is a lane peer,
 /// or a pair with an IP path that reads as the relay (`note_held` marks both).
-fn offer_for_parked(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, frame: &Verified) {
+fn offer_for_parked(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: &Verified) {
     let Some(nick) = message::sole_addressee(&frame.kind) else {
         return;
     };
-    let Some(addr) = state.peer_endpoints.get(nick).cloned() else {
+    let Some(address) = state.peer_endpoints.get(nick).cloned() else {
         return;
     };
-    if state.lane_session_wanted(addr.id, clock::Instant::now()) {
-        webrtc::negotiate_session::negotiate_session(state, ctx, addr.id, addr);
+    if state.lane_session_wanted(address.id, clock::Instant::now()) {
+        webrtc::negotiate_session::negotiate_session(state, context, address.id, address);
     }
 }
 
@@ -509,10 +509,10 @@ mod tests {
     use crate::util::clock;
     #[test]
     fn our_peer_info_says_so_while_we_hold_the_rendezvous() {
-        let addr = iroh::EndpointAddr::new(iroh::SecretKey::generate().public());
+        let address = iroh::EndpointAddr::new(iroh::SecretKey::generate().public());
 
-        let holding = peer_info_json(&addr, "proof".to_owned(), true);
-        let idle = peer_info_json(&addr, "proof".to_owned(), false);
+        let holding = peer_info_json(&address, "proof".to_owned(), true);
+        let idle = peer_info_json(&address, "proof".to_owned(), false);
 
         assert_eq!(holding["beacon"], serde_json::Value::Bool(true));
         assert_eq!(holding["proof"], "proof");
@@ -596,15 +596,15 @@ mod tests {
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn offering_for_a_parked_frame_starts_one_round_and_no_more() {
         let node = crate::testing::LaneNode::start().await;
-        let ctx = node.ctx();
+        let context = node.context();
         let mut state = node.state();
         let frame = node.frame_to_bob();
         assert_eq!(state.webrtc_admission.in_flight(), 0);
 
         state.want_lane_session(node.bob, clock::Instant::now());
-        super::offer_for_parked(&mut state, &ctx, &frame);
+        super::offer_for_parked(&mut state, &context, &frame);
         assert_eq!(state.webrtc_admission.in_flight(), 1, "the offer is out");
-        super::offer_for_parked(&mut state, &ctx, &frame);
+        super::offer_for_parked(&mut state, &context, &frame);
         assert_eq!(state.webrtc_admission.in_flight(), 1, "not a second round");
 
         state.webrtc_admission.close();
@@ -616,9 +616,9 @@ mod tests {
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn nothing_is_offered_for_a_peer_that_is_not_wanted() {
         let node = crate::testing::LaneNode::start().await;
-        let ctx = node.ctx();
+        let context = node.context();
         let mut state = node.state();
-        super::offer_for_parked(&mut state, &ctx, &node.frame_to_bob());
+        super::offer_for_parked(&mut state, &context, &node.frame_to_bob());
         assert_eq!(state.webrtc_admission.in_flight(), 0);
         node.endpoint.close().await;
     }

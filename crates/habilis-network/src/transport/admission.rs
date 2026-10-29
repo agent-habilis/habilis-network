@@ -695,8 +695,8 @@ mod tests {
         #[derive(Debug, Clone)]
         struct Hold;
         impl ProtocolHandler for Hold {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                conn.closed().await;
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                connection.closed().await;
                 Ok(())
             }
         }
@@ -725,7 +725,7 @@ mod tests {
         hub.attach(neighbor);
         admission.note_success(neighbor);
         let relayed = iroh::EndpointAddr::new(neighbor).with_relay_url(relay_url.clone());
-        let conn = client
+        let connection = client
             .connect(relayed, iroh_gossip::net::GOSSIP_ALPN)
             .await
             .expect("dial over the relay");
@@ -741,8 +741,8 @@ mod tests {
             "a live connection holds the session"
         );
 
-        conn.close(0u32.into(), b"done");
-        conn.closed().await;
+        connection.close(0u32.into(), b"done");
+        connection.closed().await;
         let later = start + window * 3;
         assert_eq!(
             admission.lock().take_idle(later, window),
@@ -765,8 +765,8 @@ mod tests {
         #[derive(Debug, Clone)]
         struct Hold;
         impl ProtocolHandler for Hold {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                conn.closed().await;
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                connection.closed().await;
                 Ok(())
             }
         }
@@ -791,12 +791,12 @@ mod tests {
             .spawn();
         let client = bind(Some(admission.connection_hook())).await;
         let relayed = iroh::EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
-        let conn = client
+        let connection = client
             .connect(relayed, iroh_gossip::net::GOSSIP_ALPN)
             .await
             .expect("dial over the relay");
 
-        let closed = tokio::time::timeout(Duration::from_secs(25), conn.closed()).await;
+        let closed = tokio::time::timeout(Duration::from_secs(25), connection.closed()).await;
 
         assert!(
             closed.is_ok(),
@@ -863,8 +863,8 @@ mod tests {
                 mpsc::UnboundedSender<(EndpointId, iroh::endpoint::ConnectionError)>,
             );
             impl ProtocolHandler for Report {
-                async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                    let reason = conn.closed().await;
+                async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                    let reason = connection.closed().await;
                     let _ = self.1.send((self.0, reason));
                     Ok(())
                 }
@@ -875,13 +875,13 @@ mod tests {
                 .accept(super::super::UNICAST_ALPN, Report(id, self.reports.clone()))
                 .spawn();
             let relayed = iroh::EndpointAddr::new(id).with_relay_url(self.relay_url.clone());
-            let conn = self
+            let connection = self
                 .node
                 .connect(relayed, super::super::UNICAST_ALPN)
                 .await
                 .expect("dial over the relay");
             self.servers.push((server, router));
-            (id, conn)
+            (id, connection)
         }
 
         /// The next connection that a server saw close, within `within`.
@@ -966,8 +966,8 @@ mod tests {
                 .is_none(),
             "exactly one eviction"
         );
-        for (_, conn) in &conns[1..] {
-            assert!(conn.close_reason().is_none(), "the others stay open");
+        for (_, connection) in &conns[1..] {
+            assert!(connection.close_reason().is_none(), "the others stay open");
         }
         fixture.shutdown().await;
     }
@@ -1121,8 +1121,8 @@ mod tests {
         #[derive(Debug, Clone)]
         struct Report(Arc<Mutex<Option<oneshot::Sender<ConnectionError>>>>);
         impl ProtocolHandler for Report {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                let reason = conn.closed().await;
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                let reason = connection.closed().await;
                 if let Some(tx) = self.0.lock().expect("report lock").take() {
                     let _ = tx.send(reason);
                 }

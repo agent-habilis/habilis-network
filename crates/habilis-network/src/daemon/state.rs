@@ -577,18 +577,21 @@ mod tests {
     fn a_proven_pair_on_the_relay_is_raced_again_when_its_link_goes_down() {
         use crate::transport::probe::PathKind;
         let (bob, now) = (endpoint_id(1), Instant::now());
-        let addr = iroh::EndpointAddr::new(bob)
+        let address = iroh::EndpointAddr::new(bob)
             .with_relay_url("https://relay.invalid".parse().expect("relay url"));
         let node = |direct: Option<DirectState>, kind: PathKind| {
             let mut node = fresh_state();
-            node.peer_endpoints.insert(nick("bob"), addr.clone());
+            node.peer_endpoints.insert(nick("bob"), address.clone());
             node.direct.extend(direct.map(|verdict| (bob, verdict)));
             node.path_kinds.insert(bob, kind);
             node
         };
 
         let mut proven = node(Some(DirectState::Direct), PathKind::Relay);
-        assert_eq!(proven.relay_race_on_link_loss(bob, now), Some(addr.clone()));
+        assert_eq!(
+            proven.relay_race_on_link_loss(bob, now),
+            Some(address.clone())
+        );
         assert!(
             proven.lane_session_wanted(bob, now),
             "the offer is not held back"
@@ -622,14 +625,14 @@ mod tests {
     fn a_proven_pair_on_the_gossip_rung_is_raced_again_when_its_link_goes_down() {
         use crate::transport::probe::PathKind;
         let (bob, now) = (endpoint_id(1), Instant::now());
-        let addr = iroh::EndpointAddr::new(bob)
+        let address = iroh::EndpointAddr::new(bob)
             .with_relay_url("https://relay.invalid".parse().expect("relay url"));
         let mut node = fresh_state();
-        node.peer_endpoints.insert(nick("bob"), addr.clone());
+        node.peer_endpoints.insert(nick("bob"), address.clone());
         node.direct.insert(bob, DirectState::Direct);
         node.path_kinds.insert(bob, PathKind::Gossip);
 
-        assert_eq!(node.relay_race_on_link_loss(bob, now), Some(addr));
+        assert_eq!(node.relay_race_on_link_loss(bob, now), Some(address));
         assert!(
             node.lane_session_wanted(bob, now),
             "the offer is not held back"
@@ -1855,7 +1858,7 @@ mod tests {
             .insert(nick("bob"), iroh::EndpointAddr::new(bob));
         state.direct.insert(bob, DirectState::Direct);
         assert_eq!(
-            state.forget_peer_endpoint("bob").map(|addr| addr.id),
+            state.forget_peer_endpoint("bob").map(|address| address.id),
             Some(bob)
         );
         assert!(state.direct.is_empty());

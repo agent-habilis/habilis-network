@@ -120,7 +120,7 @@ impl BlobServer {
     /// The serving endpoint's dialable address, for tests that connect to it
     /// directly rather than through a ticket.
     #[cfg(test)]
-    pub(crate) fn addr(&self) -> iroh::EndpointAddr {
+    pub(crate) fn address(&self) -> iroh::EndpointAddr {
         self.endpoint.addr()
     }
 
@@ -273,7 +273,7 @@ async fn serve_connection(
     // authorizes this fetch is inside the request we are waiting for, so none
     // of it can be gated on the peer having proved anything.
     let deadline = tokio::time::Instant::now() + limits.pre_auth;
-    let conn = tokio::time::timeout_at(deadline, incoming)
+    let connection = tokio::time::timeout_at(deadline, incoming)
         .await
         .context("no connection within the pre-authentication deadline")??;
     // Before the request is read, so a refused fetch costs no spool read and
@@ -281,16 +281,16 @@ async fn serve_connection(
     // what is left of the deadline: nested under the outer timer it could
     // outlive it, and a drop closes as `DONE`, not as a refusal.
     crate::transport::refuse_relayed(
-        &conn,
+        &connection,
         relay_transport,
         deadline.saturating_duration_since(tokio::time::Instant::now()),
         RELAY_REFUSED_CODE,
     )
     .await?;
-    let (send, recv) = tokio::time::timeout_at(deadline, conn.accept_bi())
+    let (send, recv) = tokio::time::timeout_at(deadline, connection.accept_bi())
         .await
         .context("no fetch request within the pre-authentication deadline")??;
-    serve_stream(&conn, send, recv, store, deadline).await
+    serve_stream(&connection, send, recv, store, deadline).await
 }
 
 /// The fetch protocol, producer side. Reads the fixed 64-byte request
@@ -298,7 +298,7 @@ async fn serve_connection(
 /// streams `size ‖ <bytes>` from the spool file. A bad secret or unknown hash
 /// closes the connection with a coded reason.
 async fn serve_stream(
-    conn: &Connection,
+    connection: &Connection,
     mut send: SendStream,
     mut recv: RecvStream,
     store: &Mutex<BlobStore>,
@@ -327,13 +327,13 @@ async fn serve_stream(
                 Some((entry.path.clone(), entry.size))
             }
             Some(_) => {
-                conn.close(BAD_SECRET.into(), b"bad secret");
+                connection.close(BAD_SECRET.into(), b"bad secret");
                 return Ok(());
             }
         }
     };
     let Some((path, size)) = served else {
-        conn.close(UNKNOWN_BLOB.into(), b"unknown blob");
+        connection.close(UNKNOWN_BLOB.into(), b"unknown blob");
         return Ok(());
     };
 
@@ -342,7 +342,7 @@ async fn serve_stream(
     let _ = send.finish();
     // Let the consumer read the tail before CONNECTION_CLOSE races it on a fast link.
     let _ = tokio::time::timeout(Duration::from_secs(2), send.stopped()).await;
-    conn.close(DONE.into(), b"done");
+    connection.close(DONE.into(), b"done");
     Ok(())
 }
 
@@ -352,16 +352,16 @@ async fn stream_file(path: &Path, send: &mut SendStream) -> Result<()> {
     let mut file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("opening spooled blob {} failed", path.display()))?;
-    let mut buf = vec![0u8; CHUNK];
+    let mut buffer = vec![0u8; CHUNK];
     loop {
         let read = file
-            .read(&mut buf)
+            .read(&mut buffer)
             .await
             .context("reading spooled blob failed")?;
         if read == 0 {
             break;
         }
-        send.write_all(&buf[..read]).await?;
+        send.write_all(&buffer[..read]).await?;
     }
     Ok(())
 }
@@ -375,16 +375,16 @@ async fn hash_file(path: PathBuf) -> Result<(BlobDigest, u64)> {
         let mut file = std::fs::File::open(&path)
             .with_context(|| format!("opening {} failed", path.display()))?;
         let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; CHUNK];
+        let mut buffer = vec![0u8; CHUNK];
         let mut size = 0u64;
         loop {
             let read = file
-                .read(&mut buf)
+                .read(&mut buffer)
                 .context("reading file for hashing failed")?;
             if read == 0 {
                 break;
             }
-            hasher.update(&buf[..read]);
+            hasher.update(&buffer[..read]);
             size += read as u64;
         }
         let digest = hasher.finalize();

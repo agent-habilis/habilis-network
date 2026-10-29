@@ -199,7 +199,10 @@ mod tests {
             UdpTransport::Absent,
             neighbor_kinds(webrtc, ip, relay),
         );
-        let all: Vec<EndpointAddr> = neighbors.iter().map(|(_, addr)| addr.clone()).collect();
+        let all: Vec<EndpointAddr> = neighbors
+            .iter()
+            .map(|(_, address)| address.clone())
+            .collect();
         assert_eq!(wanted, all);
     }
 

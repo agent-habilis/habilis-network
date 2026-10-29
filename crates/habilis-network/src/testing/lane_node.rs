@@ -74,7 +74,7 @@ impl LaneNode {
         let _ = self.gossip.shutdown().await;
     }
 
-    pub(crate) fn ctx(&self) -> handler_ctx::HandlerCtx<'_> {
+    pub(crate) fn context(&self) -> handler_ctx::HandlerCtx<'_> {
         handler_ctx::HandlerCtx {
             sender: &self.sender,
             endpoint: &self.endpoint,

@@ -76,11 +76,11 @@ impl NodeDriver for Chat {
         &mut self,
         sent: Self::Session,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
         let mut frame = Message::new_app(
-            ctx.mesh,
-            ctx.author,
+            context.mesh,
+            context.author,
             AppFrameParams::new(
                 AppTag::try_new("chat").expect("a valid app tag"),
                 None,
@@ -89,9 +89,9 @@ impl NodeDriver for Chat {
             ),
         );
         frame.timestamp = frame.timestamp + AHEAD;
-        let frame = frame.sign(ctx.identity);
+        let frame = frame.sign(context.identity);
         let bytes = frame.serialize().expect("serialize");
-        let _ = habilis_network::ops::deliver(&frame, bytes.clone(), state, ctx.sender)
+        let _ = habilis_network::ops::deliver(&frame, bytes.clone(), state, context.sender)
             .await
             .expect("a meshed node broadcasts");
         // The sender keeps its own frame, as a chat app does, so any peer late

@@ -96,13 +96,13 @@ pub(crate) async fn dial_signal_round(
 
     // The connect holds the peer's slot like every later step does, and an id that nobody serves
     // never answers it: without its own bound the round lives to the round deadline.
-    let conn = match n0_future::time::timeout(
+    let connection = match n0_future::time::timeout(
         deadlines.exchange,
         endpoint.connect(peer, MESH_WEBRTC_SIGNAL_ALPN),
     )
     .await
     {
-        Ok(conn) => conn.map_err(|error| {
+        Ok(connection) => connection.map_err(|error| {
             EndpointError::internal(
                 anyhow::Error::new(error).context("dial the mesh WebRTC signal ALPN"),
             )
@@ -122,13 +122,23 @@ pub(crate) async fn dial_signal_round(
     // timeout branch missed every prompt refusal, which is all of them.
     let offer_bytes = serde_json::to_vec(offer.envelope())
         .map_err(|error| EndpointError::Internal(error.into()))?;
-    let raw =
-        match web_rtc_signal_acceptor::exchange_envelopes(&conn, &offer_bytes, remote, deadlines)
-            .await
-        {
-            Ok(raw) => raw,
-            Err(error) => return Err(web_rtc_signal_acceptor::with_refusal(&conn, error, remote)),
-        };
+    let raw = match web_rtc_signal_acceptor::exchange_envelopes(
+        &connection,
+        &offer_bytes,
+        remote,
+        deadlines,
+    )
+    .await
+    {
+        Ok(raw) => raw,
+        Err(error) => {
+            return Err(web_rtc_signal_acceptor::with_refusal(
+                &connection,
+                error,
+                remote,
+            ));
+        }
+    };
     let answer: SignalEnvelope = serde_json::from_slice(&raw).map_err(|error| {
         EndpointError::internal(anyhow::Error::new(error).context("parse signal answer"))
     })?;
@@ -141,7 +151,7 @@ pub(crate) async fn dial_signal_round(
     web_rtc_signal_acceptor::register_session_addr(book, remote);
     // Signalling is done the moment the session is attached; the data rides its
     // own connections from here.
-    conn.close(0u32.into(), b"jsep done");
+    connection.close(0u32.into(), b"jsep done");
     tracing::debug!(target: LOG_TARGET, %remote, "webrtc session attached (offerer)");
     Ok(())
 }

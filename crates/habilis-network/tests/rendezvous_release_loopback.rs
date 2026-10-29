@@ -161,9 +161,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::JoinOptions) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             events,
@@ -193,14 +195,14 @@ impl Member {
 
     fn pump(&mut self) {
         while self.events.try_recv().is_ok() {}
-        while let Ok(msg) = self.membership.inbound.try_recv() {
-            self.seen_msgs.push(msg);
+        while let Ok(message) = self.membership.inbound.try_recv() {
+            self.seen_msgs.push(message);
         }
     }
 
     fn saw_msg(&mut self, text: &str) -> bool {
         self.pump();
-        self.seen_msgs.iter().any(|msg| msg.text == text)
+        self.seen_msgs.iter().any(|message| message.text == text)
     }
 
     /// Whether this member holds a live link to the member `nick`.

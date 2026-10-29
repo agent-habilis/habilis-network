@@ -15,16 +15,16 @@ use crate::util::clock;
 
 pub(crate) fn negotiate_session(
     state: &mut state::EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     peer: EndpointId,
-    addr: EndpointAddr,
+    address: EndpointAddr,
 ) {
     let Some(handle) = state.webrtc.clone() else {
         // No transport registered: the beacon, or a multihop peer.
         return;
     };
     // A cold pair stays where it is until the next send.
-    if retry::held_back(state, &addr) {
+    if retry::held_back(state, &address) {
         tracing::debug!(target: LOG_TARGET, %peer, "no send yet; leaving this pair alone");
         return;
     }
@@ -38,7 +38,7 @@ pub(crate) fn negotiate_session(
     // browser is the lower id it is the browser that evaluates this. It would
     // see the native peer's IP, skip, and the native — waiting to be dialled —
     // would never offer. The pair would silently never get a channel.
-    let needs_lane = session_policy::pair_needs_lane(&addr, state.local_udp_transport);
+    let needs_lane = session_policy::pair_needs_lane(&address, state.local_udp_transport);
     let kind = state.pair_path_kind(peer);
     let proven = state.direct.get(&peer) == Some(&DirectState::Direct);
     if !session_policy::wants_session(needs_lane, kind, proven) {
@@ -64,7 +64,7 @@ pub(crate) fn negotiate_session(
     // The higher id waits to be dialled, so one offer crosses per pair. Unless a frame is held for
     // the peer: that frame cannot wait for an offer that the lower id has no reason to make. If
     // both offer at once, the lower id wins (see `WebRtcSignalAcceptor::accept`).
-    let local = ctx.endpoint.id();
+    let local = context.endpoint.id();
     let frame_held = state.lane_session_wanted(peer, clock::Instant::now());
     if session_policy::waits_for_the_offer(local > peer, frame_held, kind, proven) {
         return;
@@ -77,7 +77,7 @@ pub(crate) fn negotiate_session(
     let reads_as_relay = session_policy::reads_below_a_session(kind, proven);
     let has_session = handle.has_session(&peer);
     if reads_as_relay && has_session {
-        let endpoint = ctx.endpoint.clone();
+        let endpoint = context.endpoint.clone();
         n0_future::task::spawn(async move { nudge_acceptor::nudge_session(&endpoint, peer).await });
     }
     let demoted = reads_as_relay && !has_session;
@@ -111,5 +111,5 @@ pub(crate) fn negotiate_session(
     } else {
         Offer::UdpRace
     };
-    offer::spawn_offer_round(state, ctx, peer, addr, handle, guard, offer);
+    offer::spawn_offer_round(state, context, peer, address, handle, guard, offer);
 }

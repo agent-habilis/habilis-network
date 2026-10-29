@@ -155,7 +155,7 @@ pub(crate) fn register_rendezvous(
     // mDNS/DHT only.
     // Without the rungs in `withheld`: a dial of the id tries every address that the endpoint knows
     // for it, and a listener of another program on one of them fails the dial as a whole.
-    let Some(addr) = crate::beacon::rendezvous_addr_without(params, withheld) else {
+    let Some(address) = crate::beacon::rendezvous_addr_without(params, withheld) else {
         return;
     };
     if params.bind_ports.is_empty() {
@@ -172,7 +172,7 @@ pub(crate) fn register_rendezvous(
             "pre-registered rendezvous on the loopback port ladder"
         );
     }
-    add_peer_addr(book, addr);
+    add_peer_addr(book, address);
 }
 
 /// Build the endpoint, subscribe to the topic, and produce a ready
@@ -1166,11 +1166,11 @@ mod tests {
             (vec![Transport::Udp, Transport::WebRtc], false),
             (vec![Transport::Udp, Transport::Multihop], true),
         ] {
-            let opts = crate::membership::JoinOptions {
+            let options = crate::membership::JoinOptions {
                 transport: list.clone(),
                 ..crate::membership::JoinOptions::default()
             };
-            let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
+            let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
             let config = super::setup_mesh(
                 kind,
                 super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
@@ -1212,13 +1212,13 @@ mod tests {
             ),
         ] {
             // A node without UDP needs the relay: it carries the offers of its data channels.
-            let opts = crate::membership::JoinOptions {
+            let options = crate::membership::JoinOptions {
                 transport: vec![Transport::WebRtc, Transport::Multihop],
                 lookup: vec![Lookup::Relay],
                 relay_urls: vec![relay_url.to_string()],
                 ..crate::membership::JoinOptions::default()
             };
-            let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
+            let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
             let config = super::setup_mesh(
                 kind,
                 super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
@@ -1241,13 +1241,13 @@ mod tests {
     #[test]
     async fn the_underlay_of_a_member_without_udp_has_no_ip_socket_and_has_a_webrtc_leg() {
         let (relay_url, _relay) = test_relay::spawn_plain().await.expect("a local relay");
-        let opts = crate::membership::JoinOptions {
+        let options = crate::membership::JoinOptions {
             transport: vec![Transport::WebRtc, Transport::Multihop],
             lookup: vec![Lookup::Relay],
             relay_urls: vec![relay_url.to_string()],
             ..crate::membership::JoinOptions::default()
         };
-        let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
+        let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
         let config = super::setup_mesh(
             kind,
             super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
@@ -1284,8 +1284,8 @@ mod tests {
             (0, 0, GOSSIP_ACTIVE_VIEW_CAPACITY, MAX_DIRECT_PEERS),
             (5, 3, 5, 3),
         ] {
-            let opts = crate::membership::JoinOptions::default();
-            let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
+            let options = crate::membership::JoinOptions::default();
+            let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
             let config = super::setup_mesh(
                 kind,
                 super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
@@ -1349,7 +1349,7 @@ mod tests {
                 gossip: None,
                 admission: None,
                 underlay: false,
-                opts: crate::lookup::TransportOpts::default(),
+                options: crate::lookup::TransportOpts::default(),
             },
             crate::transport::MAX_DIRECT_PEERS,
         )
@@ -1375,7 +1375,7 @@ mod tests {
                     gossip: None,
                     admission: None,
                     underlay: false,
-                    opts: crate::lookup::TransportOpts::default(),
+                    options: crate::lookup::TransportOpts::default(),
                 },
                 crate::transport::MAX_DIRECT_PEERS,
             )
@@ -1482,11 +1482,11 @@ mod tests {
         list: Vec<Transport>,
         injected: super::InjectedEndpoint,
     ) -> anyhow::Result<super::EventLoopConfig> {
-        let opts = crate::membership::JoinOptions {
+        let options = crate::membership::JoinOptions {
             transport: list,
             ..crate::membership::JoinOptions::default()
         };
-        let (kind, author) = crate::membership::resolve_kind(&opts, None)?;
+        let (kind, author) = crate::membership::resolve_kind(&options, None)?;
         super::setup_mesh(
             kind,
             super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
@@ -1594,8 +1594,8 @@ mod tests {
     // The node closes what its setup bound, so iroh has nothing to log as dropped.
     #[test]
     async fn leave_closes_the_endpoint_and_the_underlay_that_setup_bound() {
-        let opts = crate::membership::JoinOptions::default();
-        let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
+        let options = crate::membership::JoinOptions::default();
+        let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
         let config = super::setup_mesh(
             kind,
             super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
@@ -1639,13 +1639,13 @@ mod browser_tests {
         let (relay_url, _relay) = crate::lookup::test_relay::spawn_plain()
             .await
             .expect("a local relay");
-        let opts = crate::membership::JoinOptions {
+        let options = crate::membership::JoinOptions {
             transport: vec![Transport::WebRtc, Transport::Multihop],
             lookup: vec![Lookup::Relay],
             relay_urls: vec![relay_url.to_string()],
             ..crate::membership::JoinOptions::default()
         };
-        let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
+        let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
         let mut config = super::setup_mesh(
             kind,
             super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))

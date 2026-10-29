@@ -90,7 +90,7 @@ impl Inner {
                         .conns
                         .iter()
                         .filter_map(WeakConnectionHandle::upgrade)
-                        .any(|conn| conn.alpn() == iroh_gossip::net::GOSSIP_ALPN)
+                        .any(|connection| connection.alpn() == iroh_gossip::net::GOSSIP_ALPN)
             });
             if held || !hub.has_session(&peer) {
                 continue;
@@ -127,9 +127,9 @@ impl Inner {
                 slot.conns
                     .iter()
                     .filter_map(WeakConnectionHandle::upgrade)
-                    .filter(|conn| {
-                        conn.close_reason().is_none()
-                            && conn.alpn() == crate::transport::UNICAST_ALPN
+                    .filter(|connection| {
+                        connection.close_reason().is_none()
+                            && connection.alpn() == crate::transport::UNICAST_ALPN
                     }),
             );
         }
@@ -143,8 +143,9 @@ impl Inner {
             slot.conns
                 .iter()
                 .filter_map(WeakConnectionHandle::upgrade)
-                .any(|conn| {
-                    conn.close_reason().is_none() && conn.alpn() == crate::transport::UNICAST_ALPN
+                .any(|connection| {
+                    connection.close_reason().is_none()
+                        && connection.alpn() == crate::transport::UNICAST_ALPN
                 })
         });
         if !alive {
@@ -167,8 +168,8 @@ impl Inner {
                 .conns
                 .iter()
                 .filter_map(WeakConnectionHandle::upgrade)
-                .filter(|conn| conn.close_reason().is_none())
-                .map(|conn| probe::selected_kind(&conn))
+                .filter(|connection| connection.close_reason().is_none())
+                .map(|connection| probe::selected_kind(&connection))
                 .collect();
             let (established, allowed) = sampler::gossip_view(&kinds);
             gossip.set_established(*peer, established);
@@ -189,7 +190,7 @@ impl Inner {
             slot.conns.retain(|handle| {
                 handle
                     .upgrade()
-                    .is_some_and(|conn| conn.close_reason().is_none())
+                    .is_some_and(|connection| connection.close_reason().is_none())
             });
         }
         self.sync_gossip();

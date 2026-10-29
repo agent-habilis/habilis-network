@@ -62,11 +62,11 @@ impl NodeDriver for Pinger {
 
     async fn handle_session(
         &mut self,
-        resp: Self::Session,
+        response: Self::Session,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
-        habilis_network::ops::start_ping_round(state, ctx, Some(resp)).await;
+        habilis_network::ops::start_ping_round(state, context, Some(response)).await;
         true
     }
 }

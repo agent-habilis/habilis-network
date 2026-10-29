@@ -105,7 +105,7 @@ pub(crate) fn check_injected_against_mesh(
         .addr()
         .addrs
         .iter()
-        .any(|addr| matches!(addr, iroh::TransportAddr::Relay(_)));
+        .any(|address| matches!(address, iroh::TransportAddr::Relay(_)));
     let mesh_wants_relay = mesh_lookups.relay_lookup != RelayChoice::Disabled;
     if mesh_wants_relay && !endpoint_has_relay {
         tracing::warn!(
@@ -138,7 +138,7 @@ pub(crate) fn check_injected_against_mesh(
 /// Returns an error if the endpoint fails to bind.
 pub async fn build_peer_webrtc(
     lookups: &LookupOpts,
-    opts: super::TransportOpts,
+    options: super::TransportOpts,
 ) -> Result<
     (
         Endpoint,
@@ -146,7 +146,7 @@ pub async fn build_peer_webrtc(
     ),
     super::EndpointError,
 > {
-    let (endpoint, handle, _mdns) = build_peer_webrtc_with(lookups, opts, None)
+    let (endpoint, handle, _mdns) = build_peer_webrtc_with(lookups, options, None)
         .await
         .map_err(super::EndpointError::internal)?;
     Ok((endpoint, handle))
@@ -159,7 +159,7 @@ pub async fn build_peer_webrtc(
 /// Returns an error if the endpoint fails to bind.
 pub(crate) async fn build_peer_webrtc_with(
     lookups: &LookupOpts,
-    opts: super::TransportOpts,
+    options: super::TransportOpts,
     admission: Option<&crate::transport::SignalAdmission>,
 ) -> Result<(
     Endpoint,
@@ -168,7 +168,7 @@ pub(crate) async fn build_peer_webrtc_with(
 )> {
     let secret = mint_secret();
     let handle = build_webrtc_handle(secret.public());
-    let gossip = build_gossip_handle(opts, secret.public(), admission);
+    let gossip = build_gossip_handle(options, secret.public(), admission);
     let (endpoint, mdns) = super::build_endpoint_keeping_mdns(
         lookups,
         Some(secret),
@@ -181,7 +181,7 @@ pub(crate) async fn build_peer_webrtc_with(
             gossip: gossip.clone(),
             admission: admission.cloned(),
             underlay: false,
-            opts,
+            options,
         },
     )
     .await?;
@@ -199,11 +199,11 @@ pub(crate) async fn build_peer_webrtc_with(
 /// it is what tells the handle which peers are established and which pairs a higher rung
 /// carries, and the event loop reads the handle back from it.
 fn build_gossip_handle(
-    opts: super::TransportOpts,
+    options: super::TransportOpts,
     local: iroh::EndpointId,
     admission: Option<&crate::transport::SignalAdmission>,
 ) -> Option<habilis_network_iroh_gossip_transport::GossipHandle> {
-    opts.gossip.then(|| {
+    options.gossip.then(|| {
         let handle = habilis_network_iroh_gossip_transport::GossipHandle::new(local);
         handle.set_budget(Some(
             habilis_network_iroh_gossip_transport::DEFAULT_BUDGET_BYTES_PER_SEC,
@@ -267,7 +267,7 @@ fn mint_secret() -> SecretKey {
 #[cfg(all(feature = "host", test))]
 pub(crate) async fn build_peer_multihop(
     lookups: &LookupOpts,
-    opts: super::TransportOpts,
+    options: super::TransportOpts,
     admission: Option<&crate::transport::SignalAdmission>,
     relay_payload: PayloadPath,
 ) -> Result<(
@@ -277,7 +277,7 @@ pub(crate) async fn build_peer_multihop(
 )> {
     let (endpoint, handle, webrtc, _underlay_webrtc, _mdns) = build_peer_multihop_with(
         lookups,
-        opts,
+        options,
         admission,
         multihop_handle_config(relay_payload),
         None,
@@ -297,7 +297,7 @@ pub(crate) async fn build_peer_multihop(
 #[cfg(feature = "multihop")]
 pub(crate) async fn build_peer_multihop_with(
     lookups: &LookupOpts,
-    opts: super::TransportOpts,
+    options: super::TransportOpts,
     admission: Option<&crate::transport::SignalAdmission>,
     handle_config: habilis_network_iroh_multihop_transport::HandleConfig,
     underlay_cap: Option<usize>,
@@ -310,12 +310,12 @@ pub(crate) async fn build_peer_multihop_with(
 )> {
     let secret = mint_secret();
     let webrtc = build_webrtc_handle(secret.public());
-    let gossip = build_gossip_handle(opts, secret.public(), admission);
+    let gossip = build_gossip_handle(options, secret.public(), admission);
     let underlay_secret = habilis_network_iroh_multihop_transport::underlay_secret(&secret);
     // The `WebRTC` leg of the underlay: the handle and the table are made before
     // the endpoint, because the endpoint takes the transport and reports its
     // connections to the table from the first handshake on.
-    let underlay_leg = underlay_cap.filter(|_| opts.webrtc).map(|cap| {
+    let underlay_leg = underlay_cap.filter(|_| options.webrtc).map(|cap| {
         (
             build_webrtc_handle(underlay_secret.public()),
             crate::transport::SignalAdmission::new_route_table(cap),
@@ -332,8 +332,8 @@ pub(crate) async fn build_peer_multihop_with(
             admission: underlay_leg.as_ref().map(|(_, table)| table.clone()),
             // The underlay has IP sockets only when the node does: a node run without `udp`
             // has no IP on any of its endpoints, and its underlay rides WebRTC and the relay.
-            opts: super::TransportOpts {
-                udp: opts.udp,
+            options: super::TransportOpts {
+                udp: options.udp,
                 ..super::TransportOpts::default()
             },
             ..super::TransportHandles::default()
@@ -390,7 +390,7 @@ pub(crate) async fn build_peer_multihop_with(
             gossip: gossip.clone(),
             admission: admission.cloned(),
             underlay: false,
-            opts,
+            options,
         },
     )
     .await?;

@@ -25,8 +25,8 @@ pub(super) enum Route {
     Undeliverable,
 }
 
-pub(super) fn route(msg: &Verified, state: &EventLoopState) -> Route {
-    let Some(nick) = sole_addressee(&msg.kind) else {
+pub(super) fn route(message: &Verified, state: &EventLoopState) -> Route {
+    let Some(nick) = sole_addressee(&message.kind) else {
         return Route::Broadcast;
     };
     match directed_endpoint(nick, state) {

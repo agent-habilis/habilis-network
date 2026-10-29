@@ -30,11 +30,11 @@ fn neighbors_of(
     multihop: &habilis_network_iroh_multihop_transport::MultihopHandle,
 ) -> Vec<(EndpointId, iroh::EndpointAddr)> {
     let mut neighbors: Vec<(EndpointId, iroh::EndpointAddr)> = Vec::new();
-    for member in state.peer_endpoints.values().map(|addr| addr.id) {
-        if let Some(addr) =
+    for member in state.peer_endpoints.values().map(|address| address.id) {
+        if let Some(address) =
             multihop.underlay_addr_of(habilis_network_iroh_multihop_transport::AppId::new(member))
         {
-            neighbors.push((member, addr));
+            neighbors.push((member, address));
         }
     }
     plan::undenied(neighbors, |member| state.webrtc_admission.is_denied(member))
@@ -50,12 +50,12 @@ pub(crate) fn tick(state: &state::EventLoopState, underlay: &UnderlayWebRtc) {
     let neighbors = neighbors_of(state, multihop);
     underlay
         .allowed
-        .replace(neighbors.iter().map(|(_, addr)| addr.id).collect());
+        .replace(neighbors.iter().map(|(_, address)| address.id).collect());
 
     let wanted_addrs = plan::wanted_underlays(&neighbors, state.local_udp_transport, |member| {
         state.pair_path_kind(member)
     });
-    let wanted: Vec<EndpointId> = wanted_addrs.iter().map(|addr| addr.id).collect();
+    let wanted: Vec<EndpointId> = wanted_addrs.iter().map(|address| address.id).collect();
     let kept = plan::kept_underlays(&neighbors, |member| state.pair_path_kind(member));
     let held: Vec<_> = underlay.handle.live_peer_ids().collect();
     let Plan { dial, detach } = plan(
@@ -100,7 +100,7 @@ pub(crate) fn tick(state: &state::EventLoopState, underlay: &UnderlayWebRtc) {
         }
     }
     for peer in dial {
-        let Some(addr) = wanted_addrs.iter().find(|addr| addr.id == peer) else {
+        let Some(address) = wanted_addrs.iter().find(|address| address.id == peer) else {
             continue;
         };
         let guard = match underlay.admission.try_admit(peer, &underlay.handle) {
@@ -116,13 +116,13 @@ pub(crate) fn tick(state: &state::EventLoopState, underlay: &UnderlayWebRtc) {
             underlay.handle.clone(),
             underlay.admission.clone(),
         );
-        let addr = addr.clone();
+        let address = address.clone();
         let ice = state.webrtc_ice;
         let epoch = guard.epoch();
         let task = n0_future::task::spawn(async move {
             let _guard = guard;
             match Box::pin(webrtc::dial_signal::dial_signal(
-                &endpoint, &book, addr, &handle, ice,
+                &endpoint, &book, address, &handle, ice,
             ))
             .await
             {
@@ -163,7 +163,7 @@ pub(crate) fn members_with_session(
 ) -> Vec<EndpointId> {
     neighbors
         .iter()
-        .filter(|(_, addr)| held.contains(&addr.id))
+        .filter(|(_, address)| held.contains(&address.id))
         .map(|(member, _)| *member)
         .collect()
 }

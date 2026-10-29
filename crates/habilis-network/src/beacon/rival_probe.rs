@@ -146,7 +146,7 @@ pub(crate) async fn spawn_rival_probe(
 ) -> Option<RivalProbe> {
     use tracing::Instrument as _;
     let target = match rendezvous_addr(params) {
-        Some(addr) => addr,
+        Some(address) => address,
         // Nothing to name (relay disabled, no ladder). The bare id is a
         // dialable target only while a lookup can resolve it — mDNS/DHT,
         // when the mesh carries them and this build wires them.

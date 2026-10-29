@@ -85,11 +85,11 @@ impl UnicastAcceptor {
 }
 
 impl ProtocolHandler for UnicastAcceptor {
-    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         // The sender checks its own selected path, but an old build or a
         // hostile peer may not: hold until this side has proof too.
         if !refuse_unless_direct(
-            &conn,
+            &connection,
             self.relay_transport,
             PROBE_DEADLINE,
             UNICAST_RELAY_REFUSED,
@@ -102,18 +102,18 @@ impl ProtocolHandler for UnicastAcceptor {
         // peer closes the connection (`accept_uni` errors), or nothing arrives
         // for the idle timeout.
         loop {
-            match n0_future::time::timeout(self.idle, conn.accept_uni()).await {
+            match n0_future::time::timeout(self.idle, connection.accept_uni()).await {
                 Ok(Ok(mut recv)) => {
                     let _busy = self
                         .admission
                         .as_ref()
-                        .map(|table| table.busy(conn.remote_id()));
+                        .map(|table| table.busy(connection.remote_id()));
                     self.handle_frame(recv.read_to_end(MAX_UNICAST_FRAME).await);
                 }
                 Ok(Err(_closed)) => break,
                 Err(_idle) => {
                     tracing::debug!(target: LOG_TARGET, "closing an idle accepted unicast connection");
-                    conn.close(IDLE.into(), b"idle");
+                    connection.close(IDLE.into(), b"idle");
                     break;
                 }
             }
@@ -155,11 +155,11 @@ mod tests {
             .spawn();
         let client = bind().await;
         crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
-        let conn = client
+        let connection = client
             .connect(server.id(), UNICAST_ALPN)
             .await
             .expect("connect");
-        (conn, router, client, frames)
+        (connection, router, client, frames)
     }
 
     async fn advance_secs(seconds: u64) {
@@ -172,9 +172,9 @@ mod tests {
     /// Wait in real time for the close to reach us. The server closes inside the
     /// paused clock, but the close frame travels over real I/O, so a check right
     /// after `advance_secs` races it.
-    async fn closed_soon(conn: &Connection) -> bool {
+    async fn closed_soon(connection: &Connection) -> bool {
         let started = std::time::Instant::now();
-        while conn.close_reason().is_none() {
+        while connection.close_reason().is_none() {
             if started.elapsed() > Duration::from_secs(5) {
                 return false;
             }
@@ -184,9 +184,9 @@ mod tests {
     }
 
     /// Closed by the server with its idle reason: not by us, not by QUIC.
-    fn closed_by_the_acceptor(conn: &Connection) -> bool {
+    fn closed_by_the_acceptor(connection: &Connection) -> bool {
         matches!(
-            conn.close_reason(),
+            connection.close_reason(),
             Some(ConnectionError::ApplicationClosed(ref close))
                 if close.reason.as_ref() == b"idle"
                     && close.error_code.into_inner() == u64::from(IDLE)
@@ -195,15 +195,22 @@ mod tests {
 
     #[test]
     async fn an_accepted_connection_that_gets_no_stream_is_closed_after_the_idle_timeout() {
-        let (conn, router, client, _frames) = connected(Duration::from_secs(8)).await;
+        let (connection, router, client, _frames) = connected(Duration::from_secs(8)).await;
         tokio::time::pause();
 
         advance_secs(6).await;
-        assert!(conn.close_reason().is_none(), "inside the idle timeout");
+        assert!(
+            connection.close_reason().is_none(),
+            "inside the idle timeout"
+        );
 
         advance_secs(6).await;
-        assert!(closed_soon(&conn).await, "never closed");
-        assert!(closed_by_the_acceptor(&conn), "{:?}", conn.close_reason());
+        assert!(closed_soon(&connection).await, "never closed");
+        assert!(
+            closed_by_the_acceptor(&connection),
+            "{:?}",
+            connection.close_reason()
+        );
 
         tokio::time::resume();
         router.shutdown().await.expect("shutdown");
@@ -212,11 +219,11 @@ mod tests {
 
     #[test]
     async fn a_stream_restarts_the_accept_side_idle_timeout() {
-        let (conn, router, client, mut frames) = connected(Duration::from_secs(8)).await;
+        let (connection, router, client, mut frames) = connected(Duration::from_secs(8)).await;
         tokio::time::pause();
 
         advance_secs(5).await;
-        let mut stream = conn.open_uni().await.expect("open a stream");
+        let mut stream = connection.open_uni().await.expect("open a stream");
         stream.write_all(b"frame").await.expect("write");
         stream.finish().expect("finish");
         // Real I/O carries the frame to the acceptor: yield until it lands.
@@ -226,13 +233,17 @@ mod tests {
 
         advance_secs(5).await;
         assert!(
-            conn.close_reason().is_none(),
+            connection.close_reason().is_none(),
             "five seconds after a stream is inside the timeout"
         );
 
         advance_secs(7).await;
-        assert!(closed_soon(&conn).await, "never closed");
-        assert!(closed_by_the_acceptor(&conn), "{:?}", conn.close_reason());
+        assert!(closed_soon(&connection).await, "never closed");
+        assert!(
+            closed_by_the_acceptor(&connection),
+            "{:?}",
+            connection.close_reason()
+        );
 
         tokio::time::resume();
         router.shutdown().await.expect("shutdown");

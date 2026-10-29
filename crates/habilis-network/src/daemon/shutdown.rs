@@ -50,17 +50,18 @@ pub(super) use quit_params::QuitParams;
 pub(super) async fn shutdown<Driver: NodeDriver>(
     state: &mut EventLoopState,
     app: &mut Driver,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     quit: &QuitParams<'_>,
 ) {
     // Release app-owned resources (fail parked app waiters, close the
     // blob-serving endpoint whose store spool is dropped with it).
-    app.on_shutdown(state, ctx).await;
+    app.on_shutdown(state, context).await;
     #[cfg(feature = "host")]
     if let Some(sf) = state.state_file.as_ref() {
         sf.remove();
     }
-    ctx.sink
+    context
+        .sink
         .emit(NodeEvent::Info(format!("left {}", quit.leave_label)));
     // The `Left` rides gossip only — deliberately NOT mirrored over unicast
     // (unlike the meta retraction in `on_shutdown`): presence drives the
@@ -69,8 +70,8 @@ pub(super) async fn shutdown<Driver: NodeDriver>(
     // beacon into a stale connection and stalls (iroh-gossip#10; see the
     // post-departure-join test's SIGKILL choreography).
     gossip::broadcast_msg(
-        ctx.sender,
-        &Message::new_left(ctx.mesh, ctx.author).sign(&state.identity),
+        context.sender,
+        &Message::new_left(context.mesh, context.author).sign(&state.identity),
     )
     .await;
     // After the broadcast, so peers get the `Left` even when logging fails.
@@ -89,14 +90,14 @@ pub(super) async fn shutdown<Driver: NodeDriver>(
 pub(super) async fn announce_departure<Driver: NodeDriver>(
     state: &mut EventLoopState,
     app: &mut Driver,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     quit: QuitParams<'_>,
 ) -> bool {
     // Empty out any parked long-poll waiters first, so a held call returns a
     // clean timeout (empty) rather than a dropped-channel error. Other app-owned
     // waiters (app RPC calls) are failed in `on_shutdown` (inside `shutdown`).
     app.close_poll_waiters();
-    shutdown(state, app, ctx, &quit).await;
+    shutdown(state, app, context, &quit).await;
     quit.exit_on_quit && !cfg!(feature = "dhat-heap")
 }
 /// Spawn ctrl-c (all platforms) plus SIGTERM/SIGHUP/SIGQUIT (unix)
@@ -384,7 +385,7 @@ mod tests {
 
         if std::env::var_os(QUIT_CHILD).is_some() {
             let node = LaneNode::start().await;
-            let ctx = node.ctx();
+            let context = node.context();
             let mut state = node.state();
             let (inbound, _unread) = mpsc::channel(1);
             let mut app = crate::membership::MembershipApp::new(inbound);
@@ -392,7 +393,7 @@ mod tests {
             let exit = announce_departure(
                 &mut state,
                 &mut app,
-                &ctx,
+                &context,
                 QuitParams {
                     name: &name,
                     leave_label: "#test",

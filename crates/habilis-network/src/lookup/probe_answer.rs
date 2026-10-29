@@ -37,30 +37,28 @@ pub(crate) async fn probe_answer(
     target: impl Into<EndpointAddr>,
     timeout: Duration,
 ) -> ProbeAnswer {
-    let addr: EndpointAddr = target.into();
+    let address: EndpointAddr = target.into();
     let started = clock::Instant::now();
     let mut failure = None;
-    let answer = match n0_future::time::timeout(
-        timeout,
-        endpoint.connect(addr.clone(), GOSSIP_ALPN),
-    )
-    .await
-    {
-        Ok(Ok(conn)) => {
-            // Close explicitly, not via drop: the resolution side effect is
-            // done, and an orderly CONNECTION_CLOSE lets the accept side
-            // (the beacon's gossip, which adopts GOSSIP_ALPN connections)
-            // release the connection immediately instead of via its own
-            // error path.
-            conn.close(0u32.into(), b"probe");
-            ProbeAnswer::Ours
-        }
-        Ok(Err(error)) => {
-            failure = Some(error.to_string());
-            answer_of_connect_error(&error)
-        }
-        Err(_) => ProbeAnswer::NoAnswer,
-    };
+    let answer =
+        match n0_future::time::timeout(timeout, endpoint.connect(address.clone(), GOSSIP_ALPN))
+            .await
+        {
+            Ok(Ok(connection)) => {
+                // Close explicitly, not via drop: the resolution side effect is
+                // done, and an orderly CONNECTION_CLOSE lets the accept side
+                // (the beacon's gossip, which adopts GOSSIP_ALPN connections)
+                // release the connection immediately instead of via its own
+                // error path.
+                connection.close(0u32.into(), b"probe");
+                ProbeAnswer::Ours
+            }
+            Ok(Err(error)) => {
+                failure = Some(error.to_string());
+                answer_of_connect_error(&error)
+            }
+            Err(_) => ProbeAnswer::NoAnswer,
+        };
     let connected = answer == ProbeAnswer::Ours;
     // `?addr`: a loopback/private direct addr means a *local*
     // rendezvous co-host (self-partition signature); relay/public is
@@ -73,9 +71,9 @@ pub(crate) async fn probe_answer(
     // firehose, so it stays `debug`.
     let elapsed_ms = clock::millis_saturating(started.elapsed());
     if connected {
-        tracing::debug!(target: "habilis_network::lookup", connected, elapsed_ms, addr = ?addr, "rendezvous connect-probe finished");
+        tracing::debug!(target: "habilis_network::lookup", connected, elapsed_ms, address = ?address, "rendezvous connect-probe finished");
     } else {
-        tracing::info!(target: "habilis_network::lookup", connected, elapsed_ms, ?answer, ?failure, addr = ?addr, "rendezvous connect-probe finished");
+        tracing::info!(target: "habilis_network::lookup", connected, elapsed_ms, ?answer, ?failure, address = ?address, "rendezvous connect-probe finished");
     }
     answer
 }

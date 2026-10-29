@@ -440,7 +440,7 @@ mod tests {
         let router = serve(&server, &server_hub, &admission);
 
         let (client, _client_hub) = endpoint().await;
-        let conn = client
+        let connection = client
             .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
             .await
             .expect("dial the signal ALPN");
@@ -456,7 +456,7 @@ mod tests {
         );
         assert_eq!(server_hub.session_count(), 0);
 
-        conn.close(0u32.into(), b"done");
+        connection.close(0u32.into(), b"done");
         router.shutdown().await.expect("shutdown");
         client.close().await;
     }
@@ -494,8 +494,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
 
-        for conn in conns {
-            conn.close(0u32.into(), b"done");
+        for connection in conns {
+            connection.close(0u32.into(), b"done");
         }
         router.shutdown().await.expect("shutdown");
         client.close().await;
@@ -648,15 +648,15 @@ mod tests {
             server.id(),
         );
 
-        let conn = tokio::time::timeout(
+        let connection = tokio::time::timeout(
             Duration::from_secs(10),
             client.connect(EndpointAddr::new(server.id()), MESH_WEBRTC_SIGNAL_ALPN),
         )
         .await
         .expect("a bare-id dial must not hang")
         .expect("a bare-id dial must resolve through the registered custom address");
-        let direct = super::super::payload_path::selected_is_direct(&conn);
-        conn.close(0u32.into(), b"done");
+        let direct = super::super::payload_path::selected_is_direct(&connection);
+        connection.close(0u32.into(), b"done");
         assert!(direct, "the connection's selected path must be the session");
 
         router.shutdown().await.expect("shutdown");
@@ -697,15 +697,15 @@ mod tests {
         // attach the poll above observed; give it a beat to land.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let conn = tokio::time::timeout(
+        let connection = tokio::time::timeout(
             Duration::from_secs(10),
             server.connect(EndpointAddr::new(client.id()), MESH_WEBRTC_SIGNAL_ALPN),
         )
         .await
         .expect("an answerer's bare-id dial must not hang")
         .expect("an answerer's bare-id dial must resolve through the registered custom address");
-        let direct = super::super::payload_path::selected_is_direct(&conn);
-        conn.close(0u32.into(), b"done");
+        let direct = super::super::payload_path::selected_is_direct(&connection);
+        connection.close(0u32.into(), b"done");
         assert!(direct, "the connection's selected path must be the session");
 
         router.shutdown().await.expect("shutdown");
@@ -953,11 +953,12 @@ mod tests {
         #[derive(Debug, Clone)]
         struct Hold(mpsc::Sender<bool>);
         impl ProtocolHandler for Hold {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
                 let direct =
-                    super::super::payload_path::wait_direct(&conn, Duration::from_secs(12)).await;
+                    super::super::payload_path::wait_direct(&connection, Duration::from_secs(12))
+                        .await;
                 let _ = self.0.send(direct).await;
-                conn.closed().await;
+                connection.closed().await;
                 Ok(())
             }
         }
@@ -1064,8 +1065,8 @@ mod tests {
         #[derive(Debug, Clone)]
         struct Hold;
         impl ProtocolHandler for Hold {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                conn.closed().await;
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                connection.closed().await;
                 Ok(())
             }
         }
@@ -1123,15 +1124,16 @@ mod tests {
         .await
         .expect("the signal round must attach a session");
 
-        let conn = tokio::time::timeout(
+        let connection = tokio::time::timeout(
             Duration::from_secs(10),
             client.connect(EndpointAddr::new(server.id()), HOLD_ALPN),
         )
         .await
         .expect("a bare-id dial must not hang")
         .expect("a bare-id dial must connect");
-        let direct = super::super::payload_path::wait_direct(&conn, Duration::from_secs(10)).await;
-        conn.close(0u32.into(), b"done");
+        let direct =
+            super::super::payload_path::wait_direct(&connection, Duration::from_secs(10)).await;
+        connection.close(0u32.into(), b"done");
         held.close(0u32.into(), b"done");
         assert!(
             direct,
@@ -1296,7 +1298,7 @@ mod tests {
         let router = serve(&server, &server_hub, &admission);
 
         let (client, _client_hub) = endpoint().await;
-        let conn = client
+        let connection = client
             .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
             .await
             .expect("dial the signal ALPN");
@@ -1316,7 +1318,7 @@ mod tests {
             "an aborted round must give its slot back"
         );
 
-        conn.close(0u32.into(), b"done");
+        connection.close(0u32.into(), b"done");
         client.close().await;
     }
 
@@ -1334,11 +1336,11 @@ mod tests {
         struct BlackHole;
 
         impl ProtocolHandler for BlackHole {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                let (_send, mut recv) = conn.accept_bi().await?;
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                let (_send, mut recv) = connection.accept_bi().await?;
                 let _ = recv.read_to_end(MAX_ENVELOPE_BYTES).await;
                 // Hold the connection open, answering nothing.
-                conn.closed().await;
+                connection.closed().await;
                 Ok(())
             }
         }
@@ -1697,8 +1699,8 @@ mod tests {
         #[derive(Debug, Clone)]
         struct Hold;
         impl ProtocolHandler for Hold {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                conn.closed().await;
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                connection.closed().await;
                 Ok(())
             }
         }
@@ -1739,7 +1741,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = handler_ctx::HandlerCtx {
+        let context = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -1759,7 +1761,7 @@ mod tests {
             .peer_endpoints
             .insert(crate::testing::nick("bob"), server.addr());
 
-        retry::retry_sessions(&mut state, &ctx);
+        retry::retry_sessions(&mut state, &context);
         assert_eq!(
             state.webrtc_admission.in_flight(),
             0,
@@ -1771,7 +1773,7 @@ mod tests {
             .warm_or_dial(server.id())
             .await
             .expect("a send dials the peer");
-        retry::retry_sessions(&mut state, &ctx);
+        retry::retry_sessions(&mut state, &context);
         assert_eq!(
             state.webrtc_admission.in_flight(),
             1,
@@ -1806,8 +1808,8 @@ mod tests {
         #[derive(Debug, Clone)]
         struct Hold;
         impl ProtocolHandler for Hold {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                conn.closed().await;
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                connection.closed().await;
                 Ok(())
             }
         }
@@ -1847,7 +1849,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = handler_ctx::HandlerCtx {
+        let context = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -1876,7 +1878,7 @@ mod tests {
         state.direct.insert(bob, DirectState::Direct);
 
         state.path_kinds.insert(bob, PathKind::Ip);
-        retry::retry_sessions(&mut state, &ctx);
+        retry::retry_sessions(&mut state, &context);
         assert_eq!(
             state.webrtc_admission.in_flight(),
             0,
@@ -1885,7 +1887,7 @@ mod tests {
         assert_eq!(state.direct.get(&bob), Some(&DirectState::Direct));
 
         state.path_kinds.insert(bob, PathKind::Relay);
-        retry::retry_sessions(&mut state, &ctx);
+        retry::retry_sessions(&mut state, &context);
         assert_eq!(
             state.webrtc_admission.in_flight(),
             1,
@@ -1918,8 +1920,8 @@ mod tests {
         #[derive(Debug, Clone)]
         struct Hold;
         impl ProtocolHandler for Hold {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                conn.closed().await;
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                connection.closed().await;
                 Ok(())
             }
         }
@@ -1960,7 +1962,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = handler_ctx::HandlerCtx {
+        let context = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -1982,7 +1984,7 @@ mod tests {
             EndpointAddr::new(server.id()).with_relay_url(relay_url),
         );
 
-        retry::retry_sessions(&mut state, &ctx);
+        retry::retry_sessions(&mut state, &context);
         assert_eq!(
             state.webrtc_admission.in_flight(),
             0,
@@ -1990,7 +1992,7 @@ mod tests {
         );
 
         state.want_lane_session(server.id(), clock::Instant::now());
-        retry::retry_sessions(&mut state, &ctx);
+        retry::retry_sessions(&mut state, &context);
         assert_eq!(
             state.webrtc_admission.in_flight(),
             1,
@@ -2041,7 +2043,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = handler_ctx::HandlerCtx {
+        let context = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -2057,20 +2059,20 @@ mod tests {
         state.webrtc = Some(handle);
         state.local_udp_transport = UdpTransport::Present;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
-        let addr = EndpointAddr::new(peer)
+        let address = EndpointAddr::new(peer)
             .with_relay_url("https://relay.invalid".parse().expect("relay url"));
         state
             .peer_endpoints
-            .insert(crate::testing::nick("bob"), addr.clone());
+            .insert(crate::testing::nick("bob"), address.clone());
         assert!(
-            retry::held_back(&state, &addr),
+            retry::held_back(&state, &address),
             "cold: nothing asks for the session yet"
         );
 
-        let grafted = probe::ensure_direct(&mut state, &ctx, peer, &addr);
+        let grafted = probe::ensure_direct(&mut state, &context, peer, &address);
         assert!(!grafted, "the graft waits for the session");
         assert!(
-            !retry::held_back(&state, &addr),
+            !retry::held_back(&state, &address),
             "the graft asks for the session of the lane peer"
         );
         assert_eq!(
@@ -2120,7 +2122,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = handler_ctx::HandlerCtx {
+        let context = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -2140,7 +2142,7 @@ mod tests {
             .peer_endpoints
             .insert(crate::testing::nick("bob"), server.addr());
 
-        retry::retry_sessions(&mut state, &ctx);
+        retry::retry_sessions(&mut state, &context);
         assert_eq!(
             state.webrtc_admission.in_flight(),
             0,
@@ -2148,7 +2150,7 @@ mod tests {
         );
 
         state.want_lane_session(server.id(), clock::Instant::now());
-        retry::retry_sessions(&mut state, &ctx);
+        retry::retry_sessions(&mut state, &context);
         assert!(
             until(|| handle.has_session(&server.id()) && server_hub.has_session(&endpoint.id()))
                 .await,
@@ -2201,7 +2203,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = handler_ctx::HandlerCtx {
+        let context = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -2230,7 +2232,7 @@ mod tests {
         // The server serves no unicast ALPN: a cooldown stands for the failed dial that keeps UDP
         // from winning the race, without the WARN of a refused ALPN.
         state.unicast_pool.note_dial_failure(bob).await;
-        retry::retry_sessions(&mut state, &ctx);
+        retry::retry_sessions(&mut state, &context);
         assert!(
             until(|| handle.has_session(&bob) && server_hub.has_session(&endpoint.id())).await,
             "the session attaches"
@@ -2240,8 +2242,8 @@ mod tests {
         // frame is still held, so that the pair is not left alone for want of a send.
         state.direct.insert(bob, DirectState::Direct);
         state.path_kinds.insert(bob, PathKind::Relay);
-        let addr = server.addr();
-        negotiate_session::negotiate_session(&mut state, &ctx, bob, addr);
+        let address = server.addr();
+        negotiate_session::negotiate_session(&mut state, &context, bob, address);
         assert_eq!(
             state.direct.get(&bob),
             Some(&DirectState::Direct),
@@ -2304,7 +2306,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = handler_ctx::HandlerCtx {
+        let context = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -2332,21 +2334,21 @@ mod tests {
         // The server serves no unicast ALPN: a cooldown stands for the failed dial that keeps UDP
         // from winning the race, without the WARN of a refused ALPN.
         state.unicast_pool.note_dial_failure(bob).await;
-        retry::retry_sessions(&mut state, &ctx);
+        retry::retry_sessions(&mut state, &context);
         assert!(
             until(|| handle.has_session(&bob) && server_hub.has_session(&endpoint.id())).await,
             "the session attaches"
         );
 
         state.path_kinds.insert(bob, PathKind::Relay);
-        session_policy::detach_sessions_under_udp(&mut state, &ctx).await;
+        session_policy::detach_sessions_under_udp(&mut state, &context).await;
         assert!(
             handle.has_session(&bob),
             "the pair still reads as the relay"
         );
 
         state.path_kinds.insert(bob, PathKind::Ip);
-        session_policy::detach_sessions_under_udp(&mut state, &ctx).await;
+        session_policy::detach_sessions_under_udp(&mut state, &context).await;
         assert!(!handle.has_session(&bob), "UDP is selected again");
         assert_eq!(
             state.direct.get(&bob),
@@ -2385,7 +2387,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = handler_ctx::HandlerCtx {
+        let context = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -2404,14 +2406,14 @@ mod tests {
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
         let members: Vec<EndpointId> = (1..=6).map(crate::testing::endpoint_id).collect();
         for (index, id) in members.iter().enumerate() {
-            let addr = EndpointAddr::new(*id)
+            let address = EndpointAddr::new(*id)
                 .with_relay_url("https://relay.invalid".parse().expect("relay url"));
             state
                 .peer_endpoints
-                .insert(crate::testing::nick(&format!("member{index}")), addr);
+                .insert(crate::testing::nick(&format!("member{index}")), address);
         }
 
-        probe::retry_direct(&mut state, &ctx, false).await;
+        probe::retry_direct(&mut state, &context, false).await;
 
         assert_eq!(
             state.webrtc_admission.in_flight(),
@@ -2453,7 +2455,7 @@ mod tests {
         let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = event::SilentSink;
-        let ctx = handler_ctx::HandlerCtx {
+        let context = handler_ctx::HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -2472,14 +2474,14 @@ mod tests {
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
         let members: Vec<EndpointId> = (1..=6).map(crate::testing::endpoint_id).collect();
         for (index, id) in members.iter().enumerate() {
-            let addr = EndpointAddr::new(*id)
+            let address = EndpointAddr::new(*id)
                 .with_relay_url("https://relay.invalid".parse().expect("relay url"));
             state
                 .peer_endpoints
-                .insert(crate::testing::nick(&format!("member{index}")), addr);
+                .insert(crate::testing::nick(&format!("member{index}")), address);
         }
 
-        probe::retry_direct(&mut state, &ctx, false).await;
+        probe::retry_direct(&mut state, &context, false).await;
         let touched = |node: &state::EventLoopState| {
             members
                 .iter()
@@ -2488,7 +2490,7 @@ mod tests {
         };
         assert_eq!(touched(&state), LANE_OFFERS_IN_FLIGHT, "the first pass");
 
-        probe::top_up_lane_offers(&mut state, &ctx).await;
+        probe::top_up_lane_offers(&mut state, &context).await;
         assert_eq!(
             touched(&state),
             LANE_OFFERS_IN_FLIGHT,
@@ -2504,7 +2506,7 @@ mod tests {
             state.webrtc_admission.preempt_offer(offered),
             "a round to end"
         );
-        probe::top_up_lane_offers(&mut state, &ctx).await;
+        probe::top_up_lane_offers(&mut state, &context).await;
         assert_eq!(
             touched(&state),
             LANE_OFFERS_IN_FLIGHT + 1,

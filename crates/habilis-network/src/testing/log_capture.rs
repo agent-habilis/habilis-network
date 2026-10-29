@@ -38,9 +38,9 @@ impl LogCapture {
 
 #[cfg(feature = "multihop")]
 impl std::io::Write for LogCapture {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("log buffer").extend_from_slice(buf);
-        Ok(buf.len())
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log buffer").extend_from_slice(buffer);
+        Ok(buffer.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {

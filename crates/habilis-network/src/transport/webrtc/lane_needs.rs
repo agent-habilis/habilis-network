@@ -43,8 +43,8 @@ use iroh::EndpointAddr;
 /// address to hand and built a bare one, so every native peer read as relay-only
 /// and got a data channel it did not need — spending the direct-peer slots the
 /// browsers were waiting for.
-pub(crate) fn needs_webrtc_lane(addr: &EndpointAddr) -> bool {
-    !addr.is_empty() && addr.ip_addrs().next().is_none()
+pub(crate) fn needs_webrtc_lane(address: &EndpointAddr) -> bool {
+    !address.is_empty() && address.ip_addrs().next().is_none()
 }
 
 /// The local-node twin of [`needs_webrtc_lane`]: does *this* node need the

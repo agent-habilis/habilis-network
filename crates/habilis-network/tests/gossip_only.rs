@@ -39,9 +39,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::JoinOptions) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -151,12 +153,12 @@ impl Member {
     }
 
     fn saw_msg(&mut self, text: &str) -> bool {
-        while let Ok(msg) = self.membership.inbound.try_recv() {
-            self.seen_msgs.push(msg);
+        while let Ok(message) = self.membership.inbound.try_recv() {
+            self.seen_msgs.push(message);
         }
         self.seen_msgs
             .iter()
-            .any(|msg| msg.directed && msg.text == text)
+            .any(|message| message.directed && message.text == text)
     }
 
     /// Settle the pair on `expected`, driving it as production does: the engine tries a better

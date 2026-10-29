@@ -66,8 +66,8 @@ mod tests {
         #[derive(Debug, Clone)]
         struct Hold;
         impl ProtocolHandler for Hold {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                conn.closed().await;
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                connection.closed().await;
                 Ok(())
             }
         }
@@ -123,8 +123,8 @@ mod tests {
         #[derive(Debug, Clone)]
         struct Hold;
         impl ProtocolHandler for Hold {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                conn.closed().await;
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                connection.closed().await;
                 Ok(())
             }
         }
@@ -155,9 +155,9 @@ mod tests {
     }
 
     /// Closed by this side, not timed out by QUIC and not closed by the peer.
-    fn closed_as_idle(conn: &iroh::endpoint::Connection) -> bool {
+    fn closed_as_idle(connection: &iroh::endpoint::Connection) -> bool {
         matches!(
-            conn.close_reason(),
+            connection.close_reason(),
             Some(iroh::endpoint::ConnectionError::LocallyClosed)
         )
     }
@@ -165,12 +165,12 @@ mod tests {
     #[test]
     async fn a_pooled_connection_nothing_sends_on_is_closed_after_the_idle_timeout() {
         let (pool, server, router, client) = pool_with_idle(Duration::from_secs(8)).await;
-        let conn = pool.warm_or_dial(server).await.expect("dial");
+        let connection = pool.warm_or_dial(server).await.expect("dial");
         tokio::time::pause();
 
         advance_secs(6).await;
         assert!(
-            conn.close_reason().is_none() && pool.connection(server).is_some(),
+            connection.close_reason().is_none() && pool.connection(server).is_some(),
             "inside the idle timeout the connection stays pooled"
         );
 
@@ -179,7 +179,10 @@ mod tests {
             pool.inner.conns.lock().await.is_empty(),
             "an unused connection leaves the pool"
         );
-        assert!(closed_as_idle(&conn), "and is closed, not just dropped");
+        assert!(
+            closed_as_idle(&connection),
+            "and is closed, not just dropped"
+        );
 
         tokio::time::resume();
         pool.warm_or_dial(server).await.expect("a send dials again");
@@ -190,7 +193,7 @@ mod tests {
     #[test]
     async fn a_send_restarts_the_idle_timeout() {
         let (pool, server, router, client) = pool_with_idle(Duration::from_secs(8)).await;
-        let conn = pool.warm_or_dial(server).await.expect("dial");
+        let connection = pool.warm_or_dial(server).await.expect("dial");
         tokio::time::pause();
 
         advance_secs(5).await;
@@ -200,12 +203,12 @@ mod tests {
         );
         advance_secs(5).await;
         assert!(
-            conn.close_reason().is_none() && pool.connection(server).is_some(),
+            connection.close_reason().is_none() && pool.connection(server).is_some(),
             "five seconds after a send is inside the timeout"
         );
 
         advance_secs(7).await;
-        assert!(closed_as_idle(&conn), "then it idles out as well");
+        assert!(closed_as_idle(&connection), "then it idles out as well");
 
         tokio::time::resume();
         router.shutdown().await.expect("shutdown");
@@ -229,8 +232,8 @@ mod tests {
         #[derive(Debug, Clone)]
         struct Hold;
         impl ProtocolHandler for Hold {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                conn.closed().await;
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                connection.closed().await;
                 Ok(())
             }
         }
@@ -258,7 +261,7 @@ mod tests {
     async fn a_probe_connection_is_closed_after_the_hold_unless_a_send_takes_it() {
         let (pool, server, router, client) =
             pool_with_holds(Duration::from_secs(80), Duration::from_secs(8)).await;
-        let conn = pool.probe_connection(server).await.expect("dial");
+        let connection = pool.probe_connection(server).await.expect("dial");
         assert!(
             pool.used_connection(server).is_none(),
             "a probe is not a send"
@@ -268,7 +271,7 @@ mod tests {
 
         advance_secs(6).await;
         assert!(
-            conn.close_reason().is_none() && pool.connection(server).is_some(),
+            connection.close_reason().is_none() && pool.connection(server).is_some(),
             "inside the hold the probe connection stays, so the graft can form on it"
         );
         advance_secs(6).await;
@@ -276,7 +279,10 @@ mod tests {
             pool.inner.conns.lock().await.is_empty(),
             "after the hold the connection leaves the pool"
         );
-        assert!(closed_as_idle(&conn), "and is closed, not just dropped");
+        assert!(
+            closed_as_idle(&connection),
+            "and is closed, not just dropped"
+        );
 
         tokio::time::resume();
         let probed = pool.probe_connection(server).await.expect("probe again");
@@ -376,8 +382,8 @@ mod tests {
         #[derive(Debug, Clone)]
         struct Collect(mpsc::UnboundedSender<Vec<u8>>);
         impl ProtocolHandler for Collect {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                while let Ok(mut stream) = conn.accept_uni().await {
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                while let Ok(mut stream) = connection.accept_uni().await {
                     if let Ok(frame) = stream.read_to_end(64 * 1024).await {
                         let _ = self.0.send(frame);
                     }
@@ -733,11 +739,17 @@ mod tests {
         #[derive(Debug, Clone)]
         struct SlowReader;
         impl ProtocolHandler for SlowReader {
-            async fn accept(&self, conn: iroh::endpoint::Connection) -> Result<(), AcceptError> {
-                let mut stream = conn.accept_uni().await.map_err(AcceptError::from_err)?;
+            async fn accept(
+                &self,
+                connection: iroh::endpoint::Connection,
+            ) -> Result<(), AcceptError> {
+                let mut stream = connection
+                    .accept_uni()
+                    .await
+                    .map_err(AcceptError::from_err)?;
                 tokio::time::sleep(Duration::from_millis(800)).await;
                 let _ = stream.read_to_end(1 << 20).await;
-                conn.closed().await;
+                connection.closed().await;
                 Ok(())
             }
         }

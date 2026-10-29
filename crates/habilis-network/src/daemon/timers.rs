@@ -161,19 +161,19 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
     let (mut direct, mut relay, mut other) = (0usize, 0usize, 0usize);
     let linked: Vec<_> = state.linked_endpoints.iter().copied().collect();
     for peer_id in linked {
-        let (conn, relay_url) = crate::net::conn_path(endpoint, peer_id).await;
-        match conn {
+        let (connection, relay_url) = crate::net::conn_path(endpoint, peer_id).await;
+        match connection {
             crate::gossip::PathSummary::Direct => direct += 1,
             crate::gossip::PathSummary::Relay => relay += 1,
             crate::gossip::PathSummary::Mixed | crate::gossip::PathSummary::Unknown => other += 1,
         }
         // A link that was relayed at `NeighborUp` and has since punched a
         // direct path: refresh the reading the roster and lanes consult.
-        state.observe_path(peer_id, conn);
+        state.observe_path(peer_id, connection);
         tracing::debug!(
             target: "habilis_network::lifecycle",
             endpoint_id = %peer_id,
-            conn = conn.label(),
+            connection = connection.label(),
             relay = relay_url.as_ref().map_or("-", |url| url.as_str()),
             "peer conn path"
         );

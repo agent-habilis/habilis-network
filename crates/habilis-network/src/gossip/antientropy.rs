@@ -275,20 +275,20 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, me: 
             report_unreadable_digest(message, state);
             continue;
         };
-        for msg in state.message_log.missing_in_window(MissingQuery {
+        for missing in state.message_log.missing_in_window(MissingQuery {
             range,
             have: &have,
             max: budget,
             requester: &message.author,
         }) {
-            if !resend_one(&msg, state) {
+            if !resend_one(&missing, state) {
                 continue;
             }
             // Mark it sent so the next (overlapping) window doesn't re-send it
             // and waste budget — equal-timestamp ranges overlap heavily.
             // Charged even when the send failed: an addressee with no endpoint
             // yet must not be retried inside this digest; it retries next round.
-            have.insert(msg.dedup_key());
+            have.insert(missing.dedup_key());
             resent += 1;
             budget -= 1;
         }
@@ -302,11 +302,11 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, me: 
 /// drains the outbox. Never waits. Returns whether it was attempted at all —
 /// `false` only for the unserializable frame we somehow hold, which must not be
 /// charged to the round's budget.
-fn resend_one(msg: &Verified, state: &mut EventLoopState) -> bool {
-    let Ok(bytes) = msg.serialize() else {
+fn resend_one(message: &Verified, state: &mut EventLoopState) -> bool {
+    let Ok(bytes) = message.serialize() else {
         return false;
     };
-    match crate::transport::resolve(msg, bytes, state) {
+    match crate::transport::resolve(message, bytes, state) {
         Ok(resend) => {
             // The gossip layer drops a payload it has seen for 90 s, whether the app read it or
             // not. A broadcast resend therefore carries a new nonce, and so a new name.
@@ -460,7 +460,7 @@ async fn ask_back(
     channel: Channel,
     digest: &Verified,
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
 ) {
     let Ok(body) = serde_json::from_str::<HeadsBody>(digest.body.as_str()) else {
         return;
@@ -480,9 +480,9 @@ async fn ask_back(
         state.doc(channel).change_count(),
         now,
     ) {
-        ask(channel, &key, &digest.author, state, ctx).await;
+        ask(channel, &key, &digest.author, state, context).await;
     } else {
-        tracing::debug!(me = %ctx.author, peer = %digest.author, ?channel, "a peer is ahead, but a fast round waits");
+        tracing::debug!(me = %context.author, peer = %digest.author, ?channel, "a peer is ahead, but a fast round waits");
     }
 }
 
@@ -504,7 +504,7 @@ fn heads_key_of(state: &EventLoopState, channel: Channel) -> u64 {
 /// Ask again when a round stalled: a request or its answer was lost, or the
 /// peer refused us. Runs on a short timer; asks one peer that is still ahead
 /// and reachable now, once nothing was asked for a retry interval.
-pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     for channel in [Channel::State, Channel::Meta] {
         let now = Instant::now();
         let ahead = state.fast_rounds.ahead(channel);
@@ -529,8 +529,8 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, ctx: &Handler
         let Some((key, author)) = target else {
             continue;
         };
-        if ask(channel, &key, &author, state, ctx).await {
-            tracing::debug!(me = %ctx.author, peer = %author, ?channel, "retried a fast round with a peer that is ahead");
+        if ask(channel, &key, &author, state, context).await {
+            tracing::debug!(me = %context.author, peer = %author, ?channel, "retried a fast round with a peer that is ahead");
         }
     }
 }
@@ -543,14 +543,14 @@ async fn ask(
     key: &AuthorKey,
     author: &Nickname,
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
 ) -> bool {
     let Some(eid) = crate::transport::unicast_answer_target(key, state) else {
         return false;
     };
     let origin = DigestOrigin {
-        mesh: ctx.mesh,
-        author: ctx.author,
+        mesh: context.mesh,
+        author: context.author,
     };
     let Some(ours) = state_digest(state, origin, channel) else {
         return false;
@@ -571,7 +571,7 @@ async fn ask(
     state
         .fast_rounds
         .note_asked(*key, channel, ours_key, changes, now);
-    tracing::debug!(me = %ctx.author, peer = %author, ?channel, heads = ours_key, "asked a peer that is ahead for state directly (fast round)");
+    tracing::debug!(me = %context.author, peer = %author, ?channel, heads = ours_key, "asked a peer that is ahead for state directly (fast round)");
     true
 }
 
@@ -597,9 +597,9 @@ pub(crate) async fn handle_state_digest(
     channel: Channel,
     message: &Verified,
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
 ) -> Answered {
-    ask_back(channel, message, state, ctx).await;
+    ask_back(channel, message, state, context).await;
     if serde_json::from_str::<HeadsBody>(message.body.as_str()).is_ok_and(|body| body.closing) {
         return Answered::default();
     }
@@ -615,7 +615,7 @@ pub(crate) async fn handle_state_digest(
     };
     // Before the query: a refused digest costs no `changes_since`.
     if !state.state_digest_serves.admits(&serve(plane), heads, now) {
-        tracing::debug!(me = %ctx.author, author = %message.author, ?channel, ?plane, heads, "state digest ignored: this asker was served within the window");
+        tracing::debug!(me = %context.author, author = %message.author, ?channel, ?plane, heads, "state digest ignored: this asker was served within the window");
         return Answered::default();
     }
     let frames: Vec<WireFrame> = missing_frames(channel, message, state)
@@ -630,8 +630,8 @@ pub(crate) async fn handle_state_digest(
     // A point-to-point answer ends with our own heads: the asker compares them
     // with its document and asks again while it is behind (see `ask_back`).
     let origin = DigestOrigin {
-        mesh: ctx.mesh,
-        author: ctx.author,
+        mesh: context.mesh,
+        author: context.author,
     };
     let our_heads =
         heads_digest(state, origin, channel, true).and_then(|ours| ours.serialize().ok());
@@ -655,13 +655,13 @@ pub(crate) async fn handle_state_digest(
                 .state_digest_serves
                 .admits(&serve(Plane::Gossip), heads, now)
         {
-            tracing::debug!(me = %ctx.author, author = %message.author, ?channel, heads, "state digest ignored: the unicast send could not start and the gossip answers are used up for this window");
+            tracing::debug!(me = %context.author, author = %message.author, ?channel, heads, "state digest ignored: the unicast send could not start and the gossip answers are used up for this window");
             return answered;
         }
         for bytes in frames {
             // A new name for each answer, as for the resend of a message (see `resend_one`).
             let answer = bytes.with_resend_nonce(rand::random());
-            let _ = ctx.sender.broadcast(answer).await;
+            let _ = context.sender.broadcast(answer).await;
         }
         answered.broadcast = count;
         state
@@ -674,7 +674,7 @@ pub(crate) async fn handle_state_digest(
             .note(serve(Plane::Unicast), heads, now);
     }
     tracing::debug!(
-        me = %ctx.author,
+        me = %context.author,
         asker = %message.author,
         ?channel,
         heads,

@@ -152,7 +152,7 @@ pub(crate) async fn build_endpoint_keeping_mdns(
         builder = builder.alpns(alpns);
     }
 
-    let opts = transports.opts;
+    let options = transports.options;
     builder = super::install_transports(builder, &transports);
     // Tests only: the underlay is an endpoint of its own, and a test that takes
     // paths away from a pair (`habilis_network_iroh_webrtc_transport::block_ip_to`)
@@ -178,7 +178,7 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     // does not *exist* on a wasm build of iroh, because a browser has no IP
     // transports to clear. The flag is already satisfied there by construction.
     #[cfg(not(target_arch = "wasm32"))]
-    if !opts.udp {
+    if !options.udp {
         // `clear_ip_transports` only — deliberately **not**
         // `clear_address_lookup`. That was the first attempt and it silently
         // broke everything: `add_peer_addr` registers a `MemoryLookup` on the
@@ -219,14 +219,14 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     // not reach them — they have to be skipped here as well. Both exist to find
     // IP paths, so an instance with IP off has no use for either.
     #[cfg(all(feature = "host", feature = "mdns"))]
-    let mdns_handle = if lookups.mdns && opts.udp {
+    let mdns_handle = if lookups.mdns && options.udp {
         Some(super::mdns::wire(&endpoint)?)
     } else {
         None
     };
     #[cfg(not(all(feature = "host", feature = "mdns")))]
     let mdns_handle: Option<super::MdnsHandle> = None;
-    if lookups.dht && opts.udp {
+    if lookups.dht && options.udp {
         #[cfg(all(feature = "host", feature = "dht"))]
         super::dht::wire(&endpoint)?;
     }

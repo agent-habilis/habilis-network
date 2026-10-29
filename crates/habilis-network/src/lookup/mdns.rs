@@ -66,12 +66,12 @@ pub(crate) fn news_only(
     known: &mut HashMap<EndpointId, EndpointAddr>,
 ) -> Option<LanEvent> {
     match event {
-        LanEvent::Seen(addr) => {
-            if known.get(&addr.id) == Some(&addr) {
+        LanEvent::Seen(address) => {
+            if known.get(&address.id) == Some(&address) {
                 return None;
             }
-            known.insert(addr.id, addr.clone());
-            Some(LanEvent::Seen(addr))
+            known.insert(address.id, address.clone());
+            Some(LanEvent::Seen(address))
         }
         LanEvent::Gone(id) => known.remove(&id).map(|_| LanEvent::Gone(id)),
     }

@@ -452,17 +452,21 @@ async fn run_checked<Driver: NodeDriver>(
 }
 
 /// The alive tick: note the gap, broadcast the keepalive presence, then pay a held-back `PeerInfo` flood.
-async fn alive_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+async fn alive_arm(
+    anchors: &mut TickAnchors,
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+) {
     timers::note_tick_gap(
         "alive",
         &mut anchors.alive,
         &mut anchors.alive_wall,
         ALIVE_INTERVAL,
     );
-    lifecycle::heartbeat::tick_alive(state, ctx.sender, ctx.mesh, ctx.author).await;
+    lifecycle::heartbeat::tick_alive(state, context.sender, context.mesh, context.author).await;
     // A neighbor that came up inside the window of a flood is owed our address.
     if state.take_deferred_peerinfo(Instant::now()) {
-        gossip::broadcast_peer_info(state, ctx).await;
+        gossip::broadcast_peer_info(state, context).await;
         state.last_sent_at = Instant::now();
     }
 }
@@ -472,7 +476,7 @@ async fn alive_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, ctx: &
 async fn antientropy_arm(
     anchors: &mut TickAnchors,
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
 ) {
     timers::note_tick_gap(
         "antientropy",
@@ -480,12 +484,13 @@ async fn antientropy_arm(
         &mut anchors.antientropy_wall,
         antientropy_interval(),
     );
-    gossip::antientropy::broadcast_digest(state, ctx.sender, ctx.mesh, ctx.author).await;
+    gossip::antientropy::broadcast_digest(state, context.sender, context.mesh, context.author)
+        .await;
     gossip::antientropy::broadcast_state_digests(
         state,
-        ctx.sender,
-        ctx.mesh,
-        ctx.author,
+        context.sender,
+        context.mesh,
+        context.author,
         gossip::antientropy::DigestTrigger::Tick,
     )
     .await;
@@ -505,8 +510,8 @@ async fn antientropy_arm(
     clippy::unused_async,
     reason = "the `multihop` body awaits; the signatures must match so the select! arm reads the same with and without the feature"
 )]
-async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    let _ = (state, ctx);
+async fn linkstate_arm(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    let _ = (state, context);
 }
 
 /// The edges that our link-vector advertises: one per gossip neighbour, and one per member
@@ -526,15 +531,19 @@ fn advertised_links(
 }
 
 #[cfg(feature = "multihop")]
-pub(crate) async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    advertise_links(state, ctx, false).await;
+pub(crate) async fn linkstate_arm(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    advertise_links(state, context, false).await;
 }
 
 /// Advertise the links of this node. The tick sends whatever the set is, as the vector is also
 /// what keeps our edges alive in the graph of the others; `only_if_changed` is for a link that
 /// came up (see [`linkstate_now`]).
 #[cfg(feature = "multihop")]
-async fn advertise_links(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, only_if_changed: bool) {
+async fn advertise_links(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+    only_if_changed: bool,
+) {
     // Before the early return, and before our own vector goes in: a peer that has
     // stopped advertising must not keep its edges in the graph, and a node that is
     // not meshed yet keeps hearing vectors it will route over once it is.
@@ -583,7 +592,7 @@ async fn advertise_links(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, only_
     let updated = handle.feed_topology(vector.clone());
     // Our own links changed the topology: a route may exist now that did not at the last tick.
     if updated {
-        probe::nudge_climbing_pairs(state, ctx, true);
+        probe::nudge_climbing_pairs(state, context, true);
     }
     let Some(body) = gossip::json_body(&vector) else {
         return;
@@ -593,9 +602,9 @@ async fn advertise_links(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, only_
     // replaces this one, and peers never log what they receive (see
     // `is_loggable`), so a retained copy would be one that nobody else holds and
     // that every digest asks us for again.
-    let vector_msg =
-        crate::protocol::Message::new_link_state(ctx.mesh, ctx.author, body).sign(&state.identity);
-    gossip::broadcast_msg(ctx.sender, &vector_msg).await;
+    let vector_msg = crate::protocol::Message::new_link_state(context.mesh, context.author, body)
+        .sign(&state.identity);
+    gossip::broadcast_msg(context.sender, &vector_msg).await;
     // The vector that this node just sent is what a peer that turned our offer away lacked: the
     // wait that its turn-aways earned ends, and the underlay offers again at once. One offer per
     // vector sent: a link event, or the tick.
@@ -618,8 +627,8 @@ fn advertised_changed(last: Option<&[(EndpointId, u32)]>, links: &[(EndpointId, 
 /// vector had: a second link that comes up 100 ms after the first goes out at once, and a link
 /// that flaps back to the set that went out sends nothing.
 #[cfg(feature = "multihop")]
-pub(crate) async fn linkstate_now(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    advertise_links(state, ctx, true).await;
+pub(crate) async fn linkstate_now(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    advertise_links(state, context, true).await;
 }
 
 /// The sweep-tick arm: note the gap, then evict silent peers. The app's own
@@ -807,9 +816,9 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
     let mut resubscribe_attempts: u32 = 0;
 
     {
-        let ctx = parts.handler_ctx(&sender);
-        app.on_startup(&mut state, &ctx).await;
-        webrtc::rendezvous::offer_rendezvous_off_tick(&mut state, &ctx);
+        let context = parts.handler_ctx(&sender);
+        app.on_startup(&mut state, &context).await;
+        webrtc::rendezvous::offer_rendezvous_off_tick(&mut state, &context);
     }
 
     // Our own address changes (the home relay arrives after the arrival flood, an
@@ -840,8 +849,8 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         // remember to send it again.
         if state.hosts_rendezvous != state.beacon_flag_flooded {
             state.beacon_flag_flooded = state.hosts_rendezvous;
-            let ctx = parts.handler_ctx(&sender);
-            gossip::broadcast_peer_info(&mut state, &ctx).await;
+            let context = parts.handler_ctx(&sender);
+            gossip::broadcast_peer_info(&mut state, &context).await;
         }
         tokio::select! {
             () = sleep_until_opt(state.ping_round.as_ref().map(|round| round.deadline)) => {
@@ -850,8 +859,8 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
             }
             () = sleep_until_opt(state.ping_round.as_ref().and_then(|round| round.second_probe_at())) => {
                 state.idle.external += 1;
-                let ctx = parts.handler_ctx(&sender);
-                gossip::send_second_probe(&mut state, &ctx).await;
+                let context = parts.handler_ctx(&sender);
+                gossip::send_second_probe(&mut state, &context).await;
             }
             () = sleep_until_opt(app.earliest_poll_deadline()) => {
                 state.idle.external += 1;
@@ -865,13 +874,13 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 None => ipc_rx = None,
                 Some((command, resp_tx)) => {
                     state.idle.external += 1;
-                    let ctx = parts.handler_ctx(&sender);
+                    let context = parts.handler_ctx(&sender);
                     let request = super::app::IpcRequest {
                         command,
                         response: resp_tx,
                         name: &mesh_name,
                     };
-                    if app.handle_ipc(request, &mut state, &ctx).await {
+                    if app.handle_ipc(request, &mut state, &context).await {
                         state.last_sent_at = Instant::now();
                     }
                 }
@@ -880,30 +889,30 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 None => http_rx = None,
                 Some(request) => {
                     state.idle.external += 1;
-                    let ctx = parts.handler_ctx(&sender);
-                    app.handle_http(request, &mut state, &ctx).await;
+                    let context = parts.handler_ctx(&sender);
+                    app.handle_http(request, &mut state, &context).await;
                 }
             },
             event = receiver.next(), if state.gossip_open => {
                 state.idle.external += 1;
-                let ctx = parts.handler_ctx(&sender);
-                gossip::handle_gossip_event(event, &mut state, &mut app, &ctx).await;
+                let context = parts.handler_ctx(&sender);
+                gossip::handle_gossip_event(event, &mut state, &mut app, &context).await;
             }
             Some(outcome) = direct_rx.recv() => {
                 state.idle.external += 1;
-                let ctx = parts.handler_ctx(&sender);
-                probe::on_outcome(outcome, &mut state, &ctx).await;
-                probe::ensure_watchers(&mut state, ctx.endpoint.id(), ctx.rendezvous_id);
+                let context = parts.handler_ctx(&sender);
+                probe::on_outcome(outcome, &mut state, &context).await;
+                probe::ensure_watchers(&mut state, context.endpoint.id(), context.rendezvous_id);
             }
-            Some((msg, bytes)) = flush_failed_rx.recv() => {
+            Some((message, bytes)) = flush_failed_rx.recv() => {
                 state.idle.external += 1;
-                let ctx = parts.handler_ctx(&sender);
-                gossip::requeue_failed(&mut state, &ctx, msg, bytes);
+                let context = parts.handler_ctx(&sender);
+                gossip::requeue_failed(&mut state, &context, message, bytes);
             }
             () = slot_freed.notified() => {
                 state.idle.external += 1;
-                let ctx = parts.handler_ctx(&sender);
-                probe::top_up_lane_offers(&mut state, &ctx).await;
+                let context = parts.handler_ctx(&sender);
+                probe::top_up_lane_offers(&mut state, &context).await;
             }
             // A round of the multihop underlay ended, offered or answered: an offer that its
             // answerer turned away, because our link vector had not reached it yet, is made again
@@ -914,8 +923,8 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 #[cfg(feature = "multihop")]
                 {
                     underlay_webrtc::tick_now(&state);
-                    let ctx = parts.handler_ctx(&sender);
-                    linkstate_now(&mut state, &ctx).await;
+                    let context = parts.handler_ctx(&sender);
+                    linkstate_now(&mut state, &context).await;
                 }
             }
             // The gate of the multihop underlay began to refuse a hop, or admitted one that
@@ -923,32 +932,32 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
             // waiting for the stuck deadline and a link-state tick would cost 20 s or more.
             () = route_wake.notified() => {
                 state.idle.external += 1;
-                let ctx = parts.handler_ctx(&sender);
-                route_wake_arm(&mut state, &ctx);
+                let context = parts.handler_ctx(&sender);
+                route_wake_arm(&mut state, &context);
             }
             lan_event = recv_opt(&mut lan_contacts) => match lan_event {
                 None => lan_contacts = None,
                 Some(event) => {
                     state.idle.external += 1;
-                    let ctx = parts.handler_ctx(&sender);
-                    gossip::lan::on_lan_event(event, &mut state, &ctx).await;
+                    let context = parts.handler_ctx(&sender);
+                    gossip::lan::on_lan_event(event, &mut state, &context).await;
                 }
             },
             Some(address) = address_changes.next() => {
                 state.idle.external += 1;
                 if state.address_flood_due(&address) {
-                    let ctx = parts.handler_ctx(&sender);
-                    gossip::broadcast_peer_info(&mut state, &ctx).await;
+                    let context = parts.handler_ctx(&sender);
+                    gossip::broadcast_peer_info(&mut state, &context).await;
                     state.last_sent_at = Instant::now();
                 }
             }
             Some(change) = path_rx.recv() => {
                 state.idle.external += 1;
-                let ctx = parts.handler_ctx(&sender);
+                let context = parts.handler_ctx(&sender);
                 if Some(change.peer) == state.rendezvous_id {
-                    webrtc::rendezvous::offer_rendezvous_on_path_loss(&mut state, &ctx);
+                    webrtc::rendezvous::offer_rendezvous_on_path_loss(&mut state, &context);
                 } else {
-                    probe::on_path_change(change, &mut state, &ctx).await;
+                    probe::on_path_change(change, &mut state, &context).await;
                 }
             }
             // Inbound unicast rides the *same* validate + dedup path as gossip (`ingest`).
@@ -965,8 +974,8 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
             }
             _ = intervals.alive.tick() => {
                 state.idle.alive += 1;
-                let ctx = parts.handler_ctx(&sender);
-                alive_arm(&mut anchors, &mut state, &ctx).await;
+                let context = parts.handler_ctx(&sender);
+                alive_arm(&mut anchors, &mut state, &context).await;
                 // Retry WebRTC negotiation for any peer we still have no
                 // session with. Without this a pair gets exactly one attempt
                 // ever: negotiation fires on `PeerInfo`, and once the pair is
@@ -974,7 +983,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 // lost to a transient (the peer not yet reachable, an ICE
                 // hiccup) is never retried, and the pair stays relay-only for
                 // the life of the link. Observed exactly that, CLI↔browser.
-                webrtc::retry::retry_sessions(&mut state, &ctx);
+                webrtc::retry::retry_sessions(&mut state, &context);
                 // The same for the sessions of the multihop underlay, which open
                 // only to a neighbor that has no IP path to us.
                 #[cfg(feature = "multihop")]
@@ -984,24 +993,24 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 // Same cadence for the direct-path probes a lookup-only relay
                 // holds grafts on: a peer whose punch missed the deadline, or
                 // whose session attached since, gets another look.
-                probe::retry_direct(&mut state, &ctx, false).await;
-                probe::ensure_watchers(&mut state, ctx.endpoint.id(), ctx.rendezvous_id);
-                probe::nudge_webrtc_riders(&mut state, &ctx);
+                probe::retry_direct(&mut state, &context, false).await;
+                probe::ensure_watchers(&mut state, context.endpoint.id(), context.rendezvous_id);
+                probe::nudge_webrtc_riders(&mut state, &context);
             }
             _ = intervals.sweep.tick() => {
                 state.idle.sweep += 1;
                 sweep_arm(&mut anchors, &mut state, sink.as_ref());
-                let ctx = parts.handler_ctx(&sender);
-                probe::prove_routed_pairs(&mut state, &ctx).await;
-                app.on_tick(&mut state, &ctx).await;
+                let context = parts.handler_ctx(&sender);
+                probe::prove_routed_pairs(&mut state, &context).await;
+                app.on_tick(&mut state, &context).await;
             }
             _ = intervals.heal.tick() => {
                 state.idle.heal += 1;
                 let (mono_gap, wall_gap) = timers::note_tick_gap("heal", &mut anchors.heal, &mut anchors.heal_wall, heal_interval());
                 if state.gossip_open {
-                    let ctx = parts.handler_ctx(&sender);
-                    run_heal(TickGap { mono: mono_gap, wall: wall_gap }, &mut state, &ctx, &rendezvous_params).await;
-                    maybe_cohost(&mut state, &ctx, &CohostArm { policy: cohost, params: &rendezvous_params, started }, &mut rendezvous, &mut rival_probe).await;
+                    let context = parts.handler_ctx(&sender);
+                    run_heal(TickGap { mono: mono_gap, wall: wall_gap }, &mut state, &context, &rendezvous_params).await;
+                    maybe_cohost(&mut state, &context, &CohostArm { policy: cohost, params: &rendezvous_params, started }, &mut rendezvous, &mut rival_probe).await;
                 } else {
                     // Stream ended: resubscribe instead of healing a dead topic
                     // (see `resubscribe_tick`); the beacon keeps the mesh joinable.
@@ -1022,8 +1031,8 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                         }
                         return Err(error);
                     }
-                    let ctx = parts.handler_ctx(&sender);
-                    maybe_cohost(&mut state, &ctx, &CohostArm { policy: cohost, params: &rendezvous_params, started }, &mut rendezvous, &mut rival_probe).await;
+                    let context = parts.handler_ctx(&sender);
+                    maybe_cohost(&mut state, &context, &CohostArm { policy: cohost, params: &rendezvous_params, started }, &mut rendezvous, &mut rival_probe).await;
                 }
             }
             // A bootstrap rung chosen off-loop (startup probe / beacon self-monitor); apply it cheaply.
@@ -1082,10 +1091,10 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
             Some(report) = rung_reports.recv() => {
                 state.idle.external += 1;
                 state.rungs.note(report, Instant::now());
-                let ctx = parts.handler_ctx(&sender);
+                let context = parts.handler_ctx(&sender);
                 let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
-                maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
-                maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
+                maybe_reclaim(&mut state, &context, &arm, &mut rendezvous, &mut rival_probe).await;
+                maybe_cohost(&mut state, &context, &arm, &mut rendezvous, &mut rival_probe).await;
                 // Outside the reclaim window and before the grace, no walk acts on the reading:
                 // a joiner that is not meshed yet applies it itself.
                 if !state.meshed
@@ -1094,7 +1103,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 {
                     beacon::read_ladder(
                         &rendezvous_params,
-                        ctx.endpoint,
+                        context.endpoint,
                         &state.address_book,
                         &mut state.rungs,
                     )
@@ -1106,13 +1115,13 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 // the re-probe starts now. The reclaim tick below stays as the net.
                 state.beacon_closing = None;
                 state.idle.reclaim += 1;
-                let ctx = parts.handler_ctx(&sender);
+                let context = parts.handler_ctx(&sender);
                 let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
-                maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
+                maybe_reclaim(&mut state, &context, &arm, &mut rendezvous, &mut rival_probe).await;
             }
             _ = intervals.reclaim.tick() => {
                 state.idle.reclaim += 1;
-                let ctx = parts.handler_ctx(&sender);
+                let context = parts.handler_ctx(&sender);
                 let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
                 // The rival re-check shed rides this ticker, NOT the heal tick:
                 // simultaneous joiners' heal tickers align, and a shed deadline
@@ -1123,18 +1132,18 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 // forever). At this cadence the offsets survive; the next tick
                 // (~RECLAIM_INTERVAL later, after the dropped endpoint has
                 // unmapped) runs the re-probe via `maybe_reclaim`.
-                if !shed_rival_beacon_if_due(&mut state, &arm, &mut rendezvous, ctx.endpoint.id()) {
-                    maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
+                if !shed_rival_beacon_if_due(&mut state, &arm, &mut rendezvous, context.endpoint.id()) {
+                    maybe_reclaim(&mut state, &context, &arm, &mut rendezvous, &mut rival_probe).await;
                 }
-                probe::regraft_due(&mut state, &ctx).await;
-                probe::refill_isolated(&mut state, &ctx).await;
-                webrtc::session_policy::detach_sessions_under_udp(&mut state, &ctx).await;
-                gossip::antientropy::resume_fast_rounds(&mut state, &ctx).await;
+                probe::regraft_due(&mut state, &context).await;
+                probe::refill_isolated(&mut state, &context).await;
+                webrtc::session_policy::detach_sessions_under_udp(&mut state, &context).await;
+                gossip::antientropy::resume_fast_rounds(&mut state, &context).await;
             }
             _ = intervals.antientropy.tick() => {
                 state.idle.antientropy += 1;
-                let ctx = parts.handler_ctx(&sender);
-                antientropy_arm(&mut anchors, &mut state, &ctx).await;
+                let context = parts.handler_ctx(&sender);
+                antientropy_arm(&mut anchors, &mut state, &context).await;
             }
             // Counted before the census reads them, so the tick that reports an
             // interval is itself in that interval's numbers.
@@ -1144,28 +1153,28 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
             }
             _ = intervals.linkstate.tick() => {
                 state.idle.linkstate += 1;
-                let ctx = parts.handler_ctx(&sender);
-                linkstate_arm(&mut state, &ctx).await;
+                let context = parts.handler_ctx(&sender);
+                linkstate_arm(&mut state, &context).await;
             }
             _ = recv_opt(&mut external_quit_rx) => {
                 // External quit is always in-process (MCP): never hard-exit (`false`).
-                let ctx = parts.handler_ctx(&sender);
-                announce_departure(&mut state, &mut app, &ctx, QuitParams { name: &mesh_name, leave_label: &leave_label, exit_on_quit: false }).await;
+                let context = parts.handler_ctx(&sender);
+                announce_departure(&mut state, &mut app, &context, QuitParams { name: &mesh_name, leave_label: &leave_label, exit_on_quit: false }).await;
                 break;
             }
             request = recv_opt(&mut external_req_rx) => match request {
                 None => external_req_rx = None,
                 Some(request) => {
                     state.idle.external += 1;
-                    let ctx = parts.handler_ctx(&sender);
-                    if app.handle_session(request, &mut state, &ctx).await {
+                    let context = parts.handler_ctx(&sender);
+                    if app.handle_session(request, &mut state, &context).await {
                         state.last_sent_at = Instant::now();
                     }
                 }
             },
             _ = quit_rx.recv() => {
-                let ctx = parts.handler_ctx(&sender);
-                exit_after_release = announce_departure(&mut state, &mut app, &ctx, QuitParams { name: &mesh_name, leave_label: &leave_label, exit_on_quit }).await;
+                let context = parts.handler_ctx(&sender);
+                exit_after_release = announce_departure(&mut state, &mut app, &context, QuitParams { name: &mesh_name, leave_label: &leave_label, exit_on_quit }).await;
                 break;
             }
         }
@@ -1244,8 +1253,8 @@ async fn sleep_until_opt(deadline: Option<TokioInstant>) {
 /// The route-wake arm: the gate of the multihop underlay began to refuse a hop, or admitted
 /// one that it refused, so the best first hop to a pair on the relay can be another now.
 /// The pass dials the pairs whose route changed.
-pub(crate) fn route_wake_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    probe::nudge_climbing_pairs(state, ctx, true);
+pub(crate) fn route_wake_arm(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    probe::nudge_climbing_pairs(state, context, true);
 }
 
 /// The wake of the multihop handle, which rings when its relay rule starts to refuse a
@@ -1510,7 +1519,7 @@ mod route_wake_tests {
         config: HandleConfig,
     ) -> Vec<u32> {
         let node = LaneNode::start().await;
-        let ctx = node.ctx();
+        let context = node.context();
         let mut state = node.state();
         let me = MultihopHandle::new(secret, underlay, config).expect("a handle");
         state.multihop = Some(me.clone());
@@ -1518,7 +1527,7 @@ mod route_wake_tests {
         state
             .linked_endpoints
             .insert(SecretKey::generate().public());
-        linkstate_arm(&mut state, &ctx).await;
+        linkstate_arm(&mut state, &context).await;
         let own = me.app_id().to_string();
         let costs = me
             .topology_view()
@@ -1594,7 +1603,7 @@ mod route_wake_tests {
     async fn a_refused_first_hop_moves_the_dial_of_a_pair_on_the_relay_to_a_route_through_a_third()
     {
         let node = LaneNode::start().await;
-        let ctx = node.ctx();
+        let context = node.context();
         let mut state = node.state();
         let (me, via, dst) = (
             multihop_handle().await,
@@ -1608,7 +1617,7 @@ mod route_wake_tests {
         state.note_peer_endpoint(nick("dst"), EndpointAddr::new(dst.app_id().get()));
         state.path_kinds.insert(dst.app_id().get(), PathKind::Relay);
 
-        nudge_climbing_pairs(&mut state, &ctx, true);
+        nudge_climbing_pairs(&mut state, &context, true);
         let direct = state
             .route_dialed
             .get(&dst.app_id().get())
@@ -1616,7 +1625,7 @@ mod route_wake_tests {
             .expect("the direct route is dialed");
 
         me.refuse_hop_for_test(dst.app_id());
-        route_wake_arm(&mut state, &ctx);
+        route_wake_arm(&mut state, &context);
 
         let dialed = state
             .route_dialed

@@ -75,19 +75,19 @@ where
 {
     use sha2::Digest;
     use tokio::io::AsyncWriteExt as _;
-    let conn = dial(endpoint, ticket).await?;
+    let connection = dial(endpoint, ticket).await?;
     // A fresh connection to a peer behind NAT starts on the relay and punches
     // inside it, so this waits rather than refusing at once. The producer
     // waits too; refusing here first spares the round trip and names the
     // cause.
     crate::transport::refuse_relayed(
-        &conn,
+        &connection,
         ticket.relay_transport,
         crate::transport::PROBE_DEADLINE,
         super::RELAY_REFUSED_CODE,
     )
     .await?;
-    let (mut send, mut recv) = conn.open_bi().await?;
+    let (mut send, mut recv) = connection.open_bi().await?;
 
     // Request: sha256 ‖ secret, then done sending.
     send.write_all(ticket.sha256.as_bytes()).await?;
@@ -98,7 +98,7 @@ where
     // coded reason before the size arrives.
     let mut size_buf = [0u8; 8];
     if recv.read_exact(&mut size_buf).await.is_err() {
-        return Err(refusal(&conn));
+        return Err(refusal(&connection));
     }
     let size = u64::from_le_bytes(size_buf);
     if size != ticket.size {
@@ -113,15 +113,15 @@ where
 
     let mut hasher = Sha256::new();
     let mut remaining = size;
-    let mut buf = vec![0u8; CHUNK];
+    let mut buffer = vec![0u8; CHUNK];
     while remaining > 0 {
-        let want = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
-        let read = match recv.read(&mut buf[..want]).await? {
+        let want = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let read = match recv.read(&mut buffer[..want]).await? {
             Some(read) if read > 0 => read,
             _ => bail!("blob stream ended {remaining} bytes early"),
         };
-        hasher.update(&buf[..read]);
-        out.write_all(&buf[..read]).await?;
+        hasher.update(&buffer[..read]);
+        out.write_all(&buffer[..read]).await?;
         remaining -= read as u64;
     }
     out.flush().await?;
@@ -150,7 +150,7 @@ async fn dial(endpoint: &Endpoint, ticket: &BlobTicket) -> Result<Connection> {
     let started = Instant::now();
     loop {
         match endpoint.connect(ticket.address.clone(), BLOB_ALPN).await {
-            Ok(conn) => return Ok(conn),
+            Ok(connection) => return Ok(connection),
             Err(error) if started.elapsed() < DISCOVERY_DEADLINE => {
                 tracing::debug!(%error, "blob dial retrying while the address propagates");
                 tokio::time::sleep(RETRY_DELAY).await;
@@ -162,8 +162,8 @@ async fn dial(endpoint: &Endpoint, ticket: &BlobTicket) -> Result<Connection> {
 
 /// Turn a producer-side connection close into a readable error — the coded
 /// close (`bad secret` / `unknown blob`) is surfaced to the user.
-fn refusal(conn: &Connection) -> anyhow::Error {
-    match conn.close_reason() {
+fn refusal(connection: &Connection) -> anyhow::Error {
+    match connection.close_reason() {
         Some(reason) => anyhow!("the blob producer refused the fetch: {reason}"),
         None => anyhow!("the blob fetch ended before any data arrived"),
     }

@@ -55,7 +55,7 @@ pub(in crate::transport::pool) enum Hold {
 
 /// A pooled connection and when a send last used it.
 pub(in crate::transport::pool) struct Pooled {
-    pub(in crate::transport::pool) conn: Connection,
+    pub(in crate::transport::pool) connection: Connection,
     /// On the clock the tokio runtime keeps, so a test can pause it.
     pub(in crate::transport::pool) last_used: PoolInstant,
     pub(in crate::transport::pool) hold: Hold,
@@ -160,9 +160,14 @@ impl UnicastPool {
     }
 
     /// [`send_one`], marked busy in the ledger for as long as it runs.
-    async fn send_marked(&self, eid: EndpointId, conn: &Connection, bytes: &[u8]) -> Result<()> {
+    async fn send_marked(
+        &self,
+        eid: EndpointId,
+        connection: &Connection,
+        bytes: &[u8],
+    ) -> Result<()> {
         let busy = self.inner.admission.get().map(|table| table.busy(eid));
-        send_one(conn, bytes, busy).await
+        send_one(connection, bytes, busy).await
     }
 
     /// A detached pool with no endpoint — every operation is a no-op. The
@@ -201,15 +206,15 @@ impl UnicastPool {
     /// at-most-once (an app-level concern: waiter timeouts, and anti-entropy,
     /// which re-sends a directed frame point-to-point to its addressee).
     pub(crate) async fn send_if_warm(&self, eid: EndpointId, bytes: Bytes) -> WarmSend {
-        let Some(conn) = self.warm(eid).await else {
+        let Some(connection) = self.warm(eid).await else {
             return WarmSend::Cold;
         };
-        if !payload_allowed_on(&conn, self.inner.relay_transport) {
+        if !payload_allowed_on(&connection, self.inner.relay_transport) {
             return WarmSend::Refused;
         }
         let pool = self.clone();
         n0_future::task::spawn(async move {
-            let Err(error) = pool.send_marked(eid, &conn, &bytes).await else {
+            let Err(error) = pool.send_marked(eid, &connection, &bytes).await else {
                 return;
             };
             tracing::debug!(target: LOG_TARGET, %error, "unicast send failed; dropping connection and redialing");
@@ -227,7 +232,7 @@ impl UnicastPool {
     /// answer for a pair that linked through the rendezvous.
     pub(crate) async fn udp_won(&self, eid: EndpointId) -> bool {
         let won = match self.probe_connection(eid).await {
-            Ok(conn) => payload_path::wait_ip(&conn, PATH_SELECT_TIMEOUT).await,
+            Ok(connection) => payload_path::wait_ip(&connection, PATH_SELECT_TIMEOUT).await,
             Err(_) => false,
         };
         self.probe_done(eid).await;
@@ -235,9 +240,9 @@ impl UnicastPool {
     }
 
     /// Remember `addr` as the address to dial its peer at.
-    pub(crate) fn note_addr(&self, addr: &EndpointAddr) {
+    pub(crate) fn note_addr(&self, address: &EndpointAddr) {
         if let Ok(mut addrs) = self.inner.addrs.lock() {
-            addrs.insert(addr.id, addr.clone());
+            addrs.insert(address.id, address.clone());
         }
     }
 
@@ -248,8 +253,8 @@ impl UnicastPool {
         self.inner.conns.try_lock().ok().and_then(|conns| {
             conns
                 .get(&eid)
-                .map(|pooled| &pooled.conn)
-                .filter(|conn| conn.close_reason().is_none())
+                .map(|pooled| &pooled.connection)
+                .filter(|connection| connection.close_reason().is_none())
                 .cloned()
         })
     }
@@ -262,8 +267,8 @@ impl UnicastPool {
             conns
                 .get(&eid)
                 .filter(|pooled| pooled.hold == Hold::Used)
-                .map(|pooled| &pooled.conn)
-                .filter(|conn| conn.close_reason().is_none())
+                .map(|pooled| &pooled.connection)
+                .filter(|connection| connection.close_reason().is_none())
                 .cloned()
         })
     }
@@ -275,7 +280,8 @@ impl UnicastPool {
     pub(crate) fn selected_is_ip(&self, eid: EndpointId) -> bool {
         self.inner.conns.try_lock().is_ok_and(|conns| {
             conns.get(&eid).is_some_and(|pooled| {
-                pooled.conn.close_reason().is_none() && payload_path::selected_is_ip(&pooled.conn)
+                pooled.connection.close_reason().is_none()
+                    && payload_path::selected_is_ip(&pooled.connection)
             })
         })
     }
@@ -286,10 +292,10 @@ impl UnicastPool {
         let mut conns = self.inner.conns.lock().await;
         let pooled = conns
             .get_mut(&eid)
-            .filter(|pooled| pooled.conn.close_reason().is_none())?;
+            .filter(|pooled| pooled.connection.close_reason().is_none())?;
         pooled.last_used = PoolInstant::now();
         pooled.hold = Hold::Used;
-        Some(pooled.conn.clone())
+        Some(pooled.connection.clone())
     }
 
     /// Close the connections nothing has used for [`PoolInner::idle`], and the
@@ -320,7 +326,7 @@ impl UnicastPool {
                     };
                     if idle {
                         tracing::debug!(target: LOG_TARGET, %eid, "closing an idle pooled unicast connection");
-                        pooled.conn.close(IDLE.into(), b"idle");
+                        pooled.connection.close(IDLE.into(), b"idle");
                     }
                     !idle
                 });
@@ -373,7 +379,7 @@ impl UnicastPool {
         self.inner.dial_failures.lock().await.forget(&eid);
         let was_pooled = pooled.is_some();
         if let Some(pooled) = pooled {
-            pooled.conn.close(IDLE.into(), b"dropped by a test");
+            pooled.connection.close(IDLE.into(), b"dropped by a test");
         }
         was_pooled
     }
@@ -409,13 +415,13 @@ impl UnicastPool {
             .into_iter()
             .map(message::WireFrame::into_bytes)
             .collect();
-        if let Some(conn) = self.warm(eid).await {
-            if !payload_allowed_on(&conn, self.inner.relay_transport) {
+        if let Some(connection) = self.warm(eid).await {
+            if !payload_allowed_on(&connection, self.inner.relay_transport) {
                 return false;
             }
             let pool = self.clone();
             n0_future::task::spawn(async move {
-                pool.send_batch(eid, &conn, &frames).await;
+                pool.send_batch(eid, &connection, &frames).await;
             });
             return true;
         }
@@ -433,8 +439,8 @@ impl UnicastPool {
         };
         n0_future::task::spawn(async move {
             let pool = &in_flight.pool;
-            let conn = match pool.warm_or_dial(eid).await {
-                Ok(conn) => conn,
+            let connection = match pool.warm_or_dial(eid).await {
+                Ok(connection) => connection,
                 Err(error) => {
                     in_flight.publish(Err(error.to_string()));
                     tracing::debug!(target: LOG_TARGET, %eid, %error, "batch not delivered: no connection");
@@ -442,23 +448,23 @@ impl UnicastPool {
                 }
             };
             if !pool.inner.relay_transport
-                && !payload_path::wait_direct(&conn, PATH_SELECT_TIMEOUT).await
+                && !payload_path::wait_direct(&connection, PATH_SELECT_TIMEOUT).await
             {
                 in_flight.publish(Err(RELAY_REFUSED.to_owned()));
                 tracing::debug!(target: LOG_TARGET, %eid, "batch not delivered: {RELAY_REFUSED}");
                 return;
             }
             in_flight.publish(Ok(()));
-            pool.send_batch(eid, &conn, &frames).await;
+            pool.send_batch(eid, &connection, &frames).await;
         });
         true
     }
 
     /// Write `frames` to `conn` one stream at a time, in order, stopping and
     /// dropping the connection at the first write error.
-    async fn send_batch(&self, eid: EndpointId, conn: &Connection, frames: &[Bytes]) {
+    async fn send_batch(&self, eid: EndpointId, connection: &Connection, frames: &[Bytes]) {
         for bytes in frames {
-            if let Err(error) = self.send_marked(eid, conn, bytes).await {
+            if let Err(error) = self.send_marked(eid, connection, bytes).await {
                 tracing::debug!(target: LOG_TARGET, %eid, %error, "batch cut short; dropping the connection");
                 self.inner.conns.lock().await.remove(&eid);
                 return;
@@ -485,7 +491,7 @@ impl UnicastPool {
     /// fails/times out, or a stream write error.
     pub(crate) async fn dial_and_send(&self, eid: EndpointId, bytes: Bytes) -> Result<()> {
         self.inner.dial_attempts.fetch_add(1, Ordering::Relaxed);
-        let conn = self.warm_or_dial(eid).await?;
+        let connection = self.warm_or_dial(eid).await?;
         // A connection this call just dialed is milliseconds old: its
         // non-relay path (the punch, or a WebRTC path opened right after
         // `AddConnection`) is still forming, and the synchronous check read
@@ -493,11 +499,11 @@ impl UnicastPool {
         // frame to every peer without a warm connection. Wait like the
         // accept side does, on a dial-sized budget.
         if !self.inner.relay_transport
-            && !payload_path::wait_direct(&conn, PATH_SELECT_TIMEOUT).await
+            && !payload_path::wait_direct(&connection, PATH_SELECT_TIMEOUT).await
         {
             bail!("{RELAY_REFUSED}");
         }
-        if let Err(error) = self.send_marked(eid, &conn, &bytes).await {
+        if let Err(error) = self.send_marked(eid, &connection, &bytes).await {
             self.inner.conns.lock().await.remove(&eid);
             return Err(error);
         }
@@ -586,8 +592,8 @@ impl UnicastPool {
         if self.inner.endpoint.is_none() {
             bail!("unicast pool has no endpoint");
         }
-        if let Some(conn) = self.warm(eid).await {
-            return Ok(conn);
+        if let Some(connection) = self.warm(eid).await {
+            return Ok(connection);
         }
         self.dial_pooled(eid, Hold::Used).await
     }
@@ -608,11 +614,11 @@ impl UnicastPool {
             .lock()
             .await
             .get(&eid)
-            .map(|pooled| &pooled.conn)
-            .filter(|conn| conn.close_reason().is_none())
+            .map(|pooled| &pooled.connection)
+            .filter(|connection| connection.close_reason().is_none())
             .cloned();
-        if let Some(conn) = existing {
-            return Ok(conn);
+        if let Some(connection) = existing {
+            return Ok(connection);
         }
         if self
             .inner
@@ -650,7 +656,7 @@ impl UnicastPool {
         {
             bail!("{COOLDOWN_REFUSED}");
         }
-        let addr = self
+        let address = self
             .inner
             .addrs
             .lock()
@@ -669,19 +675,19 @@ impl UnicastPool {
                 gate.notified().await;
             }
         }
-        match dial(&endpoint, addr).await {
-            Ok(conn) => {
+        match dial(&endpoint, address).await {
+            Ok(connection) => {
                 self.inner.dial_failures.lock().await.forget(&eid);
                 self.inner.conns.lock().await.insert(
                     eid,
                     Pooled {
-                        conn: conn.clone(),
+                        connection: connection.clone(),
                         last_used: PoolInstant::now(),
                         hold,
                     },
                 );
                 self.ensure_sweeper();
-                Ok(conn)
+                Ok(connection)
             }
             Err(error) => {
                 self.inner
@@ -702,7 +708,7 @@ impl UnicastPool {
     /// clone drops.
     pub(crate) async fn forget(&self, eid: EndpointId) {
         if let Some(pooled) = self.inner.conns.lock().await.remove(&eid) {
-            pooled.conn.close(0u32.into(), b"peer left");
+            pooled.connection.close(0u32.into(), b"peer left");
         }
         self.inner.dial_failures.lock().await.forget(&eid);
         // A rejoin may come back at another address; its `PeerInfo` notes it.
@@ -730,9 +736,9 @@ async fn wait_for_dial(
 /// Dial `eid` on the unicast ALPN within [`DIAL_TIMEOUT`]. The endpoint already
 /// knows the peer's address (registered via `add_peer_addr`), so a bare-id
 /// `EndpointAddr` resolves through the endpoint's address book + lookups.
-async fn dial(endpoint: &Endpoint, addr: EndpointAddr) -> Result<Connection> {
-    match n0_future::time::timeout(DIAL_TIMEOUT, endpoint.connect(addr, UNICAST_ALPN)).await {
-        Ok(Ok(conn)) => Ok(conn),
+async fn dial(endpoint: &Endpoint, address: EndpointAddr) -> Result<Connection> {
+    match n0_future::time::timeout(DIAL_TIMEOUT, endpoint.connect(address, UNICAST_ALPN)).await {
+        Ok(Ok(connection)) => Ok(connection),
         Ok(Err(error)) => Err(anyhow::anyhow!("{error}")),
         Err(_) => bail!("unicast dial timed out after {DIAL_TIMEOUT:?}"),
     }
@@ -744,8 +750,8 @@ async fn dial(endpoint: &Endpoint, addr: EndpointAddr) -> Result<Connection> {
 /// after it is dropped because the connection stays pooled, so the sender does not
 /// await `stopped()` (which would block the event loop on the inline
 /// unicast-only path). Only the busy mark waits for it, in a task of its own.
-async fn send_one(conn: &Connection, bytes: &[u8], busy: Option<BusyGuard>) -> Result<()> {
-    let mut stream = conn.open_uni().await?;
+async fn send_one(connection: &Connection, bytes: &[u8], busy: Option<BusyGuard>) -> Result<()> {
+    let mut stream = connection.open_uni().await?;
     stream.write_all(bytes).await?;
     stream.finish()?;
     // `finish()` returns while the frame is still in flight. The busy mark moves to a task that waits

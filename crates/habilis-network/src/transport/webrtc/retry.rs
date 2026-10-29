@@ -22,7 +22,7 @@ use crate::util::{clock, tuning};
 ///
 /// Cheap: a map walk plus a `has_session` check per peer. The per-peer in-flight
 /// guard and the cap inside [`negotiate_session`] do the rest of the work.
-pub(crate) fn retry_sessions(state: &mut state::EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(crate) fn retry_sessions(state: &mut state::EventLoopState, context: &HandlerCtx<'_>) {
     if state.webrtc.is_none() {
         return;
     }
@@ -42,41 +42,41 @@ pub(crate) fn retry_sessions(state: &mut state::EventLoopState, ctx: &HandlerCtx
     // covers relay-only peers (other tabs) and leaves natives to dial it.
     // Read through `local_needs_webrtc_lane` the pass re-offered to every
     // native each tick, colliding with the native's own dial.
-    let own_addr = ctx.endpoint.addr();
+    let own_addr = context.endpoint.addr();
     let own_needs_lane = lane_needs::needs_webrtc_lane(&own_addr);
     let mut peers: Vec<EndpointAddr> = state
         .peer_endpoints
         .values()
-        .filter(|addr| addr.id != ctx.rendezvous_id)
-        .filter(|addr| {
+        .filter(|address| address.id != context.rendezvous_id)
+        .filter(|address| {
             session_policy::wants_session(
-                own_needs_lane || lane_needs::needs_webrtc_lane(addr),
-                state.pair_path_kind(addr.id),
-                state.direct.get(&addr.id) == Some(&DirectState::Direct),
+                own_needs_lane || lane_needs::needs_webrtc_lane(address),
+                state.pair_path_kind(address.id),
+                state.direct.get(&address.id) == Some(&DirectState::Direct),
             )
         })
-        .filter(|addr| {
+        .filter(|address| {
             !state
                 .webrtc
                 .as_ref()
-                .is_some_and(|handle| handle.has_session(&addr.id))
+                .is_some_and(|handle| handle.has_session(&address.id))
         })
-        .filter(|addr| !held_back(state, addr))
+        .filter(|address| !held_back(state, address))
         .cloned()
         .collect();
     // Sorted because the cap now bites here: in a mesh larger than the ceiling
     // this pass decides *which* peers get direct sessions, and `HashMap`
     // iteration order would make that differ run to run on one machine.
-    peers.sort_unstable_by_key(|addr| addr.id);
+    peers.sort_unstable_by_key(|address| address.id);
     // The lane offers are paced like those of `retry_direct`: one helper decides how many a
     // pass starts and which, so that the two passes do not add up to a round per member.
     let (lane, rest): (Vec<_>, Vec<_>) = peers
         .into_iter()
-        .partition(|addr| own_needs_lane || lane_needs::needs_webrtc_lane(addr));
+        .partition(|address| own_needs_lane || lane_needs::needs_webrtc_lane(address));
     let pick = probe::lane_pick();
     let lane = probe::plan_lane_offers(lane, state.webrtc_admission.in_flight(), pick);
-    for addr in rest.into_iter().chain(lane) {
-        negotiate_session::negotiate_session(state, ctx, addr.id, addr);
+    for address in rest.into_iter().chain(lane) {
+        negotiate_session::negotiate_session(state, context, address.id, address);
     }
 }
 
@@ -93,19 +93,19 @@ pub(crate) fn retry_sessions(state: &mut state::EventLoopState, ctx: &HandlerCtx
 /// never dialed, so no send ever opens a connection, and its gossip graft waits
 /// for a proven direct path. A pair behind NAT, with addresses but no punched
 /// path, would wait for ever. A session is its way out.
-pub(crate) fn held_back(state: &state::EventLoopState, addr: &EndpointAddr) -> bool {
+pub(crate) fn held_back(state: &state::EventLoopState, address: &EndpointAddr) -> bool {
     let probe_failed = !state.relay_transport.relay_allowed()
-        && state.direct.get(&addr.id) == Some(&DirectState::RelayOnly);
-    let linked = state.linked_endpoints.contains(&addr.id);
-    let wanted = state.lane_session_wanted(addr.id, clock::Instant::now());
+        && state.direct.get(&address.id) == Some(&DirectState::RelayOnly);
+    let linked = state.linked_endpoints.contains(&address.id);
+    let wanted = state.lane_session_wanted(address.id, clock::Instant::now());
     // A peer that evicted us lately is left alone by every proactive dial, and the offer of a
     // session is one. A held frame is a send, and a send dials at once.
-    let evicted_us = !linked && !wanted && state.webrtc_admission.evicted_recently(addr.id);
+    let evicted_us = !linked && !wanted && state.webrtc_admission.evicted_recently(address.id);
     evicted_us
         || (!linked
             && !wanted
             && !probe_failed
-            && state.unicast_pool.used_connection(addr.id).is_none())
+            && state.unicast_pool.used_connection(address.id).is_none())
 }
 
 /// Detach the sessions that nothing has held for
@@ -129,7 +129,10 @@ pub(crate) fn detach_idle_sessions_at(
     let mut detached = Vec::new();
     for peer in state.webrtc_admission.idle_sessions(now, window) {
         let kept = state.linked_endpoints.contains(&peer)
-            || !state.peer_endpoints.values().any(|addr| addr.id == peer);
+            || !state
+                .peer_endpoints
+                .values()
+                .any(|address| address.id == peer);
         if kept || !handle.detach(&peer) {
             continue;
         }

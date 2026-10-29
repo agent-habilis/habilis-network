@@ -17,24 +17,24 @@ pub struct ConnectionHook {
 }
 
 impl EndpointHooks for ConnectionHook {
-    async fn after_handshake<'a>(&'a self, conn: &'a Connection) -> AfterHandshakeOutcome {
-        self.admission.note_connection(conn);
+    async fn after_handshake<'a>(&'a self, connection: &'a Connection) -> AfterHandshakeOutcome {
+        self.admission.note_connection(connection);
         // A gossip connection on the gossip rung would carry the gossip that its frames need:
         // both ends close it, whatever the mesh policy says, and before the relay watch, which is
         // policy-gated.
-        if conn.alpn() == iroh_gossip::net::GOSSIP_ALPN {
-            payload_path::watch_gossip_recursion(conn, self.admission.clone());
+        if connection.alpn() == iroh_gossip::net::GOSSIP_ALPN {
+            payload_path::watch_gossip_recursion(connection, self.admission.clone());
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-            payload_path::track_gossip_conn(conn);
+            payload_path::track_gossip_conn(connection);
         }
         // The accept side watches the gossip connections it holds
         // (`DirectOnlyGossip::accept`). iroh-gossip dials its own, so the
         // watch for those starts here, with the same rule.
-        if conn.side().is_client()
+        if connection.side().is_client()
             && self.admission.watch_dialed_gossip.load(Ordering::Relaxed)
-            && conn.alpn() == iroh_gossip::net::GOSSIP_ALPN
+            && connection.alpn() == iroh_gossip::net::GOSSIP_ALPN
         {
-            direct_only_gossip::watch_relay_policy(conn, self.admission.path_sink());
+            direct_only_gossip::watch_relay_policy(connection, self.admission.path_sink());
         }
         AfterHandshakeOutcome::accept()
     }

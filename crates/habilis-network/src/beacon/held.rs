@@ -48,9 +48,9 @@ pub(crate) async fn read_busy_rungs(
                         return None;
                     }
                 };
-                let addr = EndpointAddr::new(id)
+                let address = EndpointAddr::new(id)
                     .with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
-                let answer = probe_answer(&prober, addr, budget).await;
+                let answer = probe_answer(&prober, address, budget).await;
                 tracing::debug!(target: "habilis_network::beacon", port, ?answer, "busy rung read at setup");
                 drop(n0_future::task::spawn(async move { prober.close().await }));
                 Some((port, answer))

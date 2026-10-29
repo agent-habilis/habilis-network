@@ -21,8 +21,8 @@ pub(crate) async fn tick_alive(
     if state.last_sent_at.elapsed() < ALIVE_INTERVAL {
         return;
     }
-    let msg = Message::new_alive(mesh, author).sign(&state.identity);
-    if let Ok(bytes) = msg.serialize() {
+    let message = Message::new_alive(mesh, author).sign(&state.identity);
+    if let Ok(bytes) = message.serialize() {
         let _ = sender.broadcast(bytes).await;
     }
     state.idle.broadcasts += 1;
@@ -54,7 +54,11 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
             state.write_peer_count();
             // Remembered as a quiet peer, but no longer a holder: its flag was last said before it
             // went silent, and a crashed holder never says it again.
-            if let Some(endpoint) = state.peer_endpoints.get(nick.as_str()).map(|addr| addr.id) {
+            if let Some(endpoint) = state
+                .peer_endpoints
+                .get(nick.as_str())
+                .map(|address| address.id)
+            {
                 state.forget_rival_holder(endpoint);
             }
             if state.surfaced.remove(nick.as_str()) {

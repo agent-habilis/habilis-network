@@ -21,11 +21,18 @@ use crate::transport::probe;
 /// the rendezvous is not wanted, the heal tick detaches it
 /// (`negotiate_rendezvous_session`). A timer here could detach the session of a
 /// later visit.
-pub(crate) async fn release_rendezvous_if_due(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(crate) async fn release_rendezvous_if_due(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+) {
     if !state.should_release_rendezvous(Instant::now()) {
         return;
     }
-    if let Err(error) = ctx.sender.leave_peers(vec![ctx.rendezvous_id]).await {
+    if let Err(error) = context
+        .sender
+        .leave_peers(vec![context.rendezvous_id])
+        .await
+    {
         tracing::warn!(
             target: "habilis_network::gossip",
             %error,
@@ -33,7 +40,7 @@ pub(crate) async fn release_rendezvous_if_due(state: &mut EventLoopState, ctx: &
         );
         return;
     }
-    state.mark_rendezvous_released(ctx.endpoint.id());
+    state.mark_rendezvous_released(context.endpoint.id());
 }
 
 /// Re-graft the rendezvous. `join_peers` is a cheap enqueue.
@@ -116,7 +123,7 @@ pub(crate) async fn tick_heal_hard(
 /// decided the link view is void, so the probe distrusts it too.
 ///
 /// [`EventLoopState::known_endpoints`]: crate::daemon::state::EventLoopState::known_endpoints
-pub(crate) async fn rebridge_known(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(crate) async fn rebridge_known(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let peers: Vec<EndpointId> = state
         .known_endpoints
         .iter()
@@ -133,10 +140,10 @@ pub(crate) async fn rebridge_known(state: &mut EventLoopState, ctx: &HandlerCtx<
         "heal: rendezvous-independent re-bridge (re-dialing known peers)"
     );
     if !state.relay_transport.relay_allowed() {
-        probe::retry_direct(state, ctx, true).await;
+        probe::retry_direct(state, context, true).await;
         return;
     }
-    if let Err(error) = ctx.sender.join_peers(peers).await {
+    if let Err(error) = context.sender.join_peers(peers).await {
         tracing::warn!(
             target: "habilis_network::gossip",
             %error,
@@ -155,7 +162,7 @@ pub(crate) async fn rebridge_known(state: &mut EventLoopState, ctx: &HandlerCtx<
 /// peers that evicted us re-seed their rosters the moment a link
 /// re-forms. Loud by design: this is the watchdog the 11h silent
 /// partition lacked.
-pub(crate) async fn recover_from_starvation(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(crate) async fn recover_from_starvation(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let starved_secs = state.last_inbound_at.elapsed().as_secs();
     tracing::warn!(
         target: "habilis_network::gossip",
@@ -163,13 +170,13 @@ pub(crate) async fn recover_from_starvation(state: &mut EventLoopState, ctx: &Ha
         trips = state.recovery_trips,
         "mesh starvation: no inbound traffic; re-bridging known peers and re-announcing"
     );
-    ctx.sink.emit(NodeEvent::Info(format!(
+    context.sink.emit(NodeEvent::Info(format!(
         "mesh starvation: no traffic for {starved_secs}s; attempting recovery"
     )));
     state.note_degraded();
     state.relink.clear();
-    rebridge_known(state, ctx).await;
-    super::merge_ctx::announce_arrival(state, ctx).await;
+    rebridge_known(state, context).await;
+    super::merge_ctx::announce_arrival(state, context).await;
     let now = Instant::now();
     state.last_sent_at = now;
     state.note_recovery(now);

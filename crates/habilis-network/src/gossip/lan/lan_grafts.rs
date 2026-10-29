@@ -22,7 +22,7 @@ pub(super) const RETRY_STEADY: Duration = Duration::from_mins(5);
 /// A member that was asked: the record it had, when it was asked last, and how often again.
 #[derive(Debug)]
 pub(super) struct Asked {
-    addr: EndpointAddr,
+    address: EndpointAddr,
     pub(super) at: Instant,
     again: u32,
 }
@@ -52,11 +52,11 @@ pub(crate) struct LanGrafts {
 impl LanGrafts {
     /// Whether to ask the member at `addr` to be a neighbor now. `linked` is whether it already is
     /// one. A `true` counts against the cap.
-    pub(crate) fn plan(&mut self, addr: &EndpointAddr, linked: bool, now: Instant) -> bool {
+    pub(crate) fn plan(&mut self, address: &EndpointAddr, linked: bool, now: Instant) -> bool {
         let known = self
             .asked
-            .get_mut(&addr.id)
-            .filter(|asked| asked.addr == *addr);
+            .get_mut(&address.id)
+            .filter(|asked| asked.address == *address);
         let again = match known {
             Some(asked) if linked => {
                 // A neighbor now: if the link is lost later, the wait starts from the first one.
@@ -81,9 +81,9 @@ impl LanGrafts {
         }
         self.recent.push_back(now);
         self.asked.insert(
-            addr.id,
+            address.id,
             Asked {
-                addr: addr.clone(),
+                address: address.clone(),
                 at: now,
                 again,
             },
@@ -95,7 +95,7 @@ impl LanGrafts {
     pub(crate) fn asked_records(&self) -> Vec<EndpointAddr> {
         self.asked
             .values()
-            .map(|asked| asked.addr.clone())
+            .map(|asked| asked.address.clone())
             .collect()
     }
 

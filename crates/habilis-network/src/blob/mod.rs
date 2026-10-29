@@ -223,8 +223,8 @@ mod tests {
                 .bind()
                 .await
                 .expect("bind client");
-            if let Ok(conn) = client.connect(server.addr(), super::BLOB_ALPN).await {
-                idle.push(conn);
+            if let Ok(connection) = client.connect(server.address(), super::BLOB_ALPN).await {
+                idle.push(connection);
             }
             clients.push(client);
         }
@@ -245,8 +245,8 @@ mod tests {
             "a silent peer still holds serve tasks after the pre-auth deadline"
         );
 
-        for conn in idle {
-            conn.close(0u32.into(), b"done");
+        for connection in idle {
+            connection.close(0u32.into(), b"done");
         }
         for client in clients {
             client.close().await;

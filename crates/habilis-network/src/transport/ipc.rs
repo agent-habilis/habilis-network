@@ -124,11 +124,11 @@ mod tests {
             }
 
             #[test]
-            fn prop_json_error_always_valid(msg in arb_ascii_body()) {
-                let json = json_reply::json_error(&msg);
+            fn prop_json_error_always_valid(message in arb_ascii_body()) {
+                let json = json_reply::json_error(&message);
                 let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
                 prop_assert!(parsed["ok"] == false);
-                prop_assert_eq!(&parsed["error"], &msg as &str);
+                prop_assert_eq!(&parsed["error"], &message as &str);
             }
 
             // ── Injection safety ──────────────────────────────────
@@ -141,10 +141,10 @@ mod tests {
             }
 
             #[test]
-            fn prop_json_error_injection_safe(msg in r#"["\\/\n\r\t]{1,50}"#) {
-                let json = json_reply::json_error(&msg);
+            fn prop_json_error_injection_safe(message in r#"["\\/\n\r\t]{1,50}"#) {
+                let json = json_reply::json_error(&message);
                 let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-                prop_assert_eq!(&parsed["error"], &msg as &str);
+                prop_assert_eq!(&parsed["error"], &message as &str);
             }
 
             // ── Socket prefix ─────────────────────────────────────

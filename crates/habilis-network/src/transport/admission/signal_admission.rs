@@ -99,7 +99,7 @@ impl SignalAdmission {
             slot.conns
                 .iter()
                 .filter_map(WeakConnectionHandle::upgrade)
-                .any(|conn| conn.close_reason().is_none())
+                .any(|connection| connection.close_reason().is_none())
         })
     }
 
@@ -130,8 +130,8 @@ impl SignalAdmission {
             handles
                 .iter()
                 .filter_map(WeakConnectionHandle::upgrade)
-                .filter(|conn| conn.close_reason().is_none())
-                .map(|conn| probe::selected_kind(&conn)),
+                .filter(|connection| connection.close_reason().is_none())
+                .map(|connection| probe::selected_kind(&connection)),
         )
         .or_else(|| self.recently_closed_on_rung(peer))
     }
@@ -163,8 +163,8 @@ impl SignalAdmission {
             handles
                 .iter()
                 .filter_map(WeakConnectionHandle::upgrade)
-                .filter(|conn| conn.close_reason().is_none())
-                .map(|conn| probe::selected_kind(&conn)),
+                .filter(|connection| connection.close_reason().is_none())
+                .map(|connection| probe::selected_kind(&connection)),
         )
     }
 
@@ -455,16 +455,16 @@ impl SignalAdmission {
 
     /// Put a connection under its peer, and start the sampler if it is not
     /// running.
-    pub(crate) fn note_connection(&self, conn: &Connection) {
-        let peer = conn.remote_id();
-        let handle = conn.weak_handle();
+    pub(crate) fn note_connection(&self, connection: &Connection) {
+        let peer = connection.remote_id();
+        let handle = connection.weak_handle();
         let mut inner = self.lock();
         if inner.closed {
             return;
         }
         inner.slot(peer).conns.push(handle);
         inner.sync_gossip();
-        let evictions = if conn.alpn() == crate::transport::UNICAST_ALPN {
+        let evictions = if connection.alpn() == crate::transport::UNICAST_ALPN {
             inner.ceiling.register_quic(peer, Instant::now())
         } else {
             ceiling::Admission::default()
@@ -475,8 +475,8 @@ impl SignalAdmission {
             sampler::spawn_sampler(Arc::downgrade(&self.inner), tuning::SLOT_SWEEP);
         }
         drop(inner);
-        if conn.alpn() == crate::transport::UNICAST_ALPN {
-            self.watch_for_eviction(conn.clone());
+        if connection.alpn() == crate::transport::UNICAST_ALPN {
+            self.watch_for_eviction(connection.clone());
         }
         victims.end();
     }
@@ -484,11 +484,11 @@ impl SignalAdmission {
     /// When `conn` closes, whatever the reason, the peer leaves the ledger unless it holds another
     /// unicast connection: a unit ends with its last connection. When the peer closes it with the
     /// `EVICTED` code, note that too, so that no proactive dial goes back to that peer for a while.
-    pub(crate) fn watch_for_eviction(&self, conn: Connection) {
+    pub(crate) fn watch_for_eviction(&self, connection: Connection) {
         let admission = self.clone();
         n0_future::task::spawn(async move {
-            let reason = conn.closed().await;
-            let peer = conn.remote_id();
+            let reason = connection.closed().await;
+            let peer = connection.remote_id();
             let mut inner = admission.lock();
             inner.drop_quic_without_connection(peer);
             if let iroh::endpoint::ConnectionError::ApplicationClosed(close) = reason

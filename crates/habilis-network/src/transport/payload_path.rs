@@ -46,10 +46,10 @@ static GOSSIP_CONNS: std::sync::Mutex<Vec<iroh::endpoint::WeakConnectionHandle>>
 /// list is shared by every member of the process. A connection has two ends and a close on one ends
 /// both, so a test names the remote of the end it closes.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-pub(crate) fn track_gossip_conn(conn: &Connection) {
+pub(crate) fn track_gossip_conn(connection: &Connection) {
     let mut conns = GOSSIP_CONNS.lock().expect("gossip conns poisoned");
     conns.retain(|weak| weak.upgrade().is_some());
-    conns.push(conn.weak_handle());
+    conns.push(connection.weak_handle());
 }
 
 /// Tests only: close every live gossip connection whose remote is `remote`, as a lost link does.
@@ -61,20 +61,22 @@ pub(crate) fn close_gossip_links_to(remote: iroh::EndpointId) -> usize {
     conns
         .iter()
         .filter_map(iroh::endpoint::WeakConnectionHandle::upgrade)
-        .filter(|conn| conn.remote_id() == remote && conn.close_reason().is_none())
-        .map(|conn| conn.close(TEST_CLOSE_CODE.into(), b"closed by a test"))
+        .filter(|connection| {
+            connection.remote_id() == remote && connection.close_reason().is_none()
+        })
+        .map(|connection| connection.close(TEST_CLOSE_CODE.into(), b"closed by a test"))
         .count()
 }
 
 /// Close `conn` with [`GOSSIP_RECURSION_REFUSED_CODE`] once its selected path is the gossip
 /// rung, now or after a path change. Unconditional: it reads no mesh policy.
 pub(crate) fn watch_gossip_recursion(
-    conn: &Connection,
+    connection: &Connection,
     admission: super::admission::SignalAdmission,
 ) {
-    let remote = conn.remote_id();
+    let remote = connection.remote_id();
     habilis_network_iroh_gossip_transport::watch_recursion(
-        conn,
+        connection,
         GOSSIP_RECURSION_REFUSED_CODE,
         move || {
             GOSSIP_RECURSION_CLOSES.fetch_add(1, Ordering::Relaxed);
@@ -87,8 +89,9 @@ pub(crate) fn watch_gossip_recursion(
 /// Whether iroh's selected path to the remote is not the relay: a direct UDP
 /// path, or a custom transport (`WebRTC`, multihop), which is peer to peer as
 /// far as the relay is concerned. `false` while no path is selected yet.
-pub(crate) fn selected_is_direct(conn: &Connection) -> bool {
-    conn.paths()
+pub(crate) fn selected_is_direct(connection: &Connection) -> bool {
+    connection
+        .paths()
         .iter()
         .find(iroh::endpoint::Path::is_selected)
         .is_some_and(|path| !path.is_relay())
@@ -96,8 +99,9 @@ pub(crate) fn selected_is_direct(conn: &Connection) -> bool {
 
 /// Whether iroh's selected path to the remote is a direct UDP path: the race
 /// against `WebRTC` is won. `false` while no path is selected yet.
-pub(crate) fn selected_is_ip(conn: &Connection) -> bool {
-    conn.paths()
+pub(crate) fn selected_is_ip(connection: &Connection) -> bool {
+    connection
+        .paths()
         .iter()
         .find(iroh::endpoint::Path::is_selected)
         .is_some_and(|path| path.is_ip())
@@ -107,10 +111,10 @@ pub(crate) fn selected_is_ip(conn: &Connection) -> bool {
 /// stepping down the ladder: `ip`, `webrtc`, `multihop` or `relay`. `None`
 /// while no path is selected yet.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-pub(crate) fn selected_rung(conn: &Connection) -> Option<&'static str> {
+pub(crate) fn selected_rung(connection: &Connection) -> Option<&'static str> {
     use super::probe::{PathKind, selected_kind};
 
-    match selected_kind(conn) {
+    match selected_kind(connection) {
         PathKind::Ip => Some("ip"),
         PathKind::WebRtc => Some("webrtc"),
         PathKind::Multihop => Some("multihop"),
@@ -125,8 +129,8 @@ pub(crate) fn selected_rung(conn: &Connection) -> Option<&'static str> {
 /// path snapshot, which locks and clones. With the relay lookup only, the
 /// selected path must be a proven non-relay one: "not selected yet" is
 /// refused, not trusted.
-pub(crate) fn payload_allowed_on(conn: &Connection, relay_transport: bool) -> bool {
-    relay_transport || selected_is_direct(conn)
+pub(crate) fn payload_allowed_on(connection: &Connection, relay_transport: bool) -> bool {
+    relay_transport || selected_is_direct(connection)
 }
 
 /// The refusal every payload lane reports when the relay is lookup only and
@@ -137,14 +141,14 @@ pub(crate) const RELAY_REFUSED: &str =
 /// Wait until `conn`'s selected path is not the relay, or `deadline` passes.
 /// Every path event is a reason to re-read the path list: the event's own
 /// address may be stale by the time it is handled.
-pub async fn wait_direct(conn: &Connection, deadline: Duration) -> bool {
-    wait_selected(conn, deadline, selected_is_direct).await
+pub async fn wait_direct(connection: &Connection, deadline: Duration) -> bool {
+    wait_selected(connection, deadline, selected_is_direct).await
 }
 
 /// [`wait_direct`] for a UDP path alone: whether UDP won the race against a
 /// `WebRTC` session within `deadline`.
-pub(crate) async fn wait_ip(conn: &Connection, deadline: Duration) -> bool {
-    wait_selected(conn, deadline, selected_is_ip).await
+pub(crate) async fn wait_ip(connection: &Connection, deadline: Duration) -> bool {
+    wait_selected(connection, deadline, selected_is_ip).await
 }
 
 /// Whether a payload may flow on the relay path, or only on a direct one.
@@ -185,23 +189,23 @@ enum PathWait {
 }
 
 async fn wait_selected(
-    conn: &Connection,
+    connection: &Connection,
     deadline: Duration,
     selected: fn(&Connection) -> bool,
 ) -> bool {
-    wait_selected_outcome(conn, deadline, selected).await == PathWait::Selected
+    wait_selected_outcome(connection, deadline, selected).await == PathWait::Selected
 }
 
 async fn wait_selected_outcome(
-    conn: &Connection,
+    connection: &Connection,
     deadline: Duration,
     selected: fn(&Connection) -> bool,
 ) -> PathWait {
     use futures_util::StreamExt as _;
-    let mut events = conn.path_events();
+    let mut events = connection.path_events();
     let proven = async {
         loop {
-            if selected(conn) {
+            if selected(connection) {
                 return PathWait::Selected;
             }
             if events.next().await.is_none() {
@@ -220,7 +224,7 @@ async fn wait_selected_outcome(
 /// `close_code` so the other end reads the cause. Returns whether payload
 /// may flow on `conn`.
 pub async fn refuse_unless_direct(
-    conn: &Connection,
+    connection: &Connection,
     relay: PayloadPath,
     deadline: Duration,
     close_code: u32,
@@ -228,15 +232,15 @@ pub async fn refuse_unless_direct(
     let outcome = if relay.relay_allowed() {
         PathWait::Selected
     } else {
-        wait_selected_outcome(conn, deadline, selected_is_direct).await
+        wait_selected_outcome(connection, deadline, selected_is_direct).await
     };
     match outcome {
         PathWait::Selected => {
-            tracing::debug!(target: LOG_TARGET, remote = %conn.remote_id(), "payload path admitted");
+            tracing::debug!(target: LOG_TARGET, remote = %connection.remote_id(), "payload path admitted");
             return true;
         }
         PathWait::Closed => {
-            tracing::debug!(target: LOG_TARGET, remote = %conn.remote_id(), "dialer closed before a path was selected");
+            tracing::debug!(target: LOG_TARGET, remote = %connection.remote_id(), "dialer closed before a path was selected");
             return false;
         }
         PathWait::TimedOut => {}
@@ -244,7 +248,7 @@ pub async fn refuse_unless_direct(
     // The paths iroh held at refusal time, because "which paths existed and
     // which was selected" is the whole diagnosis when a link that should
     // have gone direct did not.
-    let paths: Vec<String> = conn
+    let paths: Vec<String> = connection
         .paths()
         .iter()
         .map(|path| {
@@ -256,8 +260,8 @@ pub async fn refuse_unless_direct(
             )
         })
         .collect();
-    tracing::info!(target: LOG_TARGET, remote = %conn.remote_id(), paths = ?paths, "{RELAY_REFUSED}");
-    conn.close(close_code.into(), b"relay path refused");
+    tracing::info!(target: LOG_TARGET, remote = %connection.remote_id(), paths = ?paths, "{RELAY_REFUSED}");
+    connection.close(close_code.into(), b"relay path refused");
     false
 }
 
@@ -270,12 +274,12 @@ pub async fn refuse_unless_direct(
 /// `deadline`.
 #[cfg(feature = "blob")]
 pub(crate) async fn refuse_relayed(
-    conn: &Connection,
+    connection: &Connection,
     relay: PayloadPath,
     deadline: Duration,
     close_code: u32,
 ) -> anyhow::Result<()> {
-    if refuse_unless_direct(conn, relay, deadline, close_code).await {
+    if refuse_unless_direct(connection, relay, deadline, close_code).await {
         return Ok(());
     }
     anyhow::bail!("{RELAY_REFUSED}")

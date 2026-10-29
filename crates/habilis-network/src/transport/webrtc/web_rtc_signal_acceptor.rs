@@ -29,13 +29,13 @@ use super::close_code::{CAP_REFUSED, EVICTED, SIGNAL_ABORTED, SIGNAL_FAILED};
 /// carried exactly one path, the relay, which the lookup-only accept gate then
 /// (correctly) refused.
 pub(crate) fn register_session_addr(book: &MemoryLookup, remote: EndpointId) {
-    let addr = EndpointAddr::from_parts(
+    let address = EndpointAddr::from_parts(
         remote,
         [iroh::TransportAddr::Custom(
             habilis_network_iroh_webrtc_transport::custom_addr(remote),
         )],
     );
-    crate::lookup::add_peer_addr(book, addr);
+    crate::lookup::add_peer_addr(book, address);
     tracing::debug!(target: LOG_TARGET, %remote, "registered the webrtc transport address");
 }
 
@@ -55,12 +55,12 @@ pub(crate) fn register_session_addr(book: &MemoryLookup, remote: EndpointId) {
 /// Split out so the caller can consult the connection's close reason once for
 /// the whole exchange rather than per step.
 pub(crate) async fn exchange_envelopes(
-    conn: &Connection,
+    connection: &Connection,
     offer: &[u8],
     remote: EndpointId,
     deadlines: SignalDeadlines,
 ) -> Result<Vec<u8>> {
-    let (mut send, mut recv) = conn.open_bi().await.context("open signal stream")?;
+    let (mut send, mut recv) = connection.open_bi().await.context("open signal stream")?;
     send.write_all(offer).await.context("send signal offer")?;
     send.finish().context("finish signal stream")?;
 
@@ -69,7 +69,7 @@ pub(crate) async fn exchange_envelopes(
         Err(_elapsed) => {
             // Close explicitly so the answerer wakes now instead of waiting out
             // its own deadline on a round nobody is listening to any more.
-            conn.close(SIGNAL_ABORTED.into(), b"signalling timed out");
+            connection.close(SIGNAL_ABORTED.into(), b"signalling timed out");
             anyhow::bail!(
                 "no signal answer from {remote} within {:?}",
                 deadlines.exchange
@@ -80,9 +80,9 @@ pub(crate) async fn exchange_envelopes(
 
 /// Whether the peer closed `conn` to tell us to back off: it refused at its cap (the code of
 /// older peers), or it evicted us lately.
-pub(crate) fn refused_at_cap(conn: &Connection) -> bool {
+pub(crate) fn refused_at_cap(connection: &Connection) -> bool {
     matches!(
-        conn.close_reason(),
+        connection.close_reason(),
         Some(iroh::endpoint::ConnectionError::ApplicationClosed(ref close))
             if [u64::from(CAP_REFUSED), u64::from(EVICTED)].contains(&close.error_code.into_inner())
     )
@@ -90,9 +90,9 @@ pub(crate) fn refused_at_cap(conn: &Connection) -> bool {
 
 /// Whether the underlay of the peer closed `conn` because we are not a neighbor of it yet.
 #[cfg(any(feature = "multihop", test))]
-pub(crate) fn refused_not_a_neighbor(conn: &Connection) -> bool {
+pub(crate) fn refused_not_a_neighbor(connection: &Connection) -> bool {
     matches!(
-        conn.close_reason(),
+        connection.close_reason(),
         Some(iroh::endpoint::ConnectionError::ApplicationClosed(ref close))
             if close.error_code.into_inner() == u64::from(close_code::NOT_A_NEIGHBOR)
     )
@@ -101,18 +101,18 @@ pub(crate) fn refused_not_a_neighbor(conn: &Connection) -> bool {
 /// The error of a failed exchange: the refusal that the close reason of `conn` names, or the
 /// exchange's own cause.
 pub(crate) fn with_refusal(
-    conn: &Connection,
+    connection: &Connection,
     error: anyhow::Error,
     remote: EndpointId,
 ) -> EndpointError {
-    if refused_at_cap(conn) {
+    if refused_at_cap(connection) {
         return EndpointError::CapRefused {
             remote,
             source: error.into(),
         };
     }
     #[cfg(any(feature = "multihop", test))]
-    if refused_not_a_neighbor(conn) {
+    if refused_not_a_neighbor(connection) {
         return EndpointError::NotANeighbor {
             remote,
             source: error.into(),
@@ -176,14 +176,14 @@ impl WebRtcSignalAcceptor {
 }
 
 impl ProtocolHandler for WebRtcSignalAcceptor {
-    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         // The remote's identity comes from the *connection*, never from the
         // envelope. Over an authenticated carrier the TLS-proven id is the real
         // one, and trusting `SignalEnvelope::endpoint_id` instead would let any
         // peer attach a session under someone else's name — which, on a mesh
         // where sessions are keyed by peer, is impersonation rather than merely
         // a wasted negotiation.
-        let remote = conn.remote_id();
+        let remote = connection.remote_id();
 
         // An offer from a peer we already hold a session with is itself the
         // proof that *their* half is gone: a peer with a working session
@@ -226,7 +226,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
                         (SIGNAL_FAILED, b"already negotiating")
                     }
                 };
-                conn.close(code.into(), why);
+                connection.close(code.into(), why);
                 tracing::debug!(target: LOG_TARGET, %remote, ?reason, "refused a signal offer");
                 return Ok(());
             }
@@ -257,7 +257,14 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
             // large enough that clippy flags it on this task's stack.
             match n0_future::time::timeout(
                 deadlines.round,
-                Box::pin(answer_one(&conn, local, remote, &handle, deadlines, ice)),
+                Box::pin(answer_one(
+                    &connection,
+                    local,
+                    remote,
+                    &handle,
+                    deadlines,
+                    ice,
+                )),
             )
             .await
             {
@@ -266,7 +273,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
                     admission.report_answered(remote);
                     register_session_addr(&book, remote);
                     admission.sync_gossip();
-                    conn.close(0u32.into(), b"jsep done");
+                    connection.close(0u32.into(), b"jsep done");
                     // A connection that we dialed before the attach moves onto the
                     // session only after a path event of our own endpoint, and the
                     // offerer's nudge gives us none: iroh opens a new path only
@@ -281,11 +288,11 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
                 // fails, peers vanish mid-handshake, a NAT refuses. The peer
                 // stays reachable over whatever path it already had.
                 Ok(Err(error)) => {
-                    conn.close(SIGNAL_FAILED.into(), b"answer failed");
+                    connection.close(SIGNAL_FAILED.into(), b"answer failed");
                     tracing::debug!(target: LOG_TARGET, %remote, %error, "webrtc answer failed");
                 }
                 Err(_elapsed) => {
-                    conn.close(SIGNAL_ABORTED.into(), b"answer timed out");
+                    connection.close(SIGNAL_ABORTED.into(), b"answer timed out");
                     tracing::debug!(
                         target: LOG_TARGET,
                         %remote,
@@ -316,7 +323,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
 
 /// Read the offer off `conn`, answer it, and attach the session.
 pub(crate) async fn answer_one(
-    conn: &Connection,
+    connection: &Connection,
     local: EndpointId,
     remote: EndpointId,
     handle: &WebRtcHandle,
@@ -326,7 +333,7 @@ pub(crate) async fn answer_one(
     // Bounded: a peer that connects and never opens a stream would otherwise
     // park this task forever, and its QUIC keep-alives mean the connection
     // never idles out on its own.
-    let (mut send, mut recv) = n0_future::time::timeout(deadlines.exchange, conn.accept_bi())
+    let (mut send, mut recv) = n0_future::time::timeout(deadlines.exchange, connection.accept_bi())
         .await
         .context("timed out waiting for the signal stream")?
         .context("accept signal stream")?;

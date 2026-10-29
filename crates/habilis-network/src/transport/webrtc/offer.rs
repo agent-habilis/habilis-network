@@ -46,14 +46,14 @@ pub(crate) enum Offer {
 /// Written once — the two offer entry points had grown diverging copies.
 pub(crate) fn spawn_offer_round(
     state: &mut state::EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     peer: EndpointId,
-    addr: EndpointAddr,
+    address: EndpointAddr,
     handle: WebRtcHandle,
     guard: AdmissionGuard,
     offer: Offer,
 ) {
-    let endpoint = ctx.endpoint.clone();
+    let endpoint = context.endpoint.clone();
     let book = state.address_book.clone();
     let admission = state.webrtc_admission.clone();
     let ice = state.webrtc_ice;
@@ -65,7 +65,7 @@ pub(crate) fn spawn_offer_round(
         let _guard = guard;
         let started = n0_future::time::Instant::now();
         tracing::debug!(target: LOG_TARGET, node = %node.fmt_short(), %peer, book = ?book.get_endpoint_info(peer), "offer round started");
-        if let Err(error) = Box::pin(dial_signal(&endpoint, &book, addr, &handle, ice)).await {
+        if let Err(error) = Box::pin(dial_signal(&endpoint, &book, address, &handle, ice)).await {
             if matches!(error, EndpointError::CapRefused { .. }) {
                 admission.note_refused(peer);
             }

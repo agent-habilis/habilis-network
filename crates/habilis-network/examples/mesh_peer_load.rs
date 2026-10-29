@@ -246,7 +246,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut relay_server = None;
-    let opts = if let Some(id) = std::env::args().nth(1) {
+    let options = if let Some(id) = std::env::args().nth(1) {
         JoinOptions::default().with_mesh(Some(id))
     } else {
         let (url, server) = test_relay::spawn_plain().await?;
@@ -256,7 +256,7 @@ async fn main() -> anyhow::Result<()> {
             .with_transport(transports()?)
             .with_relay_urls(vec![url.to_string()])
     };
-    let (kind, author) = resolve_kind(&opts, None)?;
+    let (kind, author) = resolve_kind(&options, None)?;
 
     let (inbound_tx, mut inbound) = mpsc::channel(INBOUND_CAP);
     let config = setup_mesh(

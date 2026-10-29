@@ -57,8 +57,8 @@ impl ProtocolHandler for DirectOnlyGossip {
     /// lost, which leaves the pair half-linked until a heal re-grafts it.
     /// This connection is typically the far side's `ForwardJoin` dial, sent
     /// through the rendezvous before any session exists.
-    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-        let remote = conn.remote_id();
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let remote = connection.remote_id();
         if !self.relay_transport.relay_allowed()
             && let Some((webrtc, admission, local)) = &self.session_gate
             && refuse_before_session(
@@ -67,12 +67,12 @@ impl ProtocolHandler for DirectOnlyGossip {
                 *local < remote,
             )
         {
-            tracing::debug!(target: super::LOG_TARGET, remote = %conn.remote_id(), "gossip dial before its webrtc session refused");
-            conn.close(GOSSIP_RELAY_REFUSED_CODE.into(), b"no webrtc session yet");
+            tracing::debug!(target: super::LOG_TARGET, remote = %connection.remote_id(), "gossip dial before its webrtc session refused");
+            connection.close(GOSSIP_RELAY_REFUSED_CODE.into(), b"no webrtc session yet");
             return Ok(());
         }
         if !refuse_unless_direct(
-            &conn,
+            &connection,
             self.relay_transport,
             PROBE_DEADLINE,
             GOSSIP_RELAY_REFUSED_CODE,
@@ -82,10 +82,10 @@ impl ProtocolHandler for DirectOnlyGossip {
             return Ok(());
         }
         if !self.relay_transport.relay_allowed() {
-            watch_relay_policy(&conn, None);
+            watch_relay_policy(&connection, None);
         }
         self.inner
-            .handle_connection(conn)
+            .handle_connection(connection)
             .await
             .map_err(AcceptError::from_err)
     }
@@ -127,38 +127,38 @@ pub(super) fn watch_relay_policy(
     n0_future::task::spawn(async move {
         let mut on_relay_since: Option<Instant> = None;
         loop {
-            let Some(conn) = weak.upgrade() else {
+            let Some(connection) = weak.upgrade() else {
                 return;
             };
-            if conn.close_reason().is_some() {
+            if connection.close_reason().is_some() {
                 return;
             }
-            if selected_is_direct(&conn) {
+            if selected_is_direct(&connection) {
                 on_relay_since = None;
             } else {
                 if on_relay_since.is_none()
                     && let Some(sink) = &path_sink
                 {
                     let _ = sink.send(super::probe::PathChange {
-                        peer: conn.remote_id(),
+                        peer: connection.remote_id(),
                         kind: super::probe::PathKind::Relay,
-                        conn_id: conn.stable_id(),
+                        conn_id: connection.stable_id(),
                     });
                 }
                 let since = *on_relay_since.get_or_insert_with(Instant::now);
                 if since.elapsed() >= PROBE_DEADLINE {
                     tracing::info!(
                         target: super::LOG_TARGET,
-                        remote = %conn.remote_id(),
-                        dialed = conn.side().is_client(),
+                        remote = %connection.remote_id(),
+                        dialed = connection.side().is_client(),
                         "gossip link on the relay path past the deadline: closing it"
                     );
-                    conn.close(GOSSIP_RELAY_REFUSED_CODE.into(), b"relay path refused");
+                    connection.close(GOSSIP_RELAY_REFUSED_CODE.into(), b"relay path refused");
                     return;
                 }
             }
             let wait = on_relay_since.map(|since| PROBE_DEADLINE.saturating_sub(since.elapsed()));
-            drop(conn);
+            drop(connection);
             tokio::select! {
                 next = events.next() => {
                     if next.is_none() {
@@ -206,8 +206,8 @@ mod watcher_tests {
         #[derive(Debug, Clone)]
         struct WatchAndDrop;
         impl ProtocolHandler for WatchAndDrop {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                super::watch_relay_policy(&conn, None);
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                super::watch_relay_policy(&connection, None);
                 Ok(())
             }
         }
@@ -225,8 +225,8 @@ mod watcher_tests {
         let client = bind().await;
         crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
 
-        let conn = client.connect(server.id(), ALPN).await.expect("connect");
-        let closed = tokio::time::timeout(Duration::from_secs(10), conn.closed()).await;
+        let connection = client.connect(server.id(), ALPN).await.expect("connect");
+        let closed = tokio::time::timeout(Duration::from_secs(10), connection.closed()).await;
 
         assert!(
             closed.is_ok(),
@@ -249,9 +249,9 @@ mod watcher_tests {
         #[derive(Debug, Clone)]
         struct WatchAndHold(mpsc::UnboundedSender<PathChange>);
         impl ProtocolHandler for WatchAndHold {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                super::watch_relay_policy(&conn, Some(self.0.clone()));
-                conn.closed().await;
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                super::watch_relay_policy(&connection, Some(self.0.clone()));
+                connection.closed().await;
                 Ok(())
             }
         }

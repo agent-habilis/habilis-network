@@ -25,7 +25,7 @@ pub(crate) async fn handle_presence(
     event: PresenceEvent<'_>,
     state: &mut EventLoopState,
     app: &mut dyn NodeApp,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
 ) {
     let PresenceEvent {
         message,
@@ -67,7 +67,7 @@ pub(crate) async fn handle_presence(
         // for a peer known only through pre-join backlog (or one we
         // already showed going quiet) is dropped.
         if state.surfaced.remove(message.author.as_str()) {
-            ctx.sink.emit(NodeEvent::Presence {
+            context.sink.emit(NodeEvent::Presence {
                 message: Box::new(message.authored()),
                 peer: message.key(),
                 synthetic: false,
@@ -78,7 +78,7 @@ pub(crate) async fn handle_presence(
         // `surfaceable`: a relayed pre-join `Left` must never cancel live
         // work — the same join-horizon symmetry as the announcement above.
         if surfaceable {
-            app.on_peer_left(&message.author, state, ctx).await;
+            app.on_peer_left(&message.author, state, context).await;
         }
     } else if subtype == PresenceSubtype::Joined && !update.stale {
         // Every `joined` re-floods our `PeerInfo`, newcomer and rejoin
@@ -90,7 +90,7 @@ pub(crate) async fn handle_presence(
         // by `joined_refloods_peerinfo`.
         let now = Instant::now();
         if state.joined_refloods_peerinfo(update.joined_new, now) {
-            gossip::broadcast_peer_info(state, ctx).await;
+            gossip::broadcast_peer_info(state, context).await;
             state.last_sent_at = now;
         }
         if update.joined_new {
@@ -98,8 +98,8 @@ pub(crate) async fn handle_presence(
             // re-announce mints a fresh id, so without this each one becomes
             // another message we can never acknowledge and every peer re-sends to
             // us forever (see `gossip::recv::retain_own_broadcast`).
-            let joined = Message::new_joined(ctx.mesh, ctx.author).sign(ctx.identity);
-            gossip::broadcast_msg(ctx.sender, &joined).await;
+            let joined = Message::new_joined(context.mesh, context.author).sign(context.identity);
+            gossip::broadcast_msg(context.sender, &joined).await;
             gossip::retain_own_broadcast(state, &joined);
             state.last_sent_at = Instant::now();
             // Suppress "has joined" when we already printed "came back"
@@ -107,7 +107,7 @@ pub(crate) async fn handle_presence(
             // our own join (relayed backlog).
             if surfaceable && !update.returned {
                 state.surfaced.insert(message.author.clone());
-                ctx.sink.emit(NodeEvent::Presence {
+                context.sink.emit(NodeEvent::Presence {
                     message: Box::new(message.authored()),
                     peer: message.key(),
                     synthetic: false,

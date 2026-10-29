@@ -915,13 +915,13 @@ impl EventLoopState {
         {
             return None;
         }
-        let addr = self
+        let address = self
             .peer_endpoints
             .values()
-            .find(|addr| addr.id == peer)?
+            .find(|address| address.id == peer)?
             .clone();
         self.want_lane_session(peer, now);
-        Some(addr)
+        Some(address)
     }
 
     /// The gossip link of a proven peer went down: plan its re-graft at
@@ -1072,14 +1072,14 @@ impl EventLoopState {
     /// endpoint. The two share a key space: the verdict describes the pooled
     /// connection, which outlives a gossip link but not the peer.
     pub(crate) fn forget_peer_endpoint(&mut self, nick: &str) -> Option<EndpointAddr> {
-        let addr = self.peer_endpoints.remove(nick)?;
-        self.graft_backoff.reset(addr.id);
-        self.proven_endpoints.forget_endpoint(addr.id);
-        self.forget_rival_holder(addr.id);
-        self.direct.remove(&addr.id);
-        self.path_watchers.remove(&addr.id);
-        self.path_kinds.remove(&addr.id);
-        Some(addr)
+        let address = self.peer_endpoints.remove(nick)?;
+        self.graft_backoff.reset(address.id);
+        self.proven_endpoints.forget_endpoint(address.id);
+        self.forget_rival_holder(address.id);
+        self.direct.remove(&address.id);
+        self.path_watchers.remove(&address.id);
+        self.path_kinds.remove(&address.id);
+        Some(address)
     }
 
     /// A `NeighborDown` for `peer`: the gossip link is gone, the path verdict
@@ -1718,7 +1718,7 @@ impl EventLoopState {
     pub fn peer_endpoint(&self, nickname: &Nickname) -> Option<EndpointId> {
         self.peer_endpoints
             .get(nickname.as_str())
-            .map(|addr| addr.id)
+            .map(|address| address.id)
     }
 
     /// Whether this member has meshed (has at least one gossip neighbour).
@@ -1761,9 +1761,9 @@ impl EventLoopState {
 
     /// Stamp the next position on this author's hash chain, advancing it.
     /// `prev` is the content hash of the message just authored.
-    pub fn advance_chain(&mut self, prev: ContentHash) {
+    pub fn advance_chain(&mut self, previous: ContentHash) {
         self.self_seq += 1;
-        self.self_prev = Some(prev);
+        self.self_prev = Some(previous);
     }
 
     /// This author's current chain position — the `seq` the next message takes
@@ -1938,7 +1938,7 @@ impl EventLoopState {
     /// answered on gossip, as it is for a late joiner before its `PeerInfo` arrives.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub fn forget_endpoint_proof(&mut self, peer: &Nickname) {
-        if let Some(endpoint) = self.peer_endpoints.get(peer).map(|addr| addr.id) {
+        if let Some(endpoint) = self.peer_endpoints.get(peer).map(|address| address.id) {
             self.proven_endpoints.forget_endpoint(endpoint);
         }
     }

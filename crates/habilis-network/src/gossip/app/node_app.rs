@@ -22,7 +22,7 @@ pub trait NodeApp: Send {
         &mut self,
         frame: InboundApp<'_>,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool;
 
     /// Surface a reassembled multipart `App` body through the same path an
@@ -32,8 +32,8 @@ pub trait NodeApp: Send {
     /// Defaults to a no-op — an app that never splits a body past
     /// [`crate::util::consts::MAX_MESSAGE_SIZE`] (so the engine never reassembles
     /// one for it) has nothing to surface here.
-    fn surface_logical(&mut self, logical: &Authored, surfaceable: bool, ctx: &HandlerCtx<'_>) {
-        let _ = (logical, surfaceable, ctx);
+    fn surface_logical(&mut self, logical: &Authored, surfaceable: bool, context: &HandlerCtx<'_>) {
+        let _ = (logical, surfaceable, context);
     }
 
     /// Post-apply hook for a meta-channel event: adopt the author's published
@@ -45,9 +45,9 @@ pub trait NodeApp: Send {
         &mut self,
         author: &Nickname,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) {
-        let _ = (author, state, ctx);
+        let _ = (author, state, context);
     }
 
     /// The node just formed its first real-peer link (became meshed). Lets the
@@ -57,8 +57,8 @@ pub trait NodeApp: Send {
     ///
     /// Defaults to a no-op — an app with nothing to re-publish on the mesh edge
     /// leaves it empty.
-    async fn on_meshed(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-        let _ = (state, ctx);
+    async fn on_meshed(&mut self, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+        let _ = (state, context);
     }
 
     /// A peer broadcast a graceful `Left` and was removed from the roster.
@@ -72,8 +72,8 @@ pub trait NodeApp: Send {
         &mut self,
         nickname: &Nickname,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) {
-        let _ = (nickname, state, ctx);
+        let _ = (nickname, state, context);
     }
 }

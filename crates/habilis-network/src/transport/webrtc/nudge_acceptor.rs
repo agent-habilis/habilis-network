@@ -27,8 +27,8 @@ impl NudgeAcceptor {
 }
 
 impl ProtocolHandler for NudgeAcceptor {
-    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-        conn.close(0u32.into(), b"nudge");
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        connection.close(0u32.into(), b"nudge");
         Ok(())
     }
 }
@@ -61,12 +61,12 @@ pub(crate) async fn nudge_with(endpoint: &Endpoint, peer: EndpointId, addrs: &pr
     nudge_addr(endpoint, EndpointAddr::from_parts(peer, known)).await;
 }
 
-pub(crate) async fn nudge_addr(endpoint: &Endpoint, addr: EndpointAddr) {
-    let peer = addr.id;
-    if let Ok(Ok(conn)) =
-        n0_future::time::timeout(pool::DIAL_TIMEOUT, endpoint.connect(addr, NUDGE_ALPN)).await
+pub(crate) async fn nudge_addr(endpoint: &Endpoint, address: EndpointAddr) {
+    let peer = address.id;
+    if let Ok(Ok(connection)) =
+        n0_future::time::timeout(pool::DIAL_TIMEOUT, endpoint.connect(address, NUDGE_ALPN)).await
     {
-        conn.close(0u32.into(), b"nudge");
+        connection.close(0u32.into(), b"nudge");
     }
     if tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE)
         && let Some(info) = endpoint.remote_info(peer).await

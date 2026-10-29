@@ -59,9 +59,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::JoinOptions) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -99,9 +101,9 @@ impl Member {
             .unwrap_or(0)
     }
 
-    async fn add_external_addr(&self, addr: std::net::SocketAddr) {
+    async fn add_external_addr(&self, address: std::net::SocketAddr) {
         self.membership
-            .request(|reply| Request::AddExternalAddr { addr, reply })
+            .request(|reply| Request::AddExternalAddr { address, reply })
             .await
             .expect("the loop answers");
     }

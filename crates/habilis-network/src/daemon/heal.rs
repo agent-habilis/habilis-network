@@ -65,17 +65,17 @@ pub(super) fn is_wall_resume(
 pub(super) async fn run_heal(
     gap: TickGap,
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     params: &beacon::RendezvousParams,
 ) {
     // A periodic return that fell due is owed from this tick, for a bounded time.
-    state.pay_periodic_return(Instant::now(), ctx.endpoint.id());
+    state.pay_periodic_return(Instant::now(), context.endpoint.id());
     // A browser-shaped peer's rendezvous link can only ever be admitted on
     // a data channel; keep offering one while the link is down.
-    webrtc::rendezvous::negotiate_rendezvous_session(state, ctx);
+    webrtc::rendezvous::negotiate_rendezvous_session(state, context);
     // A node that came back to a mesh whose links are all up gets no link
     // event to release on, so the heal tick checks too.
-    gossip::heal::release_rendezvous_if_due(state, ctx).await;
+    gossip::heal::release_rendezvous_if_due(state, context).await;
     let threshold = heal_stall_threshold();
     let hard_edge = is_resume(gap.mono, threshold) || is_wall_resume(gap.wall, gap.mono, threshold);
     if hard_edge {
@@ -108,7 +108,7 @@ pub(super) async fn run_heal(
         // ladder walk on the event loop here.
         setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
         if webrtc::rendezvous::rendezvous_graftable(state) {
-            gossip::heal::tick_heal_hard(ctx.endpoint, params.id, ctx.sender).await;
+            gossip::heal::tick_heal_hard(context.endpoint, params.id, context.sender).await;
         }
     } else if state.rendezvous_linked {
         // A live rendezvous link has nothing to heal — and healing it
@@ -129,7 +129,7 @@ pub(super) async fn run_heal(
             "heal tick: rendezvous released; idle"
         );
     } else if webrtc::rendezvous::rendezvous_graftable(state) {
-        gossip::heal::tick_heal(params.id, ctx.sender).await;
+        gossip::heal::tick_heal(params.id, context.sender).await;
     } else {
         // The JSEP offer fired at the top of this tick; the graft waits for
         // the session it needs to survive the beacon's accept gate.
@@ -147,15 +147,15 @@ pub(super) async fn run_heal(
     // (nothing remembered), so it adds no churn. `linked_endpoints` is
     // not cleared on the resume edge, hence the explicit `hard_edge` arm.
     if (hard_edge || state.linked_endpoints.is_empty()) && !state.known_endpoints.is_empty() {
-        gossip::heal::rebridge_known(state, ctx).await;
+        gossip::heal::rebridge_known(state, context).await;
     }
     // A member of the LAN that was asked to be a neighbor and is still not one is asked again.
-    gossip::lan::ask_unlinked_again(state, ctx).await;
+    gossip::lan::ask_unlinked_again(state, context).await;
     // Starvation watchdog: links/heal can look busy while no traffic
     // flows (the roster-collapse signature), so the last word every heal
     // tick is a check on verified *inbound* silence.
     if state.starvation_due(Instant::now(), tuning::starvation_threshold()) {
-        gossip::heal::recover_from_starvation(state, ctx).await;
+        gossip::heal::recover_from_starvation(state, context).await;
     }
 }
 /// One heal-tick turn while the gossip stream is down: attempt the
@@ -186,13 +186,13 @@ pub(super) async fn resubscribe_tick(
             // The dead subscription's link view is void; the fresh one
             // emits its own NeighborUps (and re-arms the probe gate).
             state.rendezvous_linked = false;
-            let ctx = env.parts.handler_ctx(link.sender);
-            gossip::drain_queued(&mut dead_receiver, state, app, &ctx).await;
+            let context = env.parts.handler_ctx(link.sender);
+            gossip::drain_queued(&mut dead_receiver, state, app, &context).await;
             // Nothing in the normal path: the guard for a splitter that ended early.
             if let Some(mut topic_receiver) = dead_receiver.into_dead() {
-                gossip::drain_dead_receiver(&mut topic_receiver, state, app, &ctx).await;
+                gossip::drain_dead_receiver(&mut topic_receiver, state, app, &context).await;
             }
-            gossip::heal::recover_from_starvation(state, &ctx).await;
+            gossip::heal::recover_from_starvation(state, &context).await;
         }
         Resubscribe::Pending => {}
         Resubscribe::Fatal => {

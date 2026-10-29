@@ -4,8 +4,9 @@ use super::path_kind::PathKind;
 
 use iroh::endpoint::Connection;
 
-pub(crate) fn path_list(conn: &Connection) -> Vec<String> {
-    conn.paths()
+pub(crate) fn path_list(connection: &Connection) -> Vec<String> {
+    connection
+        .paths()
         .iter()
         .map(|path| {
             format!(
@@ -17,8 +18,9 @@ pub(crate) fn path_list(conn: &Connection) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn selected_kind(conn: &Connection) -> PathKind {
-    conn.paths()
+pub(crate) fn selected_kind(connection: &Connection) -> PathKind {
+    connection
+        .paths()
         .iter()
         .find(iroh::endpoint::Path::is_selected)
         .map_or(PathKind::None, |path| {
@@ -26,8 +28,8 @@ pub(crate) fn selected_kind(conn: &Connection) -> PathKind {
                 PathKind::Ip
             } else if path.is_relay() {
                 PathKind::Relay
-            } else if let iroh::TransportAddr::Custom(addr) = path.remote_addr() {
-                custom_kind(addr.id())
+            } else if let iroh::TransportAddr::Custom(address) = path.remote_addr() {
+                custom_kind(address.id())
             } else {
                 // A kind of address that iroh does not have today.
                 PathKind::Multihop

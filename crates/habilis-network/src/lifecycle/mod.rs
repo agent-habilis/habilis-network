@@ -117,7 +117,7 @@ mod departed_tests {
         let mesh = MeshId::from("test");
         let us = nick("us");
         let sink = SilentSink;
-        let ctx = HandlerCtx {
+        let context = HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -147,7 +147,7 @@ mod departed_tests {
             },
             &mut state,
             &mut app,
-            &ctx,
+            &context,
         )
         .await;
         assert!(!state.peers.contains(who.as_str()), "the first run left");
@@ -165,7 +165,7 @@ mod departed_tests {
             },
             &mut state,
             &mut app,
-            &ctx,
+            &context,
         )
         .await;
         assert!(
@@ -190,7 +190,7 @@ mod departed_tests {
         let mesh = MeshId::from("test");
         let us = nick("us");
         let sink = SilentSink;
-        let ctx = HandlerCtx {
+        let context = HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -233,7 +233,7 @@ mod departed_tests {
             },
             &mut state,
             &mut app,
-            &ctx,
+            &context,
         )
         .await;
         assert!(
@@ -258,7 +258,7 @@ mod departed_tests {
         let mesh = MeshId::from("test");
         let us = nick("us");
         let sink = SilentSink;
-        let ctx = HandlerCtx {
+        let context = HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -278,7 +278,7 @@ mod departed_tests {
         state.quiet.insert(who.clone());
 
         let replay = Message::new_left(&mesh, &who).sign(&first_run);
-        let observed = observe(&replay, &mut state, &ctx);
+        let observed = observe(&replay, &mut state, &context);
         assert!(observed.update.stale, "a copy of a goodbye is not stale");
         assert!(
             !state.peers.contains(who.as_str()),
@@ -303,7 +303,7 @@ mod departed_tests {
         let mesh = MeshId::from("test");
         let us = nick("us");
         let sink = SilentSink;
-        let ctx = HandlerCtx {
+        let context = HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -321,7 +321,7 @@ mod departed_tests {
         state.note_left(&who, departed.author_key(), UnixSecs::from_secs(1_000));
 
         let replay = Message::new_joined(&mesh, &who).sign(&departed);
-        let observed = observe(&replay, &mut state, &ctx);
+        let observed = observe(&replay, &mut state, &context);
         assert!(observed.update.stale);
         assert!(
             !state.last_seen.contains_key(who.as_str()),

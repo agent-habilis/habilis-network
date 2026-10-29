@@ -126,7 +126,7 @@ pub(super) struct CohostArm<'params> {
 /// duplicate rendezvous that would capture its own bootstrap dial.
 pub(super) async fn maybe_cohost(
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     arm: &CohostArm<'_>,
     current: &mut Option<beacon::Rendezvous>,
     probe: &mut Option<beacon::RivalProbe>,
@@ -148,7 +148,7 @@ pub(super) async fn maybe_cohost(
         && let Some(own) = held.rung_in(&arm.params.bind_ports)
         && let Some(&own_port) = arm.params.bind_ports.get(own)
     {
-        let node = ctx.endpoint.id();
+        let node = context.endpoint.id();
         let stopped = state.rungs.own_rung_failed(arm.params, node, own_port);
         let yields = own > 0
             && state
@@ -170,7 +170,7 @@ pub(super) async fn maybe_cohost(
         let held = if may_probe_to_claim(state) {
             beacon::walk_ladder(
                 arm.params,
-                ctx.endpoint,
+                context.endpoint,
                 &state.address_book,
                 current,
                 probes_before_claim(arm.policy),
@@ -184,7 +184,7 @@ pub(super) async fn maybe_cohost(
             if !state.rendezvous_linked {
                 beacon::refresh_holder_rung(
                     arm.params,
-                    ctx.endpoint,
+                    context.endpoint,
                     &state.address_book,
                     &mut state.rungs,
                 )
@@ -194,13 +194,13 @@ pub(super) async fn maybe_cohost(
         };
         match held {
             beacon::Held::Claimed => {
-                schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
+                schedule_rival_recheck(state, arm.policy, arm.params, context.endpoint);
                 // The new rendezvous never dials us; the reclaim tick re-grafts it.
                 state.arm_reclaim(Instant::now());
-                offer_to_the_new_holder(state, ctx);
+                offer_to_the_new_holder(state, context);
             }
             beacon::Held::Rival => state.note_holder_outside_mesh(Instant::now()),
-            beacon::Held::NoRung => note_no_rung_free(state, ctx, arm.params.bind_ports.len()),
+            beacon::Held::NoRung => note_no_rung_free(state, context, arm.params.bind_ports.len()),
             beacon::Held::Idle => {}
         }
     }
@@ -208,7 +208,7 @@ pub(super) async fn maybe_cohost(
 /// Every rung of the ladder is held by another process, so no member can serve the rendezvous and
 /// the room cannot be joined through it until one lets go. Said once per repeat interval, however
 /// often the walk runs: to the log, and to the sink so that the app can tell its user.
-fn note_no_rung_free(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, ports: usize) {
+fn note_no_rung_free(state: &mut EventLoopState, context: &HandlerCtx<'_>, ports: usize) {
     let now = Instant::now();
     let repeat = tuning::NO_RUNG_REPEAT;
     if state
@@ -223,7 +223,7 @@ fn note_no_rung_free(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, ports: us
         ports,
         "no rendezvous port is free: other processes hold every port of this room"
     );
-    ctx.sink.emit(NodeEvent::Info(format!(
+    context.sink.emit(NodeEvent::Info(format!(
         "no rendezvous port is free: other processes hold all {ports} ports of this room"
     )));
 }
@@ -231,8 +231,8 @@ fn note_no_rung_free(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, ports: us
 /// Offer to our new beacon at once, to the address that the claim just registered. The round of
 /// this member that was started while nobody held the rendezvous was ended by
 /// [`schedule_rival_recheck`].
-pub(super) fn offer_to_the_new_holder(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    webrtc::rendezvous::offer_rendezvous_off_tick(state, ctx);
+pub(super) fn offer_to_the_new_holder(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    webrtc::rendezvous::offer_rendezvous_off_tick(state, context);
 }
 
 /// A probe found a holder of the rendezvous that is not us ("staying peer"): the holder changed for
@@ -241,9 +241,9 @@ pub(super) fn offer_to_the_new_holder(state: &mut EventLoopState, ctx: &HandlerC
 ///
 /// It is also a holder that no member of our mesh may be known to host: the member then owes a
 /// return to it ([`EventLoopState::note_holder_outside_mesh`]).
-pub(super) fn note_rival_holds(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(super) fn note_rival_holds(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     state.cancel_rendezvous_round();
-    offer_to_the_new_holder(state, ctx);
+    offer_to_the_new_holder(state, context);
     state.note_holder_outside_mesh(Instant::now());
 }
 
@@ -267,7 +267,7 @@ pub(super) fn note_rival_holds(state: &mut EventLoopState, ctx: &HandlerCtx<'_>)
 /// never forms in time. So the re-graft rides this ticker too.
 pub(super) async fn maybe_reclaim(
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     arm: &CohostArm<'_>,
     current: &mut Option<beacon::Rendezvous>,
     probe: &mut Option<beacon::RivalProbe>,
@@ -283,7 +283,7 @@ pub(super) async fn maybe_reclaim(
         let held = if may_probe_to_claim(state) {
             beacon::walk_ladder(
                 arm.params,
-                ctx.endpoint,
+                context.endpoint,
                 &state.address_book,
                 current,
                 probes_before_claim(arm.policy),
@@ -296,12 +296,12 @@ pub(super) async fn maybe_reclaim(
         };
         match held {
             beacon::Held::Claimed => {
-                schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
-                offer_to_the_new_holder(state, ctx);
+                schedule_rival_recheck(state, arm.policy, arm.params, context.endpoint);
+                offer_to_the_new_holder(state, context);
                 return;
             }
             beacon::Held::Rival => state.note_holder_outside_mesh(Instant::now()),
-            beacon::Held::NoRung => note_no_rung_free(state, ctx, arm.params.bind_ports.len()),
+            beacon::Held::NoRung => note_no_rung_free(state, context, arm.params.bind_ports.len()),
             beacon::Held::Idle => {}
         }
         if regrafts_rendezvous(state.rendezvous_linked, state.rendezvous_wanted())
@@ -311,7 +311,7 @@ pub(super) async fn maybe_reclaim(
                 target: "habilis_network::gossip",
                 "reclaim tick: re-graft the rendezvous (link lost)"
             );
-            heal::tick_heal(arm.params.id, ctx.sender).await;
+            heal::tick_heal(arm.params.id, context.sender).await;
         }
     }
 }
@@ -942,7 +942,7 @@ mod tests {
         let identity = Identity::generate();
         let our_pubkey = identity.author_key();
         let sink = SilentSink;
-        let ctx = HandlerCtx {
+        let context = HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -968,7 +968,7 @@ mod tests {
             params: &params,
             started: Instant::now(),
         };
-        maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
+        maybe_cohost(&mut state, &context, &arm, &mut rendezvous, &mut probe).await;
         let claimed = rendezvous.is_some();
         let window_open = state.reclaim_until.is_some();
 
@@ -1048,7 +1048,7 @@ mod tests {
         let identity = Identity::generate();
         let our_pubkey = identity.author_key();
         let sink = SilentSink;
-        let ctx = HandlerCtx {
+        let context = HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -1076,7 +1076,7 @@ mod tests {
         // The walk asks the probe tasks and returns; the loop notes their reports and walks
         // again. This does what the loop does.
         for _ in 0..4 {
-            maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
+            maybe_cohost(&mut state, &context, &arm, &mut rendezvous, &mut probe).await;
             if !state.rungs.waiting() {
                 break;
             }
@@ -1225,7 +1225,7 @@ mod tests {
         let identity = Identity::generate();
         let our_pubkey = identity.author_key();
         let sink = CountingSink::new();
-        let ctx = HandlerCtx {
+        let context = HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -1251,7 +1251,7 @@ mod tests {
         };
         // The walk asks the probe task and returns; the loop notes its report and walks again.
         for _ in 0..4 {
-            maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
+            maybe_cohost(&mut state, &context, &arm, &mut rendezvous, &mut probe).await;
             if !state.rungs.waiting() {
                 break;
             }
@@ -1261,11 +1261,11 @@ mod tests {
             }
         }
         let said = sink.count();
-        maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
+        maybe_cohost(&mut state, &context, &arm, &mut rendezvous, &mut probe).await;
         let again = sink.count();
         let repeat = tuning::NO_RUNG_REPEAT + Duration::from_secs(1);
         state.no_rung_noted_at = state.no_rung_noted_at.and_then(|at| at.checked_sub(repeat));
-        maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
+        maybe_cohost(&mut state, &context, &arm, &mut rendezvous, &mut probe).await;
         let later = sink.count();
 
         if let Some(held) = other_held.take() {
@@ -1420,7 +1420,7 @@ mod tests {
             let identity = Identity::generate();
             let our_pubkey = identity.author_key();
             let sink = SilentSink;
-            let ctx = HandlerCtx {
+            let context = HandlerCtx {
                 sender: &sender,
                 endpoint: &self.endpoint,
                 mesh: &mesh,
@@ -1442,7 +1442,7 @@ mod tests {
             for _ in 0..4 {
                 maybe_cohost(
                     &mut self.state,
-                    &ctx,
+                    &context,
                     &arm,
                     &mut self.rendezvous,
                     &mut self.probe,
@@ -1723,7 +1723,7 @@ mod tests {
         let identity = Identity::generate();
         let our_pubkey = identity.author_key();
         let sink = SilentSink;
-        let ctx = HandlerCtx {
+        let context = HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -1759,7 +1759,7 @@ mod tests {
             params: &params,
             started: Instant::now(),
         };
-        maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
+        maybe_cohost(&mut state, &context, &arm, &mut rendezvous, &mut probe).await;
         let claimed = rendezvous.is_some();
         let offer_running = state.webrtc_admission.in_flight() != 0;
 
@@ -1826,7 +1826,7 @@ mod tests {
         let identity = Identity::generate();
         let our_pubkey = identity.author_key();
         let sink = SilentSink;
-        let ctx = HandlerCtx {
+        let context = HandlerCtx {
             sender: &sender,
             endpoint: &endpoint,
             mesh: &mesh,
@@ -1856,7 +1856,7 @@ mod tests {
             .track(params.id, epoch, task.abort_handle());
         assert_eq!(state.webrtc_admission.in_flight(), 1);
 
-        super::note_rival_holds(&mut state, &ctx);
+        super::note_rival_holds(&mut state, &context);
 
         let round_running = state.webrtc_admission.in_flight() != 0;
         endpoint.close().await;

@@ -23,14 +23,14 @@ use super::{RendezvousParams, RungRead, RungWatch, rung_is_busy};
 /// - `None`: relay disabled and no ladder, so there is nothing to name and
 ///   only mDNS/DHT can resolve the id.
 pub(crate) fn rendezvous_addr(params: &RendezvousParams) -> Option<EndpointAddr> {
-    let mut addr = EndpointAddr::new(params.id);
+    let mut address = EndpointAddr::new(params.id);
     if !params.bind_ports.is_empty() {
         for &port in &params.bind_ports {
-            addr = addr.with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+            address = address.with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
         }
-        return Some(addr);
+        return Some(address);
     }
-    Some(addr.with_relay_url(params.bootstrap_relay.clone()?))
+    Some(address.with_relay_url(params.bootstrap_relay.clone()?))
 }
 
 /// [`rendezvous_addr`] without the rungs of `withheld`: the address that a member registers for the
@@ -39,7 +39,7 @@ pub(crate) fn rendezvous_addr_without(
     params: &RendezvousParams,
     withheld: &[u16],
 ) -> Option<EndpointAddr> {
-    rendezvous_addr(params).map(|addr| keeping_rungs(addr, |port| !withheld.contains(&port)))
+    rendezvous_addr(params).map(|address| keeping_rungs(address, |port| !withheld.contains(&port)))
 }
 
 /// The rendezvous id at one rung of the loopback ladder.
@@ -48,10 +48,10 @@ pub(crate) fn rendezvous_holder_addr(params: &RendezvousParams, port: u16) -> En
 }
 
 /// `addr` without the IP addresses whose port `keep` refuses. An address of another kind stays.
-pub(crate) fn keeping_rungs(addr: EndpointAddr, keep: impl Fn(u16) -> bool) -> EndpointAddr {
+pub(crate) fn keeping_rungs(address: EndpointAddr, keep: impl Fn(u16) -> bool) -> EndpointAddr {
     EndpointAddr::from_parts(
-        addr.id,
-        addr.addrs.into_iter().filter(|transport| {
+        address.id,
+        address.addrs.into_iter().filter(|transport| {
             if let iroh::TransportAddr::Ip(socket) = transport {
                 keep(socket.port())
             } else {
@@ -97,8 +97,8 @@ pub(crate) async fn forget_rungs(
         .iter()
         .copied()
         .filter(|&port| forget(port))
-        .fold(EndpointAddr::new(params.id), |addr, port| {
-            addr.with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+        .fold(EndpointAddr::new(params.id), |address, port| {
+            address.with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
         });
     if forgotten.addrs.is_empty() {
         return;

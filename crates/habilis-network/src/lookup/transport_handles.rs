@@ -47,7 +47,7 @@ pub struct TransportHandles {
     pub underlay: bool,
     /// Which transports this instance may carry data on. Lives here rather than
     /// as another positional argument for the same reason the handles do.
-    pub opts: TransportOpts,
+    pub options: TransportOpts,
 }
 
 impl TransportHandles {

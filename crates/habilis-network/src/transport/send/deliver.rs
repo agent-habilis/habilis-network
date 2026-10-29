@@ -32,12 +32,12 @@ use crate::transport::{Delivered, Lane, SendError};
 /// is undeliverable — the error names which; callers retry once a real
 /// endpoint is learned. A dial or a write that fails comes through the handle.
 pub async fn deliver(
-    msg: &Verified,
+    message: &Verified,
     bytes: WireFrame,
     state: &EventLoopState,
     sender: &MeshSender,
 ) -> Result<Delivered, SendError> {
-    match resolve(msg, bytes, state)? {
+    match resolve(message, bytes, state)? {
         Resend::Broadcast(bytes) => {
             broadcast(sender, bytes)
                 .await
@@ -57,22 +57,22 @@ pub async fn deliver(
 /// The same as [`deliver`] for a message that has no path now: held for a
 /// direct path, or its addressee has no known endpoint.
 pub(crate) fn resolve(
-    msg: &Verified,
+    message: &Verified,
     bytes: WireFrame,
     state: &EventLoopState,
 ) -> Result<Resend, SendError> {
-    match super::route::route(msg, state) {
+    match super::route::route(message, state) {
         Route::Broadcast => Ok(Resend::Broadcast(bytes)),
         Route::Unicast(eid) => Ok(Resend::Unicast(eid, bytes)),
         Route::Held(eid) => Err(SendError::Held { eid }),
         Route::Undeliverable => {
-            let addressee = sole_addressee(&msg.kind);
+            let addressee = sole_addressee(&message.kind);
             let name = addressee.map_or("<none>", Nickname::as_str);
             // Two distinct causes hide behind one route: waiting on PeerInfo
             // is retryable, an addressee advertising the rendezvous is not.
             let via_rendezvous = addressee
                 .and_then(|nick| state.peer_endpoints.get(nick))
-                .is_some_and(|addr| state.rendezvous_id == Some(addr.id));
+                .is_some_and(|address| state.rendezvous_id == Some(address.id));
             let cause = if via_rendezvous {
                 "its advertised endpoint is the rendezvous pseudo-node, never a directed target"
             } else {
@@ -115,12 +115,12 @@ pub(crate) fn resolve(
 /// the peer on the cooldown, and directed sends to it return `false` for up
 /// to the dial budget plus the cooldown.
 pub async fn deliver_in_background(
-    msg: &Verified,
+    message: &Verified,
     bytes: WireFrame,
     state: &EventLoopState,
     sender: &MeshSender,
 ) -> bool {
-    deliver(msg, bytes, state, sender).await.is_ok()
+    deliver(message, bytes, state, sender).await.is_ok()
 }
 
 /// Where an answer to the digest signed by `signer` can go
@@ -152,9 +152,9 @@ pub(crate) fn note_held(state: &mut EventLoopState, error: &SendError) {
     let needs_lane = state
         .peer_endpoints
         .values()
-        .find(|addr| addr.id == *eid)
-        .is_some_and(|addr| {
-            webrtc::session_policy::pair_needs_lane(addr, state.local_udp_transport)
+        .find(|address| address.id == *eid)
+        .is_some_and(|address| {
+            webrtc::session_policy::pair_needs_lane(address, state.local_udp_transport)
         });
     // A pair that lost its direct path reads as the relay: if its offer failed, nobody would
     // offer again, so the parked frame asks.

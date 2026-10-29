@@ -297,11 +297,11 @@ mod tests {
     #[test]
     async fn a_background_send_to_a_cold_peer_returns_at_once() {
         let (state, endpoint, sender, _silent) = state_with_silent_bob().await;
-        let msg = directed_msg();
-        let bytes = msg.serialize().expect("serialize");
+        let message = directed_msg();
+        let bytes = message.serialize().expect("serialize");
 
         let started = std::time::Instant::now();
-        let sent = super::deliver_in_background(&msg, bytes, &state, &sender).await;
+        let sent = super::deliver_in_background(&message, bytes, &state, &sender).await;
         let elapsed = started.elapsed();
 
         assert!(
@@ -330,10 +330,10 @@ mod tests {
         let (state, bob) = state_knowing_bob();
         state.unicast_pool.note_dial_failure(bob).await;
         let (endpoint, sender) = loopback_node().await;
-        let msg = directed_msg();
-        let bytes = msg.serialize().expect("serialize");
+        let message = directed_msg();
+        let bytes = message.serialize().expect("serialize");
 
-        let sent = super::deliver_in_background(&msg, bytes, &state, &sender).await;
+        let sent = super::deliver_in_background(&message, bytes, &state, &sender).await;
 
         assert!(
             !sent,
@@ -350,12 +350,12 @@ mod tests {
     #[test]
     async fn two_background_sends_to_one_cold_peer_share_one_dial() {
         let (state, endpoint, sender, _silent) = state_with_silent_bob().await;
-        let msg = directed_msg();
-        let bytes = msg.serialize().expect("serialize");
+        let message = directed_msg();
+        let bytes = message.serialize().expect("serialize");
 
-        let first = super::deliver_in_background(&msg, bytes.clone(), &state, &sender).await;
+        let first = super::deliver_in_background(&message, bytes.clone(), &state, &sender).await;
         tokio::task::yield_now().await;
-        let second = super::deliver_in_background(&msg, bytes, &state, &sender).await;
+        let second = super::deliver_in_background(&message, bytes, &state, &sender).await;
         tokio::task::yield_now().await;
 
         assert!(first, "the first send starts the dial");
@@ -371,10 +371,10 @@ mod tests {
         let (mut state, bob) = state_knowing_bob();
         state.linked_endpoints.insert(bob);
         let (endpoint, sender) = loopback_node().await;
-        let msg = directed_msg();
-        let bytes = msg.serialize().expect("serialize");
+        let message = directed_msg();
+        let bytes = message.serialize().expect("serialize");
 
-        let sent = super::deliver_in_background(&msg, bytes.clone(), &state, &sender).await;
+        let sent = super::deliver_in_background(&message, bytes.clone(), &state, &sender).await;
         let replied = super::send_best_effort(bob, bytes, &state).await;
         tokio::task::yield_now().await;
 
@@ -390,10 +390,10 @@ mod tests {
     async fn a_background_send_to_an_unknown_peer_is_not_sent() {
         let state = fresh_state();
         let (endpoint, sender) = loopback_node().await;
-        let msg = directed_msg();
-        let bytes = msg.serialize().expect("serialize");
+        let message = directed_msg();
+        let bytes = message.serialize().expect("serialize");
 
-        let sent = super::deliver_in_background(&msg, bytes, &state, &sender).await;
+        let sent = super::deliver_in_background(&message, bytes, &state, &sender).await;
 
         assert!(!sent, "bob has no known endpoint");
         tokio::task::yield_now().await;
@@ -408,29 +408,29 @@ mod tests {
         let (endpoint, sender) = loopback_node().await;
         let state = state_with_pool(&endpoint, bob_endpoint.addr());
         let received = tokio::spawn(async move {
-            let conn = bob_endpoint
+            let connection = bob_endpoint
                 .accept()
                 .await
                 .expect("an incoming connection")
                 .await
                 .expect("accept the connection");
-            let mut stream = conn.accept_uni().await.expect("a uni stream");
+            let mut stream = connection.accept_uni().await.expect("a uni stream");
             let bytes = stream.read_to_end(64 * 1024).await.expect("read the frame");
-            (bytes, bob_endpoint, conn)
+            (bytes, bob_endpoint, connection)
         });
-        let conn = state
+        let connection = state
             .unicast_pool
             .warm_or_dial(endpoint_of_bob(&state))
             .await
             .expect("warm the pool");
         assert!(
-            payload_path::wait_direct(&conn, std::time::Duration::from_secs(5)).await,
+            payload_path::wait_direct(&connection, std::time::Duration::from_secs(5)).await,
             "loopback selects a direct path"
         );
-        let msg = directed_msg();
-        let bytes = msg.serialize().expect("serialize");
+        let message = directed_msg();
+        let bytes = message.serialize().expect("serialize");
 
-        let sent = super::deliver_in_background(&msg, bytes.clone(), &state, &sender).await;
+        let sent = super::deliver_in_background(&message, bytes.clone(), &state, &sender).await;
 
         assert!(sent, "a warm peer is sent to");
         let (got, returned_endpoint, _conn) =
@@ -674,7 +674,7 @@ mod tests {
     }
 
     impl Net {
-        fn ctx(&self) -> handler_ctx::HandlerCtx<'_> {
+        fn context(&self) -> handler_ctx::HandlerCtx<'_> {
             handler_ctx::HandlerCtx {
                 sender: &self.sender,
                 endpoint: &self.endpoint,
@@ -763,7 +763,7 @@ mod tests {
         state.linked_endpoints.insert(bob_endpoint.id());
         let bob_id = bob_endpoint.id();
         let received = tokio::spawn(async move {
-            let conn = bob_endpoint
+            let connection = bob_endpoint
                 .accept()
                 .await
                 .expect("an incoming connection")
@@ -771,17 +771,18 @@ mod tests {
                 .expect("accept the connection");
             let mut got = Vec::new();
             for _ in 0..3 {
-                let mut stream = conn.accept_uni().await.expect("a uni stream");
+                let mut stream = connection.accept_uni().await.expect("a uni stream");
                 got.push(stream.read_to_end(64 * 1024).await.expect("read the frame"));
             }
-            (got, bob_endpoint, conn)
+            (got, bob_endpoint, connection)
         });
         let asker = Identity::generate();
         prove_identity(&mut state, &asker, bob_id);
         let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
         let answered =
-            antientropy::handle_state_digest(Channel::State, &digest, &mut state, &net.ctx()).await;
+            antientropy::handle_state_digest(Channel::State, &digest, &mut state, &net.context())
+                .await;
 
         assert_eq!(answered.broadcast, 0, "nothing went on gossip");
         assert_eq!(answered.unicast, 3);
@@ -821,7 +822,7 @@ mod tests {
             Message::new_channel_digest(&net.mesh, &nick("bob"), body, Channel::State).sign(&bob);
 
         let answered =
-            antientropy::handle_state_digest(Channel::State, &closing, &mut state, &net.ctx())
+            antientropy::handle_state_digest(Channel::State, &closing, &mut state, &net.context())
                 .await;
         assert_eq!(
             answered.unicast + answered.broadcast,
@@ -857,7 +858,7 @@ mod tests {
             Channel::State,
             &from_the_author,
             &mut state,
-            &net.ctx(),
+            &net.context(),
         )
         .await;
         assert_eq!(
@@ -887,7 +888,7 @@ mod tests {
         // The plane does not matter here: our ask back to the peer is still
         // dialing, so the answer may take gossip.
         let answered =
-            antientropy::handle_state_digest(Channel::State, &request, &mut state, &net.ctx())
+            antientropy::handle_state_digest(Channel::State, &request, &mut state, &net.context())
                 .await;
         assert_eq!(answered.unicast + answered.broadcast, 3);
         bob_endpoint.close().await;
@@ -910,7 +911,7 @@ mod tests {
         let posing_as_bob = digest(&net.mesh, Channel::State, &serde_json::json!([]), &stranger);
 
         let answered =
-            handle_state_digest(Channel::State, &posing_as_bob, &mut state, &net.ctx()).await;
+            handle_state_digest(Channel::State, &posing_as_bob, &mut state, &net.context()).await;
         assert_eq!(
             answered,
             Answered {
@@ -933,7 +934,7 @@ mod tests {
 
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
-        let ctx = net.ctx();
+        let context = net.context();
         let asker = Identity::generate();
         prove_identity(&mut state, &asker, bob_endpoint.id());
         let empty = serde_json::json!([]);
@@ -946,24 +947,24 @@ mod tests {
         let refused = Answered::default();
 
         assert_eq!(
-            handle_state_digest(Channel::State, &state_digest, &mut state, &ctx).await,
+            handle_state_digest(Channel::State, &state_digest, &mut state, &context).await,
             gossip,
             "an unlinked asker is answered on gossip"
         );
         assert_eq!(
-            handle_state_digest(Channel::State, &state_digest, &mut state, &ctx).await,
+            handle_state_digest(Channel::State, &state_digest, &mut state, &context).await,
             refused,
             "a second gossip answer inside the window"
         );
         assert_eq!(
-            handle_state_digest(Channel::Meta, &meta_digest, &mut state, &ctx).await,
+            handle_state_digest(Channel::Meta, &meta_digest, &mut state, &context).await,
             gossip,
             "the meta digest right after is its own serve"
         );
 
         state.linked_endpoints.insert(bob_endpoint.id());
         assert_eq!(
-            handle_state_digest(Channel::State, &state_digest, &mut state, &ctx).await,
+            handle_state_digest(Channel::State, &state_digest, &mut state, &context).await,
             Answered {
                 unicast: 3,
                 broadcast: 0
@@ -971,7 +972,7 @@ mod tests {
             "the re-ask once linked goes on the other plane"
         );
         assert_eq!(
-            handle_state_digest(Channel::State, &state_digest, &mut state, &ctx).await,
+            handle_state_digest(Channel::State, &state_digest, &mut state, &context).await,
             refused,
             "a second unicast answer inside the window"
         );
@@ -993,21 +994,21 @@ mod tests {
         let bob_addr = bob_endpoint.addr();
         let (connected_tx, connected_rx) = oneshot::channel();
         let bob_task = tokio::spawn(async move {
-            let conn = bob_endpoint
+            let connection = bob_endpoint
                 .accept()
                 .await
                 .expect("an incoming connection")
                 .await
                 .expect("accept the connection");
             let _ = connected_tx.send(());
-            while let Ok(mut stream) = conn.accept_uni().await {
+            while let Ok(mut stream) = connection.accept_uni().await {
                 let _ = stream.read_to_end(1 << 20).await;
             }
             bob_endpoint.close().await;
         });
         let (net, mut state, _frames) = holder(bob_addr.clone(), 3).await;
         state.linked_endpoints.insert(bob_addr.id);
-        let ctx = net.ctx();
+        let context = net.context();
         let bob = Identity::generate();
         prove_identity(&mut state, &bob, bob_addr.id);
         let ahead = digest(
@@ -1029,12 +1030,12 @@ mod tests {
             .expect("the dial to bob completes")
             .expect("bob's task reports the connection");
 
-        antientropy::handle_state_digest(Channel::State, &ahead, &mut state, &ctx).await;
+        antientropy::handle_state_digest(Channel::State, &ahead, &mut state, &context).await;
         let first = state.fast_rounds.asked_heads(Channel::State);
         assert!(first.is_some(), "bob is ahead, so we ask him");
 
         apply_one(&mut state, &net.mesh, 100);
-        antientropy::handle_state_digest(Channel::State, &ahead, &mut state, &ctx).await;
+        antientropy::handle_state_digest(Channel::State, &ahead, &mut state, &context).await;
         assert_eq!(
             state.fast_rounds.asked_heads(Channel::State),
             first,
@@ -1044,7 +1045,7 @@ mod tests {
         for step in 101..101 + tuning::antientropy_max_resend() {
             apply_one(&mut state, &net.mesh, step);
         }
-        antientropy::handle_state_digest(Channel::State, &ahead, &mut state, &ctx).await;
+        antientropy::handle_state_digest(Channel::State, &ahead, &mut state, &context).await;
         assert_ne!(
             state.fast_rounds.asked_heads(Channel::State),
             first,
@@ -1074,13 +1075,13 @@ mod tests {
         let unreachable = iroh::EndpointAddr::new(iroh::SecretKey::generate().public());
         let (net, mut state, _frames) = holder(unreachable.clone(), 3).await;
         state.linked_endpoints.insert(unreachable.id);
-        let ctx = net.ctx();
+        let context = net.context();
         let asker = Identity::generate();
         prove_identity(&mut state, &asker, unreachable.id);
         let behind = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
         let first =
-            antientropy::handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
+            antientropy::handle_state_digest(Channel::State, &behind, &mut state, &context).await;
         assert_eq!(
             first.unicast, 3,
             "handed to the pool as a point-to-point batch"
@@ -1089,7 +1090,7 @@ mod tests {
         tokio::time::sleep(tuning::FAST_ROUND_MIN_INTERVAL + std::time::Duration::from_millis(50))
             .await;
         let again =
-            antientropy::handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
+            antientropy::handle_state_digest(Channel::State, &behind, &mut state, &context).await;
         assert_eq!(
             again,
             antientropy::Answered {
@@ -1130,7 +1131,7 @@ mod tests {
 
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
-        let ctx = net.ctx();
+        let context = net.context();
         let asker = Identity::generate();
         let heads: Vec<_> = state.doc(Channel::State).heads().collect();
         let current = serde_json::to_value(heads).expect("heads");
@@ -1138,9 +1139,11 @@ mod tests {
         let behind = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
         let nothing =
-            antientropy::handle_state_digest(Channel::State, &up_to_date, &mut state, &ctx).await;
+            antientropy::handle_state_digest(Channel::State, &up_to_date, &mut state, &context)
+                .await;
         assert_eq!(nothing.broadcast + nothing.unicast, 0, "nothing is missing");
-        let gap = antientropy::handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
+        let gap =
+            antientropy::handle_state_digest(Channel::State, &behind, &mut state, &context).await;
         assert_eq!(gap.broadcast, 3, "the gap is served inside the window");
         bob_endpoint.close().await;
         net.endpoint.close().await;
@@ -1155,7 +1158,7 @@ mod tests {
         let (endpoint, _sender) = loopback_node().await;
         let state = state_with_pool(&endpoint, bob_endpoint.addr());
         let received = tokio::spawn(async move {
-            let conn = bob_endpoint
+            let connection = bob_endpoint
                 .accept()
                 .await
                 .expect("an incoming connection")
@@ -1163,19 +1166,19 @@ mod tests {
                 .expect("accept the connection");
             let mut got = Vec::new();
             for _ in 0..4 {
-                let mut stream = conn.accept_uni().await.expect("a uni stream");
+                let mut stream = connection.accept_uni().await.expect("a uni stream");
                 got.push(stream.read_to_end(64 * 1024).await.expect("read the frame"));
             }
-            (got, bob_endpoint, conn)
+            (got, bob_endpoint, connection)
         });
         let bob = endpoint_of_bob(&state);
-        let conn = state
+        let connection = state
             .unicast_pool
             .warm_or_dial(bob)
             .await
             .expect("warm the pool");
         assert!(
-            payload_path::wait_direct(&conn, std::time::Duration::from_secs(5)).await,
+            payload_path::wait_direct(&connection, std::time::Duration::from_secs(5)).await,
             "loopback selects a direct path"
         );
         // Two batches of signed frames, each frame with its own id, so the reader sees four distinct
@@ -1222,7 +1225,7 @@ mod tests {
         count: usize,
     ) -> tokio::task::JoinHandle<(Vec<Vec<u8>>, iroh::Endpoint)> {
         tokio::spawn(async move {
-            let conn = bob_endpoint
+            let connection = bob_endpoint
                 .accept()
                 .await
                 .expect("an incoming connection")
@@ -1230,7 +1233,7 @@ mod tests {
                 .expect("accept the connection");
             let mut got = Vec::new();
             for _ in 0..count {
-                let mut stream = conn.accept_uni().await.expect("a uni stream");
+                let mut stream = connection.accept_uni().await.expect("a uni stream");
                 got.push(stream.read_to_end(64 * 1024).await.expect("read the frame"));
             }
             (got, bob_endpoint)
@@ -1252,7 +1255,7 @@ mod tests {
         prove_identity(&mut state, &asker, bob_id);
         let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
-        antientropy::handle_state_digest(Channel::State, &digest, &mut state, &net.ctx()).await;
+        antientropy::handle_state_digest(Channel::State, &digest, &mut state, &net.context()).await;
 
         let (got, returned_endpoint) =
             tokio::time::timeout(std::time::Duration::from_secs(5), received)
@@ -1299,14 +1302,16 @@ mod tests {
         let own_list: Vec<_> = state.doc(Channel::State).heads().collect();
         let own = serde_json::json!(own_list);
         let up_to_date = digest(&net.mesh, Channel::State, &own, &bob);
-        antientropy::handle_state_digest(Channel::State, &up_to_date, &mut state, &net.ctx()).await;
+        antientropy::handle_state_digest(Channel::State, &up_to_date, &mut state, &net.context())
+            .await;
         assert!(
             !state.fast_rounds.active(Channel::State, now),
             "heads we hold"
         );
 
         let from_ahead = digest(&net.mesh, Channel::State, &ahead_heads, &bob);
-        antientropy::handle_state_digest(Channel::State, &from_ahead, &mut state, &net.ctx()).await;
+        antientropy::handle_state_digest(Channel::State, &from_ahead, &mut state, &net.context())
+            .await;
         assert!(
             !state.fast_rounds.active(Channel::State, now),
             "bob is not linked"
@@ -1314,7 +1319,8 @@ mod tests {
 
         state.linked_endpoints.insert(bob_endpoint.id());
         let received = read_frames(bob_endpoint, 1);
-        antientropy::handle_state_digest(Channel::State, &from_ahead, &mut state, &net.ctx()).await;
+        antientropy::handle_state_digest(Channel::State, &from_ahead, &mut state, &net.context())
+            .await;
         assert!(state.fast_rounds.active(Channel::State, now), "asked bob");
         let (got, returned_endpoint) =
             tokio::time::timeout(std::time::Duration::from_secs(5), received)

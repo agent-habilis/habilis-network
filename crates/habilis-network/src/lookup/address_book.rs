@@ -25,19 +25,19 @@ pub fn address_book(endpoint: &Endpoint) -> MemoryLookup {
 
 /// Register a peer's address in the address book of the endpoint, so that the endpoint can
 /// connect to it by its id. The book is made by [`address_book`].
-pub fn add_peer_addr(book: &MemoryLookup, addr: EndpointAddr) {
-    let node = addr.id.fmt_short();
-    let ip_addrs: Vec<_> = addr.ip_addrs().copied().collect();
-    book.add_endpoint_info(addr);
+pub fn add_peer_addr(book: &MemoryLookup, address: EndpointAddr) {
+    let node = address.id.fmt_short();
+    let ip_addrs: Vec<_> = address.ip_addrs().copied().collect();
+    book.add_endpoint_info(address);
     tracing::debug!(target: "habilis_network::lookup", %node, ?ip_addrs, "registered a direct peer address with the endpoint");
 }
 
 /// [`add_peer_addr`] for an identity that changes holder: the entry is replaced, not merged. A merge
 /// keeps the address of every beacon that this process held under the id, and a dial to the id
 /// then tries ports of beacons that are gone.
-pub(crate) fn replace_peer_addr(book: &MemoryLookup, addr: EndpointAddr) {
-    let node = addr.id.fmt_short();
-    let ip_addrs: Vec<_> = addr.ip_addrs().copied().collect();
-    book.set_endpoint_info(addr);
+pub(crate) fn replace_peer_addr(book: &MemoryLookup, address: EndpointAddr) {
+    let node = address.id.fmt_short();
+    let ip_addrs: Vec<_> = address.ip_addrs().copied().collect();
+    book.set_endpoint_info(address);
     tracing::debug!(target: "habilis_network::lookup", %node, ?ip_addrs, "replaced the address of a peer in the endpoint's book");
 }

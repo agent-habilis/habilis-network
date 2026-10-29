@@ -190,20 +190,20 @@ pub fn blind_new_members(
 /// An unparseable id/topic/nickname, conflicting selectors, a mesh no peer on
 /// this target could reach, or a failure standing up the endpoint and overlay.
 pub async fn join<S: NodeSink + 'static>(
-    opts: &JoinOptions,
+    options: &JoinOptions,
     sink: Arc<S>,
 ) -> Result<Membership, SetupError> {
-    let nickname = opts
+    let nickname = options
         .nick
         .as_deref()
         .map(Nickname::try_new)
         .transpose()
         .map_err(|error| SetupError::internal(anyhow::anyhow!("{error}")))?;
-    let (kind, author) = resolve_kind(opts, nickname)?;
-    let max_peers = if opts.max_peers == 0 {
+    let (kind, author) = resolve_kind(options, nickname)?;
+    let max_peers = if options.max_peers == 0 {
         GOSSIP_ACTIVE_VIEW_CAPACITY
     } else {
-        opts.max_peers
+        options.max_peers
     };
 
     // A browser has no UDP socket, so the loopback ladder a selector-less create
@@ -230,7 +230,7 @@ pub async fn join<S: NodeSink + 'static>(
         kind,
         SetupParams::new(author, sink)
             .with_max_peers(max_peers)
-            .with_max_direct(opts.max_direct),
+            .with_max_direct(options.max_direct),
     )
     .await?;
 
@@ -306,10 +306,10 @@ pub async fn depart(node: Node<MembershipApp>) -> Result<(), SetupError> {
 /// Both `mesh` and `topic` set, an unparseable id or topic, an invalid mesh
 /// name, or a create whose advertise target is unreachable.
 pub fn resolve_kind(
-    opts: &JoinOptions,
+    options: &JoinOptions,
     nickname: Option<Nickname>,
 ) -> Result<(SetupKind, Nickname), SetupError> {
-    match (&opts.mesh, &opts.topic) {
+    match (&options.mesh, &options.topic) {
         (Some(_), Some(_)) => Err(SetupError::MeshAndTopic),
         (Some(id), None) => {
             let target: JoinTarget = id
@@ -330,8 +330,8 @@ pub fn resolve_kind(
             // same values.
             let config = MeshConfig::resolve(
                 &[Lookup::Mdns, Lookup::Dht, Lookup::Relay],
-                relay_ladder(&opts.relay_urls).map_err(SetupError::internal)?,
-                &opts.transport,
+                relay_ladder(&options.relay_urls).map_err(SetupError::internal)?,
+                &options.transport,
             )
             .map_err(SetupError::Config)?;
             let mesh = derive_topic_mesh_config(string, config)?;
@@ -345,12 +345,12 @@ pub fn resolve_kind(
         }
         (None, None) => {
             let config = MeshConfig::resolve(
-                &opts.lookup,
-                relay_ladder(&opts.relay_urls).map_err(SetupError::internal)?,
-                &opts.transport,
+                &options.lookup,
+                relay_ladder(&options.relay_urls).map_err(SetupError::internal)?,
+                &options.transport,
             )
             .map_err(SetupError::Config)?;
-            let name = MeshName::try_new(opts.name.as_deref().unwrap_or("habilis-network"))
+            let name = MeshName::try_new(options.name.as_deref().unwrap_or("habilis-network"))
                 .map_err(|error| SetupError::internal(anyhow::anyhow!("{error}")))?;
             let Resolved { kind, author, .. } =
                 CreateParams::new(name, nickname, config, DirectorySelection::Unset)
@@ -370,7 +370,7 @@ mod tests {
     use habilis_network_test_tracing::test;
 
     use super::{JoinOptions, Lookup, MeshConfig, SetupKind, Transport, resolve_kind};
-    fn opts() -> JoinOptions {
+    fn options() -> JoinOptions {
         JoinOptions::default()
     }
 
@@ -378,8 +378,8 @@ mod tests {
         vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay]
     }
 
-    fn create_config(opts: &JoinOptions) -> MeshConfig {
-        let (kind, _) = resolve_kind(opts, None).expect("a create resolves");
+    fn create_config(options: &JoinOptions) -> MeshConfig {
+        let (kind, _) = resolve_kind(options, None).expect("a create resolves");
         match kind {
             SetupKind::Create { config, .. } => config,
             SetupKind::Join { .. } | SetupKind::Topic { .. } => {
@@ -424,7 +424,7 @@ mod tests {
         let (kind, _author) = resolve_kind(
             &JoinOptions {
                 topic: Some("standup".to_owned()),
-                ..opts()
+                ..options()
             },
             None,
         )
@@ -452,7 +452,7 @@ mod tests {
             &JoinOptions {
                 mesh: Some("whatever".to_owned()),
                 topic: Some("standup".to_owned()),
-                ..opts()
+                ..options()
             },
             None,
         )
@@ -462,10 +462,10 @@ mod tests {
 
     #[test]
     fn a_bare_create_is_loopback_and_naming_lookups_is_not() {
-        assert!(create_config(&opts()).lookups.is_loopback());
+        assert!(create_config(&options()).lookups.is_loopback());
         let all = create_config(&JoinOptions {
             lookup: all_lookups(),
-            ..opts()
+            ..options()
         });
         assert!(!all.lookups.is_loopback());
         assert_eq!(all.lookups, LookupOpts::public_preset());
@@ -478,14 +478,14 @@ mod tests {
     fn relay_transport_is_off_unless_named_and_needs_the_relay_lookup() {
         let lookup_only = create_config(&JoinOptions {
             lookup: all_lookups(),
-            ..opts()
+            ..options()
         });
         assert!(!lookup_only.transport.relay_transport);
 
         let relayed = create_config(&JoinOptions {
             lookup: vec![Lookup::Relay],
             transport: vec![Transport::Udp, Transport::Relay],
-            ..opts()
+            ..options()
         });
         assert!(relayed.transport.relay_transport);
 
@@ -493,7 +493,7 @@ mod tests {
             resolve_kind(
                 &JoinOptions {
                     transport: vec![Transport::Udp, Transport::Relay],
-                    ..opts()
+                    ..options()
                 },
                 None,
             )
@@ -510,7 +510,7 @@ mod tests {
         let create = create_config(&JoinOptions {
             lookup: vec![Lookup::Relay],
             transport: vec![Transport::Udp],
-            ..opts()
+            ..options()
         });
         assert_eq!(create.lookups.relay_lookup, RelayChoice::Pinned);
         assert!(!create.transport.relay_transport);
@@ -520,7 +520,7 @@ mod tests {
                 topic: Some("standup".to_owned()),
                 transport: vec![Transport::Udp],
                 relay_urls: vec!["http://127.0.0.1:3340/".to_owned()],
-                ..opts()
+                ..options()
             },
             None,
         )
@@ -538,7 +538,7 @@ mod tests {
             &JoinOptions {
                 lookup: vec![Lookup::Relay],
                 transport: vec![Transport::Relay],
-                ..opts()
+                ..options()
             },
             None,
         )
@@ -556,7 +556,7 @@ mod tests {
         let config = create_config(&JoinOptions {
             lookup: vec![Lookup::Relay],
             relay_urls: urls.clone(),
-            ..opts()
+            ..options()
         });
         let RelayChoice::Custom(ladder) = &config.lookups.relay_lookup else {
             panic!("relayUrls must resolve to a custom ladder")
@@ -566,7 +566,7 @@ mod tests {
             resolve_kind(
                 &JoinOptions {
                     relay_urls: urls.clone(),
-                    ..opts()
+                    ..options()
                 },
                 None,
             )
@@ -577,7 +577,7 @@ mod tests {
         let (plain, _) = resolve_kind(
             &JoinOptions {
                 topic: Some("standup".to_owned()),
-                ..opts()
+                ..options()
             },
             None,
         )
@@ -586,7 +586,7 @@ mod tests {
             &JoinOptions {
                 topic: Some("standup".to_owned()),
                 relay_urls: urls,
-                ..opts()
+                ..options()
             },
             None,
         )
@@ -607,7 +607,7 @@ mod tests {
                 &JoinOptions {
                     lookup: vec![Lookup::Relay],
                     relay_urls: vec!["not a url".to_owned()],
-                    ..opts()
+                    ..options()
                 },
                 None,
             )
@@ -633,7 +633,7 @@ mod tests {
                     topic: kind.clone(),
                     lookup: vec![Lookup::Relay],
                     relay_urls: urls.clone(),
-                    ..opts()
+                    ..options()
                 },
                 None,
             )
@@ -653,7 +653,7 @@ mod tests {
         let (plain, _) = resolve_kind(
             &JoinOptions {
                 topic: Some("standup".to_owned()),
-                ..opts()
+                ..options()
             },
             None,
         )
@@ -662,7 +662,7 @@ mod tests {
             &JoinOptions {
                 topic: Some("standup".to_owned()),
                 transport: vec![Transport::Udp, Transport::Relay],
-                ..opts()
+                ..options()
             },
             None,
         )
@@ -681,7 +681,7 @@ mod tests {
     fn naming_one_lookup_selects_only_that_one() {
         let config = create_config(&JoinOptions {
             lookup: vec![Lookup::Mdns],
-            ..opts()
+            ..options()
         });
         assert!(config.lookups.mdns);
         assert!(!config.lookups.dht);
@@ -701,11 +701,11 @@ mod resolve_tests {
     /// exact id `TopicParams::resolve` always produced.
     #[test]
     fn a_bare_topic_still_derives_the_public_preset_mesh() {
-        let opts = JoinOptions {
+        let options = JoinOptions {
             topic: Some("standup".to_owned()),
             ..JoinOptions::default()
         };
-        let (kind, _author) = resolve_kind(&opts, None).expect("resolve");
+        let (kind, _author) = resolve_kind(&options, None).expect("resolve");
         let SetupKind::Topic { mesh, .. } = kind else {
             panic!("a topic resolves to a topic kind");
         };

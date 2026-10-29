@@ -36,9 +36,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::JoinOptions) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -105,10 +107,10 @@ impl Member {
     }
 
     fn saw(&mut self, text: &str) -> bool {
-        while let Ok(msg) = self.membership.inbound.try_recv() {
-            self.seen.push(msg);
+        while let Ok(message) = self.membership.inbound.try_recv() {
+            self.seen.push(message);
         }
-        self.seen.iter().any(|msg| msg.text == text)
+        self.seen.iter().any(|message| message.text == text)
     }
 }
 

@@ -43,7 +43,7 @@ pub(crate) fn install_transports(
     // own hole-punching; this is the browser's only path, and a fallback for
     // NATs that defeat hole-punching but not ICE.
     if let Some(handle) = transports.webrtc.clone() {
-        if transports.opts.webrtc {
+        if transports.options.webrtc {
             builder = builder.add_custom_transport(handle.transport());
             // MUST come after `builder.preset(handle)` for multihop above: there
             // is a single `path_selector` slot and the last call wins. Safe only

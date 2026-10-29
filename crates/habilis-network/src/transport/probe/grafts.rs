@@ -27,7 +27,7 @@ pub(crate) fn may_graft(known_direct: bool, has_session: bool, needs_webrtc: boo
 /// the [`DirectOutcome`] that follows, or the alive tick retries.
 pub(crate) fn ensure_direct(
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     peer: EndpointId,
     peer_addr: &iroh::EndpointAddr,
 ) -> bool {
@@ -35,7 +35,7 @@ pub(crate) fn ensure_direct(
         return true;
     }
     let needs_webrtc = webrtc::lane_needs::needs_webrtc_lane(peer_addr)
-        || webrtc::lane_needs::needs_webrtc_lane(&ctx.endpoint.addr());
+        || webrtc::lane_needs::needs_webrtc_lane(&context.endpoint.addr());
     let has_session = state
         .webrtc
         .as_ref()
@@ -57,7 +57,7 @@ pub(crate) fn ensure_direct(
         state.direct.entry(peer).or_insert(DirectState::Pending);
         if needs_webrtc {
             state.want_lane_session(peer, Instant::now());
-            webrtc::negotiate_session::negotiate_session(state, ctx, peer, peer_addr.clone());
+            webrtc::negotiate_session::negotiate_session(state, context, peer, peer_addr.clone());
         }
         return false;
     }
@@ -66,7 +66,7 @@ pub(crate) fn ensure_direct(
     let tx = state.direct_proven.clone();
     n0_future::task::spawn(async move {
         let direct = match pool.probe_connection(peer).await {
-            Ok(conn) => wait_direct(&conn, PROBE_DEADLINE).await,
+            Ok(connection) => wait_direct(&connection, PROBE_DEADLINE).await,
             Err(error) => {
                 tracing::debug!(target: crate::transport::LOG_TARGET, %peer, %error, "direct-path probe could not connect");
                 false
@@ -90,14 +90,14 @@ pub(crate) fn ensure_direct(
 pub(crate) async fn on_outcome(
     outcome: DirectOutcome,
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
 ) {
     if !outcome.applies(state, Instant::now()) {
         return;
     }
     let DirectOutcome { peer, direct, .. } = outcome;
     if direct {
-        graft_proven(state, ctx, peer).await;
+        graft_proven(state, context, peer).await;
     } else if state.demote_unproven(peer) {
         tracing::info!(target: crate::transport::LOG_TARGET, %peer, "no direct path within the probe deadline; peer stays relay-only");
     } else {
@@ -108,11 +108,11 @@ pub(crate) async fn on_outcome(
 /// Ask gossip for the link to `peer`, in the way [`graft_request`] says.
 pub(crate) async fn request_graft(
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     peer: EndpointId,
     paced: bool,
 ) -> Result<(), iroh_gossip::api::ApiError> {
-    if peer != ctx.rendezvous_id && state.rides_gossip_rung(peer) {
+    if peer != context.rendezvous_id && state.rides_gossip_rung(peer) {
         tracing::debug!(target: crate::transport::LOG_TARGET, %peer, "graft skipped: the pair rides the gossip rung");
         return Ok(());
     }
@@ -120,14 +120,14 @@ pub(crate) async fn request_graft(
         state,
         GraftTarget {
             peer,
-            rendezvous: ctx.rendezvous_id,
+            rendezvous: context.rendezvous_id,
         },
-        ctx.max_peers,
+        context.max_peers,
         Instant::now(),
         paced,
     ) {
-        GraftRequest::Join => ctx.sender.join_peers(vec![peer]).await,
-        GraftRequest::Neighbor => ctx.sender.neighbor_peers(vec![peer]).await,
+        GraftRequest::Join => context.sender.join_peers(vec![peer]).await,
+        GraftRequest::Neighbor => context.sender.neighbor_peers(vec![peer]).await,
         GraftRequest::Skip => Ok(()),
     }
 }
@@ -136,24 +136,24 @@ pub(crate) async fn request_graft(
 /// is room, and flush any frame parked for it.
 pub(crate) async fn graft_proven(
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     peer: EndpointId,
 ) {
     state.note_path_proven(peer);
     // A session to the rendezvous that attached after this node let go of it
     // must not graft it again: every graft of the rendezvous waits for
     // `rendezvous_wanted`.
-    if peer == ctx.rendezvous_id && !state.rendezvous_wanted() {
+    if peer == context.rendezvous_id && !state.rendezvous_wanted() {
         return;
     }
-    if !state.linked_endpoints.contains(&peer) && state.linked_endpoints.len() < ctx.max_peers {
+    if !state.linked_endpoints.contains(&peer) && state.linked_endpoints.len() < context.max_peers {
         state.note_relink(peer, Instant::now());
-        if let Err(error) = request_graft(state, ctx, peer, true).await {
+        if let Err(error) = request_graft(state, context, peer, true).await {
             tracing::warn!(target: crate::transport::LOG_TARGET, %peer, %error, "graft request failed");
         }
     }
     if state.meshed && !state.pending_outbound.is_empty() {
-        crate::gossip::flush_pending(state, ctx, "direct path proven").await;
+        crate::gossip::flush_pending(state, context, "direct path proven").await;
     }
 }
 
@@ -170,28 +170,32 @@ pub(crate) async fn graft_proven(
 /// would trust the pre-sleep answer.
 pub(crate) async fn retry_direct(
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     distrust_links: bool,
 ) {
     // Every alive tick, so that the clock of a starved node does not outlive its cause.
     let now = Instant::now();
-    state.note_link_count(state.linked_endpoints.len(), ctx.max_peers, now);
+    state.note_link_count(state.linked_endpoints.len(), context.max_peers, now);
     state.settle_graft_backoff(now);
     if state.relay_transport.relay_allowed() {
-        regraft::fill_active_view(state, ctx).await;
+        regraft::fill_active_view(state, context).await;
         return;
     }
     // The lane offers are paced: a browser pays an ICE gathering budget per round. The members
     // left out are not touched, so that no `Pending` mark hides them from the next pass.
-    let (lane, rest): (Vec<_>, Vec<_>) =
-        regraft::retry_candidates(state, ctx.rendezvous_id, ctx.max_peers, distrust_links)
-            .into_iter()
-            .partition(|addr| lanes::is_lane_offer(state, ctx, addr));
-    for addr in rest {
-        lanes::retry_one(state, ctx, addr, distrust_links).await;
+    let (lane, rest): (Vec<_>, Vec<_>) = regraft::retry_candidates(
+        state,
+        context.rendezvous_id,
+        context.max_peers,
+        distrust_links,
+    )
+    .into_iter()
+    .partition(|address| lanes::is_lane_offer(state, context, address));
+    for address in rest {
+        lanes::retry_one(state, context, address, distrust_links).await;
     }
     let pick = lanes::lane_pick();
-    for addr in lanes::plan_lane_offers(lane, state.webrtc_admission.in_flight(), pick) {
-        lanes::retry_one(state, ctx, addr, distrust_links).await;
+    for address in lanes::plan_lane_offers(lane, state.webrtc_admission.in_flight(), pick) {
+        lanes::retry_one(state, context, address, distrust_links).await;
     }
 }

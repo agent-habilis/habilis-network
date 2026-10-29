@@ -49,9 +49,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::JoinOptions) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,

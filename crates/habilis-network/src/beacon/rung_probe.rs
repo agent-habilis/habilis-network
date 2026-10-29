@@ -39,9 +39,9 @@ pub(crate) async fn rung_answer(
     rendezvous_id: EndpointId,
     port: u16,
 ) -> ProbeAnswer {
-    let addr = EndpointAddr::new(rendezvous_id)
+    let address = EndpointAddr::new(rendezvous_id)
         .with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
-    let answer = probe_answer(prober, addr, RENDEZVOUS_PROBE).await;
+    let answer = probe_answer(prober, address, RENDEZVOUS_PROBE).await;
     tracing::trace!(target: "habilis_network::beacon", port, ?answer, "private rung identity-probe");
     answer
 }

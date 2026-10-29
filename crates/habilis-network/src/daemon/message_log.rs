@@ -74,14 +74,14 @@ impl MessageLog {
     /// union of divergent arrival-order windows. The returned eviction lets
     /// callers prune side indexes keyed by it (the DAG `by_hash`, fork map). A message whose
     /// dedup key is already held is not added, and nothing is evicted.
-    pub fn push(&mut self, msg: Verified) -> Option<Verified> {
+    pub fn push(&mut self, message: Verified) -> Option<Verified> {
         // A frame that is already held is held once: two paths that retain the same frame
         // (an author that logs its own send and a consumer that pushes it too) cost a lookup.
-        if !self.keys.insert(msg.dedup_key()) {
+        if !self.keys.insert(message.dedup_key()) {
             return None;
         }
-        *self.per_author.entry(msg.key()).or_default() += 1;
-        self.messages.push_back(msg);
+        *self.per_author.entry(message.key()).or_default() += 1;
+        self.messages.push_back(message);
         if self.messages.len() <= self.capacity {
             return None;
         }
@@ -137,7 +137,7 @@ impl MessageLog {
         self.messages
             .iter()
             .enumerate()
-            .filter(|(_, msg)| msg.key() == fullest)
+            .filter(|(_, message)| message.key() == fullest)
             .min_by(|(_, lhs), (_, rhs)| eviction_key(lhs).cmp(&eviction_key(rhs)))
             .map(|(index, _)| index)
             .expect("the fullest author holds at least one message")
@@ -154,19 +154,19 @@ impl MessageLog {
     /// them can still backfill them. Every node that holds the goodbye does the same, so the
     /// retained set stays a function of the message set.
     pub(crate) fn drop_presence_of(&mut self, author: &AuthorKey) -> Vec<Verified> {
-        let is_departed_presence = |msg: &Verified| {
-            msg.key() == *author
+        let is_departed_presence = |message: &Verified| {
+            message.key() == *author
                 && matches!(
-                    msg.kind,
+                    message.kind,
                     MessageKind::Presence {
                         subtype: PresenceSubtype::Joined | PresenceSubtype::Alive
                     }
                 )
         };
         let mut dropped = Vec::new();
-        self.messages.retain(|msg| {
-            if is_departed_presence(msg) {
-                dropped.push(msg.clone());
+        self.messages.retain(|message| {
+            if is_departed_presence(message) {
+                dropped.push(message.clone());
                 false
             } else {
                 true
@@ -205,15 +205,17 @@ impl MessageLog {
         total: u32,
     ) -> Vec<Option<&'a Verified>> {
         let mut slots: Vec<Option<&Verified>> = vec![None; total as usize];
-        for msg in &self.messages {
-            let Some(shard) = &msg.shard else { continue };
+        for message in &self.messages {
+            let Some(shard) = &message.shard else {
+                continue;
+            };
             if shard.group == *group
                 && shard.total == total
-                && msg.key() == *author
+                && message.key() == *author
                 && let Some(slot) = slots.get_mut(shard.index as usize)
                 && slot.is_none()
             {
-                *slot = Some(msg);
+                *slot = Some(message);
             }
         }
         slots
@@ -230,7 +232,7 @@ impl MessageLog {
         let mut bounds: Vec<Bound> = self
             .messages
             .iter()
-            .map(|msg| (msg.timestamp, msg.dedup_key()))
+            .map(|message| (message.timestamp, message.dedup_key()))
             .collect();
         bounds.sort_unstable();
         bounds
@@ -357,13 +359,13 @@ impl MessageLog {
         self.messages
             .iter()
             .rev()
-            .filter(|msg| {
-                let key = msg.dedup_key();
-                let bound = (msg.timestamp, key);
+            .filter(|message| {
+                let key = message.dedup_key();
+                let bound = (message.timestamp, key);
                 bound >= range.lo
                     && bound <= range.hi
                     && !have.contains(&key)
-                    && resendable_to(msg, requester)
+                    && resendable_to(message, requester)
             })
             .take(max)
             .cloned()
@@ -389,8 +391,8 @@ impl MessageLog {
 /// does **not** filter: a directed frame the addressee holds must keep
 /// appearing in its digest ids, or the author would see it as perpetually
 /// missing and re-send it every round forever.
-fn resendable_to(msg: &Verified, requester: &Nickname) -> bool {
-    sole_addressee(&msg.kind).is_none_or(|to| to == requester)
+fn resendable_to(message: &Verified, requester: &Nickname) -> bool {
+    sole_addressee(&message.kind).is_none_or(|to| to == requester)
 }
 
 /// Total order deciding which of an author's messages goes first (smallest is
@@ -403,8 +405,13 @@ fn resendable_to(msg: &Verified, requester: &Nickname) -> bool {
 /// Ranks *within* one author, not across them: because a sender picks these
 /// fields, ordering the whole log by them let one peer stamp its way to
 /// permanent residency. [`MessageLog::eviction_index`] picks the author first.
-fn eviction_key(msg: &Verified) -> (UnixSecs, AuthorKey, Option<u64>, &str) {
-    (msg.timestamp, msg.key(), msg.seq, msg.id.as_str())
+fn eviction_key(message: &Verified) -> (UnixSecs, AuthorKey, Option<u64>, &str) {
+    (
+        message.timestamp,
+        message.key(),
+        message.seq,
+        message.id.as_str(),
+    )
 }
 
 #[cfg(test)]
@@ -432,7 +439,7 @@ mod tests {
         }
     }
 
-    fn msg(id: &str) -> Verified {
+    fn message(id: &str) -> Verified {
         signed(plain(id))
     }
 
@@ -537,12 +544,12 @@ mod tests {
     #[test]
     fn contains_follows_eviction() {
         let mut log = MessageLog::new(2);
-        let first = msg("m1");
-        let second = msg("m2");
+        let first = message("m1");
+        let second = message("m2");
         assert!(log.push(first.clone()).is_none());
         assert!(log.push(second.clone()).is_none());
         assert!(log.contains(&first.dedup_key()) && log.contains(&second.dedup_key()));
-        let gone = log.push(msg("m3")).expect("a third frame evicts one");
+        let gone = log.push(message("m3")).expect("a third frame evicts one");
         assert!(
             !log.contains(&gone.dedup_key()),
             "an evicted frame is still held"
@@ -664,7 +671,7 @@ mod tests {
             max: 10,
             requester: &nick(ANYONE),
         });
-        let bodies: Vec<&str> = gap.iter().map(|msg| msg.body.as_str()).collect();
+        let bodies: Vec<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         assert_eq!(bodies, ["20"]);
     }
 
@@ -710,7 +717,7 @@ mod tests {
             max: 10,
             requester: &nick(ANYONE),
         });
-        let bodies: HashSet<&str> = gap.iter().map(|msg| msg.body.as_str()).collect();
+        let bodies: HashSet<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         // ts 20 and 40 are in-window and missing; 30 is in `have`; 10 and 50
         // are out of window — never re-sent.
         assert_eq!(bodies, HashSet::from(["20", "40"]));
@@ -724,7 +731,7 @@ mod tests {
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob"));
         let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 10, &nick("carol")));
-        let bodies: HashSet<&str> = gap.iter().map(|msg| msg.body.as_str()).collect();
+        let bodies: HashSet<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         assert_eq!(
             bodies,
             HashSet::from(["public"]),
@@ -741,7 +748,7 @@ mod tests {
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob"));
         let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 10, &nick("bob")));
-        let bodies: HashSet<&str> = gap.iter().map(|msg| msg.body.as_str()).collect();
+        let bodies: HashSet<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         assert_eq!(bodies, HashSet::from(["public", "private"]));
     }
 
@@ -755,7 +762,7 @@ mod tests {
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob")); // newest → seen first
         let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 1, &nick("carol")));
-        let bodies: Vec<&str> = gap.iter().map(|msg| msg.body.as_str()).collect();
+        let bodies: Vec<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         assert_eq!(bodies, vec!["public"], "the budget went to a usable frame");
     }
 
@@ -808,7 +815,7 @@ mod tests {
                 requester: &nick(ANYONE),
             })
             .iter()
-            .map(|msg| msg.body.as_str().to_string())
+            .map(|message| message.body.as_str().to_string())
             .collect();
         assert_eq!(offered, newer, "holder offers exactly the newer messages");
     }
@@ -839,10 +846,14 @@ mod tests {
         );
         let evicted = log.push(honest);
         assert!(
-            evicted.is_some_and(|msg| msg.body.as_str() != "honest"),
+            evicted.is_some_and(|message| message.body.as_str() != "honest"),
             "an honest message must not be evicted the moment it arrives"
         );
-        let bodies: HashSet<&str> = log.messages.iter().map(|msg| msg.body.as_str()).collect();
+        let bodies: HashSet<&str> = log
+            .messages
+            .iter()
+            .map(|message| message.body.as_str())
+            .collect();
         assert!(bodies.contains("honest"), "the honest message must survive");
     }
 
@@ -915,7 +926,7 @@ mod tests {
         let kept = |log: &MessageLog| -> HashSet<String> {
             log.messages
                 .iter()
-                .map(|msg| msg.body.as_str().to_owned())
+                .map(|message| message.body.as_str().to_owned())
                 .collect()
         };
         assert_eq!(
@@ -935,7 +946,11 @@ mod tests {
         log.push(msg_at("a", 10));
         log.push(msg_at("b", 20)); // over cap → evicts "a" (ts=10), the oldest
         assert_eq!(log.messages.len(), 2);
-        let bodies: HashSet<&str> = log.messages.iter().map(|msg| msg.body.as_str()).collect();
+        let bodies: HashSet<&str> = log
+            .messages
+            .iter()
+            .map(|message| message.body.as_str())
+            .collect();
         assert_eq!(
             bodies,
             HashSet::from(["b", "c"]),
@@ -947,7 +962,7 @@ mod tests {
         use habilis_network_test_tracing::test;
         use proptest::{prop_assert, proptest};
 
-        use super::{MessageLog, msg};
+        use super::{MessageLog, message};
 
         proptest! {
             #![proptest_config(crate::proptest_support::config())]
@@ -958,7 +973,7 @@ mod tests {
             ) {
                 let mut log = MessageLog::new(cap);
                 for i in 0..n_pushes {
-                    log.push(msg(&format!("m{i}")));
+                    log.push(message(&format!("m{i}")));
                 }
                 prop_assert!(log.messages.len() <= cap);
             }

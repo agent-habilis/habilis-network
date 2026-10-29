@@ -191,7 +191,7 @@ pub enum Request {
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     AddExternalAddr {
         /// The address to advertise as external.
-        addr: std::net::SocketAddr,
+        address: std::net::SocketAddr,
         /// Gets `()` when the request is done.
         reply: oneshot::Sender<()>,
     },
@@ -547,7 +547,7 @@ impl NodeApp for MembershipApp {
         &mut self,
         frame: InboundApp<'_>,
         _state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
         let InboundApp {
             message,
@@ -567,7 +567,7 @@ impl NodeApp for MembershipApp {
         // option that neither blocks the event loop nor grows without bound.
         let queued = self.inbound.try_send(inbound).is_ok();
         if self.stall_began(queued) {
-            ctx.sink.emit(NodeEvent::Error(
+            context.sink.emit(NodeEvent::Error(
                 "inbound message queue full: messages are being dropped until it is read"
                     .to_owned(),
             ));
@@ -591,12 +591,12 @@ impl NodeDriver for MembershipApp {
         &mut self,
         request: Request,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
         match request {
             Request::Send { to, body, reply } => {
                 let frame = app_frame(
-                    ctx,
+                    context,
                     AppFrameParams::new(
                         AppTag::try_new(MSG_TAG).expect("a valid app tag"),
                         to,
@@ -605,7 +605,7 @@ impl NodeDriver for MembershipApp {
                     ),
                 );
                 let class = self.classify(&frame.authored());
-                match send_app(state, ctx, frame, class).await {
+                match send_app(state, context, frame, class).await {
                     Ok(crate::transport::Delivered::Done) => {
                         let _ = reply.send(Ok(()));
                     }
@@ -628,7 +628,7 @@ impl NodeDriver for MembershipApp {
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::SendCold { to, body, reply } => {
                 let frame = app_frame(
-                    ctx,
+                    context,
                     AppFrameParams::new(
                         AppTag::try_new(MSG_TAG).expect("a valid app tag"),
                         to,
@@ -666,7 +666,7 @@ impl NodeDriver for MembershipApp {
             Request::StateMerge { merge, reply } => {
                 let merged = broadcast_state_merge(
                     state,
-                    StateMergeParams::new(ctx.into(), Channel::State, merge),
+                    StateMergeParams::new(context.into(), Channel::State, merge),
                 )
                 .await;
                 let _ = reply.send(merged.map(|_| ()).map_err(|error| error.to_string()));
@@ -692,7 +692,7 @@ impl NodeDriver for MembershipApp {
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::BlindRungProbes { blind, reply } => {
-                crate::beacon::set_blind_rung_probes(ctx.endpoint.id(), blind);
+                crate::beacon::set_blind_rung_probes(context.endpoint.id(), blind);
                 let _ = reply.send(());
                 false
             }
@@ -701,12 +701,15 @@ impl NodeDriver for MembershipApp {
                 remote_ports,
                 reply,
             } => {
-                habilis_network_iroh_webrtc_transport::block_ip_to(ctx.endpoint.id(), remote_ports);
+                habilis_network_iroh_webrtc_transport::block_ip_to(
+                    context.endpoint.id(),
+                    remote_ports,
+                );
                 // iroh re-selects only on path events: nudge every peer so the
                 // new set takes effect now.
-                for addr in state.peer_endpoints.values() {
-                    let endpoint = ctx.endpoint.clone();
-                    let peer = addr.id;
+                for address in state.peer_endpoints.values() {
+                    let endpoint = context.endpoint.clone();
+                    let peer = address.id;
                     n0_future::task::spawn(async move {
                         webrtc::nudge_acceptor::nudge(&endpoint, peer).await;
                     });
@@ -716,7 +719,7 @@ impl NodeDriver for MembershipApp {
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::Ping { reply } => {
-                crate::ops::start_ping_round(state, ctx, Some(reply)).await;
+                crate::ops::start_ping_round(state, context, Some(reply)).await;
                 true
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -725,12 +728,16 @@ impl NodeDriver for MembershipApp {
                 blocked,
                 reply,
             } => {
-                habilis_network_iroh_webrtc_transport::block_rung(ctx.endpoint.id(), rung, blocked);
+                habilis_network_iroh_webrtc_transport::block_rung(
+                    context.endpoint.id(),
+                    rung,
+                    blocked,
+                );
                 // iroh re-selects only on path events: nudge every peer so the
                 // change takes effect now.
-                for addr in state.peer_endpoints.values() {
-                    let endpoint = ctx.endpoint.clone();
-                    let peer = addr.id;
+                for address in state.peer_endpoints.values() {
+                    let endpoint = context.endpoint.clone();
+                    let peer = address.id;
                     n0_future::task::spawn(async move {
                         webrtc::nudge_acceptor::nudge(&endpoint, peer).await;
                     });
@@ -745,15 +752,15 @@ impl NodeDriver for MembershipApp {
                 blocked,
                 reply,
             } => {
-                let result = known_peer(state, &peer).map(|addr| {
-                    let remote = addr.id;
+                let result = known_peer(state, &peer).map(|address| {
+                    let remote = address.id;
                     habilis_network_iroh_webrtc_transport::block_rung_to(
-                        ctx.endpoint.id(),
+                        context.endpoint.id(),
                         rung,
                         remote,
                         blocked,
                     );
-                    let endpoint = ctx.endpoint.clone();
+                    let endpoint = context.endpoint.clone();
                     n0_future::task::spawn(async move {
                         webrtc::nudge_acceptor::nudge(&endpoint, remote).await;
                     });
@@ -767,7 +774,7 @@ impl NodeDriver for MembershipApp {
                 denied,
                 reply,
             } => {
-                let member = known_peer(state, &peer).map(|addr| addr.id);
+                let member = known_peer(state, &peer).map(|address| address.id);
                 if let Ok(member) = member {
                     state.webrtc_admission.deny(member, denied);
                     if denied
@@ -788,17 +795,19 @@ impl NodeDriver for MembershipApp {
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::OfferSession { peer, reply } => {
-                let result = known_peer(state, &peer).cloned().map(|addr| {
-                    state.direct.insert(addr.id, DirectState::RelayOnly);
-                    webrtc::negotiate_session::negotiate_session(state, ctx, addr.id, addr);
+                let result = known_peer(state, &peer).cloned().map(|address| {
+                    state.direct.insert(address.id, DirectState::RelayOnly);
+                    webrtc::negotiate_session::negotiate_session(
+                        state, context, address.id, address,
+                    );
                 });
                 let _ = reply.send(result);
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::CloseLink { peer, reply } => {
-                let result = known_peer(state, &peer).map(|addr| {
-                    payload_path::close_gossip_links_to(addr.id);
+                let result = known_peer(state, &peer).map(|address| {
+                    payload_path::close_gossip_links_to(address.id);
                 });
                 let _ = reply.send(result);
                 false
@@ -820,7 +829,7 @@ impl NodeDriver for MembershipApp {
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::ForgetUnicast { peer, reply } => {
-                let id = known_peer(state, &peer).map(|addr| addr.id);
+                let id = known_peer(state, &peer).map(|address| address.id);
                 let pool = state.unicast_pool.clone();
                 let outcome = match id {
                     Ok(id) => Ok(pool.drop_connection(id).await),
@@ -836,7 +845,7 @@ impl NodeDriver for MembershipApp {
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::EndpointId { reply } => {
-                let _ = reply.send(ctx.endpoint.id());
+                let _ = reply.send(context.endpoint.id());
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -847,20 +856,20 @@ impl NodeDriver for MembershipApp {
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::SelectedRung { peer, reply } => {
-                let id = known_peer(state, &peer).ok().map(|addr| addr.id);
+                let id = known_peer(state, &peer).ok().map(|address| address.id);
                 let pool = state.unicast_pool.clone();
                 // Off the event loop: a dial can take seconds.
                 n0_future::task::spawn(async move {
                     let rung = match id {
-                        Some(id) => pool.warm_or_dial(id).await.ok().and_then(|conn| {
-                            let rung = payload_path::selected_rung(&conn);
+                        Some(id) => pool.warm_or_dial(id).await.ok().and_then(|connection| {
+                            let rung = payload_path::selected_rung(&connection);
                             // The same stable id twice is one connection read twice: a test that
                             // waits for a rung can see whether the connection it reads is the one
                             // that climbed.
                             tracing::debug!(
                                 target: "habilis_network::transport",
                                 peer = %id,
-                                conn = conn.stable_id(),
+                                connection = connection.stable_id(),
                                 ?rung,
                                 "the rung read for a test"
                             );
@@ -884,7 +893,7 @@ impl NodeDriver for MembershipApp {
                     let _ = handle.remove_origin(handle.app_id());
                 }
                 if !hold {
-                    event_loop::linkstate_arm(state, ctx).await;
+                    event_loop::linkstate_arm(state, context).await;
                 }
                 let _ = reply.send(());
                 false
@@ -895,11 +904,11 @@ impl NodeDriver for MembershipApp {
                 not(target_arch = "wasm32")
             ))]
             Request::HasRoute { peer, reply } => {
-                let has_route = known_peer(state, &peer).is_ok_and(|addr| {
+                let has_route = known_peer(state, &peer).is_ok_and(|address| {
                     state.multihop().is_some_and(|handle| {
                         handle
                             .route_addr(habilis_network_iroh_multihop_transport::AppId::new(
-                                addr.id,
+                                address.id,
                             ))
                             .is_some()
                     })
@@ -939,10 +948,10 @@ impl NodeDriver for MembershipApp {
                     state
                         .peer_endpoints
                         .values()
-                        .filter(|addr| {
-                            webrtc.has_session(&addr.id)
-                                && !state.linked_endpoints.contains(&addr.id)
-                                && addr.id != ctx.rendezvous_id
+                        .filter(|address| {
+                            webrtc.has_session(&address.id)
+                                && !state.linked_endpoints.contains(&address.id)
+                                && address.id != context.rendezvous_id
                         })
                         .count()
                 });
@@ -968,7 +977,11 @@ impl NodeDriver for MembershipApp {
             ))]
             Request::RedialCounts { reply } => {
                 let now = clock::Instant::now();
-                let ids: Vec<_> = state.peer_endpoints.values().map(|addr| addr.id).collect();
+                let ids: Vec<_> = state
+                    .peer_endpoints
+                    .values()
+                    .map(|address| address.id)
+                    .collect();
                 for id in ids {
                     let quic = state.webrtc_admission.has_live_connection(id);
                     let session = state
@@ -1018,17 +1031,17 @@ impl NodeDriver for MembershipApp {
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-            Request::AddExternalAddr { addr, reply } => {
-                ctx.endpoint.add_external_addr(addr).await;
+            Request::AddExternalAddr { address, reply } => {
+                context.endpoint.add_external_addr(address).await;
                 let _ = reply.send(());
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::BlockUdp { blocked, reply } => {
                 habilis_network_iroh_webrtc_transport::block_ip_paths(blocked);
-                for addr in state.peer_endpoints.values() {
-                    let endpoint = ctx.endpoint.clone();
-                    let peer = addr.id;
+                for address in state.peer_endpoints.values() {
+                    let endpoint = context.endpoint.clone();
+                    let peer = address.id;
                     n0_future::task::spawn(async move {
                         webrtc::nudge_acceptor::nudge(&endpoint, peer).await;
                     });
@@ -1116,7 +1129,7 @@ fn route_diag(state: &EventLoopState) -> String {
         state
             .peer_endpoints
             .iter()
-            .find(|(_, addr)| addr.id.to_string() == id)
+            .find(|(_, address)| address.id.to_string() == id)
             .map_or_else(
                 || id.chars().take(10).collect(),
                 |(nickname, _)| {
@@ -1140,9 +1153,10 @@ fn route_diag(state: &EventLoopState) -> String {
     let mut writers: Vec<String> = state
         .peer_endpoints
         .iter()
-        .filter_map(|(nickname, addr)| {
-            let underlay = handle
-                .underlay_addr_of(habilis_network_iroh_multihop_transport::AppId::new(addr.id))?;
+        .filter_map(|(nickname, address)| {
+            let underlay = handle.underlay_addr_of(
+                habilis_network_iroh_multihop_transport::AppId::new(address.id),
+            )?;
             let text: &str = nickname.borrow();
             let open = handle
                 .underlay_paths_for_test(habilis_network_iroh_multihop_transport::UnderlayId::new(

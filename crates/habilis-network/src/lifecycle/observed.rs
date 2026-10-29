@@ -25,7 +25,7 @@ pub(crate) struct Observed {
 pub(crate) fn observe(
     message: &Verified,
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
 ) -> Observed {
     let update = membership_update::compute_for(message, state);
     // Implicit heartbeat: any received message updates last_seen. Not a stale one: a copy of a
@@ -51,7 +51,7 @@ pub(crate) fn observe(
 
     if update.returned && surfaceable {
         state.surfaced.insert(message.author.clone());
-        ctx.sink.emit(NodeEvent::PeerReturn {
+        context.sink.emit(NodeEvent::PeerReturn {
             nickname: message.author.clone(),
         });
         tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer returned");
@@ -79,8 +79,9 @@ pub(crate) fn observe(
         && !matches!(message.kind, MessageKind::Presence { .. })
     {
         state.surfaced.insert(message.author.clone());
-        ctx.sink
-            .emit(synthetic_arrival(ctx.mesh, ctx.identity, message));
+        context
+            .sink
+            .emit(synthetic_arrival(context.mesh, context.identity, message));
         tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer joined");
     }
 

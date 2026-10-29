@@ -34,10 +34,12 @@ fn logs() -> String {
     habilis_network_test_tracing::captured_logs()
 }
 
-async fn open(nick: &str, opts: membership::JoinOptions) -> Membership {
+async fn open(nick: &str, options: membership::JoinOptions) -> Membership {
     let (sink, _events) = membership::json_sink();
-    let opts = opts.with_nick(Some(nick.to_owned()));
-    membership::join(&opts, sink).await.expect("open a member")
+    let options = options.with_nick(Some(nick.to_owned()));
+    membership::join(&options, sink)
+        .await
+        .expect("open a member")
 }
 
 async fn roster_len(member: &Membership) -> usize {

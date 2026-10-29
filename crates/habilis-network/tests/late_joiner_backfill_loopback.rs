@@ -63,23 +63,24 @@ impl NodeDriver for Store {
 
     async fn handle_session(
         &mut self,
-        req: Self::Session,
+        request: Self::Session,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
-        match req {
+        match request {
             Request::Write(merge, done) => {
                 broadcast_state_merge(
                     state,
-                    StateMergeParams::new(ctx.into(), Channel::State, merge).with_surface(false),
+                    StateMergeParams::new(context.into(), Channel::State, merge)
+                        .with_surface(false),
                 )
                 .await
                 .expect("a small merge is accepted");
                 let _ = done.send(());
                 true
             }
-            Request::Read(resp) => {
-                let _ = resp.send(state.doc(Channel::State).to_json());
+            Request::Read(response) => {
+                let _ = response.send(state.doc(Channel::State).to_json());
                 false
             }
         }

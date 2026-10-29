@@ -69,9 +69,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::JoinOptions) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -114,12 +116,12 @@ impl Member {
 
     /// Whether a broadcast with this text has reached this member.
     fn saw_broadcast(&mut self, text: &str) -> bool {
-        while let Ok(msg) = self.membership.inbound.try_recv() {
-            self.seen.push(msg);
+        while let Ok(message) = self.membership.inbound.try_recv() {
+            self.seen.push(message);
         }
         self.seen
             .iter()
-            .any(|msg| !msg.directed && msg.text == text)
+            .any(|message| !message.directed && message.text == text)
     }
 
     fn ports(&self) -> Vec<u16> {
@@ -275,12 +277,12 @@ impl NodeDriver for Chat {
         &mut self,
         session: Self::Session,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
         match session {
             ChatSession::Send(text, reply) => {
                 let frame = app_frame(
-                    ctx,
+                    context,
                     AppFrameParams::new(
                         AppTag::try_new("chat").expect("a valid app tag"),
                         None,
@@ -289,7 +291,7 @@ impl NodeDriver for Chat {
                     ),
                 );
                 let class = self.classify(&frame.authored());
-                let sent = send_app(state, ctx, frame, class).await.map(|_| ());
+                let sent = send_app(state, context, frame, class).await.map(|_| ());
                 let _ = reply.send(sent.map_err(|error| error.to_string()));
                 true
             }

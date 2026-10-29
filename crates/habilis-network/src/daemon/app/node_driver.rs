@@ -45,16 +45,16 @@ pub trait NodeDriver: NodeApp {
     /// One-time startup hook, run once just before the select loop begins.
     ///
     /// Defaults to a no-op.
-    async fn on_startup(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-        let _ = (state, ctx);
+    async fn on_startup(&mut self, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+        let _ = (state, context);
     }
 
     /// The periodic app-maintenance tick that rides the membership-sweep
     /// cadence (its own per-item elapsed-time budgets gate the real work).
     ///
     /// Defaults to a no-op — an app with no periodic maintenance skips it.
-    async fn on_tick(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-        let _ = (state, ctx);
+    async fn on_tick(&mut self, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+        let _ = (state, context);
     }
 
     /// Graceful-shutdown hook: release app-owned resources and fail parked
@@ -64,8 +64,8 @@ pub trait NodeDriver: NodeApp {
     /// propagation window as `Left`.
     ///
     /// Defaults to a no-op.
-    async fn on_shutdown(&mut self, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-        let _ = (state, ctx);
+    async fn on_shutdown(&mut self, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+        let _ = (state, context);
     }
 
     /// The earliest app-owned request deadline, for the loop's timer arm
@@ -126,9 +126,9 @@ pub trait NodeDriver: NodeApp {
         &mut self,
         request: Self::Session,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
-        let _ = (request, state, ctx);
+        let _ = (request, state, context);
         false
     }
 
@@ -141,9 +141,9 @@ pub trait NodeDriver: NodeApp {
         &mut self,
         request: Self::Http,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) {
-        let _ = (request, state, ctx);
+        let _ = (request, state, context);
     }
 
     /// Apply one parsed IPC command (the unix-socket `msg`/`poll`/… path),
@@ -155,9 +155,9 @@ pub trait NodeDriver: NodeApp {
         &mut self,
         request: IpcRequest<'_, Self::Ipc>,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
-        let _ = (request.name, state, ctx);
+        let _ = (request.name, state, context);
         let _ = request
             .response
             .send("{\"error\":\"this app serves no IPC commands\"}".to_owned());

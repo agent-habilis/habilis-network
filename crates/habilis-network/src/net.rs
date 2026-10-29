@@ -75,13 +75,13 @@ pub async fn conn_path(
     let mut has_direct = false;
     let mut has_relay = false;
     let mut relay_url = None;
-    for addr in info.addrs() {
-        if !matches!(addr.usage(), TransportAddrUsage::Active) {
+    for address in info.addrs() {
+        if !matches!(address.usage(), TransportAddrUsage::Active) {
             continue;
         }
         // `TransportAddr` is `#[non_exhaustive]`, so a wildcard is
         // mandatory and the match can't be made exhaustive.
-        match addr.addr() {
+        match address.addr() {
             TransportAddr::Relay(url) => {
                 has_relay = true;
                 relay_url = Some(url.clone());

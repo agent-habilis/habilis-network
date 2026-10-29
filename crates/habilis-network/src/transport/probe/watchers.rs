@@ -53,13 +53,15 @@ pub(crate) fn ensure_watchers(
         .values()
         // The rendezvous serves no unicast, so it has no pooled connection
         // to watch; `retry_candidates` skips it for the same reason.
-        .filter(|addr| {
-            addr.id != rendezvous && !webrtc::lane_needs::needs_webrtc_lane(addr) && local < addr.id
+        .filter(|address| {
+            address.id != rendezvous
+                && !webrtc::lane_needs::needs_webrtc_lane(address)
+                && local < address.id
         })
-        .map(|addr| addr.id)
+        .map(|address| address.id)
         .collect();
     for peer in peers {
-        let Some(conn) = state.unicast_pool.used_connection(peer) else {
+        let Some(connection) = state.unicast_pool.used_connection(peer) else {
             // Nothing to watch: the pair was never sent to, or the pool closed
             // its connection, and the watcher went with it. The last path kind it
             // reported must go too, or every alive tick connects to the peer
@@ -68,34 +70,39 @@ pub(crate) fn ensure_watchers(
             state.path_kinds.remove(&peer);
             continue;
         };
-        if state.path_watchers.get(&peer) == Some(&Some(conn.stable_id())) {
+        if state.path_watchers.get(&peer) == Some(&Some(connection.stable_id())) {
             continue;
         }
-        state.path_watchers.insert(peer, Some(conn.stable_id()));
+        state
+            .path_watchers
+            .insert(peer, Some(connection.stable_id()));
         tracing::debug!(target: crate::transport::LOG_TARGET, %peer, "watching the selected path");
         let tx = state.path_changes.clone();
         n0_future::task::spawn(async move {
             // iroh punches UDP again only on the client side of a
             // connection; a server-side one would never see UDP return.
-            debug_assert!(conn.side().is_client(), "a watched connection is ours");
-            let conn_id = conn.stable_id();
+            debug_assert!(
+                connection.side().is_client(),
+                "a watched connection is ours"
+            );
+            let conn_id = connection.stable_id();
             // Subscribe first, then read: a path selected before the
             // subscription is reported by the first read, not missed.
-            let mut events = conn.path_events();
+            let mut events = connection.path_events();
             let mut last = None;
-            tracing::debug!(target: crate::transport::LOG_TARGET, %peer, paths = ?kinds::path_list(&conn), "watcher started");
+            tracing::debug!(target: crate::transport::LOG_TARGET, %peer, paths = ?kinds::path_list(&connection), "watcher started");
             loop {
                 // A closed connection reads as no path; that is not a loss to
                 // race over, and a replacement gets a watcher of its own.
-                if conn.close_reason().is_some() {
+                if connection.close_reason().is_some() {
                     return;
                 }
-                let mut kind = kinds::selected_kind(&conn);
+                let mut kind = kinds::selected_kind(&connection);
                 if kind == PathKind::None {
                     // Between two path events the selection can read empty for
                     // a moment; only a loss that lasts is one.
                     n0_future::time::sleep(NO_PATH_GRACE).await;
-                    kind = kinds::selected_kind(&conn);
+                    kind = kinds::selected_kind(&connection);
                 }
                 if last != Some(kind) {
                     last = Some(kind);
@@ -130,14 +137,14 @@ pub(crate) fn mark_proven(state: &mut EventLoopState, peer: EndpointId) -> bool 
 /// a connect, and each one makes iroh try the UDP punch again and re-run path
 /// selection; without it iroh retries every 60 s. When UDP answers, the
 /// watcher sees it selected and the session is detached.
-pub(crate) fn nudge_webrtc_riders(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(crate) fn nudge_webrtc_riders(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     for peer in webrtc_riders(state) {
-        let endpoint = ctx.endpoint.clone();
+        let endpoint = context.endpoint.clone();
         n0_future::task::spawn(async move {
             webrtc::nudge_acceptor::nudge(&endpoint, peer).await;
         });
     }
-    nudge_climbing_pairs(state, ctx, false);
+    nudge_climbing_pairs(state, context, false);
 }
 
 /// A pair on the relay, or on gossip, that the topology can now route: dial with the route. The
@@ -152,29 +159,29 @@ pub(crate) fn nudge_webrtc_riders(state: &mut EventLoopState, ctx: &HandlerCtx<'
 /// by design: each dial is bounded by `DIAL_TIMEOUT`.
 pub(crate) fn nudge_climbing_pairs(
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     only_changed: bool,
 ) {
     let pairs: Vec<PairToClimb> = state
         .peer_endpoints
         .values()
-        .filter(|addr| addr.id != ctx.rendezvous_id)
-        .filter_map(|addr| {
+        .filter(|address| address.id != context.rendezvous_id)
+        .filter_map(|address| {
             let kind = kinds::pair_kind(
-                state.path_kinds.get(&addr.id).copied(),
-                state.webrtc_admission.selected_kind(addr.id),
+                state.path_kinds.get(&address.id).copied(),
+                state.webrtc_admission.selected_kind(address.id),
             )?;
             // The relay and gossip are the two rungs that a route can still climb from.
             matches!(kind, PathKind::Relay | PathKind::Gossip).then(|| {
                 let has_session = state
                     .webrtc
                     .as_ref()
-                    .is_some_and(|handle| handle.has_session(&addr.id));
+                    .is_some_and(|handle| handle.has_session(&address.id));
                 PairToClimb {
-                    peer: addr.id,
+                    peer: address.id,
                     kind,
                     has_session,
-                    route: route_to(state, addr.id),
+                    route: route_to(state, address.id),
                 }
             })
         })
@@ -191,7 +198,7 @@ pub(crate) fn nudge_climbing_pairs(
             route = addrs.route.is_some(),
             "dialing a pair on the relay"
         );
-        let endpoint = ctx.endpoint.clone();
+        let endpoint = context.endpoint.clone();
         n0_future::task::spawn(async move {
             webrtc::nudge_acceptor::nudge_with(&endpoint, peer, &addrs).await;
         });
@@ -247,7 +254,7 @@ pub(crate) fn webrtc_riders(state: &EventLoopState) -> Vec<EndpointId> {
 pub(crate) async fn on_path_change(
     change: PathChange,
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
 ) {
     let PathChange {
         peer,
@@ -288,14 +295,14 @@ pub(crate) async fn on_path_change(
                 tracing::info!(target: crate::transport::LOG_TARGET, %peer, "udp selected again; webrtc session detached");
             }
             if mark_proven(state, peer) {
-                crate::gossip::flush_pending(state, ctx, "direct path back").await;
+                crate::gossip::flush_pending(state, context, "direct path back").await;
             }
         }
         PathAction::Rerace => {
             if matches!(kind, PathKind::Multihop | PathKind::Gossip) {
                 // Off the relay, so frames may flow; but the pair has no lane yet.
                 if mark_proven(state, peer) {
-                    crate::gossip::flush_pending(state, ctx, "path off the relay").await;
+                    crate::gossip::flush_pending(state, context, "path off the relay").await;
                 }
                 tracing::info!(target: crate::transport::LOG_TARGET, %peer, ?kind, "pair is off the relay; racing for a lane");
             } else {
@@ -309,19 +316,19 @@ pub(crate) async fn on_path_change(
                 // address moves a connection onto the session's path, and the
                 // multihop route is learned by no lookup while another path is
                 // selected.
-                let endpoint = ctx.endpoint.clone();
+                let endpoint = context.endpoint.clone();
                 n0_future::task::spawn(async move {
                     webrtc::nudge_acceptor::nudge_with(&endpoint, peer, &addrs).await;
                 });
             }
             if !has_session
-                && let Some(addr) = state
+                && let Some(address) = state
                     .peer_endpoints
                     .values()
-                    .find(|addr| addr.id == peer)
+                    .find(|address| address.id == peer)
                     .cloned()
             {
-                webrtc::negotiate_session::negotiate_session(state, ctx, peer, addr);
+                webrtc::negotiate_session::negotiate_session(state, context, peer, address);
             }
         }
     }
@@ -371,12 +378,12 @@ pub(crate) fn proven_by_route(
 
 /// Mark the pairs that [`proven_by_route`] returns, and flush what waited for them. Runs on the
 /// sweep tick.
-pub(crate) async fn prove_routed_pairs(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(crate) async fn prove_routed_pairs(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let peers: Vec<EndpointId> = state
         .peer_endpoints
         .values()
-        .map(|addr| addr.id)
-        .filter(|id| *id != ctx.rendezvous_id)
+        .map(|address| address.id)
+        .filter(|id| *id != context.rendezvous_id)
         .collect();
     let proven = proven_by_route(peers, &state.direct, &state.path_watchers, |peer| {
         state.pair_path_kind(peer)
@@ -394,16 +401,16 @@ pub(crate) async fn prove_routed_pairs(state: &mut EventLoopState, ctx: &Handler
             .as_ref()
             .is_some_and(|handle| handle.has_session(&peer));
         if !has_session
-            && let Some(addr) = state
+            && let Some(address) = state
                 .peer_endpoints
                 .values()
-                .find(|addr| addr.id == peer)
+                .find(|address| address.id == peer)
                 .cloned()
         {
-            webrtc::negotiate_session::negotiate_session(state, ctx, peer, addr);
+            webrtc::negotiate_session::negotiate_session(state, context, peer, address);
         }
     }
     if flush {
-        crate::gossip::flush_pending(state, ctx, "path off the relay").await;
+        crate::gossip::flush_pending(state, context, "path off the relay").await;
     }
 }

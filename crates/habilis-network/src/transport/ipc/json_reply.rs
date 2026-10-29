@@ -11,11 +11,11 @@ use crate::protocol::{MessageId, message};
 #[must_use]
 /// # Panics
 /// Panics if an internal invariant is violated.
-pub fn json_ok_msg(id: &MessageId, msg: &message::Verified) -> String {
+pub fn json_ok_msg(id: &MessageId, message: &message::Verified) -> String {
     serde_json::json!({
         "ok": true,
         "id": id,
-        "message": serde_json::to_value(msg).expect("Message serialize is infallible"),
+        "message": serde_json::to_value(message).expect("Message serialize is infallible"),
     })
     .to_string()
 }

@@ -54,7 +54,7 @@ pub(crate) fn rendezvous_graftable(state: &state::EventLoopState) -> bool {
 /// exactly while that link is down.
 pub(crate) fn negotiate_rendezvous_session(
     state: &mut state::EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
 ) {
     if !state.rendezvous_wanted() {
         // A session to the rendezvous that this node does not want. The main
@@ -64,7 +64,7 @@ pub(crate) fn negotiate_rendezvous_session(
         // would hold one of the beacon's slots for ever.
         if !state.rendezvous_linked
             && let Some(handle) = state.webrtc.as_ref()
-            && handle.detach(&ctx.rendezvous_id)
+            && handle.detach(&context.rendezvous_id)
         {
             tracing::debug!(target: LOG_TARGET, "detached a rendezvous session that is no longer wanted");
         }
@@ -94,7 +94,7 @@ pub(crate) fn negotiate_rendezvous_session(
         }
         return;
     }
-    let rendezvous = ctx.rendezvous_id;
+    let rendezvous = context.rendezvous_id;
     // A held session with an *unlinked* rendezvous is stale: the beacon's
     // rival re-check releases and re-claims the rendezvous on a fresh
     // endpoint, whose session table starts empty, and this heal tick only
@@ -118,7 +118,7 @@ pub(crate) fn negotiate_rendezvous_session(
         }
     }
     state.rendezvous_session_stale = false;
-    offer_to_rendezvous(state, ctx, handle, Offer::Rendezvous);
+    offer_to_rendezvous(state, context, handle, Offer::Rendezvous);
 }
 
 /// Offer a `WebRTC` session to the rendezvous while its gossip link is up on the relay.
@@ -130,7 +130,7 @@ pub(crate) fn negotiate_rendezvous_session(
 /// and the stale-session detach of the heal tick does not run here.
 pub(crate) fn offer_rendezvous_on_path_loss(
     state: &mut state::EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
 ) {
     if !state.rendezvous_wanted()
         || state.relay_transport.relay_allowed()
@@ -141,10 +141,10 @@ pub(crate) fn offer_rendezvous_on_path_loss(
     let Some(handle) = state.webrtc.clone() else {
         return;
     };
-    if handle.has_session(&ctx.rendezvous_id) {
+    if handle.has_session(&context.rendezvous_id) {
         return;
     }
-    offer_to_rendezvous(state, ctx, handle, Offer::RendezvousLinked);
+    offer_to_rendezvous(state, context, handle, Offer::RendezvousLinked);
 }
 
 /// The address that an offer to the rendezvous dials: the id with every address the book holds for
@@ -160,11 +160,11 @@ pub(crate) fn rendezvous_dial_target(book: &MemoryLookup, rendezvous: EndpointId
 
 pub(crate) fn offer_to_rendezvous(
     state: &mut state::EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     handle: WebRtcHandle,
     offer: Offer,
 ) {
-    let rendezvous = ctx.rendezvous_id;
+    let rendezvous = context.rendezvous_id;
     let guard = match state.webrtc_admission.try_admit(rendezvous, &handle) {
         Ok(guard) => guard,
         Err(reason) => {
@@ -173,7 +173,7 @@ pub(crate) fn offer_to_rendezvous(
         }
     };
     let target = rendezvous_dial_target(&state.address_book, rendezvous);
-    offer::spawn_offer_round(state, ctx, rendezvous, target, handle, guard, offer);
+    offer::spawn_offer_round(state, context, rendezvous, target, handle, guard, offer);
 }
 
 /// A rendezvous offer made off the heal tick: when the loop starts, and when
@@ -186,9 +186,12 @@ pub(crate) fn offer_to_rendezvous(
 /// node whose fallback is armed. An IP-capable node's first call arms the
 /// fallback, which holds its timer grafts, so only the heal tick may make it:
 /// the punch must first have had a heal interval to land.
-pub(crate) fn offer_rendezvous_off_tick(state: &mut state::EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(crate) fn offer_rendezvous_off_tick(
+    state: &mut state::EventLoopState,
+    context: &HandlerCtx<'_>,
+) {
     if offers_off_tick(state) {
-        negotiate_rendezvous_session(state, ctx);
+        negotiate_rendezvous_session(state, context);
     }
 }
 

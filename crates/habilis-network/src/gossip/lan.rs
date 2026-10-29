@@ -14,16 +14,16 @@ pub(crate) use lan_grafts::LanGrafts;
 pub(crate) async fn on_lan_event(
     event: LanEvent,
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
 ) {
     match event {
-        LanEvent::Seen(addr) => {
-            let linked = state.linked_endpoints.contains(&addr.id);
+        LanEvent::Seen(address) => {
+            let linked = state.linked_endpoints.contains(&address.id);
             if !linked {
-                state.note_second_group_sign(ctx.endpoint.id(), Instant::now());
+                state.note_second_group_sign(context.endpoint.id(), Instant::now());
             }
-            if state.lan_grafts.plan(&addr, linked, Instant::now()) {
-                ask(addr, state, ctx).await;
+            if state.lan_grafts.plan(&address, linked, Instant::now()) {
+                ask(address, state, context).await;
             }
         }
         LanEvent::Gone(id) => state.lan_grafts.forget(&id),
@@ -32,21 +32,21 @@ pub(crate) async fn on_lan_event(
 
 /// Ask again the members of the LAN that were asked and are still not neighbors, once their wait
 /// is over. The LAN does not repeat a record that did not change, so no event comes for them.
-pub(crate) async fn ask_unlinked_again(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    for addr in state.lan_grafts.asked_records() {
-        let linked = state.linked_endpoints.contains(&addr.id);
-        if state.lan_grafts.plan(&addr, linked, Instant::now()) {
-            ask(addr, state, ctx).await;
+pub(crate) async fn ask_unlinked_again(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    for address in state.lan_grafts.asked_records() {
+        let linked = state.linked_endpoints.contains(&address.id);
+        if state.lan_grafts.plan(&address, linked, Instant::now()) {
+            ask(address, state, context).await;
         }
     }
 }
 
 /// Ask one member of the LAN to be a neighbor. An error only logs: the record stays, and the
 /// member is asked again when its wait is over.
-async fn ask(addr: EndpointAddr, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    let peer = addr.id;
-    crate::lookup::add_peer_addr(&state.address_book, addr);
-    if let Err(error) = ctx.sender.neighbor_peers(vec![peer]).await {
+async fn ask(address: EndpointAddr, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    let peer = address.id;
+    crate::lookup::add_peer_addr(&state.address_book, address);
+    if let Err(error) = context.sender.neighbor_peers(vec![peer]).await {
         tracing::warn!(
             target: "habilis_network::lookup",
             %error,
@@ -75,18 +75,18 @@ mod tests {
     fn a_member_is_asked_once_for_one_record() {
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
-        let addr = member(1);
-        assert!(grafts.plan(&addr, false, now));
-        assert!(!grafts.plan(&addr, false, now));
+        let address = member(1);
+        assert!(grafts.plan(&address, false, now));
+        assert!(!grafts.plan(&address, false, now));
     }
 
     #[test]
     fn a_changed_record_is_asked_again() {
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
-        let addr = member(1);
-        assert!(grafts.plan(&addr, false, now));
-        let moved = addr.with_ip_addr("192.0.2.1:4000".parse().expect("an address"));
+        let address = member(1);
+        assert!(grafts.plan(&address, false, now));
+        let moved = address.with_ip_addr("192.0.2.1:4000".parse().expect("an address"));
         assert!(grafts.plan(&moved, false, now));
     }
 
@@ -100,28 +100,28 @@ mod tests {
     fn a_member_that_left_is_asked_again_when_it_returns() {
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
-        let addr = member(1);
-        assert!(grafts.plan(&addr, false, now));
-        grafts.forget(&addr.id);
-        assert!(grafts.plan(&addr, false, now));
+        let address = member(1);
+        assert!(grafts.plan(&address, false, now));
+        grafts.forget(&address.id);
+        assert!(grafts.plan(&address, false, now));
     }
 
     #[test]
     fn a_member_that_is_still_not_a_neighbor_is_asked_again_after_a_wait() {
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
-        let addr = member(1);
-        assert!(grafts.plan(&addr, false, now));
+        let address = member(1);
+        assert!(grafts.plan(&address, false, now));
         assert!(
             !grafts.plan(
-                &addr,
+                &address,
                 false,
                 now + RETRY_FIRST.saturating_sub(Duration::from_secs(1))
             ),
             "the wait is not over"
         );
         assert!(
-            grafts.plan(&addr, false, now + RETRY_FIRST),
+            grafts.plan(&address, false, now + RETRY_FIRST),
             "the request may have been refused or lost, and the record will not change again"
         );
     }
@@ -130,24 +130,24 @@ mod tests {
     fn the_wait_between_two_requests_grows_to_a_steady_one() {
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
-        let addr = member(1);
-        assert!(grafts.plan(&addr, false, now));
+        let address = member(1);
+        assert!(grafts.plan(&address, false, now));
         let second = now + RETRY_FIRST;
-        assert!(grafts.plan(&addr, false, second));
+        assert!(grafts.plan(&address, false, second));
         assert!(
-            !grafts.plan(&addr, false, second + RETRY_FIRST),
+            !grafts.plan(&address, false, second + RETRY_FIRST),
             "after the first wait the steady one holds"
         );
-        assert!(grafts.plan(&addr, false, second + RETRY_STEADY));
+        assert!(grafts.plan(&address, false, second + RETRY_STEADY));
     }
 
     #[test]
     fn a_member_that_is_a_neighbor_is_not_asked_again() {
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
-        let addr = member(1);
-        assert!(grafts.plan(&addr, false, now));
-        assert!(!grafts.plan(&addr, true, now + RETRY_FIRST));
+        let address = member(1);
+        assert!(grafts.plan(&address, false, now));
+        assert!(!grafts.plan(&address, true, now + RETRY_FIRST));
     }
 
     #[test]
@@ -179,18 +179,18 @@ mod tests {
         let (logs, _guard) = LogCapture::start(tracing::Level::WARN);
         let node = LaneNode::start().await;
         node.stop_gossip().await;
-        let ctx = node.ctx();
+        let context = node.context();
         let mut state = node.state();
-        let addr = member(1);
+        let address = member(1);
 
-        super::on_lan_event(LanEvent::Seen(addr.clone()), &mut state, &ctx).await;
+        super::on_lan_event(LanEvent::Seen(address.clone()), &mut state, &context).await;
         assert_eq!(
             logs.text().matches(FAILED).count(),
             1,
             "the first request returned an error"
         );
 
-        super::ask_unlinked_again(&mut state, &ctx).await;
+        super::ask_unlinked_again(&mut state, &context).await;
         assert_eq!(
             logs.text().matches(FAILED).count(),
             1,
@@ -200,13 +200,13 @@ mod tests {
         let asked = state
             .lan_grafts
             .asked
-            .get_mut(&addr.id)
+            .get_mut(&address.id)
             .expect("the record stays after an error");
         asked.at = asked
             .at
             .checked_sub(RETRY_FIRST)
             .expect("an instant that is earlier");
-        super::ask_unlinked_again(&mut state, &ctx).await;
+        super::ask_unlinked_again(&mut state, &context).await;
         assert_eq!(
             logs.text().matches(FAILED).count(),
             2,
@@ -223,13 +223,13 @@ mod tests {
         use crate::testing::LaneNode;
 
         let node = LaneNode::start().await;
-        let ctx = node.ctx();
+        let context = node.context();
         let mut state = node.state();
         state.hosts_rendezvous = true;
         let far = Instant::now() + Duration::from_hours(1);
         state.next_rival_recheck = Some(far);
 
-        super::on_lan_event(LanEvent::Seen(member(1)), &mut state, &ctx).await;
+        super::on_lan_event(LanEvent::Seen(member(1)), &mut state, &context).await;
 
         assert!(
             state.next_rival_recheck.is_some_and(|next| next < far),
@@ -246,15 +246,15 @@ mod tests {
         use crate::testing::LaneNode;
 
         let node = LaneNode::start().await;
-        let ctx = node.ctx();
+        let context = node.context();
         let mut state = node.state();
         state.hosts_rendezvous = true;
         let far = Instant::now() + Duration::from_hours(1);
         state.next_rival_recheck = Some(far);
-        let addr = member(1);
-        state.linked_endpoints.insert(addr.id);
+        let address = member(1);
+        state.linked_endpoints.insert(address.id);
 
-        super::on_lan_event(LanEvent::Seen(addr), &mut state, &ctx).await;
+        super::on_lan_event(LanEvent::Seen(address), &mut state, &context).await;
 
         assert_eq!(state.next_rival_recheck, Some(far));
         node.stop_gossip().await;

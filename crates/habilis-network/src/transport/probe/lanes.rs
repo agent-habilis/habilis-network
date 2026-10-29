@@ -23,7 +23,7 @@ pub(crate) fn plan_lane_offers(
         .partition(webrtc::lane_needs::needs_webrtc_lane);
     let mut ordered = Vec::new();
     for group in [&mut natives, &mut browsers] {
-        group.sort_unstable_by_key(|addr| addr.id);
+        group.sort_unstable_by_key(|address| address.id);
         if let Some(start) = pick.checked_rem(group.len()) {
             group.rotate_left(start);
         }
@@ -41,29 +41,29 @@ pub(crate) fn lane_pick() -> usize {
 /// The candidates of a retry pass that need an offered session: a lane pair, and no session yet.
 pub(crate) fn is_lane_offer(
     state: &EventLoopState,
-    ctx: &HandlerCtx<'_>,
-    addr: &iroh::EndpointAddr,
+    context: &HandlerCtx<'_>,
+    address: &iroh::EndpointAddr,
 ) -> bool {
-    (webrtc::lane_needs::needs_webrtc_lane(addr)
-        || webrtc::lane_needs::needs_webrtc_lane(&ctx.endpoint.addr()))
+    (webrtc::lane_needs::needs_webrtc_lane(address)
+        || webrtc::lane_needs::needs_webrtc_lane(&context.endpoint.addr()))
         && !state
             .webrtc
             .as_ref()
-            .is_some_and(|handle| handle.has_session(&addr.id))
+            .is_some_and(|handle| handle.has_session(&address.id))
 }
 
 /// One member of a retry pass: `ensure_direct`, and the graft if the path is proven.
 pub(crate) async fn retry_one(
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
-    addr: iroh::EndpointAddr,
+    context: &HandlerCtx<'_>,
+    address: iroh::EndpointAddr,
     distrust_links: bool,
 ) {
     if distrust_links {
-        state.direct.remove(&addr.id);
+        state.direct.remove(&address.id);
     }
-    if grafts::ensure_direct(state, ctx, addr.id, &addr) {
-        grafts::graft_proven(state, ctx, addr.id).await;
+    if grafts::ensure_direct(state, context, address.id, &address) {
+        grafts::graft_proven(state, context, address.id).await;
     }
 }
 
@@ -72,16 +72,17 @@ pub(crate) async fn retry_one(
 /// [`SignalAdmission::slot_freed`](crate::transport::admission::SignalAdmission::slot_freed)), so that the
 /// next members do not wait for the alive tick. The members are not served in a fair order: the
 /// random start spreads the load, and nothing more is promised.
-pub(crate) async fn top_up_lane_offers(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(crate) async fn top_up_lane_offers(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     if state.relay_transport.relay_allowed() || state.webrtc.is_none() {
         return;
     }
-    let lane: Vec<_> = regraft::retry_candidates(state, ctx.rendezvous_id, ctx.max_peers, false)
-        .into_iter()
-        .filter(|addr| is_lane_offer(state, ctx, addr))
-        .collect();
+    let lane: Vec<_> =
+        regraft::retry_candidates(state, context.rendezvous_id, context.max_peers, false)
+            .into_iter()
+            .filter(|address| is_lane_offer(state, context, address))
+            .collect();
     let pick = lane_pick();
-    for addr in plan_lane_offers(lane, state.webrtc_admission.in_flight(), pick) {
-        retry_one(state, ctx, addr, false).await;
+    for address in plan_lane_offers(lane, state.webrtc_admission.in_flight(), pick) {
+        retry_one(state, context, address, false).await;
     }
 }

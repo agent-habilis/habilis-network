@@ -102,14 +102,14 @@ impl NodeDriver for Chat {
 
     async fn handle_session(
         &mut self,
-        req: Self::Session,
+        request: Self::Session,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
-        match req {
+        match request {
             Request::Say(text, done) => {
                 let frame = app_frame(
-                    ctx,
+                    context,
                     AppFrameParams::new(
                         AppTag::try_new("app_msg").expect("a valid app tag"),
                         None,
@@ -118,7 +118,7 @@ impl NodeDriver for Chat {
                     ),
                 );
                 let class = self.classify(&frame.authored());
-                let _ = send_app(state, ctx, frame, class)
+                let _ = send_app(state, context, frame, class)
                     .await
                     .expect("a small frame is accepted");
                 let _ = done.send(());
@@ -129,22 +129,23 @@ impl NodeDriver for Chat {
                 let _ = done.send(());
                 false
             }
-            Request::Fired(resp) => {
-                let _ = resp.send(state.inbound_drops_fired());
+            Request::Fired(response) => {
+                let _ = response.send(state.inbound_drops_fired());
                 false
             }
             Request::Merge(merge, done) => {
                 broadcast_state_merge(
                     state,
-                    StateMergeParams::new(ctx.into(), Channel::State, merge).with_surface(false),
+                    StateMergeParams::new(context.into(), Channel::State, merge)
+                        .with_surface(false),
                 )
                 .await
                 .expect("a small merge is accepted");
                 let _ = done.send(());
                 true
             }
-            Request::Read(resp) => {
-                let _ = resp.send(state.doc(Channel::State).to_json());
+            Request::Read(response) => {
+                let _ = response.send(state.doc(Channel::State).to_json());
                 false
             }
             Request::ForgetProof(peer, done) => {
@@ -205,8 +206,8 @@ async fn drop_inbound(node: &Node<Chat>, what: TestDrop) {
 async fn assert_dropped_once(node: &Node<Chat>) {
     let started = Instant::now();
     loop {
-        let (resp, fired) = oneshot::channel();
-        node.send(Request::Fired(resp))
+        let (response, fired) = oneshot::channel();
+        node.send(Request::Fired(response))
             .await
             .expect("the request reaches the loop");
         let count = fired.await.expect("the loop answers");
@@ -238,8 +239,8 @@ async fn forget_proof(node: &Node<Chat>, peer: &str) {
 }
 
 async fn state_has(node: &Node<Chat>, key: &str) -> bool {
-    let (resp, document) = oneshot::channel();
-    node.send(Request::Read(resp))
+    let (response, document) = oneshot::channel();
+    node.send(Request::Read(response))
         .await
         .expect("the request reaches the loop");
     document.await.expect("the loop answers").get(key).is_some()

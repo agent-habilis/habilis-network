@@ -74,7 +74,7 @@ pub(crate) fn detach_session_under_udp(
 /// (30 s) would leave a session under a selected UDP path for that long.
 pub(crate) async fn detach_sessions_under_udp(
     state: &mut state::EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
 ) {
     let Some(handle) = state.webrtc.clone() else {
         return;
@@ -85,15 +85,20 @@ pub(crate) async fn detach_sessions_under_udp(
     let holders: Vec<(EndpointId, bool)> = state
         .peer_endpoints
         .values()
-        .filter(|addr| addr.id != ctx.rendezvous_id && handle.has_session(&addr.id))
-        .map(|addr| (addr.id, pair_needs_lane(addr, state.local_udp_transport)))
+        .filter(|address| address.id != context.rendezvous_id && handle.has_session(&address.id))
+        .map(|address| {
+            (
+                address.id,
+                pair_needs_lane(address, state.local_udp_transport),
+            )
+        })
         .collect();
     for (peer, needs_lane) in holders {
         if detach_session_under_udp(state, peer, needs_lane)
             && state.meshed
             && !state.pending_outbound.is_empty()
         {
-            crate::gossip::flush_pending(state, ctx, "direct path back").await;
+            crate::gossip::flush_pending(state, context, "direct path back").await;
         }
     }
 }

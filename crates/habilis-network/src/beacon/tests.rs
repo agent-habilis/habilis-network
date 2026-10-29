@@ -131,9 +131,9 @@ async fn a_probe_tells_ours_from_foreign_from_no_answer() {
 
     // One prober per probe: iroh dials an identity and keeps every path it learned for it, so
     // a second dial of the same id from one endpoint can complete on the path of the first.
-    async fn asked(addr: EndpointAddr, timeout: std::time::Duration) -> ProbeAnswer {
+    async fn asked(address: EndpointAddr, timeout: std::time::Duration) -> ProbeAnswer {
         let prober = loopback_endpoint().await;
-        let answer = probe_answer(&prober, addr, timeout).await;
+        let answer = probe_answer(&prober, address, timeout).await;
         prober.close().await;
         answer
     }
@@ -1232,7 +1232,7 @@ fn a_claim_keeps_the_relay_rung_of_the_rendezvous() {
         entry
             .addrs
             .iter()
-            .any(|addr| matches!(addr, iroh::TransportAddr::Relay(_))),
+            .any(|address| matches!(address, iroh::TransportAddr::Relay(_))),
         "the relay rung that the mesh registered is gone"
     );
     let ports: Vec<u16> = entry.ip_addrs().map(std::net::SocketAddr::port).collect();
@@ -1244,13 +1244,14 @@ fn a_public_rendezvous_is_named_at_its_relay_rung() {
     let mut params = public_params();
     params.bootstrap_relay = Some("https://relay.example/".parse().expect("relay url"));
 
-    let addr = rendezvous_addr(&params).expect("a public rendezvous has a rung to name");
+    let address = rendezvous_addr(&params).expect("a public rendezvous has a rung to name");
 
-    assert_eq!(addr.id, params.id);
+    assert_eq!(address.id, params.id);
     assert!(
-        addr.addrs
+        address
+            .addrs
             .iter()
-            .any(|addr| matches!(addr, iroh::TransportAddr::Relay(_))),
+            .any(|address| matches!(address, iroh::TransportAddr::Relay(_))),
         "the probe must dial the rung the beacon homes on, not a bare id"
     );
 }
@@ -1260,12 +1261,12 @@ fn a_private_rendezvous_is_named_at_every_ladder_rung() {
     let mut params = public_params();
     params.bind_ports = vec![4001, 4002, 4003];
 
-    let addr = rendezvous_addr(&params).expect("a ladder is always nameable");
+    let address = rendezvous_addr(&params).expect("a ladder is always nameable");
 
-    let rungs = addr
+    let rungs = address
         .addrs
         .iter()
-        .filter(|addr| matches!(addr, iroh::TransportAddr::Ip(_)))
+        .filter(|address| matches!(address, iroh::TransportAddr::Ip(_)))
         .count();
     assert_eq!(
         rungs, 3,
