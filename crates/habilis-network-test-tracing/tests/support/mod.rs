@@ -4,14 +4,15 @@
 
 use std::process::Command;
 
+use std::env;
 /// Runs `body` when `RUST_LOG` is unset. Otherwise runs the test `name` of this binary in a child
 /// process without `RUST_LOG`, and fails if the child fails.
 pub(crate) fn without_rust_log(name: &str, body: impl FnOnce()) {
-    if std::env::var_os("RUST_LOG").is_none() {
+    if env::var_os("RUST_LOG").is_none() {
         body();
         return;
     }
-    let exe = std::env::current_exe().expect("the path of the test binary");
+    let exe = env::current_exe().expect("the path of the test binary");
     let mut command = Command::new(exe);
     command
         .args(["--exact", name, "--test-threads=1"])

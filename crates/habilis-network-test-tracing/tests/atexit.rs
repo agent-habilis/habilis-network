@@ -3,12 +3,13 @@
 
 use std::process::Command;
 
+use std::{env, process};
 const CHILD: &str = "HABILIS_TEST_TRACING_CHILD";
 
 #[test]
 fn a_binary_with_a_late_event_at_exit_exits_with_101() {
-    let exe = std::env::current_exe().expect("exe");
-    let output: std::process::Output = Command::new(exe)
+    let exe = env::current_exe().expect("exe");
+    let output: process::Output = Command::new(exe)
         .args(["--exact", "child_logs_after_its_guard", "--nocapture"])
         .env(CHILD, "1")
         .output()
@@ -24,7 +25,7 @@ fn a_binary_with_a_late_event_at_exit_exits_with_101() {
 
 #[test]
 fn child_logs_after_its_guard() {
-    if std::env::var_os(CHILD).is_none() {
+    if env::var_os(CHILD).is_none() {
         return;
     }
     drop(habilis_network_test_tracing::init());

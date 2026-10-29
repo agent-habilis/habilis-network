@@ -2,6 +2,9 @@
 //! sync test gets a guard, an async test runs on a runtime that drops before
 //! its guard.
 
+use std::future;
+use std::time::Duration;
+use tokio::{task, time};
 struct LogsOnDrop;
 
 impl Drop for LogsOnDrop {
@@ -26,7 +29,7 @@ fn a_sync_test_that_logs_an_error_fails() {
 #[test]
 fn a_clean_async_test_passes() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-        tokio::task::yield_now().await;
+        task::yield_now().await;
     });
 }
 
@@ -49,9 +52,9 @@ fn an_event_of_the_runtime_drop_fails_a_multi_thread_test() {
         async {
             tokio::spawn(async {
                 let _logs = LogsOnDrop;
-                std::future::pending::<()>().await;
+                future::pending::<()>().await;
             });
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            time::sleep(Duration::from_millis(50)).await;
         },
     );
 }

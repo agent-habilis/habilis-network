@@ -4,9 +4,10 @@
 
 use std::panic::AssertUnwindSafe;
 
+use tokio::runtime;
 #[test]
 fn a_warn_from_a_spawned_task_fails() {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .build()
         .expect("runtime");

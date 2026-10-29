@@ -5,6 +5,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use tokio::time;
 static FIRST_IN: AtomicBool = AtomicBool::new(false);
 static SECOND_IN: AtomicBool = AtomicBool::new(false);
 
@@ -17,7 +18,7 @@ async fn meet(mine: &AtomicBool, other: &AtomicBool) {
             started.elapsed() < Duration::from_secs(5),
             "the other test never started beside this one"
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -32,7 +33,7 @@ fn a_warn_of_a_task_fails_the_test_that_spawned_it() {
             tokio::spawn(async { tracing::warn!("relay actor errored") })
                 .await
                 .expect("task");
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            time::sleep(Duration::from_millis(300)).await;
         },
     );
 }
@@ -44,7 +45,7 @@ fn the_test_beside_it_passes() {
         2,
         async {
             meet(&SECOND_IN, &FIRST_IN).await;
-            tokio::time::sleep(Duration::from_millis(600)).await;
+            time::sleep(Duration::from_millis(600)).await;
         },
     );
 }

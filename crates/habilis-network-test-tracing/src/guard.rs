@@ -15,6 +15,15 @@ use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::{Context, SubscriberExt as _};
 use tracing_subscriber::{Layer, fmt as tracing_fmt};
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::future;
+use std::panic;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync;
+#[cfg(not(target_arch = "wasm32"))]
+use std::task::Poll;
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::runtime;
 static INSTALLED: OnceLock<Mode> = OnceLock::new();
 // the live list holds a handle to each slot, and its guard holds the same handle
 static LIVE: Mutex<Vec<Arc<Slot>>> = Mutex::new(Vec::new());
@@ -196,12 +205,12 @@ pub fn at_end(cleanup: impl Future<Output = ()> + 'static) {
 async fn finish<Reply>(output: Reply) -> Reply {
     let mut pending: Vec<Cleanup> =
         CLEANUPS.with(|cleanups| cleanups.borrow_mut().drain(..).collect());
-    std::future::poll_fn(|context| {
+    future::poll_fn(|context| {
         pending.retain_mut(|cleanup| cleanup.as_mut().poll(context).is_pending());
         if pending.is_empty() {
-            std::task::Poll::Ready(())
+            Poll::Ready(())
         } else {
-            std::task::Poll::Pending
+            Poll::Pending
         }
     })
     .await;
@@ -216,7 +225,7 @@ async fn finish<Reply>(output: Reply) -> Reply {
 /// Panics if the runtime cannot be built.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run<F: Future>(guard: Guard, future: F) -> F::Output {
-    let mut builder = tokio::runtime::Builder::new_current_thread();
+    let mut builder = runtime::Builder::new_current_thread();
     builder.thread_name(worker_name()).enable_all();
     let runtime = builder.build().expect("runtime");
     let output = runtime.block_on(async { finish(future.await).await });
@@ -233,12 +242,12 @@ pub fn run<F: Future>(guard: Guard, future: F) -> F::Output {
 /// Panics if the runtime cannot be built.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_multi_thread<F: Future>(guard: Guard, worker_threads: usize, future: F) -> F::Output {
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    let mut builder = runtime::Builder::new_multi_thread();
     builder
         .worker_threads(worker_threads)
         .thread_name(worker_name())
         .enable_all();
-    let runtime: tokio::runtime::Runtime = builder.build().expect("runtime");
+    let runtime: runtime::Runtime = builder.build().expect("runtime");
     let output = runtime.block_on(async { finish(future.await).await });
     drop(runtime);
     drop(guard);
@@ -254,7 +263,7 @@ fn worker_name() -> String {
 #[cfg(not(target_arch = "wasm32"))]
 #[expect(unsafe_code, reason = "libc::atexit and libc::_exit are FFI calls")]
 fn fail_the_binary_on_a_late_event_at_exit() {
-    static REGISTERED: std::sync::Once = std::sync::Once::new();
+    static REGISTERED: sync::Once = sync::Once::new();
     extern "C" fn at_exit() {
         let Some(late) = LATE.try_lock() else { return };
         if late.events.is_empty() {
@@ -590,7 +599,7 @@ impl Visit for Fields {
 /// # Panics
 /// Panics if the thread that runs `body` cannot be spawned.
 pub fn catch_panic<F: FnOnce() -> R + Send, R: Send>(
-    body: std::panic::AssertUnwindSafe<F>,
+    body: panic::AssertUnwindSafe<F>,
 ) -> thread::Result<R> {
     // The guard files events by thread name, so the body runs on a thread of the same name.
     let name = thread::current().name().unwrap_or_default().to_owned();

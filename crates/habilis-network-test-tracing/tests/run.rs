@@ -6,6 +6,9 @@ use std::panic::AssertUnwindSafe;
 
 use habilis_network_test_tracing::{init, run, run_multi_thread};
 
+use std::future;
+use std::time::Duration;
+use tokio::{task, time};
 struct LogsOnDrop;
 
 impl Drop for LogsOnDrop {
@@ -34,9 +37,9 @@ fn an_event_of_the_runtime_drop_fails_a_current_thread_test() {
         run(init(), async {
             tokio::spawn(async {
                 let _logs = LogsOnDrop;
-                std::future::pending::<()>().await;
+                future::pending::<()>().await;
             });
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         });
     });
     assert!(text.contains("unexpected ERROR"), "{text}");
@@ -49,9 +52,9 @@ fn an_event_of_the_runtime_drop_fails_a_multi_thread_test() {
         run_multi_thread(init(), 2, async {
             tokio::spawn(async {
                 let _logs = LogsOnDrop;
-                std::future::pending::<()>().await;
+                future::pending::<()>().await;
             });
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            time::sleep(Duration::from_millis(50)).await;
         });
     });
     assert!(text.contains("unexpected ERROR"), "{text}");
