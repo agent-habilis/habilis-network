@@ -12,7 +12,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const work = mkdtempSync(path.join(tmpdir(), "script-language-"));
 afterAll(() => rmSync(work, { recursive: true, force: true }));
 
-// Plant `files` (path -> content) and an allow list in a fresh repository, then run the check.
+// Plant `files` (path -> content) in a fresh repository, then run the check. `allow` is a file the check must ignore.
 function check(files: Record<string, string>, allow = ""): { status: number; out: string } {
   const repo = mkdtempSync(path.join(work, "repo-"));
   mkdirSync(path.join(repo, "scripts", "script-language"), { recursive: true });
@@ -20,7 +20,7 @@ function check(files: Record<string, string>, allow = ""): { status: number; out
     path.join(here, "script-language.ts"),
     path.join(repo, "scripts", "script-language", "script-language.ts"),
   );
-  writeFileSync(path.join(repo, "scripts", "script-language", "script-language.allow"), `${allow}\n`);
+  if (allow) writeFileSync(path.join(repo, "scripts", "script-language", "script-language.allow"), `${allow}\n`);
   for (const [file, content] of Object.entries(files)) {
     mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
     writeFileSync(path.join(repo, file), content);
@@ -84,17 +84,6 @@ test("a bun shebang file with no extension passes", () => {
   expectExit({ "bin/tool": "#!/usr/bin/env bun\nconsole.log('hi')\n" }, 0);
 });
 
-// The allow list.
-test("an allowed file passes", () => {
-  expectExit({ "scripts/old.py": "print('hi')\n" }, 0, "extension|scripts/old.py|kept for a bench");
-});
-test("a stale row fails", () => {
-  expectExit({ "scripts/build.ts": "console.log('hi')\n" }, 1, "extension|scripts/gone.sh|no longer there");
-});
-test("two rows for one file fail", () => {
-  expectExit(
-    { "scripts/old.py": "print('hi')\n" },
-    1,
-    "extension|scripts/old.py|one\nextension|scripts/old.py|two",
-  );
+test("no allow lookup: an allowed file still fails", () => {
+  expectExit({ "scripts/old.py": "print('hi')\n" }, 1, "extension|scripts/old.py|kept for a bench");
 });

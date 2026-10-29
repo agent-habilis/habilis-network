@@ -1,9 +1,6 @@
 #!/usr/bin/env bun
-// Scripts are written in TypeScript and run with Bun (AGENTS.md, "Scripts"). This check fails on a
-// script in another language that the repository holds: a file with a shell, Python or JavaScript
-// extension, or a file of any name whose first line is a shebang for one of those interpreters.
-// `script-language.allow` names a file that may stay, with a reason. A row that matches nothing is
-// stale and fails too. `script-language.test.ts` plants one script of each kind.
+// Shell, Python and JavaScript scripts are refused, so every script is TypeScript run with Bun.
+// `script-language.test.ts` plants one file of each kind.
 
 import { spawnSync } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync, readSync } from "node:fs";
@@ -11,7 +8,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const allowFile = process.env.SCRIPT_LANGUAGE_ALLOW || "scripts/script-language/script-language.allow";
 
 const EXTENSION = /\.(sh|bash|zsh|ksh|dash|fish|py|js|mjs|cjs)$/;
 const INTERPRETER = /^(sh|bash|zsh|ksh|dash|fish|python[0-9.]*|node|nodejs|deno)$/;
@@ -59,44 +55,15 @@ function violationOf(file: string): string | undefined {
   return INTERPRETER.test(interpreterOf(firstLine) ?? "") ? "shebang" : undefined;
 }
 
-function readAllow(): { allowed: Map<string, string>; problems: string[] } {
-  const allowed = new Map<string, string>();
-  const problems: string[] = [];
-  const file = path.join(ROOT, allowFile);
-  if (!existsSync(file)) return { allowed, problems };
-  for (const line of readFileSync(file, "utf8").split("\n")) {
-    if (/^\s*(#|$)/.test(line)) continue;
-    const [rule, target] = line.split("|");
-    const key = `${rule}|${target}`;
-    if (allowed.has(key)) {
-      problems.push(`script-language: ${allowFile} has two rows for [${rule}] ${target}. Merge them.`);
-    }
-    allowed.set(key, line);
-  }
-  return { allowed, problems };
-}
-
 function main(): number {
-  const { allowed, problems } = readAllow();
-  const found = new Set<string>();
+  const problems: string[] = [];
   for (const file of listFiles()) {
     const rule = violationOf(file);
-    if (!rule) continue;
-    const key = `${rule}|${file}`;
-    found.add(key);
-    if (!allowed.has(key)) {
-      problems.push(
-        `script-language: [${rule}] ${file}: a shell, Python or JavaScript script. Write it in TypeScript and run it with Bun, or add a row to ${allowFile} with a reason.`,
-      );
+    if (rule) {
+      problems.push(`script-language: [${rule}] ${file}: a shell, Python or JavaScript script. Write it in TypeScript and run it with Bun.`);
     }
   }
-  for (const key of [...allowed.keys()].sort()) {
-    if (!found.has(key)) {
-      const [rule, file] = key.split("|");
-      problems.push(`script-language: [${rule}] ${file}: stale row. Nothing matches it. Remove it from ${allowFile}.`);
-    }
-  }
-  for (const problem of problems) console.log(problem);
+  for (const problem of problems.sort()) console.log(problem);
   return problems.length > 0 ? 1 : 0;
 }
 
