@@ -38,7 +38,8 @@ impl ProtocolHandler for StreamAcceptor {
         {
             return Ok(());
         }
-        let Ok(Ok((send, header))) = n0_future::time::timeout(PRE_AUTH, read_header(&connection)).await
+        let Ok(Ok((send, header))) =
+            n0_future::time::timeout(PRE_AUTH, read_header(&connection)).await
         else {
             connection.close(code::UNKNOWN.into(), b"no stream request");
             return Ok(());
