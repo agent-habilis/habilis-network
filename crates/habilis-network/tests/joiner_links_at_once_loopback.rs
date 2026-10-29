@@ -120,7 +120,9 @@ fn nick(name: &str) -> Nickname {
     Nickname::try_new(name).expect("valid nickname")
 }
 
+// each member's sink is shared with the node that writes to it, and the test reads it
 async fn spawn(mesh: &Mesh, name: &str, cohost: CoHostPolicy) -> (Node<Inert>, Arc<Joined>) {
+    // each member's sink is shared with the node that writes to it, and the test reads it
     let sink = Arc::new(Joined::default());
     let params = SetupParams::new(nick(name), Arc::clone(&sink))
         .with_max_peers(16)

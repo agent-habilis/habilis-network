@@ -144,6 +144,23 @@ function argCount(args: string): number {
 
 // The asserts with no message: assert! needs a condition and a message, assert_eq! and assert_ne! need
 // two values and a message. A macro with a message already counts as one argument more.
+// An Arc type or an Arc::new (Z28): a shared handle needs a one-line reason beside it, on its line or the
+// line above, so the reader sees why it is shared. Arc::clone of a handle is not counted.
+function countArcWithoutReason(raw: string): number {
+  // Comments and strings become spaces, newlines kept, so a match maps to its line in `raw`.
+  const code = raw.replace(LEXEME, (lexeme) =>
+    /^(\/\/|\/\*|b?r?#*")/.test(lexeme) ? lexeme.replace(/[^\n]/g, " ") : lexeme,
+  );
+  const lines = raw.split("\n");
+  let count = 0;
+  for (const m of code.matchAll(/\bArc(?:<|::new\()/g)) {
+    const line = code.slice(0, m.index).split("\n").length - 1;
+    const reasoned = /\/\/\s*\S/.test(lines[line] ?? "") || /\/\/\s*\S/.test(lines[line - 1] ?? "");
+    if (!reasoned) count++;
+  }
+  return count;
+}
+
 function countAssertsNoMessage(raw: string): number {
   const text = blankStrings(stripComments(raw));
   const pattern = /\bassert(_eq|_ne)?!\s*\(/g;
@@ -770,6 +787,12 @@ const RULES: Rule[] = [
     skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
     glob: "crates/**/*.rs",
     why: "A generic parameter is T, U, E, K, V, F, I, R or S, or a CamelCase word of three letters or more.",
+  },
+  {
+    name: "arc_reason",
+    scan: countArcWithoutReason,
+    glob: "crates/**/*.rs",
+    why: "An Arc is a shared handle, and the type does not say why it is shared: a one-line comment on its line or the line above says why (Z28).",
   },
   {
     name: "abbrev_name",

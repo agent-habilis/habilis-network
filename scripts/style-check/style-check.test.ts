@@ -603,3 +603,23 @@ test("pub_const_fn: a pub const fn called from a const item is clean", () => {
 test("pub_const_fn: a pub const fn no const item calls is flagged", () => {
   expectExit("crates/demo/src/lib.rs", "pub const fn seed() -> u8 {\n    1\n}", 1, "");
 });
+
+// The arc_reason rule (Z28): an Arc type or Arc::new needs a one-line reason comment on its line or the line above.
+test("arc_reason: an Arc::new with no reason comment fails", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(x: u8) -> std::sync::Arc<u8> {\n    std::sync::Arc::new(x)\n}", 1, "");
+});
+test("arc_reason: an Arc type with no reason comment fails", () => {
+  expectExit("crates/demo/src/lib.rs", "pub struct S {\n    pub shared: std::sync::Arc<u8>,\n}", 1, "");
+});
+test("arc_reason: a reason comment on the same line passes", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(x: u8) -> std::sync::Arc<u8> { // shared across tasks\n    std::sync::Arc::new(x) // shared across tasks\n}", 0, "");
+});
+test("arc_reason: a reason comment on the line above passes", () => {
+  expectExit("crates/demo/src/lib.rs", "pub struct S {\n    // trait object: the sink is chosen at run time\n    pub sink: std::sync::Arc<dyn Fn()>,\n}", 0, "");
+});
+test("arc_reason: Arc::clone of a shared handle is not counted", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(shared: &Owner) -> usize {\n    let copy = std::sync::Arc::clone(&shared.0);\n    copy.len()\n}", 0, "");
+});
+test("arc_reason: a reason still maps to its line after a multi-line string", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn label() -> &'static str {\n    \"first\nsecond\"\n}\npub fn f(x: u8) -> std::sync::Arc<u8> { // shared across tasks\n    std::sync::Arc::new(x) // shared across tasks\n}", 0, "");
+});

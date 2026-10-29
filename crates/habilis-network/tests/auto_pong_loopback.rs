@@ -110,6 +110,7 @@ impl Joined {
     }
 }
 
+// each member's sink is shared with the node that writes to it, and the test reads it
 async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Pinger> {
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
@@ -141,7 +142,9 @@ fn each_peer_linked_only_by_gossip_answers_the_others_ping() {
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let topic = format!("auto-pong-{}", rand::random::<u64>());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let bob_saw = Arc::new(Joined::default());
 
         let alice = spawn(&topic, "alice", Arc::clone(&alice_saw)).await;
@@ -189,7 +192,9 @@ fn a_ping_sent_before_any_link_exists_is_answered_after_the_second_probe() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let topic = format!("auto-pong-early-{}", rand::random::<u64>());
 
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let alice = spawn(&topic, "alice", Arc::new(Joined::default())).await;
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let bob = spawn(&topic, "bob", Arc::new(Joined::default())).await;
         let bob_nick = Nickname::try_new("bob").expect("valid");
 

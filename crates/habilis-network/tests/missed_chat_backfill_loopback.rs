@@ -36,7 +36,9 @@ const AHEAD: Duration = Duration::from_secs(30);
 /// Logs every chat frame and records the surfaceable ones it receives.
 #[derive(Clone, Default)]
 struct Chat {
+    // the chat shares the received list with the test, which reads it
     received: Arc<Mutex<Vec<MessageId>>>,
+    // the chat and the test share the notify that wakes the reader
     changed: Arc<Notify>,
 }
 
@@ -165,7 +167,9 @@ fn nick(name: &str) -> Nickname {
     Nickname::try_new(name).expect("valid nickname")
 }
 
+// each member's sink is shared with the node that writes to it, and the test reads it
 async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Chat, Arc<Joined>) {
+    // each member's sink is shared with the node that writes to it, and the test reads it
     let sink = Arc::new(Joined::default());
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
