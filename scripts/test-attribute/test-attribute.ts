@@ -20,7 +20,7 @@ function guardAfterItems(body: string, bodyIndent: string): string {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i]!;
-    if (line.trim() === "") { i++; continue; }
+    if (line.trim() === "" || line.trimStart().startsWith("//")) { i++; continue; }
     if (!line.startsWith(bodyIndent) || !ITEM.test(line.slice(bodyIndent.length))) break;
     const end = line.trimEnd().endsWith(";") ? i : lines.findIndex((l, k) => k > i && (l === bodyIndent + "}" || l === bodyIndent + "};"));
     if (end < 0) break;

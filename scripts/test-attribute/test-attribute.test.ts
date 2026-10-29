@@ -176,3 +176,17 @@ fn std_test() {
   expect(flagged).toEqual([]);
   expect(text).toBe(source);
 });
+
+test("a comment before the leading items does not stop the guard from going after them", () => {
+  const { text } = rewrite(`use habilis_network_test_tracing::test;
+
+#[test]
+fn commented() {
+    // why the items come first
+    use std::collections::HashSet;
+    let set: HashSet<usize> = HashSet::new();
+    assert!(set.is_empty());
+}
+`);
+  expect(text).toContain("    // why the items come first\n    use std::collections::HashSet;\n    let _guard = ::habilis_network_test_tracing::init();\n    let set");
+});

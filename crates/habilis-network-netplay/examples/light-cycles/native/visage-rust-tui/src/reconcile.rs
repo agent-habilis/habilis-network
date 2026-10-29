@@ -304,10 +304,10 @@ mod tests {
     use super::{Mounted, mount, patch};
     use crate::tui::host_impl::TuiHost;
     use crate::view::{BoxProps, View};
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn mounting_a_text_view_creates_one_text_node() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
         let mounted = mount(&mut host, root, None, View::text("hi"));
@@ -321,6 +321,7 @@ mod tests {
 
     #[test]
     fn patching_the_same_shape_reuses_the_node_and_updates_content() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
         let mounted = mount(&mut host, root, None, View::text("first"));
@@ -344,6 +345,7 @@ mod tests {
 
     #[test]
     fn patching_a_different_shape_replaces_the_node() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
         let mounted = mount(&mut host, root, None, View::text("hi"));
@@ -366,6 +368,7 @@ mod tests {
 
     #[test]
     fn a_shorter_child_list_unmounts_the_tail() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
         let view = View::boxed(
@@ -389,6 +392,7 @@ mod tests {
 
     #[test]
     fn a_longer_child_list_mounts_the_extra_tail() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
         let view = View::boxed(BoxProps::default(), vec![View::text("a")]);
@@ -427,6 +431,7 @@ mod tests {
             Box::new(Child)
         }
 
+        let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
         let view = View::boxed(BoxProps::default(), vec![View::component(|()| child(), ())]);

@@ -220,7 +220,6 @@ mod tests {
     use super::{Outcome, World, outcome, step};
     use crate::grid::{Dir, Input};
     use crate::round::RoundDescriptor;
-    use habilis_network_test_tracing::test;
     use proptest::prelude::{Just, Strategy, any, prop, prop_assert_eq, prop_oneof, proptest};
 
     /// Runs `count` ticks with nobody steering.
@@ -238,6 +237,7 @@ mod tests {
 
     #[test]
     fn two_players_driving_straight_at_each_other_end_in_a_draw_or_a_winner() {
+        let _guard = ::habilis_network_test_tracing::init();
         let desc = RoundDescriptor::derive(7, vec!["a".into(), "b".into()]);
         assert_ne!(
             outcome(&coast(&desc, 200)),
@@ -248,6 +248,7 @@ mod tests {
 
     #[test]
     fn a_solo_round_never_ends_by_elimination() {
+        let _guard = ::habilis_network_test_tracing::init();
         let desc = RoundDescriptor::derive(7, vec!["solo".into()]);
         assert_eq!(
             outcome(&coast(&desc, 50)),
@@ -258,6 +259,7 @@ mod tests {
 
     #[test]
     fn a_reversal_is_refused_and_the_cycle_holds_course() {
+        let _guard = ::habilis_network_test_tracing::init();
         let desc = RoundDescriptor::derive(7, vec!["a".into(), "b".into()]);
         let mut world = World::spawn(&desc);
         let facing = world.cycles[0].dir;
@@ -284,6 +286,7 @@ mod tests {
 
     #[test]
     fn stepping_never_un_draws_a_trail_or_revives_a_cycle() {
+        let _guard = ::habilis_network_test_tracing::init();
         let desc = RoundDescriptor::derive(7, vec!["a".into(), "b".into(), "c".into()]);
         let short = coast(&desc, 5);
         let long = coast(&desc, 20);
@@ -326,6 +329,7 @@ mod tests {
                 1..80,
             ),
         ) {
+            let _guard = ::habilis_network_test_tracing::init();
             let roster: Vec<String> = (0..player_count).map(|i| format!("p{i}")).collect();
             let desc = RoundDescriptor::derive(seed, roster);
 
@@ -340,13 +344,14 @@ mod tests {
                 world
             };
             prop_assert_eq!(run().checksum(), run().checksum());
-        }
+                }
 
         #[test]
         fn a_finished_outcome_never_reverts_to_in_progress(
             seed in any::<u64>(),
             player_count in 2usize..5,
         ) {
+            let _guard = ::habilis_network_test_tracing::init();
             let roster: Vec<String> = (0..player_count).map(|i| format!("p{i}")).collect();
             let desc = RoundDescriptor::derive(seed, roster);
 
@@ -354,6 +359,6 @@ mod tests {
             if outcome(&at_100) != Outcome::InProgress {
                 prop_assert_eq!(outcome(&at_100), outcome(&coast(&desc, 200)));
             }
-        }
+                }
     }
 }

@@ -105,7 +105,6 @@ mod tests {
     use crate::runtime::Runtime;
     use crate::tui::layout::LayoutState;
     use crate::view::{BoxProps, View};
-    use habilis_network_test_tracing::test;
 
     struct Counter(Signal<i32>);
 
@@ -121,6 +120,7 @@ mod tests {
 
     #[test]
     fn a_running_app_repaints_only_after_a_signal_changes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let count = Signal::new(0);
         let mut app = Runtime::terminal(Counter(count.clone()));
 
@@ -184,6 +184,7 @@ mod tests {
         use std::cell::RefCell;
         use std::rc::Rc;
 
+        let _guard = ::habilis_network_test_tracing::init();
         let parent_renders = Rc::new(RefCell::new(0));
         let child_count = Signal::new(0);
 

@@ -400,10 +400,10 @@ mod tests {
     use super::{ScreenBuffer, paint};
     use crate::tui::node::{Arena, Tag};
     use crate::tui::width;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn a_text_node_writes_its_content_into_the_buffer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Text);
         {
@@ -424,6 +424,7 @@ mod tests {
 
     #[test]
     fn a_background_color_fills_the_whole_border_box() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
         {
@@ -447,6 +448,7 @@ mod tests {
 
     #[test]
     fn a_wide_glyph_writes_a_continuation_cell() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Text);
         {
@@ -477,6 +479,7 @@ mod tests {
 
     #[test]
     fn text_clipped_at_the_right_edge_still_advances_by_full_width() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Text);
         {

@@ -188,7 +188,6 @@ mod tests {
     use super::{Component, Instance, Step};
     use crate::reactive::Signal;
     use crate::view::View;
-    use habilis_network_test_tracing::test;
 
     struct Shown(Signal<i32>);
 
@@ -200,6 +199,7 @@ mod tests {
 
     #[test]
     fn a_loop_component_re_renders_on_every_step() {
+        let _guard = ::habilis_network_test_tracing::init();
         let count = Signal::new(0);
         let mut instance = Instance::new(Shown(count.clone()));
 
@@ -255,6 +255,7 @@ mod tests {
         use std::cell::RefCell;
         use std::rc::Rc;
 
+        let _guard = ::habilis_network_test_tracing::init();
         let count = Signal::new(0);
         let resumes = Rc::new(RefCell::new(0));
         let mut instance = Instance::new(Parked {

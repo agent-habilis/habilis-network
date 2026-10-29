@@ -377,10 +377,10 @@ mod tests {
     use super::LayoutState;
     use crate::tui::node::{Arena, Tag};
     use crate::view::{Direction, Justify};
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn a_row_of_two_fixed_children_places_them_side_by_side() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
         arena.get_mut(root).direction = Direction::Row;
@@ -409,6 +409,7 @@ mod tests {
 
     #[test]
     fn one_flexed_child_absorbs_the_leftover_space() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
         arena.get_mut(root).direction = Direction::Row;
@@ -431,6 +432,7 @@ mod tests {
 
     #[test]
     fn justify_end_pushes_children_to_the_far_edge() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
         {
@@ -453,6 +455,7 @@ mod tests {
 
     #[test]
     fn padding_and_border_shrink_the_content_box() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
         {
@@ -481,6 +484,7 @@ mod tests {
 
     #[test]
     fn a_hole_child_is_skipped_and_occupies_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
         arena.get_mut(root).direction = Direction::Row;

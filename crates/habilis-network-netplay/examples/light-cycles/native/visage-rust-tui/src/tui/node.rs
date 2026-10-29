@@ -261,10 +261,10 @@ impl Arena {
 #[cfg(test)]
 mod tests {
     use super::{Arena, Tag};
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn append_builds_order_front_to_back() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let parent = arena.create(Tag::Box);
         let a = arena.create(Tag::Box);
@@ -288,6 +288,7 @@ mod tests {
 
     #[test]
     fn insert_before_splices_into_the_middle() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let parent = arena.create(Tag::Box);
         let a = arena.create(Tag::Box);
@@ -306,6 +307,7 @@ mod tests {
 
     #[test]
     fn detach_removes_from_the_middle_and_relinks_neighbors() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let parent = arena.create(Tag::Box);
         let a = arena.create(Tag::Box);
@@ -327,6 +329,7 @@ mod tests {
 
     #[test]
     fn insert_before_doubles_as_a_move() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let parent = arena.create(Tag::Box);
         let a = arena.create(Tag::Box);
@@ -341,6 +344,7 @@ mod tests {
 
     #[test]
     fn before_self_is_a_no_op() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let parent = arena.create(Tag::Box);
         let a = arena.create(Tag::Box);
@@ -354,6 +358,7 @@ mod tests {
 
     #[test]
     fn clear_children_orphans_everyone_without_freeing_slots() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let parent = arena.create(Tag::Box);
         let a = arena.create(Tag::Box);

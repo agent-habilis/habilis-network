@@ -493,12 +493,12 @@ mod tests {
     use crate::player_handle::PlayerHandle;
     use crate::test_game::TestGame;
     use crate::transport::Message;
-    use habilis_network_test_tracing::test;
 
     /// The JSON of an input packet with no ack yet. A change here is a wire
     /// change: peers on the old bytes cannot play with peers on the new ones.
     #[test]
     fn input_packet_json_with_no_ack_frame_matches_the_golden() {
+        let _guard = ::habilis_network_test_tracing::init();
         let message = Message {
             magic: 0xabcd_1234,
             body: Body::Input(crate::transport::InputPacket {
@@ -519,6 +519,7 @@ mod tests {
     /// [`Frame::NULL`] and play on.
     #[test]
     fn an_old_packet_with_the_minus_one_ack_frame_is_a_parse_error() {
+        let _guard = ::habilis_network_test_tracing::init();
         let old = r#"{"magic":2882343476,"body":{"Input":{"start_frame":5,"ack_frame":-1,"inputs":[7]}}}"#;
         let error = serde_json::from_str::<Message<crate::test_game::TestInput>>(old)
             .expect_err("a negative frame is refused");
@@ -527,6 +528,7 @@ mod tests {
 
     #[test]
     fn an_ack_frame_is_on_the_wire_only_when_there_is_one() {
+        let _guard = ::habilis_network_test_tracing::init();
         let packet = |ack_frame| Message::<crate::test_game::TestInput> {
             magic: 0xabcd_1234,
             body: Body::InputAck { ack_frame },
@@ -570,6 +572,7 @@ mod tests {
     /// [`SYNC_RESEND_EVERY_TICKS`].
     #[test]
     fn a_syncing_peer_resends_on_a_cadence_not_every_tick() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut peer = syncing_peer();
         assert_eq!(requests(&mut peer), 1, "the first request goes out at once");
         for tick in 1..SYNC_RESEND_EVERY_TICKS {
@@ -587,6 +590,7 @@ mod tests {
     /// request is due immediately rather than a cadence later.
     #[test]
     fn an_answered_round_trip_releases_the_next_request_at_once() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut peer = syncing_peer();
         let (out, _) = peer.tick(Frame::NULL);
         let Some(Body::SyncRequest { token }) = out.first().map(|message| message.body.clone())
@@ -623,6 +627,7 @@ mod tests {
     /// every packet of the peer's new session as foreign, forever.
     #[test]
     fn a_leftover_packet_from_the_previous_match_does_not_block_the_handshake() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut peer = syncing_peer();
         let previous_match = peer.magic.wrapping_add(1);
         let mut replies = Vec::new();
@@ -668,6 +673,7 @@ mod tests {
     /// handshake it cannot finish.
     #[test]
     fn a_disconnected_peer_that_never_latched_stops_answering_requests() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut peer = syncing_peer();
         for _ in 0..=super::DISCONNECT_TIMEOUT_TICKS {
             peer.tick(Frame::NULL);
@@ -694,6 +700,7 @@ mod tests {
     /// of a wedged handshake as after it, and is counted the same way.
     #[test]
     fn a_stale_reply_before_the_latch_is_counted() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut peer = syncing_peer();
         let mut replies = Vec::new();
         peer.on_message(

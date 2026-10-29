@@ -286,11 +286,11 @@ mod tests {
         Signal, close_tracking, next_subscriber_id, open_tracking, resubscribe, schedule_update,
         take_queue,
     };
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     #[test]
     fn reading_a_signal_inside_a_tracking_window_records_it() {
+        let _guard = ::habilis_network_test_tracing::init();
         let signal = Signal::new(1);
         let prev = open_tracking(HashSet::new());
         let _ = signal.get();
@@ -304,6 +304,7 @@ mod tests {
 
     #[test]
     fn reading_a_signal_outside_any_window_records_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
         let signal = Signal::new(1);
         let _ = signal.get(); // no window open at all
         // Nothing to assert on directly here beyond "it doesn't panic" —
@@ -318,6 +319,7 @@ mod tests {
 
     #[test]
     fn peek_never_records_a_dependency_even_inside_a_window() {
+        let _guard = ::habilis_network_test_tracing::init();
         let signal = Signal::new(1);
         let prev = open_tracking(HashSet::new());
         let _ = signal.peek();
@@ -330,6 +332,7 @@ mod tests {
 
     #[test]
     fn a_subscribed_signal_queues_its_subscriber_on_change() {
+        let _guard = ::habilis_network_test_tracing::init();
         let signal = Signal::new(1);
         let sub = next_subscriber_id();
 
@@ -348,6 +351,7 @@ mod tests {
 
     #[test]
     fn setting_a_signal_to_an_equal_value_schedules_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
         let signal = Signal::new(1);
         let sub = next_subscriber_id();
         let prev = open_tracking(HashSet::new());
@@ -364,6 +368,7 @@ mod tests {
 
     #[test]
     fn resubscribing_to_a_smaller_dep_set_drops_the_stale_subscription() {
+        let _guard = ::habilis_network_test_tracing::init();
         let a = Signal::new(1);
         let b = Signal::new(1);
         let sub = next_subscriber_id();
@@ -397,6 +402,7 @@ mod tests {
 
     #[test]
     fn scheduling_the_same_subscriber_twice_queues_it_once() {
+        let _guard = ::habilis_network_test_tracing::init();
         let sub = next_subscriber_id();
         schedule_update(sub);
         schedule_update(sub);

@@ -190,7 +190,6 @@ mod tests {
     use super::{CLEAR_LINE, RESET, diff};
     use crate::tui::color;
     use crate::tui::paint::ScreenBuffer;
-    use habilis_network_test_tracing::test;
 
     fn set(buffer: &mut ScreenBuffer, x: i32, y: i32, s: &str) {
         let i =
@@ -200,6 +199,7 @@ mod tests {
 
     #[test]
     fn a_blank_first_frame_is_just_reset_plus_clear_screen() {
+        let _guard = ::habilis_network_test_tracing::init();
         let buffer = ScreenBuffer::new(10, 3);
         let out = diff(None, &buffer);
         assert_eq!(
@@ -211,6 +211,7 @@ mod tests {
 
     #[test]
     fn two_identical_frames_produce_zero_bytes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut a = ScreenBuffer::new(5, 1);
         set(&mut a, 0, 0, "x");
         let b = a.clone();
@@ -223,6 +224,7 @@ mod tests {
 
     #[test]
     fn a_changed_row_moves_the_cursor_absolutely_then_writes_the_span() {
+        let _guard = ::habilis_network_test_tracing::init();
         let a = ScreenBuffer::new(5, 1);
         let mut b = ScreenBuffer::new(5, 1);
         set(&mut b, 2, 0, "x");
@@ -236,6 +238,7 @@ mod tests {
 
     #[test]
     fn a_shortened_line_erases_the_tail_instead_of_overwriting_with_spaces() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut a = ScreenBuffer::new(5, 1);
         set(&mut a, 0, 0, "h");
         set(&mut a, 1, 0, "e");
@@ -261,6 +264,7 @@ mod tests {
 
     #[test]
     fn an_unchanged_prefix_is_not_re_emitted_even_when_the_row_changes() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Only the character at column 1 differs; column 0 already reads
         // "h" on screen and must not be rewritten — this is the whole
         // reason the algorithm scans in from both ends instead of
@@ -281,6 +285,7 @@ mod tests {
 
     #[test]
     fn a_run_of_same_styled_cells_emits_one_sgr_sequence() {
+        let _guard = ::habilis_network_test_tracing::init();
         let a = ScreenBuffer::new(3, 1);
         let mut b = ScreenBuffer::new(3, 1);
         for i in 0..3 {
@@ -304,6 +309,7 @@ mod tests {
 
     #[test]
     fn a_resize_forces_a_full_repaint_even_if_content_matches() {
+        let _guard = ::habilis_network_test_tracing::init();
         let a = ScreenBuffer::new(5, 1);
         let b = ScreenBuffer::new(6, 1); // wider — same logical content, different size
         let out = diff(Some(&a), &b);

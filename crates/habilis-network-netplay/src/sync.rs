@@ -254,7 +254,6 @@ mod tests {
     use crate::request::Request;
     use crate::rollback_error::RollbackError;
     use crate::test_game::{TestGame, TestInput, TestRunner};
-    use habilis_network_test_tracing::test;
 
     /// Two players, generous prediction window, no input delay.
     fn session() -> Sync<TestGame> {
@@ -273,6 +272,7 @@ mod tests {
 
     #[test]
     fn a_correct_prediction_never_rolls_back() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = session();
         let mut runner = TestRunner::new();
 
@@ -303,6 +303,7 @@ mod tests {
 
     #[test]
     fn a_wrong_prediction_rolls_back_and_re_simulates_with_the_truth() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = session();
         let mut runner = TestRunner::new();
 
@@ -364,6 +365,7 @@ mod tests {
 
     #[test]
     fn re_simulation_uses_a_fresh_prediction_for_frames_still_unknown() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = session();
         let mut runner = TestRunner::new();
 
@@ -396,6 +398,7 @@ mod tests {
 
     #[test]
     fn the_prediction_limit_stops_the_caller_rather_than_guessing_further() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = Sync::<TestGame>::new(2, 3, 0, PlayerHandle::new(0));
         let mut runner = TestRunner::new();
 
@@ -414,6 +417,7 @@ mod tests {
 
     #[test]
     fn confirming_frames_reopens_the_prediction_window() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = Sync::<TestGame>::new(2, 3, 0, PlayerHandle::new(0));
         let mut runner = TestRunner::new();
 
@@ -445,6 +449,7 @@ mod tests {
 
     #[test]
     fn an_unknown_player_handle_is_an_error_not_a_panic() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = session();
         assert_eq!(
             sync.add_local_input(PlayerHandle::new(9), TestInput(0)),
@@ -460,6 +465,7 @@ mod tests {
 
     #[test]
     fn inputs_are_reported_as_confirmed_or_predicted_honestly() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = session();
         sync.add_local_input(PlayerHandle::new(0), TestInput(1))
             .expect("under the limit");

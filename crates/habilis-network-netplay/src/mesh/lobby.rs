@@ -510,7 +510,6 @@ mod tests {
         session_id_for,
     };
     use habilis_network::protocol::{AuthorKey, Nickname};
-    use habilis_network_test_tracing::test;
 
     fn key(byte: u8) -> AuthorKey {
         AuthorKey::from([byte; 32])
@@ -526,6 +525,7 @@ mod tests {
 
     #[test]
     fn start_message_json_matches_the_golden() {
+        let _guard = ::habilis_network_test_tracing::init();
         let message = LobbyMessage::Start {
             epoch: Epoch::new(2),
             session_id: SessionId::new(12_345),
@@ -544,6 +544,7 @@ mod tests {
 
     #[test]
     fn session_id_matches_the_golden_for_fixed_players_and_proposer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let players = vec![key(0xaa), key(0xbb)];
         assert_eq!(
             session_id_for(&players, &key(0xaa), Epoch::new(2)),
@@ -556,6 +557,7 @@ mod tests {
     /// text. Byte order of a key is the same order, so no handle moves.
     #[test]
     fn the_order_of_the_keys_is_the_order_of_their_hex_text() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut keys = [0xff, 0x0a, 0xa0, 0x9f, 0x10].map(key);
         keys.sort();
         let by_text = {
@@ -572,6 +574,7 @@ mod tests {
 
     #[test]
     fn a_start_with_a_key_that_is_not_lowercase_hex_is_ignored() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         let upper = "AA".repeat(32);
         let raw = format!(
@@ -589,6 +592,7 @@ mod tests {
     /// it, and the lobby does not adopt a match from it.
     #[test]
     fn the_old_start_literal_with_text_players_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         let old = r#"{"Start":{"epoch":2,"session_id":12345,"players":["aaa","bbb"]}}"#;
         let error =
             serde_json::from_str::<LobbyMessage>(old).expect_err("players that are not keys");
@@ -607,6 +611,7 @@ mod tests {
     /// A nickname that `Nickname::try_new` refuses is not a presence.
     #[test]
     fn a_presence_with_a_nickname_the_wire_refuses_is_dropped() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         lobby.on_message(&key(0xbb), r#"{"Present":{"nick":""}}"#, Tick::new(0));
         let present: Vec<_> = lobby.present().collect();
@@ -619,6 +624,7 @@ mod tests {
 
     #[test]
     fn a_peer_is_present_in_its_own_lobby() {
+        let _guard = ::habilis_network_test_tracing::init();
         let lobby = Lobby::new(key(0xaa), nick("alice"));
         let present: Vec<_> = lobby.present().collect();
         assert_eq!(
@@ -630,6 +636,7 @@ mod tests {
 
     #[test]
     fn presence_from_a_peer_is_recorded() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         lobby.on_message(
             &key(0xbb),
@@ -645,6 +652,7 @@ mod tests {
 
     #[test]
     fn starting_alone_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         assert_eq!(
             lobby.propose(),
@@ -655,6 +663,7 @@ mod tests {
 
     #[test]
     fn two_peers_sharing_a_nickname_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         lobby.on_message(
             &key(0xbb),
@@ -673,6 +682,7 @@ mod tests {
     /// The property the whole module exists for.
     #[test]
     fn both_peers_derive_the_same_handles() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut alice = Lobby::new(key(0xaa), nick("alice"));
         let mut bob = Lobby::new(key(0xbb), nick("bob"));
         alice.on_message(
@@ -715,6 +725,7 @@ mod tests {
 
     #[test]
     fn simultaneous_proposals_converge_on_the_lower_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut alice = Lobby::new(key(0xaa), nick("alice"));
         let mut bob = Lobby::new(key(0xbb), nick("bob"));
         alice.on_message(
@@ -752,6 +763,7 @@ mod tests {
     /// be able to say it again.
     #[test]
     fn a_started_match_can_be_announced_again_and_a_peer_that_missed_it_catches_up() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut alice = Lobby::new(key(0xaa), nick("alice"));
         let mut bob = Lobby::new(key(0xbb), nick("bob"));
         alice.on_message(
@@ -785,6 +797,7 @@ mod tests {
 
     #[test]
     fn a_lobby_with_no_match_has_nothing_to_announce() {
+        let _guard = ::habilis_network_test_tracing::init();
         let lobby = Lobby::new(key(0xaa), nick("alice"));
         assert_eq!(
             lobby.announcement(),
@@ -801,6 +814,7 @@ mod tests {
     /// lobby elected to propose.
     #[test]
     fn a_duplicate_nickname_is_reported_without_proposing() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         assert_eq!(lobby.blocker(), None, "alone is not blocked, just empty");
 
@@ -820,6 +834,7 @@ mod tests {
 
     #[test]
     fn a_peer_that_stops_announcing_is_dropped() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         lobby.on_message(
             &key(0xbb),
@@ -843,6 +858,7 @@ mod tests {
 
     #[test]
     fn a_peer_that_keeps_announcing_is_kept_and_we_never_expire_ourselves() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         for now in [Tick::new(100), Tick::new(150), Tick::new(200)] {
             lobby.on_message(
@@ -871,6 +887,7 @@ mod tests {
 
     #[test]
     fn expiry_does_not_disturb_a_match_already_agreed() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         lobby.on_message(
             &key(0xbb),
@@ -891,6 +908,7 @@ mod tests {
 
     #[test]
     fn a_match_between_other_people_is_ignored() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         lobby.on_message(
             &key(0xbb),
@@ -911,6 +929,7 @@ mod tests {
     /// *higher* than the first's, which the tie-break alone would refuse.
     #[test]
     fn a_second_proposal_supersedes_the_first_on_both_peers() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut alice = Lobby::new(key(0xaa), nick("alice"));
         let mut bob = Lobby::new(key(0xbb), nick("bob"));
         alice.on_message(
@@ -955,6 +974,7 @@ mod tests {
 
     #[test]
     fn a_straggler_from_the_previous_match_never_resurrects_it() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut alice = Lobby::new(key(0xaa), nick("alice"));
         alice.on_message(
             &key(0xbb),

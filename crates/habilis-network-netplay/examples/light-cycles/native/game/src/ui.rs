@@ -361,7 +361,6 @@ fn flush_run(owner: Option<u8>, run: &mut String, spans: &mut Vec<View>) {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
 
     /// Regression: the room code used to be uppercased for display, but
     /// `crypto::topic_seed` hashes the topic byte-for-byte. A player who
@@ -369,6 +368,7 @@ mod tests {
     /// forever. The label may shout; the code may not.
     #[test]
     fn the_room_code_is_shown_exactly_as_given() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             super::room_label("Gadget-Plover"),
             "ROOM Gadget-Plover",

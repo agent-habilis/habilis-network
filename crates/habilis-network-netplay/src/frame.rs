@@ -143,10 +143,10 @@ pub enum InputStatus {
 #[cfg(test)]
 mod tests {
     use super::Frame;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn a_frame_that_is_a_real_frame_serializes_as_its_number() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             serde_json::to_string(&Frame::new(7)).expect("serializes"),
             "7",
@@ -163,6 +163,7 @@ mod tests {
     /// packet as `-1`.
     #[test]
     fn the_null_frame_does_not_serialize() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             serde_json::to_string(&Frame::NULL).is_err(),
             "the null frame does not serialize"

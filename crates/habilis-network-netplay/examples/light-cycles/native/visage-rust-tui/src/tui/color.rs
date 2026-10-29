@@ -103,10 +103,10 @@ mod tests {
     use super::{
         DEFAULT_COLOR, INVERSE, UNDERLINE, palette, push_attrs, push_bg, push_fg, truecolor,
     };
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn default_color_pushes_the_reset_code() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut out = Vec::new();
         push_fg(&mut out, DEFAULT_COLOR);
         assert_eq!(
@@ -125,6 +125,7 @@ mod tests {
 
     #[test]
     fn low_palette_indices_use_the_classic_codes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut out = Vec::new();
         push_fg(&mut out, palette(1)); // red
         assert_eq!(
@@ -136,6 +137,7 @@ mod tests {
 
     #[test]
     fn bright_palette_indices_use_9x_and_10x() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut out = Vec::new();
         push_fg(&mut out, palette(9)); // bright red: 30 + 60 + (9-8) = 91
         assert_eq!(out, vec!["91"], "a bright palette index uses code 91");
@@ -146,6 +148,7 @@ mod tests {
 
     #[test]
     fn high_palette_indices_use_extended_syntax() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut out = Vec::new();
         push_fg(&mut out, palette(200));
         assert_eq!(
@@ -157,6 +160,7 @@ mod tests {
 
     #[test]
     fn truecolor_uses_the_24_bit_syntax() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut out = Vec::new();
         push_fg(&mut out, truecolor(0x0000_ff80));
         assert_eq!(
@@ -168,6 +172,7 @@ mod tests {
 
     #[test]
     fn identical_attrs_emit_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut out = Vec::new();
         assert!(
             !push_attrs(&mut out, UNDERLINE, UNDERLINE),
@@ -178,6 +183,7 @@ mod tests {
 
     #[test]
     fn turning_a_bit_on_emits_only_that_code() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut out = Vec::new();
         assert!(
             !push_attrs(&mut out, 0, UNDERLINE),
@@ -188,6 +194,7 @@ mod tests {
 
     #[test]
     fn turning_a_bit_off_resets_everything_and_reapplies_the_rest() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut out = Vec::new();
         let reset = push_attrs(&mut out, UNDERLINE | INVERSE, INVERSE);
         assert!(reset, "turning a bit off resets and reapplies the rest");

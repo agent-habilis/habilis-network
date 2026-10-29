@@ -180,10 +180,10 @@ fn break_at_words(line: &str, cells: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{Truncate, Wrap, char_width, graphemes, string_width, truncate, wrap_text};
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn ascii_graphemes_are_one_cell_each() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             graphemes("abc"),
             vec!["a", "b", "c"],
@@ -198,6 +198,7 @@ mod tests {
 
     #[test]
     fn wide_cjk_characters_are_two_cells() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(char_width("字"), 2, "a wide cjk character is two cells");
         assert_eq!(
             string_width("字字"),
@@ -208,6 +209,7 @@ mod tests {
 
     #[test]
     fn truncate_end_replaces_the_tail_with_an_ellipsis() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             truncate("hello world", 8, Truncate::End),
             "hello w…",
@@ -217,6 +219,7 @@ mod tests {
 
     #[test]
     fn truncate_a_single_cell_is_just_the_ellipsis() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             truncate("hello", 1, Truncate::End),
             "…",
@@ -226,6 +229,7 @@ mod tests {
 
     #[test]
     fn truncate_shorter_than_the_budget_is_unchanged() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             truncate("hi", 10, Truncate::End),
             "hi",
@@ -235,6 +239,7 @@ mod tests {
 
     #[test]
     fn word_wrap_breaks_between_words_not_inside_them() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             wrap_text("the quick brown fox", 10, Wrap::Word),
             vec!["the quick", "brown fox"],
@@ -244,6 +249,7 @@ mod tests {
 
     #[test]
     fn char_wrap_breaks_anywhere() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             wrap_text("abcdefgh", 3, Wrap::Char),
             vec!["abc", "def", "gh"],
@@ -253,6 +259,7 @@ mod tests {
 
     #[test]
     fn no_wrap_returns_hard_lines_untouched() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             wrap_text("a very long line indeed", 5, Wrap::None),
             vec!["a very long line indeed"],
@@ -262,6 +269,7 @@ mod tests {
 
     #[test]
     fn newlines_are_always_hard_breaks() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             wrap_text("first\nsecond", 20, Wrap::Word),
             vec!["first", "second"],

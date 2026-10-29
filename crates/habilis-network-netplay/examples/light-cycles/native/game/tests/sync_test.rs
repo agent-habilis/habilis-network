@@ -15,7 +15,6 @@
 //! starts.
 
 use habilis_network_netplay::{PlayerHandle, Request, RollbackError, SyncTestSession};
-use habilis_network_test_tracing::test;
 
 use light_cycles_native::app::LightCycles;
 use light_cycles_native::grid::{Dir, Input};
@@ -65,6 +64,7 @@ fn steer(player: usize, frame: usize) -> Input {
 fn the_simulation_survives_a_rollback_on_every_frame() {
     const PLAYERS: usize = 4;
 
+    let _guard = ::habilis_network_test_tracing::init();
     let roster: Vec<String> = (0..PLAYERS).map(|i| format!("player-{i}")).collect();
     let descriptor = RoundDescriptor::derive(0xfeed_1234_5678_9abc, roster);
     let mut runner = Runner {

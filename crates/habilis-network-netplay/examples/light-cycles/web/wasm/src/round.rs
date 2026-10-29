@@ -161,10 +161,10 @@ impl SplitMix64 {
 #[cfg(test)]
 mod tests {
     use super::RoundDescriptor;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn deriving_twice_with_the_same_inputs_is_byte_identical() {
+        let _guard = ::habilis_network_test_tracing::init();
         let roster = vec!["bob".to_string(), "alice".to_string()];
         let a = RoundDescriptor::derive(3, roster.clone());
         let b = RoundDescriptor::derive(3, roster);
@@ -176,6 +176,7 @@ mod tests {
 
     #[test]
     fn roster_order_does_not_affect_the_result() {
+        let _guard = ::habilis_network_test_tracing::init();
         let a = RoundDescriptor::derive(1, vec!["a".into(), "b".into(), "c".into()]);
         let b = RoundDescriptor::derive(1, vec!["c".into(), "a".into(), "b".into()]);
         assert_eq!(a, b, "the roster order does not change the result");
@@ -185,6 +186,7 @@ mod tests {
     /// visible to the players: a different arena, not the same one again.
     #[test]
     fn a_different_session_id_gives_a_different_layout_in_practice() {
+        let _guard = ::habilis_network_test_tracing::init();
         let roster = vec!["a".to_string(), "b".to_string()];
         let a = RoundDescriptor::derive(1, roster.clone());
         let b = RoundDescriptor::derive(2, roster);
@@ -196,6 +198,7 @@ mod tests {
 
     #[test]
     fn a_different_roster_gives_a_different_descriptor() {
+        let _guard = ::habilis_network_test_tracing::init();
         let a = RoundDescriptor::derive(1, vec!["a".into(), "b".into()]);
         let b = RoundDescriptor::derive(1, vec!["a".into(), "c".into()]);
         assert_ne!(a, b, "a different roster gives a different descriptor");
@@ -203,6 +206,7 @@ mod tests {
 
     #[test]
     fn every_roster_member_gets_a_distinct_spawn() {
+        let _guard = ::habilis_network_test_tracing::init();
         let roster: Vec<String> = (0..6).map(|i| format!("player-{i}")).collect();
         let desc = RoundDescriptor::derive(0, roster);
         let mut points: Vec<(u8, u8)> = desc.spawns.iter().map(|s| (s.x, s.y)).collect();

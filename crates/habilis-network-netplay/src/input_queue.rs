@@ -301,7 +301,6 @@ mod tests {
     use super::InputQueue;
     use crate::frame::{Frame, InputStatus};
     use crate::test_game::{TestGame, TestInput};
-    use habilis_network_test_tracing::test;
 
     fn queue() -> InputQueue<TestGame> {
         InputQueue::<TestGame>::new()
@@ -309,6 +308,7 @@ mod tests {
 
     #[test]
     fn a_known_input_comes_back_confirmed() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
         queue.add_input(Frame::new(0), TestInput(7));
         assert_eq!(
@@ -325,6 +325,7 @@ mod tests {
 
     #[test]
     fn an_unknown_input_is_predicted_by_repeating_the_last_one() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
         queue.add_input(Frame::new(0), TestInput(7));
         let _ = queue.input(Frame::new(0));
@@ -338,6 +339,7 @@ mod tests {
 
     #[test]
     fn the_very_first_frame_predicts_the_default_input() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
         assert_eq!(
             queue.input(Frame::new(0)),
@@ -348,6 +350,7 @@ mod tests {
 
     #[test]
     fn a_prediction_that_turns_out_right_reports_no_misprediction() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
         queue.add_input(Frame::new(0), TestInput(7));
         let _ = queue.input(Frame::new(0));
@@ -362,6 +365,7 @@ mod tests {
 
     #[test]
     fn a_prediction_that_turns_out_wrong_reports_the_frame_it_broke_at() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
         queue.add_input(Frame::new(0), TestInput(7));
         let _ = queue.input(Frame::new(0));
@@ -376,6 +380,7 @@ mod tests {
 
     #[test]
     fn only_the_earliest_misprediction_is_reported() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
         queue.add_input(Frame::new(0), TestInput(1));
         let _ = queue.input(Frame::new(0));
@@ -392,6 +397,7 @@ mod tests {
 
     #[test]
     fn resetting_prediction_clears_the_misprediction() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
         queue.add_input(Frame::new(0), TestInput(1));
         let _ = queue.input(Frame::new(0));
@@ -419,6 +425,7 @@ mod tests {
 
     #[test]
     fn frame_delay_files_an_input_later_than_it_was_made() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
         queue.set_frame_delay(3);
         assert_eq!(
@@ -450,6 +457,7 @@ mod tests {
 
     #[test]
     fn the_ring_ages_out_old_frames_instead_of_corrupting() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = queue();
         // Push well past the ring's capacity.
         let span = i32::try_from(super::QUEUE_LEN).expect("the ring length fits an i32") * 2;

@@ -105,10 +105,10 @@ pub(crate) fn frame_advantage(current_frame: Frame, last_received_frame: Frame) 
 #[cfg(test)]
 mod tests {
     use super::TimeSync;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn a_steady_state_recommends_no_correction() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = TimeSync::default();
         for _ in 0..super::WINDOW {
             sync.advance(0, 0);
@@ -122,6 +122,7 @@ mod tests {
 
     #[test]
     fn a_small_lead_is_treated_as_jitter_not_drift() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = TimeSync::default();
         for _ in 0..super::WINDOW {
             sync.advance(2, 0);
@@ -136,6 +137,7 @@ mod tests {
 
     #[test]
     fn a_persistent_lead_recommends_yielding() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = TimeSync::default();
         for _ in 0..super::WINDOW {
             sync.advance(10, 0);
@@ -149,6 +151,7 @@ mod tests {
 
     #[test]
     fn the_peer_being_further_ahead_is_never_our_turn_to_yield() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = TimeSync::default();
         for _ in 0..super::WINDOW {
             sync.advance(4, 12);
@@ -162,6 +165,7 @@ mod tests {
 
     #[test]
     fn a_correction_is_capped_so_it_is_never_more_visible_than_the_drift() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = TimeSync::default();
         for _ in 0..super::WINDOW {
             sync.advance(1000, 0);
