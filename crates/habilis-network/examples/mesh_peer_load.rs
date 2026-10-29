@@ -63,7 +63,7 @@ fn env_number(name: &str) -> u64 {
 /// leaves the line without a role.
 fn flood_plan() -> (usize, &'static str) {
     let peers = usize::try_from(env_number("MESH_FLOOD_PEERS")).unwrap_or(0);
-    let senders = std::env::var("MESH_FLOOD_SENDERS")
+    let senders: Option<u64> = std::env::var("MESH_FLOOD_SENDERS")
         .ok()
         .and_then(|senders| -> Option<u64> { senders.parse().ok() });
     match senders {
@@ -113,13 +113,14 @@ async fn roster(sender: &mpsc::Sender<Request>) -> Option<(Vec<String>, usize)> 
     sender.send(Request::Peers { reply }).await.ok()?;
     let roster: serde_json::Value = serde_json::from_str(&answer.await.ok()?).unwrap_or_default();
     let peers = roster["peers"].as_array().cloned().unwrap_or_default();
-    let links = peers
+    let links: usize = peers
         .iter()
         .filter(|peer| peer["reach"].as_str() == Some("direct"))
         .count();
-    let named = peers
-        .iter()
-        .filter_map(|peer| peer["nickname"].as_str().map(str::to_owned));
+    let named = peers.iter().filter_map(|peer| {
+        let nickname = peer["nickname"].as_str();
+        nickname.map(str::to_owned)
+    });
     let nicks: Vec<String> = named.collect();
     Some((nicks, links))
 }

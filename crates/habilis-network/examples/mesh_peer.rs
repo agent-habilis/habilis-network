@@ -165,11 +165,12 @@ async fn run_peer(
     // on the periodic refresh. Lock-free, so reading it per second costs
     // nothing and needs no request/response hop into the loop.
     let live = LiveCount::default();
+    let live_count = live.clone();
     let config = setup_mesh(
         kind,
         SetupParams::new(author.clone(), SilentSink::default())
             .with_max_peers(16)
-            .with_live_count(live.clone()),
+            .with_live_count(live_count),
     )
     .await?;
 
