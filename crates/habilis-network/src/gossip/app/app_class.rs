@@ -5,6 +5,18 @@
 ///
 /// A set of five independent per-frame wire policies, one bit each. Build one with
 /// [`AppClass::NONE`](super::AppClass::NONE), the flags, [`AppClass::union`](super::AppClass::union) and [`AppClass::with_if`](super::AppClass::with_if).
+///
+/// # Examples
+///
+/// An app class is a set of flags, and two classes combine with the bit-or operator. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::AppClass;
+///
+/// # fn demo(class: AppClass) -> AppClass {
+/// class | class
+/// # }
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct AppClass(u8);
 

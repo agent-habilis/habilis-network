@@ -10,6 +10,17 @@ use std::sync::atomic::Ordering;
 /// `OutputEvent`. The app's [`NodeSink`] impl maps each variant onto the
 /// existing `Output` method, so the rendered stdout / `--output json` / library API
 /// forms stay byte-identical.
+///
+/// # Examples
+///
+/// A node event says what happened, such as an info line.
+///
+/// ```
+/// use habilis_network::embed::NodeEvent;
+///
+/// let event = NodeEvent::Info("started".to_owned());
+/// assert!(matches!(event, NodeEvent::Info(_)));
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum NodeEvent {
@@ -90,6 +101,24 @@ pub enum NodeEvent {
 /// The sink the engine emits generic [`NodeEvent`]s through. The app implements
 /// it (backed by its `Output` renderer); the engine holds only a `&dyn NodeSink`
 /// / `Arc<dyn NodeSink>` and never names the concrete sink.
+///
+/// # Examples
+///
+/// A sink receives each node event as it happens.
+///
+/// ```
+/// use habilis_network::embed::{NodeEvent, NodeSink};
+///
+/// struct Printer;
+///
+/// impl NodeSink for Printer {
+///     fn emit(&self, event: NodeEvent) {
+///         let _ = event;
+///     }
+/// }
+///
+/// Printer.emit(NodeEvent::Info("started".to_owned()));
+/// ```
 pub trait NodeSink: Send + Sync {
     /// Send an event to the consumer.
     fn emit(&self, event: NodeEvent);
@@ -106,6 +135,16 @@ impl<T: NodeSink + ?Sized> NodeSink for std::sync::Arc<T> {
 /// renders nothing from the engine's transport/membership surfacings (e.g. a
 /// bytes-piping consumer that only reacts to its own `App` frames), and for
 /// tests that need a sink handle without asserting on it.
+///
+/// # Examples
+///
+/// A silent sink accepts events and drops them.
+///
+/// ```
+/// use habilis_network::embed::{NodeEvent, NodeSink, SilentSink};
+///
+/// SilentSink::default().emit(NodeEvent::Info("quiet".to_owned()));
+/// ```
 #[derive(Debug, Default, Clone, Copy)]
 #[non_exhaustive]
 pub struct SilentSink;

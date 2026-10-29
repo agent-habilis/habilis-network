@@ -12,6 +12,18 @@ use crate::protocol::Nickname;
 /// live `crate::transport` send decision — distinct from `reach`, which
 /// is a gossip-overlay link fact). Serialized directly into the
 /// consumer's roster surfaces.
+///
+/// # Examples
+///
+/// A roster entry names a member and how long since it was last heard from. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::RosterEntry;
+///
+/// # fn demo(entry: &RosterEntry) {
+/// let _nickname = &entry.nickname;
+/// # }
+/// ```
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct RosterEntry {

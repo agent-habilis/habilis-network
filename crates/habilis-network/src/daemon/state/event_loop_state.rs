@@ -61,6 +61,18 @@ use tokio::sync::{mpsc, oneshot};
 /// `peers` (membership roster), `surfaced` (presentation gate),
 /// `quiet` (heartbeat-evicted). Never conflate them — they are keyed
 /// differently (node id vs nickname) and have different lifetimes.
+///
+/// # Examples
+///
+/// The event loop state is the state that the node keeps between events. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::EventLoopState;
+///
+/// # fn demo(state: &EventLoopState) {
+/// let _ = state;
+/// # }
+/// ```
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent lifecycle edges (gossip_open/rendezvous_linked/announced/meshed/degraded) plus the one-shot resident_memory_warned latch; each tracks a distinct transition, not a config bundle worth a sub-struct"

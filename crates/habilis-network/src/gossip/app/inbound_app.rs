@@ -3,6 +3,18 @@ use crate::protocol::message::Authored;
 /// An inbound `App` frame plus the surfacing decision already made by the
 /// engine's generic prefix (join-horizon / third-party gating), passed to
 /// [`NodeApp::on_app_frame`](super::NodeApp::on_app_frame).
+///
+/// # Examples
+///
+/// An inbound app is an application frame as it arrives at the node. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::InboundApp;
+///
+/// # fn demo(app: &InboundApp<'_>) {
+/// let _ = app;
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct InboundApp<'message> {

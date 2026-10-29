@@ -9,6 +9,19 @@ use crate::protocol::message::Authored;
 /// once it has done parse → signature verify → mesh gate → dedup → shard
 /// reassembly → unseal. The app never names an engine transport detail it
 /// isn't given here.
+///
+/// # Examples
+///
+/// A node app handles the application payloads of a node, and it classifies each message. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::{AppClass, NodeApp};
+/// use habilis_network::protocol::Authored;
+///
+/// # fn demo<App: NodeApp>(app: &App, message: &Authored) -> AppClass {
+/// app.classify(message)
+/// # }
+/// ```
 #[async_trait::async_trait]
 pub trait NodeApp: Send {
     /// Classify one inbound `App` frame by tag/payload — see [`AppClass`](super::AppClass).

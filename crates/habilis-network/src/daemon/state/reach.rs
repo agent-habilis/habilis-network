@@ -4,6 +4,16 @@ use serde::Serialize;
 /// link to its self-advertised endpoint, else `Gossip` (relayed). Derived
 /// from `linked_endpoints` without surfacing the node id — see
 /// `peer_endpoints`.
+///
+/// # Examples
+///
+/// A direct path and a gossip path are different reaches.
+///
+/// ```
+/// use habilis_network::embed::Reach;
+///
+/// assert_ne!(Reach::Direct, Reach::Gossip);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
