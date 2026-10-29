@@ -121,14 +121,14 @@ mod tests {
 
     use super::{Instant, Nickname, tick_sweep};
     use crate::gossip::event::SilentSink;
-    use crate::util::tuning::alive_timeout;
+    use crate::util::tuning;
     use std::time::Duration;
 
     #[test]
     fn sweep_evicts_surfaced_peer_into_quiet() {
         let mut state = fresh_state();
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
             .unwrap();
         state.last_seen.insert(nick("swift-cedar"), expired_at);
         state.peers.insert(nick("swift-cedar"));
@@ -155,7 +155,7 @@ mod tests {
             .insert(crate::testing::endpoint_id(1));
         assert!(!state.rendezvous_wanted(), "enough links: it let go");
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
             .unwrap();
         state.last_seen.insert(nick("lost-heron"), expired_at);
         state.peers.insert(nick("lost-heron"));
@@ -177,7 +177,7 @@ mod tests {
             .insert(crate::testing::endpoint_id(1));
         state.rendezvous_linked = true;
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
             .unwrap();
         state.last_seen.insert(nick("lost-heron"), expired_at);
         state.peers.insert(nick("lost-heron"));
@@ -203,7 +203,7 @@ mod tests {
             .insert(crate::protocol::AuthorKey::from_bytes([4u8; 32]), holder);
         assert!(state.rival_holder_known());
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
             .unwrap();
         state.last_seen.insert(nick("lost-heron"), expired_at);
         state.peers.insert(nick("lost-heron"));
@@ -230,7 +230,7 @@ mod tests {
             .linked_endpoints
             .insert(crate::testing::endpoint_id(1));
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
             .unwrap();
         state.last_seen.insert(nick("ghost-oak"), expired_at);
         state.peers.insert(nick("ghost-oak"));
@@ -249,7 +249,7 @@ mod tests {
         // last heard (not `null`), even though eviction drops `last_seen`.
         let mut state = fresh_state();
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
             .unwrap();
         state.last_seen.insert(nick("calm-otter"), expired_at);
         state.peers.insert(nick("calm-otter"));
@@ -268,7 +268,7 @@ mod tests {
             .last_seen_secs_ago
             .expect("quiet peer reports real recency, not null");
         assert!(
-            secs >= alive_timeout().as_secs(),
+            secs >= tuning::alive_timeout().as_secs(),
             "recency reflects the actual silence age, got {secs}s"
         );
     }
@@ -277,7 +277,7 @@ mod tests {
     fn sweep_keeps_a_quiet_peers_endpoint_for_its_return() {
         let mut state = fresh_state();
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
             .unwrap();
         state.last_seen.insert(nick("swift-cedar"), expired_at);
         state.peers.insert(nick("swift-cedar"));
@@ -316,7 +316,7 @@ mod tests {
     fn sweep_evicts_unsurfaced_peer_silently() {
         let mut state = fresh_state();
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
             .unwrap();
         state.last_seen.insert(nick("ghost-elm"), expired_at);
         state.peers.insert(nick("ghost-elm"));
@@ -356,7 +356,7 @@ mod tests {
     fn sweep_preserves_other_peers() {
         let mut state = fresh_state();
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
             .unwrap();
         state.last_seen.insert(nick("stale-nick"), expired_at);
         state.peers.insert(nick("stale-nick"));

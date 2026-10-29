@@ -368,13 +368,13 @@ impl Ceiling {
 #[cfg(test)]
 mod tests {
     use super::{Admission, Ceiling, Duration, EvictionBackoff, HashSet, Instant};
-    use crate::testing::endpoint_id;
+    use crate::testing;
     use habilis_network_test_tracing::test;
 
     #[test]
     fn an_eviction_holds_proactive_dials_for_a_minute_within_the_jitter() {
         let start = Instant::now();
-        let peer = endpoint_id(1);
+        let peer = testing::endpoint_id(1);
         for (spread, secs) in [(-1.0, 48), (0.0, 60), (1.0, 72)] {
             let mut backoff = EvictionBackoff::default();
             assert!(
@@ -385,7 +385,7 @@ mod tests {
             assert!(backoff.holds(&peer, at(start, secs - 1)));
             assert!(!backoff.holds(&peer, at(start, secs + 1)));
             assert!(
-                !backoff.holds(&endpoint_id(2), start),
+                !backoff.holds(&testing::endpoint_id(2), start),
                 "only that peer is held"
             );
         }
@@ -395,8 +395,8 @@ mod tests {
     fn a_noted_eviction_forgets_the_expired_ones() {
         let start = Instant::now();
         let mut backoff = EvictionBackoff::default();
-        backoff.note(endpoint_id(1), start, 0.0);
-        backoff.note(endpoint_id(2), at(start, 100), 0.0);
+        backoff.note(testing::endpoint_id(1), start, 0.0);
+        backoff.note(testing::endpoint_id(2), at(start, 100), 0.0);
         assert_eq!(backoff.until.len(), 1);
     }
 
@@ -408,7 +408,7 @@ mod tests {
     fn full(cap: usize, start: Instant) -> Ceiling {
         let mut ceiling = Ceiling::new(cap);
         for index in 0..cap {
-            let peer = endpoint_id(u8::try_from(index).unwrap());
+            let peer = testing::endpoint_id(u8::try_from(index).unwrap());
             assert!(ceiling.register_quic(peer, start).evict.is_empty());
             // The lower the index, the older the last use.
             ceiling.touch(peer, at(start, 10 + u64::try_from(index).unwrap()));
@@ -427,10 +427,10 @@ mod tests {
         let start = Instant::now();
         let mut ceiling = full(4, start);
         let now = at(start, 200);
-        let admission = ceiling.register_quic(endpoint_id(100), now);
+        let admission = ceiling.register_quic(testing::endpoint_id(100), now);
         assert_eq!(
             admission.evict.first(),
-            Some(&endpoint_id(0)),
+            Some(&testing::endpoint_id(0)),
             "the LRU goes first"
         );
         apply(&mut ceiling, &admission);
@@ -445,7 +445,7 @@ mod tests {
         for index in 0..4u8 {
             assert!(
                 ceiling
-                    .register_quic(endpoint_id(index), start)
+                    .register_quic(testing::endpoint_id(index), start)
                     .evict
                     .is_empty()
             );
@@ -457,12 +457,12 @@ mod tests {
     fn a_peer_younger_than_a_minute_is_kept_while_an_older_one_can_go() {
         let start = Instant::now();
         let mut ceiling = Ceiling::new(2);
-        let (old, young) = (endpoint_id(1), endpoint_id(2));
+        let (old, young) = (testing::endpoint_id(1), testing::endpoint_id(2));
         ceiling.register_quic(old, start);
         ceiling.register_quic(young, at(start, 95));
         ceiling.touch(old, at(start, 99));
         ceiling.touch(young, at(start, 96));
-        let admission = ceiling.register_quic(endpoint_id(3), at(start, 100));
+        let admission = ceiling.register_quic(testing::endpoint_id(3), at(start, 100));
         assert_eq!(
             admission.evict.first(),
             Some(&old),
@@ -474,11 +474,11 @@ mod tests {
     fn when_every_peer_is_young_the_least_recently_used_goes_anyway() {
         let start = Instant::now();
         let mut ceiling = Ceiling::new(2);
-        ceiling.register_quic(endpoint_id(1), start);
-        ceiling.register_quic(endpoint_id(2), at(start, 1));
-        ceiling.touch(endpoint_id(2), at(start, 5));
-        let admission = ceiling.register_quic(endpoint_id(3), at(start, 10));
-        assert_eq!(admission.evict.first(), Some(&endpoint_id(1)));
+        ceiling.register_quic(testing::endpoint_id(1), start);
+        ceiling.register_quic(testing::endpoint_id(2), at(start, 1));
+        ceiling.touch(testing::endpoint_id(2), at(start, 5));
+        let admission = ceiling.register_quic(testing::endpoint_id(3), at(start, 10));
+        assert_eq!(admission.evict.first(), Some(&testing::endpoint_id(1)));
         assert_eq!(admission.over_ceiling, 0, "the ceiling holds");
     }
 
@@ -486,16 +486,16 @@ mod tests {
     fn a_busy_peer_is_never_evicted_and_a_ceiling_of_busy_peers_is_overrun_by_the_newcomer() {
         let start = Instant::now();
         let mut ceiling = full(2, start);
-        ceiling.busy_begin(endpoint_id(0));
-        ceiling.busy_begin(endpoint_id(1));
-        let admission = ceiling.register_quic(endpoint_id(9), at(start, 200));
+        ceiling.busy_begin(testing::endpoint_id(0));
+        ceiling.busy_begin(testing::endpoint_id(1));
+        let admission = ceiling.register_quic(testing::endpoint_id(9), at(start, 200));
         assert!(admission.evict.is_empty(), "nobody is idle");
         assert_eq!(admission.over_ceiling, 1);
         assert_eq!(ceiling.over_ceiling(), 1);
         // The sends end: the next admission evicts down.
-        ceiling.busy_end(endpoint_id(0), at(start, 201));
-        ceiling.busy_end(endpoint_id(1), at(start, 201));
-        let later = ceiling.register_quic(endpoint_id(10), at(start, 400));
+        ceiling.busy_end(testing::endpoint_id(0), at(start, 201));
+        ceiling.busy_end(testing::endpoint_id(1), at(start, 201));
+        let later = ceiling.register_quic(testing::endpoint_id(10), at(start, 400));
         assert!(!later.evict.is_empty());
     }
 
@@ -503,15 +503,15 @@ mod tests {
     fn a_batch_evicts_down_to_ninety_percent_once_per_five_seconds() {
         let start = Instant::now();
         let mut ceiling = full(10, start);
-        let first = ceiling.register_quic(endpoint_id(100), at(start, 200));
+        let first = ceiling.register_quic(testing::endpoint_id(100), at(start, 200));
         // 10 + 1 - 9 = 2 victims: one that is needed, one for the batch.
         assert_eq!(first.evict.len(), 2);
         apply(&mut ceiling, &first);
         assert_eq!(ceiling.units(), 9);
         // Two seconds later: only what is needed.
-        let second = ceiling.register_quic(endpoint_id(101), at(start, 202));
+        let second = ceiling.register_quic(testing::endpoint_id(101), at(start, 202));
         assert!(second.evict.is_empty(), "9 + 1 fits");
-        let third = ceiling.register_quic(endpoint_id(102), at(start, 203));
+        let third = ceiling.register_quic(testing::endpoint_id(102), at(start, 203));
         assert_eq!(
             third.evict.len(),
             1,
@@ -519,7 +519,7 @@ mod tests {
         );
         apply(&mut ceiling, &third);
         // Five seconds after the first batch: a batch again.
-        let fourth = ceiling.register_quic(endpoint_id(103), at(start, 206));
+        let fourth = ceiling.register_quic(testing::endpoint_id(103), at(start, 206));
         assert_eq!(fourth.evict.len(), 2);
     }
 
@@ -532,7 +532,7 @@ mod tests {
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);
-            let peer = endpoint_id(u8::try_from(state >> 56).unwrap());
+            let peer = testing::endpoint_id(u8::try_from(state >> 56).unwrap());
             let now = at(start, step * 3);
             let admission = ceiling.register_quic(peer, now);
             apply(&mut ceiling, &admission);
@@ -550,7 +550,7 @@ mod tests {
         let start = Instant::now();
         let mut ceiling = Ceiling::refusing(2);
         for byte in 1..=4 {
-            let admission = ceiling.register_session(endpoint_id(byte), start);
+            let admission = ceiling.register_session(testing::endpoint_id(byte), start);
             assert!(
                 admission.evict.is_empty(),
                 "peer {byte}: nothing is evicted"
@@ -558,12 +558,12 @@ mod tests {
         }
         assert_eq!(ceiling.units(), 4, "the count passes the cap, no victim");
         assert!(ceiling.refuses());
-        assert!(ceiling.holds(endpoint_id(1)));
-        assert!(!ceiling.holds(endpoint_id(9)));
+        assert!(ceiling.holds(testing::endpoint_id(1)));
+        assert!(!ceiling.holds(testing::endpoint_id(9)));
         let mut cache = Ceiling::new(2);
-        cache.register_session(endpoint_id(1), start);
-        cache.register_session(endpoint_id(2), start);
-        let admission = cache.register_session(endpoint_id(3), start);
+        cache.register_session(testing::endpoint_id(1), start);
+        cache.register_session(testing::endpoint_id(2), start);
+        let admission = cache.register_session(testing::endpoint_id(3), start);
         assert_eq!(admission.evict.len(), 1, "the cache evicts, as before");
     }
 
@@ -571,12 +571,12 @@ mod tests {
     fn a_session_to_a_neighbor_does_not_count_until_the_peer_stops_being_one() {
         let start = Instant::now();
         let mut ceiling = Ceiling::new(2);
-        let neighbor = endpoint_id(1);
+        let neighbor = testing::endpoint_id(1);
         ceiling.set_neighbors(&HashSet::from([neighbor]), start);
         ceiling.register_session(neighbor, start);
         assert_eq!(ceiling.units(), 0, "a gossip link is outside the ceiling");
-        ceiling.register_quic(endpoint_id(2), start);
-        ceiling.register_quic(endpoint_id(3), start);
+        ceiling.register_quic(testing::endpoint_id(2), start);
+        ceiling.register_quic(testing::endpoint_id(3), start);
         assert_eq!(ceiling.units(), 2);
         // It stops being a neighbor: its session counts from now on, and the ceiling holds.
         let admission = ceiling.set_neighbors(&HashSet::new(), at(start, 200));
@@ -591,23 +591,23 @@ mod tests {
     fn two_peers_at_a_ceiling_of_two_and_a_newcomer_evict_exactly_one_then_nothing() {
         let start = Instant::now();
         let mut ceiling = Ceiling::new(2);
-        ceiling.register_quic(endpoint_id(1), start);
-        ceiling.register_quic(endpoint_id(2), start);
-        let admission = ceiling.register_quic(endpoint_id(3), at(start, 100));
+        ceiling.register_quic(testing::endpoint_id(1), start);
+        ceiling.register_quic(testing::endpoint_id(2), start);
+        let admission = ceiling.register_quic(testing::endpoint_id(3), at(start, 100));
         assert_eq!(admission.evict.len(), 1);
         apply(&mut ceiling, &admission);
         // Touching, a second look at a held peer, a close: no eviction.
-        ceiling.touch(endpoint_id(3), at(start, 101));
+        ceiling.touch(testing::endpoint_id(3), at(start, 101));
         assert!(
             ceiling
-                .register_quic(endpoint_id(3), at(start, 102))
+                .register_quic(testing::endpoint_id(3), at(start, 102))
                 .evict
                 .is_empty()
         );
-        let survivor = if admission.evict[0] == endpoint_id(1) {
-            endpoint_id(2)
+        let survivor = if admission.evict[0] == testing::endpoint_id(1) {
+            testing::endpoint_id(2)
         } else {
-            endpoint_id(1)
+            testing::endpoint_id(1)
         };
         ceiling.unregister_quic(survivor);
         assert_eq!(ceiling.units(), 1);
@@ -617,12 +617,12 @@ mod tests {
     fn a_session_and_its_connection_are_one_unit() {
         let start = Instant::now();
         let mut ceiling = Ceiling::new(1);
-        ceiling.register_session(endpoint_id(1), start);
-        ceiling.register_quic(endpoint_id(1), at(start, 1));
+        ceiling.register_session(testing::endpoint_id(1), start);
+        ceiling.register_quic(testing::endpoint_id(1), at(start, 1));
         assert_eq!(ceiling.units(), 1);
-        ceiling.unregister_session(endpoint_id(1));
+        ceiling.unregister_session(testing::endpoint_id(1));
         assert_eq!(ceiling.units(), 1, "the connection still counts");
-        ceiling.unregister_quic(endpoint_id(1));
+        ceiling.unregister_quic(testing::endpoint_id(1));
         assert_eq!(ceiling.units(), 0);
     }
 }

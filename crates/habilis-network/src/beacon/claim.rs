@@ -5,9 +5,8 @@ use tokio::sync::mpsc;
 use crate::lookup::{add_peer_addr, build_mesh, replace_peer_addr};
 use crate::util::tuning;
 
-use super::bind::build_rendezvous_endpoint;
 use super::rung_ladder::{holder_entry, rung_of, settle_on_rung};
-use super::{Held, Rendezvous, RendezvousParams, RungWatch, Walk};
+use super::{Held, Rendezvous, RendezvousParams, RungWatch, Walk, bind};
 #[cfg(test)]
 use super::{RivalProbe, walk_ladder};
 
@@ -92,20 +91,21 @@ pub(crate) async fn claim_holder(
     current: &mut Option<Rendezvous>,
     rungs: &mut RungWatch,
 ) -> Held {
-    let (endpoint, lane) = match build_rendezvous_endpoint(params, peer, peer_book, rungs).await {
-        Walk::Bound(endpoint, lane) => (endpoint, lane),
-        // Private: a rung is taken by the beacon of our own mesh. Joiners reach it by an
-        // identity-checked dial; whether this member must go to it is the caller's to say.
-        Walk::Rival(port) => {
-            rungs.clear_foreign(port);
-            settle_on_rung(params, peer, peer_book, port).await;
-            return Held::Rival;
-        }
-        Walk::NoRung => return Held::NoRung,
-        // Public: the endpoint build failed. Private: a rung is read, or waits for its probe.
-        // Nothing to do; the next tick retries.
-        Walk::Nothing => return Held::Idle,
-    };
+    let (endpoint, lane) =
+        match bind::build_rendezvous_endpoint(params, peer, peer_book, rungs).await {
+            Walk::Bound(endpoint, lane) => (endpoint, lane),
+            // Private: a rung is taken by the beacon of our own mesh. Joiners reach it by an
+            // identity-checked dial; whether this member must go to it is the caller's to say.
+            Walk::Rival(port) => {
+                rungs.clear_foreign(port);
+                settle_on_rung(params, peer, peer_book, port).await;
+                return Held::Rival;
+            }
+            Walk::NoRung => return Held::NoRung,
+            // Public: the endpoint build failed. Private: a rung is read, or waits for its probe.
+            // Nothing to do; the next tick retries.
+            Walk::Nothing => return Held::Idle,
+        };
 
     // The rendezvous pseudo-node's active view is overlay plumbing, not the
     // member peer cap, so it stays at the shipped default rather than

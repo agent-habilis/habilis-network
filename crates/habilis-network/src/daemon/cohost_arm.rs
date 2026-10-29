@@ -445,7 +445,7 @@ pub(super) fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool 
 /// tier is `roster == 0`, not "small": two survivors of a departed origin each
 /// count the other, and that split is the one the brisk cap exists for.
 pub(super) fn next_recheck_delay(round: u32, roster: usize, endpoint_id: EndpointId) -> Duration {
-    use crate::util::clock::millis_saturating;
+    use crate::util::clock;
     use crate::util::tuning::{
         RIVAL_RECHECK_OFFSET_SPAN, RIVAL_RECHECK_SMALL_ROSTER, rival_recheck, rival_recheck_alone,
         rival_recheck_first, rival_recheck_meshed,
@@ -455,7 +455,8 @@ pub(super) fn next_recheck_delay(round: u32, roster: usize, endpoint_id: Endpoin
         let mut prefix = [0u8; 8];
         prefix.copy_from_slice(&endpoint_id.as_bytes()[..8]);
         // Pubkey bytes are already uniform — no hashing needed.
-        let offset_ms = u64::from_le_bytes(prefix) % millis_saturating(RIVAL_RECHECK_OFFSET_SPAN);
+        let offset_ms =
+            u64::from_le_bytes(prefix) % clock::millis_saturating(RIVAL_RECHECK_OFFSET_SPAN);
         return rival_recheck_first() + Duration::from_millis(offset_ms);
     }
     let base = if roster > RIVAL_RECHECK_SMALL_ROSTER {
@@ -1403,7 +1404,7 @@ mod tests {
             use crate::gossip::event::SilentSink;
             use crate::protocol::MeshId;
             use crate::protocol::identity::Identity;
-            use crate::testing::nick;
+            use crate::testing;
             use crate::transport::MeshSender;
             use crate::util::clock::Instant;
 
@@ -1415,7 +1416,7 @@ mod tests {
                 .split();
             let sender = MeshSender::new(gossip_sender);
             let mesh = MeshId::from("test");
-            let author = nick("holder");
+            let author = testing::nick("holder");
             let identity = Identity::generate();
             let our_pubkey = identity.author_key();
             let sink = SilentSink;
@@ -1515,7 +1516,7 @@ mod tests {
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     #[test]
     async fn a_holder_whose_beacon_stops_answering_sheds_at_the_second_check_and_not_the_first() {
-        use habilis_network_test_tracing::saw_warn;
+        use habilis_network_test_tracing;
 
         // The stalled beacon serves no protocol, so each check that dials it is refused with
         // alert 120 and the router of the beacon logs it: the stall causes this WARN.
@@ -1533,7 +1534,10 @@ mod tests {
         holder.heal_tick().await;
         let shed_at_the_second = holder.rendezvous.is_none();
         for _ in 0..100 {
-            if saw_warn("iroh::protocol", "peer doesn't support any known protocol") {
+            if habilis_network_test_tracing::saw_warn(
+                "iroh::protocol",
+                "peer doesn't support any known protocol",
+            ) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1777,7 +1781,6 @@ mod tests {
     async fn a_held_verdict_ends_the_round_that_ran_against_the_missing_holder() {
         use iroh_gossip::net::Gossip;
 
-        use super::note_rival_holds;
         use crate::daemon::handler_ctx::HandlerCtx;
         use crate::gossip::event::SilentSink;
         use crate::protocol::MeshId;
@@ -1853,7 +1856,7 @@ mod tests {
             .track(params.id, epoch, task.abort_handle());
         assert_eq!(state.webrtc_admission.in_flight(), 1);
 
-        note_rival_holds(&mut state, &ctx);
+        super::note_rival_holds(&mut state, &ctx);
 
         let round_running = state.webrtc_admission.in_flight() != 0;
         endpoint.close().await;

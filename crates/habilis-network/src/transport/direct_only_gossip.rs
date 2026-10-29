@@ -190,8 +190,6 @@ mod watcher_tests {
     use iroh::endpoint::Connection;
     use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 
-    use super::watch_relay_policy;
-
     #[cfg(feature = "iroh-test-utils")]
     use crate::lookup::test_relay;
     use iroh::endpoint::presets;
@@ -209,7 +207,7 @@ mod watcher_tests {
         struct WatchAndDrop;
         impl ProtocolHandler for WatchAndDrop {
             async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                watch_relay_policy(&conn, None);
+                super::watch_relay_policy(&conn, None);
                 Ok(())
             }
         }
@@ -252,7 +250,7 @@ mod watcher_tests {
         struct WatchAndHold(mpsc::UnboundedSender<PathChange>);
         impl ProtocolHandler for WatchAndHold {
             async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                watch_relay_policy(&conn, Some(self.0.clone()));
+                super::watch_relay_policy(&conn, Some(self.0.clone()));
                 conn.closed().await;
                 Ok(())
             }
@@ -292,7 +290,7 @@ mod watcher_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::refuse_before_session;
+
     use habilis_network_test_tracing::test;
 
     // The offerer attaches one DTLS trip before the answerer does, and grafts
@@ -300,15 +298,15 @@ mod tests {
     #[test]
     fn a_dial_during_the_round_is_held_not_refused() {
         assert!(
-            refuse_before_session(false, false, false),
+            super::refuse_before_session(false, false, false),
             "no session, no round"
         );
         assert!(
-            !refuse_before_session(false, true, false),
+            !super::refuse_before_session(false, true, false),
             "the round is finishing"
         );
         assert!(
-            !refuse_before_session(true, false, false),
+            !super::refuse_before_session(true, false, false),
             "the session is up"
         );
     }
@@ -320,15 +318,15 @@ mod tests {
     #[test]
     fn the_offerer_refuses_a_dial_before_its_session() {
         assert!(
-            refuse_before_session(false, true, true),
+            super::refuse_before_session(false, true, true),
             "mid-round, as the offerer"
         );
         assert!(
-            refuse_before_session(false, false, true),
+            super::refuse_before_session(false, false, true),
             "no round, as the offerer"
         );
         assert!(
-            !refuse_before_session(true, false, true),
+            !super::refuse_before_session(true, false, true),
             "the session is up"
         );
     }

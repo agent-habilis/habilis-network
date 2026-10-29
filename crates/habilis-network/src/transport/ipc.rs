@@ -94,7 +94,7 @@ mod tests {
     // ── property-based tests ───────────────────────────────────────
 
     mod prop {
-        use crate::util::mesh_prefix;
+        use crate::util;
         use habilis_network_test_tracing::test;
         use proptest::collection::vec as arb_vec;
         use proptest::strategy::Strategy;
@@ -151,13 +151,13 @@ mod tests {
 
             #[test]
             fn prop_mesh_prefix_max_16_chars(mesh in arb_mesh()) {
-                let prefix = mesh_prefix(mesh.as_str());
+                let prefix = util::mesh_prefix(mesh.as_str());
                 prop_assert!(prefix.chars().count() <= 16);
             }
 
             #[test]
             fn prop_mesh_prefix_is_prefix_of_input(mesh in arb_mesh()) {
-                let prefix = mesh_prefix(mesh.as_str());
+                let prefix = util::mesh_prefix(mesh.as_str());
                 prop_assert!(mesh.as_str().starts_with(&prefix));
             }
         }

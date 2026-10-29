@@ -18,23 +18,23 @@ pub(crate) use presence_event::{PresenceEvent, handle_presence};
 
 #[cfg(test)]
 mod tests {
-    use super::observed::synthetic_arrival;
+    use super::observed;
     use crate::gossip::event::NodeEvent;
     use crate::protocol::identity::Identity;
     use crate::protocol::{MeshId, Message};
-    use crate::testing::nick;
+    use crate::testing;
 
     #[test]
     fn a_synthetic_presence_names_the_peer_apart_from_its_signer() {
         let mesh = MeshId::from("test");
         let node = Identity::generate();
         let peer = Identity::generate();
-        let joined = Message::new_joined(&mesh, &nick("bob")).sign(&peer);
+        let joined = Message::new_joined(&mesh, &testing::nick("bob")).sign(&peer);
         let NodeEvent::Presence {
             message,
             peer: key,
             synthetic,
-        } = synthetic_arrival(&mesh, &node, &joined)
+        } = observed::synthetic_arrival(&mesh, &node, &joined)
         else {
             panic!("a synthetic arrival is a presence");
         };

@@ -1179,7 +1179,7 @@ mod tests {
         MSG_TAG, MembershipApp, MessageBody, Nickname, mpsc, msg_body, msg_fits,
     };
     use crate::protocol::{Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
-    use crate::runtime::derive_topic_mesh_config;
+    use crate::runtime;
     use habilis_network_test_tracing::test;
 
     /// The longest nickname there is: 32 four-byte scalars.
@@ -1202,7 +1202,7 @@ mod tests {
             &[],
         )
         .expect("config");
-        let mesh = derive_topic_mesh_config("standup", config).expect("mesh");
+        let mesh = runtime::derive_topic_mesh_config("standup", config).expect("mesh");
         MeshId::try_new(mesh.to_string()).expect("id")
     }
 

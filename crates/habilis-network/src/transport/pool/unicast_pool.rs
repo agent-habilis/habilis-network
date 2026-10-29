@@ -23,7 +23,6 @@ use tokio::sync::{Mutex, watch};
 
 use crate::transport::webrtc::close_code::IDLE;
 use crate::transport::{LOG_TARGET, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
-use payload_path::wait_direct;
 
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
@@ -442,7 +441,9 @@ impl UnicastPool {
                     return;
                 }
             };
-            if !pool.inner.relay_transport && !wait_direct(&conn, PATH_SELECT_TIMEOUT).await {
+            if !pool.inner.relay_transport
+                && !payload_path::wait_direct(&conn, PATH_SELECT_TIMEOUT).await
+            {
                 in_flight.publish(Err(RELAY_REFUSED.to_owned()));
                 tracing::debug!(target: LOG_TARGET, %eid, "batch not delivered: {RELAY_REFUSED}");
                 return;
@@ -491,7 +492,9 @@ impl UnicastPool {
         // "no path selected yet" as relay — refusing the *first* directed
         // frame to every peer without a warm connection. Wait like the
         // accept side does, on a dial-sized budget.
-        if !self.inner.relay_transport && !wait_direct(&conn, PATH_SELECT_TIMEOUT).await {
+        if !self.inner.relay_transport
+            && !payload_path::wait_direct(&conn, PATH_SELECT_TIMEOUT).await
+        {
             bail!("{RELAY_REFUSED}");
         }
         if let Err(error) = self.send_marked(eid, &conn, &bytes).await {

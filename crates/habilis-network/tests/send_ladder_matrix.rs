@@ -28,7 +28,7 @@
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
 mod common;
-use habilis_network::net::test_relay;
+use habilis_network::net;
 mod until_known;
 
 use std::time::{Duration, Instant};
@@ -38,7 +38,6 @@ use habilis_network::iroh::{EndpointId, RelayUrl};
 use habilis_network::membership::{self, Inbound, Membership, Request, Rung};
 use habilis_network::protocol::{Lookup, MeshConfig, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
-use until_known::until_peer_known;
 
 /// Long enough for an ICE round, or for a multihop route to be advertised once
 /// (every 15 s) and then used: the stuck edge of the pair ages out after 20 s.
@@ -389,7 +388,7 @@ impl Member {
     }
 
     async fn block_rung_to(&self, rung: Rung, peer: &str) {
-        until_peer_known(&self.membership, peer, |reply| Request::BlockRungTo {
+        until_known::until_peer_known(&self.membership, peer, |reply| Request::BlockRungTo {
             rung,
             peer: peer.to_owned(),
             blocked: true,
@@ -770,7 +769,7 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
         !cell.target_full && !cell.kinds.is_empty(),
         "{name}: a cell with a full target has no test before Phase 2"
     );
-    let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+    let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
     let (alice, mut bob, carol) = members(&relay, cell.transports, sender_id).await;
     assert!(
         rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
@@ -931,7 +930,7 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_parks_a_frame() {
             .find(|(cell, _)| *cell == "udp_webrtc_ip_direct")
             .expect("the cell is in the table");
 
-        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+        let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let (alice, mut bob, carol) = members(&relay, cell.transports, SenderId::Higher).await;
         assert!(
             rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
@@ -1187,7 +1186,7 @@ fn a_send_with_gossip_off_and_no_direct_path_fails_with_a_clear_error() {
             .expect("the cell is in the table");
 
         assert!(!cell.has(Transport::Gossip) && cell.expected().is_none());
-        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+        let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let (alice, mut bob, carol) = members(&relay, cell.transports, SenderId::Any).await;
         assert!(
             rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,

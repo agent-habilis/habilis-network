@@ -171,7 +171,7 @@ mod tests {
     use iroh_gossip::proto::DeliveryScope;
 
     use super::{MeshReceiver, TopicItem, spawn_split};
-    use crate::testing::endpoint_id;
+    use crate::testing;
 
     use tokio::sync::mpsc;
     type Mesh = MeshReceiver<BoxStream<'static, TopicItem>>;
@@ -193,13 +193,13 @@ mod tests {
         Event::Received(Message {
             content,
             scope: DeliveryScope::Neighbors,
-            delivered_from: endpoint_id(9),
+            delivered_from: testing::endpoint_id(9),
         })
     }
 
     /// A frame for the node `app`, as the transport of another member puts it on the topic.
     fn frame_for(app: iroh::EndpointId) -> Bytes {
-        Frame::fixture(app, endpoint_id(8), b"datagram")
+        Frame::fixture(app, testing::endpoint_id(8), b"datagram")
             .encode()
             .expect("a frame")
     }
@@ -233,11 +233,11 @@ mod tests {
     /// called for it.
     #[test]
     async fn a_frame_goes_to_the_handle_and_a_mesh_message_to_the_loop() {
-        let handle = GossipHandle::new(endpoint_id(1));
+        let handle = GossipHandle::new(testing::endpoint_id(1));
         let (tx, events) = topic();
         let mut mesh = spawn_split(events, Some(handle.clone()));
 
-        tx.send(Ok(message(frame_for(endpoint_id(1)))))
+        tx.send(Ok(message(frame_for(testing::endpoint_id(1)))))
             .expect("send");
         tx.send(Ok(message(Bytes::from_static(b"a mesh message"))))
             .expect("send");
@@ -257,7 +257,7 @@ mod tests {
     /// `Lagged` raises `topic_lagged` and is still forwarded, so that the loop logs it.
     #[test]
     async fn a_lagged_event_raises_topic_lagged_and_is_forwarded() {
-        let handle = GossipHandle::new(endpoint_id(1));
+        let handle = GossipHandle::new(testing::endpoint_id(1));
         let (tx, events) = topic();
         let mut mesh = spawn_split(events, Some(handle.clone()));
 
@@ -293,7 +293,7 @@ mod tests {
     /// messages wait in order for the loop.
     #[test]
     async fn a_busy_loop_does_not_stop_the_splitter_reading() {
-        let handle = GossipHandle::new(endpoint_id(1));
+        let handle = GossipHandle::new(testing::endpoint_id(1));
         let (tx, events) = topic();
         let mut mesh = spawn_split(events, Some(handle.clone()));
 
@@ -301,7 +301,7 @@ mod tests {
             tx.send(Ok(message(Bytes::from(vec![b'm', index]))))
                 .expect("send");
             for _ in 0..1000 {
-                tx.send(Ok(message(frame_for(endpoint_id(1)))))
+                tx.send(Ok(message(frame_for(testing::endpoint_id(1)))))
                     .expect("send");
             }
         }
@@ -336,17 +336,17 @@ mod tests {
             "mesh message dropped: the queue to the event loop is full",
         );
 
-        let handle = GossipHandle::new(endpoint_id(1));
+        let handle = GossipHandle::new(testing::endpoint_id(1));
         let (tx, events) = topic();
         let mut mesh = spawn_split(events, Some(handle.clone()));
         let storm = MESH_TOPIC_EVENTS_CAP + 100;
 
         for index in 0..storm {
             tx.send(Ok(message(numbered(index)))).expect("send");
-            tx.send(Ok(message(frame_for(endpoint_id(1)))))
+            tx.send(Ok(message(frame_for(testing::endpoint_id(1)))))
                 .expect("send");
         }
-        tx.send(Ok(Event::NeighborDown(endpoint_id(7))))
+        tx.send(Ok(Event::NeighborDown(testing::endpoint_id(7))))
             .expect("send");
         // The loop reads nothing from the mesh meanwhile.
         frames_in(&handle, storm as u64).await;
@@ -418,11 +418,11 @@ mod tests {
         use habilis_network_iroh_gossip_transport::frame::FRAME_KIND;
 
         let mesh = crate::protocol::MeshId::from("test");
-        let author = crate::testing::nick("alice");
+        let author = testing::nick("alice");
         let answer = crate::protocol::Message::new_pong(
             &mesh,
             &author,
-            crate::testing::nick("bob"),
+            testing::nick("bob"),
             &crate::protocol::MessageId::random(),
         )
         .sign(&crate::protocol::Identity::generate());

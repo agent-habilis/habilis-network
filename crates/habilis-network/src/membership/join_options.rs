@@ -369,7 +369,7 @@ pub fn resolve_kind(
 #[cfg(test)]
 mod tests {
     use crate::protocol::{LookupOpts, RelayChoice};
-    use crate::runtime::derive_topic_mesh_with;
+    use crate::runtime;
     use habilis_network_test_tracing::test;
 
     use super::{JoinOptions, Lookup, MeshConfig, SetupKind, Transport, resolve_kind};
@@ -420,7 +420,7 @@ mod tests {
     }
 
     /// The interop assertion. A browser resolving `topic` and a terminal calling
-    /// `derive_topic_mesh_with(s, public_preset())` must land on the same id:
+    /// `runtime::derive_topic_mesh_with(s, public_preset())` must land on the same id:
     /// the derivation mixes the lookups in, so this is not a formality.
     #[test]
     fn a_topic_derives_the_public_preset_mesh() {
@@ -432,7 +432,7 @@ mod tests {
             None,
         )
         .expect("a plain topic string resolves");
-        let expected = derive_topic_mesh_with("standup", LookupOpts::public_preset())
+        let expected = runtime::derive_topic_mesh_with("standup", LookupOpts::public_preset())
             .expect("the same string derives");
         match kind {
             SetupKind::Topic { mesh, topic_string } => {

@@ -2,13 +2,9 @@ use crate::protocol::mesh::LookupOpts;
 
 use iroh::Endpoint;
 
-use super::claim::ensure;
-use super::dependents::foreign_sessions;
-use super::rival_probe::verdict_of;
-use super::rung_ladder::holder_entry;
 use super::{
-    Contest, Rendezvous, RendezvousParams, RivalProbe, probe_verdict, releasable, rendezvous_addr,
-    spawn_rival_probe,
+    Contest, Rendezvous, RendezvousParams, RivalProbe, claim, dependents, probe_verdict,
+    releasable, rendezvous_addr, rival_probe, rung_ladder, spawn_rival_probe,
 };
 use crate::util::clock::Instant;
 use habilis_network_test_tracing::test;
@@ -47,7 +43,7 @@ async fn one_walk_that_meets_a_silent_rung_binds_nothing_and_costs_one_attempt()
     let mut probe = None;
 
     let started = Instant::now();
-    let claimed = ensure(&params, &peer, &book, &mut beacon, false, &mut probe).await;
+    let claimed = claim::ensure(&params, &peer, &book, &mut beacon, false, &mut probe).await;
     let took = started.elapsed();
 
     if let Some(held) = beacon.take() {
@@ -82,7 +78,7 @@ async fn a_walk_that_meets_another_meshs_beacon_binds_the_next_rung_at_once() {
     let mut other_beacon = None;
     let mut other_probe = None;
     assert!(
-        ensure(
+        claim::ensure(
             &other,
             &other_peer,
             &other_book,
@@ -101,7 +97,7 @@ async fn a_walk_that_meets_another_meshs_beacon_binds_the_next_rung_at_once() {
     let mut beacon = None;
     let mut probe = None;
     let started = Instant::now();
-    let claimed = ensure(&params, &peer, &book, &mut beacon, false, &mut probe).await;
+    let claimed = claim::ensure(&params, &peer, &book, &mut beacon, false, &mut probe).await;
     let took = started.elapsed();
 
     if let Some(held) = beacon.take() {
@@ -153,7 +149,7 @@ async fn a_probe_tells_ours_from_foreign_from_no_answer() {
     let mut beacon = None;
     let mut holder_probe = None;
     assert!(
-        ensure(
+        claim::ensure(
             &params,
             &holder,
             &holder_book,
@@ -728,8 +724,7 @@ async fn the_walk_of_a_claim_tick_returns_at_once_on_a_rung_that_says_nothing() 
 /// The second answer used to be `false`, the same as "nothing happened".
 #[test]
 async fn a_walk_that_reads_a_holder_of_our_mesh_says_so() {
-    use super::Held;
-    use super::claim::ensure_holder;
+    use super::{Held, claim};
 
     let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .and_then(|socket| socket.local_addr())
@@ -742,7 +737,7 @@ async fn a_walk_that_reads_a_holder_of_our_mesh_says_so() {
     let first_book = crate::lookup::address_book(&first);
     let mut first_beacon = None;
     let mut first_probe = None;
-    let claimed = ensure_holder(
+    let claimed = claim::ensure_holder(
         &params,
         &first,
         &first_book,
@@ -756,7 +751,7 @@ async fn a_walk_that_reads_a_holder_of_our_mesh_says_so() {
     let second_book = crate::lookup::address_book(&second);
     let mut second_beacon = None;
     let mut second_probe = None;
-    let read = ensure_holder(
+    let read = claim::ensure_holder(
         &params,
         &second,
         &second_book,
@@ -765,7 +760,7 @@ async fn a_walk_that_reads_a_holder_of_our_mesh_says_so() {
         &mut second_probe,
     )
     .await;
-    let held_again = ensure_holder(
+    let held_again = claim::ensure_holder(
         &params,
         &first,
         &first_book,
@@ -812,8 +807,8 @@ fn a_session_of_our_own_endpoints_is_no_dependent() {
     let tab = SecretKey::generate().public();
     let own = [peer, beacon];
 
-    assert_eq!(foreign_sessions(&[peer, beacon], &own).len(), 0);
-    assert_eq!(foreign_sessions(&[peer, tab], &own), [tab]);
+    assert_eq!(dependents::foreign_sessions(&[peer, beacon], &own).len(), 0);
+    assert_eq!(dependents::foreign_sessions(&[peer, tab], &own), [tab]);
 }
 
 /// A real endpoint that touches nothing: `LookupOpts::loopback` binds
@@ -1066,7 +1061,7 @@ async fn a_claim_leaves_the_endpoint_knowing_only_the_rung_it_bound() {
         .expect("the endpoint takes the ladder");
     let mut beacon = None;
 
-    let claimed = super::claim::claim(&params, &peer, &book, &mut beacon).await;
+    let claimed = claim::claim(&params, &peer, &book, &mut beacon).await;
 
     let on = beacon
         .as_ref()
@@ -1133,7 +1128,7 @@ async fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
     let holder_peer = loopback_endpoint().await;
     let holder_book = crate::lookup::address_book(&holder_peer);
     let mut beacon = None;
-    assert!(super::claim::claim(&params, &holder_peer, &holder_book, &mut beacon).await);
+    assert!(claim::claim(&params, &holder_peer, &holder_book, &mut beacon).await);
     let on = beacon
         .as_ref()
         .and_then(|held| held.rung_in(&rungs))
@@ -1142,10 +1137,7 @@ async fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
 
     let member = loopback_endpoint().await;
     let book = crate::lookup::address_book(&member);
-    crate::lookup::replace_peer_addr(
-        &book,
-        super::rung_ladder::rendezvous_holder_addr(&params, stale),
-    );
+    crate::lookup::replace_peer_addr(&book, rung_ladder::rendezvous_holder_addr(&params, stale));
     let (reports, mut arrivals) = mpsc::unbounded_channel();
     let mut rungs_watch = super::RungWatch::new(reports);
     for _ in 0..3 {
@@ -1200,7 +1192,7 @@ async fn a_rung_that_this_member_binds_is_no_longer_foreign() {
     let mut rungs = super::RungWatch::detached();
     rungs.mark_foreign(rung);
 
-    let outcome = super::claim::claim_holder(&params, &peer, &book, &mut beacon, &mut rungs).await;
+    let outcome = claim::claim_holder(&params, &peer, &book, &mut beacon, &mut rungs).await;
 
     if let Some(held) = beacon.take() {
         held.shed_and_wait().await;
@@ -1230,7 +1222,7 @@ fn a_claim_keeps_the_relay_rung_of_the_rendezvous() {
     let book = memory::MemoryLookup::new();
     crate::lookup::add_peer_addr(&book, at(4000));
 
-    crate::lookup::replace_peer_addr(&book, holder_entry(at(5000), &params, &[]));
+    crate::lookup::replace_peer_addr(&book, rung_ladder::holder_entry(at(5000), &params, &[]));
 
     let entry = book
         .get_endpoint_info(params.id)
@@ -1294,8 +1286,11 @@ fn nothing_to_name_is_none_not_a_bare_id() {
 
 #[test]
 fn an_answered_probe_is_taken_at_its_word() {
-    assert!(verdict_of(Ok(true)), "a rival answered");
-    assert!(!verdict_of(Ok(false)), "nobody answered; the id is free");
+    assert!(rival_probe::verdict_of(Ok(true)), "a rival answered");
+    assert!(
+        !rival_probe::verdict_of(Ok(false)),
+        "nobody answered; the id is free"
+    );
     // `RecvError` cannot be constructed here, so the unanswered case is
     // covered end-to-end by `a_probe_whose_task_dies_frees_the_slot_too`.
 }
@@ -1479,7 +1474,7 @@ async fn a_rendezvous_does_not_dial_its_own_peer() {
     let mut beacon = None;
     let mut probe = None;
     assert!(
-        ensure(&params, &peer, &book, &mut beacon, false, &mut probe).await,
+        claim::ensure(&params, &peer, &book, &mut beacon, false, &mut probe).await,
         "a free ladder rung is claimed"
     );
 
@@ -1535,7 +1530,7 @@ async fn a_holder_reaches_its_own_public_rendezvous_without_lookups() {
     let mut beacon = None;
     let mut probe = None;
     assert!(
-        ensure(&params, &peer, &book, &mut beacon, false, &mut probe).await,
+        claim::ensure(&params, &peer, &book, &mut beacon, false, &mut probe).await,
         "a public rendezvous is claimed when no probe is asked for"
     );
     sender
@@ -1592,7 +1587,7 @@ async fn a_member_that_links_to_the_beacon_is_reported_to_its_holder() {
     let mut beacon = None;
     let mut probe = None;
     assert!(
-        ensure(&params, &peer, &book, &mut beacon, false, &mut probe).await,
+        claim::ensure(&params, &peer, &book, &mut beacon, false, &mut probe).await,
         "a public rendezvous is claimed when no probe is asked for"
     );
     sender
@@ -1645,7 +1640,7 @@ async fn ensure_starts_the_probe_instead_of_waiting_for_it() {
     let mut probe = None;
 
     let started = Instant::now();
-    let claimed = ensure(&params, &peer, &book, &mut beacon, true, &mut probe).await;
+    let claimed = claim::ensure(&params, &peer, &book, &mut beacon, true, &mut probe).await;
     let elapsed = started.elapsed();
 
     // The structural assertion, not the clock, is what pins this: a call
@@ -1670,7 +1665,7 @@ async fn ensure_starts_the_probe_instead_of_waiting_for_it() {
     // A second call must not stack a second probe answering the same
     // question at the same cost.
     let before = Instant::now();
-    assert!(!ensure(&params, &peer, &book, &mut beacon, true, &mut probe).await);
+    assert!(!claim::ensure(&params, &peer, &book, &mut beacon, true, &mut probe).await);
     assert!(
         before.elapsed() < std::time::Duration::from_secs(1),
         "and neither must the next tick"

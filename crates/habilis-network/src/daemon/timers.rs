@@ -243,10 +243,8 @@ pub(crate) fn note_tick_gap(
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::fresh_state;
+    use crate::testing;
     use habilis_network_test_tracing::{expect_warn, test};
-
-    use super::warn_on_high_resident_memory;
 
     use crate::gossip::event::CountingSink;
 
@@ -260,10 +258,10 @@ mod tests {
             "resident memory crossed the warn threshold",
         );
         let sink = CountingSink::new();
-        let mut state = fresh_state();
+        let mut state = testing::fresh_state();
 
         // Real resident memory is tens of MiB ≫ 1, so this crosses immediately.
-        warn_on_high_resident_memory(&mut state, &sink, 1);
+        super::warn_on_high_resident_memory(&mut state, &sink, 1);
         assert!(
             state.resident_memory_warned,
             "first crossing latches the warn"
@@ -271,15 +269,15 @@ mod tests {
         assert_eq!(sink.count(), 1, "an info event is emitted on the crossing");
 
         // Second tick: latched, so no second event (no per-tick spam).
-        warn_on_high_resident_memory(&mut state, &sink, 1);
+        super::warn_on_high_resident_memory(&mut state, &sink, 1);
         assert_eq!(sink.count(), 1, "warn fires exactly once per process");
     }
 
     #[test]
     fn resident_memory_warn_disabled_by_zero_threshold() {
         let sink = CountingSink::new();
-        let mut state = fresh_state();
-        warn_on_high_resident_memory(&mut state, &sink, 0);
+        let mut state = testing::fresh_state();
+        super::warn_on_high_resident_memory(&mut state, &sink, 0);
         assert!(
             !state.resident_memory_warned,
             "threshold 0 disables the warn"

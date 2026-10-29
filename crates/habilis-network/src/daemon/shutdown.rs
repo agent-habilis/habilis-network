@@ -22,7 +22,7 @@ use super::state::EventLoopState;
 use crate::gossip::event::NodeEvent;
 use crate::protocol::Message;
 #[cfg(all(unix, feature = "host"))]
-use crate::util::tuning::ppid_watch_interval;
+use crate::util::tuning;
 
 #[cfg(feature = "host")]
 use crate::util::process;
@@ -182,7 +182,7 @@ fn owner_start(pid: u32) -> Result<u64, OwnerPidError> {
     reason = "libc::getppid FFI; no safe wrapper, always succeeds"
 )]
 fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>, owner: Option<Owner>) {
-    let interval = ppid_watch_interval();
+    let interval = tuning::ppid_watch_interval();
     if let Some(owner) = owner {
         tokio::spawn(watch_owner(owner, interval, quit_tx));
         return;

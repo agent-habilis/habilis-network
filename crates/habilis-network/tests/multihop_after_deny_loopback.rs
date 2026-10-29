@@ -30,9 +30,8 @@ use habilis_network::membership::{self, Inbound, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 use habilis_network_iroh_multihop_transport::MultihopCounters;
 use tokio::sync::mpsc::UnboundedReceiver;
-use until_known::until_peer_known;
 
-use habilis_network::net::test_relay;
+use habilis_network::net;
 /// Long enough for the climb to multihop and for the topology to hold the route.
 const STEP_DEADLINE: Duration = Duration::from_mins(3);
 /// The WARN that the underlay logs for a hop that stays on the relay for longer than the stuck limit.
@@ -117,7 +116,7 @@ impl Member {
     /// Refuse every `WebRTC` session with `peer`, on the application endpoint and on the
     /// underlay.
     async fn deny_peer(&self, peer: &str) {
-        until_peer_known(&self.membership, peer, |reply| Request::DenyPeer {
+        until_known::until_peer_known(&self.membership, peer, |reply| Request::DenyPeer {
             peer: peer.to_owned(),
             denied: true,
             reply,
@@ -212,7 +211,7 @@ async fn cut_ip_between(first: &Member, second: &Member) {
 fn a_pair_that_denied_each_other_still_gets_a_message_through_a_third_member() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+        let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let list = vec![Transport::Udp, Transport::WebRtc, Transport::Multihop];
         let alice = Member::create("alice", &relay, list).await;
         let bob = Member::join("bob", &alice).await;

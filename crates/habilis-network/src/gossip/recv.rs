@@ -14,12 +14,11 @@ use iroh_gossip::api::{ApiError, Event};
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
-use crate::lifecycle;
 use crate::lifecycle::membership_update::MembershipUpdate;
-use crate::lookup::add_peer_addr;
 use crate::protocol::message::{Authored, MessageBody, Proof, Verified, WireFrame};
 use crate::protocol::{Channel, ContentHash, Message, MessageKind, Nickname, PresenceSubtype};
 use crate::util::clock::Instant;
+use crate::{lifecycle, lookup};
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
 // `clock::Instant` off wasm32. See `daemon::state`.
 use n0_future::time::Instant as TokioInstant;
@@ -27,7 +26,7 @@ use n0_future::time::Instant as TokioInstant;
 use super::antientropy;
 use super::app::{AppClass, InboundApp, NodeApp};
 use super::merge_ctx::{announce_arrival, broadcast_peer_info};
-use crate::net::conn_path;
+use crate::net;
 
 #[cfg(feature = "multihop")]
 use crate::daemon::event_loop;
@@ -54,7 +53,7 @@ pub(crate) async fn handle_gossip_event(
             ingest(received.content, state, app, ctx).await;
         }
         Some(Ok(Event::NeighborUp(node_id))) => {
-            let (conn, relay) = conn_path(ctx.endpoint, node_id).await;
+            let (conn, relay) = net::conn_path(ctx.endpoint, node_id).await;
             tracing::info!(target: "habilis_network::gossip",
                 local = %ctx.endpoint.id().fmt_short(),
                 endpoint_id = %node_id,
@@ -1568,7 +1567,7 @@ async fn handle_peer_info(message: &Verified, state: &mut EventLoopState, ctx: &
     // it. An address with no entry is not given to it: with none known it would start an
     // Address Lookup and wait for it.
     if first_sighting || changed {
-        add_peer_addr(&state.address_book, peer_addr.clone());
+        lookup::add_peer_addr(&state.address_book, peer_addr.clone());
         state.unicast_pool.note_addr(&peer_addr);
         if !peer_addr.addrs.is_empty() {
             let endpoint = ctx.endpoint.clone();
@@ -1637,7 +1636,7 @@ async fn handle_peer_info(message: &Verified, state: &mut EventLoopState, ctx: &
         && !state.graft_blocked(peer_id, now)
     {
         state.note_relink(peer_id, now);
-        add_peer_addr(&state.address_book, peer_addr.clone());
+        lookup::add_peer_addr(&state.address_book, peer_addr.clone());
         state.unicast_pool.note_addr(&peer_addr);
         // With the relay lookup only, the graft waits for a proven direct
         // path (`transport::probe`); the loop grafts on the probe's verdict.
@@ -1696,19 +1695,19 @@ fn is_loggable(kind: &MessageKind) -> bool {
 
 #[cfg(test)]
 mod arms_reclaim_tests {
-    use super::arms_reclaim;
+
     use habilis_network_test_tracing::test;
 
     #[test]
     fn the_beacon_link_dropping_arms_it() {
-        assert!(arms_reclaim(true, 3, false));
+        assert!(super::arms_reclaim(true, 3, false));
     }
 
     #[test]
     fn losing_the_last_peer_arms_it() {
         // Isolated: nobody left to mesh through, so a beacon may be ours to
         // stand up even if we never held a link to the old one.
-        assert!(arms_reclaim(false, 0, false));
+        assert!(super::arms_reclaim(false, 0, false));
     }
 
     #[test]
@@ -1717,7 +1716,7 @@ mod arms_reclaim_tests {
         // dies, each tab still linked to the other. Not the rendezvous, not
         // isolation — and before this the tab armed nothing and waited out the
         // heal cadence.
-        assert!(arms_reclaim(false, 1, true));
+        assert!(super::arms_reclaim(false, 1, true));
     }
 
     #[test]
@@ -1725,33 +1724,33 @@ mod arms_reclaim_tests {
         // A peer flapping while the beacon link is live is HyParView doing its
         // job. Arming here is what would make initial convergence pay a bind
         // storm on every non-beacon node.
-        assert!(!arms_reclaim(false, 1, false));
-        assert!(!arms_reclaim(false, 64, false));
+        assert!(!super::arms_reclaim(false, 1, false));
+        assert!(!super::arms_reclaim(false, 64, false));
     }
 
     #[test]
     fn a_rendezvous_released_on_purpose_arms_nothing() {
         // Enough links to others, the beacon let go of by choice: the
         // `NeighborDown` it causes is not a loss, and nothing may come back.
-        assert!(!arms_reclaim(false, 3, false));
+        assert!(!super::arms_reclaim(false, 3, false));
     }
 
     #[test]
     fn a_lost_rendezvous_arms_even_when_the_node_wants_none() {
         // It may be dead, and failover needs someone to notice.
-        assert!(arms_reclaim(true, 5, false));
+        assert!(super::arms_reclaim(true, 5, false));
     }
 
     #[test]
     fn a_node_with_enough_links_does_not_arm_for_a_beacon_it_does_not_hold() {
         // Released earlier, and a plain neighbour drops: still no reason to
         // go back to the rendezvous.
-        assert!(!arms_reclaim(false, 3, false));
+        assert!(!super::arms_reclaim(false, 3, false));
     }
 
     #[test]
     fn a_node_below_the_release_count_wants_the_beacon_back() {
-        assert!(arms_reclaim(false, 2, true));
+        assert!(super::arms_reclaim(false, 2, true));
     }
 }
 
@@ -1825,11 +1824,10 @@ mod is_loggable_tests {
 /// the author retains its own presence.
 #[cfg(test)]
 mod retain_own_broadcast_tests {
-    use crate::testing::fresh_state;
+    use crate::testing;
     use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
-    use super::retain_own_broadcast;
     use crate::daemon::message_log::{MissingQuery, WindowRange};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::message::Verified;
@@ -1845,10 +1843,10 @@ mod retain_own_broadcast_tests {
     /// advertise names it.
     #[test]
     fn own_presence_lands_in_the_local_log() {
-        let mut state = fresh_state();
+        let mut state = testing::fresh_state();
         let mine = joined(&state, "me");
         assert_eq!(state.message_log.len(), 0, "log starts empty");
-        retain_own_broadcast(&mut state, &mine);
+        super::retain_own_broadcast(&mut state, &mine);
         assert_eq!(
             state.message_log.len(),
             1,
@@ -1860,12 +1858,12 @@ mod retain_own_broadcast_tests {
     /// sends does not quietly widen what anti-entropy replays.
     #[test]
     fn own_unloggable_plumbing_is_not_retained() {
-        let mut state = fresh_state();
+        let mut state = testing::fresh_state();
         let body = crate::protocol::MessageBody::try_new("{}".to_owned()).expect("valid body");
         let peer_info =
             Message::new_peer_info(&MeshId::from("💬test"), &Nickname::from("me"), body)
                 .sign(&state.identity);
-        retain_own_broadcast(&mut state, &peer_info);
+        super::retain_own_broadcast(&mut state, &peer_info);
         assert_eq!(
             state.message_log.len(),
             0,
@@ -1898,7 +1896,7 @@ mod retain_own_broadcast_tests {
     /// to her on every round.
     #[test]
     fn an_own_app_broadcast_that_the_app_logs_is_retained() {
-        let mut state = fresh_state();
+        let mut state = testing::fresh_state();
         let frame = app_frame(&state, None);
         super::retain_own_app_broadcast(&mut state, &frame, class(true));
         assert_eq!(state.message_log.len(), 1);
@@ -1909,7 +1907,7 @@ mod retain_own_broadcast_tests {
     /// be served).
     #[test]
     fn an_own_app_frame_that_the_app_does_not_log_or_that_is_directed_is_not_retained() {
-        let mut state = fresh_state();
+        let mut state = testing::fresh_state();
         let broadcast = app_frame(&state, None);
         super::retain_own_app_broadcast(&mut state, &broadcast, class(false));
         let directed = app_frame(&state, Some("you"));
@@ -1923,12 +1921,12 @@ mod retain_own_broadcast_tests {
     #[test]
     fn a_peer_offers_nothing_back_against_our_digest() {
         // Us: we broadcast our own `joined`, and receive the peer's.
-        let mut us = fresh_state();
+        let mut us = testing::fresh_state();
         let ours = joined(&us, "us");
-        retain_own_broadcast(&mut us, &ours);
-        let mut them = fresh_state();
+        super::retain_own_broadcast(&mut us, &ours);
+        let mut them = testing::fresh_state();
         let theirs = joined(&them, "them");
-        retain_own_broadcast(&mut them, &theirs);
+        super::retain_own_broadcast(&mut them, &theirs);
         // Each side ingests the other's presence, as gossip delivers it.
         super::push_to_log(&mut us, theirs);
         super::push_to_log(&mut them, ours);
@@ -1966,7 +1964,6 @@ mod evicted_orphan_tests {
     use iroh_gossip::net::Gossip;
     use serde_json::json;
 
-    use super::ingest;
     use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::EventLoopState;
     use crate::doc::Ingested;
@@ -2085,7 +2082,7 @@ mod evicted_orphan_tests {
         // Newest first: every frame but the root arrives as an orphan, so the
         // per-author ceiling evicts the stalest of them before the root lands.
         for frame in frames.iter().rev() {
-            ingest(wire(frame), &mut reader, &mut app, &ctx).await;
+            super::ingest(wire(frame), &mut reader, &mut app, &ctx).await;
         }
         let missing: Vec<&Verified> = (0..frames.len())
             .filter(|&step| !holds(&reader, step))
@@ -2110,7 +2107,7 @@ mod evicted_orphan_tests {
         // What anti-entropy does for a peer whose heads show the gap: re-serve
         // the author's original signed frames.
         for frame in &missing {
-            ingest(wire(frame), &mut reader, &mut app, &ctx).await;
+            super::ingest(wire(frame), &mut reader, &mut app, &ctx).await;
         }
 
         let held = (0..frames.len())
@@ -2619,7 +2616,6 @@ mod first_contact_tests {
     /// where the islands meet.
     #[test]
     async fn an_island_whose_peers_went_silent_comes_back_to_the_rendezvous() {
-        use crate::testing::nick;
         use std::time::Duration;
 
         let node = Node::spawn().await;
@@ -2655,11 +2651,9 @@ mod first_contact_tests {
     /// carries it but is signed by another key must bind nothing.
     #[test]
     async fn a_peer_info_binds_its_signer_only_with_the_endpoints_proof() {
-        use crate::protocol::AuthorKey;
-        use crate::protocol::identity::encode_pubkey;
         use crate::protocol::message::MessageBody;
-        use crate::protocol::peer_addr_error::endpoint_addr_to_json;
-        use crate::transport::proven_endpoints::sign;
+        use crate::protocol::{AuthorKey, identity, peer_addr_error};
+        use crate::transport::proven_endpoints;
 
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2667,21 +2661,23 @@ mod first_contact_tests {
         let bob_endpoint = bob_endpoint_key.public();
         let bob = Identity::generate();
         let stranger = Identity::generate();
-        let bob_signer = AuthorKey::from_hex(&encode_pubkey(&bob.public())).expect("a 32-byte key");
+        let bob_signer =
+            AuthorKey::from_hex(&identity::encode_pubkey(&bob.public())).expect("a 32-byte key");
         let peer_info = |proof: Option<&str>, signed_by: &Identity| {
-            let mut json = endpoint_addr_to_json(&iroh::EndpointAddr::new(bob_endpoint));
+            let mut json =
+                peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(bob_endpoint));
             if let Some(proof) = proof {
                 json["proof"] = serde_json::Value::String(proof.to_owned());
             }
             let body = MessageBody::try_new(json.to_string()).expect("an address body");
             Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(signed_by)
         };
-        let bobs_proof = sign(&bob_endpoint_key, &node.mesh, &bob_signer);
+        let bobs_proof = proven_endpoints::sign(&bob_endpoint_key, &node.mesh, &bob_signer);
 
         let mut state = fresh_state();
         super::handle_peer_info(&peer_info(Some(&bobs_proof), &stranger), &mut state, &ctx).await;
-        let stranger_signer =
-            AuthorKey::from_hex(&encode_pubkey(&stranger.public())).expect("a 32-byte key");
+        let stranger_signer = AuthorKey::from_hex(&identity::encode_pubkey(&stranger.public()))
+            .expect("a 32-byte key");
         assert_eq!(
             state.proven_endpoints.get(&stranger_signer),
             None,
@@ -2709,7 +2705,7 @@ mod first_contact_tests {
         use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
         use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 
-        use crate::protocol::peer_addr_error::endpoint_addr_to_json;
+        use crate::protocol::peer_addr_error;
 
         async fn handle_for(secret: &SecretKey) -> MultihopHandle {
             let underlay = Endpoint::builder(presets::Minimal)
@@ -2748,7 +2744,8 @@ mod first_contact_tests {
         );
         assert!(ours.topology_view().edges.is_empty());
 
-        let address = endpoint_addr_to_json(&EndpointAddr::new(author_key.public()));
+        let address =
+            peer_addr_error::endpoint_addr_to_json(&EndpointAddr::new(author_key.public()));
         let address_body = MessageBody::try_new(address.to_string()).expect("an address body");
         let peer_info = Message::new_peer_info(&node.mesh, &nick("alice-aa"), address_body)
             .sign(&Identity::generate());
@@ -2846,10 +2843,10 @@ mod first_contact_tests {
     /// A `PeerInfo` of the author `bob` that carries `addr`.
     fn peer_info(node: &Node, addr: &iroh::EndpointAddr) -> Verified {
         use crate::protocol::message::MessageBody;
-        use crate::protocol::peer_addr_error::endpoint_addr_to_json;
+        use crate::protocol::peer_addr_error;
 
-        let body =
-            MessageBody::try_new(endpoint_addr_to_json(addr).to_string()).expect("an address body");
+        let body = MessageBody::try_new(peer_addr_error::endpoint_addr_to_json(addr).to_string())
+            .expect("an address body");
         Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&Identity::generate())
     }
 
@@ -2883,7 +2880,7 @@ mod first_contact_tests {
     #[test]
     async fn a_second_peer_info_right_after_a_deferred_dial_does_not_dial() {
         use crate::protocol::message::MessageBody;
-        use crate::protocol::peer_addr_error::endpoint_addr_to_json;
+        use crate::protocol::peer_addr_error;
 
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2895,7 +2892,7 @@ mod first_contact_tests {
             }
         };
         let body = MessageBody::try_new(
-            endpoint_addr_to_json(&iroh::EndpointAddr::new(lower)).to_string(),
+            peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(lower)).to_string(),
         )
         .expect("an address body");
         let peer_info =
@@ -2930,7 +2927,7 @@ mod first_contact_tests {
     #[test]
     async fn a_peer_info_leaves_one_slot_free_in_a_mesh_larger_than_g_plus_one() {
         use crate::protocol::message::MessageBody;
-        use crate::protocol::peer_addr_error::endpoint_addr_to_json;
+        use crate::protocol::peer_addr_error;
 
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2943,7 +2940,7 @@ mod first_contact_tests {
             }
         };
         let body = MessageBody::try_new(
-            endpoint_addr_to_json(&iroh::EndpointAddr::new(newcomer)).to_string(),
+            peer_addr_error::endpoint_addr_to_json(&iroh::EndpointAddr::new(newcomer)).to_string(),
         )
         .expect("an address body");
         let peer_info =
@@ -3129,7 +3126,6 @@ mod link_state_tests {
     use iroh::endpoint::presets;
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 
-    use super::handle_link_state;
     use crate::protocol::{MeshId, Message};
     use crate::testing::{fresh_state, nick};
 
@@ -3188,7 +3184,7 @@ mod link_state_tests {
             Message::new_link_state(&MeshId::from("test"), &nick(author), body.clone())
         };
 
-        handle_link_state(&message_from("alice-aa"), &mut state);
+        super::handle_link_state(&message_from("alice-aa"), &mut state);
         assert!(
             ours.topology_view().edges.is_empty(),
             "no address learned for the author yet"
@@ -3197,7 +3193,7 @@ mod link_state_tests {
         state
             .peer_endpoints
             .insert(nick("mallory-mm"), EndpointAddr::new(bob.public()));
-        handle_link_state(&message_from("mallory-mm"), &mut state);
+        super::handle_link_state(&message_from("mallory-mm"), &mut state);
         assert!(
             ours.topology_view().edges.is_empty(),
             "an author bound to another endpoint cannot speak for this origin"
@@ -3206,7 +3202,7 @@ mod link_state_tests {
         state
             .peer_endpoints
             .insert(nick("alice-aa"), EndpointAddr::new(alice.public()));
-        handle_link_state(&message_from("alice-aa"), &mut state);
+        super::handle_link_state(&message_from("alice-aa"), &mut state);
         assert_eq!(
             ours.topology_view().edges.len(),
             1,
@@ -3365,7 +3361,7 @@ mod left_tests {
             HandleConfig, MultihopHandle, underlay_secret,
         };
 
-        use crate::daemon::event_loop::linkstate_arm;
+        use crate::daemon::event_loop;
 
         let lookups = LookupOpts::loopback();
         let (endpoint, peer_handle, _webrtc) = build_peer_multihop(
@@ -3437,7 +3433,7 @@ mod left_tests {
 
         // The leaver says nothing more: wait out the max age, then tick.
         tokio::time::sleep(Duration::from_millis(900)).await;
-        linkstate_arm(&mut state, &ctx).await;
+        event_loop::linkstate_arm(&mut state, &ctx).await;
         assert!(
             !advertises(&handle),
             "the stale links are still in the routing table of a node that is not meshed"
@@ -3454,7 +3450,6 @@ mod left_tests {
 mod requeue_tests {
     use habilis_network_test_tracing::test;
 
-    use super::requeue;
     use crate::testing::{LaneNode, nick};
 
     use crate::util::clock;
@@ -3478,7 +3473,12 @@ mod requeue_tests {
             crate::transport::resolve(&frame, bytes.clone(), &state)
                 .expect_err("no endpoint is known for bob yet"),
         );
-        assert!(requeue(&mut state, &ctx, frame.clone(), bytes.clone()));
+        assert!(super::requeue(
+            &mut state,
+            &ctx,
+            frame.clone(),
+            bytes.clone()
+        ));
         assert!(!state.lane_session_wanted(node.bob, now), "bob is unknown");
         assert_eq!(state.webrtc_admission.in_flight(), 0);
 
@@ -3487,7 +3487,7 @@ mod requeue_tests {
             crate::transport::resolve(&frame, bytes.clone(), &state)
                 .expect_err("a lookup-only relay holds the frame"),
         );
-        assert!(requeue(&mut state, &ctx, frame, bytes));
+        assert!(super::requeue(&mut state, &ctx, frame, bytes));
 
         assert!(
             state.lane_session_wanted(node.bob, now),
@@ -3510,7 +3510,6 @@ mod parked_link_state_tests {
     use iroh::endpoint::presets;
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 
-    use super::handle_link_state;
     use crate::daemon::state::ParkedLinkStates;
     use crate::protocol::{MeshId, Message};
     use crate::testing::{fresh_state, nick};
@@ -3564,7 +3563,7 @@ mod parked_link_state_tests {
         state.multihop = Some(ours.clone());
 
         let message = vector_message("mallory-mm", &theirs, vec![(bob.public(), 10)]);
-        handle_link_state(&message, &mut state);
+        super::handle_link_state(&message, &mut state);
         state.bind_peer_endpoint(nick("mallory-mm"), EndpointAddr::new(bob.public()));
         assert!(
             ours.topology_view().edges.is_empty(),
@@ -3592,8 +3591,8 @@ mod parked_link_state_tests {
             &theirs,
             vec![(bob.public(), 10), (carol.public(), 10)],
         );
-        handle_link_state(&older, &mut state);
-        handle_link_state(&newer, &mut state);
+        super::handle_link_state(&older, &mut state);
+        super::handle_link_state(&newer, &mut state);
         state.bind_peer_endpoint(nick("alice-aa"), EndpointAddr::new(alice.public()));
         assert_eq!(
             ours.topology_view().edges.len(),

@@ -55,7 +55,7 @@ use super::handler_ctx::HandlerCtx;
 use super::heal::{GossipLink, ResubscribeEnv, apply_rung_change, resubscribe_tick, run_heal};
 use super::node::SignalHandling;
 #[cfg(feature = "host")]
-use super::shutdown::spawn_quit_signal_tasks;
+use super::shutdown;
 use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure, never_quit};
 use super::state::{EventLoopState, MeshSecrets};
 use super::timers;
@@ -179,7 +179,7 @@ async fn run_checked<Driver: NodeDriver>(
             StateFile::new(path, &mesh_str, &author, &mesh_name)
                 .with_base(runtime_base.clone())
                 .with_topic(topic_string.as_deref())
-                .with_owner_pid(owner.map(super::shutdown::Owner::pid))
+                .with_owner_pid(owner.map(shutdown::Owner::pid))
         });
     #[cfg(not(feature = "host"))]
     drop(state_file);
@@ -366,7 +366,7 @@ async fn run_checked<Driver: NodeDriver>(
     // case: there are no process signals to listen for.
     #[cfg(feature = "host")]
     let quit_rx = if handle_signals == SignalHandling::Handle {
-        spawn_quit_signal_tasks(exit_on_quit, owner)
+        shutdown::spawn_quit_signal_tasks(exit_on_quit, owner)
     } else {
         never_quit()
     };
@@ -1441,12 +1441,10 @@ mod tests {
 
     use tokio::sync::oneshot;
 
-    use super::closed_opt;
-
     /// The wake for the close of a shed beacon: pending with no shed, ready when the close reports,
     /// ready when the close task is lost.
     async fn wakes_within_a_moment(closing: &mut Option<oneshot::Receiver<()>>) -> bool {
-        n0_future::time::timeout(Duration::from_millis(100), closed_opt(closing))
+        n0_future::time::timeout(Duration::from_millis(100), super::closed_opt(closing))
             .await
             .is_ok()
     }
@@ -1692,8 +1690,6 @@ mod advertised_links_tests {
 
     use iroh::{EndpointId, SecretKey};
 
-    use super::advertised_links;
-
     fn id(seed: u8) -> EndpointId {
         SecretKey::from_bytes(&[seed; 32]).public()
     }
@@ -1710,21 +1706,21 @@ mod advertised_links_tests {
     #[test]
     fn a_member_with_a_held_session_and_no_gossip_link_is_an_edge() {
         let linked = HashSet::from([id(1)]);
-        let links = advertised_links(&linked, &[id(2)], 10);
+        let links = super::advertised_links(&linked, &[id(2)], 10);
         assert_eq!(sorted(links), sorted(vec![(id(1), 10), (id(2), 10)]));
     }
 
     #[test]
     fn a_member_that_is_linked_and_held_is_one_edge() {
         let linked = HashSet::from([id(1)]);
-        let links = advertised_links(&linked, &[id(1)], 10);
+        let links = super::advertised_links(&linked, &[id(1)], 10);
         assert_eq!(links, vec![(id(1), 10)]);
     }
 
     #[test]
     fn with_no_held_session_the_edges_are_the_gossip_links() {
         let linked = HashSet::from([id(1), id(2)]);
-        let links = advertised_links(&linked, &[], 100);
+        let links = super::advertised_links(&linked, &[], 100);
         assert_eq!(sorted(links), sorted(vec![(id(1), 100), (id(2), 100)]));
     }
 }

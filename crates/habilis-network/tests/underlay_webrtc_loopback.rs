@@ -17,9 +17,8 @@ use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{self, Inbound, Membership, Request, Rung};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
-use until_known::until_peer_known;
 
-use habilis_network::net::test_relay;
+use habilis_network::net;
 /// Long enough for an ICE round on the application pair, then for the alive tick
 /// that offers the underlay session, then for a second ICE round.
 const STEP_DEADLINE: Duration = Duration::from_mins(3);
@@ -117,7 +116,7 @@ impl Member {
     }
 
     async fn block_rung_to(&self, rung: Rung, peer: &str, blocked: bool) {
-        until_peer_known(&self.membership, peer, |reply| Request::BlockRungTo {
+        until_known::until_peer_known(&self.membership, peer, |reply| Request::BlockRungTo {
             rung,
             peer: peer.to_owned(),
             blocked,
@@ -249,7 +248,7 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
 fn the_underlay_opens_a_webrtc_session_to_a_neighbor_that_has_no_ip_path() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+        let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
         let bob = Member::join("bob", &alice).await;
         assert!(
@@ -358,7 +357,7 @@ async fn cut_webrtc_between_alice_and_bob(alice: &Member, bob: &Member) {
 fn the_underlay_opens_a_session_to_carol_when_only_the_application_ip_is_cut() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+        let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let (alice, bob, carol) = three_members(&relay).await;
         cut_application_ip_from_alice(&alice, &bob, &carol).await;
         alice
@@ -384,7 +383,7 @@ fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member() {
     let guard = habilis_network_test_tracing::init();
     guard.expect_warn(STAYS_ON_RELAY.0, STAYS_ON_RELAY.1);
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+        let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let (alice, mut bob, carol) = three_members(&relay).await;
         let run_started = Instant::now();
 

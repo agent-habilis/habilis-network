@@ -1,8 +1,7 @@
 use iroh::address_lookup::memory;
 use iroh::{Endpoint, EndpointId};
 
-use super::claim::claim_holder;
-use super::{Held, Rendezvous, RendezvousParams, RungWatch};
+use super::{Held, Rendezvous, RendezvousParams, RungWatch, claim};
 
 /// Two holders of one beacon: this node and a rival that it has read. One struct for the pair,
 /// because both are an `EndpointId` and a swap compiles and flips the answer.
@@ -41,7 +40,7 @@ pub(crate) async fn claim_after_probe(
     if !releasable(current) {
         return false;
     }
-    claim_holder(params, peer, peer_book, current, rungs).await == Held::Claimed
+    claim::claim_holder(params, peer, peer_book, current, rungs).await == Held::Claimed
 }
 
 /// Whether the beacon slot is free to (re)claim: empty, or holding a

@@ -601,7 +601,6 @@ mod tests {
     /// case answers on gossip as before.
     #[test]
     fn a_digest_answer_goes_point_to_point_only_to_a_linked_neighbor() {
-        use super::unicast_answer_target;
         let bob = endpoint_id(1);
         let bob_key = "bb".repeat(32);
         let carol_key = "cc".repeat(32);
@@ -615,30 +614,33 @@ mod tests {
             state
         };
 
-        assert_eq!(unicast_answer_target(&bob_signer, &linked()), Some(bob));
         assert_eq!(
-            unicast_answer_target(&carol_signer, &linked()),
+            super::unicast_answer_target(&bob_signer, &linked()),
+            Some(bob)
+        );
+        assert_eq!(
+            super::unicast_answer_target(&carol_signer, &linked()),
             None,
             "no known endpoint"
         );
         let mut rendezvous = linked();
         rendezvous.rendezvous_id = Some(bob);
         assert_eq!(
-            unicast_answer_target(&bob_signer, &rendezvous),
+            super::unicast_answer_target(&bob_signer, &rendezvous),
             None,
             "the rendezvous pseudo-node"
         );
         let mut held = linked();
         held.direct.remove(&bob);
         assert_eq!(
-            unicast_answer_target(&bob_signer, &held),
+            super::unicast_answer_target(&bob_signer, &held),
             None,
             "no proven direct path on a lookup-only relay"
         );
         let mut unlinked = linked();
         unlinked.linked_endpoints.remove(&bob);
         assert_eq!(
-            unicast_answer_target(&bob_signer, &unlinked),
+            super::unicast_answer_target(&bob_signer, &unlinked),
             None,
             "known but not a gossip neighbor"
         );
@@ -803,7 +805,7 @@ mod tests {
     /// that cost a serve at each turn. The receiver only asks back.
     #[test]
     async fn the_heads_that_close_an_answer_draw_no_answer() {
-        use crate::gossip::antientropy::handle_state_digest;
+        use crate::gossip::antientropy;
         use crate::protocol::Channel;
 
         let (bob_endpoint, _bob_sender) = loopback_node().await;
@@ -818,7 +820,9 @@ mod tests {
         let closing =
             Message::new_channel_digest(&net.mesh, &nick("bob"), body, Channel::State).sign(&bob);
 
-        let answered = handle_state_digest(Channel::State, &closing, &mut state, &net.ctx()).await;
+        let answered =
+            antientropy::handle_state_digest(Channel::State, &closing, &mut state, &net.ctx())
+                .await;
         assert_eq!(
             answered.unicast + answered.broadcast,
             0,
@@ -838,7 +842,7 @@ mod tests {
     /// heads we do not hold, where we cannot tell what it has.
     #[test]
     async fn a_peer_is_not_sent_its_own_changes() {
-        use crate::gossip::antientropy::handle_state_digest;
+        use crate::gossip::antientropy;
         use crate::protocol::Channel;
 
         let (bob_endpoint, _bob_sender) = loopback_node().await;
@@ -849,8 +853,13 @@ mod tests {
         let unknown = serde_json::json!(["heads-we-do-not-hold"]);
         let from_the_author = digest(&net.mesh, Channel::State, &unknown, &author);
 
-        let answered =
-            handle_state_digest(Channel::State, &from_the_author, &mut state, &net.ctx()).await;
+        let answered = antientropy::handle_state_digest(
+            Channel::State,
+            &from_the_author,
+            &mut state,
+            &net.ctx(),
+        )
+        .await;
         assert_eq!(
             answered.unicast + answered.broadcast,
             0,
@@ -864,7 +873,7 @@ mod tests {
     /// what that peer lacks, so we over-serve rather than under-serve.
     #[test]
     async fn a_third_peer_with_unknown_heads_gets_every_change() {
-        use crate::gossip::antientropy::handle_state_digest;
+        use crate::gossip::antientropy;
         use crate::protocol::Channel;
 
         let (bob_endpoint, _bob_sender) = loopback_node().await;
@@ -877,7 +886,9 @@ mod tests {
 
         // The plane does not matter here: our ask back to the peer is still
         // dialing, so the answer may take gossip.
-        let answered = handle_state_digest(Channel::State, &request, &mut state, &net.ctx()).await;
+        let answered =
+            antientropy::handle_state_digest(Channel::State, &request, &mut state, &net.ctx())
+                .await;
         assert_eq!(answered.unicast + answered.broadcast, 3);
         bob_endpoint.close().await;
         net.endpoint.close().await;
@@ -975,7 +986,7 @@ mod tests {
     /// at once only after a full answer landed since the last ask.
     #[test]
     async fn a_partial_answer_does_not_ask_the_round_peer_again_at_once() {
-        use crate::gossip::antientropy::handle_state_digest;
+        use crate::gossip::antientropy;
         use crate::protocol::Channel;
 
         let (bob_endpoint, _bob_sender) = loopback_node().await;
@@ -1018,12 +1029,12 @@ mod tests {
             .expect("the dial to bob completes")
             .expect("bob's task reports the connection");
 
-        handle_state_digest(Channel::State, &ahead, &mut state, &ctx).await;
+        antientropy::handle_state_digest(Channel::State, &ahead, &mut state, &ctx).await;
         let first = state.fast_rounds.asked_heads(Channel::State);
         assert!(first.is_some(), "bob is ahead, so we ask him");
 
         apply_one(&mut state, &net.mesh, 100);
-        handle_state_digest(Channel::State, &ahead, &mut state, &ctx).await;
+        antientropy::handle_state_digest(Channel::State, &ahead, &mut state, &ctx).await;
         assert_eq!(
             state.fast_rounds.asked_heads(Channel::State),
             first,
@@ -1033,7 +1044,7 @@ mod tests {
         for step in 101..101 + tuning::antientropy_max_resend() {
             apply_one(&mut state, &net.mesh, step);
         }
-        handle_state_digest(Channel::State, &ahead, &mut state, &ctx).await;
+        antientropy::handle_state_digest(Channel::State, &ahead, &mut state, &ctx).await;
         assert_ne!(
             state.fast_rounds.asked_heads(Channel::State),
             first,
@@ -1055,7 +1066,7 @@ mod tests {
     /// `budget_tests::the_serve_budget_takes_new_heads_up_to_its_count`.
     #[test]
     async fn after_a_failed_batch_the_asker_is_answered_again_on_gossip() {
-        use crate::gossip::antientropy::handle_state_digest;
+        use crate::gossip::antientropy;
         use crate::protocol::Channel;
 
         // Linked and known by nickname, but with no address to dial: the
@@ -1068,7 +1079,8 @@ mod tests {
         prove_identity(&mut state, &asker, unreachable.id);
         let behind = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
-        let first = handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
+        let first =
+            antientropy::handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
         assert_eq!(
             first.unicast, 3,
             "handed to the pool as a point-to-point batch"
@@ -1076,7 +1088,8 @@ mod tests {
 
         tokio::time::sleep(tuning::FAST_ROUND_MIN_INTERVAL + std::time::Duration::from_millis(50))
             .await;
-        let again = handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
+        let again =
+            antientropy::handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
         assert_eq!(
             again,
             antientropy::Answered {
@@ -1112,7 +1125,7 @@ mod tests {
     /// checked before the missing-frames query, which this test cannot see.)
     #[test]
     async fn a_digest_with_nothing_missing_does_not_use_the_serve() {
-        use crate::gossip::antientropy::handle_state_digest;
+        use crate::gossip::antientropy;
         use crate::protocol::Channel;
 
         let (bob_endpoint, _bob_sender) = loopback_node().await;
@@ -1124,9 +1137,10 @@ mod tests {
         let up_to_date = digest(&net.mesh, Channel::State, &current, &asker);
         let behind = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
-        let nothing = handle_state_digest(Channel::State, &up_to_date, &mut state, &ctx).await;
+        let nothing =
+            antientropy::handle_state_digest(Channel::State, &up_to_date, &mut state, &ctx).await;
         assert_eq!(nothing.broadcast + nothing.unicast, 0, "nothing is missing");
-        let gap = handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
+        let gap = antientropy::handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
         assert_eq!(gap.broadcast, 3, "the gap is served inside the window");
         bob_endpoint.close().await;
         net.endpoint.close().await;

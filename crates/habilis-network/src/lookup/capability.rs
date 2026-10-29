@@ -6,9 +6,7 @@ use anyhow::Result;
 use iroh::Watcher;
 
 use crate::protocol::mesh::LookupOpts;
-use crate::util::clock::millis_saturating;
-
-use super::build_peer_endpoint;
+use crate::util::clock;
 
 pub use network_capability::NetworkCapability;
 
@@ -26,7 +24,7 @@ pub async fn probe(timeout: Duration) -> Result<NetworkCapability, super::Endpoi
 }
 
 async fn probe_checked(timeout: Duration) -> Result<NetworkCapability> {
-    let endpoint = build_peer_endpoint(&LookupOpts::public_preset()).await?;
+    let endpoint = super::build_peer_endpoint(&LookupOpts::public_preset()).await?;
     let node_id = endpoint.id().to_string();
     let local_addrs = endpoint.bound_sockets();
 
@@ -48,7 +46,7 @@ async fn probe_checked(timeout: Duration) -> Result<NetworkCapability> {
                     .filter(|(_, relay, _)| *relay == url)
                     .map(|(_, _, latency)| latency)
                     .min()
-                    .map(millis_saturating)
+                    .map(clock::millis_saturating)
             });
             NetworkCapability {
                 node_id,

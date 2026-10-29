@@ -55,8 +55,7 @@ fn only_our_tag_is_a_member_of_our_mesh() {
 fn the_forwarder_passes_news_only() {
     use std::collections::HashMap;
 
-    use super::LanEvent;
-    use super::mdns::news_only;
+    use super::{LanEvent, mdns};
 
     let id = iroh::SecretKey::generate().public();
     let stranger = iroh::SecretKey::generate().public();
@@ -69,25 +68,25 @@ fn the_forwarder_passes_news_only() {
     let mut known = HashMap::new();
 
     assert_eq!(
-        news_only(LanEvent::Gone(stranger), &mut known),
+        mdns::news_only(LanEvent::Gone(stranger), &mut known),
         None,
         "a Gone for an id never passed ends here"
     );
-    assert!(news_only(LanEvent::Seen(at(1)), &mut known).is_some());
+    assert!(mdns::news_only(LanEvent::Seen(at(1)), &mut known).is_some());
     assert_eq!(
-        news_only(LanEvent::Seen(at(1)), &mut known),
+        mdns::news_only(LanEvent::Seen(at(1)), &mut known),
         None,
         "the same record again is the refresh, not news"
     );
     assert!(
-        news_only(LanEvent::Seen(at(2)), &mut known).is_some(),
+        mdns::news_only(LanEvent::Seen(at(2)), &mut known).is_some(),
         "a changed record is news"
     );
     assert_eq!(
-        news_only(LanEvent::Gone(id), &mut known),
+        mdns::news_only(LanEvent::Gone(id), &mut known),
         Some(LanEvent::Gone(id))
     );
-    assert_eq!(news_only(LanEvent::Gone(id), &mut known), None);
+    assert_eq!(mdns::news_only(LanEvent::Gone(id), &mut known), None);
 }
 
 /// R3: two members of one mesh and a stranger of another, all on the LAN with mDNS and no
@@ -572,7 +571,7 @@ async fn only_the_member_endpoint_has_the_gossip_handle() {
 #[cfg(feature = "host")]
 #[test]
 async fn the_member_of_a_udp_and_gossip_list_keeps_ip_above_gossip() {
-    use habilis_network_iroh_gossip_transport::gossip_addr;
+    use habilis_network_iroh_gossip_transport;
     use std::time::Duration;
 
     use iroh::protocol::{AcceptError, ProtocolHandler};
@@ -613,7 +612,9 @@ async fn the_member_of_a_udp_and_gossip_list_keeps_ip_above_gossip() {
         .addr()
         .addrs
         .into_iter()
-        .chain([iroh::TransportAddr::Custom(gossip_addr(bob.id()))]);
+        .chain([iroh::TransportAddr::Custom(
+            habilis_network_iroh_gossip_transport::gossip_addr(bob.id()),
+        )]);
     let connection = alice
         .connect(iroh::EndpointAddr::from_parts(bob.id(), both), ALPN)
         .await

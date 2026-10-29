@@ -49,7 +49,7 @@ use habilis_network::membership::{
 };
 use habilis_network::protocol::{Lookup, Nickname, Transport};
 use habilis_network::runtime::{Node, SetupParams, SignalHandling, setup_mesh};
-use habilis_network::util::resident_memory::current_resident_memory_mb;
+use habilis_network::util::resident_memory;
 use tokio::sync::{mpsc, oneshot};
 
 use habilis_network::net::test_relay;
@@ -313,7 +313,7 @@ async fn main() -> anyhow::Result<()> {
                 if blocked { 2 } else { 1 },
                 nicks.len(),
                 webrtc.session_count(),
-                current_resident_memory_mb().unwrap_or(0),
+                resident_memory::current_resident_memory_mb().unwrap_or(0),
                 redials[0],
                 redials[1],
                 redials[2],

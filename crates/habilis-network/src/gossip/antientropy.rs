@@ -41,8 +41,6 @@ use crate::util::tuning::{
     ANTIENTROPY_ANSWERERS, ANTIENTROPY_DIGEST_WINDOW_IDS, antientropy_max_resend,
 };
 
-use super::broadcast_msg;
-
 use std::collections::hash_map;
 
 pub(crate) use answered::Answered;
@@ -162,7 +160,7 @@ pub(crate) async fn broadcast_digest(
     };
     tracing::trace!(ids = total_ids, "anti-entropy digest broadcast");
     state.idle.broadcasts += 1;
-    broadcast_msg(
+    super::broadcast_msg(
         sender,
         &Message::new_digest(mesh, author, body).sign(&state.identity),
     )
@@ -418,7 +416,7 @@ async fn broadcast_state_digest(
     };
     state.idle.broadcasts += 1;
     tracing::debug!(me = %origin.author, ?channel, heads = heads_key(&digest), ?trigger, "broadcast a state digest on gossip");
-    broadcast_msg(sender, &digest).await;
+    super::broadcast_msg(sender, &digest).await;
 }
 
 /// The signed heads digest for `channel`, or `None` while no gossip path can

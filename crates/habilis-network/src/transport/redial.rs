@@ -13,7 +13,7 @@ mod track;
 #[cfg(test)]
 mod tests {
     use super::track::Track;
-    use crate::testing::endpoint_id;
+    use crate::testing;
     use crate::util::clock::Instant;
     use habilis_network_test_tracing::test;
     use std::time::Duration;
@@ -24,7 +24,7 @@ mod tests {
 
     #[test]
     fn a_connection_that_comes_back_soon_after_a_close_is_a_redial() {
-        let (mut track, peer, start) = (Track::default(), endpoint_id(1), Instant::now());
+        let (mut track, peer, start) = (Track::default(), testing::endpoint_id(1), Instant::now());
         track.observe(start, peer, true);
         track.observe(after(start, 130), peer, false);
         track.observe(after(start, 190), peer, true);
@@ -33,7 +33,7 @@ mod tests {
 
     #[test]
     fn a_connection_that_comes_back_after_the_window_is_not_a_redial() {
-        let (mut track, peer, start) = (Track::default(), endpoint_id(1), Instant::now());
+        let (mut track, peer, start) = (Track::default(), testing::endpoint_id(1), Instant::now());
         track.observe(start, peer, true);
         track.observe(after(start, 130), peer, false);
         track.observe(after(start, 130 + 301), peer, true);
@@ -42,7 +42,7 @@ mod tests {
 
     #[test]
     fn the_first_connection_of_a_peer_is_not_a_redial() {
-        let (mut track, peer, start) = (Track::default(), endpoint_id(1), Instant::now());
+        let (mut track, peer, start) = (Track::default(), testing::endpoint_id(1), Instant::now());
         track.observe(start, peer, true);
         track.observe(after(start, 1), peer, true);
         assert_eq!((track.closes(), track.redials()), (0, 0));
@@ -51,7 +51,7 @@ mod tests {
     #[test]
     fn each_peer_is_counted_on_its_own() {
         let (mut track, start) = (Track::default(), Instant::now());
-        let (one, two) = (endpoint_id(1), endpoint_id(2));
+        let (one, two) = (testing::endpoint_id(1), testing::endpoint_id(2));
         track.observe(start, one, true);
         track.observe(start, two, true);
         track.observe(after(start, 10), one, false);

@@ -15,7 +15,7 @@ pub(crate) use warm_send::WarmSend;
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::endpoint_id;
+    use crate::testing;
     use crate::util::clock::Instant;
     use habilis_network_test_tracing::test;
     use std::time::Duration;
@@ -29,25 +29,25 @@ mod tests {
     #[test]
     fn a_fresh_failure_puts_the_endpoint_on_cooldown() {
         let mut failures = Cooldown::new(DIAL_FAILURE_COOLDOWN);
-        let bob = endpoint_id(1);
+        let bob = testing::endpoint_id(1);
         let now = Instant::now();
         failures.note(bob, now);
         assert!(failures.on_cooldown(&bob, now));
         // Another endpoint is unaffected.
-        assert!(!failures.on_cooldown(&endpoint_id(2), now));
+        assert!(!failures.on_cooldown(&testing::endpoint_id(2), now));
     }
 
     #[test]
     fn an_expired_failure_allows_the_dial_and_is_pruned() {
         let mut failures = Cooldown::new(DIAL_FAILURE_COOLDOWN);
-        let bob = endpoint_id(1);
+        let bob = testing::endpoint_id(1);
         let failed_at = Instant::now();
         failures.note(bob, failed_at);
         let later = failed_at + DIAL_FAILURE_COOLDOWN + Duration::from_millis(1);
         assert!(!failures.on_cooldown(&bob, later));
         // Pruning happens on the next write rather than on the read, so the
         // table still cannot grow without bound.
-        failures.note(endpoint_id(2), later);
+        failures.note(testing::endpoint_id(2), later);
         assert_eq!(
             failures.len(),
             1,
@@ -599,7 +599,7 @@ mod tests {
     #[test]
     async fn forget_clears_the_cooldown_and_tolerates_absence() {
         let pool = super::UnicastPool::disconnected();
-        let bob = endpoint_id(1);
+        let bob = testing::endpoint_id(1);
         pool.inner
             .dial_failures
             .lock()
@@ -611,7 +611,7 @@ mod tests {
         assert!(pool.inner.dial_failures.lock().await.is_empty());
         assert!(pool.inner.conns.lock().await.is_empty());
         // Absent endpoint: nothing to drop, nothing panics.
-        pool.forget(endpoint_id(2)).await;
+        pool.forget(testing::endpoint_id(2)).await;
     }
 
     /// A send over a pooled connection is a use of it: the ledger of the ceiling moves its
