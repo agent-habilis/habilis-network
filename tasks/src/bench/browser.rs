@@ -170,7 +170,7 @@ impl Browser<'_> {
             let negotiate_ms = negotiate(&client, &server_tab)?;
             server_tab.call("serve()")?;
             let samples = rounds(&client, &server_tab.id, args, message)?;
-            Measured::from_samples(negotiate_ms, samples)
+            Measured::summarize(negotiate_ms, samples)
         };
         run().into()
     }
@@ -221,7 +221,7 @@ impl Browser<'_> {
             let negotiate_ms = started.elapsed().as_secs_f64() * 1000.0;
 
             let samples = rounds(&client, &peer.id.to_string(), args, None)?;
-            Measured::from_samples(negotiate_ms, samples)
+            Measured::summarize(negotiate_ms, samples)
         };
         Box::pin(run).await.into()
     }

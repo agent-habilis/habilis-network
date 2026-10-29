@@ -142,8 +142,8 @@ pub(super) async fn ladder_measure(
     .map_err(|error| format!("round trips failed: {error:#}"))?;
     let round_trips: Vec<_> = round_trips.collect();
     connection.close(0u32.into(), b"done");
-    let mut measured = Measured::from_samples(negotiate_ms, samples)?;
-    measured.rtt = Rtt::from_samples(&round_trips);
+    let mut measured = Measured::summarize(negotiate_ms, samples)?;
+    measured.rtt = Rtt::summarize(&round_trips);
     Ok(measured)
 }
 
@@ -289,7 +289,7 @@ pub(crate) async fn habilis_network_native_native_webrtc(args: &Args) -> Outcome
         let (client, server, router, negotiate_ms) = Box::pin(webrtc_pair()).await?;
         let measured = async {
             let samples = rounds(&client.endpoint, webrtc_addr(&server), args).await?;
-            Measured::from_samples(negotiate_ms, samples)
+            Measured::summarize(negotiate_ms, samples)
         }
         .await;
         close_cell(&client.endpoint, router).await;
@@ -338,7 +338,7 @@ async fn ip_pair<F: Future<Output = Result<Endpoint, String>>>(
         let (client, server) = bind_two(bind).await?;
         bench_ip(client, server, |client, addr| async move {
             let samples = rounds(&client, addr, args).await?;
-            Measured::from_samples(0.0, samples)
+            Measured::summarize(0.0, samples)
         })
         .await
     };

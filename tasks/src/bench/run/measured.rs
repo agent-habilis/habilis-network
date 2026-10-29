@@ -19,7 +19,7 @@ impl Measured {
 
     /// The first sample is the warm-up and is discarded; every remaining one
     /// must have crossed the same path, or the cell measured two things.
-    pub(crate) fn from_samples(negotiate_ms: f64, mut rounds: Vec<Sample>) -> Result<Self, String> {
+    pub(crate) fn summarize(negotiate_ms: f64, mut rounds: Vec<Sample>) -> Result<Self, String> {
         if rounds.len() < 2 {
             return Err("fewer than two samples: nothing left after the warm-up".to_owned());
         }

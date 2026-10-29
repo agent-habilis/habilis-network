@@ -70,7 +70,7 @@ pub(crate) async fn ladder_gossip_backup(args: &Args) -> Outcome {
             }));
         }
         let samples = first_samples.ok_or("no group ran")?;
-        let mut measured = Measured::from_samples(0.0, samples)?;
+        let mut measured = Measured::summarize(0.0, samples)?;
         measured.extra = Some(json!({ "groups": groups }));
         Ok(measured)
     };
@@ -318,8 +318,8 @@ async fn measure_flood(flood: &Flood, args: &Args) -> Result<Measured, String> {
             "forward_dropped": now.forward_dropped - then.forward_dropped,
         })
     };
-    let mut measured = Measured::from_samples(0.0, samples)?;
-    measured.rtt = Rtt::from_samples(&round_trips);
+    let mut measured = Measured::summarize(0.0, samples)?;
+    measured.rtt = Rtt::summarize(&round_trips);
     measured.extra = Some(json!({
         "members": { "a": member(0), "b": member(1), "c": member(2) },
         "frames_originated": originated,

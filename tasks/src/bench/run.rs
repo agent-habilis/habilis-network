@@ -455,13 +455,13 @@ mod tests {
 
     #[test]
     fn rtt_is_the_nearest_rank_p50_and_p99() {
-        let rtt = Rtt::from_samples(&millis(100)).map(|rtt| (rtt.p50_ms, rtt.p99_ms));
+        let rtt = Rtt::summarize(&millis(100)).map(|rtt| (rtt.p50_ms, rtt.p99_ms));
         assert_eq!(rtt, Some((50.0, 99.0)));
     }
 
     #[test]
     fn rtt_of_no_samples_is_none() {
-        assert!(Rtt::from_samples(&[]).is_none());
+        assert!(Rtt::summarize(&[]).is_none());
     }
 
     #[test]

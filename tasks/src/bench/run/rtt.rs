@@ -8,7 +8,7 @@ pub(crate) struct Rtt {
 
 impl Rtt {
     /// Nearest-rank percentiles of the samples; `None` when there are none.
-    pub(crate) fn from_samples(samples: &[Duration]) -> Option<Self> {
+    pub(crate) fn summarize(samples: &[Duration]) -> Option<Self> {
         let mut sorted: Vec<f64> = samples
             .iter()
             .map(|sample| sample.as_secs_f64() * 1000.0)
