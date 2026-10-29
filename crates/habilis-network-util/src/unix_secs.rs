@@ -42,11 +42,10 @@ impl UnixSecs {
     /// an `i64` (more than 290 billion seconds, far beyond any real system clock).
     #[must_use]
     pub fn now() -> Self {
+        let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok();
         Self(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .ok()
-                .and_then(|since_epoch| i64::try_from(since_epoch.as_secs()).ok())
+            since_epoch
+                .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
                 .unwrap_or(0),
         )
     }

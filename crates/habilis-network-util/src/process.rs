@@ -32,10 +32,8 @@ pub fn parent_of(pid: u32) -> Option<u32> {
 #[must_use]
 pub fn comm_of(pid: u32) -> Option<String> {
     let info = bsdinfo_for(pid)?;
-    let bytes: Vec<u8> = info
-        .pbi_comm
-        .iter()
-        .take_while(|&&byte| byte != 0)
+    let name = info.pbi_comm.iter().take_while(|&&byte| byte != 0);
+    let bytes: Vec<u8> = name
         .map(|&byte| u8::from_ne_bytes(byte.to_ne_bytes()))
         .collect();
     String::from_utf8(bytes).ok()

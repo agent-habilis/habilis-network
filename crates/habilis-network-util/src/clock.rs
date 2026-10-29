@@ -34,10 +34,9 @@ use web_time::UNIX_EPOCH;
 #[cfg(any(test, feature = "test-fixtures"))]
 #[must_use]
 pub fn unix_nanos() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|since_epoch| i64::try_from(since_epoch.as_nanos()).ok())
+    let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok();
+    since_epoch
+        .and_then(|elapsed| i64::try_from(elapsed.as_nanos()).ok())
         .unwrap_or(0)
 }
 
