@@ -4,6 +4,7 @@ use std::fmt;
 
 use habilis_network_protocol::message::BodyError;
 
+use std::error;
 /// Why a shared-state change could not be built or wrapped for the wire.
 ///
 /// # Examples
@@ -25,14 +26,12 @@ pub enum DocError {
     /// The body failed `MessageBody` validation.
     Body(BodyError),
     /// Automerge refused the change, or the envelope did not encode.
-    Encode(Box<dyn std::error::Error + Send + Sync + 'static>),
+    Encode(Box<dyn error::Error + Send + Sync + 'static>),
 }
 
 impl DocError {
     /// Wrap a failure of automerge or of the envelope encoding.
-    pub(crate) fn encode(
-        error: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
-    ) -> Self {
+    pub(crate) fn encode(error: impl Into<Box<dyn error::Error + Send + Sync + 'static>>) -> Self {
         Self::Encode(error.into())
     }
 }
@@ -49,8 +48,8 @@ impl fmt::Display for DocError {
     }
 }
 
-impl std::error::Error for DocError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl error::Error for DocError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::NotAnObject => None,
             Self::Body(error) => Some(error),

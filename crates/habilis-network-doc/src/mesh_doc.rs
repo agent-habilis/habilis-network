@@ -12,6 +12,8 @@ use habilis_network_util::consts::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX
 
 use crate::{DocError, wire};
 
+use automerge::transaction;
+use std::mem;
 /// Matches the receive path these drops happen on, so a reader filtering the
 /// gossip target sees the orphan buffer alongside the frames feeding it.
 const LOG_TARGET: &str = "habilis_network::gossip";
@@ -576,7 +578,7 @@ impl MeshDoc {
     /// The dedup keys of the orphan frames dropped since the last call, for the
     /// receive path to forget.
     pub fn take_dropped(&mut self) -> impl Iterator<Item = DedupKey> + use<> {
-        std::mem::take(&mut self.dropped).into_iter()
+        mem::take(&mut self.dropped).into_iter()
     }
 
     /// How many orphans this author key has buffered. Scanned rather than counted
@@ -711,7 +713,7 @@ fn peers_genesis(map: &str) -> Change {
         let mut tx = doc.transaction();
         tx.put_object(&ROOT, map, ObjType::Map)
             .expect("root is a map");
-        tx.commit_with(automerge::transaction::CommitOptions::default().with_time(0));
+        tx.commit_with(transaction::CommitOptions::default().with_time(0));
     }
     doc.get_changes(&[])
         .pop()
@@ -739,7 +741,7 @@ fn actor_for(seed: &[u8]) -> automerge::ActorId {
 /// members (vivifying missing maps), delete on `null`, and replace on any
 /// scalar or array.
 fn write_map(
-    tx: &mut automerge::transaction::Transaction<'_>,
+    tx: &mut transaction::Transaction<'_>,
     obj: &ObjId,
     merge: &Value,
 ) -> anyhow::Result<()> {
@@ -767,7 +769,7 @@ fn write_map(
 
 /// The map object at `obj[key]`, reusing an existing map or creating one.
 fn ensure_map(
-    tx: &mut automerge::transaction::Transaction<'_>,
+    tx: &mut transaction::Transaction<'_>,
     obj: &ObjId,
     key: &str,
 ) -> anyhow::Result<ObjId> {
@@ -780,7 +782,7 @@ fn ensure_map(
 /// Write a scalar or array as `obj[key]`, replacing whatever is there (RFC 7386
 /// semantics for non-object values).
 fn write_value(
-    tx: &mut automerge::transaction::Transaction<'_>,
+    tx: &mut transaction::Transaction<'_>,
     obj: &ObjId,
     key: &str,
     value: &Value,
@@ -799,7 +801,7 @@ fn write_value(
 }
 
 fn append_item(
-    tx: &mut automerge::transaction::Transaction<'_>,
+    tx: &mut transaction::Transaction<'_>,
     list: &ObjId,
     index: usize,
     item: &Value,
@@ -823,7 +825,7 @@ fn append_item(
 }
 
 fn put_scalar(
-    tx: &mut automerge::transaction::Transaction<'_>,
+    tx: &mut transaction::Transaction<'_>,
     obj: &ObjId,
     key: &str,
     scalar: &Value,
@@ -840,7 +842,7 @@ fn put_scalar(
 }
 
 fn insert_scalar(
-    tx: &mut automerge::transaction::Transaction<'_>,
+    tx: &mut transaction::Transaction<'_>,
     list: &ObjId,
     index: usize,
     scalar: &Value,
@@ -866,7 +868,7 @@ fn insert_scalar(
 }
 
 fn put_number(
-    tx: &mut automerge::transaction::Transaction<'_>,
+    tx: &mut transaction::Transaction<'_>,
     obj: &ObjId,
     key: &str,
     number: &serde_json::Number,

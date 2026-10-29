@@ -11,6 +11,7 @@ use habilis_network_protocol::SymmetricKey;
 use crate::DocError;
 use habilis_network_protocol::message::MessageBody;
 
+use habilis_network_protocol::seal_error;
 /// The tagged `State`/`Meta` message body.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "k", rename_all = "snake_case")]
@@ -138,7 +139,7 @@ pub fn parse_change_body(body: &str) -> Option<Vec<u8>> {
 /// assert_eq!(decrypt_body(sealed.as_str(), Some(&key)).as_deref(), Some("hello"));
 /// ```
 pub fn encrypt_body(plain: &MessageBody, key: &SymmetricKey) -> Result<MessageBody, DocError> {
-    let blob = habilis_network_protocol::seal_error::seal_symmetric(key, plain.as_str().as_bytes());
+    let blob = seal_error::seal_symmetric(key, plain.as_str().as_bytes());
     let json = serde_json::to_string(&StateOp::Enc {
         data: bs58::encode(blob).into_string(),
     })
@@ -173,7 +174,7 @@ pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
         Ok(StateOp::Enc { data }) => {
             let key = key?;
             let blob = bs58::decode(&data).into_vec().ok()?;
-            let plain = habilis_network_protocol::seal_error::open_symmetric(key, &blob).ok()?;
+            let plain = seal_error::open_symmetric(key, &blob).ok()?;
             String::from_utf8(plain).ok()
         }
         // A non-`enc` body: passthrough on a passwordless mesh (no key), but
