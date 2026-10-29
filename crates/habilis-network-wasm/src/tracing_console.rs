@@ -40,9 +40,9 @@ mod console_writer {
     pub(crate) struct ConsoleWriter(Vec<u8>);
 
     impl io::Write for ConsoleWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.extend_from_slice(buf);
-            Ok(buf.len())
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0.extend_from_slice(buffer);
+            Ok(buffer.len())
         }
 
         fn flush(&mut self) -> io::Result<()> {

@@ -36,9 +36,9 @@ impl StreamNode {
     /// The options fail to parse or are invalid, or the endpoint fails to bind.
     pub async fn bind(opts_json: String) -> Result<StreamNode, JsValue> {
         console_error_panic_hook::set_once();
-        let opts: StreamOpts = serde_json::from_str(&opts_json)
+        let options: StreamOpts = serde_json::from_str(&opts_json)
             .map_err(|error| crate::to_js_error(&format!("invalid options: {error}")))?;
-        let node = habilis_network_stream::StreamNode::bind(&opts)
+        let node = habilis_network_stream::StreamNode::bind(&options)
             .await
             .map_err(|error| crate::to_js_error(&format!("{error:#}")))?;
         Ok(Self::holding(node))

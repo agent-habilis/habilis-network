@@ -34,10 +34,10 @@ impl MeshPeer {
     /// mesh, say — a browser cannot reach one), or setup itself fails.
     pub async fn open(opts_json: String) -> Result<MeshPeer, JsValue> {
         console_error_panic_hook::set_once();
-        let opts: JoinOptions = serde_json::from_str(&opts_json)
+        let options: JoinOptions = serde_json::from_str(&opts_json)
             .map_err(|error| to_js_error(&format!("invalid options: {error}")))?;
         let (sink, events) = json_sink();
-        let membership = habilis_network::membership::join(&opts, sink)
+        let membership = habilis_network::membership::join(&options, sink)
             .await
             .map_err(|error| to_js_error(&format!("{error:#}")))?;
         let node = membership.node;
@@ -102,8 +102,8 @@ impl MeshPeer {
     /// `null` once the mesh is gone and the queue is drained.
     #[wasm_bindgen(js_name = nextMsg)]
     pub async fn next_msg(&self) -> Option<String> {
-        let msg = self.inbound.lock().await.recv().await?;
-        Some(msg_json(&msg))
+        let message = self.inbound.lock().await.recv().await?;
+        Some(msg_json(&message))
     }
 
     /// The next surfaced node event (`habilis_network::membership::MembershipEvent`),
@@ -197,11 +197,11 @@ impl MeshPeer {
     }
 }
 
-fn msg_json(msg: &Inbound) -> String {
+fn msg_json(message: &Inbound) -> String {
     serde_json::json!({
-        "nick": msg.nick,
-        "directed": msg.directed,
-        "text": msg.text,
+        "nick": message.nick,
+        "directed": message.directed,
+        "text": message.text,
     })
     .to_string()
 }
