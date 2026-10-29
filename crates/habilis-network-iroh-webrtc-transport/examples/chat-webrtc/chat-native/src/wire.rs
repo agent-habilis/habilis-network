@@ -17,8 +17,8 @@ use serde::de::DeserializeOwned;
 ///
 /// # Errors
 /// The message does not encode, or the stream is gone.
-pub async fn write_msg<T: Serialize>(send: &mut SendStream, msg: &T) -> Result<()> {
-    let frame = encode_frame(msg)?;
+pub async fn write_msg<T: Serialize>(send: &mut SendStream, message: &T) -> Result<()> {
+    let frame = encode_frame(message)?;
     send.write_all(&frame).await.context("write frame")?;
     Ok(())
 }

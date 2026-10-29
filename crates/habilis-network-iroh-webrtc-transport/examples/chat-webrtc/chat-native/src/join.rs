@@ -167,8 +167,8 @@ async fn chat(connection: &Connection, nick: &str) -> Result<()> {
     // reads and must never be cancelled between them.
     let (tx, incoming) = mpsc::channel::<ServerMsg>(INBOX_CAPACITY);
     tokio::spawn(async move {
-        while let Ok(msg) = wire::read_msg::<ServerMsg>(&mut recv).await {
-            if tx.send(msg).await.is_err() {
+        while let Ok(message) = wire::read_msg::<ServerMsg>(&mut recv).await {
+            if tx.send(message).await.is_err() {
                 break;
             }
         }

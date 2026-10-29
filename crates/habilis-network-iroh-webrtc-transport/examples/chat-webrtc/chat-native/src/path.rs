@@ -50,8 +50,8 @@ pub fn selected_label(connection: &Connection) -> String {
     label_of(selected.remote_addr())
 }
 
-fn label_of(addr: &TransportAddr) -> String {
-    match addr {
+fn label_of(address: &TransportAddr) -> String {
+    match address {
         TransportAddr::Custom(custom) if custom.id() == WEBRTC_TRANSPORT_ID => WEBRTC.to_owned(),
         // A different custom transport is not a case this example produces, but
         // saying which one beats reporting "custom" and leaving the reader to

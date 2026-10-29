@@ -213,7 +213,7 @@ pub fn on_webrtc(connection: &Connection) -> bool {
     connection.paths().iter().any(|path| {
         matches!(
             path.remote_addr(),
-            TransportAddr::Custom(addr) if addr.id() == WEBRTC_TRANSPORT_ID
+            TransportAddr::Custom(address) if address.id() == WEBRTC_TRANSPORT_ID
         )
     })
 }

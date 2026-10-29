@@ -410,8 +410,8 @@ impl CustomSender for BrowserHubSender {
     /// Live sessions only. A reserved slot has no pump behind it, so calling it
     /// a valid address would have QUIC write into a channel that is not open —
     /// which is exactly what a stuck phantom entry used to do, silently.
-    fn is_valid_send_addr(&self, addr: &CustomAddr) -> bool {
-        let Ok(remote) = crate::parse_custom_addr(addr) else {
+    fn is_valid_send_addr(&self, address: &CustomAddr) -> bool {
+        let Ok(remote) = crate::parse_custom_addr(address) else {
             return false;
         };
         self.sessions.is_live(&remote)

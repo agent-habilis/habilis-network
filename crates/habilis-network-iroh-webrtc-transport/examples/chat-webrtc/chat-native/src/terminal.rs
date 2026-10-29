@@ -20,8 +20,8 @@ const CHANNEL_CAPACITY: usize = 64;
 
 /// One line of a transcript.
 #[must_use]
-pub fn render(msg: &ServerMsg) -> String {
-    match msg {
+pub fn render(message: &ServerMsg) -> String {
+    match message {
         ServerMsg::Welcome { you, roster } => {
             format!("* you are \"{you}\" — in the room: {}", roster.join(", "))
         }
@@ -59,7 +59,7 @@ pub fn from_membership(mut membership: Membership) -> mpsc::Receiver<ServerMsg> 
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
     tokio::spawn(async move {
         while let Some(fanout) = membership.next_broadcast().await {
-            if tx.send(fanout.msg).await.is_err() {
+            if tx.send(fanout.message).await.is_err() {
                 break;
             }
         }
@@ -94,8 +94,8 @@ where
                 say(text).await?;
             }
             received = incoming.recv() => {
-                let Some(msg) = received else { return Ok(()) };
-                println!("{}", render(&msg));
+                let Some(message) = received else { return Ok(()) };
+                println!("{}", render(&message));
             }
         }
     }

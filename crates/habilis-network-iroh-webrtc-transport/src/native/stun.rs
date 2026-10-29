@@ -264,9 +264,9 @@ where
         if let Some(at) = retransmit_at
             && now >= at
         {
-            for (_, addr, transaction_id) in &pending {
+            for (_, address, transaction_id) in &pending {
                 let request = binding_request(*transaction_id);
-                let _ = socket.send_to(&request, *addr).await;
+                let _ = socket.send_to(&request, *address).await;
             }
             retransmit_at = None;
         }
@@ -277,8 +277,8 @@ where
                 let Some(Ok((server, resolved))) = joined else {
                     continue;
                 };
-                let addr = match resolved {
-                    Ok(Some(addr)) => addr,
+                let address = match resolved {
+                    Ok(Some(address)) => address,
                     Ok(None) => {
                         tracing::debug!(%server, "STUN server resolved to nothing");
                         continue;
@@ -291,8 +291,8 @@ where
                 let mut transaction_id = [0u8; TRANSACTION_ID_LEN];
                 rand::fill(&mut transaction_id);
                 let request = binding_request(transaction_id);
-                match socket.send_to(&request, addr).await {
-                    Ok(_) => pending.push((server, addr, transaction_id)),
+                match socket.send_to(&request, address).await {
+                    Ok(_) => pending.push((server, address, transaction_id)),
                     Err(error) => {
                         tracing::debug!(%server, %error, "sending a STUN Binding Request failed");
                     }
@@ -392,11 +392,11 @@ mod tests {
     /// `203.0.113.7:41234`, XOR-masked per RFC 5389 §15.2.
     fn xor_ipv4_value() -> Vec<u8> {
         let mask = MAGIC_COOKIE.to_be_bytes();
-        let addr = [203u8, 0, 113, 7];
+        let address = [203u8, 0, 113, 7];
         let port = 0xA112u16 ^ u16::try_from(MAGIC_COOKIE >> 16).expect("fits"); // 41234
         let mut value = vec![0, FAMILY_IPV4];
         value.extend_from_slice(&port.to_be_bytes());
-        value.extend(addr.iter().zip(mask).map(|(byte, mask)| byte ^ mask));
+        value.extend(address.iter().zip(mask).map(|(byte, mask)| byte ^ mask));
         value
     }
 
@@ -413,8 +413,8 @@ mod tests {
     #[test]
     fn xor_mapped_ipv4_is_unmasked() {
         let message = response(ATTR_XOR_MAPPED_ADDRESS, &xor_ipv4_value(), TXID);
-        let addr = parse_binding_response(&message, &TXID).expect("parse");
-        assert_eq!(addr, SocketAddr::from(([203, 0, 113, 7], 41234)));
+        let address = parse_binding_response(&message, &TXID).expect("parse");
+        assert_eq!(address, SocketAddr::from(([203, 0, 113, 7], 41234)));
     }
 
     #[test]
@@ -424,8 +424,8 @@ mod tests {
         value.extend_from_slice(&41234u16.to_be_bytes());
         value.extend_from_slice(&[203, 0, 113, 7]);
         let message = response(ATTR_MAPPED_ADDRESS, &value, TXID);
-        let addr = parse_binding_response(&message, &TXID).expect("parse");
-        assert_eq!(addr, SocketAddr::from(([203, 0, 113, 7], 41234)));
+        let address = parse_binding_response(&message, &TXID).expect("parse");
+        assert_eq!(address, SocketAddr::from(([203, 0, 113, 7], 41234)));
     }
 
     #[test]
@@ -433,19 +433,20 @@ mod tests {
         let mut mask = [0u8; 16];
         mask[..4].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
         mask[4..].copy_from_slice(&TXID);
-        let addr: std::net::Ipv6Addr = "2001:db8::1".parse().expect("addr");
+        let address: std::net::Ipv6Addr = "2001:db8::1".parse().expect("addr");
         let port = 0x1388u16 ^ u16::try_from(MAGIC_COOKIE >> 16).expect("fits"); // 5000
         let mut value = vec![0, FAMILY_IPV6];
         value.extend_from_slice(&port.to_be_bytes());
         value.extend(
-            addr.octets()
+            address
+                .octets()
                 .iter()
                 .zip(mask)
                 .map(|(byte, mask)| byte ^ mask),
         );
         let message = response(ATTR_XOR_MAPPED_ADDRESS, &value, TXID);
         let parsed = parse_binding_response(&message, &TXID).expect("parse");
-        assert_eq!(parsed, SocketAddr::new(addr.into(), 5000));
+        assert_eq!(parsed, SocketAddr::new(address.into(), 5000));
     }
 
     #[test]
@@ -521,7 +522,7 @@ mod tests {
     /// canonical `203.0.113.7:41234`, echoing the request's transaction id.
     async fn mock_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
-        let addr = socket.local_addr().expect("local addr");
+        let address = socket.local_addr().expect("local addr");
         let task = tokio::spawn(async move {
             let mut buffer = [0u8; 1500];
             while let Ok((len, from)) = socket.recv_from(&mut buffer).await {
@@ -534,7 +535,7 @@ mod tests {
                 let _ = socket.send_to(&message, from).await;
             }
         });
-        (addr, task)
+        (address, task)
     }
 
     #[test]
@@ -689,7 +690,7 @@ mod tests {
     /// from the one probed.
     async fn sideways_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let listen = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listen.local_addr().expect("local addr");
+        let address = listen.local_addr().expect("local addr");
         let task = tokio::spawn(async move {
             let reply_from = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
             let mut buffer = [0u8; 1500];
@@ -703,15 +704,15 @@ mod tests {
                 let _ = reply_from.send_to(&message, from).await;
             }
         });
-        (addr, task)
+        (address, task)
     }
 
     #[test]
     async fn a_reply_from_a_rewritten_source_address_still_counts() {
-        let (addr, server) = sideways_server().await;
+        let (address, server) = sideways_server().await;
         let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         let config = IceConfig {
-            stun_servers: vec![addr.to_string()],
+            stun_servers: vec![address.to_string()],
             stun_timeout: Duration::from_millis(500),
         };
         let reflexive = gather_reflexive(&client, &config).await;

@@ -20,11 +20,11 @@ pub fn custom_addr(endpoint: EndpointId) -> CustomAddr {
 /// # Errors
 /// The address carries another transport's id, or its payload is not a
 /// 32-byte endpoint id.
-pub fn parse_custom_addr(addr: &CustomAddr) -> io::Result<EndpointId> {
-    if addr.id() != WEBRTC_TRANSPORT_ID {
+pub fn parse_custom_addr(address: &CustomAddr) -> io::Result<EndpointId> {
+    if address.id() != WEBRTC_TRANSPORT_ID {
         return Err(io::Error::other("unexpected transport id"));
     }
-    let bytes: [u8; 32] = addr
+    let bytes: [u8; 32] = address
         .data()
         .try_into()
         .map_err(|_| io::Error::other("unexpected endpoint id length"))?;

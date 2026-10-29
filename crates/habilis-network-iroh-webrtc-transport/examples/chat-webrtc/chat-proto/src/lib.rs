@@ -128,8 +128,8 @@ pub const FRAME_HEADER_LEN: usize = 4;
 ///
 /// # Errors
 /// The message does not serialize, or its body exceeds [`MAX_FRAME_BYTES`].
-pub fn encode_frame<T: Serialize>(msg: &T) -> Result<Vec<u8>> {
-    let body = serde_json::to_vec(msg).context("serialize frame")?;
+pub fn encode_frame<T: Serialize>(message: &T) -> Result<Vec<u8>> {
+    let body = serde_json::to_vec(message).context("serialize frame")?;
     ensure!(
         body.len() <= MAX_FRAME_BYTES,
         "frame is {} bytes, max is {MAX_FRAME_BYTES}",
@@ -315,11 +315,11 @@ mod tests {
 
     #[test]
     fn a_frame_round_trips() {
-        let msg = ServerMsg::Said {
+        let message = ServerMsg::Said {
             nick: "bob".into(),
             text: "hi".into(),
         };
-        let frame = encode_frame(&msg).expect("encode");
+        let frame = encode_frame(&message).expect("encode");
         let header: [u8; FRAME_HEADER_LEN] = frame[..FRAME_HEADER_LEN].try_into().expect("header");
         let len = decode_frame_len(header).expect("length");
         assert_eq!(len, frame.len() - FRAME_HEADER_LEN);

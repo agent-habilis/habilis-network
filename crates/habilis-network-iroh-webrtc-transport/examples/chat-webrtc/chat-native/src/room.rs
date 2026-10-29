@@ -32,7 +32,7 @@ pub struct MemberId(u64);
 #[derive(Debug, Clone)]
 pub struct Fanout {
     from: MemberId,
-    pub msg: ServerMsg,
+    pub message: ServerMsg,
 }
 
 #[derive(Debug)]
@@ -87,7 +87,7 @@ impl Room {
         // member joining an empty room is the ordinary case, not an error.
         let _ = self.inner.tx.send(Fanout {
             from: id,
-            msg: ServerMsg::Joined { nick: nick.clone() },
+            message: ServerMsg::Joined { nick: nick.clone() },
         });
 
         Membership {
@@ -114,7 +114,7 @@ impl Room {
         };
         let _ = self.inner.tx.send(Fanout {
             from,
-            msg: ServerMsg::Said { nick, text },
+            message: ServerMsg::Said { nick, text },
         });
     }
 
@@ -208,7 +208,7 @@ impl Drop for Membership {
         if let Some(nick) = removed {
             let _ = self.inner.tx.send(Fanout {
                 from: self.id,
-                msg: ServerMsg::Left { nick },
+                message: ServerMsg::Left { nick },
             });
         }
     }
@@ -239,18 +239,18 @@ mod tests {
 
         // alice's own Joined is filtered; bob's is not.
         let seen = alice.next_broadcast().await.expect("bob joined");
-        assert!(matches!(seen.msg, ServerMsg::Joined { ref nick } if nick == "bob"));
+        assert!(matches!(seen.message, ServerMsg::Joined { ref nick } if nick == "bob"));
 
         room.say(alice.id, "hi".to_owned());
         let heard = bob.next_broadcast().await.expect("bob hears alice");
         assert!(
-            matches!(heard.msg, ServerMsg::Said { ref nick, ref text } if nick == "alice" && text == "hi")
+            matches!(heard.message, ServerMsg::Said { ref nick, ref text } if nick == "alice" && text == "hi")
         );
 
         // And alice hears nothing further of her own.
         room.say(bob.id, "hello".to_owned());
         let next = alice.next_broadcast().await.expect("alice hears bob");
-        assert!(matches!(next.msg, ServerMsg::Said { ref nick, .. } if nick == "bob"));
+        assert!(matches!(next.message, ServerMsg::Said { ref nick, .. } if nick == "bob"));
     }
 
     /// Leaving is a `Drop`, so a handler that unwinds still cleans up. If this
@@ -266,7 +266,7 @@ mod tests {
 
         drop(bob);
         let seen = alice.next_broadcast().await.expect("bob left");
-        assert!(matches!(seen.msg, ServerMsg::Left { ref nick } if nick == "bob"));
+        assert!(matches!(seen.message, ServerMsg::Left { ref nick } if nick == "bob"));
         assert_eq!(room.len(), 1);
     }
 

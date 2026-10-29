@@ -106,7 +106,7 @@ pub(crate) async fn drive_until_channel_ready(
     deadline: Duration,
 ) -> Result<ChannelId, JsepError> {
     let give_up = Instant::now() + deadline;
-    let mut buf = vec![0u8; 2000];
+    let mut buffer = vec![0u8; 2000];
     let mut next_wake = Instant::now();
     let mut opened: Option<ChannelId> = None;
     let mut noise = HandshakeNoise::default();
@@ -122,7 +122,7 @@ pub(crate) async fn drive_until_channel_ready(
                 rtc.handle_input(Input::Timeout(Instant::now()))
                     .map_err(JsepError::engine("str0m timeout input"))?;
             }
-            received = socket.recv_from(&mut buf) => {
+            received = socket.recv_from(&mut buffer) => {
                 // Never fatal, for the reason the STUN gather sharing this
                 // socket is not: Windows reports an ICMP port-unreachable from
                 // a dead server as a receive error, and several dead servers
@@ -156,8 +156,8 @@ pub(crate) async fn drive_until_channel_ready(
                 // What the old bail did buy was a *named* failure instead of a
                 // silent timeout, so the count is carried to the deadline and
                 // reported there.
-                let Ok(receive) = Receive::new(Protocol::Udp, src, advertised, &buf[..len]) else {
-                    if super::stun::is_plain_stun_response(&buf[..len]) {
+                let Ok(receive) = Receive::new(Protocol::Udp, src, advertised, &buffer[..len]) else {
+                    if super::stun::is_plain_stun_response(&buffer[..len]) {
                         tracing::trace!(%src, "ignoring a late STUN gather reply during the handshake");
                     } else {
                         tracing::debug!(%src, len, "ignoring an unparseable datagram during the handshake");
@@ -285,7 +285,7 @@ pub(crate) async fn drive_session(
         channel_id,
         advertised,
     } = session;
-    let mut buf = vec![0u8; 2000];
+    let mut buffer = vec![0u8; 2000];
     let mut next_wake = Instant::now();
     let mut consecutive_recv_errors: usize = 0;
 
@@ -301,7 +301,7 @@ pub(crate) async fn drive_session(
                     break SessionEnd::Failed(error.into());
                 }
             }
-            received = socket.recv_from(&mut buf) => {
+            received = socket.recv_from(&mut buffer) => {
                 // A single receive error must not tear down a working session:
                 // this is the socket the STUN gather shares, and Windows
                 // reports an ICMP port-unreachable from a dead server as one.
@@ -326,7 +326,7 @@ pub(crate) async fn drive_session(
                 if len == 0 {
                     continue;
                 }
-                let Ok(receive) = Receive::new(Protocol::Udp, src, advertised, &buf[..len]) else {
+                let Ok(receive) = Receive::new(Protocol::Udp, src, advertised, &buffer[..len]) else {
                     continue;
                 };
                 if let Err(error) = rtc.handle_input(Input::Receive(Instant::now(), receive)) {

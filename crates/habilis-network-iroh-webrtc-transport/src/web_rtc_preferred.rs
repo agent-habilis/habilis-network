@@ -57,8 +57,8 @@ impl WebRtcPreferred {
 }
 
 impl PathSelector for WebRtcPreferred {
-    fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
-        let paths: Vec<PathSelectionData<'_>> = ctx.paths().collect();
+    fn select(&self, context: &PathSelectionContext<'_>) -> PathSelection {
+        let paths: Vec<PathSelectionData<'_>> = context.paths().collect();
         // The first rung with a usable path wins; within a rung, lowest RTT.
         let chosen = climb(&paths, custom_rung, |rung, path| {
             !blocked(self.local, rung, path)
@@ -81,7 +81,7 @@ impl PathSelector for WebRtcPreferred {
             tracing::trace!(
                 target: "habilis_ladder",
                 local = %self.local.fmt_short(),
-                current = ?ctx.current().map(transports::FourTuple::remote),
+                current = ?context.current().map(transports::FourTuple::remote),
                 ?seen,
                 chosen = ?chosen.map(|path| path.network_path().remote()),
                 "path selection"

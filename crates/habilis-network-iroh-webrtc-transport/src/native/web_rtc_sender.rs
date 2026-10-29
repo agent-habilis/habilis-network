@@ -30,8 +30,8 @@ impl std::fmt::Debug for WebRtcSender {
 }
 
 impl CustomSender for WebRtcSender {
-    fn is_valid_send_addr(&self, addr: &CustomAddr) -> bool {
-        addr.id() == WEBRTC_TRANSPORT_ID && addr.data().len() == 32
+    fn is_valid_send_addr(&self, address: &CustomAddr) -> bool {
+        address.id() == WEBRTC_TRANSPORT_ID && address.data().len() == 32
     }
 
     fn poll_send(

@@ -88,8 +88,8 @@ async fn serve(room: &Room, connection: Connection) -> Result<()> {
     // receiver in its place is cancel-safe.
     let (tx, mut rx) = mpsc::channel::<ClientMsg>(INBOX_CAPACITY);
     let reader = tokio::spawn(async move {
-        while let Ok(msg) = wire::read_msg::<ClientMsg>(&mut recv).await {
-            if tx.send(msg).await.is_err() {
+        while let Ok(message) = wire::read_msg::<ClientMsg>(&mut recv).await {
+            if tx.send(message).await.is_err() {
                 break;
             }
         }
@@ -113,19 +113,19 @@ async fn pump(
     loop {
         tokio::select! {
             inbound = rx.recv() => {
-                let Some(msg) = inbound else { return Ok(()) };
-                if let Err(error) = msg.validate() {
+                let Some(message) = inbound else { return Ok(()) };
+                if let Err(error) = message.validate() {
                     tracing::debug!(nick = %membership.nick, %error, "refused a frame");
                     continue;
                 }
-                match msg {
+                match message {
                     ClientMsg::Say { text } => room.say(membership.id, text),
                     ClientMsg::Join { .. } => bail!("a second join on one stream"),
                 }
             }
             fanout = membership.next_broadcast() => {
                 let Some(fanout) = fanout else { return Ok(()) };
-                wire::write_msg(send, &fanout.msg).await?;
+                wire::write_msg(send, &fanout.message).await?;
             }
         }
     }

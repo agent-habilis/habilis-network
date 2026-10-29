@@ -265,7 +265,10 @@ impl ChatPeer {
     pub async fn ice_pair(&self) -> Option<String> {
         let remote = self.hub.selected_remote_candidate(&self.remote).await?;
         let local = self.hub.selected_local_candidate(&self.remote).await;
-        let local = local.map_or_else(|| "?".to_owned(), |(addr, kind)| candidate(&addr, &kind));
+        let local = local.map_or_else(
+            || "?".to_owned(),
+            |(address, kind)| candidate(&address, &kind),
+        );
         Some(format!("{local} ⇢ {}", candidate(&remote.0, &remote.1)))
     }
 
@@ -360,7 +363,7 @@ fn spawn_reader(mut recv: RecvStream, emit: Emitter) {
     wasm_bindgen_futures::spawn_local(async move {
         loop {
             match read_msg::<ServerMsg>(&mut recv).await {
-                Ok(msg) => emit.send(&event_of(&msg)),
+                Ok(message) => emit.send(&event_of(&message)),
                 Err(error) => {
                     emit.send(&Event::Closed {
                         reason: describe(&error),
@@ -378,8 +381,8 @@ fn spawn_writer(mut send: endpoint::SendStream, emit: Emitter) -> mpsc::Unbounde
     let (tx, mut rx) = mpsc::unbounded::<String>();
     wasm_bindgen_futures::spawn_local(async move {
         while let Some(text) = rx.next().await {
-            let msg = ClientMsg::Say { text };
-            if let Err(error) = write_msg(&mut send, &msg).await {
+            let message = ClientMsg::Say { text };
+            if let Err(error) = write_msg(&mut send, &message).await {
                 emit.send(&Event::Closed {
                     reason: describe(&error),
                 });
@@ -390,8 +393,8 @@ fn spawn_writer(mut send: endpoint::SendStream, emit: Emitter) -> mpsc::Unbounde
     tx
 }
 
-fn event_of(msg: &ServerMsg) -> Event {
-    match msg {
+fn event_of(message: &ServerMsg) -> Event {
+    match message {
         ServerMsg::Welcome { you, roster } => Event::Welcome {
             you: you.clone(),
             roster: roster.clone(),
@@ -414,8 +417,8 @@ fn candidate(address: &str, kind: &str) -> String {
     }
 }
 
-fn label_of(addr: &TransportAddr) -> String {
-    match addr {
+fn label_of(address: &TransportAddr) -> String {
+    match address {
         TransportAddr::Custom(custom) if custom.id() == WEBRTC_TRANSPORT_ID => "webrtc".to_owned(),
         TransportAddr::Custom(custom) => format!("custom({})", custom.id()),
         TransportAddr::Ip(_) => "ip".to_owned(),
@@ -429,8 +432,11 @@ fn label_of(addr: &TransportAddr) -> String {
 // The same two reads the CLI does, against the same `chat_proto` helpers. Not
 // shared code only because the stream types cannot be: there is no tokio here.
 
-async fn write_msg<T: Serialize>(send: &mut endpoint::SendStream, msg: &T) -> Result<(), JsValue> {
-    let frame = encode_frame(msg).map_err(|error| err("encode a frame", &error))?;
+async fn write_msg<T: Serialize>(
+    send: &mut endpoint::SendStream,
+    message: &T,
+) -> Result<(), JsValue> {
+    let frame = encode_frame(message).map_err(|error| err("encode a frame", &error))?;
     send.write_all(&frame)
         .await
         .map_err(|error| err("write a frame", &error))?;
