@@ -511,6 +511,17 @@ test("self_convention: the guide's shapes are clean", () => {
   expectExit("crates/demo/src/lib.rs", selfConv("    pub fn as_x(&self) -> u8 {\n        1\n    }\n    pub fn to_x(&self) -> u8 {\n        1\n    }\n    pub fn into_x(self) -> u8 {\n        1\n    }"), 0);
 });
 
+// The operator rule: an Index impl counts, an arithmetic or logic operator keeps its math meaning (Z14).
+test("operator: an arithmetic impl is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "impl std::ops::Add<u8> for Demo {\n    type Output = Demo;\n    fn add(self, rhs: u8) -> Demo {\n        self\n    }\n}", 0);
+});
+test("operator: a bit flag impl is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "impl BitOr for Demo {\n    type Output = Demo;\n    fn bitor(self, rhs: Demo) -> Demo {\n        self\n    }\n}", 0);
+});
+test("operator: an Index impl counts", () => {
+  expectExit("crates/demo/src/lib.rs", "impl Index<usize> for Demo {\n    type Output = u8;\n    fn index(&self, at: usize) -> &u8 {\n        &0\n    }\n}", 1);
+});
+
 // The generic_name rule: a generic parameter is a short letter from the allowed set, or a CamelCase word (N7).
 test("generic_name: a single letter outside the set counts", () => {
   expectExit("crates/demo/src/lib.rs", "pub struct Wrap<A>(pub A);", 1);

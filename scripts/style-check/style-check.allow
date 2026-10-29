@@ -25,9 +25,6 @@ anyhow_pub|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|3|benchmark
 # glob: every glob import still to be replaced with explicit imports (tracker items G2 and G3). The rows go away with the fix.
 
 # operator: an overload that has a math or logic meaning (U22). Each line names the meaning.
-operator|crates/habilis-network-netplay/src/frame.rs|4|Frame: a frame plus or minus a number of frames, and the gap between two frames.
-operator|crates/habilis-network-util/src/unix_secs.rs|2|UnixSecs plus or minus a Duration: a point in time moved by a span.
-operator|crates/habilis-network/src/gossip/app/app_class.rs|1|AppClass bit flags: BitOr joins two sets of flags.
 
 # pub_const_fn: a public const fn (U21). Each row is a count that may only go down.
 

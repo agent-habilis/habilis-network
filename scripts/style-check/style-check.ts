@@ -591,9 +591,9 @@ const RULES: Rule[] = [
   },
   {
     name: "operator",
-    pattern: /^\s*impl(<[^>]*>)?\s+(std::ops::|ops::)?(Add|Sub|Mul|Div|Rem|Neg|Not|Index|IndexMut|BitAnd|BitOr|BitXor|Shl|Shr)(Assign)?\b/,
+    pattern: /^\s*impl(<[^>]*>)?\s+(std::ops::|ops::)?(Index|IndexMut)\b/,
     glob: "crates/**/*.rs",
-    why: "An operator overload has a math or logic meaning only (a frame advances by frames, a flag set joins flags). Any other use needs a line in style-check.allow with a reason.",
+    why: "An arithmetic or logic operator (Add, Sub, BitOr and the like) has its math meaning by name, so it is allowed. Indexing with [] hides a lookup that can fail, so write a get method that returns an Option.",
   },
   {
     name: "pub_const_fn",
