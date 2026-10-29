@@ -28,7 +28,7 @@
 //! ```ignore
 //! // A dedicated underlay endpoint the crate forwards over, on the key derived
 //! // from the application key.
-//! let underlay = Endpoint::builder(presets::N0)
+//! let underlay: Endpoint = Endpoint::builder(presets::N0)
 //!     .secret_key(underlay_secret(&app_secret))
 //!     .bind()
 //!     .await?;
@@ -730,7 +730,7 @@ mod tests {
                 .wrapping_add(3);
         }
         let secret = SecretKey::from_bytes(&bytes);
-        let underlay = Endpoint::builder(presets::Minimal)
+        let underlay: Endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(&secret))
             .relay_mode(RelayMode::Disabled)
             .bind()
@@ -776,7 +776,7 @@ mod tests {
     /// An underlay on loopback only, bound to the derived key of `secret`.
     async fn loopback_underlay(secret: &SecretKey) -> Endpoint {
         let loopback_addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("loopback");
-        let underlay = Endpoint::builder(presets::Minimal)
+        let underlay: Endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(secret))
             .relay_mode(RelayMode::Disabled)
             .bind_addr(loopback_addr)
@@ -821,7 +821,7 @@ mod tests {
         .expect("an extra ALPN is allowed");
 
         let loopback_addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("loopback");
-        let client = Endpoint::builder(presets::Minimal)
+        let client: Endpoint = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .bind_addr(loopback_addr)
             .expect("valid bind addr")
@@ -889,7 +889,7 @@ mod tests {
 
     /// A handle whose underlay can only reach other underlays through the relay.
     async fn relay_only_handle(secret: &SecretKey, url: &iroh::RelayUrl) -> MultihopHandle {
-        let underlay = Endpoint::builder(presets::Minimal)
+        let underlay: Endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(secret))
             .relay_mode(RelayMode::custom([url.clone()]))
             .clear_ip_transports()
@@ -1100,7 +1100,7 @@ mod tests {
                 .resolve(dst.get())
                 .expect("the lookup answers");
             let item = answers.next().await.expect("an item").expect("no error");
-            let custom = item
+            let custom: iroh_base::CustomAddr = item
                 .endpoint_info()
                 .addrs()
                 .find(|address| address.is_custom())

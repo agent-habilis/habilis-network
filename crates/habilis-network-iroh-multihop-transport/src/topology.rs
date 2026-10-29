@@ -350,7 +350,7 @@ impl Topology {
     /// which node is "us". Backs the `topology` IPC query.
     #[must_use]
     pub fn view(&self, self_id: AppId) -> TopologyView {
-        let edges = self
+        let edges: Vec<TopologyEdge> = self
             .vectors
             .values()
             .map(|held| &held.vector)
@@ -645,7 +645,7 @@ mod tests {
         let before = before_routes[0].encode();
 
         let relay: iroh::RelayUrl = "http://127.0.0.1:1/".parse().expect("a relay url");
-        let moved = EndpointAddr::new(nc.get())
+        let moved: EndpointAddr = EndpointAddr::new(nc.get())
             .with_relay_url(relay)
             .with_ip_addr("10.0.0.7:4000".parse().expect("an address"));
         assert!(ingest(

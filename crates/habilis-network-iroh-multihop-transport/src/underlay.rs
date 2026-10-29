@@ -530,7 +530,7 @@ mod tests {
     /// as it is in production.
     async fn forwarder() -> (Forwarder, AppId, mpsc::Receiver<Delivered>) {
         let loopback: SocketAddr = "127.0.0.1:0".parse().expect("loopback addr");
-        let underlay = Endpoint::builder(presets::Minimal)
+        let underlay: Endpoint = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .bind_addr(loopback)
             .expect("valid bind addr")

@@ -85,7 +85,7 @@ async fn make_node(secret: SecretKey) -> Node {
     let underlay = underlay_endpoint(&secret).await;
     let handle = MultihopHandle::new(&secret, underlay, HandleConfig::default())
         .expect("underlay on the derived key");
-    let app = Endpoint::builder(presets::Minimal)
+    let app: Endpoint = Endpoint::builder(presets::Minimal)
         .secret_key(secret.clone())
         .relay_mode(RelayMode::Disabled)
         .preset(handle.clone())
@@ -112,7 +112,7 @@ async fn make_dual_node(
     let webrtc = habilis_network_iroh_webrtc_transport::WebRtcHandle::new(
         habilis_network_iroh_webrtc_transport::WebRtcTransport::new(secret.public()),
     );
-    let app = Endpoint::builder(presets::Minimal)
+    let app: Endpoint = Endpoint::builder(presets::Minimal)
         .secret_key(secret.clone())
         .relay_mode(RelayMode::Disabled)
         .preset(handle.clone())
@@ -164,7 +164,7 @@ fn secret(seed: u8) -> SecretKey {
 /// Assert the connection's selected path is our multihop custom transport — i.e.
 /// the bytes really travelled over the relays, not some direct shortcut.
 fn assert_multihop_selected(connection: &Connection) {
-    let selected_is_multihop = connection.paths().iter().any(|path| {
+    let selected_is_multihop: bool = connection.paths().iter().any(|path| {
         path.is_selected()
             && matches!(path.remote_addr(), TransportAddr::Custom(address) if address.id() == MULTIHOP_TRANSPORT_ID)
     });
