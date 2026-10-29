@@ -158,7 +158,7 @@ impl MeshDoc {
     /// anywhere. This is the `state` channel.
     #[must_use]
     pub fn new_ungated() -> Self {
-        Self::from_parts(Automerge::new(), HashSet::new(), None)
+        Self::assemble(Automerge::new(), HashSet::new(), None)
     }
 
     /// A channel whose per-peer map is gated by `gate` — the `meta` channel.
@@ -181,14 +181,10 @@ impl MeshDoc {
         let hash = genesis.hash();
         let _ = doc.apply_changes([genesis]);
         applied.insert(hash);
-        Self::from_parts(doc, applied, Some(gate))
+        Self::assemble(doc, applied, Some(gate))
     }
 
-    fn from_parts(
-        doc: Automerge,
-        applied: HashSet<ChangeHash>,
-        gate: Option<SelfWriteGate>,
-    ) -> Self {
+    fn assemble(doc: Automerge, applied: HashSet<ChangeHash>, gate: Option<SelfWriteGate>) -> Self {
         Self {
             doc: Box::new(doc),
             applied,

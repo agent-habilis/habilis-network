@@ -93,7 +93,7 @@ pub async fn run(nick: &str, relay: Option<RelayUrl>, host_ice: bool) -> Result<
     // Taken before the membership moves into the drain task: `say` needs the id
     // to tag the host's own lines, which is what keeps them from echoing back.
     let host_id = membership.id;
-    let incoming = terminal::from_membership(membership);
+    let incoming = terminal::membership_events(membership);
     let outcome = terminal::participate(incoming, |text| {
         let room = room.clone();
         async move {

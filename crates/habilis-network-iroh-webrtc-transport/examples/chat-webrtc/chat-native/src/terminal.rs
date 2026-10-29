@@ -55,7 +55,7 @@ pub fn lines() -> mpsc::Receiver<String> {
 /// The task owns the membership, so the member stays in the roster exactly as
 /// long as this channel is alive and leaves when it is dropped.
 #[must_use]
-pub fn from_membership(mut membership: Membership) -> mpsc::Receiver<ServerMsg> {
+pub fn membership_events(mut membership: Membership) -> mpsc::Receiver<ServerMsg> {
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
     tokio::spawn(async move {
         while let Some(fanout) = membership.next_broadcast().await {
