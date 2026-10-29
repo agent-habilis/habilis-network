@@ -1,6 +1,6 @@
 //! Two endpoints that carry a WebRTC session over loopback.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use habilis_network_iroh_webrtc_transport::{
     IceConfig, WEBRTC_TRANSPORT_ID, WebRtcTransport, answer_with, custom_addr, offer_with,
@@ -9,6 +9,7 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
 
+use tokio::{io, time};
 const ECHO_ALPN: &[u8] = b"habilis-network-webrtc/test-echo/0";
 const JSEP_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -18,7 +19,7 @@ struct Echo;
 impl ProtocolHandler for Echo {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let (mut send, mut recv) = connection.accept_bi().await?;
-        tokio::io::copy(&mut recv, &mut send).await?;
+        io::copy(&mut recv, &mut send).await?;
         send.finish()?;
         connection.closed().await;
         Ok(())
@@ -134,13 +135,13 @@ fn a_detach_ends_the_far_sides_session_too() -> anyhow::Result<()> {
             transport_client.detach(&id_server),
             "a detach ends the far side's session too"
         );
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         while transport_server.has_session(&id_client) {
             assert!(
                 started.elapsed() < Duration::from_secs(2),
                 "the far side still holds the session"
             );
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            time::sleep(Duration::from_millis(50)).await;
         }
         Ok(())
     })

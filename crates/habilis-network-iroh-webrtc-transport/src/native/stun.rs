@@ -379,9 +379,12 @@ mod tests {
         parse_binding_response,
     };
     use std::net::SocketAddr;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio::net::UdpSocket;
 
+    use std::io::ErrorKind;
+    use std::{cell, future, io, net};
+    use tokio::{task, time};
     const TXID: [u8; TRANSACTION_ID_LEN] = [9u8; TRANSACTION_ID_LEN];
 
     /// Build a Binding Success Response carrying one address attribute.
@@ -478,7 +481,7 @@ mod tests {
         let mut mask = [0u8; 16];
         mask[..4].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
         mask[4..].copy_from_slice(&TXID);
-        let address: std::net::Ipv6Addr = "2001:db8::1".parse().expect("addr");
+        let address: net::Ipv6Addr = "2001:db8::1".parse().expect("addr");
         let port = 0x1388u16 ^ u16::try_from(MAGIC_COOKIE >> 16).expect("fits"); // 5000
         let mut value = vec![0, FAMILY_IPV6];
         value.extend_from_slice(&port.to_be_bytes());
@@ -593,7 +596,7 @@ mod tests {
 
     /// A mock STUN server on loopback: answers every Binding Request with the
     /// canonical `203.0.113.7:41234`, echoing the request's transaction id.
-    async fn mock_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    async fn mock_server() -> (SocketAddr, task::JoinHandle<()>) {
         let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         let address = socket.local_addr().expect("local addr");
         let task = tokio::spawn(async move {
@@ -625,7 +628,7 @@ mod tests {
                 stun_servers: vec![silent_addr.to_string(), live_addr.to_string()],
                 stun_timeout: Duration::from_secs(2),
             };
-            let start = std::time::Instant::now();
+            let start = Instant::now();
             let reflexive = gather_reflexive(&client, &config).await;
             let elapsed = start.elapsed();
             server.abort();
@@ -656,11 +659,11 @@ mod tests {
                 stun_servers: vec!["hung.invalid:3478".to_owned(), live_addr.to_string()],
                 stun_timeout: Duration::from_secs(2),
             };
-            let start = std::time::Instant::now();
+            let start = Instant::now();
             let reflexive =
                 super::gather_with_resolver(&client, &config, |name: String| async move {
                     if name.starts_with("hung") {
-                        return std::future::pending().await;
+                        return future::pending().await;
                     }
                     let parsed: Option<SocketAddr> = name.parse().ok();
                     Ok(parsed)
@@ -695,7 +698,7 @@ mod tests {
             };
             let reflexive =
                 super::gather_with_resolver(&client, &config, |name: String| async move {
-                    tokio::time::sleep(Duration::from_millis(1200)).await;
+                    time::sleep(Duration::from_millis(1200)).await;
                     let parsed: Option<SocketAddr> = name.parse().ok();
                     Ok(parsed)
                 })
@@ -715,20 +718,20 @@ mod tests {
     /// shape Windows produces when dead servers' ICMP port-unreachables
     /// surface as receive errors while a live server's answer is in flight.
     struct StormySocket {
-        errors_left: std::cell::Cell<usize>,
-        sent: std::cell::RefCell<Vec<(Vec<u8>, SocketAddr)>>,
+        errors_left: cell::Cell<usize>,
+        sent: cell::RefCell<Vec<(Vec<u8>, SocketAddr)>>,
     }
 
     impl super::ProbeSocket for StormySocket {
-        async fn send_to(&self, buffer: &[u8], target: SocketAddr) -> std::io::Result<usize> {
+        async fn send_to(&self, buffer: &[u8], target: SocketAddr) -> io::Result<usize> {
             self.sent.borrow_mut().push((buffer.to_vec(), target));
             Ok(buffer.len())
         }
 
-        async fn recv_from(&self, buffer: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        async fn recv_from(&self, buffer: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
             if self.errors_left.get() > 0 {
                 self.errors_left.set(self.errors_left.get() - 1);
-                return Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+                return Err(io::Error::from(ErrorKind::ConnectionReset));
             }
             let (request, from) = self
                 .sent
@@ -751,8 +754,8 @@ mod tests {
             // answer: the deadline already bounds the loop, so giving up early
             // buys nothing and costs the only NAT-crossing candidate.
             let socket = StormySocket {
-                errors_left: std::cell::Cell::new(10),
-                sent: std::cell::RefCell::new(Vec::new()),
+                errors_left: cell::Cell::new(10),
+                sent: cell::RefCell::new(Vec::new()),
             };
             let config = IceConfig {
                 stun_servers: vec!["203.0.113.9:3478".to_owned()],
@@ -776,7 +779,7 @@ mod tests {
     /// the multi-homed / anycast / rewritten-return-path case. The reply
     /// carries the correct transaction id; only the source address differs
     /// from the one probed.
-    async fn sideways_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    async fn sideways_server() -> (SocketAddr, task::JoinHandle<()>) {
         let listen = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         let address = listen.local_addr().expect("local addr");
         let task = tokio::spawn(async move {

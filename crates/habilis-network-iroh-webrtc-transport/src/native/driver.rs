@@ -483,6 +483,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::net::UdpSocket;
 
+    use tokio::time;
     #[test]
     fn a_quiet_timeout_says_only_that_it_timed_out() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -531,7 +532,7 @@ mod tests {
             let noise = tokio::spawn(async move {
                 for _ in 0..5u8 {
                     let _ = sender.send_to(&[0xFF; 32], local).await;
-                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    time::sleep(Duration::from_millis(20)).await;
                 }
             });
 

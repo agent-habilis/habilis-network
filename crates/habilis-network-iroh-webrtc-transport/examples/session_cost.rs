@@ -22,6 +22,7 @@
 //! such lines and prints the slope per role, with its standard error and the noise floor
 //! (the spread of the `k = 0` runs).
 
+use std::io as std_io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,9 +33,11 @@ use habilis_network_iroh_webrtc_transport::{
 };
 use habilis_network_util::resident_memory;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::io::{self, AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 
+use std::{env, fs, process};
+use tokio::time;
 const JSEP_DEADLINE: Duration = Duration::from_secs(30);
 const MIB: f64 = 1_048_576.0;
 
@@ -134,7 +137,7 @@ async fn send(out: &mut ChildStdin, message: &Msg) -> anyhow::Result<()> {
     Ok(())
 }
 
-type Lines = tokio::io::Lines<BufReader<ChildStdout>>;
+type Lines = io::Lines<BufReader<ChildStdout>>;
 
 async fn receive(lines: &mut Lines) -> anyhow::Result<Msg> {
     let line = lines
@@ -186,21 +189,21 @@ fn resident() -> u64 {
 
 /// Waits `settle` seconds, then the median of five readings one second apart.
 async fn settled(settle: u64) -> u64 {
-    tokio::time::sleep(Duration::from_secs(settle)).await;
+    time::sleep(Duration::from_secs(settle)).await;
     let mut readings = Vec::new();
     for _ in 0..5 {
         readings.push(resident());
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
     median(&readings)
 }
 
 /// The load average of the last minute, `None` where it cannot be read.
 fn load1() -> Option<f64> {
-    if let Ok(text) = std::fs::read_to_string("/proc/loadavg") {
+    if let Ok(text) = fs::read_to_string("/proc/loadavg") {
         return text.split_whitespace().next()?.parse().ok();
     }
-    let output = std::process::Command::new("sysctl")
+    let output = process::Command::new("sysctl")
         .args(["-n", "vm.loadavg"])
         .output()
         .ok()?;
@@ -213,11 +216,11 @@ async fn measure(role: Role, sessions: usize, settle: u64, hold: u64) -> anyhow:
         resident_memory::current_resident_memory_bytes().is_some(),
         "the resident memory of this process cannot be read on this platform"
     );
-    let mut command = Command::new(std::env::current_exe()?);
+    let mut command = Command::new(env::current_exe()?);
     command
         .arg("peer")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped());
+        .stdin(process::Stdio::piped())
+        .stdout(process::Stdio::piped());
     let mut child = command.kill_on_drop(true).spawn()?;
     let mut to_peer = child.stdin.take().context("no stdin")?;
     let mut from_peer = BufReader::new(child.stdout.take().context("no stdout")?).lines();
@@ -289,8 +292,8 @@ async fn measure(role: Role, sessions: usize, settle: u64, hold: u64) -> anyhow:
 /// The peer: answers or offers on request, with a fresh endpoint id for every session, and
 /// keeps its end of every session open until its stdin closes.
 async fn run_peer() -> anyhow::Result<()> {
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let mut out = tokio::io::stdout();
+    let mut lines = BufReader::new(io::stdin()).lines();
+    let mut out = io::stdout();
     // the example keeps each transport alive while its sessions run
     let mut held: Vec<Arc<WebRtcTransport>> = Vec::new();
     let ice = IceConfig::host_only();
@@ -321,7 +324,7 @@ async fn run_peer() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn reply(out: &mut tokio::io::Stdout, message: &Msg) -> anyhow::Result<()> {
+async fn reply(out: &mut io::Stdout, message: &Msg) -> anyhow::Result<()> {
     let mut line = serde_json::to_vec(message)?;
     line.push(b'\n');
     out.write_all(&line).await?;
@@ -337,7 +340,7 @@ fn field(row: &serde_json::Value, name: &str) -> Option<f64> {
 /// Reads the lines of `measure` from stdin and prints the slope per role and per reading.
 fn run_fit() -> anyhow::Result<()> {
     let mut rows: Vec<serde_json::Value> = Vec::new();
-    for line in std::io::stdin().lines() {
+    for line in std_io::stdin().lines() {
         let line = line?;
         if line.trim_start().starts_with('{') {
             rows.push(serde_json::from_str(&line)?);
@@ -426,7 +429,7 @@ fn argument(args: &[String], name: &str) -> Option<String> {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("peer") => Box::pin(run_peer()).await,
         Some("fit") => run_fit(),
