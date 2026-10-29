@@ -7,7 +7,8 @@ const CHILD: &str = "HABILIS_TEST_TRACING_CHILD";
 
 #[test]
 fn a_binary_with_a_late_event_at_exit_exits_with_101() {
-    let output: std::process::Output = Command::new(std::env::current_exe().expect("exe"))
+    let exe = std::env::current_exe().expect("exe");
+    let output: std::process::Output = Command::new(exe)
         .args(["--exact", "child_logs_after_its_guard", "--nocapture"])
         .env(CHILD, "1")
         .output()

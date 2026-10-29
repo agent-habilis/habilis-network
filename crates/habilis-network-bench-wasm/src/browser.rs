@@ -158,11 +158,11 @@ pub fn serve() -> Result<String, JsValue> {
 
 async fn connection_to(remote: EndpointId) -> Result<Connection, JsValue> {
     let (endpoint, open) = with_state(|state| {
-        let open: Option<Connection> = state
+        let live = state
             .connection
             .as_ref()
-            .filter(|(id, connection)| *id == remote && connection.close_reason().is_none())
-            .map(|(_, connection)| connection.clone());
+            .filter(|(id, connection)| *id == remote && connection.close_reason().is_none());
+        let open: Option<Connection> = live.map(|(_, connection)| connection.clone());
         Ok((state.endpoint.clone(), open))
     })?;
     if let Some(connection) = open {

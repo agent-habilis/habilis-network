@@ -33,11 +33,10 @@ const CHUNK: usize = 64 * 1024;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     use clap::Parser as _;
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "habilis_network=warn".into());
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "habilis_network=warn".into()),
-        )
+        .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
 

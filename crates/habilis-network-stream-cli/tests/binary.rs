@@ -28,13 +28,13 @@ fn payload(len: usize) -> Vec<u8> {
 
 /// A producer on `relay`, with `--robot` notes on stderr, sent line by line.
 fn producer(relay: &str) -> (Child, mpsc::Receiver<serde_json::Value>) {
-    let mut child: Child = Command::new(BINARY)
+    let mut command = Command::new(BINARY);
+    command
         .args(["--lookup", "relay", "--relay-url", relay, "--robot"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start the producer");
+        .stderr(Stdio::piped());
+    let mut child: Child = command.spawn().expect("start the producer");
     let stderr = child.stderr.take().expect("stderr");
     let (notes, received) = mpsc::channel();
     std::thread::spawn(move || {
@@ -91,12 +91,12 @@ fn bytes_piped_in_come_out_of_another_binary_byte_exact() {
 
             let ready = note(&notes, "ready", "");
             let hash = ready["hash"].as_str().expect("a hash").to_owned();
-            let mut reader: Child = Command::new(BINARY)
+            let mut command = Command::new(BINARY);
+            command
                 .arg(&hash)
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("start the reader");
+                .stderr(Stdio::null());
+            let mut reader: Child = command.spawn().expect("start the reader");
             let mut got = Vec::new();
             reader
                 .stdout
@@ -136,17 +136,18 @@ fn a_producer_stopped_by_sigterm_abandons_its_reader_at_once() {
                 .as_str()
                 .expect("a hash")
                 .to_owned();
-            let mut reader: Child = Command::new(BINARY)
+            let mut command = Command::new(BINARY);
+            command
                 .arg(&hash)
                 .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("start the reader");
+                .stderr(Stdio::piped());
+            let mut reader: Child = command.spawn().expect("start the reader");
             note(&notes, "note", "a reader attached; streaming stdin");
 
             let stopped = Instant::now();
+            let pid = producer.id().to_string();
             let killed: std::process::ExitStatus = Command::new("kill")
-                .args(["-TERM", &producer.id().to_string()])
+                .args(["-TERM", &pid])
                 .status()
                 .expect("kill");
             assert!(

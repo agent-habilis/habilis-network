@@ -256,18 +256,18 @@ pub fn is_blocked_to(
     remote: Option<std::net::SocketAddr>,
     remote_id: Option<iroh::EndpointId>,
 ) -> bool {
-    let rung_blocked: bool = RUNGS_BLOCKED
-        .lock()
-        .expect("rung blocks")
-        .as_ref()
-        .is_some_and(|blocks| blocks.contains(&(local, rung)));
+    let rung_blocked: bool = {
+        let guard = RUNGS_BLOCKED.lock().expect("rung blocks");
+        guard
+            .as_ref()
+            .is_some_and(|blocks| blocks.contains(&(local, rung)))
+    };
     if rung_blocked {
         return true;
     }
     let remote_blocked = remote_id.is_some_and(|remote_id| {
-        RUNGS_BLOCKED_TO
-            .lock()
-            .expect("rung blocks to a remote")
+        let guard = RUNGS_BLOCKED_TO.lock().expect("rung blocks to a remote");
+        guard
             .as_ref()
             .is_some_and(|blocks| blocks.contains(&(local, rung, remote_id)))
     });
@@ -277,12 +277,9 @@ pub fn is_blocked_to(
     rung == Rung::Ip
         && (IP_BLOCKED.load(Ordering::SeqCst)
             || remote.is_some_and(|remote| {
-                IP_BLOCKED_TO
-                    .lock()
-                    .expect("ip blocks")
-                    .as_ref()
-                    .and_then(|blocks| blocks.get(&local))
-                    .is_some_and(|ports| ports.contains(&remote.port()))
+                let guard = IP_BLOCKED_TO.lock().expect("ip blocks");
+                let ports = guard.as_ref().and_then(|blocks| blocks.get(&local));
+                ports.is_some_and(|set| set.contains(&remote.port()))
             }))
 }
 

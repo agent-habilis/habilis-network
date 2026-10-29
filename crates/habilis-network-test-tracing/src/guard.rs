@@ -234,12 +234,12 @@ pub fn run<F: Future>(guard: Guard, future: F) -> F::Output {
 /// Panics if the runtime cannot be built.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_multi_thread<F: Future>(guard: Guard, worker_threads: usize, future: F) -> F::Output {
-    let runtime: tokio::runtime::Runtime = tokio::runtime::Builder::new_multi_thread()
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder
         .worker_threads(worker_threads)
         .thread_name(worker_name())
-        .enable_all()
-        .build()
-        .expect("runtime");
+        .enable_all();
+    let runtime: tokio::runtime::Runtime = builder.build().expect("runtime");
     let output = runtime.block_on(async { finish(future.await).await });
     drop(runtime);
     drop(guard);
@@ -289,9 +289,10 @@ where
             .with_ansi(mode == Mode::Stderr)
             .with_writer(writer)
             .with_filter(filter);
-        tracing_subscriber::registry()
+        let layers = tracing_subscriber::registry()
             .with(print)
-            .with(Catch.with_filter(LevelFilter::WARN))
+            .with(Catch.with_filter(LevelFilter::WARN));
+        layers
             .try_init()
             .expect("another global tracing subscriber is installed");
         mode

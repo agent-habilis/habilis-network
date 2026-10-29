@@ -6,12 +6,9 @@ use std::panic::AssertUnwindSafe;
 use std::thread;
 
 fn named<T: Send + 'static>(name: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
-    thread::Builder::new()
-        .name(name.to_owned())
-        .spawn(body)
-        .expect("spawn")
-        .join()
-        .expect("join")
+    let builder = thread::Builder::new().name(name.to_owned());
+    let handle = builder.spawn(body).expect("spawn");
+    handle.join().expect("join")
 }
 
 #[test]

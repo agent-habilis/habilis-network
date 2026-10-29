@@ -56,14 +56,11 @@ fn rotate(path: &Path, reopen: impl FnOnce(&Path) -> io::Result<fs::File>) -> io
 fn open_truncated(path: &Path) -> io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt as _;
 
-    fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        // Owner-only: the log records the mesh's nicknames, peers and (with
-        // `--log-raw`) message bodies, so it must not be world-readable.
-        .mode(0o600)
-        .open(path)
+    let mut options = fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    // Owner-only: the log records the mesh's nicknames, peers and (with
+    // `--log-raw`) message bodies, so it must not be world-readable.
+    options.mode(0o600).open(path)
 }
 
 /// Rotate the attached file once `written` reaches `max` (`max == 0`
@@ -138,12 +135,9 @@ impl LogSink {
         let opened =
             habilis_network_util::ensure_parent_private(base.as_deref(), &path).and_then(|()| {
                 use std::os::unix::fs::OpenOptionsExt as _;
-                fs::OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&path)
+                let mut options = fs::OpenOptions::new();
+                options.create(true).write(true).truncate(true);
+                options.mode(0o600).open(&path)
             });
         match opened {
             Ok(mut file) => {
@@ -338,12 +332,9 @@ mod tests {
             std::env::temp_dir().join(format!("habilis-network-logsink-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("rot.log");
-        let file: fs::File = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)
-            .expect("open test log");
+        let mut options = fs::OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        let file: fs::File = options.open(&path).expect("open test log");
         let max = 100u64;
         let mut sink = LogSink(Arc::new(Mutex::new(State::Attached {
             file,
