@@ -1194,6 +1194,7 @@ async fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
             rungs_watch.note(report, Instant::now());
         }
     }
+    rungs_watch.finish().await;
 
     let kept: Vec<u16> = book
         .get_endpoint_info(params.id)
@@ -1723,4 +1724,28 @@ async fn ensure_starts_the_probe_instead_of_waiting_for_it() {
         probe.abort_and_close().await;
     }
     peer.close().await;
+}
+
+/// A rung probe that the watch starts owns an endpoint until the probe closes it. Dropping the
+/// runtime with the probe out drops that endpoint open, so the owner finishes the watch first.
+#[cfg(feature = "host")]
+#[test]
+fn a_rung_watch_that_asks_and_then_finishes_leaves_no_open_endpoint() {
+    let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .expect("a free loopback port");
+    let port = silent.local_addr().expect("its address").port();
+    let params = public_params();
+    let errors = crate::testing::errors_through_runtime_drop(async {
+        let (reports, _arrivals) = mpsc::unbounded_channel();
+        let mut rungs = super::RungWatch::new(reports);
+        rungs.ask(&params, SecretKey::generate().public(), port, false);
+        // Let the probe bind its endpoint and start its dial on the silent rung.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        rungs.finish().await;
+    });
+    drop(silent);
+    assert!(
+        !errors.contains("Endpoint dropped without calling"),
+        "the probe's endpoint reached the runtime drop open:\n{errors}"
+    );
 }
