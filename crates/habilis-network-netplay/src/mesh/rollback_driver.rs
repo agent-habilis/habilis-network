@@ -157,7 +157,7 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                 // Resolve and release the lock *before* awaiting: holding a
                 // `std::sync::Mutex` guard across an await is denied
                 // workspace-wide, and rightly so.
-                let nickname = self
+                let nickname: Option<Nickname> = self
                     .mailboxes
                     .directory
                     .lock()

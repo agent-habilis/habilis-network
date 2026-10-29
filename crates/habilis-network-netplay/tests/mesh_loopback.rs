@@ -246,7 +246,7 @@ fn two_peers_play_a_match_over_a_loopback_mesh() {
             let mut players = vec![spawn(&topic, "alice").await, spawn(&topic, "bob").await];
 
             // 1. The mesh forms and both peers see each other in the lobby.
-            let met = drive(&mut players, Duration::from_secs(30), |players| {
+            let met: bool = drive(&mut players, Duration::from_secs(30), |players| {
                 players.iter().all(|player| {
                     player
                         .lobby
@@ -271,7 +271,7 @@ fn two_peers_play_a_match_over_a_loopback_mesh() {
                 .broadcast_lobby(&start);
 
             // 3. Both build a session and complete the rollback handshake.
-            let running = drive(&mut players, Duration::from_secs(30), |players| {
+            let running: bool = drive(&mut players, Duration::from_secs(30), |players| {
                 players.iter().all(|player| {
                     player
                         .session

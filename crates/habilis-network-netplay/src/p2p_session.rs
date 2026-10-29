@@ -104,7 +104,7 @@ impl<T: Config, Link: Transport<T>> P2PSession<T, Link> {
             max_prediction,
             "session built, synchronizing"
         );
-        let peers = players
+        let peers: Vec<PeerProtocol<T>> = players
             .into_iter()
             .enumerate()
             .map(|(index, addr)| (PlayerHandle::new(index), addr))
