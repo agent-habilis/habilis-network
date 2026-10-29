@@ -340,7 +340,9 @@ function countAbbrevNames(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)))
     .split("\n")
     .filter((line) => !/^\s*#\[/.test(line))
-    .join("\n");
+    .join("\n")
+    // The fields of the aead crate's `Payload { msg, aad }` literal are named by that crate.
+    .replace(/\bPayload\s*\{[^}]*\}/g, (literal) => literal.replace(/\bmsg\b/g, "_"));
   let count = 0;
   // A name after a dot is a method call or a field access: the name is declared elsewhere, where it counts,
   // or it belongs to a foreign API (`endpoint.addr()`) that this crate cannot rename.

@@ -537,6 +537,12 @@ test("abbrev_name: the word in a string or a comment is clean", () => {
 test("abbrev_name: a method call or a field access after a dot is clean", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(endpoint: &Endpoint) {\n    let _ = endpoint.addr();\n    let _ = endpoint.cfg;\n}", 0);
 });
+test("abbrev_name: the msg field of the foreign aead Payload literal is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f(plain: &[u8]) {\n    let _ = Payload { msg: plain, aad: &[] };\n}", 0);
+});
+test("abbrev_name: msg in a struct of this crate still counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub struct Packet {\n    msg: u8,\n}", 1);
+});
 test("abbrev_name: a declared name still counts after the dot rule", () => {
   expectExit("crates/demo/src/lib.rs", "pub struct S {\n    ctx: u8,\n}\npub fn addr() {}", 1);
 });
