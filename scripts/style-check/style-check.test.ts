@@ -13,12 +13,13 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const work = mkdtempSync(path.join(tmpdir(), "style-check-"));
 afterAll(() => rmSync(work, { recursive: true, force: true }));
 
-// Plant `content` at `file` in a fresh repository with `allow` as its allow list, then run the check.
+// Plant `content` at `file` in a fresh repository, then run the check. `allow` is a file the check must
+// ignore, and it is written only when a test passes one.
 function check(file: string, content: string, allow = ""): { status: number; out: string } {
   const repo = mkdtempSync(path.join(work, "repo-"));
   mkdirSync(path.join(repo, "scripts", "style-check"), { recursive: true });
   copyFileSync(path.join(here, "style-check.ts"), path.join(repo, "scripts", "style-check", "style-check.ts"));
-  writeFileSync(path.join(repo, "scripts", "style-check", "style-check.allow"), `${allow}\n`);
+  if (allow) writeFileSync(path.join(repo, "scripts", "style-check", "style-check.allow"), `${allow}\n`);
   mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
   // A doc example in the demo crate, so the crate_example rule does not fire on every case.
   mkdirSync(path.join(repo, "crates", "demo", "src"), { recursive: true });
@@ -110,9 +111,6 @@ test("glob: explicit import", () => {
 test("glob: a comment that holds a glob", () => {
   expectExit("src/a.rs", "// use super::*;", 0);
 });
-test("glob: counted exception", () => {
-  expectExit("src/a.rs", "use super::*;", 0, "glob|src/a.rs|1|test exception");
-});
 
 // A clean file passes, and so does a string that only looks like a block doc comment.
 test("clean file", () => {
@@ -125,27 +123,12 @@ test("doc comment with ///", () => {
   expectExit("src/a.rs", "/// A doc comment.\nfn f() {}", 0);
 });
 
-// The allow list.
+// No allow lookup: a violation fails even when a row in the list names it.
+test("no allow lookup: a planted violation fails though a row names it", () => {
+  expectExit("src/a.rs", violation, 1, "catch_unwind|src/a.rs|1|a boundary");
+});
 test("file name with a space", () => {
   expectExit("c/src/a b.rs", violation, 1);
-});
-test("allowed, exact count", () => {
-  expectExit("src/a.rs", violation, 0, "catch_unwind|src/a.rs|1|a boundary");
-});
-test("allowed, count exceeded", () => {
-  expectExit("src/a.rs", `${violation}\n${violation}`, 1, "catch_unwind|src/a.rs|1|a boundary");
-});
-test("allowed, count too high (stale)", () => {
-  expectExit("src/a.rs", violation, 1, "catch_unwind|src/a.rs|2|a boundary");
-});
-test("allowed, file has no match (stale)", () => {
-  expectExit("src/a.rs", "fn f() {}", 1, "catch_unwind|src/a.rs|1|a boundary");
-});
-test("two rows for one file", () => {
-  expectExit("src/a.rs", violation, 1, "catch_unwind|src/a.rs|1|one\ncatch_unwind|src/a.rs|1|two");
-});
-test("comment and blank lines in the list", () => {
-  expectExit("src/a.rs", violation, 0, "# a comment\n\ncatch_unwind|src/a.rs|1|a boundary");
 });
 
 // The anyhow_pub rule: a public signature that returns anyhow, in a library file.
@@ -184,54 +167,15 @@ test("anyhow_pub: five public forms, not the pub(crate), the test module, or the
   expectExit("crates/demo/src/lib.rs", anyhowFixture, 1);
   expectExit("crates/demo/src/main.rs", anyhowMain, 0);
 });
-test("anyhow_pub: the exact count is allowed", () => {
-  expectExit("crates/demo/src/lib.rs", anyhowFixture, 0, "anyhow_pub|crates/demo/src/lib.rs|5|fixture");
-});
-test("anyhow_pub: one more than allowed fails", () => {
-  expectExit("crates/demo/src/lib.rs", anyhowFixture.replace("#[cfg(test)]", "pub fn z() -> anyhow::Result<()> { Ok(()) }\n#[cfg(test)]"), 1, "anyhow_pub|crates/demo/src/lib.rs|5|fixture");
-});
-test("anyhow_pub: a stale count fails", () => {
-  expectExit("crates/demo/src/lib.rs", anyhowFixture, 1, "anyhow_pub|crates/demo/src/lib.rs|6|fixture");
-});
 
 // The advisor's review of the anyhow_pub rule: one case per hole, each failing on the old rule.
-test("anyhow_pub: a bare Result fn counts beside the import, once per fn", () => {
-  expectExit("crates/demo/src/lib.rs", "use anyhow::Result;\npub fn f() -> Result<u8> { Ok(1) }\npub fn g() -> Result<u8> { Ok(2) }", 0, "anyhow_pub|crates/demo/src/lib.rs|2|fixture");
-});
-test("anyhow_pub: a test module strips only its own body", () => {
-  expectExit("crates/demo/src/lib.rs", "#[cfg(test)]\nmod tests {\n    fn t() {}\n}\npub fn late() -> anyhow::Result<()> { Ok(()) }", 0, "anyhow_pub|crates/demo/src/lib.rs|1|fixture");
-});
 test("anyhow_pub: a commented-out signature does not count", () => {
   expectExit("crates/demo/src/lib.rs", "// pub fn f() -> anyhow::Result<()> { Ok(()) }", 0);
-});
-test("anyhow_pub: the error may be second, and the alias may sit in a Future", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Result<(), anyhow::Error> { Ok(()) }\npub trait T {\n    fn g(&self) -> impl Future<Output = anyhow::Result<()>>;\n}", 0, "anyhow_pub|crates/demo/src/lib.rs|2|fixture");
-});
-test("anyhow_pub: an Option of the alias counts", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Option<anyhow::Result<()>> { None }", 0, "anyhow_pub|crates/demo/src/lib.rs|1|fixture");
-});
-test("anyhow_pub: a pub trait inside an inline module counts", () => {
-  expectExit("crates/demo/src/lib.rs", "pub mod m {\n    pub trait T {\n        fn d(&self) -> anyhow::Result<()>;\n    }\n}", 0, "anyhow_pub|crates/demo/src/lib.rs|1|fixture");
-});
-test("anyhow_pub: an extern C fn counts", () => {
-  expectExit("crates/demo/src/lib.rs", "pub extern \"C\" fn f() -> anyhow::Result<()> { Ok(()) }", 0, "anyhow_pub|crates/demo/src/lib.rs|1|fixture");
-});
-test("anyhow_pub: a use-as alias counts through its fns", () => {
-  expectExit("crates/demo/src/lib.rs", "use anyhow::Result as AResult;\npub fn f() -> AResult<()> { Ok(()) }\npub fn g() -> AResult<u8> { Ok(1) }", 0, "anyhow_pub|crates/demo/src/lib.rs|2|fixture");
-});
-test("anyhow_pub: a type alias of the alias counts through its fns", () => {
-  expectExit("crates/demo/src/lib.rs", "pub type Res<T> = anyhow::Result<T>;\npub fn f() -> Res<()> { Ok(()) }", 0, "anyhow_pub|crates/demo/src/lib.rs|1|fixture");
-});
-test("anyhow_pub: a macro body that names its fn counts", () => {
-  expectExit("crates/demo/src/lib.rs", "macro_rules! m {\n    ($name:ident) => {\n        pub fn $name() -> anyhow::Result<()> { Ok(()) }\n    };\n}", 0, "anyhow_pub|crates/demo/src/lib.rs|1|fixture");
 });
 
 // Batch 4 prelude (b): string literals are blanked, and `use anyhow as X` names a module alias.
 test("anyhow_pub: a string that holds the signature does not count", () => {
   expectExit("crates/demo/src/lib.rs", "pub const S: &str = \"pub fn f() -> anyhow::Result<()>\";", 0);
-});
-test("anyhow_pub: a module alias of anyhow counts through its fns", () => {
-  expectExit("crates/demo/src/lib.rs", "use anyhow as ah;\npub fn f() -> ah::Result<()> { Ok(()) }", 0, "anyhow_pub|crates/demo/src/lib.rs|1|fixture");
 });
 
 // The manual_eq_ord rule: a hand-written Eq, Ord or PartialOrd needs a row and a reason.
@@ -239,14 +183,8 @@ const manualEq = "pub struct Key(u8);\nimpl Eq for Key {}";
 test("manual_eq_ord: a manual Eq impl with no row fails", () => {
   expectExit("crates/demo/src/lib.rs", manualEq, 1, "");
 });
-test("manual_eq_ord: the exact count is allowed", () => {
-  expectExit("crates/demo/src/lib.rs", manualEq, 0, "manual_eq_ord|crates/demo/src/lib.rs|1|fixture");
-});
 test("manual_eq_ord: a derive does not count", () => {
   expectExit("crates/demo/src/lib.rs", "#[derive(PartialEq, Eq)]\npub struct Key(u8);", 0, "");
-});
-test("manual_eq_ord: an Ord and a PartialOrd impl count separately", () => {
-  expectExit("crates/demo/src/lib.rs", "impl Ord for K {}\nimpl PartialOrd for K {}", 0, "manual_eq_ord|crates/demo/src/lib.rs|2|fixture");
 });
 
 // The manual_hash rule: a hand-written Hash must agree with Eq, so it needs a row and a reason.
@@ -285,9 +223,6 @@ test("assert_no_message: a trailing comma adds no message", () => {
 test("assert_no_message: a debug_assert! is not an assert! here", () => {
   expectExit("crates/demo/src/lib.rs", "fn f(x: bool) {\n    debug_assert!(x);\n}", 0, "");
 });
-test("assert_no_message: the exact count is allowed", () => {
-  expectExit("crates/demo/src/lib.rs", "fn f(x: bool) {\n    assert!(x);\n    assert!(!x);\n}", 0, "assert_no_message|crates/demo/src/lib.rs|2|fixture");
-});
 
 // The assert_repeats_condition rule (P14): a message that only repeats the condition fails.
 test("assert_repeats_condition: a message that repeats the condition fails", () => {
@@ -311,9 +246,6 @@ test("long_chain: a chain of five calls fails with no row", () => {
 test("long_chain: a chain of four calls passes", () => {
   expectExit("crates/demo/src/lib.rs", longChain, 0, "");
 });
-test("long_chain: the exact count is allowed", () => {
-  expectExit("crates/demo/src/lib.rs", longChain.replace("count()", "take(3).count()"), 0, "long_chain|crates/demo/src/lib.rs|1|fixture");
-});
 
 // The untyped_generic_let rule (P4): a let that takes its type from parse, into or try_into needs a row.
 test("untyped_generic_let: an untyped parse with no row fails", () => {
@@ -321,9 +253,6 @@ test("untyped_generic_let: an untyped parse with no row fails", () => {
 });
 test("untyped_generic_let: a typed let passes", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(s: &str) -> Result<u8, std::num::ParseIntError> {\n    let n: u8 = s.parse()?;\n    Ok(n)\n}", 0, "");
-});
-test("untyped_generic_let: the exact count is allowed", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(s: &str) -> Result<u8, std::num::ParseIntError> {\n    let n = s.parse()?;\n    Ok(n)\n}", 0, "untyped_generic_let|crates/demo/src/lib.rs|1|fixture");
 });
 
 // The turbofish_collect_parse rule (P2): a collect or parse turbofish needs a row.
@@ -339,9 +268,6 @@ test("turbofish_collect_parse: a forced _ passes", () => {
 test("dyn_param: a dyn parameter counts", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(sink: &dyn Sink) {}", 1);
 });
-test("dyn_param: a counted dyn parameter passes", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(sink: &dyn Sink) {}", 0, "dyn_param|crates/demo/src/lib.rs|1|fixture");
-});
 test("dyn_param: a generic parameter is clean", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f<T: Sink>(sink: &T) {}", 0);
 });
@@ -353,12 +279,6 @@ test("dyn_param: a dyn return is not a parameter", () => {
 const untypedChain = "fn f(v: &[u8]) -> usize {\n    let n = v.iter().map(|x| x + 1).filter(|x| *x > 1).take(3).count();\n    n\n}";
 test("untyped_long_chain_let: an untyped let of five calls fails with no row", () => {
   expectExit("crates/demo/src/lib.rs", untypedChain, 1, "");
-});
-test("untyped_long_chain_let: a typed let passes", () => {
-  expectExit("crates/demo/src/lib.rs", untypedChain.replace("let n =", "let n: usize ="), 0, "long_chain|crates/demo/src/lib.rs|1|fixture");
-});
-test("untyped_long_chain_let: the exact count is allowed", () => {
-  expectExit("crates/demo/src/lib.rs", untypedChain, 0, "long_chain|crates/demo/src/lib.rs|1|fixture\nuntyped_long_chain_let|crates/demo/src/lib.rs|1|fixture");
 });
 
 // The pub_vec_return rule: a public function returns a Vec, outside tests and examples.
@@ -389,9 +309,6 @@ test("pub_vec_return: a test module is clean", () => {
 test("pub_vec_return: an example is clean", () => {
   expectExit("crates/demo/examples/e.rs", "pub fn f() -> Vec<u8> { Vec::new() }", 0);
 });
-test("pub_vec_return: an allowed row with its count passes", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Vec<String> { Vec::new() }", 0, "pub_vec_return|crates/demo/src/lib.rs|1|the owned names");
-});
 
 // The pub_vec_param rule: a public function takes a Vec parameter, outside tests and examples.
 test("pub_vec_param: a pub fn that only iterates a Vec parameter counts", () => {
@@ -421,9 +338,6 @@ test("pub_vec_param: a Vec that the body mutates is clean", () => {
 test("pub_vec_param: a private fn is clean", () => {
   expectExit("crates/demo/src/lib.rs", "fn f(xs: Vec<u8>) -> usize { xs.iter().count() }", 0);
 });
-test("pub_vec_param: an allowed row with its count passes", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(xs: Vec<u8>) -> usize { xs.iter().count() }", 0, "pub_vec_param|crates/demo/src/lib.rs|1|the list is iterated");
-});
 
 // The pub_impl_into rule: a public function takes impl Into<T>, outside tests and examples.
 test("pub_impl_into: a pub fn with impl Into counts", () => {
@@ -431,9 +345,6 @@ test("pub_impl_into: a pub fn with impl Into counts", () => {
 });
 test("pub_impl_into: a private fn is clean", () => {
   expectExit("crates/demo/src/lib.rs", "fn f(s: impl Into<String>) -> String { s.into() }", 0);
-});
-test("pub_impl_into: an allowed row with its count passes", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(s: impl Into<String>) -> String { s.into() }", 0, "pub_impl_into|crates/demo/src/lib.rs|1|a validating constructor");
 });
 
 // The app_impl_into rule: application code (main.rs and bin/ targets) takes a concrete type.
@@ -544,9 +455,6 @@ test("generic_name: a single letter outside the set counts", () => {
 test("generic_name: a lowercase generic counts", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f<x: Copy>(v: x) -> x {\n    v\n}", 1);
 });
-test("generic_name: the allowed letters and a CamelCase word are clean", () => {
-  expectExit("crates/demo/src/lib.rs", "pub struct Pair<T, Handle>(pub T, pub Handle);\npub fn f<Decoder: Copy>(v: Decoder) -> Decoder {\n    v\n}", 0);
-});
 
 // The fn_import rule (O23): a top-level function imported by its bare name needs a row.
 test("fn_import: a bare function import with no row fails", () => {
@@ -560,9 +468,6 @@ test("fn_import: a module of an outside crate that shares a name with a local fn
 });
 test("fn_import: a pub use re-export of a function is not a bare call-site import", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn build_mesh() {}\npub use crate::demo::build_mesh;\npub(crate) use crate::demo::build_mesh as other;", 0);
-});
-test("fn_import: the exact count is allowed", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn build_mesh() {}\nuse crate::demo::build_mesh;", 0, "fn_import|crates/demo/src/lib.rs|1|fixture");
 });
 
 // The abbrev_name rule: an identifier that is a letter-deleted abbreviation counts, a string or a comment does not (N13).
@@ -616,9 +521,6 @@ test("arc_reason: a reason comment on the same line passes", () => {
 });
 test("arc_reason: a reason comment on the line above passes", () => {
   expectExit("crates/demo/src/lib.rs", "pub struct S {\n    // trait object: the sink is chosen at run time\n    pub sink: std::sync::Arc<dyn Fn()>,\n}", 0, "");
-});
-test("arc_reason: Arc::clone of a shared handle is not counted", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(shared: &Owner) -> usize {\n    let copy = std::sync::Arc::clone(&shared.0);\n    copy.len()\n}", 0, "");
 });
 test("arc_reason: a reason still maps to its line after a multi-line string", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn label() -> &'static str {\n    \"first\nsecond\"\n}\npub fn f(x: u8) -> std::sync::Arc<u8> { // shared across tasks\n    std::sync::Arc::new(x) // shared across tasks\n}", 0, "");

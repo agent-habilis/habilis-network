@@ -1,5 +1,0 @@
-# file|count|reason
-# Used by scripts/module-layout/module-layout.ts. Each leaf file that is named for none of its public types has one row. A row goes when the file is renamed or split.
-
-
-# O11: a mod.rs or lib.rs that defines items. Each row goes when the items move to leaf files.

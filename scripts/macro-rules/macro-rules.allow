@@ -1,3 +1,0 @@
-# file|count|reason
-# Used by scripts/macro-rules/macro-rules.ts. Keep each count exact: the check fails when it is too high or too low.
-

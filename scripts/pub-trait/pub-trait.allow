@@ -1,2 +1,0 @@
-# file|count|reason
-# Used by scripts/pub-trait/pub-trait.ts. Keep each count exact: the check fails when it is too high or too low.
