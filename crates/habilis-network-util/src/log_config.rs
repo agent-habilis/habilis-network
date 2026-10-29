@@ -104,11 +104,11 @@ pub fn log_raw() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::path::PathBuf;
 
     #[test]
     fn default_is_the_configured_runtime_base() {
+        let _guard = ::habilis_network_test_tracing::init();
         let base = crate::runtime_base("demo");
         assert_eq!(
             super::resolve_log_dir(None, Some(base.clone())),
@@ -119,6 +119,7 @@ mod tests {
 
     #[test]
     fn override_wins_verbatim() {
+        let _guard = ::habilis_network_test_tracing::init();
         let dir = super::resolve_log_dir(
             Some(PathBuf::from("/custom/x")),
             Some(PathBuf::from("/base")),

@@ -36,11 +36,11 @@ pub use runtime_dir::{
 #[cfg(test)]
 mod tests {
     use super::{is_under_runtime_base, mesh_prefix, runtime_base};
-    use habilis_network_test_tracing::test;
     use std::path::Path;
 
     #[test]
     fn runtime_base_is_deterministic_and_uid_scoped() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Regression guard: for a given product the base must be a fixed function
         // of the uid, not of the environment — a daemon and a later CLI in a
         // different context (cron/sudo/statusline) have to agree, or the CLI can't
@@ -63,6 +63,7 @@ mod tests {
 
     #[test]
     fn is_under_runtime_base_discriminates() {
+        let _guard = ::habilis_network_test_tracing::init();
         let base = runtime_base("demo");
         assert!(
             is_under_runtime_base(&base, &base.join("abcdefghijkmnp/nick.state.json")),
@@ -81,6 +82,7 @@ mod tests {
 
     #[test]
     fn truncates_to_16_chars() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             mesh_prefix("abcdefghijkmnpqrs").chars().count(),
             16,
@@ -90,11 +92,13 @@ mod tests {
 
     #[test]
     fn short_input_unchanged() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(mesh_prefix("abcd"), "abcd", "a short input is unchanged");
     }
 
     #[test]
     fn result_is_a_prefix_of_input() {
+        let _guard = ::habilis_network_test_tracing::init();
         let input = "abcdefghijkmnpqrstuvwx";
         assert!(
             input.starts_with(&mesh_prefix(input)),
@@ -104,6 +108,7 @@ mod tests {
 
     #[test]
     fn stem_is_path_safe_ascii() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The stem goes straight into a path, so it must carry no separator
         // and nothing needing escaping. Fed a *real* id (bare Base58), not the
         // short labels the cases above use.

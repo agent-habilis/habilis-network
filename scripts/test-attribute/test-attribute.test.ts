@@ -148,3 +148,19 @@ fn opens_with_items() {
 `);
   expect(text).toContain("    const N: usize = 2;\n    let _guard = ::habilis_network_test_tracing::init();\n    let set");
 });
+
+test("an attribute that spans lines stays in place", () => {
+  const { text, flagged } = rewrite(`use habilis_network_test_tracing::test;
+
+#[test]
+#[expect(
+    unsafe_code,
+    reason = "libc mmap and munmap"
+)]
+fn spans_lines() {
+    assert!(true);
+}
+`);
+  expect(flagged).toEqual([]);
+  expect(text).toContain("#[test]\n#[expect(\n    unsafe_code,\n    reason = \"libc mmap and munmap\"\n)]\nfn spans_lines() {\n    let _guard");
+});

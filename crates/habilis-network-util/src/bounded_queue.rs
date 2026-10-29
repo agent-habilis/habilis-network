@@ -66,10 +66,10 @@ impl<T> BoundedQueue<T> {
 #[cfg(test)]
 mod tests {
     use super::BoundedQueue;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn push_rejects_newest_when_full() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = BoundedQueue::new(2);
         assert!(queue.push(1u32), "a push into an empty queue is accepted");
         assert!(queue.push(2), "a push past capacity is rejected");
@@ -84,6 +84,7 @@ mod tests {
 
     #[test]
     fn take_empties_in_fifo_order() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = BoundedQueue::new(8);
         assert!(queue.push("a"), "a push of a is accepted");
         assert!(queue.push("b"), "a push of b is accepted");
@@ -94,6 +95,7 @@ mod tests {
 
     #[test]
     fn stays_capped_under_churn() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = BoundedQueue::new(10);
         let mut stored = 0;
         for value in 0..1000u32 {

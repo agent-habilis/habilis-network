@@ -106,13 +106,13 @@ impl std::fmt::Display for UnixSecs {
 
 #[cfg(test)]
 mod unix_secs_tests {
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::UnixSecs;
 
     #[test]
     fn it_adds_and_subtracts_a_duration() {
+        let _guard = ::habilis_network_test_tracing::init();
         let point = UnixSecs::from(1_700_000_000);
         assert_eq!(
             (point + Duration::from_mins(1)).as_secs(),
@@ -128,6 +128,7 @@ mod unix_secs_tests {
 
     #[test]
     fn a_sum_past_the_range_saturates_at_max() {
+        let _guard = ::habilis_network_test_tracing::init();
         let point = UnixSecs::from(i64::MAX - 5);
         assert_eq!(
             point + Duration::from_mins(1),
@@ -151,6 +152,7 @@ mod unix_secs_tests {
     /// point of any count to the end of the range, never to a point short of it.
     #[test]
     fn a_span_past_the_range_saturates_at_the_end_of_the_range() {
+        let _guard = ::habilis_network_test_tracing::init();
         let span = Duration::from_secs(u64::MAX);
         assert_eq!(
             UnixSecs::ZERO - span,
@@ -176,6 +178,7 @@ mod unix_secs_tests {
 
     #[test]
     fn since_is_the_span_and_never_negative() {
+        let _guard = ::habilis_network_test_tracing::init();
         let earlier = UnixSecs::from(100);
         let later = UnixSecs::from(160);
         assert_eq!(
@@ -200,6 +203,7 @@ mod unix_secs_tests {
     /// `u64` holds it.
     #[test]
     fn a_span_wider_than_i64_max_is_exact() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             UnixSecs::MAX.since(UnixSecs::from(i64::MIN)),
             Duration::from_secs(u64::MAX),
@@ -219,6 +223,7 @@ mod unix_secs_tests {
 
     #[test]
     fn it_orders_as_its_count_and_keeps_the_open_end() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(UnixSecs::ZERO < UnixSecs::from(1), "zero orders before one");
         assert!(
             UnixSecs::from(1) < UnixSecs::MAX,
@@ -233,6 +238,7 @@ mod unix_secs_tests {
 
     #[test]
     fn it_round_trips_its_little_endian_bytes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let point = UnixSecs::from(1_700_000_000);
         assert_eq!(
             point.to_le_bytes(),
@@ -248,6 +254,7 @@ mod unix_secs_tests {
 
     #[test]
     fn it_prints_its_count() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             UnixSecs::from(42).to_string(),
             "42",
@@ -262,6 +269,7 @@ mod unix_secs_tests {
 
     #[test]
     fn now_is_the_system_clock() {
+        let _guard = ::habilis_network_test_tracing::init();
         let before = UnixSecs::now();
         let now = UnixSecs::now();
         let after = UnixSecs::now();

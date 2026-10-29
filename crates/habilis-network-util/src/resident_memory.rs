@@ -137,7 +137,6 @@ fn maxrss_bytes() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
 
     /// The current reading falls when memory is given back, which the peak never
     /// does. A block of 128 `MiB` is mapped, touched, read, unmapped and read again;
@@ -152,6 +151,7 @@ mod tests {
     fn the_current_resident_memory_falls_when_memory_is_given_back() {
         const BLOCK: usize = 128 * 1024 * 1024;
         const MIB: u64 = 1024 * 1024;
+        let _guard = ::habilis_network_test_tracing::init();
         let before = super::current_resident_memory_bytes().expect("readable");
         // SAFETY: an anonymous private mapping of BLOCK bytes that nothing else
         // uses; every write is inside it, and it is unmapped once, with the same
@@ -190,6 +190,7 @@ mod tests {
     #[cfg(all(unix, feature = "host"))]
     #[test]
     fn reads_a_plausible_resident_memory() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The test process holds a real address space, so resident memory is
         // readable and non-trivial — guards against a units/selector regression
         // returning 0.

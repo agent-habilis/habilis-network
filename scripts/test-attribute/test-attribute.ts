@@ -9,7 +9,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 const IMPORT = /^[ \t]*use habilis_network_test_tracing::test;\n/gm;
 const BRACE_IMPORT = /^([ \t]*)use habilis_network_test_tracing::\{([^}]*)\};\n/gm;
 const TEST_FN =
-  /^([ \t]*)#\[test(\(([^\n)]*)\))?\]\n((?:[ \t]*#\[[^\n]*\]\n)*)([ \t]*)(pub(?:\([^)]*\))?\s+)?(async\s+)?fn\s+(\w+)\s*\(/gm;
+  /^([ \t]*)#\[test(\(([^\n)]*)\))?\]\n((?:[ \t]*#\[[^\]]*\]\n)*)([ \t]*)(pub(?:\([^)]*\))?\s+)?(async\s+)?fn\s+(\w+)\s*\(/gm;
 
 // Where the sync guard goes: after the item declarations that open the body (use, const, fn, ...),
 // since an item after a statement is a lint. Returns the body with the guard line inserted.

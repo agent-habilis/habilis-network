@@ -85,7 +85,6 @@ impl<K: Eq + Hash + Clone> Cooldown<K> {
 #[cfg(test)]
 mod tests {
     use crate::clock::Instant;
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::Cooldown;
@@ -94,6 +93,7 @@ mod tests {
 
     #[test]
     fn note_then_on_cooldown_within_window() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut cooldown: Cooldown<u8> = Cooldown::new(WINDOW);
         let start = Instant::now();
         assert!(
@@ -114,6 +114,7 @@ mod tests {
 
     #[test]
     fn clear_drops_every_active_cooldown() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut cooldown: Cooldown<u8> = Cooldown::new(WINDOW);
         let start = Instant::now();
         cooldown.note(1, start);
@@ -136,6 +137,7 @@ mod tests {
 
     #[test]
     fn is_per_key() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut cooldown: Cooldown<u8> = Cooldown::new(WINDOW);
         let start = Instant::now();
         cooldown.note(1, start);
@@ -151,6 +153,7 @@ mod tests {
 
     #[test]
     fn note_self_prunes_expired_entries() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut cooldown: Cooldown<u8> = Cooldown::new(WINDOW);
         let start = Instant::now();
         // Many distinct keys spread across more than a full window: each `note`

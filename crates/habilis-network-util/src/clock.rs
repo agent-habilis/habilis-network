@@ -57,13 +57,13 @@ pub const fn millis_saturating(duration: Duration) -> u64 {
 
 #[cfg(test)]
 mod millis_saturating_tests {
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     const ONE_SECOND: u64 = super::millis_saturating(Duration::from_secs(1));
 
     #[test]
     fn it_counts_the_whole_seconds_and_the_subsecond_part() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(ONE_SECOND, 1000, "one second is a thousand milliseconds");
         assert_eq!(
             super::millis_saturating(Duration::ZERO),
@@ -85,6 +85,7 @@ mod millis_saturating_tests {
 
     #[test]
     fn it_saturates_where_a_u64_of_milliseconds_overflows() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             super::millis_saturating(Duration::from_secs(u64::MAX)),
             u64::MAX,

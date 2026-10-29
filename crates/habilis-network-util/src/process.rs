@@ -153,7 +153,6 @@ pub fn ancestry_contains(pid: u32, ancestor: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{ancestry_contains, comm_of, is_alive, live_start_time, parent_of, terminate};
-    use habilis_network_test_tracing::test;
 
     fn self_pid() -> u32 {
         std::process::id()
@@ -161,6 +160,7 @@ mod tests {
 
     #[test]
     fn terminate_refuses_pid_zero() {
+        let _guard = ::habilis_network_test_tracing::init();
         // `kill(0, SIGTERM)` would signal every process of our own group, the test run included.
         let error = terminate(0).expect_err("pid 0 must be refused");
         assert_eq!(
@@ -172,6 +172,7 @@ mod tests {
 
     #[test]
     fn parent_of_self_is_our_ppid() {
+        let _guard = ::habilis_network_test_tracing::init();
         #[expect(unsafe_code, reason = "libc::getppid FFI; always succeeds")]
         // SAFETY: `getppid` takes no argument and always succeeds.
         let ppid = unsafe { libc::getppid() };
@@ -184,6 +185,7 @@ mod tests {
 
     #[test]
     fn ancestry_contains_own_parent() {
+        let _guard = ::habilis_network_test_tracing::init();
         let parent = parent_of(self_pid()).expect("self has a parent");
         assert!(
             ancestry_contains(self_pid(), parent),
@@ -193,6 +195,7 @@ mod tests {
 
     #[test]
     fn ancestry_excludes_self() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             !ancestry_contains(self_pid(), self_pid()),
             "the ancestry excludes this process itself"
@@ -201,12 +204,14 @@ mod tests {
 
     #[test]
     fn is_alive_self_true_absurd_false() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(is_alive(self_pid()), "this process is alive");
         assert!(!is_alive(u32::MAX - 1), "an absurd pid is not alive");
     }
 
     #[test]
     fn comm_of_self_names_the_test_binary() {
+        let _guard = ::habilis_network_test_tracing::init();
         let comm = comm_of(self_pid()).expect("self has a comm");
         assert!(
             !comm.is_empty(),
@@ -216,6 +221,7 @@ mod tests {
 
     #[test]
     fn live_start_time_is_stable_for_self_and_absent_for_a_dead_pid() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = live_start_time(self_pid()).expect("self is live");
         assert_eq!(
             live_start_time(self_pid()),
@@ -231,6 +237,7 @@ mod tests {
 
     #[test]
     fn terminate_rejects_a_dead_pid() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             terminate(u32::MAX - 1).is_err(),
             "terminating a dead pid is an error"

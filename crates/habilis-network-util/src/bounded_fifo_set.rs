@@ -96,10 +96,10 @@ impl<T: Clone + Eq + Hash> BoundedFifoSet<T> {
 #[cfg(test)]
 mod tests {
     use super::BoundedFifoSet;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn insert_reports_novelty_and_dedupes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut set = BoundedFifoSet::new(8);
         assert!(set.insert(1u32), "first insert is new");
         assert!(!set.insert(1u32), "re-insert is a dup, no-op");
@@ -112,6 +112,7 @@ mod tests {
 
     #[test]
     fn evicts_oldest_past_capacity() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut set = BoundedFifoSet::new(3);
         for value in 0..3u32 {
             set.insert(value);
@@ -128,6 +129,7 @@ mod tests {
 
     #[test]
     fn stays_capped_under_churn() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut set = BoundedFifoSet::new(10);
         for value in 0..1000u32 {
             set.insert(value);
@@ -137,6 +139,7 @@ mod tests {
 
     #[test]
     fn remove_clears_set_and_order() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut set = BoundedFifoSet::new(8);
         set.insert(1u32);
         set.insert(2u32);
@@ -150,6 +153,7 @@ mod tests {
 
     #[test]
     fn zero_capacity_is_clamped_to_one() {
+        let _guard = ::habilis_network_test_tracing::init();
         // A 0 capacity must not yield a set that holds nothing yet reports
         // inserts as new: it's clamped to 1, so membership actually works.
         let mut set = BoundedFifoSet::new(0);
@@ -160,6 +164,7 @@ mod tests {
 
     #[test]
     fn remove_by_borrowed_form() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The `Borrow<Q>` bound lets a `String` set be queried/removed by `&str`.
         let mut set: BoundedFifoSet<String> = BoundedFifoSet::new(4);
         set.insert("alice".to_owned());

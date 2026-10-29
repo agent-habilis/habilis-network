@@ -81,62 +81,67 @@ fn finish(buffer: &[u8]) -> LineRead {
 #[cfg(test)]
 mod tests {
     use super::{LineRead, io, read_bounded_line};
-    use habilis_network_test_tracing::test;
 
     #[test]
-    async fn reads_lines_then_eof() {
-        let data = b"hello\nworld\n";
-        let mut reader = io::BufReader::new(&data[..]);
-        assert!(
-            matches!(
-                read_bounded_line(&mut reader, 100).await.unwrap(),
-                LineRead::Line(line) if line == "hello"
-            ),
-            "the first line is read"
-        );
-        assert!(
-            matches!(
-                read_bounded_line(&mut reader, 100).await.unwrap(),
-                LineRead::Line(line) if line == "world"
-            ),
-            "the second line is read"
-        );
-        assert!(
-            matches!(
-                read_bounded_line(&mut reader, 100).await.unwrap(),
-                LineRead::Eof
-            ),
-            "the stream ends after the last line"
-        );
+    fn reads_lines_then_eof() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let data = b"hello\nworld\n";
+            let mut reader = io::BufReader::new(&data[..]);
+            assert!(
+                matches!(
+                    read_bounded_line(&mut reader, 100).await.unwrap(),
+                    LineRead::Line(line) if line == "hello"
+                ),
+                "the first line is read"
+            );
+            assert!(
+                matches!(
+                    read_bounded_line(&mut reader, 100).await.unwrap(),
+                    LineRead::Line(line) if line == "world"
+                ),
+                "the second line is read"
+            );
+            assert!(
+                matches!(
+                    read_bounded_line(&mut reader, 100).await.unwrap(),
+                    LineRead::Eof
+                ),
+                "the stream ends after the last line"
+            );
+        });
     }
 
     #[test]
-    async fn over_long_line_dropped_then_stream_realigns() {
-        let data = b"thisaverylongline\nok\n";
-        let mut reader = io::BufReader::new(&data[..]);
-        assert!(
-            matches!(
-                read_bounded_line(&mut reader, 4).await.unwrap(),
-                LineRead::TooLong
-            ),
-            "an over-long line is dropped and the stream realigns"
-        );
-        assert!(
-            matches!(read_bounded_line(&mut reader, 100).await.unwrap(), LineRead::Line(line) if line == "ok"),
-            "the next line must be read intact after dropping the oversize one"
-        );
+    fn over_long_line_dropped_then_stream_realigns() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let data = b"thisaverylongline\nok\n";
+            let mut reader = io::BufReader::new(&data[..]);
+            assert!(
+                matches!(
+                    read_bounded_line(&mut reader, 4).await.unwrap(),
+                    LineRead::TooLong
+                ),
+                "an over-long line is dropped and the stream realigns"
+            );
+            assert!(
+                matches!(read_bounded_line(&mut reader, 100).await.unwrap(), LineRead::Line(line) if line == "ok"),
+                "the next line must be read intact after dropping the oversize one"
+            );
+        });
     }
 
     #[test]
-    async fn final_line_without_newline_is_delivered() {
-        let data = b"tail";
-        let mut reader = io::BufReader::new(&data[..]);
-        assert!(
-            matches!(
-                read_bounded_line(&mut reader, 100).await.unwrap(),
-                LineRead::Line(line) if line == "tail"
-            ),
-            "a final line without a newline is delivered"
-        );
+    fn final_line_without_newline_is_delivered() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let data = b"tail";
+            let mut reader = io::BufReader::new(&data[..]);
+            assert!(
+                matches!(
+                    read_bounded_line(&mut reader, 100).await.unwrap(),
+                    LineRead::Line(line) if line == "tail"
+                ),
+                "a final line without a newline is delivered"
+            );
+        });
     }
 }

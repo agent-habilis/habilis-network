@@ -58,10 +58,10 @@ pub fn build_string() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::VERSION;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn version_carries_crate_version_and_git_stamp() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             VERSION.starts_with(env!("CARGO_PKG_VERSION")),
             "version must lead with the crate version: {VERSION}"
