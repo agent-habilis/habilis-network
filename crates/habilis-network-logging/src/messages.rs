@@ -188,7 +188,7 @@ mod tests {
         assert!(redacted.ends_with('>'), "expected trailing `>`: {redacted}");
 
         // 8 hex chars between the space and the closing `>`.
-        let hex = redacted
+        let hex: &str = redacted
             .strip_prefix("<redacted 11B ")
             .and_then(|rest| rest.strip_suffix('>'))
             .expect("redaction layout");
