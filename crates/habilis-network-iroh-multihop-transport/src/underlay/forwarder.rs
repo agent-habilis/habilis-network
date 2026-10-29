@@ -22,6 +22,8 @@ use super::{
     UNRESOLVED_SEEN_CAP, WRITER_QUEUE, WriterPool, path_list, paths_of, writer_task,
 };
 
+#[cfg(target_arch = "wasm32")]
+use n0_future::task;
 use tokio::sync;
 /// Routes cells outbound to next hops and delivers terminal cells locally.
 #[derive(Debug)]
@@ -446,7 +448,7 @@ impl Forwarder {
         #[cfg(not(target_arch = "wasm32"))]
         self.runtime.spawn(writer);
         #[cfg(target_arch = "wasm32")]
-        n0_future::task::spawn(writer);
+        task::spawn(writer);
         Some(tx)
     }
 }
