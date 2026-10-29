@@ -194,9 +194,8 @@ pub async fn join<S: NodeSink + 'static>(
     // join takes a shared sink, which the event loop keeps
     sink: Arc<S>,
 ) -> Result<Membership, SetupError> {
-    let nickname = options
-        .nick
-        .as_deref()
+    let nick_text = options.nick.as_deref();
+    let nickname = nick_text
         .map(Nickname::try_new)
         .transpose()
         .map_err(|error| SetupError::internal(anyhow::anyhow!("{error}")))?;
@@ -469,15 +468,12 @@ mod tests {
 
     #[test]
     fn naming_both_selectors_is_an_error_rather_than_a_precedence_rule() {
-        let error = resolve_kind(
-            &JoinOptions {
-                mesh: Some("whatever".to_owned()),
-                topic: Some("standup".to_owned()),
-                ..options()
-            },
-            None,
-        )
-        .expect_err("mesh and topic together");
+        let conflicting = JoinOptions {
+            mesh: Some("whatever".to_owned()),
+            topic: Some("standup".to_owned()),
+            ..options()
+        };
+        let error = resolve_kind(&conflicting, None).expect_err("mesh and topic together");
         assert!(error.to_string().contains("only one"), "{error}");
     }
 
@@ -676,16 +672,14 @@ mod tests {
             .map(|index| format!("https://r{index}.example"))
             .collect();
         for kind in [None, Some("standup".to_owned())] {
-            let error = resolve_kind(
-                &JoinOptions {
-                    topic: kind.clone(),
-                    lookup: vec![Lookup::Relay],
-                    relay_urls: urls.clone(),
-                    ..options()
-                },
-                None,
-            )
-            .expect_err("300 rungs must not reach the encoder");
+            let oversize = JoinOptions {
+                topic: kind.clone(),
+                lookup: vec![Lookup::Relay],
+                relay_urls: urls.clone(),
+                ..options()
+            };
+            let error =
+                resolve_kind(&oversize, None).expect_err("300 rungs must not reach the encoder");
             // `{:#}` so the topic path's context does not hide the cause.
             assert!(
                 format!("{error:#}").contains("relay ladder too long"),

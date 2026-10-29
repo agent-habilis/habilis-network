@@ -669,7 +669,8 @@ impl NodeDriver for MembershipApp {
                     StateMergeParams::new(context.into(), Channel::State, merge),
                 )
                 .await;
-                let _ = reply.send(merged.map(|_| ()).map_err(|error| error.to_string()));
+                let outcome = merged.map(|_| ()).map_err(|error| error.to_string());
+                let _ = reply.send(outcome);
                 true
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -1051,7 +1052,8 @@ impl NodeDriver for MembershipApp {
                 false
             }
             Request::StateJson { reply } => {
-                let _ = reply.send(state.doc(Channel::State).to_json().to_string());
+                let state_json = state.doc(Channel::State).to_json().to_string();
+                let _ = reply.send(state_json);
                 false
             }
             Request::Peers { reply } => {
