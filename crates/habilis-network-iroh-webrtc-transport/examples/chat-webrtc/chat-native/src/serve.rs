@@ -7,9 +7,8 @@ use habilis_network_iroh_webrtc_transport::iroh::endpoint::{Connection, SendStre
 use habilis_network_iroh_webrtc_transport::iroh::protocol::{AcceptError, ProtocolHandler};
 use tokio::sync::mpsc;
 
-use crate::path;
 use crate::room::{Membership, Room};
-use crate::wire;
+use crate::{path, wire};
 
 /// How many unhandled inbound messages to buffer before back-pressuring the
 /// reader task. Small on purpose: the only thing downstream is a broadcast

@@ -131,7 +131,8 @@ mod tests {
         );
 
         let mut layout_state = LayoutState::new();
-        let (first_bytes, first_buffer) = super::render_frame(&mut app, &mut layout_state, None, 20, 1);
+        let (first_bytes, first_buffer) =
+            super::render_frame(&mut app, &mut layout_state, None, 20, 1);
         assert!(first_bytes.contains("count is 0"));
         assert_eq!(row_text(&first_buffer).trim_end(), "count is 0");
 
@@ -190,7 +191,8 @@ mod tests {
             "parent re-rendered when only the child's signal changed"
         );
 
-        let (_bytes, new_buffer) = super::render_frame(&mut app, &mut layout_state, Some(&buffer), 20, 1);
+        let (_bytes, new_buffer) =
+            super::render_frame(&mut app, &mut layout_state, Some(&buffer), 20, 1);
         assert_eq!(row_text(&new_buffer).trim_end(), "child sees 7");
     }
 

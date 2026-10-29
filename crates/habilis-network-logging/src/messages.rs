@@ -202,7 +202,10 @@ mod tests {
     #[test]
     fn redacted_body_is_deterministic_for_the_same_message() {
         let message = Message::fixture(MessageKind::app_broadcast("app_msg"), "same body");
-        assert_eq!(super::redacted_body(&message), super::redacted_body(&message));
+        assert_eq!(
+            super::redacted_body(&message),
+            super::redacted_body(&message)
+        );
     }
 
     #[test]
