@@ -60,21 +60,21 @@ impl Member {
     }
 
     async fn create_with(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
-        Self::open(
-            &membership::JoinOptions::default()
-                .with_nick(Some(nick.to_owned()))
-                .with_lookup(vec![Lookup::Relay])
-                .with_transport(transport)
-                .with_relay_urls(vec![relay.to_string()]),
-        )
-        .await
+        let options = membership::JoinOptions::default()
+            .with_nick(Some(nick.to_owned()))
+            .with_lookup(vec![Lookup::Relay]);
+        let options = options
+            .with_transport(transport)
+            .with_relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
+        let mesh = creator.membership.node.mesh_id().to_string();
         Self::open(
             &membership::JoinOptions::default()
                 .with_nick(Some(nick.to_owned()))
-                .with_mesh(Some(creator.membership.node.mesh_id().to_string())),
+                .with_mesh(Some(mesh)),
         )
         .await
     }
@@ -85,8 +85,8 @@ impl Member {
             .request(|reply| Request::Peers { reply })
             .await
             .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
+        let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
+        roster
             .and_then(|roster| roster["peers"].as_array().map(Vec::len))
             .unwrap_or(0)
     }
@@ -309,9 +309,9 @@ async fn three_members(relay: &RelayUrl) -> (Member, Member, Member) {
 /// IP: alice to carol and alice to bob, on the application endpoint of each
 /// member. Carol and bob keep it.
 async fn cut_application_ip_from_alice(alice: &Member, bob: &Member, carol: &Member) {
-    alice
-        .block_ip_to(bob.ports().into_iter().chain(carol.ports()).collect())
-        .await;
+    let mut blocked = bob.ports();
+    blocked.extend(carol.ports());
+    alice.block_ip_to(blocked).await;
     bob.block_ip_to(alice.ports()).await;
     carol.block_ip_to(alice.ports()).await;
 }

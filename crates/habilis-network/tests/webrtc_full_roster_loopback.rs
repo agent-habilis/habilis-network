@@ -246,10 +246,11 @@ fn dump_logs() {
 
 /// How many times a member has linked to the rendezvous, in this run.
 fn rendezvous_visits() -> usize {
-    logs()
+    let text = logs();
+    let visits = text
         .lines()
-        .filter(|line| line.contains("gossip neighbor up") && line.contains("is_rendezvous=true"))
-        .count()
+        .filter(|line| line.contains("gossip neighbor up") && line.contains("is_rendezvous=true"));
+    visits.count()
 }
 
 /// How many members hold a link to the rendezvous that they made after the crash: those whose
@@ -268,11 +269,8 @@ fn rendezvous_holders(log: &str) -> usize {
         if !up && !line.contains("gossip neighbor down") {
             continue;
         }
-        let Some(local) = line
-            .split("local=")
-            .nth(1)
-            .and_then(|rest| rest.split_whitespace().next())
-        else {
+        let rest = line.split("local=").nth(1);
+        let Some(local) = rest.and_then(|rest| rest.split_whitespace().next()) else {
             continue;
         };
         last_is_up.insert(local, up);
@@ -323,6 +321,7 @@ fn come_back_trace() -> String {
             .any(|needle| line.contains(needle))
         })
         .collect();
-    let recent: Vec<_> = lines.into_iter().rev().take(60).rev().collect();
+    let newest = lines.into_iter().rev().take(60);
+    let recent: Vec<_> = newest.rev().collect();
     recent.join("\n")
 }

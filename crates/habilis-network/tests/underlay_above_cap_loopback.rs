@@ -39,8 +39,8 @@ async fn roster_len(member: &Membership) -> usize {
         .request(|reply| Request::Peers { reply })
         .await
         .unwrap_or_default();
-    serde_json::from_str::<serde_json::Value>(&json)
-        .ok()
+    let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
+    roster
         .and_then(|roster| roster["peers"].as_array().map(Vec::len))
         .unwrap_or(0)
 }
@@ -68,37 +68,34 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let (first_sink, _first_events) = membership::json_sink();
-        let creator: Membership = membership::join(
-            &membership::JoinOptions::default()
-                .with_nick(Some("m0".to_owned()))
-                .with_lookup(vec![Lookup::Relay])
-                .with_transport(vec![
-                    Transport::WebRtc,
-                    Transport::Multihop,
-                    Transport::Relay,
-                ])
-                .with_relay_urls(vec![relay.to_string()])
-                .with_max_peers(CAP),
-            first_sink,
-        )
-        .await
-        .expect("open the first member");
+        let options = membership::JoinOptions::default()
+            .with_nick(Some("m0".to_owned()))
+            .with_lookup(vec![Lookup::Relay]);
+        let options = options
+            .with_transport(vec![
+                Transport::WebRtc,
+                Transport::Multihop,
+                Transport::Relay,
+            ])
+            .with_relay_urls(vec![relay.to_string()])
+            .with_max_peers(CAP);
+        let creator: Membership = membership::join(&options, first_sink)
+            .await
+            .expect("open the first member");
         let mesh = creator.node.mesh_id().to_string();
         let mut members = vec![creator];
         let mut sinks = Vec::new();
         for index in 1..MEMBERS {
             let (sink, events) = membership::json_sink();
             sinks.push(events);
+            let member_options = membership::JoinOptions::default()
+                .with_nick(Some(format!("m{index}")))
+                .with_mesh(Some(mesh.clone()))
+                .with_max_peers(CAP);
             members.push(
-                membership::join(
-                    &membership::JoinOptions::default()
-                        .with_nick(Some(format!("m{index}")))
-                        .with_mesh(Some(mesh.clone()))
-                        .with_max_peers(CAP),
-                    sink,
-                )
-                .await
-                .expect("open a member"),
+                membership::join(&member_options, sink)
+                    .await
+                    .expect("open a member"),
             );
         }
 

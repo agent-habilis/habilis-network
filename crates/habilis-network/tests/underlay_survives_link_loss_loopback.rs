@@ -58,8 +58,8 @@ async fn roster_len(member: &Membership) -> usize {
         .request(|reply| Request::Peers { reply })
         .await
         .unwrap_or_default();
-    serde_json::from_str::<serde_json::Value>(&json)
-        .ok()
+    let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
+    roster
         .and_then(|roster| roster["peers"].as_array().map(Vec::len))
         .unwrap_or(0)
 }
@@ -72,25 +72,25 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let (sink_a, _events_a) = membership::json_sink();
-        let alice: Membership = membership::join(
-            &membership::JoinOptions::default()
-                .with_nick(Some("alice".to_owned()))
-                .with_lookup(vec![Lookup::Relay])
-                .with_transport(vec![
-                    Transport::WebRtc,
-                    Transport::Multihop,
-                    Transport::Relay,
-                ])
-                .with_relay_urls(vec![relay.to_string()]),
-            sink_a,
-        )
-        .await
-        .expect("open alice");
+        let options = membership::JoinOptions::default()
+            .with_nick(Some("alice".to_owned()))
+            .with_lookup(vec![Lookup::Relay]);
+        let options = options
+            .with_transport(vec![
+                Transport::WebRtc,
+                Transport::Multihop,
+                Transport::Relay,
+            ])
+            .with_relay_urls(vec![relay.to_string()]);
+        let alice: Membership = membership::join(&options, sink_a)
+            .await
+            .expect("open alice");
         let (sink_b, _events_b) = membership::json_sink();
+        let mesh = alice.node.mesh_id().to_string();
         let bob: Membership = membership::join(
             &membership::JoinOptions::default()
                 .with_nick(Some("bob".to_owned()))
-                .with_mesh(Some(alice.node.mesh_id().to_string())),
+                .with_mesh(Some(mesh)),
             sink_b,
         )
         .await
