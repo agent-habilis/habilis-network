@@ -91,12 +91,13 @@ fn pair_link_closed(since: usize, one: &EndpointId, two: &EndpointId) -> bool {
             && (line.contains(&format!("remote={one} "))
                 || line.contains(&format!("remote={two} ")))
     });
+    let down_from = |local: &EndpointId, far: &EndpointId, line: &str| {
+        line.contains(&format!("local={} ", local.fmt_short()))
+            && line.contains(&format!("endpoint_id={far} "))
+    };
     let down: bool = log.lines().any(|line| {
         line.contains("gossip neighbor down")
-            && ((line.contains(&format!("local={} ", one.fmt_short()))
-                && line.contains(&format!("endpoint_id={two} ")))
-                || (line.contains(&format!("local={} ", two.fmt_short()))
-                    && line.contains(&format!("endpoint_id={one} "))))
+            && (down_from(one, two, line) || down_from(two, one, line))
     });
     closed && down
 }
@@ -106,10 +107,11 @@ fn pair_link_closed(since: usize, one: &EndpointId, two: &EndpointId) -> bool {
 /// comes back and leaves again counts twice. The creator hosts the rendezvous
 /// and has no such link, so it never counts.
 fn rendezvous_links_down() -> usize {
-    logs()
-        .lines()
-        .filter(|line| line.contains("gossip neighbor down") && line.contains("is_rendezvous=true"))
-        .count()
+    let text = logs();
+    let lines = text.lines().filter(|line| {
+        line.contains("gossip neighbor down") && line.contains("is_rendezvous=true")
+    });
+    lines.count()
 }
 
 /// The lines that say how the rendezvous was held, let go of and re-grafted: the
@@ -132,7 +134,8 @@ fn rendezvous_trace() -> String {
             .any(|needle| line.contains(needle))
         })
         .collect();
-    let recent: Vec<_> = lines.into_iter().rev().take(120).rev().collect();
+    let recent = lines.into_iter().rev().take(120);
+    let recent: Vec<_> = recent.rev().collect();
     recent.join("\n")
 }
 
@@ -174,23 +177,21 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(
-            &membership::JoinOptions::default()
-                .with_nick(Some(nick.to_owned()))
-                .with_lookup(vec![Lookup::Relay])
-                .with_transport(vec![Transport::Udp])
-                .with_relay_urls(vec![relay.to_string()]),
-        )
-        .await
+        let options = membership::JoinOptions::default()
+            .with_nick(Some(nick.to_owned()))
+            .with_lookup(vec![Lookup::Relay]);
+        let options = options
+            .with_transport(vec![Transport::Udp])
+            .with_relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(
-            &membership::JoinOptions::default()
-                .with_nick(Some(nick.to_owned()))
-                .with_mesh(Some(creator.membership.node.mesh_id().to_string())),
-        )
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .with_nick(Some(nick.to_owned()))
+            .with_mesh(Some(mesh));
+        Self::open(&options).await
     }
 
     fn pump(&mut self) {
@@ -212,8 +213,8 @@ impl Member {
             .request(|reply| Request::Peers { reply })
             .await
             .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
+        let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
+        roster
             .and_then(|roster| {
                 roster["peers"].as_array().map(|peers| {
                     peers
@@ -230,8 +231,8 @@ impl Member {
             .request(|reply| Request::Peers { reply })
             .await
             .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
+        let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
+        roster
             .and_then(|roster| roster["peers"].as_array().map(Vec::len))
             .unwrap_or(0)
     }

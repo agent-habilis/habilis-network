@@ -63,22 +63,19 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(
-            &membership::JoinOptions::default()
-                .with_nick(Some(nick.to_owned()))
-                .with_lookup(vec![Lookup::Relay])
-                .with_relay_urls(vec![relay.to_string()]),
-        )
-        .await
+        let options = membership::JoinOptions::default()
+            .with_nick(Some(nick.to_owned()))
+            .with_lookup(vec![Lookup::Relay]);
+        let options = options.with_relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(
-            &membership::JoinOptions::default()
-                .with_nick(Some(nick.to_owned()))
-                .with_mesh(Some(creator.membership.node.mesh_id().to_string())),
-        )
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .with_nick(Some(nick.to_owned()))
+            .with_mesh(Some(mesh));
+        Self::open(&options).await
     }
 
     async fn roster_len(&self) -> usize {
@@ -87,8 +84,8 @@ impl Member {
             .request(|reply| Request::Peers { reply })
             .await
             .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
+        let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
+        roster
             .and_then(|roster| roster["peers"].as_array().map(Vec::len))
             .unwrap_or(0)
     }

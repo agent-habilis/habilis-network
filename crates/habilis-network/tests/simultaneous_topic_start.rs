@@ -104,14 +104,14 @@ fn round_log_path(topic: &str) -> std::path::PathBuf {
 fn init_process() -> habilis_network_test_tracing::Guard {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        init(
-            Tuning::DEFAULTS
-                .with_heal_interval(Duration::from_secs(5))
-                .with_rival_recheck_first(Duration::from_secs(3))
-                .with_rival_recheck(Duration::from_secs(8))
-                .with_rival_recheck_meshed(Duration::from_secs(12))
-                .with_rival_recheck_alone(Duration::from_secs(12)),
-        );
+        let tuning = Tuning::DEFAULTS
+            .with_heal_interval(Duration::from_secs(5))
+            .with_rival_recheck_first(Duration::from_secs(3))
+            .with_rival_recheck(Duration::from_secs(8));
+        let tuning = tuning
+            .with_rival_recheck_meshed(Duration::from_secs(12))
+            .with_rival_recheck_alone(Duration::from_secs(12));
+        init(tuning);
     });
     habilis_network_test_tracing::init_with_writer(
         "habilis_network=info,habilis_network::beacon=info",
@@ -212,6 +212,7 @@ fn mdns_only() -> LookupOpts {
     LookupOpts::new(RelayChoice::Disabled).with_mdns(true)
 }
 
+// The sink is shared: the spawned task feeds it and the caller reads it after the join.
 async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Member> {
     let mesh = derive_topic_mesh_with(topic, mdns_only()).expect("derive an mDNS-only mesh");
     let author = Nickname::try_new(nick).expect("valid nickname");
@@ -247,10 +248,11 @@ async fn round(members: usize, start: Start, index: usize) -> Result<Duration, S
     *ROUND_LOG.lock().expect("no poison") =
         Some(std::fs::File::create(&log_path).expect("create the log file of the round"));
     let names: Vec<String> = (0..members).map(|number| format!("peer{number}")).collect();
-    let nicks: Vec<Nickname> = names
+    let parsed = names
         .iter()
-        .map(|name| Nickname::try_new(name.as_str()).expect("valid nickname"))
-        .collect();
+        .map(|name| Nickname::try_new(name.as_str()).expect("valid nickname"));
+    let nicks: Vec<Nickname> = parsed.collect();
+    // One sink per member, each handed to that member's task while the caller keeps the others.
     let sinks: Vec<Arc<Joined>> = nicks.iter().map(|_| Arc::default()).collect();
 
     let began = Instant::now();
@@ -278,12 +280,11 @@ async fn round(members: usize, start: Start, index: usize) -> Result<Duration, S
     let mut slowest = Duration::ZERO;
     let mut stuck = Vec::new();
     for (member, sink) in sinks.iter().enumerate() {
-        let others: Vec<Nickname> = nicks
+        let candidates = nicks
             .iter()
             .enumerate()
-            .filter(|(other, _)| *other != member)
-            .map(|(_, nick)| nick.clone())
-            .collect();
+            .filter(|(other, _)| *other != member);
+        let others: Vec<Nickname> = candidates.map(|(_, nick)| nick.clone()).collect();
         match sink.wait_for_all(&others, until).await {
             Some(when) => slowest = slowest.max(when.duration_since(began)),
             None => stuck.push(format!("{} saw {:?}", names[member], sink.seen_names())),
@@ -319,12 +320,14 @@ fn distribution(times: &[Duration]) -> String {
             .filter(|time| **time > Duration::from_secs(limit))
             .count()
     };
+    let median = sorted.get(sorted.len() / 2).copied().unwrap_or_default();
+    let max = sorted.last().copied().unwrap_or_default();
     format!(
         "median {:?}, over 20 s {}, over 30 s {}, max {:?}",
-        sorted.get(sorted.len() / 2).copied().unwrap_or_default(),
+        median,
         over(20),
         over(30),
-        sorted.last().copied().unwrap_or_default()
+        max
     )
 }
 
