@@ -117,7 +117,7 @@ where
         let mut stream = stream;
         let mut dropped = 0u64;
         while let Some(item) = stream.next().await {
-            let delivered = match route_and_deliver(&item, handle.as_ref()) {
+            let delivered: bool = match route_and_deliver(&item, handle.as_ref()) {
                 Route::Frame => true,
                 Route::Control => control_tx.send(item).is_ok(),
                 Route::Data => match data_tx.try_send(item) {

@@ -2179,7 +2179,7 @@ mod evicted_orphan_tests {
             !missing.is_empty(),
             "nothing was evicted, so this test proves nothing"
         );
-        let already_seen = missing
+        let already_seen: usize = missing
             .iter()
             .filter(|frame| reader.seen.contains(&frame.dedup_key()))
             .count();
@@ -2973,10 +2973,9 @@ mod first_contact_tests {
         state.link(peer);
         let relay: iroh::RelayUrl = "https://relay.example".parse().expect("a relay url");
         let knows_relay = || async {
-            node.endpoint.remote_info(peer).await.is_some_and(|info| {
-                info.addrs().any(
-                    |known| matches!(known.addr(), iroh::TransportAddr::Relay(url) if *url == relay),
-                )
+            let info = node.endpoint.remote_info(peer).await;
+            info.is_some_and(|info| {
+                info.addrs().any(|known| matches!(known.addr(), iroh::TransportAddr::Relay(url) if *url == relay))
             })
         };
         let first = iroh::EndpointAddr::new(peer).with_ip_addr(test_ip());

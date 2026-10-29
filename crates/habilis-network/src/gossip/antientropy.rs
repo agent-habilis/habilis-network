@@ -338,11 +338,10 @@ fn resend_one(message: &Verified, state: &mut EventLoopState) -> bool {
 fn answer_rank(digest_id: &str, member: &Nickname) -> (u64, String) {
     use sha2::{Digest as _, Sha256};
 
-    let hash = Sha256::new()
+    let hasher: Sha256 = Sha256::new()
         .chain_update(digest_id.as_bytes())
-        .chain_update([0])
-        .chain_update(member.as_str().as_bytes())
-        .finalize();
+        .chain_update([0]);
+    let hash = hasher.chain_update(member.as_str().as_bytes()).finalize();
     let mut head = [0u8; 8];
     head.copy_from_slice(&hash[..8]);
     // The name breaks a tie, so the order is total.
@@ -635,7 +634,7 @@ pub(crate) async fn handle_state_digest(
     };
     let our_heads =
         heads_digest(state, origin, channel, true).and_then(|ours| ours.serialize().ok());
-    let fallback = match target {
+    let fallback: Option<&str> = match target {
         None => Some("asker has no proven endpoint that is a linked neighbor with a direct path"),
         Some(eid)
             if state
@@ -1107,7 +1106,7 @@ mod tests {
     fn one_digest_is_answered_by_k_members_not_by_all() {
         let members = members(48);
         let asker = &members[0];
-        let answering = members
+        let answering: usize = members
             .iter()
             .filter(|me| *me != asker)
             .filter(|me| super::answers_digest(me, asker, "digest-1", members.iter()))
