@@ -126,7 +126,7 @@ impl MessageLog {
     fn eviction_index(&self) -> usize {
         // Ties go to the lowest author key, so the choice is total and identical
         // on every node.
-        let fullest = self
+        let fullest: AuthorKey = self
             .per_author
             .iter()
             .max_by(|(lhs_key, lhs_count), (rhs_key, rhs_count)| {
@@ -984,10 +984,11 @@ mod tests {
         }
 
         let kept = |log: &MessageLog| -> HashSet<String> {
-            log.messages
+            let bodies = log
+                .messages
                 .iter()
-                .map(|message| message.body.as_str().to_owned())
-                .collect()
+                .map(|message| message.body.as_str().to_owned());
+            bodies.collect()
         };
         assert_eq!(
             kept(&forward),

@@ -1510,7 +1510,7 @@ mod route_wake_tests {
 
     async fn multihop_handle() -> MultihopHandle {
         let secret = SecretKey::generate();
-        let underlay = Endpoint::builder(presets::Minimal)
+        let underlay: Endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(&secret))
             .relay_mode(iroh::RelayMode::Disabled)
             .bind()
@@ -1538,7 +1538,7 @@ mod route_wake_tests {
             .insert(SecretKey::generate().public());
         linkstate_arm(&mut state, &context).await;
         let own = me.app_id().to_string();
-        let costs = me
+        let costs: Vec<u32> = me
             .topology_view()
             .edges
             .iter()
@@ -1588,7 +1588,7 @@ mod route_wake_tests {
         // here is a listener that never answers.
         let (_silent, relay) = crate::testing::silent_relay_rung();
         let secret = SecretKey::generate();
-        let underlay = Endpoint::builder(presets::Minimal)
+        let underlay: Endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(&secret))
             .relay_mode(iroh::RelayMode::custom([relay]))
             .clear_ip_transports()
@@ -1636,7 +1636,7 @@ mod route_wake_tests {
         state.path_kinds.insert(dst.app_id().get(), PathKind::Relay);
 
         nudge_climbing_pairs(&mut state, &context, true);
-        let direct = state
+        let direct: TransportAddr = state
             .route_dialed
             .get(&dst.app_id().get())
             .cloned()
@@ -1645,7 +1645,7 @@ mod route_wake_tests {
         me.refuse_hop_for_test(dst.app_id());
         route_wake_arm(&mut state, &context);
 
-        let dialed = state
+        let dialed: TransportAddr = state
             .route_dialed
             .get(&dst.app_id().get())
             .cloned()

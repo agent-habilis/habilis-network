@@ -282,11 +282,8 @@ pub fn read_identity(path: &Path) -> SessionIdentity {
         .ok()
         .and_then(|contents| serde_json::from_str(&contents).ok());
     let field = |key: &str| {
-        parsed
-            .as_ref()
-            .and_then(|doc| doc.get(key))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
+        let value = parsed.as_ref().and_then(|doc| doc.get(key));
+        value.and_then(serde_json::Value::as_str).map(str::to_owned)
     };
     SessionIdentity {
         mesh: parsed.as_ref().and_then(mesh_field),

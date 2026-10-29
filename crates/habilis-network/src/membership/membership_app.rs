@@ -636,7 +636,7 @@ impl NodeDriver for MembershipApp {
                         body,
                     ),
                 );
-                let routed = frame
+                let routed: Result<_, String> = frame
                     .serialize()
                     .map_err(|error| error.to_string())
                     .and_then(|bytes| {
@@ -904,7 +904,7 @@ impl NodeDriver for MembershipApp {
                 not(target_arch = "wasm32")
             ))]
             Request::HasRoute { peer, reply } => {
-                let has_route = known_peer(state, &peer).is_ok_and(|address| {
+                let has_route: bool = known_peer(state, &peer).is_ok_and(|address| {
                     state.multihop().is_some_and(|handle| {
                         handle
                             .route_addr(habilis_network_iroh_multihop_transport::AppId::new(
@@ -944,7 +944,7 @@ impl NodeDriver for MembershipApp {
                 not(target_arch = "wasm32")
             ))]
             Request::SessionsToNonNeighbors { reply } => {
-                let sessions = state.webrtc.as_ref().map_or(0, |webrtc| {
+                let sessions: usize = state.webrtc.as_ref().map_or(0, |webrtc| {
                     state
                         .peer_endpoints
                         .values()
@@ -993,7 +993,7 @@ impl NodeDriver for MembershipApp {
                     state.redials.session.observe(now, id, session);
                     state.redials.pool.observe(now, id, pooled);
                 }
-                let counts = [
+                let counts: [u64; 6] = [
                     state.redials.quic.closes(),
                     state.redials.quic.redials(),
                     state.redials.session.closes(),
@@ -1158,7 +1158,7 @@ fn route_diag(state: &EventLoopState) -> String {
                 habilis_network_iroh_multihop_transport::AppId::new(address.id),
             )?;
             let text: &str = nickname.borrow();
-            let open = handle
+            let open: String = handle
                 .underlay_paths_for_test(habilis_network_iroh_multihop_transport::UnderlayId::new(
                     underlay.id,
                 ))

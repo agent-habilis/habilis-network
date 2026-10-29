@@ -1534,13 +1534,12 @@ mod tests {
             .insert(nick("beacon"), iroh::EndpointAddr::new(rendezvous_ep));
 
         let reach = |current: &EventLoopState| {
-            current
-                .roster_snapshot()
+            let roster = current.roster_snapshot();
+            let beacon = roster
                 .peers
                 .iter()
-                .find(|entry| entry.nickname.as_str() == "beacon")
-                .expect("beacon in roster")
-                .reach
+                .find(|entry| entry.nickname.as_str() == "beacon");
+            beacon.expect("beacon in roster").reach
         };
 
         state.rendezvous_linked = true;
@@ -1565,11 +1564,12 @@ mod tests {
         state.peers.insert(nick("unknown"));
 
         let lane = |current: &EventLoopState, name: &str| {
-            current
-                .roster_snapshot()
+            let roster = current.roster_snapshot();
+            let entry = roster
                 .peers
                 .iter()
-                .find(|entry| entry.nickname.as_str() == name)
+                .find(|entry| entry.nickname.as_str() == name);
+            entry
                 .unwrap_or_else(|| panic!("{name} missing from roster"))
                 .transport
         };
