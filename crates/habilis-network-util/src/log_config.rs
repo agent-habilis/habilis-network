@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 #[cfg(feature = "host")]
 use crate::tuning::LOG_FILE_MAX_BYTES;
 
+use std::env;
 /// Log config, installed **once** at startup from the `--log-dir` /
 /// `--log-max-bytes` / `--log-raw` flags. The consumer parses the flags and
 /// calls [`configure`]; if it never does (a path that doesn't log to files)
@@ -115,7 +116,7 @@ pub fn configured_base() -> Option<PathBuf> {
 /// Resolver split out of [`log_dir`] so the policy is testable: the override
 /// wins verbatim, else the consumer's runtime base.
 fn resolve_log_dir(override_dir: Option<PathBuf>, base: Option<PathBuf>) -> PathBuf {
-    override_dir.or(base).unwrap_or_else(std::env::temp_dir)
+    override_dir.or(base).unwrap_or_else(env::temp_dir)
 }
 
 /// Per-member log file — `<mesh_prefix>/<nick>.tracing.log`, inside the

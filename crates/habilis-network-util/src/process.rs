@@ -1,3 +1,7 @@
+use std::io;
+use std::io::ErrorKind;
+#[cfg(target_os = "macos")]
+use std::mem;
 /// Bound on the parent-walk in [`ancestry_contains`]: real process trees are
 /// far shallower, and the bound keeps a pathological ppid cycle (pid reuse
 /// mid-walk) from looping forever.
@@ -9,7 +13,7 @@ fn bsdinfo_for(pid: u32) -> Option<libc::proc_bsdinfo> {
     let pid = libc::pid_t::try_from(pid).ok()?;
     // SAFETY: `proc_bsdinfo` is a plain C struct of integers and byte arrays, so all-zero bytes
     // are a valid value.
-    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+    let mut info = unsafe { mem::zeroed::<libc::proc_bsdinfo>() };
     let size = i32::try_from(size_of::<libc::proc_bsdinfo>()).ok()?;
     // SAFETY: `info` is a live, unique local of exactly `size` bytes, and `size` is the size that
     // the call gets, so the kernel writes inside the buffer. The kernel checks `pid`.
@@ -171,7 +175,7 @@ pub fn is_alive(pid: u32) -> bool {
     // SAFETY: signal 0 sends no signal. The call reads no memory of ours, and `pid` is a valid
     // `pid_t`.
     let status = unsafe { libc::kill(pid, 0) };
-    status == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    status == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Ask a process to terminate (SIGTERM) — the graceful path: a mesh daemon
@@ -194,19 +198,18 @@ pub fn is_alive(pid: u32) -> bool {
 /// # Ok(())
 /// # }
 /// ```
-pub fn terminate(pid: u32) -> std::io::Result<()> {
+pub fn terminate(pid: u32) -> io::Result<()> {
     if pid == 0 {
-        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+        return Err(io::Error::from(ErrorKind::InvalidInput));
     }
-    let pid = libc::pid_t::try_from(pid)
-        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let pid = libc::pid_t::try_from(pid).map_err(|_| io::Error::from(ErrorKind::InvalidInput))?;
     // SAFETY: the call reads no memory of ours. `pid` is a valid `pid_t`, and the kernel checks
     // the permission.
     let status = unsafe { libc::kill(pid, libc::SIGTERM) };
     if status == 0 {
         Ok(())
     } else {
-        Err(std::io::Error::last_os_error())
+        Err(io::Error::last_os_error())
     }
 }
 
@@ -250,8 +253,10 @@ pub fn ancestry_contains(pid: u32, ancestor: u32) -> bool {
 mod tests {
     use super::{ancestry_contains, comm_of, is_alive, live_start_time, parent_of, terminate};
 
+    use std::io::ErrorKind;
+    use std::process;
     fn self_pid() -> u32 {
-        std::process::id()
+        process::id()
     }
 
     #[test]
@@ -261,7 +266,7 @@ mod tests {
         let error = terminate(0).expect_err("pid 0 must be refused");
         assert_eq!(
             error.kind(),
-            std::io::ErrorKind::InvalidInput,
+            ErrorKind::InvalidInput,
             "terminating pid zero is refused as invalid input"
         );
     }

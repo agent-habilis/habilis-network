@@ -13,6 +13,7 @@
 
 use std::collections::VecDeque;
 
+use std::mem;
 /// A first-in, first-out queue of at most `capacity` items. It keeps duplicates, and a push is
 /// rejected when the queue is full.
 ///
@@ -59,7 +60,7 @@ impl<T> BoundedQueue<T> {
 
     /// Take everything in FIFO order, leaving the queue empty.
     pub fn take(&mut self) -> VecDeque<T> {
-        std::mem::take(&mut self.queue)
+        mem::take(&mut self.queue)
     }
 
     #[must_use]

@@ -9,6 +9,7 @@
 
 use std::time::Duration;
 
+use std::sync;
 /// In-memory message-log capacity: how many recent messages each member
 /// retains as the anti-entropy recovery source and poll/fetch history. A
 /// bigger log lets a reconnecting peer recover a longer gap. It also anchors
@@ -432,7 +433,7 @@ impl Default for Tuning {
     }
 }
 
-static TUNING: std::sync::OnceLock<Tuning> = std::sync::OnceLock::new();
+static TUNING: sync::OnceLock<Tuning> = sync::OnceLock::new();
 
 /// Install the process tuning, once, at daemon startup (from the parsed CLI
 /// flags). A second call is ignored; if never called (in-process: library API or MCP), `current`

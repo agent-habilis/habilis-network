@@ -1,3 +1,11 @@
+#[cfg(feature = "host")]
+use std::fs;
+#[cfg(feature = "host")]
+use std::io;
+#[cfg(feature = "host")]
+use std::io::ErrorKind;
+#[cfg(feature = "host")]
+use std::path;
 /// The per-mesh folder name — the first 16 characters of the mesh
 /// identifier. The stem of every per-mesh file (socket / log / state), so it
 /// lives here rather than in any one module. See [`mesh_runtime_dir`].
@@ -56,8 +64,8 @@ pub fn mesh_prefix(mesh_id: &str) -> String {
 /// ```
 #[must_use]
 #[cfg(feature = "host")]
-pub fn runtime_base(product: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(format!("/tmp/{product}-{}", current_uid()))
+pub fn runtime_base(product: &str) -> path::PathBuf {
+    path::PathBuf::from(format!("/tmp/{product}-{}", current_uid()))
 }
 
 /// This process's effective user id — the id a newly created file/dir is
@@ -106,7 +114,7 @@ fn current_uid() -> u32 {
 /// # }
 /// ```
 #[cfg(feature = "host")]
-pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
+pub fn ensure_runtime_base(base: &path::Path) -> io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
 
     // Deliberately *not* cached: a long-running daemon writes on every heartbeat,
@@ -115,21 +123,21 @@ pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
     // syscalls — is what keeps a reaped base from silently reappearing at the
     // umask default `0755` on the next write. Idempotent and concurrency-safe:
     // racing creates collapse to `AlreadyExists`, the checks are read-only.
-    match std::fs::DirBuilder::new()
+    match fs::DirBuilder::new()
         .mode(0o700)
         .recursive(true)
         .create(base)
     {
         Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error),
     }
     // `symlink_metadata` does not follow a link, so a base swapped for a symlink
     // into a world-readable dir is rejected rather than trusted.
-    let meta = std::fs::symlink_metadata(base)?;
+    let meta = fs::symlink_metadata(base)?;
     if !meta.file_type().is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
             format!(
                 "runtime dir {} is not a directory — remove it",
                 base.display()
@@ -139,8 +147,8 @@ pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
     if meta.uid() != current_uid() {
         // A local user squatted our predictable /tmp path. We refuse to write
         // secrets into a dir we do not own; the operator must clear it.
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
+        return Err(io::Error::new(
+            ErrorKind::PermissionDenied,
             format!(
                 "runtime dir {} is owned by another user (squatted) — remove it and retry",
                 base.display()
@@ -148,7 +156,7 @@ pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
         ));
     }
     if meta.permissions().mode() & 0o077 != 0 {
-        std::fs::set_permissions(base, std::fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(base, fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
 }
@@ -168,7 +176,7 @@ pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
 /// ```
 #[must_use]
 #[cfg(feature = "host")]
-pub fn is_under_runtime_base(base: &std::path::Path, path: &std::path::Path) -> bool {
+pub fn is_under_runtime_base(base: &path::Path, path: &path::Path) -> bool {
     path.starts_with(base)
 }
 
@@ -200,10 +208,7 @@ pub fn is_under_runtime_base(base: &std::path::Path, path: &std::path::Path) -> 
 /// # }
 /// ```
 #[cfg(feature = "host")]
-pub fn ensure_parent_private(
-    base: Option<&std::path::Path>,
-    path: &std::path::Path,
-) -> std::io::Result<()> {
+pub fn ensure_parent_private(base: Option<&path::Path>, path: &path::Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt as _;
     if let Some(base) = base
         && is_under_runtime_base(base, path)
@@ -214,7 +219,7 @@ pub fn ensure_parent_private(
         // Mode 0700 (not plain `create_dir_all`, which is 0755): closes the
         // narrow window where the reaper deletes the base between the ensure
         // above and this create, and keeps the per-mesh subdir private too.
-        std::fs::DirBuilder::new()
+        fs::DirBuilder::new()
             .mode(0o700)
             .recursive(true)
             .create(parent)?;
@@ -240,7 +245,7 @@ pub fn ensure_parent_private(
 /// ```
 #[must_use]
 #[cfg(feature = "host")]
-pub fn mesh_runtime_dir(base: &std::path::Path, mesh_id: &str) -> std::path::PathBuf {
+pub fn mesh_runtime_dir(base: &path::Path, mesh_id: &str) -> path::PathBuf {
     base.join(mesh_prefix(mesh_id))
 }
 
@@ -267,15 +272,12 @@ pub fn mesh_runtime_dir(base: &std::path::Path, mesh_id: &str) -> std::path::Pat
 /// # }
 /// ```
 #[cfg(feature = "host")]
-pub fn ensure_mesh_runtime_dir(
-    base: &std::path::Path,
-    mesh_id: &str,
-) -> std::io::Result<std::path::PathBuf> {
+pub fn ensure_mesh_runtime_dir(base: &path::Path, mesh_id: &str) -> io::Result<path::PathBuf> {
     use std::os::unix::fs::DirBuilderExt as _;
     ensure_runtime_base(base)?;
     let dir = mesh_runtime_dir(base, mesh_id);
     // 0700, and closes the reaper race (see `ensure_parent_private`).
-    std::fs::DirBuilder::new()
+    fs::DirBuilder::new()
         .mode(0o700)
         .recursive(true)
         .create(&dir)?;

@@ -8,6 +8,11 @@
 //! Warn-only by design: host safety comes from the scenario runbook's OS resource
 //! caps, not from the daemon exiting.
 
+#[cfg(any(
+    all(target_os = "macos", feature = "host"),
+    all(unix, feature = "host")
+))]
+use std::mem;
 /// This process's peak resident memory in **bytes**, or `None` if it can't
 /// be read on this platform.
 ///
@@ -110,7 +115,7 @@ pub fn current_resident_memory_mb() -> Option<u64> {
 fn current_rss_bytes() -> Option<u64> {
     // SAFETY: `mach_task_basic_info` is a plain C struct of integers, so all-zero bytes are a
     // valid value.
-    let mut info: libc::mach_task_basic_info = unsafe { std::mem::zeroed() };
+    let mut info: libc::mach_task_basic_info = unsafe { mem::zeroed() };
     let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
     // SAFETY: `info` is a valid, unique `mach_task_basic_info`, `count` is its size
     // in `natural_t` units as the call needs, and the selector is the documented
@@ -157,7 +162,7 @@ fn maxrss_bytes() -> Option<u64> {
     // overwrites the fields it reports. We pass a valid unique pointer to it
     // and the documented `RUSAGE_SELF` selector.
     let usage = unsafe {
-        let mut usage: libc::rusage = std::mem::zeroed();
+        let mut usage: libc::rusage = mem::zeroed();
         if libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) != 0 {
             return None;
         }
@@ -186,6 +191,8 @@ fn maxrss_bytes() -> Option<u64> {
 #[cfg(test)]
 mod tests {
 
+    #[cfg(all(any(target_os = "macos", target_os = "linux"), feature = "host"))]
+    use std::ptr;
     /// The current reading falls when memory is given back, which the peak never
     /// does. A block of 128 `MiB` is mapped, touched, read, unmapped and read again;
     /// `munmap` returns the pages at once, whereas `free` on macOS leaves them
@@ -206,7 +213,7 @@ mod tests {
         // length.
         let (with_block, after) = unsafe {
             let base = libc::mmap(
-                std::ptr::null_mut(),
+                ptr::null_mut(),
                 BLOCK,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_ANON | libc::MAP_PRIVATE,

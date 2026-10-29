@@ -6,6 +6,7 @@ use web_time::UNIX_EPOCH;
 
 use crate::clock::SystemTime;
 
+use std::{fmt, ops};
 /// A point in time as whole seconds since the Unix epoch: the unit of a message timestamp, of
 /// the join time, of a digest window bound and of an invite expiry.
 ///
@@ -81,7 +82,7 @@ impl UnixSecs {
 }
 
 /// The point `rhs` after `self`, saturating at [`UnixSecs::MAX`].
-impl std::ops::Add<Duration> for UnixSecs {
+impl ops::Add<Duration> for UnixSecs {
     type Output = Self;
 
     fn add(self, rhs: Duration) -> Self {
@@ -90,7 +91,7 @@ impl std::ops::Add<Duration> for UnixSecs {
 }
 
 /// The point `rhs` before `self`, saturating at the lowest count.
-impl std::ops::Sub<Duration> for UnixSecs {
+impl ops::Sub<Duration> for UnixSecs {
     type Output = Self;
 
     fn sub(self, rhs: Duration) -> Self {
@@ -98,8 +99,8 @@ impl std::ops::Sub<Duration> for UnixSecs {
     }
 }
 
-impl std::fmt::Display for UnixSecs {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for UnixSecs {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
 }
