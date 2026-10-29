@@ -11,6 +11,7 @@ use crate::{FrameSink, GossipHandle, shared};
 /// The members that share one flood.
 #[derive(Debug, Default, Clone)]
 pub struct Hub {
+    // each handle that joins the hub keeps a clone of the member list
     inner: Arc<Mutex<Members>>,
 }
 
@@ -31,6 +32,7 @@ impl Hub {
     /// Add `handle` to the flood and attach a sink to it.
     pub fn join(&self, handle: &GossipHandle) {
         shared::locked(&self.inner).members.push(handle.clone());
+        // trait object: the handle calls the sink; the hub keeps a clone
         handle.attach(Arc::new(MemorySink {
             hub: self.clone(),
             from: handle.clone(),

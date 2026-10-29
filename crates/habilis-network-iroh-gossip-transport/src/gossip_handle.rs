@@ -33,8 +33,10 @@ use iroh::endpoint::transports;
 /// the endpoint builder, and `attach` a sink once the topic is joined.
 #[derive(Debug, Clone)]
 pub struct GossipHandle {
+    // the handle and its transport share one state, cloned into each
     pub(crate) shared: Arc<Shared>,
     inbound: mpsc::Sender<Packet>,
+    // the endpoint's transport and this handle share one instance
     transport: Arc<GossipTransport>,
 }
 
@@ -42,6 +44,7 @@ impl GossipHandle {
     /// A handle with no sink. The path is not valid until `attach` is called.
     #[must_use]
     pub fn new(app_id: EndpointId) -> Self {
+        // shared by the handle, the transport and the receive task
         let shared = Arc::new(Shared {
             app_id,
             local_addr: gossip_addr(app_id),
@@ -53,6 +56,7 @@ impl GossipHandle {
             counters: Counters::default(),
         });
         let (inbound, receiver) = mpsc::channel(INBOUND_CAP);
+        // the handle keeps a clone while the endpoint's transport holds another
         let transport = Arc::new(GossipTransport {
             shared: Arc::clone(&shared),
             inbound: Mutex::new(Some(receiver)),
@@ -75,6 +79,7 @@ impl GossipHandle {
     /// The engine calls this when it joins the topic, and again where it replaces
     /// the topic's sender after a resubscribe.
     pub fn attach_gossip(&self, sender: iroh_gossip::api::GossipSender) {
+        // the sink is a trait object: the handle stores it and the receive task calls it
         self.attach(Arc::new(crate::gossip_sink::GossipSink::spawn(sender)));
     }
 
@@ -92,7 +97,9 @@ impl GossipHandle {
     /// and no other selector is: iroh's default treats a custom transport as primary, and the
     /// mesh topic would carry the bytes of a pair that has an IP path.
     #[must_use]
+    // trait object: the endpoint builder takes the selector by Arc
     pub fn path_selector(&self) -> Arc<dyn transports::PathSelector> {
+        // trait object: the endpoint builder takes the selector by Arc
         Arc::new(crate::gossip_ladder::GossipLadder::new(self.app_id()))
     }
 
@@ -171,7 +178,9 @@ impl GossipHandle {
 
     /// The transport, for `Builder::add_custom_transport`.
     #[must_use]
+    // trait object: the endpoint builder takes the transport by Arc
     pub fn custom_transport(&self) -> Arc<dyn CustomTransport> {
+        // the endpoint and the handle share the one transport
         Arc::clone(&self.transport) as Arc<dyn CustomTransport>
     }
 
@@ -215,6 +224,7 @@ impl GossipHandle {
 
 #[derive(Debug)]
 struct GossipTransport {
+    // the state the handle and its sender share
     shared: Arc<Shared>,
     /// Taken by the single `bind` call. `None` afterwards.
     inbound: Mutex<Option<mpsc::Receiver<Packet>>>,
@@ -236,6 +246,7 @@ impl CustomTransport for GossipTransport {
 
 #[derive(Debug)]
 struct GossipEndpoint {
+    // the state the handle and its sender share
     shared: Arc<Shared>,
     inbound: mpsc::Receiver<Packet>,
     local: n0_watcher::Watchable<Vec<CustomAddr>>,
@@ -246,7 +257,9 @@ impl CustomEndpoint for GossipEndpoint {
         self.local.watch()
     }
 
+    // trait object: the endpoint calls the sender through this Arc
     fn create_sender(&self) -> Arc<dyn CustomSender> {
+        // the sender is shared with the endpoint, which calls it from its tasks
         Arc::new(GossipSender {
             shared: Arc::clone(&self.shared),
         })
@@ -301,6 +314,7 @@ impl CustomEndpoint for GossipEndpoint {
 
 #[derive(Debug)]
 struct GossipSender {
+    // the state the handle and its tasks share
     shared: Arc<Shared>,
 }
 
@@ -474,6 +488,7 @@ mod tests {
         let to_bob = gossip_addr(secret(2).public());
 
         assert!(!sender.is_valid_send_addr(&to_bob), "before attach");
+        // the test reads the recorder after the handle takes a clone
         handle.attach(Arc::new(Recorder::default()));
         assert!(sender.is_valid_send_addr(&to_bob), "after attach");
         handle.detach();
@@ -483,6 +498,7 @@ mod tests {
     #[test]
     fn a_panic_in_the_liveness_check_does_not_poison_the_sink_lock() {
         let handle = GossipHandle::new(secret(1).public());
+        // a sink that panics, to see the handle survive it
         handle.attach(Arc::new(Panicking));
 
         let outcome =
@@ -501,6 +517,7 @@ mod tests {
     #[test]
     fn a_datagram_over_the_frame_budget_is_dropped_by_the_sender() {
         let handle = GossipHandle::new(secret(1).public());
+        // the test reads the recorder after the handle takes a clone
         let recorder = Arc::new(Recorder::default());
         handle.attach(Arc::clone(&recorder));
         let bob = secret(2).public();
@@ -519,6 +536,7 @@ mod tests {
     struct CountingWaker(AtomicUsize);
 
     impl Wake for CountingWaker {
+        // the Wake contract takes the task as an Arc
         fn wake(self: Arc<Self>) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
@@ -531,6 +549,7 @@ mod tests {
         let me = secret(1).public();
         let handle = GossipHandle::new(me);
         let mut endpoint = handle.transport.bind().expect("bind");
+        // the Wake contract hands the waker out as an Arc
         let waker = Arc::new(CountingWaker::default());
         let std_waker = std::task::Waker::from(Arc::clone(&waker));
         let mut cx = Context::from_waker(&std_waker);
@@ -683,6 +702,7 @@ mod tests {
         let bob = secret(2).public();
 
         handle.shared.send_datagram(bob, &[1u8; 100]);
+        // the test reads the recorder after the handle takes a clone
         handle.attach(Arc::new(Recorder::default()));
         handle
             .shared
@@ -773,6 +793,7 @@ mod tests {
     #[test]
     fn a_destination_that_is_not_allowed_gets_no_frame() {
         let handle = GossipHandle::new(secret(1).public());
+        // the test reads the recorder after the handle takes a clone
         let recorder = Arc::new(Recorder::default());
         handle.attach(Arc::clone(&recorder));
         let (bob, carol) = (secret(2).public(), secret(3).public());
@@ -803,6 +824,7 @@ mod tests {
     #[test]
     fn a_destination_that_was_never_named_is_allowed() {
         let handle = GossipHandle::new(secret(1).public());
+        // the test reads the recorder after the handle takes a clone
         let recorder = Arc::new(Recorder::default());
         handle.attach(Arc::clone(&recorder));
 
@@ -861,6 +883,7 @@ mod tests {
     #[test]
     fn an_established_destination_is_charged_and_a_handshake_is_exempt() {
         let handle = GossipHandle::new(secret(1).public());
+        // the test reads the recorder after the handle takes a clone
         let recorder = Arc::new(Recorder::default());
         handle.attach(Arc::clone(&recorder));
         let (bob, carol) = (secret(2).public(), secret(3).public());
@@ -901,6 +924,7 @@ mod tests {
     #[test]
     fn without_a_budget_nothing_is_dropped_for_bytes() {
         let handle = GossipHandle::new(secret(1).public());
+        // the test reads the recorder after the handle takes a clone
         let recorder = Arc::new(Recorder::default());
         handle.attach(Arc::clone(&recorder));
         let bob = secret(2).public();
@@ -929,6 +953,7 @@ mod tests {
         let me = secret(1).public();
         let handle = GossipHandle::new(me);
         let mut endpoint = handle.transport.bind().expect("bind");
+        // the Wake contract hands the waker out as an Arc
         let waker = Arc::new(CountingWaker::default());
         let std_waker = std::task::Waker::from(Arc::clone(&waker));
         let mut cx = Context::from_waker(&std_waker);

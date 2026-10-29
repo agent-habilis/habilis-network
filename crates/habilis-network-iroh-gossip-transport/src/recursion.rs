@@ -82,6 +82,7 @@ mod tests {
 
     /// Reports how its connection was closed.
     #[derive(Debug, Clone)]
+    // the router owns the handler; the test keeps a clone to take the sender out
     struct CloseProbe(Arc<Mutex<Option<oneshot::Sender<ConnectionError>>>>);
 
     impl ProtocolHandler for CloseProbe {
@@ -122,6 +123,7 @@ mod tests {
         let bob = gossip_only_endpoint(secret(2), &bob_handle).await;
         let (tx, rx) = oneshot::channel();
         let router = Router::builder(bob.clone())
+            // the router owns the handler; the test keeps a clone to take the sender out
             .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
             .spawn();
         let connection = alice
@@ -173,6 +175,7 @@ mod tests {
         let (alice, bob) = (loopback(secret(5)).await, loopback(secret(6)).await);
         let (tx, _rx) = oneshot::channel();
         let router = Router::builder(bob.clone())
+            // the router owns the handler; the test keeps a clone to take the sender out
             .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
             .spawn();
         let connection = alice.connect(bob.addr(), ALPN).await.expect("connect");
@@ -208,6 +211,7 @@ mod tests {
         let (alice, bob) = (loopback(secret(3)).await, loopback(secret(4)).await);
         let (tx, _rx) = oneshot::channel();
         let router = Router::builder(bob.clone())
+            // the router owns the handler; the test keeps a clone to take the sender out
             .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
             .spawn();
         let connection = alice.connect(bob.addr(), ALPN).await.expect("connect");

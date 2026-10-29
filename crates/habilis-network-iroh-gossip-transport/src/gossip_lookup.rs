@@ -21,6 +21,7 @@ const PROVENANCE: &str = "iroh-gossip-transport";
 /// engine's rule (`GossipHandle::allow`), not this lookup's.
 #[derive(Debug)]
 pub(crate) struct GossipLookup {
+    // the lookup reads the same state the handle writes
     pub(crate) shared: Arc<Shared>,
 }
 

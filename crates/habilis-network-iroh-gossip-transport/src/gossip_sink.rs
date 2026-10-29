@@ -22,6 +22,7 @@ const QUEUE: usize = 256;
 #[derive(Debug)]
 pub struct GossipSink {
     queue: mpsc::Sender<Bytes>,
+    // the sink's task and the handle both read the liveness flag
     alive: Arc<AtomicBool>,
 }
 
@@ -30,6 +31,7 @@ impl GossipSink {
     #[must_use]
     pub fn spawn(sender: GossipSender) -> Self {
         let (queue, mut frames) = mpsc::channel::<Bytes>(QUEUE);
+        // the sink's task and the handle both read the liveness flag
         let alive = Arc::new(AtomicBool::new(true));
         let task_alive = Arc::clone(&alive);
         n0_future::task::spawn(async move {

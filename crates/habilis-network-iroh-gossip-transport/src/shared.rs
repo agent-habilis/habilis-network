@@ -33,6 +33,7 @@ pub(crate) struct Packet {
 pub(crate) struct Shared {
     pub(crate) app_id: EndpointId,
     pub(crate) local_addr: CustomAddr,
+    // trait object: the sink is installed at run time
     pub(crate) sink: Mutex<Option<Arc<dyn FrameSink>>>,
     pub(crate) attached: AtomicBool,
     /// Destinations that the engine stopped, because a higher rung carries them.

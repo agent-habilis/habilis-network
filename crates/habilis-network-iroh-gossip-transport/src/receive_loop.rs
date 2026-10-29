@@ -204,6 +204,7 @@ mod tests {
             builder = builder.relay_mode(RelayMode::Disabled);
             builder = builder.clear_ip_transports();
             builder = builder.add_custom_transport(handle.custom_transport());
+            // trait object: the endpoint builder takes the selector by Arc
             builder = builder.path_selector(std::sync::Arc::new(Ladder));
             builder = builder.address_lookup(lookup.clone());
             for bind in binds {
