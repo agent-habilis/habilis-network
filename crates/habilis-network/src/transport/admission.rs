@@ -1405,7 +1405,7 @@ mod tests {
         hub.join(&handle);
         let admission = SignalAdmission::new(8);
         admission.set_gossip(handle.clone());
-        let mut builder = iroh::Endpoint::builder(presets::Minimal)
+        let mut builder: iroh::endpoint::Builder = iroh::Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
             .add_custom_transport(handle.custom_transport())

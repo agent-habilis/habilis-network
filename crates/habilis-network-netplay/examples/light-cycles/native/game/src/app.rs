@@ -167,7 +167,7 @@ impl Game {
 
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
-        let roster = self
+        let roster: Vec<(String, String)> = self
             .descriptor
             .as_ref()
             .map(|desc| {

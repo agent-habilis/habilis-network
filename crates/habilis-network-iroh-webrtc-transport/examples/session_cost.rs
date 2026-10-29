@@ -80,7 +80,7 @@ fn fit(points: &[(f64, f64)]) -> Option<Fit> {
         .sum();
     let slope = sxy / sxx;
     let intercept = mean_y - slope * mean_x;
-    let slope_stderr = (points.len() >= 3).then(|| {
+    let slope_stderr: Option<f64> = (points.len() >= 3).then(|| {
         let sse: f64 = points
             .iter()
             .map(|&(px, py)| (py - (intercept + slope * px)).powi(2))

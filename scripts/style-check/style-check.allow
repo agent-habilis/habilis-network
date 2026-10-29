@@ -93,11 +93,6 @@ long_chain|crates/habilis-network/tests/webrtc_full_roster_loopback.rs|3|kept: s
 # turbofish_collect_parse: a collect or parse turbofish (P2). Each row is a count that may only go down.
 
 # untyped_long_chain_let: a let of a chain of five or more calls with no type (P5). Each row is a count that may only go down.
-untyped_long_chain_let|crates/habilis-network-iroh-webrtc-transport/examples/session_cost.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/native/game/src/app.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/web/wasm/src/app.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/web/wasm/src/lib.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/src/transport/admission.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 
 # pub_vec_return: a public function returns a Vec. The guide prefers an iterator. These keep a Vec:
 # each one returns an owned byte buffer or an owned list that the caller keeps.

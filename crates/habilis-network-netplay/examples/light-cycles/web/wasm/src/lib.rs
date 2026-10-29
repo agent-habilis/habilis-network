@@ -245,7 +245,7 @@ impl LightCyclesPeer {
     pub fn hud(&self) -> Result<String, JsValue> {
         let game = self.game.borrow();
         let snapshot = game.snapshot();
-        let roster = snapshot
+        let roster: Vec<RosterEntryDto> = snapshot
             .roster
             .iter()
             .enumerate()
