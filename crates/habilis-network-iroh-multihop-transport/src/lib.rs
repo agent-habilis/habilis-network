@@ -220,6 +220,7 @@ impl HandleConfig {
 /// of it. Its `Debug` output shows no key material.
 #[derive(Clone, Debug)]
 pub struct MultihopHandle {
+    // every clone of the handle shares one inner state
     inner: Arc<HandleInner>,
 }
 
@@ -229,12 +230,15 @@ struct HandleInner {
     config: HandleConfig,
     /// The `seq` of the last vector this handle made.
     last_seq: AtomicU64,
+    // shared with the accept loop that forwards for the handle
     forwarder: Arc<Forwarder>,
+    // shared with the forwarder and the lookup, which read the vectors
     topology: Arc<RwLock<Topology>>,
     /// Picks the route to a destination, for `route_addr` and for the lookup.
     chooser: RouteChooser,
     self_id: AppId,
     underlay: Endpoint,
+    // the endpoint and the handle share the one transport
     transport: Arc<MultihopTransport>,
     // Kept alive so the underlay's `FORWARD_ALPN` accept loop keeps running;
     // `close` shuts it down.
@@ -286,7 +290,9 @@ impl MultihopHandle {
             return Err(HandleError::UnderlayKey);
         }
         let (inbound_tx, inbound_rx) = mpsc::channel(INBOUND_CAP);
+        // shared with the forwarder and the lookup, which read the vectors
         let topology = Arc::new(RwLock::new(Topology::with_max_age(config.vector_max_age)));
+        // shared with the handle accept loop that forwards for it
         let forwarder = Arc::new(Forwarder::new(
             underlay.clone(),
             app_id,
@@ -301,12 +307,14 @@ impl MultihopHandle {
             underlay_id: UnderlayId::new(underlay.id()),
         };
         let self_addr = RouteInner::singleton(self_hop).encode();
+        // shared by the transport and its receive task
         let shared = Arc::new(Shared {
             self_hop,
             self_addr,
             forwarder: Arc::clone(&forwarder),
         });
 
+        // the endpoint and the handle share the one transport
         let transport = Arc::new(MultihopTransport::new(shared, inbound_rx));
         let mut router = iroh::protocol::Router::builder(underlay.clone()).accept(
             underlay::FORWARD_ALPN,
@@ -320,6 +328,7 @@ impl MultihopHandle {
         let chooser = RouteChooser::new(app_id, Arc::clone(&topology), Arc::clone(&forwarder));
 
         Ok(Self {
+            // every clone of the handle shares this inner state
             inner: Arc::new(HandleInner {
                 secret: secret.clone(),
                 config,
@@ -407,6 +416,7 @@ impl MultihopHandle {
     /// well before the stuck deadline and the next link-state tick. A holder that
     /// dials by [`route_addr`](Self::route_addr) can choose again then.
     #[must_use]
+    // the caller awaits the same Notify the topology signals
     pub fn route_wake(&self) -> Arc<tokio::sync::Notify> {
         self.inner.forwarder.route_wake()
     }
@@ -595,7 +605,9 @@ impl MultihopHandle {
 
     /// The custom transport factory, for `Builder::add_custom_transport`.
     #[must_use]
+    // trait object: the endpoint builder takes the transport by Arc
     pub fn custom_transport(&self) -> Arc<dyn CustomTransport> {
+        // the endpoint and the handle share the one transport
         Arc::clone(&self.inner.transport) as Arc<dyn CustomTransport>
     }
 
@@ -609,7 +621,9 @@ impl MultihopHandle {
     /// The path selector: a direct path, then multihop, then the relay. For
     /// `Builder::path_selector`.
     #[must_use]
+    // trait object: the endpoint builder takes the selector by Arc
     pub fn path_selector(&self) -> Arc<dyn PathSelector> {
+        // trait object: the endpoint builder takes the selector by Arc
         Arc::new(MultihopLadder::new(self.inner.self_id.get()))
     }
 }
@@ -621,7 +635,9 @@ impl MultihopHandle {
 /// them. The handle does not exist yet when the underlay is built, hence a free
 /// function. For `Builder::path_selector`.
 #[must_use]
+// trait object: the endpoint builder takes the selector by Arc
 pub fn underlay_path_selector(underlay_id: UnderlayId) -> Arc<dyn PathSelector> {
+    // trait object: the endpoint builder takes the selector by Arc
     Arc::new(MultihopLadder::new(underlay_id.get()))
 }
 
@@ -787,6 +803,7 @@ mod tests {
 
     /// Counts the connections it accepts, then waits for the dialer to close.
     #[derive(Debug, Clone)]
+    // the test reads the count the handler increments
     struct Counting(std::sync::Arc<atomic::AtomicUsize>);
 
     impl iroh::protocol::ProtocolHandler for Counting {
@@ -804,6 +821,7 @@ mod tests {
 
     #[test]
     async fn an_extra_protocol_is_accepted_on_the_underlay() {
+        // the test reads the count after the accept loop runs
         let accepted = std::sync::Arc::new(atomic::AtomicUsize::new(0));
         let secret = SecretKey::from_bytes(&[51; 32]);
         let handle = MultihopHandle::with_protocols(

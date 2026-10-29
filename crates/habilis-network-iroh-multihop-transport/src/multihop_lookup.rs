@@ -62,14 +62,18 @@ pub(crate) struct Chosen {
 #[derive(Debug, Clone)]
 pub(crate) struct RouteChooser {
     self_id: AppId,
+    // shared with the handle, which updates the vectors
     topology: Arc<RwLock<Topology>>,
+    // shared with the handle that forwards for it
     forwarder: Arc<Forwarder>,
 }
 
 impl RouteChooser {
     pub(crate) fn new(
         self_id: AppId,
+        // shared with the handle, which updates the vectors
         topology: Arc<RwLock<Topology>>,
+        // shared with the handle that forwards for it
         forwarder: Arc<Forwarder>,
     ) -> Self {
         Self {

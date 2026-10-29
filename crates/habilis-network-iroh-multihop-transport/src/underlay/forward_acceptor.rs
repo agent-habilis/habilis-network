@@ -13,10 +13,12 @@ use super::{GateRole, RelayGate};
 /// hand them to the [`Forwarder`].
 #[derive(Debug, Clone)]
 pub(crate) struct ForwardAcceptor {
+    // the accept loop and the handle share the forwarder
     forwarder: Arc<Forwarder>,
 }
 
 impl ForwardAcceptor {
+    // the accept loop and the handle share the forwarder
     pub(crate) fn new(forwarder: Arc<Forwarder>) -> Self {
         Self { forwarder }
     }
@@ -25,6 +27,7 @@ impl ForwardAcceptor {
         self,
         upstream: UnderlayId,
         connection: Connection,
+        // the accept loop and its connections share the gate
         gate: Arc<Mutex<RelayGate>>,
         mut recv: iroh::endpoint::RecvStream,
     ) {
@@ -48,6 +51,7 @@ impl ProtocolHandler for ForwardAcceptor {
         // sender cannot choose, and constant across every stream on this
         // connection. Every cell that arrives here is checked against it.
         let upstream = UnderlayId::new(connection.remote_id());
+        // the accept loop and its connections share the gate
         let gate = Arc::new(Mutex::new(RelayGate::new(
             self.forwarder.rule.allow_relay,
             self.forwarder.underlay.id(),

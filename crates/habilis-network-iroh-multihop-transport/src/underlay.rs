@@ -389,6 +389,7 @@ async fn writer_task(
     dst: EndpointAddr,
     mut rx: mpsc::Receiver<Cell>,
     handle: mpsc::Sender<Cell>,
+    // the writer pool is shared by the forwarder and its accept loops
     pool: Arc<WriterPool>,
     rule: RelayRule,
 ) {
@@ -535,6 +536,7 @@ mod tests {
                 inbound,
                 false,
                 Duration::from_secs(20),
+                // the topology is shared by the forwarder and the handle
                 Arc::new(RwLock::new(Topology::default())),
             ),
             app_id,
@@ -745,6 +747,7 @@ mod tests {
     /// A node whose underlay can only use the relay, as a forwarder with its
     /// accept side running.
     struct RelayNode {
+        // the test harness shares the forwarder with its writers
         forwarder: Arc<Forwarder>,
         hop: RouteHop,
         /// The key of the application endpoint, which signs the link vector of the node.
@@ -790,12 +793,14 @@ mod tests {
         let app_secret = SecretKey::from_bytes(&[seed.wrapping_add(100); 32]);
         let app_id = AppId::new(app_secret.public());
         let (inbound, received) = mpsc::channel(8);
+        // the forwarder is shared with the accept loop the test runs
         let forwarder = Arc::new(Forwarder::new(
             underlay.clone(),
             app_id,
             inbound,
             allow_relay,
             Duration::from_millis(300),
+            // the topology is shared with the forwarder
             Arc::new(RwLock::new(Topology::default())),
         ));
         let router = iroh::protocol::Router::builder(underlay.clone())
@@ -1027,6 +1032,7 @@ mod tests {
         let delivered = cell(vec![self_hop(&forwarder)], 0, sender);
         forwarder.handle_cell(delivered, sender.underlay_id);
         assert_eq!(forwarder.counters().delivered, 1, "the cell was delivered");
+        // the test counts warnings from the code under test and reads the count after
         let warnings = Arc::new(AtomicUsize::new(0));
         tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
             forwarder.dial_addr(&sender);
@@ -1061,6 +1067,7 @@ mod tests {
                 .ingest(own_vector),
             "the vector of this node is accepted"
         );
+        // the test counts warnings from the code under test and reads the count after
         let warnings = Arc::new(AtomicUsize::new(0));
         tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
             forwarder.dial_addr(&neighbor);
@@ -1079,6 +1086,7 @@ mod tests {
     #[test]
     async fn a_hop_without_a_vector_that_no_delivered_cell_named_is_a_warning() {
         let (forwarder, _app, _received) = forwarder().await;
+        // the test counts warnings from the code under test and reads the count after
         let warnings = Arc::new(AtomicUsize::new(0));
         tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
             forwarder.dial_addr(&stranger(141));
@@ -1127,6 +1135,7 @@ mod tests {
                 .ingest(own_vector),
             "the vector of this node is accepted"
         );
+        // the test counts warnings from the code under test and reads the count after
         let warnings = Arc::new(AtomicUsize::new(0));
         tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
             forwarder.dial_addr(&neighbor);
@@ -1175,6 +1184,7 @@ mod tests {
             assert!(topology.ingest(vector), "the vector is accepted");
             assert!(topology.remove(gone.app_id), "the vector is removed");
         }
+        // the test counts warnings from the code under test and reads the count after
         let warnings = Arc::new(AtomicUsize::new(0));
         tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
             forwarder.dial_addr(&gone);
@@ -1212,6 +1222,7 @@ mod tests {
             received.try_recv().expect("delivered");
         }
         let newest = hop(cap);
+        // the test counts warnings from the code under test and reads the count after
         let warnings = Arc::new(AtomicUsize::new(0));
         tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
             forwarder.dial_addr(&newest);
@@ -1297,6 +1308,7 @@ mod tests {
     async fn loopback_node_with(
         seed: u8,
         stuck_after: Duration,
+        // trait object: the selector is chosen per test
         selector: Option<Arc<dyn PathSelector>>,
     ) -> RelayNode {
         let loopback: SocketAddr = "127.0.0.1:0".parse().expect("loopback addr");
@@ -1313,12 +1325,14 @@ mod tests {
         let app_secret = SecretKey::from_bytes(&[seed.wrapping_add(100); 32]);
         let app_id = AppId::new(app_secret.public());
         let (inbound, received) = mpsc::channel(8);
+        // the forwarder is shared with the accept loop the test runs
         let forwarder = Arc::new(Forwarder::new(
             underlay.clone(),
             app_id,
             inbound,
             false,
             stuck_after,
+            // the topology is shared with the forwarder
             Arc::new(RwLock::new(Topology::default())),
         ));
         let router = iroh::protocol::Router::builder(underlay.clone())
@@ -1485,6 +1499,7 @@ mod tests {
         // path of its own and selects none, but its connection has the IP path open.
         let stuck_after = Duration::from_millis(300);
         let from = loopback_node(31, stuck_after).await;
+        // trait object: the test passes a selector that never selects
         let mut to = loopback_node_with(32, stuck_after, Some(Arc::new(NeverSelects))).await;
         assert!(
             cell_arrives(&from, &mut to).await,

@@ -32,6 +32,7 @@ pub(crate) struct Shared {
     /// underlay neighbour can dial it as-is; longer routes are computed by the
     /// initiator's address lookup.
     pub(crate) self_addr: CustomAddr,
+    // the forwarder is shared with the handle, which forwards cells for its peers
     pub(crate) forwarder: Arc<Forwarder>,
 }
 
@@ -39,6 +40,7 @@ pub(crate) struct Shared {
 /// calls [`bind`](CustomTransport::bind) during `Endpoint::builder().bind()`.
 #[derive(Debug)]
 pub(crate) struct MultihopTransport {
+    // the state the transport and its handle share
     shared: Arc<Shared>,
     /// Taken by the single `bind` call. `None` afterwards.
     inbound: Mutex<Option<mpsc::Receiver<Delivered>>>,
@@ -51,6 +53,7 @@ impl MultihopTransport {
         self.shared.self_hop
     }
 
+    // the transport and its handle share this state
     pub(crate) fn new(shared: Arc<Shared>, inbound: mpsc::Receiver<Delivered>) -> Self {
         Self {
             shared,
@@ -79,6 +82,7 @@ impl CustomTransport for MultihopTransport {
 /// The [`CustomEndpoint`]: iroh's receive/local-address handle for the transport.
 #[derive(Debug)]
 struct MultihopEndpoint {
+    // the state the sender and the transport share
     shared: Arc<Shared>,
     inbound: mpsc::Receiver<Delivered>,
     local: n0_watcher::Watchable<Vec<CustomAddr>>,
@@ -89,7 +93,9 @@ impl CustomEndpoint for MultihopEndpoint {
         self.local.watch()
     }
 
+    // trait object: the endpoint calls the sender through this Arc
     fn create_sender(&self) -> Arc<dyn CustomSender> {
+        // the sender is shared with the endpoint, which calls it from its tasks
         Arc::new(MultihopSender {
             shared: Arc::clone(&self.shared),
         })
@@ -148,6 +154,7 @@ impl CustomEndpoint for MultihopEndpoint {
 /// The [`CustomSender`]: routes each outbound QUIC packet onto its first hop.
 #[derive(Debug)]
 struct MultihopSender {
+    // the state the transport and its receive task share
     shared: Arc<Shared>,
 }
 

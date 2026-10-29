@@ -36,6 +36,7 @@ pub(crate) struct Forwarder {
     /// outside. A browser has no runtime and spawns on its one thread.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) runtime: Handle,
+    // the writer pool is shared by the forwarder and its accept loops
     pub(super) pool: Arc<WriterPool>,
     /// Terminal deliveries destined for the local application endpoint.
     pub(super) inbound: mpsc::Sender<Delivered>,
@@ -67,6 +68,7 @@ impl Forwarder {
         inbound: mpsc::Sender<Delivered>,
         allow_relay: bool,
         stuck_after: Duration,
+        // shared with the handle, which updates the vectors
         topology: Arc<RwLock<Topology>>,
     ) -> Self {
         Self {
@@ -74,6 +76,7 @@ impl Forwarder {
             self_app_id,
             #[cfg(not(target_arch = "wasm32"))]
             runtime: Handle::current(),
+            // the writer pool is shared by the forwarder and its accept loops
             pool: Arc::new(WriterPool::default()),
             inbound,
             dropped: AtomicU64::new(0),
