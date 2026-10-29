@@ -193,15 +193,10 @@ impl Game {
                 desc.roster.iter().map(entry).collect()
             })
             .unwrap_or_default();
-        let my_pubkey = self
-            .transport
-            .local_pubkey()
-            .map(|key| key.to_string())
-            .unwrap_or_default();
-        let present = self
-            .lobby
-            .as_ref()
-            .map_or(1, |lobby| lobby.present().count());
+        let pubkey = self.transport.local_pubkey();
+        let my_pubkey: String = pubkey.map(|key| key.to_string()).unwrap_or_default();
+        let current = self.lobby.as_ref();
+        let present = current.map_or(1, |lobby| lobby.present().count());
         let syncing = self
             .session
             .as_ref()

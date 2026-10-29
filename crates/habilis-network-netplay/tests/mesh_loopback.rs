@@ -257,12 +257,8 @@ fn two_peers_play_a_match_over_a_loopback_mesh() {
             assert!(met, "the two peers never found each other in the lobby");
 
             // 2. One of them starts the match. The other adopts it off the wire.
-            let start = players[0]
-                .lobby
-                .as_mut()
-                .expect("alice has a lobby")
-                .propose()
-                .expect("two distinct players are present");
+            let lobby = players[0].lobby.as_mut().expect("alice has a lobby");
+            let start = lobby.propose().expect("two distinct players are present");
             players[0]
                 .transport
                 .as_ref()

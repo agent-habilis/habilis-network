@@ -104,7 +104,8 @@ fn public_path_probe() {
             // Both bots claim the beacon after two probe rounds (~23s), and the first
             // rival re-check (~12s later) is what merges the two halves.
             let started = drive(&mut bots, Duration::from_secs(60), |bots| {
-                bots.iter().all(|bot| bot.game.snapshot().roster.len() == 2)
+                let roster = |bot: &Bot| bot.game.snapshot().roster.len();
+                bots.iter().all(|bot| roster(bot) == 2)
             })
             .await;
             assert!(started, "the two bots never started a match together");
@@ -167,10 +168,8 @@ fn public_path_probe() {
             // tie-break alone would have refused it and the two would have sat on
             // a finished game forever.
             let spawns = |bots: &[Bot]| -> Vec<(i16, i16)> {
-                bots[0]
-                    .game
-                    .snapshot()
-                    .world
+                let world = bots[0].game.snapshot().world;
+                world
                     .cycles
                     .iter()
                     .map(|cycle| (cycle.x, cycle.y))

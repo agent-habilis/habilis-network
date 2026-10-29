@@ -113,7 +113,8 @@ fn two_bots_play_a_match_and_agree_on_its_outcome() {
             // The mesh forms, the lobby agrees a match, and both bots build a
             // session for it. Nobody negotiates the roster: the lobby fixes it.
             let started = drive(&mut bots, Duration::from_secs(30), |bots| {
-                bots.iter().all(|bot| bot.game.snapshot().roster.len() == 2)
+                let roster = |bot: &Bot| bot.game.snapshot().roster.len();
+                bots.iter().all(|bot| roster(bot) == 2)
             })
             .await;
             assert!(started, "the two bots never started a match together");
@@ -163,9 +164,8 @@ fn two_bots_play_a_match_and_agree_on_its_outcome() {
                     });
                 }
                 let first = first_match[0].as_ref().map(|seen| seen.outcome);
-                let agreed = first_match
-                    .iter()
-                    .all(|seen| seen.as_ref().map(|seen| seen.outcome) == first);
+                let outcome_of = |seen: &Option<FirstMatch>| seen.as_ref().map(|seen| seen.outcome);
+                let agreed = first_match.iter().all(|seen| outcome_of(seen) == first);
                 first.is_some() && agreed
             })
             .await;
@@ -193,10 +193,8 @@ fn two_bots_play_a_match_and_agree_on_its_outcome() {
             // job: the second match's id is not ordered below the first's, so the
             // tie-break alone would have refused it and the two would have sat on
             // a finished game forever.
-            let first_arena = first_match[0]
-                .as_ref()
-                .map(|seen| seen.positions.clone())
-                .unwrap_or_default();
+            let head = first_match[0].as_ref();
+            let first_arena = head.map(|seen| seen.positions.clone()).unwrap_or_default();
 
             let rematched = drive(&mut bots, Duration::from_secs(30), |bots| {
                 bots.iter().all(|bot| bot.game.snapshot().match_number == 2)
