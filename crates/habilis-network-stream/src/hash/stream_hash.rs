@@ -41,7 +41,8 @@ pub struct StreamHash {
 }
 
 // Hand-written because the secret has no `PartialEq`: it is compared in
-// constant time, so two hashes never answer faster for a closer secret.
+// constant time, so two hashes never answer faster for a closer secret. There is no `Eq`: a
+// secret-bearing type is not a map key.
 impl PartialEq for StreamHash {
     fn eq(&self, other: &Self) -> bool {
         self.addr == other.addr
@@ -51,8 +52,6 @@ impl PartialEq for StreamHash {
             && ct_eq(self.secret.as_bytes(), other.secret.as_bytes())
     }
 }
-
-impl Eq for StreamHash {}
 
 impl fmt::Debug for StreamHash {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

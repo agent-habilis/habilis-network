@@ -6,7 +6,7 @@
 //! source routing (each hop only knows its neighbours; only the initiator can
 //! reason about a whole path).
 
-use std::cmp::Ordering;
+use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crate::app_id::AppId;
@@ -122,15 +122,12 @@ impl Graph {
         let Leg { src, dst } = leg;
         let mut best: HashMap<AppId, LinkMetric> = HashMap::new();
         let mut prev: HashMap<AppId, AppId> = HashMap::new();
-        let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
+        let mut heap: BinaryHeap<Reverse<(LinkMetric, AppId)>> = BinaryHeap::new();
 
         best.insert(src, LinkMetric::ZERO);
-        heap.push(HeapEntry {
-            cost: LinkMetric::ZERO,
-            node: src,
-        });
+        heap.push(Reverse((LinkMetric::ZERO, src)));
 
-        while let Some(HeapEntry { cost, node }) = heap.pop() {
+        while let Some(Reverse((cost, node))) = heap.pop() {
             if node == dst {
                 return Some(Path {
                     hops: reconstruct(&prev, leg),
@@ -179,7 +176,7 @@ struct RelaxEdge<'blocked> {
 fn relax(
     best: &mut HashMap<AppId, LinkMetric>,
     prev: &mut HashMap<AppId, AppId>,
-    heap: &mut BinaryHeap<HeapEntry>,
+    heap: &mut BinaryHeap<Reverse<(LinkMetric, AppId)>>,
     candidate: RelaxEdge<'_>,
 ) {
     let RelaxEdge {
@@ -203,10 +200,7 @@ fn relax(
     }
     best.insert(next, next_cost);
     prev.insert(next, node);
-    heap.push(HeapEntry {
-        cost: next_cost,
-        node: next,
-    });
+    heap.push(Reverse((next_cost, next)));
 }
 
 /// Walk `prev` from `dst` back to `src`, returning the hops after `src` in
@@ -224,35 +218,6 @@ fn reconstruct(prev: &HashMap<AppId, AppId>, leg: Leg) -> Vec<AppId> {
     }
     hops.reverse();
     hops
-}
-
-/// A min-heap entry ordered by cost only, so the graph never needs `Ord` on
-/// `AppId`. The `Ord` impl is reversed so `BinaryHeap` (a max-heap) yields
-/// the lowest-cost node first.
-struct HeapEntry {
-    cost: LinkMetric,
-    node: AppId,
-}
-
-impl PartialEq for HeapEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.cost == other.cost
-    }
-}
-
-impl Eq for HeapEntry {}
-
-impl Ord for HeapEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Reversed: the smallest cost is the greatest heap element.
-        other.cost.cmp(&self.cost)
-    }
-}
-
-impl PartialOrd for HeapEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
 }
 
 #[cfg(test)]

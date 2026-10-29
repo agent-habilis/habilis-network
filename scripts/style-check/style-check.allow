@@ -50,8 +50,6 @@ pub_const_fn|crates/habilis-network-util/src/unix_secs.rs|4|kept: 4 UnixSecs new
 pub_const_fn|crates/habilis-network/src/gossip/app/app_class.rs|7|kept: flag set of a gossip message (union, with_if, loggable, beat, valid, chained, sealed): bit-flag logic
 
 # A hand-written Eq, Ord or PartialOrd: the compiler checks a derive, not a manual impl.
-manual_eq_ord|crates/habilis-network-stream/src/hash/stream_hash.rs|1|Eq marker for StreamHash: a 32-byte hash compared bytewise, so equality is reflexive
-manual_eq_ord|crates/habilis-network-iroh-multihop-transport/src/graph.rs|3|HeapEntry: Eq, Ord and PartialOrd of one cost key for the route heap; the cost is a u32, a total order
 
 # assert_no_message: an assert with no message (P13). Each row is a count that may only go down.
 assert_no_message|crates/habilis-network-chunks/src/lib.rs|59|kept: assert without a message, to be given one (P13 rollout)
