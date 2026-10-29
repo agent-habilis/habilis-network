@@ -22,6 +22,7 @@ const DRAIN: Duration = Duration::from_secs(5);
 #[derive(Debug)]
 pub struct Producer {
     hash: StreamHash,
+    // the producer shares the registry with the node
     registry: Arc<Registry>,
     attach: Option<oneshot::Receiver<Link>>,
     link: Option<Link>,
@@ -29,6 +30,7 @@ pub struct Producer {
 }
 
 impl Producer {
+    // the node and each producer share the registry
     pub(crate) fn new(hash: StreamHash, registry: Arc<Registry>) -> Self {
         let attach = registry.open(hash.id, hash.secret.clone());
         Self {

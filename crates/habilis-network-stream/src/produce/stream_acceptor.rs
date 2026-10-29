@@ -20,6 +20,7 @@ const PRE_AUTH: Duration = Duration::from_secs(10);
 /// stream and hand its connection to the waiting [`Producer`].
 #[derive(Debug, Clone)]
 pub(crate) struct StreamAcceptor {
+    // the acceptor shares the registry with the node, which holds the producers
     pub(crate) registry: Arc<Registry>,
     pub(crate) relay_transport: PayloadPath,
 }

@@ -29,6 +29,7 @@ pub struct StreamNode {
     pub(super) endpoint: Endpoint,
     router: Router,
     webrtc: WebRtcHandle,
+    // the node shares the registry with its producers and its acceptor
     registry: Arc<Registry>,
     lookups: LookupOpts,
     pub(super) transport: TransportPolicy,
@@ -94,6 +95,7 @@ impl StreamNode {
             .await
             .map_err(StreamError::bind("start the stream node"))?;
         let producers = address_book(&endpoint);
+        // the producers and the acceptor share this registry with the node
         let registry = Arc::new(Registry::default());
         let ice = IceProfile::default().with_host_only(lookups.is_loopback());
         let mut router = Router::builder(endpoint.clone()).accept(
