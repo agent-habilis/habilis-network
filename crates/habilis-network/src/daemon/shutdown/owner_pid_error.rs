@@ -1,4 +1,14 @@
 /// Why a pid cannot be the owner of a detached daemon.
+///
+/// # Examples
+///
+/// A reserved pid returns this error with the pid.
+///
+/// ```
+/// use habilis_network::runtime::{OwnerPidError, validate_owner_pid};
+///
+/// assert!(matches!(validate_owner_pid(0), Err(OwnerPidError::Reserved(0))));
+/// ```
 #[cfg(feature = "host")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

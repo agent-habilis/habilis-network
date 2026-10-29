@@ -152,6 +152,17 @@ pub(super) fn spawn_quit_signal_tasks(
 /// # Errors
 /// `pid` is 0 or 1, the calling process's own pid, or no live process has it
 /// (a zombie counts as dead). The message is one line.
+///
+/// # Examples
+///
+/// The pids 0 and 1 are never a valid owner.
+///
+/// ```
+/// use habilis_network::runtime::validate_owner_pid;
+///
+/// assert!(validate_owner_pid(0).is_err());
+/// assert!(validate_owner_pid(1).is_err());
+/// ```
 #[cfg(feature = "host")]
 pub fn validate_owner_pid(pid: u32) -> Result<(), OwnerPidError> {
     owner_start(pid).map(drop)

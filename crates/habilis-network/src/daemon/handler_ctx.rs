@@ -11,6 +11,18 @@ use crate::transport::MeshSender;
 
 /// Immutable loop-level context threaded through every handler.
 /// Bundles the refs a handler may need but never mutates itself.
+///
+/// # Examples
+///
+/// A handler context is what a handler gets from the node for one event. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::HandlerCtx;
+///
+/// # fn demo(ctx: &HandlerCtx<'_>) {
+/// let _ = ctx;
+/// # }
+/// ```
 pub struct HandlerCtx<'node> {
     /// The sender of the topic.
     pub sender: &'node MeshSender,

@@ -3,6 +3,18 @@ use crate::protocol::mesh::{Mesh, MeshConfig, MeshName};
 
 /// What kind of mesh we're setting up — either minting a new one
 /// (create) or attaching to an existing one (join).
+///
+/// # Examples
+///
+/// A setup kind says whether the node creates a mesh, joins one, or follows a topic. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::runtime::SetupKind;
+///
+/// # fn demo(kind: SetupKind) -> bool {
+/// matches!(kind, SetupKind::Create { .. })
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum SetupKind {

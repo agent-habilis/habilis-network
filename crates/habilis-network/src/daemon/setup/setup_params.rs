@@ -12,6 +12,18 @@ use std::sync::atomic;
 /// [`SetupKind`](super::SetupKind): this member's identity/io/tuning and the localhost
 /// binding request. Bundled so the one-shot assembly stays within the
 /// argument budget.
+///
+/// # Examples
+///
+/// The parameters of a setup carry what the node needs to start. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::runtime::SetupParams;
+///
+/// # fn demo(params: SetupParams) {
+/// let _ = params;
+/// # }
+/// ```
 #[non_exhaustive]
 pub struct SetupParams {
     /// This member's nickname, the author of every message it sends.
@@ -173,6 +185,18 @@ impl std::fmt::Debug for SetupParams {
 
 /// The shared live-peer count. The loop mirrors its roster size into it, and a directory advertiser
 /// re-broadcasts from it. Clones share one counter.
+///
+/// # Examples
+///
+/// A live count is the number of members that a setup sees as live. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::runtime::LiveCount;
+///
+/// # fn demo(count: LiveCount) {
+/// let _ = count;
+/// # }
+/// ```
 #[derive(Debug, Default)]
 // the counter is shared by the setup and the caller, which reads it
 pub struct LiveCount(std::sync::Arc<atomic::AtomicUsize>);

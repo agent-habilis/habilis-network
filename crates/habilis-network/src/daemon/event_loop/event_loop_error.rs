@@ -2,6 +2,18 @@
 ///
 /// [`EventLoopError::Internal`] holds the causes that no caller acts on: the loop ended
 /// on a failure of one of its tasks or of its endpoint. It keeps their text and chain.
+///
+/// # Examples
+///
+/// The event loop stopped on an internal fault. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::runtime::EventLoopError;
+///
+/// # fn demo(error: &EventLoopError) -> bool {
+/// matches!(error, EventLoopError::Internal(_))
+/// # }
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]

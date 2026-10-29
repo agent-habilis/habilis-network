@@ -13,6 +13,19 @@ use crate::gossip::app::NodeApp;
 /// timers, driver-channel inputs, and lifecycle hooks. The loop owns the mesh
 /// [`EventLoopState`] and the concrete `impl NodeDriver`; every callback hands
 /// the app the loop state plus the per-arm [`HandlerCtx`].
+///
+/// # Examples
+///
+/// A node driver is the app that the event loop runs. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::NodeDriver;
+/// use habilis_network::runtime::{EventLoopConfig, run};
+///
+/// # async fn demo<Driver: NodeDriver>(config: EventLoopConfig, app: Driver) {
+/// let _ = run(config, app, None, None).await;
+/// # }
+/// ```
 #[async_trait::async_trait]
 pub trait NodeDriver: NodeApp {
     /// The typed in-process request an in-process session pushes (the shared

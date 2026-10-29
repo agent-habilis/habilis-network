@@ -15,6 +15,16 @@ use habilis_network_protocol::ConfigError;
 /// [`SetupError::Internal`] holds the other causes, which no caller acts on; it
 /// keeps their text and their chain. A connect timeout to the creator of a mesh (the
 /// "creator unreachable" that the gossip-join skill describes) lands in `Internal`.
+///
+/// # Examples
+///
+/// Naming both a mesh and a topic is a setup error.
+///
+/// ```
+/// use habilis_network::runtime::SetupError;
+///
+/// assert!(matches!(SetupError::MeshAndTopic, SetupError::MeshAndTopic));
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]

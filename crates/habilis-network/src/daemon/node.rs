@@ -15,6 +15,16 @@ use crate::protocol::{MeshId, Nickname};
 use crate::util::tuning::{NODE_LEAVE, SESSION_REQUEST_CAP};
 
 /// Whether a session registers the process-wide ctrl-c and SIGTERM listeners.
+///
+/// # Examples
+///
+/// A node either handles a signal itself, or it leaves the mesh when the signal comes.
+///
+/// ```
+/// use habilis_network::runtime::SignalHandling;
+///
+/// assert_ne!(SignalHandling::Handle, SignalHandling::Leave);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SignalHandling {
@@ -27,6 +37,20 @@ pub enum SignalHandling {
 /// A live in-process membership over a background event loop, generic over the
 /// application driver `A`. Drop it (or call [`Node::leave`]) to wind the loop
 /// down.
+///
+/// # Examples
+///
+/// A node is a running member of a mesh, and it names its mesh and its nickname. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::NodeDriver;
+/// use habilis_network::runtime::Node;
+///
+/// # async fn demo<Driver: NodeDriver + 'static>(node: &Node<Driver>) {
+/// let _mesh = node.mesh_id();
+/// let _nick = node.nickname();
+/// # }
+/// ```
 pub struct Node<Driver: NodeDriver> {
     mesh_id: MeshId,
     name: MeshName,

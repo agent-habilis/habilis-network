@@ -573,6 +573,18 @@ fn resolve_caps(max_peers: usize, max_direct: usize) -> (usize, usize) {
 /// # Errors
 /// The join target fails to resolve, the password fails to verify, or the
 /// endpoint cannot bind.
+///
+/// # Examples
+///
+/// It sets up a mesh from its kind and its parameters, and it returns the config for the event loop. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::runtime::{EventLoopConfig, SetupError, SetupKind, SetupParams, setup_mesh};
+///
+/// # async fn demo(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig, SetupError> {
+/// setup_mesh(kind, params).await
+/// # }
+/// ```
 pub async fn setup_mesh(
     kind: SetupKind,
     params: SetupParams,

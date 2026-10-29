@@ -80,6 +80,19 @@ use crate::util::version;
 ///
 /// # Errors
 /// Propagates a fatal setup/transport error that terminates the event loop.
+///
+/// # Examples
+///
+/// It runs the event loop of a node until it stops. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::NodeDriver;
+/// use habilis_network::runtime::{EventLoopConfig, run};
+///
+/// # async fn demo<Driver: NodeDriver>(config: EventLoopConfig, app: Driver) {
+/// let _ = run(config, app, None, None).await;
+/// # }
+/// ```
 pub async fn run<Driver: NodeDriver>(
     config: EventLoopConfig,
     app: Driver,
