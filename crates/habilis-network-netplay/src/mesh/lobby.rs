@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::player_handle::PlayerHandle;
 
+use std::{error, fmt};
 /// Which match this is, counting from 1; `0` before the first.
 ///
 /// Monotonic, so a rematch always supersedes the match before it and a
@@ -77,8 +78,8 @@ impl Epoch {
     }
 }
 
-impl std::fmt::Display for Epoch {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Epoch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
 }
@@ -114,8 +115,8 @@ impl SessionId {
     }
 }
 
-impl std::fmt::Display for SessionId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for SessionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
 }
@@ -276,8 +277,8 @@ pub enum LobbyError {
     DuplicateNickname(Nickname),
 }
 
-impl std::fmt::Display for LobbyError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for LobbyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotEnoughPlayers => write!(formatter, "need at least two players to start"),
             Self::DuplicateNickname(nick) => write!(
@@ -289,7 +290,7 @@ impl std::fmt::Display for LobbyError {
     }
 }
 
-impl std::error::Error for LobbyError {}
+impl error::Error for LobbyError {}
 
 /// The agreed shape of a match.
 ///

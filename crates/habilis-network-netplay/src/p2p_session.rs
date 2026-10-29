@@ -29,6 +29,7 @@ use crate::session_state::SessionState;
 use crate::sync::Sync;
 use crate::transport::{Message, Transport};
 
+use std::{fmt, mem};
 /// A peer-to-peer rollback session.
 ///
 /// # Examples
@@ -89,8 +90,8 @@ pub struct P2PSession<T: Config, Link: Transport<T>> {
     unaddressed_drops: u64,
 }
 
-impl<T: Config, Link: Transport<T>> std::fmt::Debug for P2PSession<T, Link> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<T: Config, Link: Transport<T>> fmt::Debug for P2PSession<T, Link> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = formatter.debug_struct("P2PSession");
         debug
             .field("state", &self.state)
@@ -175,7 +176,7 @@ impl<T: Config, Link: Transport<T>> P2PSession<T, Link> {
 
     /// Take everything that has happened since the last call.
     pub fn drain_events(&mut self) -> impl Iterator<Item = Event<T::Address>> {
-        std::mem::take(&mut self.events).into_iter()
+        mem::take(&mut self.events).into_iter()
     }
 
     /// Drain the transport, apply what arrived, and send what is due.

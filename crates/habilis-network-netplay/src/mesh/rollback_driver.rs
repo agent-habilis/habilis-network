@@ -16,6 +16,8 @@ use crate::mesh::outbound::Outbound;
 use crate::mesh::pending_transport::PendingTransport;
 use crate::transport::Message;
 
+use habilis_network::ops;
+use std::fmt;
 /// App tag for rollback packets.
 pub const ROLLBACK_TAG: &str = "rb_input";
 /// App tag for lobby packets.
@@ -51,8 +53,8 @@ pub struct RollbackDriver<T: Config> {
     mailboxes: Arc<Mailboxes<T>>,
 }
 
-impl<T: Config> std::fmt::Debug for RollbackDriver<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<T: Config> fmt::Debug for RollbackDriver<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RollbackDriver")
             .finish_non_exhaustive()
@@ -236,7 +238,7 @@ fn frame_for(
     let (Ok(tag), Ok(body)) = (AppTag::try_new(tag), MessageBody::try_new(payload)) else {
         return None;
     };
-    Some(habilis_network::ops::app_frame(
+    Some(ops::app_frame(
         context,
         AppFrameParams::new(tag, to, None, body),
     ))
@@ -253,7 +255,5 @@ async fn send(
     frame: Verified,
     class: AppClass,
 ) -> bool {
-    habilis_network::ops::send_app(state, context, frame, class)
-        .await
-        .is_ok()
+    ops::send_app(state, context, frame, class).await.is_ok()
 }

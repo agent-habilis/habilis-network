@@ -11,6 +11,7 @@ use crate::mesh::outbound::Outbound;
 use crate::mesh::rollback_driver;
 use crate::transport::{Message, Transport};
 
+use std::{fmt, mem};
 /// A [`Transport`] over a habilis-network mesh.
 ///
 /// Addresses are peers' public keys — the signed identity on every frame,
@@ -63,8 +64,8 @@ impl<T: Config> Clone for MeshTransport<T> {
     }
 }
 
-impl<T: Config> std::fmt::Debug for MeshTransport<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<T: Config> fmt::Debug for MeshTransport<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("MeshTransport")
             .field("capacity", &self.outbox.max_capacity())
@@ -91,7 +92,7 @@ impl<T: Config> MeshTransport<T> {
         self.mailboxes
             .lobby
             .lock()
-            .map(|mut lobby| std::mem::take(&mut *lobby))
+            .map(|mut lobby| mem::take(&mut *lobby))
             .unwrap_or_default()
             .into_iter()
     }

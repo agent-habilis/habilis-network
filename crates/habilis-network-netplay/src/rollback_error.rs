@@ -3,6 +3,7 @@
 use crate::frame::Frame;
 use crate::player_handle::PlayerHandle;
 
+use std::{error, fmt};
 /// Errors a rollback session can return.
 ///
 /// # Examples
@@ -63,8 +64,8 @@ pub enum RollbackError {
     },
 }
 
-impl std::fmt::Display for RollbackError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for RollbackError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::PredictionLimit => write!(
                 formatter,
@@ -88,4 +89,4 @@ impl std::fmt::Display for RollbackError {
     }
 }
 
-impl std::error::Error for RollbackError {}
+impl error::Error for RollbackError {}

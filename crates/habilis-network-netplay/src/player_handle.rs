@@ -1,5 +1,6 @@
 //! Player handles.
 
+use std::fmt;
 /// A player's place in the roster, counting from `0`.
 ///
 /// Positional: every peer of a match builds the same roster in the same order,
@@ -35,8 +36,8 @@ impl PlayerHandle {
     }
 }
 
-impl std::fmt::Display for PlayerHandle {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for PlayerHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
 }

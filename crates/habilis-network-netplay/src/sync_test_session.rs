@@ -37,6 +37,7 @@ use crate::request::Request;
 use crate::rollback_error::RollbackError;
 use crate::sync::Sync;
 
+use std::fmt;
 /// A local session that re-simulates every frame and compares checksums.
 ///
 /// # Examples
@@ -72,8 +73,8 @@ pub struct SyncTestSession<T: Config> {
     history: BTreeMap<Frame, u128>,
 }
 
-impl<T: Config> std::fmt::Debug for SyncTestSession<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<T: Config> fmt::Debug for SyncTestSession<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = formatter.debug_struct("SyncTestSession");
         debug
             .field("num_players", &self.num_players)

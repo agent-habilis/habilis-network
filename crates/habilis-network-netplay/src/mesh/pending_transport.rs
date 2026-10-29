@@ -9,6 +9,7 @@ use crate::mesh::mailboxes::Mailboxes;
 use crate::mesh::mesh_transport::MeshTransport;
 use crate::mesh::outbound::Outbound;
 
+use std::fmt;
 /// A transport waiting for the node's sender.
 ///
 /// See [`RollbackDriver::new`].
@@ -40,8 +41,8 @@ pub struct PendingTransport<T: Config> {
     mailboxes: Arc<Mailboxes<T>>,
 }
 
-impl<T: Config> std::fmt::Debug for PendingTransport<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<T: Config> fmt::Debug for PendingTransport<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PendingTransport")
             .finish_non_exhaustive()

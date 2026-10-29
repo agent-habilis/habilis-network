@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use crate::config::Config;
 use crate::frame::{Frame, InputStatus};
 
+use std::fmt;
 /// A slot the game saves a frame's state into, and the session loads it back
 /// out of.
 ///
@@ -60,9 +61,9 @@ impl<S> Default for StateCell<S> {
     }
 }
 
-impl<S> std::fmt::Debug for StateCell<S> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let inner = self.0.lock().map_err(|_| std::fmt::Error)?;
+impl<S> fmt::Debug for StateCell<S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let inner = self.0.lock().map_err(|_| fmt::Error)?;
         let mut debug = formatter.debug_struct("StateCell");
         debug
             .field("frame", &inner.frame)
@@ -185,8 +186,8 @@ pub enum Request<T: Config> {
     },
 }
 
-impl<T: Config> std::fmt::Debug for Request<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<T: Config> fmt::Debug for Request<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SaveState { frame, .. } => formatter
                 .debug_struct("SaveState")

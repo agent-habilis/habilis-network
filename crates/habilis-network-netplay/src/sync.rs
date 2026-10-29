@@ -33,6 +33,7 @@ use crate::request::{Request, StateCell};
 use crate::rollback_error::RollbackError;
 use crate::saved_states::SavedStates;
 
+use std::fmt;
 pub(crate) struct Sync<T: Config> {
     input_queues: Vec<InputQueue<T>>,
     saved_states: SavedStates<T::State>,
@@ -43,8 +44,8 @@ pub(crate) struct Sync<T: Config> {
     last_confirmed_frame: Frame,
 }
 
-impl<T: Config> std::fmt::Debug for Sync<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<T: Config> fmt::Debug for Sync<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = formatter.debug_struct("Sync");
         debug
             .field("current_frame", &self.current_frame)

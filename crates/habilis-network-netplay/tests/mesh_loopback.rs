@@ -25,6 +25,9 @@ use habilis_network_netplay::{
     SessionState, Tick,
 };
 
+use std::{process, thread};
+use tokio::time;
+use tokio::time::Instant;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct Input(i32);
 
@@ -214,7 +217,7 @@ async fn drive(
     timeout: Duration,
     mut condition: impl FnMut(&[Player]) -> bool,
 ) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = Instant::now() + timeout;
     let mut tick = 0;
     loop {
         for player in players.iter_mut() {
@@ -226,10 +229,10 @@ async fn drive(
         if condition(players) {
             return true;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -238,9 +241,9 @@ fn two_peers_play_a_match_over_a_loopback_mesh() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(
         guard,
-        std::thread::available_parallelism().map_or(1, usize::from),
+        thread::available_parallelism().map_or(1, usize::from),
         async {
-            let topic = format!("habilis-network-netplay-loopback-{}", std::process::id());
+            let topic = format!("habilis-network-netplay-loopback-{}", process::id());
 
             let mut players = vec![spawn(&topic, "alice").await, spawn(&topic, "bob").await];
 

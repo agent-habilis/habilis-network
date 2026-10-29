@@ -15,6 +15,7 @@ use crate::player_handle::PlayerHandle;
 use crate::time_sync::{TimeSync, frame_advantage};
 use crate::transport::{Body, InputPacket, Message};
 
+use std::fmt;
 /// Handshake round-trips before a peer is considered reachable. More than
 /// one because a single reply only proves the path worked once.
 const SYNC_ROUNDTRIPS: u32 = 5;
@@ -131,8 +132,8 @@ pub(crate) struct PeerProtocol<T: Config> {
     unlatched_drops: u32,
 }
 
-impl<T: Config> std::fmt::Debug for PeerProtocol<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<T: Config> fmt::Debug for PeerProtocol<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = formatter.debug_struct("PeerProtocol");
         debug
             .field("addr", &self.address)
@@ -504,6 +505,7 @@ mod tests {
     use crate::test_game::TestGame;
     use crate::transport::Message;
 
+    use crate::{test_game, transport};
     /// The JSON of an input packet with no ack yet. A change here is a wire
     /// change: peers on the old bytes cannot play with peers on the new ones.
     #[test]
@@ -511,10 +513,10 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let message = Message {
             magic: 0xabcd_1234,
-            body: Body::Input(crate::transport::InputPacket {
+            body: Body::Input(transport::InputPacket {
                 start_frame: Frame::new(5),
                 ack_frame: None,
-                inputs: vec![crate::test_game::TestInput(7)],
+                inputs: vec![test_game::TestInput(7)],
             }),
         };
         assert_eq!(
@@ -531,7 +533,7 @@ mod tests {
     fn an_old_packet_with_the_minus_one_ack_frame_is_a_parse_error() {
         let _guard = ::habilis_network_test_tracing::init();
         let old = r#"{"magic":2882343476,"body":{"Input":{"start_frame":5,"ack_frame":-1,"inputs":[7]}}}"#;
-        let error = serde_json::from_str::<Message<crate::test_game::TestInput>>(old)
+        let error = serde_json::from_str::<Message<test_game::TestInput>>(old)
             .expect_err("a negative frame is refused");
         assert!(error.to_string().contains("negative"), "{error}");
     }
@@ -539,7 +541,7 @@ mod tests {
     #[test]
     fn an_ack_frame_is_on_the_wire_only_when_there_is_one() {
         let _guard = ::habilis_network_test_tracing::init();
-        let packet = |ack_frame| Message::<crate::test_game::TestInput> {
+        let packet = |ack_frame| Message::<test_game::TestInput> {
             magic: 0xabcd_1234,
             body: Body::InputAck { ack_frame },
         };
@@ -554,7 +556,7 @@ mod tests {
             "an ack frame is on the wire"
         );
         for json in [none, some] {
-            let back: Message<crate::test_game::TestInput> =
+            let back: Message<test_game::TestInput> =
                 serde_json::from_str(&json).expect("round trips");
             assert_eq!(
                 serde_json::to_string(&back).expect("serializes"),
@@ -644,10 +646,10 @@ mod tests {
         peer.on_message(
             &Message {
                 magic: previous_match,
-                body: Body::Input(crate::transport::InputPacket {
+                body: Body::Input(transport::InputPacket {
                     start_frame: Frame::new(40),
                     ack_frame: Some(Frame::new(39)),
-                    inputs: vec![crate::test_game::TestInput(7)],
+                    inputs: vec![test_game::TestInput(7)],
                 }),
             },
             &mut replies,

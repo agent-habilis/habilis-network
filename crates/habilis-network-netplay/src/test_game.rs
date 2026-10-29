@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::request::Request;
 
+use crate::frame;
 /// One player's input: a number folded into the running total.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub(crate) struct TestInput(pub(crate) i32);
@@ -21,7 +22,7 @@ pub(crate) struct TestInput(pub(crate) i32);
 #[derive(Debug, Clone, Default, PartialEq, Eq, Copy)]
 pub(crate) struct TestState {
     pub(crate) value: i64,
-    pub(crate) frame: crate::frame::Frame,
+    pub(crate) frame: frame::Frame,
 }
 
 /// A deterministic toy game: the state is a sum of every input ever applied.
@@ -39,7 +40,7 @@ pub(crate) struct TestRunner {
     pub(crate) state: TestState,
     /// Every frame advanced, in order — so a test can assert *what* was
     /// re-simulated, not merely that the result matched.
-    pub(crate) advanced: Vec<crate::frame::Frame>,
+    pub(crate) advanced: Vec<frame::Frame>,
 }
 
 impl TestRunner {

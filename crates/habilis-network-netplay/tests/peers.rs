@@ -19,6 +19,7 @@ use habilis_network_netplay::{
 };
 use serde::{Deserialize, Serialize};
 
+use std::{cell, mem};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct Input(i32);
 
@@ -105,7 +106,7 @@ impl Network {
     /// Release everything held back, ahead of anything sent since — which is
     /// what makes the delivery order wrong.
     fn flush_delayed(&mut self) {
-        for (from, to, message) in std::mem::take(&mut self.delayed) {
+        for (from, to, message) in mem::take(&mut self.delayed) {
             self.inboxes.entry(to).or_default().push((from, message));
         }
     }
@@ -118,7 +119,7 @@ impl Network {
 /// One peer's view of the shared network.
 struct Wire {
     addr: String,
-    net: Rc<std::cell::RefCell<Network>>,
+    net: Rc<cell::RefCell<Network>>,
 }
 
 impl Transport<Game> for Wire {
@@ -164,8 +165,8 @@ impl Peer {
 }
 
 /// Build `count` peers on one network, with the given impairment.
-fn build(count: usize, impairment: Impairment) -> (Rc<std::cell::RefCell<Network>>, Vec<Peer>) {
-    let net = Rc::new(std::cell::RefCell::new(Network {
+fn build(count: usize, impairment: Impairment) -> (Rc<cell::RefCell<Network>>, Vec<Peer>) {
+    let net = Rc::new(cell::RefCell::new(Network {
         impairment,
         rng_state: 0x1234_5678,
         ..Network::default()
@@ -198,7 +199,7 @@ fn build(count: usize, impairment: Impairment) -> (Rc<std::cell::RefCell<Network
 }
 
 /// Run `ticks` of the frame loop across every peer.
-fn run(net: &Rc<std::cell::RefCell<Network>>, peers: &mut [Peer], ticks: usize) {
+fn run(net: &Rc<cell::RefCell<Network>>, peers: &mut [Peer], ticks: usize) {
     for tick in 0..ticks {
         for (handle, peer) in peers.iter_mut().enumerate() {
             peer.session.poll_remote_peers();

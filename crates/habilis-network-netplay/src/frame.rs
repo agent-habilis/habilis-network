@@ -4,6 +4,7 @@ use std::ops::{Add, AddAssign, Sub};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use std::{fmt, num};
 /// A simulation frame number.
 ///
 /// Signed, so [`Frame::NULL`] can be a sentinel and so "how far ahead am I"
@@ -86,8 +87,8 @@ impl Frame {
     }
 }
 
-impl std::fmt::Display for Frame {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Frame {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
 }
@@ -123,7 +124,7 @@ impl Sub for Frame {
 }
 
 impl TryFrom<Frame> for usize {
-    type Error = std::num::TryFromIntError;
+    type Error = num::TryFromIntError;
 
     fn try_from(frame: Frame) -> Result<Self, Self::Error> {
         Self::try_from(frame.0)

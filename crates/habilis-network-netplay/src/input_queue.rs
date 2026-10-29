@@ -15,6 +15,7 @@
 use crate::config::Config;
 use crate::frame::{Frame, InputStatus};
 
+use std::fmt;
 /// Ring-buffer capacity, in frames.
 ///
 /// Bounds how far back a late input can still be filed. Must comfortably
@@ -73,8 +74,8 @@ pub(crate) struct InputQueue<T: Config> {
     prediction: Slot<T::Input>,
 }
 
-impl<T: Config> std::fmt::Debug for InputQueue<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<T: Config> fmt::Debug for InputQueue<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = formatter.debug_struct("InputQueue");
         debug
             .field("length", &self.length)

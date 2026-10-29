@@ -8,6 +8,7 @@ use habilis_network::protocol::{AuthorKey, Nickname};
 use crate::config::Config;
 use crate::transport::Message;
 
+use std::fmt;
 /// Everything the frame loop and the event loop share.
 ///
 /// Cloning shares the mailboxes rather than copying them; the driver keeps
@@ -27,8 +28,8 @@ pub(crate) struct Mailboxes<T: Config> {
     pub(crate) directory: Mutex<HashMap<AuthorKey, Nickname>>,
 }
 
-impl<T: Config> std::fmt::Debug for Mailboxes<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<T: Config> fmt::Debug for Mailboxes<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("Mailboxes").finish_non_exhaustive()
     }
 }
