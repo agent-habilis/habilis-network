@@ -249,6 +249,7 @@ function countAssertsRepeatingCondition(raw: string): number {
 // The statements with a method chain of five or more calls. A statement ends at a `;`, a `{` or a `}`
 // outside a string, so a chain cannot hide across a block. Comments and strings are blanked first.
 const CHAIN_LIMIT = 5;
+const LET_CHAIN_LIMIT = 4;
 function countLongChains(raw: string): number {
   const text = blankStrings(stripComments(raw));
   let count = 0;
@@ -284,7 +285,7 @@ function countUntypedLongChainLets(raw: string): number {
   let count = 0;
   for (const m of text.matchAll(/\blet\s+(?:mut\s+)?\w+\s*=\s*([^;]*);/g)) {
     const calls = (m[1] ?? "").match(/\.\s*\w+\s*(?:::<[^>]*>\s*)?\(/g);
-    if (calls && calls.length >= CHAIN_LIMIT) count++;
+    if (calls && calls.length >= LET_CHAIN_LIMIT) count++;
   }
   return count;
 }
@@ -705,7 +706,7 @@ const RULES: Rule[] = [
     name: "untyped_long_chain_let",
     scan: countUntypedLongChainLets,
     glob: "crates/**/*.rs",
-    why: "A let of a chain of five or more calls names its type (P5). The reader cannot infer the result from the chain alone.",
+    why: "A let of a chain of four or more calls names its type or a middle step (P5). The reader cannot infer the result from the chain alone.",
   },
   {
     name: "crate_example",
