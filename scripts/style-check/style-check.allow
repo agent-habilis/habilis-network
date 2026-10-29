@@ -343,7 +343,6 @@ dyn_param|crates/habilis-network/src/daemon/setup/setup_params.rs|1|the protocol
 # turbofish_collect_parse: a collect or parse turbofish (P2). Each row is a count that may only go down.
 
 # untyped_long_chain_let: a let of a chain of five or more calls with no type (P5). Each row is a count that may only go down.
-untyped_long_chain_let|crates/habilis-network-bench-wasm/src/browser.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-chunks/src/idb_store.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-chunks/tests/idb_browser/cases.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-chunks/tests/origin/cases.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)

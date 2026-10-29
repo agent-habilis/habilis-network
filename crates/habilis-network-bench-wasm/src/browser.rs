@@ -158,7 +158,7 @@ pub fn serve() -> Result<String, JsValue> {
 
 async fn connection_to(remote: EndpointId) -> Result<Connection, JsValue> {
     let (endpoint, open) = with_state(|state| {
-        let open = state
+        let open: Option<Connection> = state
             .connection
             .as_ref()
             .filter(|(id, connection)| *id == remote && connection.close_reason().is_none())
