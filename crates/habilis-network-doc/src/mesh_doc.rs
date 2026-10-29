@@ -593,7 +593,7 @@ impl MeshDoc {
         for entry in self.pending.values() {
             *per_author.entry(entry.frame.key()).or_default() += 1;
         }
-        let longest = per_author.values().copied().max().unwrap_or(0);
+        let longest: usize = per_author.values().copied().max().unwrap_or(0);
         (self.pending.len(), longest)
     }
 
@@ -607,10 +607,8 @@ impl MeshDoc {
     /// else.
     fn drain_pending(&mut self) {
         loop {
-            let waiting = self
-                .pending
-                .iter()
-                .filter(|(_, entry)| self.deps_satisfied(entry.change.deps()));
+            let entries = self.pending.iter();
+            let waiting = entries.filter(|(_, entry)| self.deps_satisfied(entry.change.deps()));
             let ready: Vec<ChangeHash> = waiting.map(|(hash, _)| *hash).collect();
             if ready.is_empty() {
                 return;
