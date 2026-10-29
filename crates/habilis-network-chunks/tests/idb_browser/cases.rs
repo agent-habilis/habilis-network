@@ -305,7 +305,7 @@ async fn stored_chunks_still_verify_against_their_map() {
 
     let mut rebuilt = Vec::new();
     for index in 0..map.len() {
-        let chunk = store
+        let chunk: Vec<u8> = store
             .get(map.leaf(index).expect("in range"))
             .await
             .expect("get")

@@ -153,7 +153,7 @@ impl DiskOrigin {
         let Ok(meta) = fs::metadata(&borrowed.path) else {
             return false;
         };
-        let mtime = meta
+        let mtime: i64 = meta
             .modified()
             .ok()
             .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())

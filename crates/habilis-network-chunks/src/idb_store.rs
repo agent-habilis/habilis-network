@@ -487,7 +487,7 @@ fn decode_map(bytes: &[u8]) -> Result<ChunkMap, ChunkError> {
     }
     let size = u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
     let count = u32::from_le_bytes(bytes[8..12].try_into().expect("4 bytes")) as usize;
-    let expected = 12usize
+    let expected: usize = 12usize
         .checked_add(
             count
                 .checked_mul(32)

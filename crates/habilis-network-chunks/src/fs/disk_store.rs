@@ -33,7 +33,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ChunkError> {
         .parent()
         .ok_or_else(|| ChunkError::Malformed("a chunk path has a parent".to_owned()))?;
     fs::create_dir_all(parent).map_err(store(|| format!("creating {}", parent.display())))?;
-    let temp = parent.join(format!(
+    let temp: PathBuf = parent.join(format!(
         ".{}.tmp",
         path.file_name()
             .and_then(|name| name.to_str())

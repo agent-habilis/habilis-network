@@ -337,9 +337,6 @@ long_chain|crates/habilis-network/tests/webrtc_full_roster_loopback.rs|3|kept: s
 # turbofish_collect_parse: a collect or parse turbofish (P2). Each row is a count that may only go down.
 
 # untyped_long_chain_let: a let of a chain of five or more calls with no type (P5). Each row is a count that may only go down.
-untyped_long_chain_let|crates/habilis-network-chunks/src/idb_store.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-chunks/tests/idb_browser/cases.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-chunks/tests/origin/cases.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-gossip-transport/src/recursion.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-gossip-transport/src/gossip_ladder.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-gossip-transport/src/receive_loop.rs|4|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
@@ -502,8 +499,6 @@ abbrev_name|crates/habilis-network/src/transport/webrtc/session_policy.rs|9|exis
 abbrev_name|crates/habilis-network/src/transport/webrtc/web_rtc_signal_acceptor.rs|21|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network-chunks/src/fs/disk_store.rs|2|kept: statements with a chain of five or more calls, moved with fs.rs (P15 rollout)
 long_chain|crates/habilis-network-chunks/src/fs/disk_origin.rs|1|kept: statements with a chain of five or more calls, moved with fs.rs (P15 rollout)
-untyped_long_chain_let|crates/habilis-network-chunks/src/fs/disk_origin.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-chunks/src/fs/disk_store.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 long_chain|crates/habilis-network-stream/src/hash/mod.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 abbrev_name|crates/habilis-network/src/lifecycle/observed.rs|5|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lifecycle/presence_event.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
