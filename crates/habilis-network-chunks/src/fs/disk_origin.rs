@@ -14,6 +14,7 @@ use crate::{
     FileId, Root, chunk_hash,
 };
 
+use std::time;
 /// One file this origin serves, where it sits.
 #[derive(Debug, Clone)]
 struct Borrowed {
@@ -169,7 +170,7 @@ impl DiskOrigin {
             return false;
         };
         let modified = meta.modified().ok();
-        let since = modified.and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+        let since = modified.and_then(|time| time.duration_since(time::UNIX_EPOCH).ok());
         let mtime: i64 = since
             .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
             .unwrap_or(0);

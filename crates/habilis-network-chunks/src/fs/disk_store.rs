@@ -9,11 +9,13 @@ use crate::ChunkError;
 
 use crate::{ChunkHash, ChunkMap, ChunkSource, ChunkStore, Coverage, FileId, Root, chunk_hash};
 
+use std::error;
+use std::io::ErrorKind;
 /// Wraps a backend's error as a store failure. The step is built only when the
 /// call fails, so a `format!` in it costs nothing on the success path.
 pub(super) fn store<E, S>(step: impl FnOnce() -> S) -> impl FnOnce(E) -> ChunkError
 where
-    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    E: Into<Box<dyn error::Error + Send + Sync>>,
     S: Into<String>,
 {
     move |source| ChunkError::Store {
@@ -237,7 +239,7 @@ impl ChunkSource for DiskStore {
     async fn get(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>, ChunkError> {
         match fs::read(self.chunk_path(hash)) {
             Ok(bytes) => Ok(Some(bytes)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error).map_err(store(|| "reading a chunk")),
         }
     }
@@ -249,7 +251,7 @@ impl ChunkSource for DiskStore {
     async fn map(&self, root: Root) -> Result<Option<ChunkMap>, ChunkError> {
         match fs::read(self.map_path(root)) {
             Ok(bytes) => Ok(Some(decode_map(&bytes)?)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error).map_err(store(|| "reading a chunk map")),
         }
     }

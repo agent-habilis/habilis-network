@@ -1,6 +1,7 @@
 use crate::chunk_hash::chunk_hash;
 use crate::{CHUNK_BYTES, CHUNK_BYTES_USIZE, ChunkError, ChunkHash, Root};
 
+use std::ops;
 /// Domain separator for a root, so a root can never collide with the hash of a
 /// chunk that happens to hold the same bytes.
 const ROOT_CONTEXT: &[u8] = b"habilis-network-chunks/root/v1";
@@ -132,7 +133,7 @@ impl ChunkMap {
     /// [`CHUNK_BYTES`], and that shortness is part of what it hashes — so a
     /// caller that pads it would compute a different address.
     #[must_use]
-    pub fn range_of(&self, index: usize) -> std::ops::Range<u64> {
+    pub fn range_of(&self, index: usize) -> ops::Range<u64> {
         let start = u64::try_from(index)
             .unwrap_or(u64::MAX)
             .saturating_mul(CHUNK_BYTES)
@@ -143,7 +144,7 @@ impl ChunkMap {
 
     /// Which chunks cover `[offset, offset + len)`.
     #[must_use]
-    pub fn indices_for(&self, offset: u64, len: u64) -> std::ops::Range<usize> {
+    pub fn indices_for(&self, offset: u64, len: u64) -> ops::Range<usize> {
         if len == 0 || offset >= self.size {
             return 0..0;
         }
