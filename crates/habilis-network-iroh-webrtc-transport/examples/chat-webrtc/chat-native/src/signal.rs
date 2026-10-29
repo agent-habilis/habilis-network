@@ -38,6 +38,7 @@ use habilis_network_iroh_webrtc_transport::{
     IceConfig, MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle, answer_with, offer_with,
 };
 
+use tokio::time;
 /// How long one JSEP round may take.
 ///
 /// It covers candidate gathering on both sides plus the DTLS/SCTP handshake. A
@@ -80,7 +81,7 @@ impl ProtocolHandler for SignalAcceptor {
         // state, which is large enough to be worth keeping off a task's stack.
         tokio::spawn(Box::pin(async move {
             let round = Box::pin(answer_one(&connection, local, remote, &handle, &ice));
-            match tokio::time::timeout(JSEP_DEADLINE, round).await {
+            match time::timeout(JSEP_DEADLINE, round).await {
                 Ok(Ok(())) => {
                     tracing::info!(%remote, "attached a WebRTC session");
                 }

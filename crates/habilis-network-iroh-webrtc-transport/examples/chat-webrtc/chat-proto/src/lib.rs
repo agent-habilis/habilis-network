@@ -16,6 +16,8 @@ use anyhow::{Context as _, Result, bail, ensure};
 use habilis_network_iroh_webrtc_transport::iroh_base::{EndpointId, RelayUrl};
 use serde::{Deserialize, Serialize};
 
+use serde::de;
+use std::str;
 /// The chat itself: one long-lived bidirectional stream per peer.
 ///
 /// Wire-load-bearing — both ends must agree on the string, so it moves only
@@ -163,7 +165,7 @@ pub fn decode_frame_len(header: [u8; FRAME_HEADER_LEN]) -> Result<usize> {
 ///
 /// # Errors
 /// The body is not the expected message.
-pub fn decode_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T> {
+pub fn decode_body<T: de::DeserializeOwned>(body: &[u8]) -> Result<T> {
     serde_json::from_slice(body).context("decode frame body")
 }
 
@@ -243,7 +245,7 @@ impl Ticket {
         let relay = if relay_len == 0 {
             None
         } else {
-            let text = std::str::from_utf8(relay_bytes).context("relay URL is not utf8")?;
+            let text = str::from_utf8(relay_bytes).context("relay URL is not utf8")?;
             let relay: RelayUrl = text.parse().context("ticket holds an invalid relay URL")?;
             Some(relay)
         };
@@ -259,10 +261,11 @@ mod tests {
         decode_frame_len, encode_frame,
     };
 
+    use habilis_network_iroh_webrtc_transport::iroh_base;
     /// Generated rather than a hardcoded array: an endpoint id is a point on a
     /// curve, and most 32-byte patterns are not one.
     fn sample_id() -> EndpointId {
-        habilis_network_iroh_webrtc_transport::iroh_base::SecretKey::generate().public()
+        iroh_base::SecretKey::generate().public()
     }
 
     #[test]

@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 
 use crate::room::Membership;
 
+use tokio::io;
 const CHANNEL_CAPACITY: usize = 64;
 
 /// One line of a transcript.
@@ -40,7 +41,7 @@ pub fn render(message: &ServerMsg) -> String {
 pub fn lines() -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
     tokio::spawn(async move {
-        let mut stdin = BufReader::new(tokio::io::stdin()).lines();
+        let mut stdin = BufReader::new(io::stdin()).lines();
         while let Ok(Some(line)) = stdin.next_line().await {
             if tx.send(line).await.is_err() {
                 break;

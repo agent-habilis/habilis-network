@@ -16,6 +16,7 @@ use crate::serve::ChatAcceptor;
 use crate::signal::SignalAcceptor;
 use crate::terminal;
 
+use tokio::time;
 /// How long to wait for a relay before printing a ticket anyway.
 ///
 /// A ticket with no relay in it is still useful — a peer on the same LAN can be
@@ -62,7 +63,7 @@ pub async fn run(nick: &str, relay: Option<RelayUrl>, host_ice: bool) -> Result<
 
     // The ticket needs a relay in it, and `addr()` only carries one once the
     // endpoint has actually reached a relay server.
-    if tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online())
+    if time::timeout(ONLINE_TIMEOUT, endpoint.online())
         .await
         .is_err()
     {
@@ -117,7 +118,7 @@ fn spawn_census(room: Room, handle: WebRtcHandle) {
     tokio::spawn(async move {
         let mut last = None;
         loop {
-            tokio::time::sleep(CENSUS_INTERVAL).await;
+            time::sleep(CENSUS_INTERVAL).await;
             let now = (room.len(), handle.session_count());
             if last != Some(now) {
                 let (members, sessions) = now;

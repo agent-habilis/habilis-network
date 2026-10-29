@@ -11,6 +11,7 @@
 //!
 //! Run `chat-native host`, then follow the two lines it prints.
 
+use std::io;
 mod host;
 mod join;
 mod path;
@@ -90,7 +91,7 @@ async fn main() -> Result<()> {
     // is the interesting setting when a negotiation misbehaves.
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
+        .with_writer(io::stderr)
         .init();
 
     match Cli::parse().command {

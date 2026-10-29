@@ -11,6 +11,7 @@ use habilis_network_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID;
 use habilis_network_iroh_webrtc_transport::iroh::TransportAddr;
 use habilis_network_iroh_webrtc_transport::iroh::endpoint::{Connection, Path};
 
+use tokio::time::{self, Instant};
 /// The label a settled `webrtc` path reports. Compared against rather than
 /// spelled out at each site, since the UI and the tests both key off it.
 pub const WEBRTC: &str = "webrtc";
@@ -30,13 +31,13 @@ const SETTLE_POLL: Duration = Duration::from_millis(100);
 /// Resolves early the moment the answer is `webrtc`, since that is the one
 /// outcome that will not change for the better.
 pub async fn settled_label(connection: &Connection) -> String {
-    let deadline = tokio::time::Instant::now() + SETTLE_TIMEOUT;
+    let deadline = Instant::now() + SETTLE_TIMEOUT;
     loop {
         let label = selected_label(connection);
-        if label == WEBRTC || tokio::time::Instant::now() >= deadline {
+        if label == WEBRTC || Instant::now() >= deadline {
             return label;
         }
-        tokio::time::sleep(SETTLE_POLL).await;
+        time::sleep(SETTLE_POLL).await;
     }
 }
 

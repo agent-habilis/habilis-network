@@ -24,6 +24,7 @@ use tokio::sync::mpsc;
 
 use crate::{ice_config, path, signal, terminal, wire};
 
+use tokio::{sync, time};
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How many unrendered messages to buffer between the reader task and the
@@ -63,7 +64,7 @@ pub async fn run(ticket: &str, nick: &str, webrtc: bool, host_ice: bool) -> Resu
             .bind()
             .await
             .context("bind the signalling endpoint")?;
-        if tokio::time::timeout(ONLINE_TIMEOUT, signalling.online())
+        if time::timeout(ONLINE_TIMEOUT, signalling.online())
             .await
             .is_err()
         {
@@ -113,7 +114,7 @@ pub async fn run(ticket: &str, nick: &str, webrtc: bool, host_ice: bool) -> Resu
             .secret_key(key)
             .relay_mode(relay_mode);
         let endpoint = endpoint_builder.bind().await.context("bind the endpoint")?;
-        if tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online())
+        if time::timeout(ONLINE_TIMEOUT, endpoint.online())
             .await
             .is_err()
         {
@@ -176,7 +177,7 @@ async fn chat(connection: &Connection, nick: &str) -> Result<()> {
     // Behind a mutex only so the closure can hand an owned guard to each
     // future: `participate` awaits every `say` before reading the next line, so
     // there is never real contention.
-    let send = Arc::new(tokio::sync::Mutex::new(send));
+    let send = Arc::new(sync::Mutex::new(send));
     terminal::participate(incoming, move |text| {
         let send = Arc::clone(&send);
         async move {
