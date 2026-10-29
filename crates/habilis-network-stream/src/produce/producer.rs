@@ -127,10 +127,8 @@ impl Drop for Producer {
         // A link can wait in the hand-off when nothing polled `attached()`.
         // Dropped there, its send half finishes, and the consumer would read
         // an empty, cleanly ended stream instead of an abandoned one.
-        let waiting = self
-            .attach
-            .as_mut()
-            .and_then(|attach| attach.try_recv().ok());
+        let slot = self.attach.as_mut();
+        let waiting = slot.and_then(|attach| attach.try_recv().ok());
         if let Some(link) = self.link.as_ref().or(waiting.as_ref()) {
             link.connection.close(code::ABANDONED.into(), b"abandoned");
         }

@@ -106,11 +106,12 @@ impl StreamNode {
             },
         );
         if transports.webrtc {
+            let endpoint_id = endpoint.id();
             let acceptor = WebRtcSignalAcceptor::new(
                 webrtc.clone(),
                 endpoint.clone(),
                 producers.clone(),
-                endpoint.id(),
+                endpoint_id,
                 SignalAdmission::new(MAX_DIRECT_PEERS),
                 ice,
             );

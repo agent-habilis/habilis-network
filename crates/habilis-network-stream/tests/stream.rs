@@ -399,10 +399,12 @@ fn two_streams_on_one_node_stay_apart() {
 
 /// A node on the local relay, with `transport` as given.
 async fn on_relay(url: &str, transport: Vec<Transport>) -> StreamNode {
-    let opts = StreamOpts::default()
+    let base = StreamOpts::default();
+    let relay_urls = vec![url.to_owned()];
+    let opts = base
         .with_lookup(vec![Lookup::Relay])
         .with_transport(transport)
-        .with_relay_urls(vec![url.to_owned()]);
+        .with_relay_urls(relay_urls);
     StreamNode::bind(&opts).await.expect("bind a relay node")
 }
 
