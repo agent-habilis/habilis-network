@@ -12,6 +12,9 @@ use crate::transport::payload_path::{PROBE_DEADLINE, wait_direct};
 use crate::transport::webrtc;
 use crate::util::clock::Instant;
 
+use crate::{gossip, transport};
+use iroh_gossip::api;
+use n0_future::task;
 /// Pure: may a peer be grafted, from what is known right now? A `WebRTC`
 /// pair needs its session attached; an IP pair needs a proven direct path.
 pub(crate) fn may_graft(known_direct: bool, has_session: bool, needs_webrtc: bool) -> bool {
@@ -64,11 +67,11 @@ pub(crate) fn ensure_direct(
     state.direct.insert(peer, DirectState::Pending);
     let pool = state.unicast_pool.clone();
     let tx = state.direct_proven.clone();
-    n0_future::task::spawn(async move {
+    task::spawn(async move {
         let direct = match pool.probe_connection(peer).await {
             Ok(connection) => wait_direct(&connection, PROBE_DEADLINE).await,
             Err(error) => {
-                tracing::debug!(target: crate::transport::LOG_TARGET, %peer, %error, "direct-path probe could not connect");
+                tracing::debug!(target: transport::LOG_TARGET, %peer, %error, "direct-path probe could not connect");
                 false
             }
         };
@@ -99,9 +102,9 @@ pub(crate) async fn on_outcome(
     if direct {
         graft_proven(state, context, peer).await;
     } else if state.demote_unproven(peer) {
-        tracing::info!(target: crate::transport::LOG_TARGET, %peer, "no direct path within the probe deadline; peer stays relay-only");
+        tracing::info!(target: transport::LOG_TARGET, %peer, "no direct path within the probe deadline; peer stays relay-only");
     } else {
-        tracing::debug!(target: crate::transport::LOG_TARGET, %peer, "late probe verdict ignored; the peer is no longer pending");
+        tracing::debug!(target: transport::LOG_TARGET, %peer, "late probe verdict ignored; the peer is no longer pending");
     }
 }
 
@@ -111,9 +114,9 @@ pub(crate) async fn request_graft(
     context: &HandlerCtx<'_>,
     peer: EndpointId,
     paced: bool,
-) -> Result<(), iroh_gossip::api::ApiError> {
+) -> Result<(), api::ApiError> {
     if peer != context.rendezvous_id && state.rides_gossip_rung(peer) {
-        tracing::debug!(target: crate::transport::LOG_TARGET, %peer, "graft skipped: the pair rides the gossip rung");
+        tracing::debug!(target: transport::LOG_TARGET, %peer, "graft skipped: the pair rides the gossip rung");
         return Ok(());
     }
     match graft_request(
@@ -149,11 +152,11 @@ pub(crate) async fn graft_proven(
     if !state.linked_endpoints.contains(&peer) && state.linked_endpoints.len() < context.max_peers {
         state.note_relink(peer, Instant::now());
         if let Err(error) = request_graft(state, context, peer, true).await {
-            tracing::warn!(target: crate::transport::LOG_TARGET, %peer, %error, "graft request failed");
+            tracing::warn!(target: transport::LOG_TARGET, %peer, %error, "graft request failed");
         }
     }
     if state.meshed && !state.pending_outbound.is_empty() {
-        crate::gossip::flush_pending(state, context, "direct path proven").await;
+        gossip::flush_pending(state, context, "direct path proven").await;
     }
 }
 

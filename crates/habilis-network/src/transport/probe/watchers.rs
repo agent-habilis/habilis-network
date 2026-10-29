@@ -21,6 +21,8 @@ use crate::util::clock::Instant;
 #[cfg(feature = "multihop")]
 use crate::transport::underlay_webrtc;
 
+use crate::{gossip, transport};
+use n0_future::{task, time};
 /// Start a path watcher for every raced peer not yet watched: a peer with UDP
 /// on both ends, on a node running `WebRTC`, where this node offers (the lower
 /// id). Only the offerer can race again, and its detach reaches the answerer
@@ -76,9 +78,9 @@ pub(crate) fn ensure_watchers(
         state
             .path_watchers
             .insert(peer, Some(connection.stable_id()));
-        tracing::debug!(target: crate::transport::LOG_TARGET, %peer, "watching the selected path");
+        tracing::debug!(target: transport::LOG_TARGET, %peer, "watching the selected path");
         let tx = state.path_changes.clone();
-        n0_future::task::spawn(async move {
+        task::spawn(async move {
             // iroh punches UDP again only on the client side of a
             // connection; a server-side one would never see UDP return.
             debug_assert!(
@@ -90,7 +92,7 @@ pub(crate) fn ensure_watchers(
             // subscription is reported by the first read, not missed.
             let mut events = connection.path_events();
             let mut last = None;
-            tracing::debug!(target: crate::transport::LOG_TARGET, %peer, paths = ?kinds::path_list(&connection), "watcher started");
+            tracing::debug!(target: transport::LOG_TARGET, %peer, paths = ?kinds::path_list(&connection), "watcher started");
             loop {
                 // A closed connection reads as no path; that is not a loss to
                 // race over, and a replacement gets a watcher of its own.
@@ -101,7 +103,7 @@ pub(crate) fn ensure_watchers(
                 if kind == PathKind::None {
                     // Between two path events the selection can read empty for
                     // a moment; only a loss that lasts is one.
-                    n0_future::time::sleep(NO_PATH_GRACE).await;
+                    time::sleep(NO_PATH_GRACE).await;
                     kind = kinds::selected_kind(&connection);
                 }
                 if last != Some(kind) {
@@ -140,7 +142,7 @@ pub(crate) fn mark_proven(state: &mut EventLoopState, peer: EndpointId) -> bool 
 pub(crate) fn nudge_webrtc_riders(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     for peer in webrtc_riders(state) {
         let endpoint = context.endpoint.clone();
-        n0_future::task::spawn(async move {
+        task::spawn(async move {
             webrtc::nudge_acceptor::nudge(&endpoint, peer).await;
         });
     }
@@ -191,7 +193,7 @@ pub(crate) fn nudge_climbing_pairs(
         pair_to_climb::plan_relay_dials(pairs, &mut state.route_dialed, only_changed, gossip_on)
     {
         tracing::debug!(
-            target: crate::transport::LOG_TARGET,
+            target: transport::LOG_TARGET,
             %peer,
             only_changed,
             session = addrs.session,
@@ -199,7 +201,7 @@ pub(crate) fn nudge_climbing_pairs(
             "dialing a pair on the relay"
         );
         let endpoint = context.endpoint.clone();
-        n0_future::task::spawn(async move {
+        task::spawn(async move {
             webrtc::nudge_acceptor::nudge_with(&endpoint, peer, &addrs).await;
         });
     }
@@ -266,7 +268,7 @@ pub(crate) async fn on_path_change(
         // A replaced connection's watcher.
         _ => return,
     }
-    tracing::debug!(target: crate::transport::LOG_TARGET, %peer, ?kind, "selected path changed");
+    tracing::debug!(target: transport::LOG_TARGET, %peer, ?kind, "selected path changed");
     state.path_kinds.insert(peer, kind);
     forget_route_unless_climbing(&mut state.route_dialed, peer, kind);
     // The pair may have just reached WebRTC, or IP: the underlay opens or drops its
@@ -292,24 +294,24 @@ pub(crate) async fn on_path_change(
         PathAction::Proven | PathAction::Detach => {
             if action == PathAction::Detach {
                 let _ = handle.detach(&peer);
-                tracing::info!(target: crate::transport::LOG_TARGET, %peer, "udp selected again; webrtc session detached");
+                tracing::info!(target: transport::LOG_TARGET, %peer, "udp selected again; webrtc session detached");
             }
             if mark_proven(state, peer) {
-                crate::gossip::flush_pending(state, context, "direct path back").await;
+                gossip::flush_pending(state, context, "direct path back").await;
             }
         }
         PathAction::Rerace => {
             if matches!(kind, PathKind::Multihop | PathKind::Gossip) {
                 // Off the relay, so frames may flow; but the pair has no lane yet.
                 if mark_proven(state, peer) {
-                    crate::gossip::flush_pending(state, context, "path off the relay").await;
+                    gossip::flush_pending(state, context, "path off the relay").await;
                 }
-                tracing::info!(target: crate::transport::LOG_TARGET, %peer, ?kind, "pair is off the relay; racing for a lane");
+                tracing::info!(target: transport::LOG_TARGET, %peer, ?kind, "pair is off the relay; racing for a lane");
             } else {
                 if state.direct.get(&peer) == Some(&DirectState::Direct) {
                     state.direct.insert(peer, DirectState::RelayOnly);
                 }
-                tracing::info!(target: crate::transport::LOG_TARGET, %peer, ?kind, detector = "watcher", "direct path lost; racing again");
+                tracing::info!(target: transport::LOG_TARGET, %peer, ?kind, detector = "watcher", "direct path lost; racing again");
             }
             if let Some(addrs) = ladder.nudge {
                 // One dial carries what iroh may not know yet: the session's
@@ -317,7 +319,7 @@ pub(crate) async fn on_path_change(
                 // multihop route is learned by no lookup while another path is
                 // selected.
                 let endpoint = context.endpoint.clone();
-                n0_future::task::spawn(async move {
+                task::spawn(async move {
                     webrtc::nudge_acceptor::nudge_with(&endpoint, peer, &addrs).await;
                 });
             }
@@ -390,7 +392,7 @@ pub(crate) async fn prove_routed_pairs(state: &mut EventLoopState, context: &Han
     });
     let mut flush = false;
     for peer in proven {
-        tracing::info!(target: crate::transport::LOG_TARGET, %peer, "pair is off the relay on a multihop route; proven");
+        tracing::info!(target: transport::LOG_TARGET, %peer, "pair is off the relay on a multihop route; proven");
         flush |= mark_proven(state, peer);
         // The proof must not remove the trigger of the session: a held frame used to open it, and a
         // pair that is proven is no longer held. A multihop route has no lane of its own, so the
@@ -411,6 +413,6 @@ pub(crate) async fn prove_routed_pairs(state: &mut EventLoopState, context: &Han
         }
     }
     if flush {
-        crate::gossip::flush_pending(state, context, "path off the relay").await;
+        gossip::flush_pending(state, context, "path off the relay").await;
     }
 }

@@ -8,10 +8,15 @@
 
 use std::time::Duration;
 
-use iroh::endpoint::Connection;
+use iroh::endpoint::{Connection, Path};
 
 use super::LOG_TARGET;
 
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use iroh::endpoint;
+use n0_future::time as n0future_time;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use std::sync;
 use std::sync::atomic;
 use std::sync::atomic::Ordering;
 /// How long a hold waits for iroh to select a non-relay path. Hole punching
@@ -39,8 +44,8 @@ pub(crate) fn gossip_recursion_closes() -> u64 {
 }
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-static GOSSIP_CONNS: std::sync::Mutex<Vec<iroh::endpoint::WeakConnectionHandle>> =
-    std::sync::Mutex::new(Vec::new());
+static GOSSIP_CONNS: sync::Mutex<Vec<endpoint::WeakConnectionHandle>> =
+    sync::Mutex::new(Vec::new());
 
 /// Tests only: remember a gossip connection, so that [`close_gossip_links_to`] can close it. The
 /// list is shared by every member of the process. A connection has two ends and a close on one ends
@@ -60,7 +65,7 @@ pub(crate) fn close_gossip_links_to(remote: iroh::EndpointId) -> usize {
     let conns = GOSSIP_CONNS.lock().expect("gossip conns poisoned");
     conns
         .iter()
-        .filter_map(iroh::endpoint::WeakConnectionHandle::upgrade)
+        .filter_map(endpoint::WeakConnectionHandle::upgrade)
         .filter(|connection| {
             connection.remote_id() == remote && connection.close_reason().is_none()
         })
@@ -91,7 +96,7 @@ pub(crate) fn watch_gossip_recursion(
 /// far as the relay is concerned. `false` while no path is selected yet.
 pub(crate) fn selected_is_direct(connection: &Connection) -> bool {
     let paths = connection.paths();
-    let selected = paths.iter().find(iroh::endpoint::Path::is_selected);
+    let selected = paths.iter().find(Path::is_selected);
     selected.is_some_and(|path| !path.is_relay())
 }
 
@@ -99,7 +104,7 @@ pub(crate) fn selected_is_direct(connection: &Connection) -> bool {
 /// against `WebRTC` is won. `false` while no path is selected yet.
 pub(crate) fn selected_is_ip(connection: &Connection) -> bool {
     let paths = connection.paths();
-    let selected = paths.iter().find(iroh::endpoint::Path::is_selected);
+    let selected = paths.iter().find(Path::is_selected);
     selected.is_some_and(|path| path.is_ip())
 }
 
@@ -236,7 +241,7 @@ async fn wait_selected_outcome(
             }
         }
     };
-    n0_future::time::timeout(deadline, proven)
+    n0future_time::timeout(deadline, proven)
         .await
         .unwrap_or(PathWait::TimedOut)
 }
@@ -332,6 +337,7 @@ mod tests {
     use iroh::{Endpoint, RelayMode};
 
     use super::{Connection, PathWait, wait_selected_outcome};
+    use tokio::time;
 
     const ALPN: &[u8] = b"test/path-wait";
 
@@ -379,7 +385,7 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (client, server, dialed, accepted) = connected().await;
             tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                time::sleep(Duration::from_millis(100)).await;
                 dialed.close(0u32.into(), b"gave up");
             });
 

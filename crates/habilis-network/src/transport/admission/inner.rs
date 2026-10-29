@@ -13,6 +13,9 @@ use crate::util::clock::Instant;
 use super::{RefusalBackoff, Sessions, Slot, Victims, sampler};
 use tokio::sync::mpsc;
 
+use crate::transport;
+use iroh_gossip::net;
+use std::fmt;
 /// How long a pair keeps reading as the gossip rung after the recursion rule closed its gossip
 /// connection and no other connection is left to read. The loss of the link, the race for a
 /// session and its attach all fit in it.
@@ -50,8 +53,8 @@ pub(crate) struct Inner {
     pub(crate) closed_on_rung: HashMap<EndpointId, Instant>,
 }
 
-impl std::fmt::Debug for Inner {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Inner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = formatter.debug_struct("Inner");
         debug.field("peers", &self.slots.len());
         debug.field("closed", &self.closed);
@@ -85,8 +88,7 @@ impl Inner {
         for peer in self.ceiling.session_peers() {
             let held: bool = self.slots.get(&peer).is_some_and(|slot| {
                 let mut gossip = slot.conns.iter().filter_map(WeakConnectionHandle::upgrade);
-                let on_gossip =
-                    gossip.any(|connection| connection.alpn() == iroh_gossip::net::GOSSIP_ALPN);
+                let on_gossip = gossip.any(|connection| connection.alpn() == net::GOSSIP_ALPN);
                 slot.round.is_some() || on_gossip
             });
             if held || !hub.has_session(&peer) {
@@ -126,7 +128,7 @@ impl Inner {
                     .filter_map(WeakConnectionHandle::upgrade)
                     .filter(|connection| {
                         connection.close_reason().is_none()
-                            && connection.alpn() == crate::transport::UNICAST_ALPN
+                            && connection.alpn() == transport::UNICAST_ALPN
                     }),
             );
         }
@@ -142,7 +144,7 @@ impl Inner {
                 .filter_map(WeakConnectionHandle::upgrade)
                 .any(|connection| {
                     connection.close_reason().is_none()
-                        && connection.alpn() == crate::transport::UNICAST_ALPN
+                        && connection.alpn() == transport::UNICAST_ALPN
                 })
         });
         if !alive {

@@ -1,6 +1,7 @@
 //! The error of an IPC call that finds no running daemon.
 
 use crate::protocol::Nickname;
+use std::{error, fmt};
 /// Nothing is listening on `nickname`'s control socket. Typed rather than a
 /// finished sentence: the remedy is "start one with …", which names a command,
 /// and only the consumer knows what its commands are called. It appends that
@@ -24,8 +25,8 @@ pub struct NoDaemon {
     pub nickname: Nickname,
 }
 
-impl std::fmt::Display for NoDaemon {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for NoDaemon {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
             "No active gossip server running for nickname '{}'.",
@@ -34,4 +35,4 @@ impl std::fmt::Display for NoDaemon {
     }
 }
 
-impl std::error::Error for NoDaemon {}
+impl error::Error for NoDaemon {}

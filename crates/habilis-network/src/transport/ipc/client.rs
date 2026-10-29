@@ -14,6 +14,8 @@ use tokio::io::{AsyncWriteExt, BufReader};
 
 use crate::util::line_read::{self, LineRead};
 
+use std::{fs, path};
+use tokio::io;
 /// Client-side: send an IPC command to the running server and return the raw JSON response.
 ///
 /// # Panics
@@ -38,7 +40,7 @@ use crate::util::line_read::{self, LineRead};
 /// # }
 /// ```
 pub async fn send<Cmd>(
-    base: &std::path::Path,
+    base: &path::Path,
     command: &Cmd,
     nickname: &Nickname,
 ) -> Result<String, IpcError>
@@ -85,7 +87,7 @@ where
 /// # }
 /// ```
 pub async fn send_to_path<Cmd: Serialize>(
-    path: &std::path::Path,
+    path: &path::Path,
     command: &Cmd,
 ) -> Result<String, IpcError> {
     use anyhow::Context;
@@ -107,7 +109,7 @@ pub async fn send_to_path<Cmd: Serialize>(
 /// Write `cmd`, half-close, and read back the single-line JSON response.
 /// The shared body of [`send`] and [`send_to_path`].
 async fn round_trip<Cmd: Serialize>(stream: Stream, command: &Cmd) -> Result<String> {
-    let (read_half, mut write_half) = tokio::io::split(stream);
+    let (read_half, mut write_half) = io::split(stream);
 
     let json = serde_json::to_string(command)?;
     write_half.write_all(format!("{json}\n").as_bytes()).await?;
@@ -138,12 +140,11 @@ async fn round_trip<Cmd: Serialize>(stream: Stream, command: &Cmd) -> Result<Str
 ///
 /// assert_eq!(active_socket_paths(Path::new("/nonexistent")).count(), 0);
 /// ```
-pub fn active_socket_paths(base: &std::path::Path) -> impl Iterator<Item = std::path::PathBuf> {
-    let entries = std::fs::read_dir(base).into_iter().flatten().flatten();
+pub fn active_socket_paths(base: &path::Path) -> impl Iterator<Item = path::PathBuf> {
+    let entries = fs::read_dir(base).into_iter().flatten().flatten();
     let dir_paths = entries.map(|entry| entry.path());
     let dirs = dir_paths.filter(|path| path.is_dir());
-    let read_mesh =
-        |dir: std::path::PathBuf| std::fs::read_dir(dir).into_iter().flatten().flatten();
+    let read_mesh = |dir: path::PathBuf| fs::read_dir(dir).into_iter().flatten().flatten();
     let files = dirs.flat_map(read_mesh);
     let paths = files.map(|entry| entry.path());
     paths.filter(|path| path.extension().is_some_and(|ext| ext == "sock"))

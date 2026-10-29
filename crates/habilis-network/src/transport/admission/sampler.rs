@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use super::Inner;
 
+use n0_future::{task, time};
 /// Pure: what the table tells the gossip transport about a peer whose live connections read as
 /// `kinds`: whether it is established (any live connection, on any protocol) and whether frames
 /// may go to it (no higher rung carries the pair: see
@@ -21,9 +22,9 @@ pub(crate) fn gossip_view(kinds: &[probe::PathKind]) -> (bool, bool) {
 
 /// One timer for the whole table, ending with it.
 pub(crate) fn spawn_sampler(table: Weak<Mutex<Inner>>, period: Duration) {
-    n0_future::task::spawn(async move {
+    task::spawn(async move {
         loop {
-            n0_future::time::sleep(period).await;
+            time::sleep(period).await;
             let Some(table) = table.upgrade() else {
                 return;
             };

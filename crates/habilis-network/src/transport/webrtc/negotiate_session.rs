@@ -13,6 +13,7 @@ use crate::daemon::state::DirectState;
 use crate::transport::probe;
 use crate::util::clock;
 
+use n0_future::task;
 pub(crate) fn negotiate_session(
     state: &mut state::EventLoopState,
     context: &HandlerCtx<'_>,
@@ -78,7 +79,7 @@ pub(crate) fn negotiate_session(
     let has_session = handle.has_session(&peer);
     if reads_as_relay && has_session {
         let endpoint = context.endpoint.clone();
-        n0_future::task::spawn(async move { nudge_acceptor::nudge_session(&endpoint, peer).await });
+        task::spawn(async move { nudge_acceptor::nudge_session(&endpoint, peer).await });
     }
     let demoted = reads_as_relay && !has_session;
     if demoted {

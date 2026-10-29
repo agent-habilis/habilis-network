@@ -3,7 +3,7 @@ use crate::transport::{ceiling, probe, webrtc};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use iroh::EndpointId;
@@ -20,6 +20,10 @@ use super::{
 };
 use tokio::sync::mpsc;
 
+use crate::transport;
+use iroh::endpoint::ConnectionError;
+use n0_future::task;
+use tokio::sync::{Notify, Notify as tokio_Notify};
 /// The one place a direct-peer slot is granted, for both roles.
 ///
 /// # Examples
@@ -44,7 +48,7 @@ pub struct SignalAdmission {
     pub(crate) watch_dialed_gossip: Arc<AtomicBool>,
     /// Woken when a round ends, offered or answered, so that the event loop can offer the
     /// sessions that the budget kept back (see [`Self::slot_freed`]).
-    pub(crate) freed: Arc<tokio::sync::Notify>,
+    pub(crate) freed: Arc<tokio_Notify>,
 }
 
 impl SignalAdmission {
@@ -92,7 +96,7 @@ impl SignalAdmission {
             // the flag is shared by the table and the gossip watch
             watch_dialed_gossip: Arc::new(AtomicBool::new(false)),
             // the slot-freed signal is shared with the pool that waits on it
-            freed: Arc::new(tokio::sync::Notify::new()),
+            freed: Arc::new(tokio_Notify::new()),
         }
     }
 
@@ -349,7 +353,7 @@ impl SignalAdmission {
         slot.epoch += 1;
         slot.outgoing = false;
         drop(inner);
-        tracing::debug!(target: crate::transport::LOG_TARGET, peer = %peer.fmt_short(), "cancelled the signalling round of a peer whose holder changed");
+        tracing::debug!(target: transport::LOG_TARGET, peer = %peer.fmt_short(), "cancelled the signalling round of a peer whose holder changed");
         self.freed.notify_one();
         true
     }
@@ -444,7 +448,7 @@ impl SignalAdmission {
     /// enough. The end of a round that failed counts as much as one that attached, and no
     /// `DirectOutcome` is sent for it, because a verdict of `direct: false` would mark a lane peer
     /// relay-only.
-    pub(crate) fn slot_freed(&self) -> Arc<tokio::sync::Notify> {
+    pub(crate) fn slot_freed(&self) -> Arc<Notify> {
         Arc::clone(&self.freed)
     }
 
@@ -478,7 +482,7 @@ impl SignalAdmission {
         }
         inner.slot(peer).conns.push(handle);
         inner.sync_gossip();
-        let evictions = if connection.alpn() == crate::transport::UNICAST_ALPN {
+        let evictions = if connection.alpn() == transport::UNICAST_ALPN {
             inner.ceiling.register_quic(peer, Instant::now())
         } else {
             ceiling::Admission::default()
@@ -489,7 +493,7 @@ impl SignalAdmission {
             sampler::spawn_sampler(Arc::downgrade(&self.inner), tuning::SLOT_SWEEP);
         }
         drop(inner);
-        if connection.alpn() == crate::transport::UNICAST_ALPN {
+        if connection.alpn() == transport::UNICAST_ALPN {
             self.watch_for_eviction(connection.clone());
         }
         victims.end();
@@ -500,12 +504,12 @@ impl SignalAdmission {
     /// `EVICTED` code, note that too, so that no proactive dial goes back to that peer for a while.
     pub(crate) fn watch_for_eviction(&self, connection: Connection) {
         let admission = self.clone();
-        n0_future::task::spawn(async move {
+        task::spawn(async move {
             let reason = connection.closed().await;
             let peer = connection.remote_id();
             let mut inner = admission.lock();
             inner.drop_quic_without_connection(peer);
-            if let iroh::endpoint::ConnectionError::ApplicationClosed(close) = reason
+            if let ConnectionError::ApplicationClosed(close) = reason
                 && close.error_code.into_inner() == u64::from(webrtc::close_code::EVICTED)
             {
                 let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
@@ -636,7 +640,7 @@ impl SignalAdmission {
         self.lock().ceiling.over_ceiling()
     }
 
-    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().expect("signal admission poisoned")
     }
 }

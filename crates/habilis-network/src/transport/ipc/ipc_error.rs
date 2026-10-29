@@ -2,6 +2,7 @@
 
 use super::no_daemon::NoDaemon;
 
+use std::{error, fmt};
 /// Why a command could not reach its daemon.
 ///
 /// [`IpcError::NoDaemon`] is the one a caller acts on (no live daemon to ask).
@@ -26,7 +27,7 @@ pub enum IpcError {
     /// No daemon is listening on the socket.
     NoDaemon(NoDaemon),
     /// A cause no caller acts on. It keeps its text and its chain.
-    Internal(Box<dyn std::error::Error + Send + Sync>),
+    Internal(Box<dyn error::Error + Send + Sync>),
 }
 
 impl IpcError {
@@ -36,17 +37,17 @@ impl IpcError {
     }
 }
 
-impl std::fmt::Display for IpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for IpcError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoDaemon(error) => std::fmt::Display::fmt(error, f),
-            Self::Internal(error) => std::fmt::Display::fmt(error.as_ref(), f),
+            Self::NoDaemon(error) => fmt::Display::fmt(error, f),
+            Self::Internal(error) => fmt::Display::fmt(error.as_ref(), f),
         }
     }
 }
 
-impl std::error::Error for IpcError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl error::Error for IpcError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Internal(error) => error.source(),
             Self::NoDaemon(_) => None,

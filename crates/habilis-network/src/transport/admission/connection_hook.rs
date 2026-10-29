@@ -7,6 +7,7 @@ use iroh::endpoint::{AfterHandshakeOutcome, Connection, EndpointHooks};
 
 use super::SignalAdmission;
 
+use iroh_gossip::net;
 /// Reports every connection of the endpoint it is installed on, in or out and
 /// on any protocol, to its [`SignalAdmission`], which keeps them under their
 /// peer so that it can close and prune them. It also watches the gossip
@@ -22,7 +23,7 @@ impl EndpointHooks for ConnectionHook {
         // A gossip connection on the gossip rung would carry the gossip that its frames need:
         // both ends close it, whatever the mesh policy says, and before the relay watch, which is
         // policy-gated.
-        if connection.alpn() == iroh_gossip::net::GOSSIP_ALPN {
+        if connection.alpn() == net::GOSSIP_ALPN {
             payload_path::watch_gossip_recursion(connection, self.admission.clone());
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             payload_path::track_gossip_conn(connection);
@@ -32,7 +33,7 @@ impl EndpointHooks for ConnectionHook {
         // watch for those starts here, with the same rule.
         if connection.side().is_client()
             && self.admission.watch_dialed_gossip.load(Ordering::Relaxed)
-            && connection.alpn() == iroh_gossip::net::GOSSIP_ALPN
+            && connection.alpn() == net::GOSSIP_ALPN
         {
             direct_only_gossip::watch_relay_policy(connection, self.admission.path_sink());
         }

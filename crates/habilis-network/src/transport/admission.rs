@@ -104,10 +104,20 @@ mod tests {
     #[cfg(feature = "iroh-test-utils")]
     use crate::lookup::test_relay;
     use crate::transport::payload_path;
+    use habilis_network_iroh_gossip_transport::hub::Hub as habilisnetworkirohgossiptransport_Hub;
+    #[cfg(feature = "iroh-test-utils")]
     use iroh::endpoint::presets;
+    use iroh::{endpoint, protocol};
+    use iroh_gossip::net;
+    use n0_future::task as n0future_task;
+    #[cfg(feature = "iroh-test-utils")]
+    use std::any;
+    use std::future;
     #[cfg(feature = "iroh-test-utils")]
     use tokio::sync::mpsc;
     use tokio::sync::oneshot;
+    use tokio::time::Instant as tokio_Instant;
+    use tokio::{task, time};
     fn peer(byte: u8) -> EndpointId {
         iroh::SecretKey::from_bytes(&[byte; 32]).public()
     }
@@ -207,7 +217,7 @@ mod tests {
                 .try_admit_offer(peer(1), &hub())
                 .expect("a free slot");
             assert!(
-                tokio::time::timeout(Duration::from_millis(100), freed.notified())
+                time::timeout(Duration::from_millis(100), freed.notified())
                     .await
                     .is_err(),
                 "a round in flight wakes nobody"
@@ -215,7 +225,7 @@ mod tests {
 
             drop(guard);
             assert!(
-                tokio::time::timeout(Duration::from_secs(1), freed.notified())
+                time::timeout(Duration::from_secs(1), freed.notified())
                     .await
                     .is_ok(),
                 "the end of the round wakes the waiter"
@@ -239,9 +249,9 @@ mod tests {
             let hub = hub();
             let guard = admission.try_admit(peer(1), &hub).expect("a free slot");
             let epoch = guard.epoch();
-            let task = n0_future::task::spawn(async move {
+            let task = n0future_task::spawn(async move {
                 let _guard = guard;
-                std::future::pending::<()>().await;
+                future::pending::<()>().await;
             });
             admission.track(peer(1), epoch, task.abort_handle());
             admission.note_refused(peer(1));
@@ -435,10 +445,10 @@ mod tests {
             let guard = admission.try_admit(peer(1), &hub).expect("admit");
             let epoch = guard.epoch();
 
-            let task = n0_future::task::spawn(async move {
+            let task = n0future_task::spawn(async move {
                 let _guard = guard;
                 // Never returns on its own — only an abort ends this.
-                std::future::pending::<()>().await;
+                future::pending::<()>().await;
             });
             admission.track(peer(1), epoch, task.abort_handle());
             assert_eq!(
@@ -449,8 +459,8 @@ mod tests {
 
             admission.close();
             // Let the aborted task's drop glue run.
-            tokio::task::yield_now().await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            task::yield_now().await;
+            time::sleep(Duration::from_millis(50)).await;
 
             assert_eq!(
                 admission.in_flight(),
@@ -859,7 +869,7 @@ mod tests {
                 let bind = |hook: Option<ConnectionHook>| {
                     let relay_url = relay_url.clone();
                     async move {
-                        let mut builder: iroh::endpoint::Builder =
+                        let mut builder: endpoint::Builder =
                             iroh::Endpoint::builder(presets::Minimal)
                                 .relay_mode(iroh::RelayMode::custom([relay_url]))
                                 .clear_ip_transports();
@@ -873,7 +883,7 @@ mod tests {
                 let hub = FakeHub::default();
                 let server = bind(None).await;
                 let router = Router::builder(server.clone())
-                    .accept(iroh_gossip::net::GOSSIP_ALPN, Hold)
+                    .accept(net::GOSSIP_ALPN, Hold)
                     .spawn();
                 let client = bind(Some(admission.connection_hook())).await;
                 let neighbor = server.id();
@@ -882,7 +892,7 @@ mod tests {
                 admission.note_success(neighbor);
                 let relayed = iroh::EndpointAddr::new(neighbor).with_relay_url(relay_url.clone());
                 let connection = client
-                    .connect(relayed, iroh_gossip::net::GOSSIP_ALPN)
+                    .connect(relayed, net::GOSSIP_ALPN)
                     .await
                     .expect("dial over the relay");
                 let window = tuning::DIRECT_IDLE_BACKSTOP;
@@ -953,18 +963,17 @@ mod tests {
                 admission.watch_dialed_gossip(true);
                 let server = bind(None).await;
                 let router = Router::builder(server.clone())
-                    .accept(iroh_gossip::net::GOSSIP_ALPN, Hold)
+                    .accept(net::GOSSIP_ALPN, Hold)
                     .spawn();
                 let client = bind(Some(admission.connection_hook())).await;
                 let relayed =
                     iroh::EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
                 let connection = client
-                    .connect(relayed, iroh_gossip::net::GOSSIP_ALPN)
+                    .connect(relayed, net::GOSSIP_ALPN)
                     .await
                     .expect("dial over the relay");
 
-                let closed =
-                    tokio::time::timeout(Duration::from_secs(25), connection.closed()).await;
+                let closed = time::timeout(Duration::from_secs(25), connection.closed()).await;
 
                 assert!(
                     closed.is_ok(),
@@ -983,10 +992,10 @@ mod tests {
         admission: SignalAdmission,
         node: iroh::Endpoint,
         relay_url: iroh::RelayUrl,
-        _relay_server: Box<dyn std::any::Any + Send>,
-        reports: mpsc::UnboundedSender<(EndpointId, iroh::endpoint::ConnectionError)>,
-        closed: mpsc::UnboundedReceiver<(EndpointId, iroh::endpoint::ConnectionError)>,
-        servers: Vec<(iroh::Endpoint, iroh::protocol::Router)>,
+        _relay_server: Box<dyn any::Any + Send>,
+        reports: mpsc::UnboundedSender<(EndpointId, endpoint::ConnectionError)>,
+        closed: mpsc::UnboundedReceiver<(EndpointId, endpoint::ConnectionError)>,
+        servers: Vec<(iroh::Endpoint, protocol::Router)>,
     }
 
     #[cfg(feature = "iroh-test-utils")]
@@ -1030,7 +1039,7 @@ mod tests {
             #[derive(Debug, Clone)]
             struct Report(
                 EndpointId,
-                mpsc::UnboundedSender<(EndpointId, iroh::endpoint::ConnectionError)>,
+                mpsc::UnboundedSender<(EndpointId, endpoint::ConnectionError)>,
             );
             impl ProtocolHandler for Report {
                 async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
@@ -1059,8 +1068,8 @@ mod tests {
         async fn next_closed(
             &mut self,
             within: Duration,
-        ) -> Option<(EndpointId, iroh::endpoint::ConnectionError)> {
-            tokio::time::timeout(within, self.closed.recv())
+        ) -> Option<(EndpointId, endpoint::ConnectionError)> {
+            time::timeout(within, self.closed.recv())
                 .await
                 .ok()
                 .flatten()
@@ -1137,7 +1146,7 @@ mod tests {
                     .await
                     .expect("a connection must be evicted");
                 assert_eq!(peer, first, "the least recently used goes");
-                let iroh::endpoint::ConnectionError::ApplicationClosed(close) = &reason else {
+                let endpoint::ConnectionError::ApplicationClosed(close) = &reason else {
                     panic!("expected the EVICTED code, got {reason:?}");
                 };
                 assert_eq!(
@@ -1187,7 +1196,7 @@ mod tests {
                     if backed_off {
                         break;
                     }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    time::sleep(Duration::from_millis(50)).await;
                 }
                 assert!(backed_off, "the evicted peer holds its proactive dials");
                 assert!(
@@ -1227,7 +1236,7 @@ mod tests {
                     if fixture.admission.direct_units() == 3 {
                         break;
                     }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    time::sleep(Duration::from_millis(50)).await;
                 }
                 assert_eq!(
                     fixture.admission.direct_units(),
@@ -1241,7 +1250,7 @@ mod tests {
                 while let Some((peer, reason)) =
                     fixture.next_closed(Duration::from_millis(700)).await
                 {
-                    if let iroh::endpoint::ConnectionError::ApplicationClosed(close) = &reason
+                    if let endpoint::ConnectionError::ApplicationClosed(close) = &reason
                         && close.error_code.into_inner()
                             == u64::from(super::super::webrtc::close_code::EVICTED)
                     {
@@ -1334,6 +1343,7 @@ mod tests {
     /// is off, which is its default.
     #[test]
     fn a_gossip_connection_on_the_gossip_path_is_closed_by_the_hook() {
+        use iroh::endpoint::presets;
         ::habilis_network_test_tracing::run_multi_thread(
             ::habilis_network_test_tracing::init(),
             2,
@@ -1389,7 +1399,7 @@ mod tests {
                 let (tx, rx) = oneshot::channel();
                 let router = Router::builder(bob.clone())
                     .accept(
-                        iroh_gossip::net::GOSSIP_ALPN,
+                        net::GOSSIP_ALPN,
                         // the report is shared with the hook, which sends through it
                         Report(Arc::new(Mutex::new(Some(tx)))),
                     )
@@ -1401,14 +1411,14 @@ mod tests {
                     [TransportAddr::Custom(gossip_addr(bob.id()))],
                 );
                 let connection = alice
-                    .connect(target, iroh_gossip::net::GOSSIP_ALPN)
+                    .connect(target, net::GOSSIP_ALPN)
                     .await
                     .expect("connect over the gossip path");
 
-                let at_alice = tokio::time::timeout(Duration::from_secs(5), connection.closed())
+                let at_alice = time::timeout(Duration::from_secs(5), connection.closed())
                     .await
                     .expect("the dialed end was not closed");
-                let at_bob = tokio::time::timeout(Duration::from_secs(5), rx)
+                let at_bob = time::timeout(Duration::from_secs(5), rx)
                     .await
                     .expect("the accepted end was not closed")
                     .expect("the probe reported");
@@ -1488,7 +1498,7 @@ mod tests {
     /// reported to its own table, which keeps the gossip handle.
     async fn ip_and_gossip_node(
         seed: u8,
-        hub: &habilis_network_iroh_gossip_transport::hub::Hub,
+        hub: &habilisnetworkirohgossiptransport_Hub,
         with_ip: bool,
     ) -> (
         iroh::Endpoint,
@@ -1496,6 +1506,7 @@ mod tests {
         habilis_network_iroh_gossip_transport::GossipHandle,
     ) {
         use habilis_network_iroh_gossip_transport::GossipHandle;
+        use iroh::endpoint::presets;
         use iroh::{RelayMode, SecretKey};
 
         let key = SecretKey::from_bytes(&[seed; 32]);
@@ -1509,7 +1520,7 @@ mod tests {
         let base = iroh::Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled);
-        let mut builder: iroh::endpoint::Builder = base
+        let mut builder: endpoint::Builder = base
             .add_custom_transport(transport)
             .path_selector(selector)
             .hooks(hook);
@@ -1527,8 +1538,8 @@ mod tests {
     #[derive(Debug, Clone)]
     struct HoldConnections;
 
-    impl iroh::protocol::ProtocolHandler for HoldConnections {
-        async fn accept(&self, connection: Connection) -> Result<(), iroh::protocol::AcceptError> {
+    impl protocol::ProtocolHandler for HoldConnections {
+        async fn accept(&self, connection: Connection) -> Result<(), protocol::AcceptError> {
             connection.closed().await;
             Ok(())
         }
@@ -1551,7 +1562,7 @@ mod tests {
                 let hub = Hub::new();
                 let (alice, alice_table, alice_handle) = ip_and_gossip_node(41, &hub, true).await;
                 let (bob, bob_table, bob_handle) = ip_and_gossip_node(42, &hub, true).await;
-                let router = iroh::protocol::Router::builder(bob.clone())
+                let router = protocol::Router::builder(bob.clone())
                     .accept(GOSSIP_TEST_ALPN, HoldConnections)
                     .spawn();
                 let custom = TransportAddr::Custom(
@@ -1563,7 +1574,7 @@ mod tests {
                     .await
                     .expect("connect");
 
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                let deadline = tokio_Instant::now() + Duration::from_secs(10);
                 loop {
                     alice_table.sync_gossip();
                     bob_table.sync_gossip();
@@ -1571,15 +1582,15 @@ mod tests {
                         break;
                     }
                     assert!(
-                        tokio::time::Instant::now() < deadline,
+                        tokio_Instant::now() < deadline,
                         "a pair on IP is blocked at both ends"
                     );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    time::sleep(Duration::from_millis(100)).await;
                 }
                 assert!(alice_handle.is_established(bob.id()), "the dialer");
                 assert!(bob_handle.is_established(alice.id()), "the acceptor");
                 let sent = alice_handle.stats().frames_out + bob_handle.stats().frames_out;
-                tokio::time::sleep(Duration::from_secs(4)).await;
+                time::sleep(Duration::from_secs(4)).await;
                 assert_eq!(
                     alice_handle.stats().frames_out + bob_handle.stats().frames_out,
                     sent,
@@ -1606,7 +1617,7 @@ mod tests {
                 let hub = Hub::new();
                 let (alice, alice_table, alice_handle) = ip_and_gossip_node(43, &hub, false).await;
                 let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(44, &hub, false).await;
-                let router = iroh::protocol::Router::builder(bob.clone())
+                let router = protocol::Router::builder(bob.clone())
                     .accept(GOSSIP_TEST_ALPN, HoldConnections)
                     .spawn();
                 let target = EndpointAddr::from_parts(
@@ -1658,7 +1669,7 @@ mod tests {
                 let sessions = FakeHub::default();
                 // the table keeps the hub as a shared trait object
                 alice_table.lock().hub = Some(Arc::new(sessions.clone()));
-                let router = iroh::protocol::Router::builder(bob.clone())
+                let router = protocol::Router::builder(bob.clone())
                     .accept(GOSSIP_TEST_ALPN, HoldConnections)
                     .spawn();
                 let target = EndpointAddr::from_parts(
@@ -1706,7 +1717,7 @@ mod tests {
                 let sessions = FakeHub::default();
                 // the table keeps the hub as a shared trait object
                 alice_table.lock().hub = Some(Arc::new(sessions.clone()));
-                let router = iroh::protocol::Router::builder(bob.clone())
+                let router = protocol::Router::builder(bob.clone())
                     .accept(GOSSIP_TEST_ALPN, HoldConnections)
                     .spawn();
                 let target = EndpointAddr::from_parts(

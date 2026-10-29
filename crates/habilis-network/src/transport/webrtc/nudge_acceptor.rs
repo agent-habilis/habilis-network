@@ -12,6 +12,7 @@ use crate::transport::LOG_TARGET;
 
 use crate::transport::probe;
 
+use n0_future::time;
 /// Closes every nudge at once. See [`NUDGE_ALPN`]. An endpoint that runs the `WebRTC` signal
 /// acceptor must serve this too: its answerer dials the nudge when a session attaches.
 ///
@@ -76,7 +77,7 @@ pub(crate) async fn nudge_with(endpoint: &Endpoint, peer: EndpointId, addrs: &pr
 pub(crate) async fn nudge_addr(endpoint: &Endpoint, address: EndpointAddr) {
     let peer = address.id;
     if let Ok(Ok(connection)) =
-        n0_future::time::timeout(pool::DIAL_TIMEOUT, endpoint.connect(address, NUDGE_ALPN)).await
+        time::timeout(pool::DIAL_TIMEOUT, endpoint.connect(address, NUDGE_ALPN)).await
     {
         connection.close(0u32.into(), b"nudge");
     }

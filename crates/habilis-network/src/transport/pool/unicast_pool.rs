@@ -30,14 +30,19 @@ use crate::util::tuning::{DIRECT_IDLE_BACKSTOP, PROBE_HOLD};
 
 use crate::protocol::message;
 
+use n0_future::{task, time};
+use std::sync::{Mutex as std_Mutex, OnceLock, OnceLock as std_OnceLock};
+use std::{fmt, result};
+#[cfg(test)]
+use tokio::sync::Notify;
 #[derive(Clone)]
 pub(crate) struct UnicastPool {
     // the pool and its clones share the inner state
     pub(in crate::transport::pool) inner: Arc<PoolInner>,
 }
 
-impl std::fmt::Debug for UnicastPool {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for UnicastPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UnicastPool").finish_non_exhaustive()
     }
 }
@@ -97,24 +102,24 @@ pub(in crate::transport::pool) struct PoolInner {
     /// behind it.
     #[cfg(test)]
     // the gate is shared by the dial and the test that holds it
-    pub(in crate::transport::pool) dial_gate: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
+    pub(in crate::transport::pool) dial_gate: std_Mutex<Option<Arc<Notify>>>,
     /// Each peer's full address, from its `PeerInfo`. Dialed instead of the
     /// bare id so the relay is in the address book before the handshake:
     /// iroh opens a connection's relay path only then, and with it a UDP loss
     /// has a backup path to fall to rather than none.
-    pub(in crate::transport::pool) addrs: std::sync::Mutex<HashMap<EndpointId, EndpointAddr>>,
+    pub(in crate::transport::pool) addrs: std_Mutex<HashMap<EndpointId, EndpointAddr>>,
     /// `TransportPolicy::relay`. Off, a send on a connection whose selected
     /// path is the relay is refused; the connection stays pooled, since iroh
     /// may still punch a direct path on it.
     pub(in crate::transport::pool) relay_transport: bool,
     /// The table whose ceiling the connections of this pool count against. Set once the
     /// table exists, which is after the pool.
-    pub(in crate::transport::pool) admission: std::sync::OnceLock<SignalAdmission>,
+    pub(in crate::transport::pool) admission: std_OnceLock<SignalAdmission>,
 }
 
 /// What the dialer of a peer publishes to the callers that wait on its dial: nothing while the dial
 /// runs, then `Ok` or the text of its error.
-pub(super) type DialOutcome = Option<std::result::Result<(), String>>;
+pub(super) type DialOutcome = Option<result::Result<(), String>>;
 
 impl UnicastPool {
     /// A pool wired to `endpoint`, able to dial and carry unicast traffic.
@@ -147,11 +152,11 @@ impl UnicastPool {
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
-                addrs: std::sync::Mutex::new(HashMap::new()),
+                addrs: std_Mutex::new(HashMap::new()),
                 #[cfg(test)]
-                dial_gate: std::sync::Mutex::new(None),
+                dial_gate: std_Mutex::new(None),
                 relay_transport,
-                admission: std::sync::OnceLock::new(),
+                admission: std_OnceLock::new(),
             }),
         }
     }
@@ -189,11 +194,11 @@ impl UnicastPool {
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
-                addrs: std::sync::Mutex::new(HashMap::new()),
+                addrs: std_Mutex::new(HashMap::new()),
                 #[cfg(test)]
-                dial_gate: std::sync::Mutex::new(None),
+                dial_gate: std_Mutex::new(None),
                 relay_transport: false,
-                admission: std::sync::OnceLock::new(),
+                admission: OnceLock::new(),
             }),
         }
     }
@@ -217,7 +222,7 @@ impl UnicastPool {
             return WarmSend::Refused;
         }
         let pool = self.clone();
-        n0_future::task::spawn(async move {
+        task::spawn(async move {
             let Err(error) = pool.send_marked(eid, &connection, &bytes).await else {
                 return;
             };
@@ -308,9 +313,9 @@ impl UnicastPool {
         }
         let pool = Arc::downgrade(&self.inner);
         let period = (self.inner.idle.min(self.inner.probe_hold) / 4).max(Duration::from_millis(1));
-        n0_future::task::spawn(async move {
+        task::spawn(async move {
             loop {
-                n0_future::time::sleep(period).await;
+                time::sleep(period).await;
                 let Some(inner) = pool.upgrade() else {
                     return;
                 };
@@ -352,7 +357,7 @@ impl UnicastPool {
         }
         let registration = self.register_dial(eid);
         let pool = self.clone();
-        n0_future::task::spawn(async move {
+        task::spawn(async move {
             if let Err(error) = pool.send_registered(registration, eid, bytes).await {
                 tracing::debug!(target: LOG_TARGET, %eid, %error, "background send not delivered");
             }
@@ -363,9 +368,9 @@ impl UnicastPool {
     /// Tests only: hold the next dial until the returned [`Notify`](tokio::sync::Notify) is notified.
     #[cfg(test)]
     // the gate is shared by the dial and the test that holds it
-    pub(crate) fn hold_next_dial(&self) -> Arc<tokio::sync::Notify> {
+    pub(crate) fn hold_next_dial(&self) -> Arc<Notify> {
         // the gate is shared by the dial and the test that holds it
-        let gate = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::new(Notify::new());
         if let Ok(mut slot) = self.inner.dial_gate.lock() {
             *slot = Some(Arc::clone(&gate));
         }
@@ -422,7 +427,7 @@ impl UnicastPool {
                 return false;
             }
             let pool = self.clone();
-            n0_future::task::spawn(async move {
+            task::spawn(async move {
                 pool.send_batch(eid, &connection, &frames).await;
             });
             return true;
@@ -439,7 +444,7 @@ impl UnicastPool {
         let Registration::Dialer(in_flight) = self.register_dial(eid) else {
             return false;
         };
-        n0_future::task::spawn(async move {
+        task::spawn(async move {
             let pool = &in_flight.pool;
             let connection = match pool.warm_or_dial(eid).await {
                 Ok(connection) => connection,
@@ -717,9 +722,7 @@ impl UnicastPool {
 
 /// Wait for the dialer of a peer to publish how its dial ended. The current value is read first, so
 /// that a receiver made after the publish still sees it.
-async fn wait_for_dial(
-    mut outcome: watch::Receiver<DialOutcome>,
-) -> std::result::Result<(), String> {
+async fn wait_for_dial(mut outcome: watch::Receiver<DialOutcome>) -> result::Result<(), String> {
     loop {
         if let Some(done) = outcome.borrow_and_update().clone() {
             return done;
@@ -734,7 +737,7 @@ async fn wait_for_dial(
 /// knows the peer's address (registered via `add_peer_addr`), so a bare-id
 /// `EndpointAddr` resolves through the endpoint's address book + lookups.
 async fn dial(endpoint: &Endpoint, address: EndpointAddr) -> Result<Connection> {
-    match n0_future::time::timeout(DIAL_TIMEOUT, endpoint.connect(address, UNICAST_ALPN)).await {
+    match time::timeout(DIAL_TIMEOUT, endpoint.connect(address, UNICAST_ALPN)).await {
         Ok(Ok(connection)) => Ok(connection),
         Ok(Err(error)) => Err(anyhow::anyhow!("{error}")),
         Err(_) => bail!("unicast dial timed out after {DIAL_TIMEOUT:?}"),
@@ -756,8 +759,8 @@ async fn send_one(connection: &Connection, bytes: &[u8], busy: Option<BusyGuard>
     // evict the connection under a slow reader. The sender does not wait: it would block the event
     // loop on the inline path.
     if let Some(busy) = busy {
-        n0_future::task::spawn(async move {
-            let _ = n0_future::time::timeout(BUSY_AFTER_FINISH, stream.stopped()).await;
+        task::spawn(async move {
+            let _ = time::timeout(BUSY_AFTER_FINISH, stream.stopped()).await;
             drop(busy);
         });
     }

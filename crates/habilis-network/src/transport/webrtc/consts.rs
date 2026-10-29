@@ -1,5 +1,6 @@
 //! The ALPNs, the deadlines and the direct-peer cap of the WebRTC plane.
 
+use std::time;
 /// ALPN for the JSEP exchange. Wire-load-bearing in the same way
 /// `crate::transport::UNICAST_ALPN` is: both ends must agree, so it moves only with a
 /// deliberate protocol break.
@@ -24,7 +25,7 @@ pub const MESH_WEBRTC_SIGNAL_ALPN: &[u8] = b"habilis-mesh/webrtc-signal/1";
         reason = "the browser backend takes no deadline; kept on both targets per the note above"
     )
 )]
-pub(crate) const JSEP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+pub(crate) const JSEP_DEADLINE: time::Duration = time::Duration::from_secs(20);
 
 /// One leg of the envelope exchange: dial, open, write, then wait for the
 /// peer's envelope.
@@ -34,7 +35,7 @@ pub(crate) const JSEP_DEADLINE: std::time::Duration = std::time::Duration::from_
 /// vanilla-ICE gathering budget (≤10s) before its answer exists; a CLI answerer
 /// pays up to two 2s STUN probes. 20s is comfortably past the worst honest path
 /// and leaves room for a relay round trip on a throttled tab.
-pub(crate) const SIGNAL_EXCHANGE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+pub(crate) const SIGNAL_EXCHANGE_DEADLINE: time::Duration = time::Duration::from_secs(20);
 
 /// The whole round, either role.
 ///
@@ -43,7 +44,7 @@ pub(crate) const SIGNAL_EXCHANGE_DEADLINE: std::time::Duration = std::time::Dura
 /// catches a peer that stalls somewhere with no budget of its own. It also sits
 /// below two `alive` ticks, so a peer that always times out is retried on the
 /// following tick rather than being skipped indefinitely.
-pub(crate) const SIGNAL_ROUND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
+pub(crate) const SIGNAL_ROUND_DEADLINE: time::Duration = time::Duration::from_secs(45);
 
 /// The default of C, the ceiling of direct connections one node holds (64): the `WebRTC`
 /// sessions and the unicast connections together. A node sets its own with

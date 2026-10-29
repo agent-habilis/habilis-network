@@ -9,6 +9,7 @@ use crate::daemon::state::{DirectState, EventLoopState};
 use crate::transport::webrtc;
 use crate::util::clock::Instant;
 
+use crate::{lookup, transport};
 /// Graft again the proven peers whose link went down about a second ago (see
 /// [`EventLoopState::plan_regraft_on_link_loss`]). The reclaim ticker calls this, because
 /// the heal tick would leave the pair apart for 10 to 15 s.
@@ -23,9 +24,9 @@ pub(crate) async fn regraft_due(state: &mut EventLoopState, context: &HandlerCtx
             continue;
         };
         state.note_relink(peer, Instant::now());
-        crate::lookup::add_peer_addr(&state.address_book, address.clone());
+        lookup::add_peer_addr(&state.address_book, address.clone());
         state.unicast_pool.note_addr(&address);
-        tracing::debug!(target: crate::transport::LOG_TARGET, %peer, "the link went down: grafting the proven peer again");
+        tracing::debug!(target: transport::LOG_TARGET, %peer, "the link went down: grafting the proven peer again");
         if grafts::ensure_direct(state, context, peer, &address) {
             grafts::graft_proven(state, context, peer).await;
         }
@@ -113,7 +114,7 @@ pub(crate) async fn refill_isolated(state: &mut EventLoopState, context: &Handle
     else {
         return;
     };
-    tracing::info!(target: crate::transport::LOG_TARGET, peer = %address.id, "no link left: asking another known peer");
+    tracing::info!(target: transport::LOG_TARGET, peer = %address.id, "no link left: asking another known peer");
     graft_one(state, context, address, now).await;
 }
 
@@ -125,9 +126,9 @@ pub(crate) async fn graft_one(
     now: Instant,
 ) {
     state.note_relink(address.id, now);
-    crate::lookup::add_peer_addr(&state.address_book, address.clone());
+    lookup::add_peer_addr(&state.address_book, address.clone());
     state.unicast_pool.note_addr(&address);
-    tracing::debug!(target: crate::transport::LOG_TARGET, peer = %address.id, linked = state.linked_endpoints.len(), "filling the active view");
+    tracing::debug!(target: transport::LOG_TARGET, peer = %address.id, linked = state.linked_endpoints.len(), "filling the active view");
     if grafts::ensure_direct(state, context, address.id, &address) {
         grafts::graft_proven(state, context, address.id).await;
     }

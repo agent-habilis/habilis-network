@@ -21,10 +21,12 @@ use crate::util::line_read::{self, LineRead};
 use crate::util::tuning::{IPC_ACCEPT_BACKOFF_MAX, IPC_ACCEPT_BACKOFF_MIN, IPC_IO_TIMEOUT};
 use tokio::sync::oneshot;
 
+use std::{fs, path, sync};
+use tokio::{io, time};
 /// Returns the IPC endpoint identifier for a specific agent on a mesh —
 /// a filesystem socket path (the project targets Unix only). Lives in the
 /// mesh's runtime folder beside its `<nick>.tracing.log` / `<nick>.state.json`.
-pub(crate) fn socket_path(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -> String {
+pub(crate) fn socket_path(base: &path::Path, mesh: &MeshId, nickname: &Nickname) -> String {
     format!(
         "{}/{nickname}.ipc.sock",
         util::mesh_runtime_dir(base, mesh.as_str()).display()
@@ -43,7 +45,7 @@ pub(super) fn to_name(path: &str) -> Result<Name<'_>> {
 ///
 /// # Errors
 /// An invalid socket name, or the OS refusing the bind.
-pub(crate) fn bind(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -> Result<Listener> {
+pub(crate) fn bind(base: &path::Path, mesh: &MeshId, nickname: &Nickname) -> Result<Listener> {
     let path = socket_path(base, mesh, nickname);
 
     // The runtime base must exist and be private (0700) before the socket is
@@ -54,7 +56,7 @@ pub(crate) fn bind(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -
     util::ensure_mesh_runtime_dir(base, mesh.as_str())
         .map_err(|error| anyhow::anyhow!("failed to prepare runtime dir: {error}"))?;
     // Best-effort cleanup of a stale socket file.
-    let _ = std::fs::remove_file(&path);
+    let _ = fs::remove_file(&path);
 
     let name = to_name(&path)?;
     let listener = ListenerOptions::new()
@@ -67,8 +69,7 @@ pub(crate) fn bind(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -
     // users; this is defense in depth against a permissive umask on the socket.
     {
         use std::os::unix::fs::PermissionsExt as _;
-        if let Err(error) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-        {
+        if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
             tracing::warn!(?path, %error, "IPC socket: could not restrict to 0600");
         }
     }
@@ -83,7 +84,7 @@ pub(crate) async fn serve<Cmd>(
     listener: Listener,
     tx: mpsc::Sender<IpcMessage<Cmd>>,
     // trait object: the listener and its connections share the sink
-    sink: std::sync::Arc<dyn event::NodeSink>,
+    sink: sync::Arc<dyn event::NodeSink>,
 ) where
     Cmd: DeserializeOwned + Send + 'static,
 {
@@ -117,7 +118,7 @@ pub(crate) async fn serve<Cmd>(
                     backoff_ms = clock::millis_saturating(backoff),
                     "IPC: accept error; retrying"
                 );
-                tokio::time::sleep(backoff).await;
+                time::sleep(backoff).await;
                 backoff = next_accept_backoff(backoff);
             }
         }
@@ -133,14 +134,14 @@ async fn handle_connection<Cmd>(stream: Stream, tx: mpsc::Sender<IpcMessage<Cmd>
 where
     Cmd: DeserializeOwned + Send + 'static,
 {
-    let (read_half, mut write_half) = tokio::io::split(stream);
+    let (read_half, mut write_half) = io::split(stream);
     let mut reader = BufReader::new(read_half);
 
     // I/O deadline on both legs: a client that connects and goes silent
     // (or stops draining the response) would otherwise pin this task and
     // its fd for the daemon's lifetime.
     let io_deadline = IPC_IO_TIMEOUT;
-    let line = match tokio::time::timeout(
+    let line = match time::timeout(
         io_deadline,
         line_read::read_bounded_line(&mut reader, MAX_IPC_COMMAND_BYTES),
     )
@@ -149,7 +150,7 @@ where
         Ok(Ok(LineRead::Line(line))) => line,
         Ok(Ok(LineRead::TooLong)) => {
             let error = json_reply::json_error("command too large");
-            let _ = tokio::time::timeout(
+            let _ = time::timeout(
                 io_deadline,
                 write_half.write_all(format!("{error}\n").as_bytes()),
             )
@@ -183,7 +184,7 @@ where
         }
     };
 
-    let _ = tokio::time::timeout(
+    let _ = time::timeout(
         io_deadline,
         write_half.write_all(format!("{response}\n").as_bytes()),
     )

@@ -11,6 +11,8 @@ use crate::transport::LOG_TARGET;
 
 use crate::daemon::state;
 
+use crate::lookup::EndpointError;
+use n0_future::{task, time};
 /// [`tick`] now, when the engine learns something that changes the neighbors or
 /// their paths (a neighbor came up, a path changed), without waiting for the alive
 /// tick. A hop that stays on the relay is withdrawn from the vector after 20 s,
@@ -127,7 +129,7 @@ pub(crate) fn tick(state: &state::EventLoopState, underlay: &UnderlayWebRtc) {
         let address = address.clone();
         let ice = state.webrtc_ice;
         let epoch = guard.epoch();
-        let task = n0_future::task::spawn(async move {
+        let task = task::spawn(async move {
             let _guard = guard;
             match Box::pin(webrtc::dial_signal::dial_signal(
                 &endpoint, &book, address, &handle, ice,
@@ -144,17 +146,17 @@ pub(crate) fn tick(state: &state::EventLoopState, underlay: &UnderlayWebRtc) {
                     webrtc::nudge_acceptor::nudge_session(&endpoint, peer).await;
                 }
                 Err(error) => {
-                    if matches!(error, crate::lookup::EndpointError::CapRefused { .. }) {
+                    if matches!(error, EndpointError::CapRefused { .. }) {
                         admission.note_refused(peer);
                     }
                     tracing::debug!(target: LOG_TARGET, %peer, %error, "underlay webrtc offer failed");
                     // The guard of the round is held for the delay: its end rings the table, and
                     // the loop ticks and offers again (see `event_loop`). A second turn-away in
                     // a row is noted as a refusal: the peer waits, and the round ends at once.
-                    if matches!(error, crate::lookup::EndpointError::NotANeighbor { .. })
+                    if matches!(error, EndpointError::NotANeighbor { .. })
                         && admission.note_not_a_neighbor(peer)
                     {
-                        n0_future::time::sleep(plan::REFUSAL_RETRY).await;
+                        time::sleep(plan::REFUSAL_RETRY).await;
                     }
                 }
             }

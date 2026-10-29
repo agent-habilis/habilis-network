@@ -8,6 +8,7 @@ use iroh::endpoint::Connection;
 
 use super::Sessions;
 
+use crate::transport;
 /// What an eviction ends: the connections, closed with the `EVICTED` code, and the sessions.
 #[derive(Default)]
 pub(crate) struct Victims {
@@ -20,7 +21,7 @@ impl Victims {
     pub(crate) fn end(self) {
         for victim in self.conns {
             tracing::info!(
-                target: crate::transport::LOG_TARGET,
+                target: transport::LOG_TARGET,
                 peer = %victim.remote_id().fmt_short(),
                 "evicting a direct connection at the ceiling"
             );
@@ -28,7 +29,7 @@ impl Victims {
         }
         for (peer, hub) in self.sessions {
             tracing::info!(
-                target: crate::transport::LOG_TARGET,
+                target: transport::LOG_TARGET,
                 peer = %peer.fmt_short(),
                 "evicting a session at the ceiling"
             );

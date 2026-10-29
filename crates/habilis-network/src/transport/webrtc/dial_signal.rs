@@ -14,6 +14,7 @@ use crate::transport::LOG_TARGET;
 
 use crate::lookup::EndpointError;
 
+use n0_future::time;
 /// Offer a session to `peer` and attach it. The caller decides *whether* to
 /// dial (see the role rule in `lifecycle`); this only performs the exchange.
 ///
@@ -73,7 +74,7 @@ pub(crate) async fn dial_signal_with(
     // writing kept this future alive for the life of the process, and its QUIC
     // keep-alives meant the connection never idled out either.
     let remote = peer.id;
-    match n0_future::time::timeout(
+    match time::timeout(
         deadlines.round,
         // Boxed for the same reason `answer_one` is: the pending session state
         // is large, and this future is held across a spawn.
@@ -112,7 +113,7 @@ pub(crate) async fn dial_signal_round(
 
     // The connect holds the peer's slot like every later step does, and an id that nobody serves
     // never answers it: without its own bound the round lives to the round deadline.
-    let connection = match n0_future::time::timeout(
+    let connection = match time::timeout(
         deadlines.exchange,
         endpoint.connect(peer, MESH_WEBRTC_SIGNAL_ALPN),
     )

@@ -12,6 +12,7 @@ use crate::transport::LOG_TARGET;
 
 use crate::daemon::state;
 
+use iroh::address_lookup;
 /// Whether the periodic heal legs may graft-dial the rendezvous at all.
 ///
 /// A webrtc-shaped node on a lookup-only mesh must never graft on a timer:
@@ -154,7 +155,7 @@ pub(crate) fn offer_rendezvous_on_path_loss(
 pub(crate) fn rendezvous_dial_target(book: &MemoryLookup, rendezvous: EndpointId) -> EndpointAddr {
     book.get_endpoint_info(rendezvous).map_or_else(
         || EndpointAddr::new(rendezvous),
-        iroh::address_lookup::EndpointInfo::into_endpoint_addr,
+        address_lookup::EndpointInfo::into_endpoint_addr,
     )
 }
 

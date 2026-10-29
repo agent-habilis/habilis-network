@@ -72,6 +72,8 @@ use backend_web::{build_answer, build_offer};
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::time::Duration;
+    #[cfg(feature = "iroh-test-utils")]
+    use tokio::time::Instant as tokio_Instant;
 
     use habilis_network_iroh_webrtc_transport::WebRtcTransport;
     use iroh::endpoint::presets;
@@ -100,9 +102,20 @@ mod tests {
     use crate::gossip::event;
     #[cfg(feature = "iroh-test-utils")]
     use crate::lookup::test_relay;
-    use crate::transport::probe;
+    use crate::transport::{PayloadPath, probe};
     use crate::util::{clock, tuning};
+    use crate::{lookup, testing, transport};
+    use iroh_gossip::api::Event;
+    use iroh_gossip::net::Gossip as irohgossip_Gossip;
+    use iroh_gossip::proto;
+    use n0_future::time::Instant as n0future_Instant;
+    use std::future;
+    #[cfg(feature = "iroh-test-utils")]
+    use std::mem;
+    use std::net::{Ipv4Addr, Ipv4Addr as std_Ipv4Addr, SocketAddr, UdpSocket};
+    use std::time::Instant as std_Instant;
     use tokio::sync::mpsc;
+    use tokio::time;
     fn relay_addr() -> iroh::TransportAddr {
         iroh::TransportAddr::Relay("https://relay.example".parse().expect("a relay url"))
     }
@@ -420,7 +433,7 @@ mod tests {
     }
 
     fn serve(endpoint: &Endpoint, handle: &WebRtcHandle, admission: &SignalAdmission) -> Router {
-        let book = crate::lookup::address_book(&endpoint.clone());
+        let book = lookup::address_book(&endpoint.clone());
         let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
             handle.clone(),
             endpoint.clone(),
@@ -445,7 +458,7 @@ mod tests {
             if check() {
                 return true;
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            time::sleep(Duration::from_millis(25)).await;
         }
         check()
     }
@@ -529,7 +542,7 @@ mod tests {
                         admission.in_flight() <= 1,
                         "one peer must never hold more than one slot"
                     );
-                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    time::sleep(Duration::from_millis(25)).await;
                 }
 
                 for connection in conns {
@@ -561,7 +574,7 @@ mod tests {
                     let (client, client_hub) = endpoint().await;
                     dial_signal::dial_signal_with(
                         &client,
-                        &crate::lookup::address_book(&client),
+                        &lookup::address_book(&client),
                         server.addr(),
                         &client_hub,
                         quick(),
@@ -613,7 +626,7 @@ mod tests {
                 for (client, hub) in [(&first, &first_hub), (&second, &second_hub)] {
                     dial_signal::dial_signal_with(
                         client,
-                        &crate::lookup::address_book(client),
+                        &lookup::address_book(client),
                         server.addr(),
                         hub,
                         quick(),
@@ -629,7 +642,7 @@ mod tests {
 
                 let error = dial_signal::dial_signal_with(
                     &first,
-                    &crate::lookup::address_book(&first),
+                    &lookup::address_book(&first),
                     server.addr(),
                     &first_hub,
                     quick(),
@@ -694,7 +707,7 @@ mod tests {
                 let (client, client_hub) = endpoint_with_lookup().await;
                 dial_signal::dial_signal_with(
                     &client,
-                    &crate::lookup::address_book(&client),
+                    &lookup::address_book(&client),
                     server.addr(),
                     &client_hub,
                     quick(),
@@ -708,11 +721,11 @@ mod tests {
                 );
 
                 web_rtc_signal_acceptor::register_session_addr(
-                    &crate::lookup::address_book(&client),
+                    &lookup::address_book(&client),
                     server.id(),
                 );
 
-                let connection: Connection = tokio::time::timeout(
+                let connection: Connection = time::timeout(
                     Duration::from_secs(10),
                     client.connect(EndpointAddr::new(server.id()), MESH_WEBRTC_SIGNAL_ALPN),
                 )
@@ -751,7 +764,7 @@ mod tests {
                 let client_router = serve(&client, &client_hub, &client_admission);
                 dial_signal::dial_signal_with(
                     &client,
-                    &crate::lookup::address_book(&client),
+                    &lookup::address_book(&client),
                     server.addr(),
                     &client_hub,
                     quick(),
@@ -765,9 +778,9 @@ mod tests {
                 );
                 // `register_session_addr` runs in the acceptor task right after the
                 // attach the poll above observed; give it a beat to land.
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                time::sleep(Duration::from_millis(200)).await;
 
-                let connection: Connection = tokio::time::timeout(
+                let connection: Connection = time::timeout(
                     Duration::from_secs(10),
                     server.connect(EndpointAddr::new(client.id()), MESH_WEBRTC_SIGNAL_ALPN),
                 )
@@ -808,7 +821,7 @@ mod tests {
                 let server_gossip = Gossip::builder().spawn(server.clone());
                 // One Router for both ALPNs: `Router::spawn` overrides the endpoint's
                 // ALPN list, so a second Router silently unregisters the first's.
-                let book = crate::lookup::address_book(&server.clone());
+                let book = lookup::address_book(&server.clone());
                 let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
                     server_hub.clone(),
                     server.clone(),
@@ -825,7 +838,7 @@ mod tests {
                     GOSSIP_ALPN,
                     super::super::DirectOnlyGossip::new(
                         server_gossip.clone(),
-                        crate::transport::PayloadPath::DirectOnly,
+                        PayloadPath::DirectOnly,
                         None,
                     ),
                 );
@@ -836,7 +849,7 @@ mod tests {
 
                 dial_signal::dial_signal_with(
                     &client,
-                    &crate::lookup::address_book(&client),
+                    &lookup::address_book(&client),
                     server.addr(),
                     &client_hub,
                     quick(),
@@ -845,11 +858,11 @@ mod tests {
                 .await
                 .expect("the signal round must attach a session");
                 web_rtc_signal_acceptor::register_session_addr(
-                    &crate::lookup::address_book(&client),
+                    &lookup::address_book(&client),
                     server.id(),
                 );
 
-                let topic = iroh_gossip::proto::TopicId::from_bytes([9u8; 32]);
+                let topic = proto::TopicId::from_bytes([9u8; 32]);
                 let mut server_topic = server_gossip
                     .subscribe(topic, vec![])
                     .await
@@ -859,24 +872,24 @@ mod tests {
                     .await
                     .expect("client subscribes and grafts by bare id");
 
-                let linked = tokio::time::timeout(Duration::from_secs(20), async {
-                loop {
-                    tokio::select! {
-                        event = client_topic.next() => {
-                            if matches!(
-                                event,
-                                Some(Ok(iroh_gossip::api::Event::NeighborUp(id))) if id == server.id()
-                            ) {
-                                return;
+                let linked = time::timeout(Duration::from_secs(20), async {
+                    loop {
+                        tokio::select! {
+                            event = client_topic.next() => {
+                                if matches!(
+                                    event,
+                                    Some(Ok(Event::NeighborUp(id))) if id == server.id()
+                                ) {
+                                    return;
+                                }
+                            }
+                            event = server_topic.next() => {
+                                let _ = event;
                             }
                         }
-                        event = server_topic.next() => {
-                            let _ = event;
-                        }
                     }
-                }
-            })
-            .await;
+                })
+                .await;
                 assert!(
                     linked.is_ok(),
                     "the graft dial must ride the attached session through the lookup-only gate"
@@ -942,7 +955,7 @@ mod tests {
 
                 let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
                 let server_gossip = Gossip::builder().spawn(server.clone());
-                let book = crate::lookup::address_book(&server.clone());
+                let book = lookup::address_book(&server.clone());
                 let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
                     server_hub.clone(),
                     server.clone(),
@@ -958,7 +971,7 @@ mod tests {
                     GOSSIP_ALPN,
                     super::super::DirectOnlyGossip::new(
                         server_gossip.clone(),
-                        crate::transport::PayloadPath::DirectOnly,
+                        PayloadPath::DirectOnly,
                         None,
                     ),
                 );
@@ -969,7 +982,7 @@ mod tests {
                 let relay_addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
                 dial_signal::dial_signal_with(
                     &client,
-                    &crate::lookup::address_book(&client),
+                    &lookup::address_book(&client),
                     relay_addr,
                     &client_hub,
                     SignalDeadlines::DEFAULT,
@@ -978,11 +991,11 @@ mod tests {
                 .await
                 .expect("the signal round must attach a session over the relay");
                 web_rtc_signal_acceptor::register_session_addr(
-                    &crate::lookup::address_book(&client),
+                    &lookup::address_book(&client),
                     server.id(),
                 );
 
-                let topic = iroh_gossip::proto::TopicId::from_bytes([11u8; 32]);
+                let topic = proto::TopicId::from_bytes([11u8; 32]);
                 let mut server_topic = server_gossip
                     .subscribe(topic, vec![])
                     .await
@@ -992,24 +1005,24 @@ mod tests {
                     .await
                     .expect("client subscribes and grafts by bare id");
 
-                let linked = tokio::time::timeout(Duration::from_secs(40), async {
-                loop {
-                    tokio::select! {
-                        event = client_topic.next() => {
-                            if matches!(
-                                event,
-                                Some(Ok(iroh_gossip::api::Event::NeighborUp(id))) if id == server.id()
-                            ) {
-                                return;
+                let linked = time::timeout(Duration::from_secs(40), async {
+                    loop {
+                        tokio::select! {
+                            event = client_topic.next() => {
+                                if matches!(
+                                    event,
+                                    Some(Ok(Event::NeighborUp(id))) if id == server.id()
+                                ) {
+                                    return;
+                                }
+                            }
+                            event = server_topic.next() => {
+                                let _ = event;
                             }
                         }
-                        event = server_topic.next() => {
-                            let _ = event;
-                        }
                     }
-                }
-            })
-            .await;
+                })
+                .await;
                 assert!(
                     linked.is_ok(),
                     "with a session attached, the graft must not stay pinned to the relay"
@@ -1076,7 +1089,7 @@ mod tests {
                 };
                 let (mut low_key, mut high_key) = (SecretKey::generate(), SecretKey::generate());
                 if low_key.public() > high_key.public() {
-                    std::mem::swap(&mut low_key, &mut high_key);
+                    mem::swap(&mut low_key, &mut high_key);
                 }
                 let low_hub = WebRtcHandle::new(WebRtcTransport::new(low_key.public()));
                 let low = bind(low_key, &low_hub).await;
@@ -1089,7 +1102,7 @@ mod tests {
                     .accept(HOLD_ALPN, Hold(held_tx))
                     .spawn();
                 let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-                let book = crate::lookup::address_book(&high.clone());
+                let book = lookup::address_book(&high.clone());
                 let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
                     high_hub.clone(),
                     high.clone(),
@@ -1112,7 +1125,7 @@ mod tests {
 
                 dial_signal::dial_signal_with(
                     &low,
-                    &crate::lookup::address_book(&low),
+                    &lookup::address_book(&low),
                     high_on_relay,
                     &low_hub,
                     SignalDeadlines::DEFAULT,
@@ -1121,12 +1134,12 @@ mod tests {
                 .await
                 .expect("the offerer attaches a session");
                 web_rtc_signal_acceptor::register_session_addr(
-                    &crate::lookup::address_book(&low),
+                    &lookup::address_book(&low),
                     high.id(),
                 );
                 nudge_acceptor::nudge(&low, high.id()).await;
 
-                let direct = tokio::time::timeout(Duration::from_secs(20), held_rx.recv())
+                let direct = time::timeout(Duration::from_secs(20), held_rx.recv())
                     .await
                     .expect("the held connection reports in time")
                     .expect("the channel is open");
@@ -1192,7 +1205,7 @@ mod tests {
                 let client = relay_only(client_key, &client_hub).await;
 
                 let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-                let book = crate::lookup::address_book(&server.clone());
+                let book = lookup::address_book(&server.clone());
                 let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
                     server_hub.clone(),
                     server.clone(),
@@ -1214,7 +1227,7 @@ mod tests {
                     .expect("a relayed connection before any session");
                 dial_signal::dial_signal_with(
                     &client,
-                    &crate::lookup::address_book(&client),
+                    &lookup::address_book(&client),
                     relay_addr,
                     &client_hub,
                     quick(),
@@ -1223,7 +1236,7 @@ mod tests {
                 .await
                 .expect("the signal round must attach a session");
 
-                let connection: Connection = tokio::time::timeout(
+                let connection: Connection = time::timeout(
                     Duration::from_secs(10),
                     client.connect(EndpointAddr::new(server.id()), HOLD_ALPN),
                 )
@@ -1306,7 +1319,7 @@ mod tests {
 
                 let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
                 let server_gossip = Gossip::builder().spawn(server.clone());
-                let book = crate::lookup::address_book(&server.clone());
+                let book = lookup::address_book(&server.clone());
                 let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
                     server_hub.clone(),
                     server.clone(),
@@ -1322,7 +1335,7 @@ mod tests {
                     GOSSIP_ALPN,
                     super::super::DirectOnlyGossip::new(
                         server_gossip.clone(),
-                        crate::transport::PayloadPath::DirectOnly,
+                        PayloadPath::DirectOnly,
                         None,
                     ),
                 );
@@ -1331,11 +1344,11 @@ mod tests {
                 let client_gossip = Gossip::builder().spawn(client.clone());
                 // What register_rendezvous does for a joiner: the relay-homed
                 // address, registered before the first graft dial.
-                crate::lookup::add_peer_addr(
-                    &crate::lookup::address_book(&client),
+                lookup::add_peer_addr(
+                    &lookup::address_book(&client),
                     EndpointAddr::new(server.id()).with_relay_url(relay_url.clone()),
                 );
-                let topic = iroh_gossip::proto::TopicId::from_bytes([13u8; 32]);
+                let topic = proto::TopicId::from_bytes([13u8; 32]);
                 let mut server_topic = server_gossip
                     .subscribe(topic, vec![])
                     .await
@@ -1348,13 +1361,13 @@ mod tests {
                     .split();
 
                 // Outlast the gate's hold (15 s) so the refusal has happened.
-                tokio::time::sleep(Duration::from_secs(17)).await;
+                time::sleep(Duration::from_secs(17)).await;
 
                 // Now the session, as the heal tick would drive it.
                 let relay_addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
                 dial_signal::dial_signal_with(
                     &client,
-                    &crate::lookup::address_book(&client),
+                    &lookup::address_book(&client),
                     relay_addr,
                     &client_hub,
                     SignalDeadlines::DEFAULT,
@@ -1363,38 +1376,38 @@ mod tests {
                 .await
                 .expect("the signal round must attach a session over the relay");
                 web_rtc_signal_acceptor::register_session_addr(
-                    &crate::lookup::address_book(&client),
+                    &lookup::address_book(&client),
                     server.id(),
                 );
 
-                let linked = tokio::time::timeout(Duration::from_secs(40), async {
-                loop {
-                    client_sender
-                        .join_peers(vec![server.id()])
-                        .await
-                        .expect("re-graft");
-                    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                let linked = time::timeout(Duration::from_secs(40), async {
                     loop {
-                        tokio::select! {
-                            event = client_rx.next() => {
-                                if matches!(
-                                    event,
-                                    Some(Ok(iroh_gossip::api::Event::NeighborUp(id))) if id == server.id()
-                                ) {
-                                    return;
+                        client_sender
+                            .join_peers(vec![server.id()])
+                            .await
+                            .expect("re-graft");
+                        let deadline = tokio_Instant::now() + Duration::from_secs(5);
+                        loop {
+                            tokio::select! {
+                                event = client_rx.next() => {
+                                    if matches!(
+                                        event,
+                                        Some(Ok(Event::NeighborUp(id))) if id == server.id()
+                                    ) {
+                                        return;
+                                    }
                                 }
-                            }
-                            event = server_topic.next() => {
-                                let _ = event;
-                            }
-                            () = tokio::time::sleep_until(deadline) => {
-                                break;
+                                event = server_topic.next() => {
+                                    let _ = event;
+                                }
+                                () = time::sleep_until(deadline) => {
+                                    break;
+                                }
                             }
                         }
                     }
-                }
-            })
-            .await;
+                })
+                .await;
                 assert!(
                     linked.is_ok(),
                     "a refused relay-only graft must not poison the re-graft over the session"
@@ -1428,7 +1441,7 @@ mod tests {
 
                 // Well inside the round deadline, so a pass here is the abort working
                 // and not the timeout firing.
-                tokio::time::timeout(Duration::from_millis(500), router.shutdown())
+                time::timeout(Duration::from_millis(500), router.shutdown())
                     .await
                     .expect("shutdown must not wait out the round deadline")
                     .expect("shutdown");
@@ -1477,10 +1490,10 @@ mod tests {
                     .spawn();
 
                 let (client, client_hub) = endpoint().await;
-                let started = std::time::Instant::now();
+                let started = std_Instant::now();
                 let outcome = dial_signal::dial_signal_with(
                     &client,
-                    &crate::lookup::address_book(&client),
+                    &lookup::address_book(&client),
                     server.addr(),
                     &client_hub,
                     quick(),
@@ -1515,7 +1528,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let book = MemoryLookup::new();
         let id = SecretKey::generate().public();
-        let at = |port: u16| std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+        let at = |port: u16| SocketAddr::from((std_Ipv4Addr::LOCALHOST, port));
         assert_eq!(
             rendezvous::rendezvous_dial_target(&book, id)
                 .ip_addrs()
@@ -1526,9 +1539,9 @@ mod tests {
 
         // A claim of the first beacon, its shed, a claim of the second beacon: the dial carries
         // the second beacon's address only.
-        crate::lookup::replace_peer_addr(&book, EndpointAddr::new(id).with_ip_addr(at(4000)));
+        lookup::replace_peer_addr(&book, EndpointAddr::new(id).with_ip_addr(at(4000)));
         book.remove_endpoint_info(id);
-        crate::lookup::replace_peer_addr(&book, EndpointAddr::new(id).with_ip_addr(at(5000)));
+        lookup::replace_peer_addr(&book, EndpointAddr::new(id).with_ip_addr(at(5000)));
 
         let target = rendezvous::rendezvous_dial_target(&book, id);
         assert_eq!(
@@ -1566,8 +1579,7 @@ mod tests {
             2,
             async {
                 // Bound, and never read: packets to it vanish, and nothing answers.
-                let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-                    .expect("a socket");
+                let silent = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("a socket");
                 let nobody: EndpointAddr = EndpointAddr::new(SecretKey::generate().public())
                     .with_ip_addr(silent.local_addr().expect("its address"));
                 let (client, client_hub) = endpoint().await;
@@ -1575,10 +1587,10 @@ mod tests {
                     exchange: Duration::from_millis(400),
                     round: Duration::from_secs(8),
                 };
-                let started = n0_future::time::Instant::now();
+                let started = n0future_Instant::now();
                 let outcome = dial_signal::dial_signal_with(
                     &client,
-                    &crate::lookup::address_book(&client),
+                    &lookup::address_book(&client),
                     nobody,
                     &client_hub,
                     deadlines,
@@ -1603,7 +1615,7 @@ mod tests {
     #[test]
     fn only_a_node_that_already_offers_offers_off_the_heal_tick() {
         let _guard = ::habilis_network_test_tracing::init();
-        let mut state = crate::testing::fresh_state();
+        let mut state = testing::fresh_state();
         state.local_udp_transport = UdpTransport::Absent;
         assert!(rendezvous::offers_off_tick(&state), "a lane-needing node");
         state.local_udp_transport = UdpTransport::Present;
@@ -1631,11 +1643,11 @@ mod tests {
     #[test]
     fn a_cold_non_neighbor_pair_waits_for_a_send_unless_a_frame_is_held_for_a_lane_peer() {
         let _guard = ::habilis_network_test_tracing::init();
-        let peer = crate::testing::endpoint_id(7);
+        let peer = testing::endpoint_id(7);
         let ip_pair = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
         let lane_pair = EndpointAddr::new(peer)
             .with_relay_url("https://relay.invalid".parse().expect("relay url"));
-        let mut state = crate::testing::fresh_state();
+        let mut state = testing::fresh_state();
         state.local_udp_transport = UdpTransport::Present;
 
         assert!(
@@ -1673,11 +1685,11 @@ mod tests {
         use crate::daemon::state::DirectState;
 
         let _guard = ::habilis_network_test_tracing::init();
-        let peer = crate::testing::endpoint_id(7);
+        let peer = testing::endpoint_id(7);
         let ip_pair = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
-        let mut state = crate::testing::fresh_state();
+        let mut state = testing::fresh_state();
         state.local_udp_transport = UdpTransport::Present;
-        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
+        state.relay_transport = PayloadPath::DirectOnly;
 
         for (known, held) in [
             (None, true),
@@ -1702,7 +1714,7 @@ mod tests {
 
         // With the relay carrying payload the pair can talk without a session, so
         // a failed probe is no reason to open one before a send.
-        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
+        state.relay_transport = PayloadPath::RelayAllowed;
         state.direct.insert(peer, DirectState::RelayOnly);
         assert!(
             retry::held_back(&state, &ip_pair),
@@ -1718,11 +1730,11 @@ mod tests {
         use crate::daemon::state::DirectState;
 
         let _guard = ::habilis_network_test_tracing::init();
-        let peer = crate::testing::endpoint_id(7);
+        let peer = testing::endpoint_id(7);
         let pair = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
-        let mut state = crate::testing::fresh_state();
+        let mut state = testing::fresh_state();
         state.local_udp_transport = UdpTransport::Present;
-        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
+        state.relay_transport = PayloadPath::DirectOnly;
         state.direct.insert(peer, DirectState::RelayOnly);
         assert!(
             !retry::held_back(&state, &pair),
@@ -1787,7 +1799,7 @@ mod tests {
             .expect("room");
         dial_signal::dial_signal_with(
             &client,
-            &crate::lookup::address_book(&client),
+            &lookup::address_book(&client),
             server.addr(),
             &client_hub,
             quick(),
@@ -1803,13 +1815,13 @@ mod tests {
             "the client has a session with the server"
         );
 
-        let mut state = crate::testing::fresh_state();
+        let mut state = testing::fresh_state();
         state.webrtc = Some(client_hub.clone());
         state.webrtc_admission = client_admission.clone();
         state.local_udp_transport = UdpTransport::Present;
         state
             .peer_endpoints
-            .insert(crate::testing::nick("bob"), bob_addr(server.id()));
+            .insert(testing::nick("bob"), bob_addr(server.id()));
         let window = tuning::DIRECT_IDLE_BACKSTOP;
         let start = Instant::now();
 
@@ -1884,24 +1896,21 @@ mod tests {
                 let server: Endpoint = builder.bind().await.expect("bind a loopback server");
                 let router: Router = Router::builder(server.clone())
                     .accept(NUDGE_ALPN, NudgeAcceptor)
-                    .accept(crate::transport::UNICAST_ALPN, Hold)
+                    .accept(transport::UNICAST_ALPN, Hold)
                     .spawn();
-                crate::lookup::add_peer_addr(
-                    &crate::lookup::address_book(&endpoint),
-                    server.addr(),
-                );
+                lookup::add_peer_addr(&lookup::address_book(&endpoint), server.addr());
 
-                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let gossip = irohgossip_Gossip::builder().spawn(endpoint.clone());
                 let topic = gossip
-                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
                     .await
                     .expect("subscribe to a peerless topic");
                 let (gossip_sender, _receiver) = topic.split();
-                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let sender = transport::MeshSender::new(gossip_sender);
                 let mesh = MeshId::from("test");
                 let identity = Identity::generate();
                 let our_pubkey = identity.author_key();
-                let author = crate::testing::nick("alice");
+                let author = testing::nick("alice");
                 let sink = event::SilentSink;
                 let context = handler_ctx::HandlerCtx {
                     sender: &sender,
@@ -1911,17 +1920,17 @@ mod tests {
                     identity: &identity,
                     our_pubkey,
                     max_peers: 16,
-                    rendezvous_id: crate::testing::endpoint_id(9),
+                    rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
                 };
-                let mut state = crate::testing::fresh_state();
+                let mut state = testing::fresh_state();
                 state.webrtc = Some(handle);
                 state.local_udp_transport = UdpTransport::Present;
-                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+                state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
                 state
                     .peer_endpoints
-                    .insert(crate::testing::nick("bob"), server.addr());
+                    .insert(testing::nick("bob"), server.addr());
 
                 retry::retry_sessions(&mut state, &context);
                 assert_eq!(
@@ -1999,24 +2008,21 @@ mod tests {
                 let server: Endpoint = builder.bind().await.expect("bind a loopback server");
                 let router: Router = Router::builder(server.clone())
                     .accept(NUDGE_ALPN, NudgeAcceptor)
-                    .accept(crate::transport::UNICAST_ALPN, Hold)
+                    .accept(transport::UNICAST_ALPN, Hold)
                     .spawn();
-                crate::lookup::add_peer_addr(
-                    &crate::lookup::address_book(&endpoint),
-                    server.addr(),
-                );
+                lookup::add_peer_addr(&lookup::address_book(&endpoint), server.addr());
 
-                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let gossip = irohgossip_Gossip::builder().spawn(endpoint.clone());
                 let topic = gossip
-                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
                     .await
                     .expect("subscribe to a peerless topic");
                 let (gossip_sender, _receiver) = topic.split();
-                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let sender = transport::MeshSender::new(gossip_sender);
                 let mesh = MeshId::from("test");
                 let identity = Identity::generate();
                 let our_pubkey = identity.author_key();
-                let author = crate::testing::nick("alice");
+                let author = testing::nick("alice");
                 let sink = event::SilentSink;
                 let context = handler_ctx::HandlerCtx {
                     sender: &sender,
@@ -2026,18 +2032,18 @@ mod tests {
                     identity: &identity,
                     our_pubkey,
                     max_peers: 16,
-                    rendezvous_id: crate::testing::endpoint_id(9),
+                    rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
                 };
-                let mut state = crate::testing::fresh_state();
+                let mut state = testing::fresh_state();
                 state.webrtc = Some(handle);
                 state.local_udp_transport = UdpTransport::Present;
-                state.relay_transport = crate::transport::PayloadPath::DirectOnly;
-                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+                state.relay_transport = PayloadPath::DirectOnly;
+                state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
                 state
                     .peer_endpoints
-                    .insert(crate::testing::nick("bob"), server.addr());
+                    .insert(testing::nick("bob"), server.addr());
                 let bob = server.id();
                 state
                     .unicast_pool
@@ -2123,24 +2129,21 @@ mod tests {
                 let server: Endpoint = builder.bind().await.expect("bind a loopback server");
                 let router: Router = Router::builder(server.clone())
                     .accept(NUDGE_ALPN, NudgeAcceptor)
-                    .accept(crate::transport::UNICAST_ALPN, Hold)
+                    .accept(transport::UNICAST_ALPN, Hold)
                     .spawn();
-                crate::lookup::add_peer_addr(
-                    &crate::lookup::address_book(&endpoint),
-                    server.addr(),
-                );
+                lookup::add_peer_addr(&lookup::address_book(&endpoint), server.addr());
 
-                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let gossip = irohgossip_Gossip::builder().spawn(endpoint.clone());
                 let topic = gossip
-                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
                     .await
                     .expect("subscribe to a peerless topic");
                 let (gossip_sender, _receiver) = topic.split();
-                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let sender = transport::MeshSender::new(gossip_sender);
                 let mesh = MeshId::from("test");
                 let identity = Identity::generate();
                 let our_pubkey = identity.author_key();
-                let author = crate::testing::nick("alice");
+                let author = testing::nick("alice");
                 let sink = event::SilentSink;
                 let context = handler_ctx::HandlerCtx {
                     sender: &sender,
@@ -2150,17 +2153,17 @@ mod tests {
                     identity: &identity,
                     our_pubkey,
                     max_peers: 16,
-                    rendezvous_id: crate::testing::endpoint_id(9),
+                    rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
                 };
-                let mut state = crate::testing::fresh_state();
+                let mut state = testing::fresh_state();
                 state.webrtc = Some(handle);
                 state.local_udp_transport = UdpTransport::Present;
-                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+                state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
                 let relay_url: iroh::RelayUrl = "https://relay.invalid".parse().expect("relay url");
                 state.peer_endpoints.insert(
-                    crate::testing::nick("bob"),
+                    testing::nick("bob"),
                     EndpointAddr::new(server.id()).with_relay_url(relay_url),
                 );
 
@@ -2217,17 +2220,17 @@ mod tests {
                 let (server, _server_hub) = endpoint_with(key).await;
                 let peer = server.id();
 
-                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let gossip = irohgossip_Gossip::builder().spawn(endpoint.clone());
                 let topic = gossip
-                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
                     .await
                     .expect("subscribe to a peerless topic");
                 let (gossip_sender, _receiver) = topic.split();
-                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let sender = transport::MeshSender::new(gossip_sender);
                 let mesh = MeshId::from("test");
                 let identity = Identity::generate();
                 let our_pubkey = identity.author_key();
-                let author = crate::testing::nick("alice");
+                let author = testing::nick("alice");
                 let sink = event::SilentSink;
                 let context = handler_ctx::HandlerCtx {
                     sender: &sender,
@@ -2237,19 +2240,19 @@ mod tests {
                     identity: &identity,
                     our_pubkey,
                     max_peers: 16,
-                    rendezvous_id: crate::testing::endpoint_id(9),
+                    rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
                 };
-                let mut state = crate::testing::fresh_state();
+                let mut state = testing::fresh_state();
                 state.webrtc = Some(handle);
                 state.local_udp_transport = UdpTransport::Present;
-                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+                state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
                 let address = EndpointAddr::new(peer)
                     .with_relay_url("https://relay.invalid".parse().expect("relay url"));
                 state
                     .peer_endpoints
-                    .insert(crate::testing::nick("bob"), address.clone());
+                    .insert(testing::nick("bob"), address.clone());
                 assert!(
                     retry::held_back(&state, &address),
                     "cold: nothing asks for the session yet"
@@ -2302,17 +2305,17 @@ mod tests {
                 let server_admission = SignalAdmission::new(8);
                 let router = serve(&server, &server_hub, &server_admission);
 
-                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let gossip = irohgossip_Gossip::builder().spawn(endpoint.clone());
                 let topic = gossip
-                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
                     .await
                     .expect("subscribe to a peerless topic");
                 let (gossip_sender, _receiver) = topic.split();
-                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let sender = transport::MeshSender::new(gossip_sender);
                 let mesh = MeshId::from("test");
                 let identity = Identity::generate();
                 let our_pubkey = identity.author_key();
-                let author = crate::testing::nick("alice");
+                let author = testing::nick("alice");
                 let sink = event::SilentSink;
                 let context = handler_ctx::HandlerCtx {
                     sender: &sender,
@@ -2322,17 +2325,17 @@ mod tests {
                     identity: &identity,
                     our_pubkey,
                     max_peers: 16,
-                    rendezvous_id: crate::testing::endpoint_id(9),
+                    rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
                 };
-                let mut state = crate::testing::fresh_state();
+                let mut state = testing::fresh_state();
                 state.webrtc = Some(handle.clone());
                 state.local_udp_transport = UdpTransport::Absent;
-                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+                state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
                 state
                     .peer_endpoints
-                    .insert(crate::testing::nick("bob"), server.addr());
+                    .insert(testing::nick("bob"), server.addr());
 
                 retry::retry_sessions(&mut state, &context);
                 assert_eq!(
@@ -2390,17 +2393,17 @@ mod tests {
                 let server_admission = SignalAdmission::new(8);
                 let router = serve(&server, &server_hub, &server_admission);
 
-                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let gossip = irohgossip_Gossip::builder().spawn(endpoint.clone());
                 let topic = gossip
-                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
                     .await
                     .expect("subscribe to a peerless topic");
                 let (gossip_sender, _receiver) = topic.split();
-                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let sender = transport::MeshSender::new(gossip_sender);
                 let mesh = MeshId::from("test");
                 let identity = Identity::generate();
                 let our_pubkey = identity.author_key();
-                let author = crate::testing::nick("alice");
+                let author = testing::nick("alice");
                 let sink = event::SilentSink;
                 let context = handler_ctx::HandlerCtx {
                     sender: &sender,
@@ -2410,18 +2413,18 @@ mod tests {
                     identity: &identity,
                     our_pubkey,
                     max_peers: 16,
-                    rendezvous_id: crate::testing::endpoint_id(9),
+                    rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
                 };
-                let mut state = crate::testing::fresh_state();
+                let mut state = testing::fresh_state();
                 state.webrtc = Some(handle.clone());
                 state.local_udp_transport = UdpTransport::Present;
-                state.relay_transport = crate::transport::PayloadPath::DirectOnly;
-                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+                state.relay_transport = PayloadPath::DirectOnly;
+                state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
                 state
                     .peer_endpoints
-                    .insert(crate::testing::nick("bob"), server.addr());
+                    .insert(testing::nick("bob"), server.addr());
                 let bob = server.id();
 
                 // Attach a session: a frame is held for the peer, and the higher id offers for it.
@@ -2500,17 +2503,17 @@ mod tests {
                 let server_admission = SignalAdmission::new(8);
                 let router = serve(&server, &server_hub, &server_admission);
 
-                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let gossip = irohgossip_Gossip::builder().spawn(endpoint.clone());
                 let topic = gossip
-                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
                     .await
                     .expect("subscribe to a peerless topic");
                 let (gossip_sender, _receiver) = topic.split();
-                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let sender = transport::MeshSender::new(gossip_sender);
                 let mesh = MeshId::from("test");
                 let identity = Identity::generate();
                 let our_pubkey = identity.author_key();
-                let author = crate::testing::nick("alice");
+                let author = testing::nick("alice");
                 let sink = event::SilentSink;
                 let context = handler_ctx::HandlerCtx {
                     sender: &sender,
@@ -2520,18 +2523,18 @@ mod tests {
                     identity: &identity,
                     our_pubkey,
                     max_peers: 16,
-                    rendezvous_id: crate::testing::endpoint_id(9),
+                    rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
                 };
-                let mut state = crate::testing::fresh_state();
+                let mut state = testing::fresh_state();
                 state.webrtc = Some(handle.clone());
                 state.local_udp_transport = UdpTransport::Present;
-                state.relay_transport = crate::transport::PayloadPath::DirectOnly;
-                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+                state.relay_transport = PayloadPath::DirectOnly;
+                state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
                 state
                     .peer_endpoints
-                    .insert(crate::testing::nick("bob"), server.addr());
+                    .insert(testing::nick("bob"), server.addr());
                 let bob = server.id();
 
                 state.want_lane_session(bob, clock::Instant::now());
@@ -2588,17 +2591,17 @@ mod tests {
                 use crate::util::tuning::LANE_OFFERS_IN_FLIGHT;
 
                 let (endpoint, handle) = endpoint().await;
-                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let gossip = irohgossip_Gossip::builder().spawn(endpoint.clone());
                 let topic = gossip
-                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
                     .await
                     .expect("subscribe to a peerless topic");
                 let (gossip_sender, _receiver) = topic.split();
-                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let sender = transport::MeshSender::new(gossip_sender);
                 let mesh = MeshId::from("test");
                 let identity = Identity::generate();
                 let our_pubkey = identity.author_key();
-                let author = crate::testing::nick("alice");
+                let author = testing::nick("alice");
                 let sink = event::SilentSink;
                 let context = handler_ctx::HandlerCtx {
                     sender: &sender,
@@ -2608,22 +2611,22 @@ mod tests {
                     identity: &identity,
                     our_pubkey,
                     max_peers: 16,
-                    rendezvous_id: crate::testing::endpoint_id(99),
+                    rendezvous_id: testing::endpoint_id(99),
                     external_msg_tx: None,
                     sink: &sink,
                 };
-                let mut state = crate::testing::fresh_state();
+                let mut state = testing::fresh_state();
                 state.webrtc = Some(handle);
                 state.local_udp_transport = UdpTransport::Present;
-                state.relay_transport = crate::transport::PayloadPath::DirectOnly;
-                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
-                let members: Vec<EndpointId> = (1..=6).map(crate::testing::endpoint_id).collect();
+                state.relay_transport = PayloadPath::DirectOnly;
+                state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
+                let members: Vec<EndpointId> = (1..=6).map(testing::endpoint_id).collect();
                 for (index, id) in members.iter().enumerate() {
                     let address = EndpointAddr::new(*id)
                         .with_relay_url("https://relay.invalid".parse().expect("relay url"));
                     state
                         .peer_endpoints
-                        .insert(crate::testing::nick(&format!("member{index}")), address);
+                        .insert(testing::nick(&format!("member{index}")), address);
                 }
 
                 probe::retry_direct(&mut state, &context, false).await;
@@ -2662,17 +2665,17 @@ mod tests {
                 use crate::util::tuning::LANE_OFFERS_IN_FLIGHT;
 
                 let (endpoint, handle) = endpoint().await;
-                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let gossip = irohgossip_Gossip::builder().spawn(endpoint.clone());
                 let topic = gossip
-                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
                     .await
                     .expect("subscribe to a peerless topic");
                 let (gossip_sender, _receiver) = topic.split();
-                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let sender = transport::MeshSender::new(gossip_sender);
                 let mesh = MeshId::from("test");
                 let identity = Identity::generate();
                 let our_pubkey = identity.author_key();
-                let author = crate::testing::nick("alice");
+                let author = testing::nick("alice");
                 let sink = event::SilentSink;
                 let context = handler_ctx::HandlerCtx {
                     sender: &sender,
@@ -2682,22 +2685,22 @@ mod tests {
                     identity: &identity,
                     our_pubkey,
                     max_peers: 16,
-                    rendezvous_id: crate::testing::endpoint_id(99),
+                    rendezvous_id: testing::endpoint_id(99),
                     external_msg_tx: None,
                     sink: &sink,
                 };
-                let mut state = crate::testing::fresh_state();
+                let mut state = testing::fresh_state();
                 state.webrtc = Some(handle);
                 state.local_udp_transport = UdpTransport::Present;
-                state.relay_transport = crate::transport::PayloadPath::DirectOnly;
-                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
-                let members: Vec<EndpointId> = (1..=6).map(crate::testing::endpoint_id).collect();
+                state.relay_transport = PayloadPath::DirectOnly;
+                state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
+                let members: Vec<EndpointId> = (1..=6).map(testing::endpoint_id).collect();
                 for (index, id) in members.iter().enumerate() {
                     let address = EndpointAddr::new(*id)
                         .with_relay_url("https://relay.invalid".parse().expect("relay url"));
                     state
                         .peer_endpoints
-                        .insert(crate::testing::nick(&format!("member{index}")), address);
+                        .insert(testing::nick(&format!("member{index}")), address);
                 }
 
                 probe::retry_direct(&mut state, &context, false).await;
@@ -2769,13 +2772,13 @@ mod tests {
                 let epoch = offer.epoch();
                 let offering = tokio::spawn(async move {
                     let _offer = offer;
-                    std::future::pending::<()>().await;
+                    future::pending::<()>().await;
                 });
                 higher_admission.track(lower.id(), epoch, offering.abort_handle());
 
                 dial_signal::dial_signal_with(
                     &lower,
-                    &crate::lookup::address_book(&lower),
+                    &lookup::address_book(&lower),
                     higher.addr(),
                     &lower_hub,
                     quick(),
@@ -2841,7 +2844,7 @@ mod tests {
 
                 dial_signal::dial_signal_with(
                     &lower,
-                    &crate::lookup::address_book(&lower),
+                    &lookup::address_book(&lower),
                     higher.addr(),
                     &lower_hub,
                     quick(),
@@ -2850,7 +2853,7 @@ mod tests {
                 .await
                 .expect("the offer of the lower id is answered");
 
-                let outcome = tokio::time::timeout(Duration::from_secs(5), attached.recv())
+                let outcome = time::timeout(Duration::from_secs(5), attached.recv())
                     .await
                     .expect("the answerer reports the attach")
                     .expect("the sink stays open");
@@ -2877,9 +2880,9 @@ mod tests {
         use crate::transport::probe::DirectOutcome;
 
         let _guard = ::habilis_network_test_tracing::init();
-        let peer = crate::testing::endpoint_id(7);
+        let peer = testing::endpoint_id(7);
         let now = clock::Instant::now();
-        let mut state = crate::testing::fresh_state();
+        let mut state = testing::fresh_state();
         let answered = DirectOutcome {
             peer,
             direct: true,
@@ -2930,7 +2933,7 @@ mod tests {
 
                 let outcome = dial_signal::dial_signal_with(
                     &higher,
-                    &crate::lookup::address_book(&higher),
+                    &lookup::address_book(&higher),
                     lower.addr(),
                     &higher_hub,
                     quick(),
@@ -2955,7 +2958,7 @@ mod tests {
     #[test]
     fn an_offer_fallback_holds_the_timer_graft() {
         let _guard = ::habilis_network_test_tracing::init();
-        let mut state = crate::testing::fresh_state();
+        let mut state = testing::fresh_state();
         assert!(
             rendezvous::rendezvous_graftable(&state),
             "an IP-capable node grafts on its timer until it falls back"

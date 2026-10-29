@@ -41,7 +41,12 @@ mod tests {
         IceProfile, MESH_WEBRTC_SIGNAL_ALPN, SignalAdmission, WebRtcSignalAcceptor,
     };
 
+    use crate::lookup::EndpointError;
     use crate::transport::webrtc;
+    use crate::{lookup, testing};
+    use iroh::endpoint;
+    use std::time::{Duration, Duration as std_Duration};
+    use tokio::{time, time as tokio_time};
     fn id(seed: u8) -> EndpointId {
         SecretKey::from_bytes(&[seed; 32]).public()
     }
@@ -342,31 +347,31 @@ mod tests {
 
     /// The code that the gate closes a connection with when the dialer is not a
     /// neighbor.
-    fn closed_with(reason: &iroh::endpoint::ConnectionError) -> Option<u64> {
+    fn closed_with(reason: &endpoint::ConnectionError) -> Option<u64> {
         match reason {
-            iroh::endpoint::ConnectionError::ApplicationClosed(close) => {
+            endpoint::ConnectionError::ApplicationClosed(close) => {
                 Some(close.error_code.into_inner())
             }
-            iroh::endpoint::ConnectionError::VersionMismatch
-            | iroh::endpoint::ConnectionError::TransportError(_)
-            | iroh::endpoint::ConnectionError::ConnectionClosed(_)
-            | iroh::endpoint::ConnectionError::Reset
-            | iroh::endpoint::ConnectionError::TimedOut
-            | iroh::endpoint::ConnectionError::LocallyClosed
-            | iroh::endpoint::ConnectionError::CidsExhausted => None,
+            endpoint::ConnectionError::VersionMismatch
+            | endpoint::ConnectionError::TransportError(_)
+            | endpoint::ConnectionError::ConnectionClosed(_)
+            | endpoint::ConnectionError::Reset
+            | endpoint::ConnectionError::TimedOut
+            | endpoint::ConnectionError::LocallyClosed
+            | endpoint::ConnectionError::CidsExhausted => None,
         }
     }
 
     #[test]
     fn the_gate_refuses_a_signal_from_an_endpoint_that_is_not_a_neighbor() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let (logs, _log_guard) = crate::testing::LogCapture::start(tracing::Level::DEBUG);
+            let (logs, _log_guard) = testing::LogCapture::start(tracing::Level::DEBUG);
             let server = loopback_endpoint().await;
             let allowed = Allowed::default();
             let acceptor: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
-                crate::lookup::build_webrtc_handle(server.id()),
+                lookup::build_webrtc_handle(server.id()),
                 server.clone(),
-                crate::lookup::address_book(&server.clone()),
+                lookup::address_book(&server.clone()),
                 server.id(),
                 SignalAdmission::new(4),
                 IceProfile { host_only: true },
@@ -383,7 +388,7 @@ mod tests {
                 .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
                 .await
                 .expect("the connection opens");
-            let reason = tokio::time::timeout(std::time::Duration::from_secs(5), refused.closed())
+            let reason = tokio_time::timeout(std_Duration::from_secs(5), refused.closed())
                 .await
                 .expect("the gate closes the connection of a stranger");
             assert_eq!(closed_with(&reason), Some(9), "{reason:?}");
@@ -402,7 +407,7 @@ mod tests {
                 .await
                 .expect("the connection opens");
             assert!(
-                tokio::time::timeout(std::time::Duration::from_millis(700), accepted.closed())
+                tokio_time::timeout(std_Duration::from_millis(700), accepted.closed())
                     .await
                     .is_err(),
                 "a neighbor is not turned away"
@@ -419,9 +424,9 @@ mod tests {
             let server = loopback_endpoint().await;
             let allowed = Allowed::default();
             let acceptor: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
-                crate::lookup::build_webrtc_handle(server.id()),
+                lookup::build_webrtc_handle(server.id()),
                 server.clone(),
-                crate::lookup::address_book(&server.clone()),
+                lookup::address_book(&server.clone()),
                 server.id(),
                 SignalAdmission::new(4),
                 IceProfile { host_only: true },
@@ -433,8 +438,8 @@ mod tests {
                 )
                 .spawn();
             let client = loopback_endpoint().await;
-            let handle = crate::lookup::build_webrtc_handle(client.id());
-            let book = crate::lookup::address_book(&client);
+            let handle = lookup::build_webrtc_handle(client.id());
+            let book = lookup::address_book(&client);
 
             let error = webrtc::dial_signal::dial_signal(
                 &client,
@@ -446,18 +451,18 @@ mod tests {
             .await
             .expect_err("the gate turns a stranger away");
             assert!(
-                matches!(error, crate::lookup::EndpointError::NotANeighbor { .. }),
+                matches!(error, EndpointError::NotANeighbor { .. }),
                 "the refusal is read from the close code: {error:#}"
             );
             assert!(
-                !matches!(error, crate::lookup::EndpointError::CapRefused { .. }),
+                !matches!(error, EndpointError::CapRefused { .. }),
                 "a stranger is not a cap refusal: {error:#}"
             );
 
             // Once the client is a neighbor the same dial is not turned away as one.
             allowed.replace([client.id()].into_iter().collect());
-            if let Ok(Err(late_error)) = tokio::time::timeout(
-                std::time::Duration::from_secs(3),
+            if let Ok(Err(late_error)) = time::timeout(
+                Duration::from_secs(3),
                 webrtc::dial_signal::dial_signal(
                     &client,
                     &book,
@@ -469,10 +474,7 @@ mod tests {
             .await
             {
                 assert!(
-                    !matches!(
-                        late_error,
-                        crate::lookup::EndpointError::NotANeighbor { .. }
-                    ),
+                    !matches!(late_error, EndpointError::NotANeighbor { .. }),
                     "a neighbor is not turned away: {late_error:#}"
                 );
             }

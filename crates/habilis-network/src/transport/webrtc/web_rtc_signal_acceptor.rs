@@ -20,6 +20,9 @@ use crate::lookup::EndpointError;
 use super::close_code;
 use super::close_code::{CAP_REFUSED, EVICTED, SIGNAL_ABORTED, SIGNAL_FAILED};
 
+use crate::lookup;
+use iroh::endpoint::ConnectionError;
+use n0_future::{task, time};
 /// Register `remote`'s `WebRTC` transport address after a session attach.
 ///
 /// Load-bearing, not bookkeeping: an attached session is only *usable* once a
@@ -35,7 +38,7 @@ pub(crate) fn register_session_addr(book: &MemoryLookup, remote: EndpointId) {
             habilis_network_iroh_webrtc_transport::custom_addr(remote),
         )],
     );
-    crate::lookup::add_peer_addr(book, address);
+    lookup::add_peer_addr(book, address);
     tracing::debug!(target: LOG_TARGET, %remote, "registered the webrtc transport address");
 }
 
@@ -64,7 +67,7 @@ pub(crate) async fn exchange_envelopes(
     send.write_all(offer).await.context("send signal offer")?;
     send.finish().context("finish signal stream")?;
 
-    match n0_future::time::timeout(deadlines.exchange, recv.read_to_end(MAX_ENVELOPE_BYTES)).await {
+    match time::timeout(deadlines.exchange, recv.read_to_end(MAX_ENVELOPE_BYTES)).await {
         Ok(raw) => raw.context("read signal answer"),
         Err(_elapsed) => {
             // Close explicitly so the answerer wakes now instead of waiting out
@@ -83,7 +86,7 @@ pub(crate) async fn exchange_envelopes(
 pub(crate) fn refused_at_cap(connection: &Connection) -> bool {
     matches!(
         connection.close_reason(),
-        Some(iroh::endpoint::ConnectionError::ApplicationClosed(ref close))
+        Some(ConnectionError::ApplicationClosed(ref close))
             if [u64::from(CAP_REFUSED), u64::from(EVICTED)].contains(&close.error_code.into_inner())
     )
 }
@@ -93,7 +96,7 @@ pub(crate) fn refused_at_cap(connection: &Connection) -> bool {
 pub(crate) fn refused_not_a_neighbor(connection: &Connection) -> bool {
     matches!(
         connection.close_reason(),
-        Some(iroh::endpoint::ConnectionError::ApplicationClosed(ref close))
+        Some(ConnectionError::ApplicationClosed(ref close))
             if close.error_code.into_inner() == u64::from(close_code::NOT_A_NEIGHBOR)
     )
 }
@@ -263,11 +266,11 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
         // `JoinSet`, so shutdown cannot reach it and nothing bounds how long it
         // lives. The guard and the round deadline below are what replace those
         // two guarantees.
-        let task = n0_future::task::spawn(async move {
+        let task = task::spawn(async move {
             let _guard = guard;
             // Boxed: the answer future carries the whole sans-io str0m state,
             // large enough that clippy flags it on this task's stack.
-            match n0_future::time::timeout(
+            match time::timeout(
                 deadlines.round,
                 Box::pin(answer_one(
                     &connection,
@@ -291,7 +294,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
                     // offerer's nudge gives us none: iroh opens a new path only
                     // from the client side of a connection.
                     let nudging = endpoint.clone();
-                    n0_future::task::spawn(async move {
+                    task::spawn(async move {
                         nudge_acceptor::nudge_session(&nudging, remote).await;
                     });
                     tracing::debug!(target: LOG_TARGET, %remote, "webrtc session attached (answerer)");
@@ -345,11 +348,11 @@ pub(crate) async fn answer_one(
     // Bounded: a peer that connects and never opens a stream would otherwise
     // park this task forever, and its QUIC keep-alives mean the connection
     // never idles out on its own.
-    let (mut send, mut recv) = n0_future::time::timeout(deadlines.exchange, connection.accept_bi())
+    let (mut send, mut recv) = time::timeout(deadlines.exchange, connection.accept_bi())
         .await
         .context("timed out waiting for the signal stream")?
         .context("accept signal stream")?;
-    let raw = n0_future::time::timeout(deadlines.exchange, recv.read_to_end(MAX_ENVELOPE_BYTES))
+    let raw = time::timeout(deadlines.exchange, recv.read_to_end(MAX_ENVELOPE_BYTES))
         .await
         .context("timed out reading the signal offer")?
         .context("read signal offer")?;

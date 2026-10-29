@@ -13,6 +13,8 @@ use crate::daemon::state;
 use crate::lookup::EndpointError;
 use crate::transport::probe;
 
+use n0_future::task;
+use n0_future::time::Instant;
 /// What an offer is for, which decides what happens once its session attaches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Offer {
@@ -61,9 +63,9 @@ pub(crate) fn spawn_offer_round(
     let pool = state.unicast_pool.clone();
     let epoch = guard.epoch();
     let node = endpoint.id();
-    let task = n0_future::task::spawn(async move {
+    let task = task::spawn(async move {
         let _guard = guard;
-        let started = n0_future::time::Instant::now();
+        let started = Instant::now();
         tracing::debug!(target: LOG_TARGET, node = %node.fmt_short(), %peer, book = ?book.get_endpoint_info(peer), "offer round started");
         if let Err(error) = Box::pin(dial_signal(&endpoint, &book, address, &handle, ice)).await {
             if matches!(error, EndpointError::CapRefused { .. }) {

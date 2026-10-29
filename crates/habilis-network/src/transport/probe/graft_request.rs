@@ -5,6 +5,7 @@ use iroh::EndpointId;
 use crate::daemon::state::EventLoopState;
 use crate::util::clock::Instant;
 
+use crate::transport;
 /// How a graft asks for a link.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum GraftRequest {
@@ -55,7 +56,7 @@ pub(crate) fn graft_request(
         // A `Join` is not refused, so it ignores the backoff of the peer.
         GraftRequest::Join
     } else if paced && state.graft_backoff.is_blocked(&peer, now) {
-        tracing::debug!(target: crate::transport::LOG_TARGET, %peer, "graft skipped: the peer refused lately");
+        tracing::debug!(target: transport::LOG_TARGET, %peer, "graft skipped: the peer refused lately");
         GraftRequest::Skip
     } else {
         state.graft_backoff.asked(peer, now);

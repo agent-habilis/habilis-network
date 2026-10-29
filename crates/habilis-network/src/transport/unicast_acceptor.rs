@@ -18,6 +18,8 @@ use super::payload_path::{PROBE_DEADLINE, refuse_unless_direct};
 use super::webrtc::close_code::{IDLE, UNICAST_RELAY_REFUSED};
 use super::{LOG_TARGET, PayloadPath};
 
+use n0_future::time as n0future_time;
+use std::fmt;
 /// Per-frame read cap: one wire message plus gossip's envelope headroom (the
 /// same slack the size assertion reserves). Bounds allocation against a peer
 /// that opens a stream and never stops writing.
@@ -66,7 +68,7 @@ impl UnicastAcceptor {
 impl UnicastAcceptor {
     /// Forward one frame read outcome to the event loop. Split out of
     /// `accept` so the match arms aren't nested inside its `while let`.
-    fn handle_frame<Error: std::fmt::Display>(&self, result: Result<Vec<u8>, Error>) {
+    fn handle_frame<Error: fmt::Display>(&self, result: Result<Vec<u8>, Error>) {
         match result {
             Ok(bytes) => {
                 // Bounded, non-blocking: a flooding peer can't back-pressure
@@ -102,7 +104,7 @@ impl ProtocolHandler for UnicastAcceptor {
         // peer closes the connection (`accept_uni` errors), or nothing arrives
         // for the idle timeout.
         loop {
-            match n0_future::time::timeout(self.idle, connection.accept_uni()).await {
+            match n0future_time::timeout(self.idle, connection.accept_uni()).await {
                 Ok(Ok(mut recv)) => {
                     let admission = self.admission.as_ref();
                     let _busy = admission.map(|table| table.busy(connection.remote_id()));
@@ -129,7 +131,10 @@ mod tests {
 
     use super::super::UNICAST_ALPN;
     use super::{Bytes, DIRECT_IDLE_BACKSTOP, IDLE, PayloadPath, UnicastAcceptor, mpsc};
+    use crate::lookup;
     use iroh::endpoint::presets;
+    use std::time::Instant;
+    use tokio::{task, time, time as tokio_time};
     /// A server accepting unicast with the given idle timeout, and a client
     /// connected to it.
     async fn connected(
@@ -151,7 +156,7 @@ mod tests {
             )
             .spawn();
         let client = bind().await;
-        crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
+        lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
         let connection = client
             .connect(server.id(), UNICAST_ALPN)
             .await
@@ -161,8 +166,8 @@ mod tests {
 
     async fn advance_secs(seconds: u64) {
         for _ in 0..seconds {
-            tokio::time::advance(Duration::from_secs(1)).await;
-            tokio::task::yield_now().await;
+            tokio_time::advance(Duration::from_secs(1)).await;
+            task::yield_now().await;
         }
     }
 
@@ -170,12 +175,12 @@ mod tests {
     /// paused clock, but the close frame travels over real I/O, so a check right
     /// after `advance_secs` races it.
     async fn closed_soon(connection: &Connection) -> bool {
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         while connection.close_reason().is_none() {
             if started.elapsed() > Duration::from_secs(5) {
                 return false;
             }
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
         true
     }
@@ -194,7 +199,7 @@ mod tests {
     fn an_accepted_connection_that_gets_no_stream_is_closed_after_the_idle_timeout() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (connection, router, client, _frames) = connected(Duration::from_secs(8)).await;
-            tokio::time::pause();
+            tokio_time::pause();
 
             advance_secs(6).await;
             assert!(
@@ -210,7 +215,7 @@ mod tests {
                 connection.close_reason()
             );
 
-            tokio::time::resume();
+            tokio_time::resume();
             router.shutdown().await.expect("shutdown");
             client.close().await;
         });
@@ -220,7 +225,7 @@ mod tests {
     fn a_stream_restarts_the_accept_side_idle_timeout() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (connection, router, client, mut frames) = connected(Duration::from_secs(8)).await;
-            tokio::time::pause();
+            tokio_time::pause();
 
             advance_secs(5).await;
             let mut stream = connection.open_uni().await.expect("open a stream");
@@ -228,7 +233,7 @@ mod tests {
             stream.finish().expect("finish");
             // Real I/O carries the frame to the acceptor: yield until it lands.
             while frames.try_recv().is_err() {
-                tokio::task::yield_now().await;
+                task::yield_now().await;
             }
 
             advance_secs(5).await;
@@ -245,7 +250,7 @@ mod tests {
                 connection.close_reason()
             );
 
-            tokio::time::resume();
+            time::resume();
             router.shutdown().await.expect("shutdown");
             client.close().await;
         });

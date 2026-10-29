@@ -40,10 +40,16 @@ mod tests {
     use crate::daemon::state::DirectState;
     use crate::gossip::{antientropy, event};
     use crate::protocol::identity;
-    use crate::transport::payload_path;
+    use crate::transport::{PayloadPath, payload_path};
     use crate::util::{clock, tuning};
+    use crate::{lookup, protocol, transport};
     use iroh::endpoint::presets;
+    use iroh_gossip::net::Gossip;
+    use iroh_gossip::proto;
+    use std::net::{UdpSocket, UdpSocket as std_UdpSocket};
+    use std::time::{Duration, Duration as std_Duration, Instant as std_Instant};
     use tokio::sync::oneshot;
+    use tokio::{task, time, time as tokio_time};
     fn mesh() -> MeshId {
         MeshId::from("test")
     }
@@ -187,7 +193,7 @@ mod tests {
     fn on_a_payload_relay_the_cold_send_to_a_lane_peer_is_not_held() {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_a_lane_bob();
-        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
+        state.relay_transport = PayloadPath::RelayAllowed;
 
         assert_eq!(
             route(&directed_msg(), &state),
@@ -250,7 +256,7 @@ mod tests {
                 0,
                 "the receive path entered the inline-dial path itself"
             );
-            tokio::task::yield_now().await;
+            task::yield_now().await;
             assert_eq!(
                 state.unicast_pool.dial_attempts(),
                 1,
@@ -261,21 +267,21 @@ mod tests {
 
     /// A loopback endpoint with no relay, and a gossip sender on a peerless
     /// topic: the real pieces a directed send needs, and nothing reachable.
-    async fn loopback_node() -> (iroh::Endpoint, crate::transport::MeshSender) {
-        let alpns = vec![crate::transport::UNICAST_ALPN.to_vec()];
+    async fn loopback_node() -> (iroh::Endpoint, transport::MeshSender) {
+        let alpns = vec![transport::UNICAST_ALPN.to_vec()];
         let endpoint: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .alpns(alpns)
             .bind()
             .await
             .expect("bind a loopback endpoint");
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let gossip = Gossip::builder().spawn(endpoint.clone());
         let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
             .await
             .expect("subscribe to a peerless topic");
         let (gossip_sender, _receiver) = topic.split();
-        (endpoint, crate::transport::MeshSender::new(gossip_sender))
+        (endpoint, transport::MeshSender::new(gossip_sender))
     }
 
     /// A state that knows `bob` at `bob_addr`, with a proven direct path and a
@@ -283,9 +289,9 @@ mod tests {
     fn state_with_pool(endpoint: &iroh::Endpoint, bob_addr: iroh::EndpointAddr) -> EventLoopState {
         let mut state = fresh_state();
         state.meshed = true;
-        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+        state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
         state.direct.insert(bob_addr.id, DirectState::Direct);
-        crate::lookup::add_peer_addr(&crate::lookup::address_book(endpoint), bob_addr.clone());
+        lookup::add_peer_addr(&lookup::address_book(endpoint), bob_addr.clone());
         state.peer_endpoints.insert(nick("bob"), bob_addr);
         state
     }
@@ -295,11 +301,11 @@ mod tests {
     async fn state_with_silent_bob() -> (
         EventLoopState,
         iroh::Endpoint,
-        crate::transport::MeshSender,
-        std::net::UdpSocket,
+        transport::MeshSender,
+        std_UdpSocket,
     ) {
         let (endpoint, sender) = loopback_node().await;
-        let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
+        let silent = UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
         let bob = iroh::SecretKey::generate().public();
         let bob_addr = iroh::EndpointAddr::from_parts(
             bob,
@@ -325,12 +331,12 @@ mod tests {
             let message = directed_msg();
             let bytes = message.serialize().expect("serialize");
 
-            let started = std::time::Instant::now();
+            let started = std_Instant::now();
             let sent = super::deliver_in_background(&message, bytes, &state, &sender).await;
             let elapsed = started.elapsed();
 
             assert!(
-                elapsed < std::time::Duration::from_millis(500),
+                elapsed < std_Duration::from_millis(500),
                 "the send held its caller for {elapsed:?}; on the event loop that is the whole node"
             );
             assert!(sent, "a known peer gets a background dial");
@@ -339,7 +345,7 @@ mod tests {
                 0,
                 "the caller entered the inline-dial path itself"
             );
-            tokio::task::yield_now().await;
+            task::yield_now().await;
             assert_eq!(
                 state.unicast_pool.dial_attempts(),
                 1,
@@ -366,7 +372,7 @@ mod tests {
                 !sent,
                 "the cooldown refuses the dial, so nothing was started"
             );
-            tokio::task::yield_now().await;
+            task::yield_now().await;
             assert_eq!(
                 state.unicast_pool.dial_attempts(),
                 0,
@@ -388,9 +394,9 @@ mod tests {
 
             let first =
                 super::deliver_in_background(&message, bytes.clone(), &state, &sender).await;
-            tokio::task::yield_now().await;
+            task::yield_now().await;
             let second = super::deliver_in_background(&message, bytes, &state, &sender).await;
-            tokio::task::yield_now().await;
+            task::yield_now().await;
 
             assert!(first, "the first send starts the dial");
             assert!(second, "the second send waits for the dial in flight");
@@ -416,7 +422,7 @@ mod tests {
 
             let sent = super::deliver_in_background(&message, bytes.clone(), &state, &sender).await;
             let replied = super::send_best_effort(bob, bytes, &state).await;
-            tokio::task::yield_now().await;
+            task::yield_now().await;
 
             assert!(sent, "the background send starts the dial");
             assert!(replied, "the reply waits for the dial in flight");
@@ -442,7 +448,7 @@ mod tests {
             let sent = super::deliver_in_background(&message, bytes, &state, &sender).await;
 
             assert!(!sent, "bob has no known endpoint");
-            tokio::task::yield_now().await;
+            task::yield_now().await;
             assert_eq!(
                 state.unicast_pool.dial_attempts(),
                 0,
@@ -476,7 +482,7 @@ mod tests {
                 .await
                 .expect("warm the pool");
             assert!(
-                payload_path::wait_direct(&connection, std::time::Duration::from_secs(5)).await,
+                payload_path::wait_direct(&connection, std_Duration::from_secs(5)).await,
                 "loopback selects a direct path"
             );
             let message = directed_msg();
@@ -486,7 +492,7 @@ mod tests {
 
             assert!(sent, "a warm peer is sent to");
             let (got, returned_endpoint, _conn) =
-                tokio::time::timeout(std::time::Duration::from_secs(5), received)
+                tokio_time::timeout(std_Duration::from_secs(5), received)
                     .await
                     .expect("bob reads the frame in time")
                     .expect("reader task");
@@ -626,13 +632,13 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
-        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
+        state.relay_transport = PayloadPath::RelayAllowed;
         assert_eq!(
             route(&directed_msg(), &state),
             Route::Unicast(bob),
             "a directed frame is held while the relay is lookup-only and no direct path is proven"
         );
-        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
+        state.relay_transport = PayloadPath::DirectOnly;
         for unproven in [
             None,
             Some(DirectState::Pending),
@@ -694,13 +700,13 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
-        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
+        state.relay_transport = PayloadPath::RelayAllowed;
         assert_eq!(
             lane_for(&nick("bob"), &state),
             Lane::Unicast,
             "a peer on a lookup-only relay starts on the unicast lane"
         );
-        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
+        state.relay_transport = PayloadPath::DirectOnly;
         assert_eq!(
             lane_for(&nick("bob"), &state),
             Lane::RelayOnly,
@@ -733,8 +739,8 @@ mod tests {
         let bob = endpoint_id(1);
         let bob_key = "bb".repeat(32);
         let carol_key = "cc".repeat(32);
-        let bob_signer = crate::protocol::AuthorKey::decode_hex(&bob_key).expect("a key");
-        let carol_signer = crate::protocol::AuthorKey::decode_hex(&carol_key).expect("a key");
+        let bob_signer = protocol::AuthorKey::decode_hex(&bob_key).expect("a key");
+        let carol_signer = protocol::AuthorKey::decode_hex(&carol_key).expect("a key");
         let linked = || {
             let mut state = fresh_state();
             prove(&mut state, &bob_key, bob);
@@ -779,7 +785,7 @@ mod tests {
     /// Record, as a verified `PeerInfo` proof would, that the signing key
     /// `pubkey` (hex) owns `endpoint`.
     fn prove(state: &mut EventLoopState, pubkey: &str, endpoint: EndpointId) {
-        let signer = crate::protocol::AuthorKey::decode_hex(pubkey).expect("a 32-byte key");
+        let signer = protocol::AuthorKey::decode_hex(pubkey).expect("a 32-byte key");
         let linked = state.linked_endpoints.clone();
         state.proven_endpoints.insert(signer, endpoint, &linked);
     }
@@ -795,11 +801,11 @@ mod tests {
     /// answer tests live here, not in `antientropy`, for the loopback helpers.
     struct Net {
         endpoint: iroh::Endpoint,
-        sender: crate::transport::MeshSender,
+        sender: transport::MeshSender,
         mesh: MeshId,
         identity: Identity,
-        our_pubkey: crate::protocol::AuthorKey,
-        author: crate::protocol::Nickname,
+        our_pubkey: protocol::AuthorKey,
+        author: protocol::Nickname,
         sink: event::SilentSink,
     }
 
@@ -873,7 +879,7 @@ mod tests {
     /// `bob`'s digest on `channel`, advertising `heads`, signed by `asker`.
     fn digest(
         mesh: &MeshId,
-        channel: crate::protocol::Channel,
+        channel: protocol::Channel,
         heads: &serde_json::Value,
         asker: &Identity,
     ) -> Verified {
@@ -926,7 +932,7 @@ mod tests {
                 "all three answers to the linked neighbor go point to point"
             );
             let (got, returned_endpoint, _conn) =
-                tokio::time::timeout(std::time::Duration::from_secs(5), received)
+                tokio_time::timeout(std_Duration::from_secs(5), received)
                     .await
                     .expect("bob reads the answer in time")
                     .expect("reader task");
@@ -1192,7 +1198,7 @@ mod tests {
                     .await,
                 "a partial answer does not ask the round peer again at once"
             );
-            tokio::time::timeout(std::time::Duration::from_secs(5), connected_rx)
+            tokio_time::timeout(std_Duration::from_secs(5), connected_rx)
                 .await
                 .expect("the dial to bob completes")
                 .expect("bob's task reports the connection");
@@ -1219,7 +1225,7 @@ mod tests {
                 "a full answer landed since the ask, so we ask again at once"
             );
             net.endpoint.close().await;
-            tokio::time::timeout(std::time::Duration::from_secs(5), bob_task)
+            tokio_time::timeout(std_Duration::from_secs(5), bob_task)
                 .await
                 .expect("bob sees the connection close")
                 .expect("bob task");
@@ -1257,10 +1263,8 @@ mod tests {
                 "handed to the pool as a point-to-point batch"
             );
 
-            tokio::time::sleep(
-                tuning::FAST_ROUND_MIN_INTERVAL + std::time::Duration::from_millis(50),
-            )
-            .await;
+            tokio_time::sleep(tuning::FAST_ROUND_MIN_INTERVAL + std_Duration::from_millis(50))
+                .await;
             let again =
                 antientropy::handle_state_digest(Channel::State, &behind, &mut state, &context)
                     .await;
@@ -1356,7 +1360,7 @@ mod tests {
                 .await
                 .expect("warm the pool");
             assert!(
-                payload_path::wait_direct(&connection, std::time::Duration::from_secs(5)).await,
+                payload_path::wait_direct(&connection, std_Duration::from_secs(5)).await,
                 "loopback selects a direct path"
             );
             // Two batches of signed frames, each frame with its own id, so the reader sees four distinct
@@ -1380,7 +1384,7 @@ mod tests {
             assert!(first, "the first batch starts");
             assert!(second, "the second batch to the same warm peer starts too");
             let (mut got, returned_endpoint, _conn) =
-                tokio::time::timeout(std::time::Duration::from_secs(5), received)
+                tokio_time::timeout(std_Duration::from_secs(5), received)
                     .await
                     .expect("bob reads both batches in time")
                     .expect("reader task");
@@ -1404,7 +1408,7 @@ mod tests {
     fn read_frames(
         bob_endpoint: iroh::Endpoint,
         count: usize,
-    ) -> tokio::task::JoinHandle<(Vec<Vec<u8>>, iroh::Endpoint)> {
+    ) -> task::JoinHandle<(Vec<Vec<u8>>, iroh::Endpoint)> {
         tokio::spawn(async move {
             let connection = bob_endpoint
                 .accept()
@@ -1441,7 +1445,7 @@ mod tests {
                 .await;
 
             let (got, returned_endpoint) =
-                tokio::time::timeout(std::time::Duration::from_secs(5), received)
+                tokio_time::timeout(std_Duration::from_secs(5), received)
                     .await
                     .expect("bob reads the answer in time")
                     .expect("reader task");
@@ -1520,11 +1524,10 @@ mod tests {
             )
             .await;
             assert!(state.fast_rounds.active(Channel::State, now), "asked bob");
-            let (got, returned_endpoint) =
-                tokio::time::timeout(std::time::Duration::from_secs(5), received)
-                    .await
-                    .expect("bob reads the ask in time")
-                    .expect("reader task");
+            let (got, returned_endpoint) = time::timeout(Duration::from_secs(5), received)
+                .await
+                .expect("bob reads the ask in time")
+                .expect("reader task");
             let ask = Message::parse(&got[0]).expect("the ask parses");
             assert_eq!(
                 ask.kind,
@@ -1549,10 +1552,12 @@ mod chain_tests {
 
     use super::SendError;
 
+    use std::io;
+    use std::io::ErrorKind;
     #[test]
     fn an_internal_cause_keeps_its_chain() {
         let _guard = ::habilis_network_test_tracing::init();
-        let io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
+        let io = io::Error::new(ErrorKind::AddrInUse, "Address already in use");
         let cause = anyhow::Error::new(io).context("bind the endpoint");
         let error = anyhow::Error::new(SendError::internal(cause));
         let text = format!("{error:#}");
@@ -1569,11 +1574,13 @@ mod leave_tests {
     use super::SendError;
     use crate::daemon::event_loop::EventLoopError;
 
+    use std::io;
+    use std::io::ErrorKind;
     /// A leave that fails because the loop ended with an error keeps that error's text.
     #[test]
     fn a_leave_failure_keeps_the_event_loop_error() {
         let _guard = ::habilis_network_test_tracing::init();
-        let io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
+        let io = io::Error::new(ErrorKind::AddrInUse, "Address already in use");
         let error = SendError::EventLoop(EventLoopError::Internal(Box::new(io)));
         let text = format!("{:#}", anyhow::Error::new(error));
         assert!(text.starts_with("the mesh event loop failed"), "{text}");

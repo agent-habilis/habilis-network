@@ -17,6 +17,8 @@ use crate::util::clock;
 
 use crate::transport::{Delivered, Lane, SendError};
 
+use crate::{protocol, transport};
+use n0_future::task;
 /// Route one already-signed, already-serialized message. `bytes` MUST be
 /// `msg.serialize()` — the same wire form gossip uses.
 ///
@@ -160,7 +162,7 @@ pub async fn deliver_in_background(
 /// holder that hears a digest answers it: the asker's link count bounds how
 /// many answers reach its unicast inbox. `None` means answer on gossip.
 pub(crate) fn unicast_answer_target(
-    signer: &crate::protocol::AuthorKey,
+    signer: &protocol::AuthorKey,
     state: &EventLoopState,
 ) -> Option<EndpointId> {
     let eid = state
@@ -226,7 +228,7 @@ fn directly_meshed(nick: &Nickname, state: &EventLoopState) -> bool {
 async fn send_unicast(eid: EndpointId, bytes: WireFrame, pool: &UnicastPool) -> Result<Delivered> {
     match pool.send_if_warm(eid, bytes.clone().into_bytes()).await {
         WarmSend::Sent => Ok(Delivered::Done),
-        WarmSend::Refused => Err(anyhow::anyhow!("{}", crate::transport::RELAY_REFUSED)),
+        WarmSend::Refused => Err(anyhow::anyhow!("{}", transport::RELAY_REFUSED)),
         WarmSend::Cold => {
             if pool.is_cooling(eid).await {
                 return Err(anyhow::anyhow!("{COOLDOWN_REFUSED}")
@@ -237,7 +239,7 @@ async fn send_unicast(eid: EndpointId, bytes: WireFrame, pool: &UnicastPool) -> 
             let registration = pool.register_dial(eid);
             let (outcome_tx, outcome) = oneshot::channel();
             let pool = pool.clone();
-            n0_future::task::spawn(async move {
+            task::spawn(async move {
                 let sent = pool
                     .send_registered(registration, eid, bytes.into_bytes())
                     .await

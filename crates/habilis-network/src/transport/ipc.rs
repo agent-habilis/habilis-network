@@ -21,7 +21,11 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::gossip::event;
+    use crate::util;
     use crate::util::tuning;
+    use std::time::Duration;
+    use std::{path, process, sync};
+    use tokio::time;
     /// A minimal mesh-addressed command standing in for the app's real
     /// `IpcCommand` (which lives app-side): exercises the engine's generic
     /// socket framing without naming any application type.
@@ -95,8 +99,8 @@ mod tests {
 
     /// A base of this suite's own, so a test that binds a real socket can never
     /// collide with (or be found by) a daemon running under a product's base.
-    fn test_base() -> std::path::PathBuf {
-        crate::util::runtime_base("habilis-network-ipc-test")
+    fn test_base() -> path::PathBuf {
+        util::runtime_base("habilis-network-ipc-test")
     }
 
     #[test]
@@ -114,7 +118,7 @@ mod tests {
             "the socket path ends with the nickname socket name"
         );
         assert!(
-            path.contains(&crate::util::mesh_prefix(mesh.as_str())),
+            path.contains(&util::mesh_prefix(mesh.as_str())),
             "the socket path carries the mesh prefix"
         );
     }
@@ -130,6 +134,7 @@ mod tests {
         use crate::protocol::MeshId;
         use crate::transport::ipc::json_reply;
 
+        use crate::proptest_support;
         fn arb_ascii_body() -> impl Strategy<Value = String> {
             arb_vec(0x20u8..0x7Eu8, 0..200).prop_map(|bytes| String::from_utf8(bytes).unwrap())
         }
@@ -139,7 +144,7 @@ mod tests {
         }
 
         proptest! {
-            #![proptest_config(crate::proptest_support::config())]
+            #![proptest_config(proptest_support::config())]
             // ── JSON response validity ────────────────────────────
 
             #[test]
@@ -219,7 +224,7 @@ mod tests {
     fn ipc_listen_and_send_msg() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             // Base58-encode the pid so the mesh id passes strict charset validation.
-            let pid_b58 = bs58::encode(std::process::id().to_le_bytes()).into_string();
+            let pid_b58 = bs58::encode(process::id().to_le_bytes()).into_string();
             let mesh = MeshId::from(format!("ipctest{pid_b58}").as_str());
             let nickname = Nickname::from("test-nick");
 
@@ -232,7 +237,7 @@ mod tests {
                 listener,
                 tx,
                 // trait object: the setup takes the silent sink as a shared handle
-                std::sync::Arc::new(event::SilentSink),
+                sync::Arc::new(event::SilentSink),
             ));
 
             // Spawn a handler that responds to messages
@@ -299,7 +304,7 @@ mod tests {
             use interprocess::local_socket::{GenericFilePath, ToFsName};
             use tokio::io::AsyncReadExt;
 
-            let pid_b58 = bs58::encode(std::process::id().to_le_bytes()).into_string();
+            let pid_b58 = bs58::encode(process::id().to_le_bytes()).into_string();
             let mesh = MeshId::from(format!("ipcquiet{pid_b58}").as_str());
             let nickname = Nickname::from("idle-nick");
             let (tx, rx) = mpsc::channel::<IpcMessage<TestCommand>>(8);
@@ -308,7 +313,7 @@ mod tests {
                 listener,
                 tx,
                 // trait object: the setup takes the silent sink as a shared handle
-                std::sync::Arc::new(event::SilentSink),
+                sync::Arc::new(event::SilentSink),
             ));
             // Echo handler so a healthy command still round-trips while the
             // idle connection is parked.
@@ -328,8 +333,8 @@ mod tests {
 
             // The parked connection is closed (EOF) at the deadline, with margin.
             let mut sink = Vec::new();
-            let read = tokio::time::timeout(
-                tuning::IPC_IO_TIMEOUT + std::time::Duration::from_secs(5),
+            let read = time::timeout(
+                tuning::IPC_IO_TIMEOUT + Duration::from_secs(5),
                 idle.read_to_end(&mut sink),
             )
             .await;
@@ -349,10 +354,12 @@ mod chain_tests {
 
     use super::IpcError;
 
+    use std::io;
+    use std::io::ErrorKind;
     #[test]
     fn an_internal_cause_keeps_its_chain() {
         let _guard = ::habilis_network_test_tracing::init();
-        let io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
+        let io = io::Error::new(ErrorKind::AddrInUse, "Address already in use");
         let cause = anyhow::Error::new(io).context("bind the endpoint");
         let error = anyhow::Error::new(IpcError::internal(cause));
         let text = format!("{error:#}");

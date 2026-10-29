@@ -2,6 +2,7 @@
 
 use super::consts::{SIGNAL_EXCHANGE_DEADLINE, SIGNAL_ROUND_DEADLINE};
 
+use std::time;
 /// The deadlines one round runs under.
 ///
 /// Injectable so tests need not wait 45 real seconds. A `util::tuning` knob
@@ -15,9 +16,9 @@ use super::consts::{SIGNAL_EXCHANGE_DEADLINE, SIGNAL_ROUND_DEADLINE};
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SignalDeadlines {
     /// Bound on each wait for the peer's envelope.
-    pub(crate) exchange: std::time::Duration,
+    pub(crate) exchange: time::Duration,
     /// Bound on the whole round, both roles.
-    pub(crate) round: std::time::Duration,
+    pub(crate) round: time::Duration,
 }
 
 impl SignalDeadlines {

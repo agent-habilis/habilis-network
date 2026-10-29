@@ -11,6 +11,7 @@ use crate::transport::LOG_TARGET;
 use crate::daemon::state;
 use crate::transport::probe;
 
+use crate::gossip;
 /// Whether a pair needs the lane: **either** end lacking IP is enough. The
 /// remote is judged by its advertised address, this node by what it knows
 /// about itself.
@@ -111,7 +112,7 @@ pub(crate) async fn detach_sessions_under_udp(
             && state.meshed
             && !state.pending_outbound.is_empty()
         {
-            crate::gossip::flush_pending(state, context, "direct path back").await;
+            gossip::flush_pending(state, context, "direct path back").await;
         }
     }
 }

@@ -22,9 +22,14 @@ mod tests {
     use super::timeouts::DIAL_FAILURE_COOLDOWN;
     use crate::util::cooldown::Cooldown;
 
+    use crate::lookup;
+    use crate::transport::PayloadPath;
     use crate::util::tuning;
-    use iroh::endpoint::presets;
+    use iroh::endpoint::{ConnectionError, presets};
+    use iroh::{endpoint, protocol};
+    use std::{mem, net};
     use tokio::sync::mpsc;
+    use tokio::{runtime, task, time};
     #[test]
     fn a_fresh_failure_puts_the_endpoint_on_cooldown() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -97,7 +102,7 @@ mod tests {
                     .accept(super::super::UNICAST_ALPN, Hold)
                     .spawn();
                 let client = bind().await;
-                crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
+                lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
                 let pool = super::UnicastPool::new(client.clone(), false);
 
                 assert!(!pool.selected_is_ip(server.id()), "nothing pooled yet");
@@ -108,7 +113,7 @@ mod tests {
                         started.elapsed() < Duration::from_secs(10),
                         "udp never selected"
                     );
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    time::sleep(Duration::from_millis(50)).await;
                 }
                 let held = pool.inner.conns.lock().await;
                 assert!(
@@ -130,7 +135,7 @@ mod tests {
     ) -> (
         super::UnicastPool,
         iroh::EndpointId,
-        iroh::protocol::Router,
+        protocol::Router,
         iroh::Endpoint,
     ) {
         use iroh::endpoint::Connection;
@@ -156,7 +161,7 @@ mod tests {
             .accept(super::super::UNICAST_ALPN, Hold)
             .spawn();
         let client = bind().await;
-        crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
+        lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
         let pool = super::UnicastPool::with_idle(client.clone(), false, idle);
         (pool, server.id(), router, client)
     }
@@ -165,16 +170,16 @@ mod tests {
     /// in order with the connection's own.
     async fn advance_secs(seconds: u64) {
         for _ in 0..seconds {
-            tokio::time::advance(Duration::from_secs(1)).await;
-            tokio::task::yield_now().await;
+            time::advance(Duration::from_secs(1)).await;
+            task::yield_now().await;
         }
     }
 
     /// Closed by this side, not timed out by QUIC and not closed by the peer.
-    fn closed_as_idle(connection: &iroh::endpoint::Connection) -> bool {
+    fn closed_as_idle(connection: &endpoint::Connection) -> bool {
         matches!(
             connection.close_reason(),
-            Some(iroh::endpoint::ConnectionError::LocallyClosed)
+            Some(ConnectionError::LocallyClosed)
         )
     }
 
@@ -183,7 +188,7 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (pool, server, router, client) = pool_with_idle(Duration::from_secs(8)).await;
             let connection = pool.warm_or_dial(server).await.expect("dial");
-            tokio::time::pause();
+            time::pause();
 
             advance_secs(6).await;
             assert!(
@@ -201,7 +206,7 @@ mod tests {
                 "and is closed, not just dropped"
             );
 
-            tokio::time::resume();
+            time::resume();
             pool.warm_or_dial(server).await.expect("a send dials again");
             router.shutdown().await.expect("shutdown");
             client.close().await;
@@ -213,7 +218,7 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (pool, server, router, client) = pool_with_idle(Duration::from_secs(8)).await;
             let connection = pool.warm_or_dial(server).await.expect("dial");
-            tokio::time::pause();
+            time::pause();
 
             advance_secs(5).await;
             assert!(
@@ -229,7 +234,7 @@ mod tests {
             advance_secs(7).await;
             assert!(closed_as_idle(&connection), "then it idles out as well");
 
-            tokio::time::resume();
+            time::resume();
             router.shutdown().await.expect("shutdown");
             client.close().await;
         });
@@ -243,7 +248,7 @@ mod tests {
     ) -> (
         super::UnicastPool,
         iroh::EndpointId,
-        iroh::protocol::Router,
+        protocol::Router,
         iroh::Endpoint,
     ) {
         use iroh::endpoint::Connection;
@@ -269,7 +274,7 @@ mod tests {
             .accept(super::super::UNICAST_ALPN, Hold)
             .spawn();
         let client = bind().await;
-        crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
+        lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
         let pool = super::UnicastPool::with_timeouts(client.clone(), false, idle, probe_hold);
         (pool, server.id(), router, client)
     }
@@ -288,7 +293,7 @@ mod tests {
                 "a probe is not a send"
             );
             pool.probe_done(server).await;
-            tokio::time::pause();
+            time::pause();
 
             advance_secs(6).await;
             assert!(
@@ -305,10 +310,10 @@ mod tests {
                 "and is closed, not just dropped"
             );
 
-            tokio::time::resume();
+            time::resume();
             let probed = pool.probe_connection(server).await.expect("probe again");
             pool.probe_done(server).await;
-            tokio::time::pause();
+            time::pause();
             advance_secs(5).await;
             assert!(
                 pool.warm_or_dial(server).await.is_ok(),
@@ -321,7 +326,7 @@ mod tests {
                 "a used connection follows the idle timeout, not the hold"
             );
 
-            tokio::time::resume();
+            time::resume();
             router.shutdown().await.expect("shutdown");
             client.close().await;
         });
@@ -335,17 +340,17 @@ mod tests {
         // The endpoint lives on a runtime of its own, so that dropping the runtime of the dial
         // leaves the endpoint a runtime to close on.
         let _guard = ::habilis_network_test_tracing::init();
-        let endpoint_runtime = tokio::runtime::Runtime::new().expect("an endpoint runtime");
+        let endpoint_runtime = runtime::Runtime::new().expect("an endpoint runtime");
         let endpoint = endpoint_runtime.block_on(async {
             let builder =
                 iroh::Endpoint::builder(presets::Minimal).relay_mode(iroh::RelayMode::Disabled);
             builder.bind().await.expect("bind a loopback endpoint")
         });
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("a runtime");
-        let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
+        let silent = net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
         let bob = iroh::SecretKey::generate().public();
         let pool = runtime.block_on(async {
             let bob_addr = iroh::EndpointAddr::from_parts(
@@ -354,14 +359,14 @@ mod tests {
                     silent.local_addr().expect("silent addr"),
                 )],
             );
-            crate::lookup::add_peer_addr(&crate::lookup::address_book(&endpoint), bob_addr);
+            lookup::add_peer_addr(&lookup::address_book(&endpoint), bob_addr);
             let pool = super::UnicastPool::new(endpoint.clone(), false);
             assert!(
                 pool.dial_and_send_in_background(bob, bytes::Bytes::new())
                     .await,
                 "a background send is accepted after the dropped dial"
             );
-            tokio::task::yield_now().await;
+            task::yield_now().await;
             pool
         });
 
@@ -374,14 +379,14 @@ mod tests {
         // the endpoint logs a WARN of the network monitor. So when the close does not end, the
         // endpoint and its runtime stay as they are until the process ends.
         let closed = endpoint_runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), endpoint.close())
+            time::timeout(Duration::from_secs(5), endpoint.close())
                 .await
                 .is_ok()
         });
         if !closed {
-            std::mem::forget(pool);
-            std::mem::forget(endpoint);
-            std::mem::forget(endpoint_runtime);
+            mem::forget(pool);
+            mem::forget(endpoint);
+            mem::forget(endpoint_runtime);
         }
         assert!(
             !still_in_flight,
@@ -394,7 +399,7 @@ mod tests {
     async fn pool_with_collecting_server() -> (
         super::UnicastPool,
         iroh::EndpointId,
-        iroh::protocol::Router,
+        protocol::Router,
         iroh::Endpoint,
         mpsc::UnboundedReceiver<Vec<u8>>,
     ) {
@@ -426,7 +431,7 @@ mod tests {
             .accept(super::super::UNICAST_ALPN, Collect(frames_tx))
             .spawn();
         let client = bind().await;
-        crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
+        lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
         let pool = super::UnicastPool::new(client.clone(), false);
         (pool, server.id(), router, client, frames)
     }
@@ -437,9 +442,9 @@ mod tests {
         super::UnicastPool,
         iroh::EndpointId,
         iroh::Endpoint,
-        std::net::UdpSocket,
+        net::UdpSocket,
     ) {
-        let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
+        let silent = net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
         let bob = iroh::SecretKey::generate().public();
         let endpoint = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
@@ -452,13 +457,13 @@ mod tests {
                 silent.local_addr().expect("silent addr"),
             )],
         );
-        crate::lookup::add_peer_addr(&crate::lookup::address_book(&endpoint), bob_addr);
+        lookup::add_peer_addr(&lookup::address_book(&endpoint), bob_addr);
         let pool = super::UnicastPool::new(endpoint.clone(), false);
         (pool, bob, endpoint, silent)
     }
 
     async fn next_frame(frames: &mut mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<u8> {
-        tokio::time::timeout(Duration::from_secs(10), frames.recv())
+        time::timeout(Duration::from_secs(10), frames.recv())
             .await
             .expect("a frame arrives in time")
             .expect("the server keeps its channel")
@@ -582,17 +587,17 @@ mod tests {
                     started.elapsed() < Duration::from_secs(2),
                     "the dialer never registered"
                 );
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                time::sleep(Duration::from_millis(5)).await;
             }
             let waiter = tokio::spawn({
                 let pool = pool.clone();
                 async move { pool.dial_or_warm_send(bob, bytes::Bytes::new()).await }
             });
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            time::sleep(Duration::from_millis(100)).await;
 
             dialer.abort();
 
-            let outcome = tokio::time::timeout(Duration::from_secs(1), waiter)
+            let outcome = time::timeout(Duration::from_secs(1), waiter)
                 .await
                 .expect("the waiter wakes long before the dial times out")
                 .expect("the waiter task ends");
@@ -714,7 +719,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(
                         super::super::UNICAST_ALPN,
-                        UnicastAcceptor::new(tx, crate::transport::PayloadPath::RelayAllowed),
+                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
                     )
                     .spawn();
                 let admission = SignalAdmission::new(8);
@@ -725,7 +730,7 @@ mod tests {
                     .bind()
                     .await
                     .expect("bind a loopback endpoint");
-                crate::lookup::add_peer_addr(&crate::lookup::address_book(&node), server.addr());
+                lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
                 let pool = super::UnicastPool::new(node.clone(), true);
                 pool.set_admission(admission.clone());
 
@@ -735,7 +740,7 @@ mod tests {
                 let first = admission
                     .last_use(server.id())
                     .expect("the ledger holds it");
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                time::sleep(Duration::from_millis(300)).await;
                 pool.dial_and_send(server.id(), bytes::Bytes::from_static(b"two"))
                     .await
                     .expect("the second send");
@@ -772,7 +777,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(
                         super::super::UNICAST_ALPN,
-                        UnicastAcceptor::new(tx, crate::transport::PayloadPath::RelayAllowed),
+                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
                     )
                     .spawn();
                 let admission = SignalAdmission::new(8);
@@ -783,7 +788,7 @@ mod tests {
                     .bind()
                     .await
                     .expect("bind a loopback endpoint");
-                crate::lookup::add_peer_addr(&crate::lookup::address_book(&node), server.addr());
+                lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
                 let pool = super::UnicastPool::new(node.clone(), true);
                 pool.set_admission(admission.clone());
                 admission.note_evicted(server.id());
@@ -832,13 +837,13 @@ mod tests {
                 impl ProtocolHandler for SlowReader {
                     async fn accept(
                         &self,
-                        connection: iroh::endpoint::Connection,
+                        connection: endpoint::Connection,
                     ) -> Result<(), AcceptError> {
                         let mut stream = connection
                             .accept_uni()
                             .await
                             .map_err(AcceptError::from_err)?;
-                        tokio::time::sleep(Duration::from_millis(800)).await;
+                        time::sleep(Duration::from_millis(800)).await;
                         let _ = stream.read_to_end(1 << 20).await;
                         connection.closed().await;
                         Ok(())
@@ -861,7 +866,7 @@ mod tests {
                     .bind()
                     .await
                     .expect("bind a loopback endpoint");
-                crate::lookup::add_peer_addr(&crate::lookup::address_book(&node), server.addr());
+                lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
                 let pool = super::UnicastPool::new(node.clone(), true);
                 pool.set_admission(admission.clone());
 
@@ -879,7 +884,7 @@ mod tests {
                         idle = true;
                         break;
                     }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    time::sleep(Duration::from_millis(50)).await;
                 }
                 assert!(idle, "the mark ends once the peer has read the frame");
 

@@ -18,6 +18,8 @@ use super::payload_path::{
     GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, refuse_unless_direct, selected_is_direct,
 };
 
+use n0_future::{task, time as n0future_time};
+use std::future;
 use tokio::sync::mpsc;
 #[derive(Debug, Clone)]
 pub(crate) struct DirectOnlyGossip {
@@ -124,7 +126,7 @@ pub(super) fn watch_relay_policy(
     use futures_util::StreamExt as _;
     let weak = gossip_conn.weak_handle();
     let mut events = gossip_conn.path_events();
-    n0_future::task::spawn(async move {
+    task::spawn(async move {
         let mut on_relay_since: Option<Instant> = None;
         loop {
             let Some(connection) = weak.upgrade() else {
@@ -167,8 +169,8 @@ pub(super) fn watch_relay_policy(
                 }
                 () = async {
                     match wait {
-                        Some(wait) => n0_future::time::sleep(wait).await,
-                        None => std::future::pending().await,
+                        Some(wait) => n0future_time::sleep(wait).await,
+                        None => future::pending().await,
                     }
                 } => {}
             }
@@ -189,11 +191,15 @@ mod watcher_tests {
     use iroh::endpoint::Connection;
     use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 
+    use crate::lookup;
     #[cfg(feature = "iroh-test-utils")]
     use crate::lookup::test_relay;
     use iroh::endpoint::presets;
     #[cfg(feature = "iroh-test-utils")]
     use tokio::sync::mpsc;
+    #[cfg(feature = "iroh-test-utils")]
+    use tokio::time;
+    use tokio::time as tokio_time;
     /// The watcher must not keep a link open that gossip has dropped. A handler
     /// that starts the watch and returns drops the last strong handle, so the
     /// connection must close, and the dialer sees it close. A watcher that held
@@ -226,11 +232,11 @@ mod watcher_tests {
                     .accept(ALPN, WatchAndDrop)
                     .spawn();
                 let client = bind().await;
-                crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
+                lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
 
                 let connection = client.connect(server.id(), ALPN).await.expect("connect");
                 let closed =
-                    tokio::time::timeout(Duration::from_secs(10), connection.closed()).await;
+                    tokio_time::timeout(Duration::from_secs(10), connection.closed()).await;
 
                 assert!(
                     closed.is_ok(),
@@ -288,7 +294,7 @@ mod watcher_tests {
                 let relayed =
                     iroh::EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
                 let _conn = client.connect(relayed, ALPN).await.expect("connect");
-                let report = tokio::time::timeout(Duration::from_secs(5), reports.recv())
+                let report = time::timeout(Duration::from_secs(5), reports.recv())
                     .await
                     .expect("no report inside 5 s: the watch waits for the deadline")
                     .expect("the sink stays open");
