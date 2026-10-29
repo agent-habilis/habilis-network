@@ -442,7 +442,7 @@ impl MeshConfig {
     /// A [`ConfigError::Invalid`] when `relay_urls` is given without [`Lookup::Relay`],
     /// when `transports` leaves neither [`Transport::Udp`] nor [`Transport::WebRtc`], or
     /// when the config needs a relay lookup (see [`MeshConfig::validate`]) while none is on.
-    /// A [`ConfigError::Invalid`] also from [`TransportPolicy::from_transports`].
+    /// A [`ConfigError::Invalid`] also from [`TransportPolicy`]'s `TryFrom` list conversion.
     pub fn resolve(
         lookups: &[Lookup],
         relay_urls: Option<RelayLadder>,
