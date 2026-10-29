@@ -258,7 +258,6 @@ fn say(line: std::fmt::Arguments<'_>) {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::io::{Error, ErrorKind, Read};
 
     use tokio::sync::mpsc;
@@ -286,6 +285,7 @@ mod tests {
     /// failed input: the stream must carry on, not end in an error.
     #[test]
     fn an_interrupted_read_is_retried() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (tx, mut rx) = mpsc::channel(4);
         let input = InterruptedOnce {
             interrupted: false,
@@ -312,6 +312,7 @@ mod tests {
                 Err(Error::other("the disk went away"))
             }
         }
+        let _guard = ::habilis_network_test_tracing::init();
         let (tx, mut rx) = mpsc::channel(4);
         std::thread::spawn(move || super::forward(Failing, &tx));
         let first = rx.blocking_recv().expect("the error is sent");

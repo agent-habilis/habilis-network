@@ -59,7 +59,6 @@ impl Args {
 #[cfg(test)]
 mod tests {
     use super::{Args, Lookup, Parser, Transport};
-    use habilis_network_test_tracing::test;
 
     fn parse(args: &[&str]) -> Args {
         Args::try_parse_from(std::iter::once("habilis-network-stream").chain(args.iter().copied()))
@@ -68,6 +67,7 @@ mod tests {
 
     #[test]
     fn a_bare_producer_uses_every_lookup_and_a_named_one_replaces_them() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             parse(&[]).options().lookup,
             vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay],
@@ -82,6 +82,7 @@ mod tests {
 
     #[test]
     fn transport_is_a_comma_list_of_known_names() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             parse(&["--transport", "udp,relay"]).options().transport,
             vec![Transport::Udp, Transport::Relay],
@@ -95,6 +96,7 @@ mod tests {
 
     #[test]
     fn a_positional_argument_is_the_hash_to_read() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             parse(&["abc"]).hash.as_deref(),
             Some("abc"),
@@ -109,6 +111,7 @@ mod tests {
 
     #[test]
     fn the_page_url_carries_the_hash_in_the_fragment() {
+        let _guard = ::habilis_network_test_tracing::init();
         let args = parse(&["--web-url", "http://127.0.0.1:3020/"]);
         assert_eq!(
             args.page_url("abc").as_deref(),
