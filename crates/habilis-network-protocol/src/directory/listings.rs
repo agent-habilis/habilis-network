@@ -23,6 +23,30 @@ const MAX_LISTINGS: usize = 256;
 /// deterministic (the caller supplies `now`), so it unit-tests without
 /// a clock or a network. Shared by the CLI `discover` stream and the
 /// in-process directory watcher.
+///
+/// # Examples
+///
+/// A set of listings keeps one entry for each mesh that an ad names.
+///
+/// ```
+/// use std::time::Instant;
+///
+/// use habilis_network_protocol::directory::Listings;
+/// use habilis_network_protocol::mesh::MeshId;
+///
+/// use habilis_network_protocol::{Mesh, MeshConfig, MeshName, Seed};
+///
+/// let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
+/// let mesh = Mesh::try_new(Seed::new([4u8; 32]), MeshName::try_new("chat").expect("a name"), config)
+///     .expect("a mesh");
+///
+/// let text = mesh.to_string();
+/// let mut listings = Listings::new();
+/// listings.note(&format!(r#"{{"id":"{text}","peers":3}}"#), Instant::now());
+/// assert_eq!(listings.snapshot().count(), 1);
+/// let id = MeshId::try_new(&text).expect("a valid id");
+/// assert!(listings.get(&id).is_some());
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct Listings {
     entries: HashMap<MeshId, Listing>,

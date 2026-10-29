@@ -39,6 +39,17 @@ const SIG_DOMAIN: &[u8] = b"habilis-mesh/invite/v1";
 /// A decoded invite ticket. Parsing (`decode`) is structural only — verifying
 /// the issuer signature, checking expiry, and unwrapping the root all happen in
 /// [`Self::redeem`], which needs the password for a protected invite.
+///
+/// # Examples
+///
+/// Text that is not an invite ticket does not decode.
+///
+/// ```
+/// use habilis_network_protocol::invite::InviteTicket;
+///
+/// let result = InviteTicket::decode("not a ticket");
+/// assert!(result.is_err());
+/// ```
 #[derive(Clone, PartialEq, Eq)]
 pub struct InviteTicket {
     mesh_hash: String,
@@ -86,6 +97,23 @@ fn signing_bytes(mesh_hash: &str, root: &SymmetricKey, expiry: UnixSecs) -> Vec<
 /// # Errors
 /// [`InviteError::Refused`] when this session is not the creator (holds no issuer
 /// key), or when `mesh` is not invite-only.
+///
+/// # Examples
+///
+/// A mesh that is not invite-only refuses to mint an invite.
+///
+/// ```
+/// use habilis_network_protocol::invite::{InviteError, mint};
+///
+/// use habilis_network_protocol::{Mesh, MeshConfig, MeshName, Seed};
+///
+/// let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
+/// let mesh = Mesh::try_new(Seed::new([4u8; 32]), MeshName::try_new("chat").expect("a name"), config)
+///     .expect("a mesh");
+///
+/// let error = mint(&mesh, None, None).unwrap_err();
+/// assert!(matches!(error, InviteError::Refused(_)));
+/// ```
 pub fn mint(
     mesh: &Mesh,
     ttl: Option<Duration>,

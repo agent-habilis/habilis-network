@@ -9,6 +9,17 @@ use crate::base58check::Base58Error;
 type BoxedError = Box<dyn Error + Send + Sync>;
 
 /// Why an invite ticket cannot be minted, decoded or redeemed.
+///
+/// # Examples
+///
+/// A token that is not Base58Check returns this error.
+///
+/// ```
+/// use habilis_network_protocol::invite::{InviteError, InviteTicket};
+///
+/// let error = InviteTicket::decode("0OIl").unwrap_err();
+/// assert!(matches!(error, InviteError::Base58(_)));
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]

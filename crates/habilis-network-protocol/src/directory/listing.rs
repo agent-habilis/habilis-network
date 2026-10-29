@@ -7,6 +7,30 @@ use habilis_network_util::clock::Instant;
 use habilis_network_util::unix_secs::UnixSecs;
 
 /// One live directory entry, decoded from an [`super::Ad`].
+///
+/// # Examples
+///
+/// A listing holds the mesh id and the member count from the latest ad.
+///
+/// ```
+/// use std::time::Instant;
+///
+/// use habilis_network_protocol::directory::Listings;
+/// use habilis_network_protocol::mesh::MeshId;
+///
+/// use habilis_network_protocol::{Mesh, MeshConfig, MeshName, Seed};
+///
+/// let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
+/// let mesh = Mesh::try_new(Seed::new([4u8; 32]), MeshName::try_new("chat").expect("a name"), config)
+///     .expect("a mesh");
+///
+/// let text = mesh.to_string();
+/// let mut listings = Listings::new();
+/// listings.note(&format!(r#"{{"id":"{text}","peers":3}}"#), Instant::now());
+/// let id = MeshId::try_new(&text).expect("a valid id");
+/// let listing = listings.get(&id).expect("the listed mesh");
+/// assert_eq!(listing.peers, 3);
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Listing {

@@ -27,6 +27,21 @@ const DIRECTORY_BASE_SEED: Seed = Seed::new(*b"habilis-mesh/directory/domain/v1"
 /// # Panics
 /// Never. The directory config carries no password or invite issuer, which
 /// [`Mesh::try_new`] refuses, so the constructor cannot fail here.
+///
+/// # Examples
+///
+/// The same directory name always gives the same directory mesh.
+///
+/// ```
+/// use habilis_network_protocol::MeshName;
+/// use habilis_network_protocol::directory::directory_mesh;
+/// use habilis_network_protocol::mesh::{LookupOpts, RelayChoice};
+///
+/// let name = MeshName::try_new("directory-chat").expect("a name");
+/// let first = directory_mesh(&name, LookupOpts::new(RelayChoice::Disabled));
+/// let again = directory_mesh(&name, LookupOpts::new(RelayChoice::Disabled));
+/// assert_eq!(first.to_string(), again.to_string());
+/// ```
 #[must_use]
 pub fn directory_mesh(directory: &MeshName, lookups: LookupOpts) -> Mesh {
     Mesh::try_new(
@@ -44,6 +59,21 @@ pub fn directory_mesh(directory: &MeshName, lookups: LookupOpts) -> Mesh {
 /// lookups. The lookups become the directory session's lookups, so a member
 /// reaches the directory over exactly those mechanisms — a disabled leg issues
 /// no network requests for the directory at all.
+///
+/// # Examples
+///
+/// A directory config builds a mesh that carries the directory name.
+///
+/// ```
+/// use habilis_network_protocol::directory::directory_config;
+/// use habilis_network_protocol::mesh::{LookupOpts, RelayChoice};
+/// use habilis_network_protocol::{Mesh, MeshName, Seed};
+///
+/// let config = directory_config(LookupOpts::new(RelayChoice::Disabled));
+/// let name = MeshName::try_new("directory-chat").expect("a name");
+/// let mesh = Mesh::try_new(Seed::new([6u8; 32]), name, config).expect("a mesh");
+/// assert_eq!(mesh.name().as_str(), "directory-chat");
+/// ```
 #[must_use]
 pub fn directory_config(lookups: LookupOpts) -> MeshConfig {
     MeshConfig {
