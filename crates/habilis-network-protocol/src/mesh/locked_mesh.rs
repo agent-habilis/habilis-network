@@ -253,7 +253,7 @@ impl LockedMesh {
                 "trailing bytes in mesh identifier".to_owned(),
             ));
         }
-        let config = MeshConfig::from_bytes(config_raw)?;
+        let config = MeshConfig::try_from(config_raw)?;
 
         Ok(LockedMesh { name, seed, config })
     }
