@@ -45,43 +45,61 @@ mod tests {
         // of the uid, not of the environment — a daemon and a later CLI in a
         // different context (cron/sudo/statusline) have to agree, or the CLI can't
         // find the socket.
-        assert_eq!(runtime_base("demo"), runtime_base("demo"));
+        assert_eq!(
+            runtime_base("demo"),
+            runtime_base("demo"),
+            "the runtime base is deterministic for one name"
+        );
         let shown = runtime_base("demo").to_string_lossy().into_owned();
         assert!(shown.starts_with("/tmp/demo-"), "unexpected base: {shown}");
         // …and two embedders never share a base, so their daemons can never
         // collide on a socket or read each other's state files.
-        assert_ne!(runtime_base("demo"), runtime_base("other"));
+        assert_ne!(
+            runtime_base("demo"),
+            runtime_base("other"),
+            "different names give different runtime bases"
+        );
     }
 
     #[test]
     fn is_under_runtime_base_discriminates() {
         let base = runtime_base("demo");
-        assert!(is_under_runtime_base(
-            &base,
-            &base.join("abcdefghijkmnp/nick.state.json")
-        ));
-        assert!(!is_under_runtime_base(&base, Path::new("/etc/passwd")));
+        assert!(
+            is_under_runtime_base(&base, &base.join("abcdefghijkmnp/nick.state.json")),
+            "a path under the runtime base is discriminated as inside"
+        );
+        assert!(
+            !is_under_runtime_base(&base, Path::new("/etc/passwd")),
+            "a password path is not under the runtime base"
+        );
         // The un-suffixed sibling is a different directory, not a parent.
-        assert!(!is_under_runtime_base(
-            &base,
-            Path::new("/tmp/demo/sessions/x.json")
-        ));
+        assert!(
+            !is_under_runtime_base(&base, Path::new("/tmp/demo/sessions/x.json")),
+            "a path under another directory is not under the runtime base"
+        );
     }
 
     #[test]
     fn truncates_to_16_chars() {
-        assert_eq!(mesh_prefix("abcdefghijkmnpqrs").chars().count(), 16);
+        assert_eq!(
+            mesh_prefix("abcdefghijkmnpqrs").chars().count(),
+            16,
+            "a long mesh prefix is truncated to 16 characters"
+        );
     }
 
     #[test]
     fn short_input_unchanged() {
-        assert_eq!(mesh_prefix("abcd"), "abcd");
+        assert_eq!(mesh_prefix("abcd"), "abcd", "a short input is unchanged");
     }
 
     #[test]
     fn result_is_a_prefix_of_input() {
         let input = "abcdefghijkmnpqrstuvwx";
-        assert!(input.starts_with(&mesh_prefix(input)));
+        assert!(
+            input.starts_with(&mesh_prefix(input)),
+            "the mesh prefix is a prefix of its input"
+        );
     }
 
     #[test]

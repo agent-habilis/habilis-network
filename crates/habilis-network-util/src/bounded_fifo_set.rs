@@ -103,7 +103,11 @@ mod tests {
         let mut set = BoundedFifoSet::new(8);
         assert!(set.insert(1u32), "first insert is new");
         assert!(!set.insert(1u32), "re-insert is a dup, no-op");
-        assert_eq!(set.len(), 1);
+        assert_eq!(
+            set.len(),
+            1,
+            "inserting a duplicate reports no novelty and keeps one entry"
+        );
     }
 
     #[test]
@@ -113,10 +117,13 @@ mod tests {
             set.insert(value);
         }
         // Pushing a 4th evicts the oldest (0), FIFO; length stays capped.
-        assert!(set.insert(99));
-        assert_eq!(set.len(), 3);
+        assert!(set.insert(99), "a new entry is novel past capacity");
+        assert_eq!(set.len(), 3, "the set keeps its capacity of three");
         assert!(!set.contains(&0), "oldest evicted");
-        assert!(set.contains(&99) && set.contains(&2));
+        assert!(
+            set.contains(&99) && set.contains(&2),
+            "the newest entry and the newest survivor are kept"
+        );
     }
 
     #[test]
@@ -133,12 +140,12 @@ mod tests {
         let mut set = BoundedFifoSet::new(8);
         set.insert(1u32);
         set.insert(2u32);
-        assert!(set.remove(&1));
-        assert!(!set.contains(&1));
+        assert!(set.remove(&1), "removing an entry clears it from the set");
+        assert!(!set.contains(&1), "a removed entry is no longer contained");
         assert!(!set.remove(&1), "second remove is a no-op");
         // Re-inserting the removed value works (order queue stayed consistent).
-        assert!(set.insert(1u32));
-        assert_eq!(set.len(), 2);
+        assert!(set.insert(1u32), "a removed entry can be inserted again");
+        assert_eq!(set.len(), 2, "the set holds two entries after the reinsert");
     }
 
     #[test]
@@ -148,7 +155,7 @@ mod tests {
         let mut set = BoundedFifoSet::new(0);
         assert!(set.insert(7u32), "first insert is new");
         assert!(set.contains(&7), "the inserted item is actually retained");
-        assert_eq!(set.len(), 1);
+        assert_eq!(set.len(), 1, "zero capacity is clamped to one entry");
     }
 
     #[test]
@@ -156,8 +163,8 @@ mod tests {
         // The `Borrow<Q>` bound lets a `String` set be queried/removed by `&str`.
         let mut set: BoundedFifoSet<String> = BoundedFifoSet::new(4);
         set.insert("alice".to_owned());
-        assert!(set.contains("alice"));
-        assert!(set.remove("alice"));
-        assert!(set.is_empty());
+        assert!(set.contains("alice"), "a borrowed key is contained");
+        assert!(set.remove("alice"), "a borrowed key removes its entry");
+        assert!(set.is_empty(), "removing the only entry empties the set");
     }
 }

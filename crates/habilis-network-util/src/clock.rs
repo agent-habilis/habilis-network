@@ -65,13 +65,22 @@ mod millis_saturating_tests {
 
     #[test]
     fn it_counts_the_whole_seconds_and_the_subsecond_part() {
-        assert_eq!(ONE_SECOND, 1000);
-        assert_eq!(super::millis_saturating(Duration::ZERO), 0);
-        assert_eq!(super::millis_saturating(Duration::from_millis(1500)), 1500);
+        assert_eq!(ONE_SECOND, 1000, "one second is a thousand milliseconds");
+        assert_eq!(
+            super::millis_saturating(Duration::ZERO),
+            0,
+            "a zero duration is zero milliseconds"
+        );
+        assert_eq!(
+            super::millis_saturating(Duration::from_millis(1500)),
+            1500,
+            "a second and a half is 1500 milliseconds"
+        );
         // A part of a millisecond is cut, as `Duration::as_millis` cuts it.
         assert_eq!(
             super::millis_saturating(Duration::new(2, 999_999_999)),
-            2999
+            2999,
+            "a sub-millisecond part is truncated"
         );
     }
 
@@ -79,8 +88,13 @@ mod millis_saturating_tests {
     fn it_saturates_where_a_u64_of_milliseconds_overflows() {
         assert_eq!(
             super::millis_saturating(Duration::from_secs(u64::MAX)),
-            u64::MAX
+            u64::MAX,
+            "milliseconds saturate where a u64 would overflow"
         );
-        assert_eq!(super::millis_saturating(Duration::MAX), u64::MAX);
+        assert_eq!(
+            super::millis_saturating(Duration::MAX),
+            u64::MAX,
+            "the largest duration saturates to u64 max"
+        );
     }
 }

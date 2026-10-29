@@ -165,7 +165,11 @@ mod tests {
     fn terminate_refuses_pid_zero() {
         // `kill(0, SIGTERM)` would signal every process of our own group, the test run included.
         let error = terminate(0).expect_err("pid 0 must be refused");
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "terminating pid zero is refused as invalid input"
+        );
     }
 
     #[test]
@@ -173,41 +177,65 @@ mod tests {
         #[expect(unsafe_code, reason = "libc::getppid FFI; always succeeds")]
         // SAFETY: `getppid` takes no argument and always succeeds.
         let ppid = unsafe { libc::getppid() };
-        assert_eq!(parent_of(self_pid()), u32::try_from(ppid).ok());
+        assert_eq!(
+            parent_of(self_pid()),
+            u32::try_from(ppid).ok(),
+            "the parent of this process is its ppid"
+        );
     }
 
     #[test]
     fn ancestry_contains_own_parent() {
         let parent = parent_of(self_pid()).expect("self has a parent");
-        assert!(ancestry_contains(self_pid(), parent));
+        assert!(
+            ancestry_contains(self_pid(), parent),
+            "the ancestry of this process contains its parent"
+        );
     }
 
     #[test]
     fn ancestry_excludes_self() {
-        assert!(!ancestry_contains(self_pid(), self_pid()));
+        assert!(
+            !ancestry_contains(self_pid(), self_pid()),
+            "the ancestry excludes this process itself"
+        );
     }
 
     #[test]
     fn is_alive_self_true_absurd_false() {
-        assert!(is_alive(self_pid()));
-        assert!(!is_alive(u32::MAX - 1));
+        assert!(is_alive(self_pid()), "this process is alive");
+        assert!(!is_alive(u32::MAX - 1), "an absurd pid is not alive");
     }
 
     #[test]
     fn comm_of_self_names_the_test_binary() {
         let comm = comm_of(self_pid()).expect("self has a comm");
-        assert!(!comm.is_empty());
+        assert!(
+            !comm.is_empty(),
+            "the command name of this process is not empty"
+        );
     }
 
     #[test]
     fn live_start_time_is_stable_for_self_and_absent_for_a_dead_pid() {
         let start = live_start_time(self_pid()).expect("self is live");
-        assert_eq!(live_start_time(self_pid()), Some(start));
-        assert_eq!(live_start_time(u32::MAX - 1), None);
+        assert_eq!(
+            live_start_time(self_pid()),
+            Some(start),
+            "the live start time of this process is stable"
+        );
+        assert_eq!(
+            live_start_time(u32::MAX - 1),
+            None,
+            "a dead pid has no live start time"
+        );
     }
 
     #[test]
     fn terminate_rejects_a_dead_pid() {
-        assert!(terminate(u32::MAX - 1).is_err());
+        assert!(
+            terminate(u32::MAX - 1).is_err(),
+            "terminating a dead pid is an error"
+        );
     }
 }

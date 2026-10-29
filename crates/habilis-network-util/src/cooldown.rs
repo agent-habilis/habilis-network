@@ -101,9 +101,15 @@ mod tests {
             "unseen key is never on cooldown"
         );
         cooldown.note(1, start);
-        assert!(cooldown.on_cooldown(&1, start));
+        assert!(
+            cooldown.on_cooldown(&1, start),
+            "a noted key is on cooldown within the window"
+        );
         // Past the window the key is free again (no permanent lockout).
-        assert!(!cooldown.on_cooldown(&1, start + WINDOW + Duration::from_secs(1)));
+        assert!(
+            !cooldown.on_cooldown(&1, start + WINDOW + Duration::from_secs(1)),
+            "a noted key is off cooldown after the window"
+        );
     }
 
     #[test]
@@ -112,11 +118,20 @@ mod tests {
         let start = Instant::now();
         cooldown.note(1, start);
         cooldown.note(2, start);
-        assert!(cooldown.on_cooldown(&1, start));
+        assert!(
+            cooldown.on_cooldown(&1, start),
+            "a noted key is on cooldown before the clear"
+        );
         cooldown.clear();
         // A starvation recovery must be able to re-announce immediately.
-        assert!(!cooldown.on_cooldown(&1, start));
-        assert!(!cooldown.on_cooldown(&2, start));
+        assert!(
+            !cooldown.on_cooldown(&1, start),
+            "a clear drops the cooldown of the key"
+        );
+        assert!(
+            !cooldown.on_cooldown(&2, start),
+            "a clear drops every cooldown"
+        );
     }
 
     #[test]
@@ -124,7 +139,10 @@ mod tests {
         let mut cooldown: Cooldown<u8> = Cooldown::new(WINDOW);
         let start = Instant::now();
         cooldown.note(1, start);
-        assert!(cooldown.on_cooldown(&1, start));
+        assert!(
+            cooldown.on_cooldown(&1, start),
+            "one key's cooldown does not hold another key"
+        );
         assert!(
             !cooldown.on_cooldown(&2, start),
             "one key's cooldown never gates another"

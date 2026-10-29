@@ -110,7 +110,11 @@ mod tests {
     #[test]
     fn default_is_the_configured_runtime_base() {
         let base = crate::runtime_base("demo");
-        assert_eq!(super::resolve_log_dir(None, Some(base.clone())), base);
+        assert_eq!(
+            super::resolve_log_dir(None, Some(base.clone())),
+            base,
+            "the default log dir is the configured runtime base"
+        );
     }
 
     #[test]
@@ -119,6 +123,6 @@ mod tests {
             Some(PathBuf::from("/custom/x")),
             Some(PathBuf::from("/base")),
         );
-        assert_eq!(dir, PathBuf::from("/custom/x"));
+        assert_eq!(dir, PathBuf::from("/custom/x"), "an override wins verbatim");
     }
 }

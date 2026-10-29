@@ -113,22 +113,36 @@ mod unix_secs_tests {
     #[test]
     fn it_adds_and_subtracts_a_duration() {
         let point = UnixSecs::from_secs(1_700_000_000);
-        assert_eq!((point + Duration::from_mins(1)).as_secs(), 1_700_000_060);
-        assert_eq!((point - Duration::from_mins(1)).as_secs(), 1_699_999_940);
+        assert_eq!(
+            (point + Duration::from_mins(1)).as_secs(),
+            1_700_000_060,
+            "adding a minute moves the point forward"
+        );
+        assert_eq!(
+            (point - Duration::from_mins(1)).as_secs(),
+            1_699_999_940,
+            "subtracting a minute moves the point back"
+        );
     }
 
     #[test]
     fn a_sum_past_the_range_saturates_at_max() {
         let point = UnixSecs::from_secs(i64::MAX - 5);
-        assert_eq!(point + Duration::from_mins(1), UnixSecs::MAX);
+        assert_eq!(
+            point + Duration::from_mins(1),
+            UnixSecs::MAX,
+            "a sum past the range saturates at max"
+        );
         // A u64 count of seconds that does not fit an i64 clamps too, as an invite ttl does.
         assert_eq!(
             UnixSecs::from_secs(10) + Duration::from_secs(u64::MAX),
-            UnixSecs::MAX
+            UnixSecs::MAX,
+            "a sum of ten seconds and a huge span saturates at max"
         );
         assert_eq!(
             UnixSecs::from_secs(i64::MIN + 1) - Duration::from_secs(u64::MAX),
-            UnixSecs::from_secs(i64::MIN)
+            UnixSecs::from_secs(i64::MIN),
+            "a difference past the minimum saturates at the minimum"
         );
     }
 
@@ -137,12 +151,25 @@ mod unix_secs_tests {
     #[test]
     fn a_span_past_the_range_saturates_at_the_end_of_the_range() {
         let span = Duration::from_secs(u64::MAX);
-        assert_eq!(UnixSecs::ZERO - span, UnixSecs::from_secs(i64::MIN));
-        assert_eq!(UnixSecs::from_secs(i64::MIN) + span, UnixSecs::MAX);
-        assert_eq!(UnixSecs::MAX - span, UnixSecs::from_secs(i64::MIN));
+        assert_eq!(
+            UnixSecs::ZERO - span,
+            UnixSecs::from_secs(i64::MIN),
+            "subtracting a huge span from zero saturates at the start of the range"
+        );
+        assert_eq!(
+            UnixSecs::from_secs(i64::MIN) + span,
+            UnixSecs::MAX,
+            "subtracting from the minimum saturates at the start of the range"
+        );
+        assert_eq!(
+            UnixSecs::MAX - span,
+            UnixSecs::from_secs(i64::MIN),
+            "subtracting a huge span from max keeps the range end"
+        );
         assert_eq!(
             UnixSecs::from_secs(i64::MIN) - span,
-            UnixSecs::from_secs(i64::MIN)
+            UnixSecs::from_secs(i64::MIN),
+            "subtracting a span from the minimum plus one saturates at the start"
         );
     }
 
@@ -150,12 +177,21 @@ mod unix_secs_tests {
     fn since_is_the_span_and_never_negative() {
         let earlier = UnixSecs::from_secs(100);
         let later = UnixSecs::from_secs(160);
-        assert_eq!(later.since(earlier), Duration::from_mins(1));
+        assert_eq!(
+            later.since(earlier),
+            Duration::from_mins(1),
+            "since is the span between two points"
+        );
         // A clock set back between two readings is a zero span, not a wrap.
-        assert_eq!(earlier.since(later), Duration::ZERO);
+        assert_eq!(
+            earlier.since(later),
+            Duration::ZERO,
+            "since is zero when the later point comes first"
+        );
         assert_eq!(
             UnixSecs::MAX.since(UnixSecs::from_secs(-1)).as_secs(),
-            i64::MAX as u64 + 1
+            i64::MAX as u64 + 1,
+            "since from max to minus one is the exact span"
         );
     }
 
@@ -165,36 +201,65 @@ mod unix_secs_tests {
     fn a_span_wider_than_i64_max_is_exact() {
         assert_eq!(
             UnixSecs::MAX.since(UnixSecs::from_secs(i64::MIN)),
-            Duration::from_secs(u64::MAX)
+            Duration::from_secs(u64::MAX),
+            "a span wider than i64 max is exact from max"
         );
         assert_eq!(
             UnixSecs::MAX.since(UnixSecs::from_secs(-1)),
-            Duration::from_secs(i64::MAX as u64 + 1)
+            Duration::from_secs(i64::MAX as u64 + 1),
+            "a span from minus one to max is exact"
         );
         assert_eq!(
             UnixSecs::from_secs(i64::MIN).since(UnixSecs::MAX),
-            Duration::ZERO
+            Duration::ZERO,
+            "a span from the minimum to minus one is exact"
         );
     }
 
     #[test]
     fn it_orders_as_its_count_and_keeps_the_open_end() {
-        assert!(UnixSecs::ZERO < UnixSecs::from_secs(1));
-        assert!(UnixSecs::from_secs(1) < UnixSecs::MAX);
-        assert_eq!(UnixSecs::MAX.as_secs(), i64::MAX);
+        assert!(
+            UnixSecs::ZERO < UnixSecs::from_secs(1),
+            "zero orders before one"
+        );
+        assert!(
+            UnixSecs::from_secs(1) < UnixSecs::MAX,
+            "one orders before the open end"
+        );
+        assert_eq!(
+            UnixSecs::MAX.as_secs(),
+            i64::MAX,
+            "max holds i64 max as its count"
+        );
     }
 
     #[test]
     fn it_round_trips_its_little_endian_bytes() {
         let point = UnixSecs::from_secs(1_700_000_000);
-        assert_eq!(point.to_le_bytes(), 1_700_000_000_i64.to_le_bytes());
-        assert_eq!(UnixSecs::from_le_bytes(point.to_le_bytes()), point);
+        assert_eq!(
+            point.to_le_bytes(),
+            1_700_000_000_i64.to_le_bytes(),
+            "the little endian bytes are the count's bytes"
+        );
+        assert_eq!(
+            UnixSecs::from_le_bytes(point.to_le_bytes()),
+            point,
+            "the little endian bytes round trip"
+        );
     }
 
     #[test]
     fn it_prints_its_count() {
-        assert_eq!(UnixSecs::from_secs(42).to_string(), "42");
-        assert_eq!(format!("{:?}", UnixSecs::from_secs(42)), "UnixSecs(42)");
+        assert_eq!(
+            UnixSecs::from_secs(42).to_string(),
+            "42",
+            "a point prints its count"
+        );
+        assert_eq!(
+            format!("{:?}", UnixSecs::from_secs(42)),
+            "UnixSecs(42)",
+            "a point debug prints its count"
+        );
     }
 
     #[test]
@@ -202,8 +267,14 @@ mod unix_secs_tests {
         let before = UnixSecs::now();
         let now = UnixSecs::now();
         let after = UnixSecs::now();
-        assert!(before <= now && now <= after);
+        assert!(
+            before <= now && now <= after,
+            "now lies between the two clock reads"
+        );
         // 2020-01-01: the "0 on failure" path is not the normal case.
-        assert!(before > UnixSecs::from_secs(1_577_836_800));
+        assert!(
+            before > UnixSecs::from_secs(1_577_836_800),
+            "now is after 2020"
+        );
     }
 }

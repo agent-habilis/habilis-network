@@ -87,28 +87,40 @@ mod tests {
     async fn reads_lines_then_eof() {
         let data = b"hello\nworld\n";
         let mut reader = io::BufReader::new(&data[..]);
-        assert!(matches!(
-            read_bounded_line(&mut reader, 100).await.unwrap(),
-            LineRead::Line(line) if line == "hello"
-        ));
-        assert!(matches!(
-            read_bounded_line(&mut reader, 100).await.unwrap(),
-            LineRead::Line(line) if line == "world"
-        ));
-        assert!(matches!(
-            read_bounded_line(&mut reader, 100).await.unwrap(),
-            LineRead::Eof
-        ));
+        assert!(
+            matches!(
+                read_bounded_line(&mut reader, 100).await.unwrap(),
+                LineRead::Line(line) if line == "hello"
+            ),
+            "the first line is read"
+        );
+        assert!(
+            matches!(
+                read_bounded_line(&mut reader, 100).await.unwrap(),
+                LineRead::Line(line) if line == "world"
+            ),
+            "the second line is read"
+        );
+        assert!(
+            matches!(
+                read_bounded_line(&mut reader, 100).await.unwrap(),
+                LineRead::Eof
+            ),
+            "the stream ends after the last line"
+        );
     }
 
     #[test]
     async fn over_long_line_dropped_then_stream_realigns() {
         let data = b"thisaverylongline\nok\n";
         let mut reader = io::BufReader::new(&data[..]);
-        assert!(matches!(
-            read_bounded_line(&mut reader, 4).await.unwrap(),
-            LineRead::TooLong
-        ));
+        assert!(
+            matches!(
+                read_bounded_line(&mut reader, 4).await.unwrap(),
+                LineRead::TooLong
+            ),
+            "an over-long line is dropped and the stream realigns"
+        );
         assert!(
             matches!(read_bounded_line(&mut reader, 100).await.unwrap(), LineRead::Line(line) if line == "ok"),
             "the next line must be read intact after dropping the oversize one"
@@ -119,9 +131,12 @@ mod tests {
     async fn final_line_without_newline_is_delivered() {
         let data = b"tail";
         let mut reader = io::BufReader::new(&data[..]);
-        assert!(matches!(
-            read_bounded_line(&mut reader, 100).await.unwrap(),
-            LineRead::Line(line) if line == "tail"
-        ));
+        assert!(
+            matches!(
+                read_bounded_line(&mut reader, 100).await.unwrap(),
+                LineRead::Line(line) if line == "tail"
+            ),
+            "a final line without a newline is delivered"
+        );
     }
 }

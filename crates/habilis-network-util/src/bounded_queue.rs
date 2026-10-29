@@ -71,8 +71,8 @@ mod tests {
     #[test]
     fn push_rejects_newest_when_full() {
         let mut queue = BoundedQueue::new(2);
-        assert!(queue.push(1u32));
-        assert!(queue.push(2));
+        assert!(queue.push(1u32), "a push into an empty queue is accepted");
+        assert!(queue.push(2), "a push past capacity is rejected");
         assert!(!queue.push(3), "rejected when full — nothing evicted");
         let taken: Vec<_> = queue.take().into_iter().collect();
         assert_eq!(
@@ -85,10 +85,10 @@ mod tests {
     #[test]
     fn take_empties_in_fifo_order() {
         let mut queue = BoundedQueue::new(8);
-        assert!(queue.push("a"));
-        assert!(queue.push("b"));
+        assert!(queue.push("a"), "a push of a is accepted");
+        assert!(queue.push("b"), "a push of b is accepted");
         let taken: Vec<_> = queue.take().into_iter().collect();
-        assert_eq!(taken, vec!["a", "b"]);
+        assert_eq!(taken, vec!["a", "b"], "the queue drains in fifo order");
         assert!(queue.take().is_empty(), "second take is empty");
     }
 
