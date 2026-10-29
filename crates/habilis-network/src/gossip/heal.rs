@@ -9,7 +9,9 @@ use crate::util::clock::Instant;
 use crate::util::tuning::HEAL_HARD_PROBE;
 
 use crate::gossip::event::NodeEvent;
+use crate::lookup;
 use crate::transport::probe;
+use n0_future::task;
 /// Let go of the rendezvous if this node is due to
 /// ([`EventLoopState::should_release_rendezvous`]).
 ///
@@ -100,9 +102,8 @@ pub(crate) async fn tick_heal_hard(
     // only for that resolution side effect. Detached because a cold path can
     // take seconds and this must never run on the sole event loop.
     let endpoint = endpoint.clone();
-    n0_future::task::spawn(async move {
-        let _ =
-            crate::lookup::probe_connect(&endpoint, rendezvous_id.into(), HEAL_HARD_PROBE).await;
+    task::spawn(async move {
+        let _ = lookup::probe_connect(&endpoint, rendezvous_id.into(), HEAL_HARD_PROBE).await;
     });
     regraft(rendezvous_id, sender).await;
 }

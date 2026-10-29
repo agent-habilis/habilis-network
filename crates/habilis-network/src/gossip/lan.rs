@@ -5,6 +5,7 @@ use crate::daemon::state::EventLoopState;
 use crate::lookup::LanEvent;
 use crate::util::clock::Instant;
 
+use crate::lookup;
 mod lan_grafts;
 
 pub(crate) use lan_grafts::LanGrafts;
@@ -45,7 +46,7 @@ pub(crate) async fn ask_unlinked_again(state: &mut EventLoopState, context: &Han
 /// member is asked again when its wait is over.
 async fn ask(address: EndpointAddr, state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let peer = address.id;
-    crate::lookup::add_peer_addr(&state.address_book, address);
+    lookup::add_peer_addr(&state.address_book, address);
     if let Err(error) = context.sender.neighbor_peers(vec![peer]).await {
         tracing::warn!(
             target: "habilis_network::lookup",

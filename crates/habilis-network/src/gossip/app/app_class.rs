@@ -1,3 +1,4 @@
+use std::{fmt, ops};
 /// Per-frame classification the engine needs to decide retention, push
 /// surfacing, and fork/DAG indexing without knowing the app's tag taxonomy.
 /// Only meaningful for `MessageKind::App` frames — the engine consults it
@@ -92,7 +93,7 @@ impl AppClass {
     }
 }
 
-impl std::ops::BitOr for AppClass {
+impl ops::BitOr for AppClass {
     type Output = Self;
 
     fn bitor(self, rhs: Self) -> Self {
@@ -100,8 +101,8 @@ impl std::ops::BitOr for AppClass {
     }
 }
 
-impl std::fmt::Debug for AppClass {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for AppClass {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = formatter.debug_struct("AppClass");
         debug.field("loggable", &self.loggable());
         debug.field("beat", &self.beat());

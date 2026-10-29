@@ -17,8 +17,11 @@ use crate::util::consts::MAX_MESSAGE_SIZE;
 
 use crate::logging::messages;
 use crate::protocol::{message, peer_addr_error};
+use crate::transport;
 use crate::transport::{proven_endpoints, webrtc};
 use crate::util::{clock, tuning};
+use n0_future::task;
+use n0_future::time::Instant as n0future_Instant;
 use tokio::sync::oneshot;
 /// Build → sign → deliver one outbound `App` frame — the payload-generic
 /// counterpart to the application's own (chain-stamping, sharding, sealing) chat /
@@ -84,24 +87,24 @@ pub async fn send_app(
     context: &HandlerCtx<'_>,
     frame: Verified,
     class: AppClass,
-) -> Result<crate::transport::Delivered, crate::transport::SendError> {
+) -> Result<transport::Delivered, transport::SendError> {
     if frame.wire_len() > MAX_MESSAGE_SIZE {
-        return Err(crate::transport::SendError::Oversize(format!(
+        return Err(transport::SendError::Oversize(format!(
             "app frame too large: {} bytes exceeds the {MAX_MESSAGE_SIZE}-byte single-frame limit",
             frame.wire_len()
         )));
     }
     let bytes = frame
         .serialize()
-        .map_err(|error| crate::transport::SendError::Internal(error.into()))?;
+        .map_err(|error| transport::SendError::Internal(error.into()))?;
     messages::log_out(&frame);
     if state.meshed {
         // Directed vs. broadcast is decided inside `deliver` from the frame's
         // `to` — the same routing the application's send path rides. A frame
         // held off a relay-only peer is parked, not failed: the proven direct
         // path flushes it (see `gossip::recv::flush_pending`).
-        match crate::transport::deliver(&frame, bytes.clone(), state, context.sender).await {
-            Err(crate::transport::SendError::Held { .. }) => {
+        match transport::deliver(&frame, bytes.clone(), state, context.sender).await {
+            Err(transport::SendError::Held { .. }) => {
                 park_and_offer(state, context, &frame, &bytes);
             }
             outcome => {
@@ -118,9 +121,9 @@ pub async fn send_app(
         // Buffered until the meshed edge flushes it through the same send
         // decision (see `gossip::recv::flush_pending`). A parked frame is still ours.
         super::recv::retain_own_app_broadcast(state, &frame, class);
-        Ok(crate::transport::Delivered::Done)
+        Ok(transport::Delivered::Done)
     } else {
-        Err(crate::transport::SendError::internal(anyhow::anyhow!(
+        Err(transport::SendError::internal(anyhow::anyhow!(
             "pending outbound buffer full; app frame dropped"
         )))
     }
@@ -201,7 +204,7 @@ pub async fn start_ping_round(
     context: &HandlerCtx<'_>,
     response: Option<oneshot::Sender<Vec<(Nickname, u64)>>>,
 ) {
-    let now = n0_future::time::Instant::now();
+    let now = n0future_Instant::now();
     let window = tuning::ping_window();
     let probe = Message::new_ping(context.mesh, context.author).sign(context.identity);
     state.arm_ping_round(PingRound::new(&probe, now, now + window, response));
@@ -217,7 +220,7 @@ pub(crate) async fn send_second_probe(state: &mut EventLoopState, context: &Hand
     let probe = Message::new_ping(context.mesh, context.author).sign(context.identity);
     round
         .probes
-        .insert(probe.id.clone(), n0_future::time::Instant::now());
+        .insert(probe.id.clone(), n0future_Instant::now());
     broadcast_msg(context.sender, &probe).await;
 }
 
@@ -375,7 +378,7 @@ impl<'mesh> StateMergeParams<'mesh> {
 pub async fn broadcast_state_merge(
     state: &mut EventLoopState,
     params: StateMergeParams<'_>,
-) -> Result<Option<WireFrame>, crate::transport::SendError> {
+) -> Result<Option<WireFrame>, transport::SendError> {
     use crate::doc::Ingested;
 
     let StateMergeParams {
@@ -400,7 +403,7 @@ pub async fn broadcast_state_merge(
     let fork_doc = state.doc(channel);
     let built = fork_doc
         .build_change(&merge, &actor_seed)
-        .map_err(|error| crate::transport::SendError::Internal(error.into()))?;
+        .map_err(|error| transport::SendError::Internal(error.into()))?;
     let Some(change_bytes) = built else {
         return Ok(None);
     };
@@ -413,11 +416,11 @@ pub async fn broadcast_state_merge(
     let channel_doc = state.doc(channel);
     let composed = channel_doc.compose_wire_body(&change_bytes, surface.then_some(&merge));
     let (wire_body, plain_body) =
-        composed.map_err(|error| crate::transport::SendError::Internal(error.into()))?;
+        composed.map_err(|error| transport::SendError::Internal(error.into()))?;
     let signed = Message::new_channel_event(mesh, author, wire_body, channel).sign(&state.identity);
     let bytes = signed
         .serialize()
-        .map_err(|error| crate::transport::SendError::Internal(error.into()))?;
+        .map_err(|error| transport::SendError::Internal(error.into()))?;
     messages::log_out(&signed);
 
     // 3. Apply the signed frame to the live doc through the authorization gate.
@@ -428,14 +431,14 @@ pub async fn broadcast_state_merge(
         Ingested::Applied { doc, .. } => doc,
         Ingested::Duplicate => return Ok(None),
         Ingested::Rejected => {
-            return Err(crate::transport::SendError::internal(anyhow::anyhow!(
+            return Err(transport::SendError::internal(anyhow::anyhow!(
                 "write rejected: a member may only write its own /peers/<nick>/card"
             )));
         }
         Ingested::Buffered => unreachable!("a locally-built change's deps are always present"),
         Ingested::Ignored => unreachable!("a locally-built change body always decodes"),
         _ => {
-            return Err(crate::transport::SendError::internal(anyhow::anyhow!(
+            return Err(transport::SendError::internal(anyhow::anyhow!(
                 "the document did not take the change"
             )));
         }
@@ -458,7 +461,7 @@ pub async fn broadcast_state_merge(
         sender
             .broadcast(bytes.clone())
             .await
-            .map_err(|error| crate::transport::SendError::internal(anyhow::anyhow!("{error}")))?;
+            .map_err(|error| transport::SendError::internal(anyhow::anyhow!("{error}")))?;
     } else {
         // No gossip path yet: buffer until we mesh. (The change is already in
         // the local doc, so heads anti-entropy still reconciles it if the
@@ -506,7 +509,7 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &WireFrame) {
         let pool = state.unicast_pool.clone();
         let endpoint_id = endpoint_id.id;
         let bytes = bytes.clone();
-        n0_future::task::spawn(async move {
+        task::spawn(async move {
             if let Err(error) = pool.dial_and_send(endpoint_id, bytes.into_bytes()).await {
                 tracing::debug!(target: "habilis_network::gossip", %error, "unicast farewell mirror failed");
             }
@@ -589,8 +592,8 @@ pub(super) async fn announce_arrival(state: &mut EventLoopState, context: &Handl
 /// that link needs the session, so a frame that waited for the link could never ask for it. The rule
 /// is the one of a frame held on a meshed node ([`crate::transport::note_held`]).
 fn mark_parked(state: &mut EventLoopState, frame: &Verified, bytes: &WireFrame) {
-    if let Err(error) = crate::transport::resolve(frame, bytes.clone(), state) {
-        crate::transport::note_held(state, &error);
+    if let Err(error) = transport::resolve(frame, bytes.clone(), state) {
+        transport::note_held(state, &error);
     }
 }
 
@@ -629,7 +632,10 @@ mod tests {
     use crate::protocol::{MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick};
 
+    use crate::protocol;
     use crate::protocol::{message, peer_addr_error};
+    #[cfg(feature = "host")]
+    use crate::testing;
     use crate::util::clock;
     #[test]
     fn our_peer_info_says_so_while_we_hold_the_rendezvous() {
@@ -688,9 +694,9 @@ mod tests {
             &MeshId::from("test"),
             &nick("alice"),
             nick("bob"),
-            &crate::protocol::MessageId::random(),
+            &protocol::MessageId::random(),
         )
-        .sign(&crate::protocol::Identity::generate());
+        .sign(&protocol::Identity::generate());
         let bytes = frame.serialize().expect("serialize");
         let now = clock::Instant::now();
         assert!(
@@ -717,13 +723,13 @@ mod tests {
             &MeshId::from("test"),
             &nick("alice"),
             message::AppFrameParams::new(
-                crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                 None,
                 None,
-                crate::protocol::MessageBody::from("hi"),
+                protocol::MessageBody::from("hi"),
             ),
         )
-        .sign(&crate::protocol::Identity::generate());
+        .sign(&protocol::Identity::generate());
         mark_parked(&mut state, &frame, &frame.serialize().expect("serialize"));
         assert!(
             !state.lane_session_wanted(bob, clock::Instant::now()),
@@ -740,7 +746,7 @@ mod tests {
             ::habilis_network_test_tracing::init(),
             2,
             async {
-                let node = crate::testing::LaneNode::start().await;
+                let node = testing::LaneNode::start().await;
                 let context = node.context();
                 let mut state = node.state();
                 let frame = node.frame_to_bob();
@@ -770,7 +776,7 @@ mod tests {
             ::habilis_network_test_tracing::init(),
             2,
             async {
-                let node = crate::testing::LaneNode::start().await;
+                let node = testing::LaneNode::start().await;
                 let context = node.context();
                 let mut state = node.state();
                 super::offer_for_parked(&mut state, &context, &node.frame_to_bob());

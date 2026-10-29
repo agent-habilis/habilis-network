@@ -8,6 +8,8 @@
 //! in `lifecycle`; this layer never touches the peer roster
 //! directly — it calls into `lifecycle::observe` and dispatches by kind.
 
+use habilis_network_util::consts;
+use iroh_gossip::proto;
 pub(crate) mod antientropy;
 pub(crate) mod app;
 pub(crate) mod event;
@@ -32,8 +34,7 @@ mod path_summary;
 /// `habilis-network-protocol` deliberately does not depend on iroh-gossip and so
 /// cannot name the constant being checked against.
 const _: () = assert!(
-    habilis_network_util::consts::MAX_MESSAGE_SIZE + 256
-        <= iroh_gossip::proto::DEFAULT_MAX_MESSAGE_SIZE,
+    consts::MAX_MESSAGE_SIZE + 256 <= proto::DEFAULT_MAX_MESSAGE_SIZE,
     "MAX_MESSAGE_SIZE leaves too little headroom under iroh-gossip's DEFAULT_MAX_MESSAGE_SIZE"
 );
 

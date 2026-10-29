@@ -38,6 +38,11 @@ use crate::transport::underlay_webrtc;
 use crate::transport::{probe, proven_endpoints, webrtc};
 use tokio::sync::mpsc;
 
+use crate::transport::Delivered;
+use crate::{doc, transport};
+use iroh_gossip::api;
+use n0_future::task as n0future_task;
+use std::ops;
 /// The first link to a real peer: user content can be delivered now, so flush what was
 /// buffered while unmeshed, in order, and ask again for state and chat.
 async fn mesh_on_first_link(
@@ -332,7 +337,7 @@ fn arms_reclaim(
 /// up/down from a dead subscription is stale link state the fresh
 /// subscription re-derives immediately.
 pub(crate) async fn drain_dead_receiver(
-    receiver: &mut iroh_gossip::api::GossipReceiver,
+    receiver: &mut api::GossipReceiver,
     state: &mut EventLoopState,
     app: &mut dyn NodeApp,
     context: &HandlerCtx<'_>,
@@ -409,9 +414,9 @@ pub(crate) async fn flush_pending(
         // Re-route each frame through the send decision rather than blanket-
         // broadcasting: a directed frame buffered while unmeshed must still
         // take unicast, never the gossip flood.
-        match crate::transport::deliver(&message, bytes.clone(), state, context.sender).await {
-            Ok(crate::transport::Delivered::Done) => delivered += 1,
-            Ok(crate::transport::Delivered::Pending(handle)) => {
+        match transport::deliver(&message, bytes.clone(), state, context.sender).await {
+            Ok(Delivered::Done) => delivered += 1,
+            Ok(Delivered::Pending(handle)) => {
                 delivered += 1;
                 watch_flush(handle, message, bytes, state.flush_failed.clone());
             }
@@ -437,12 +442,12 @@ pub(crate) async fn flush_pending(
 /// back to the loop through `failed`, which buffers it again as a flush does for a frame that cannot
 /// be delivered yet: a failed dial never loses a buffered frame.
 fn watch_flush(
-    handle: crate::transport::PendingSend,
+    handle: transport::PendingSend,
     message: Verified,
     bytes: WireFrame,
     failed: mpsc::UnboundedSender<(Verified, WireFrame)>,
 ) {
-    n0_future::task::spawn(async move {
+    n0future_task::spawn(async move {
         match handle.await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
@@ -898,7 +903,7 @@ async fn auto_pong(message: &Message, state: &EventLoopState, context: &HandlerC
         .filter(|eid| Some(*eid) != state.rendezvous_id);
     match (warm_endpoint, pong.serialize()) {
         (Some(eid), Ok(bytes)) => {
-            if !crate::transport::send_best_effort(eid, bytes, state).await {
+            if !transport::send_best_effort(eid, bytes, state).await {
                 tracing::debug!(target: "habilis_network::gossip", pinger = %message.author, "auto-pong skipped: no warm path");
             }
         }
@@ -1173,11 +1178,7 @@ fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
     clippy::match_same_arms,
     reason = "the named variants are listed on purpose, so a new variant stays visible"
 )]
-fn ingest_channel_event(
-    event: ChannelEvent<'_>,
-    doc: &mut crate::doc::MeshDoc,
-    context: &HandlerCtx<'_>,
-) {
+fn ingest_channel_event(event: ChannelEvent<'_>, doc: &mut doc::MeshDoc, context: &HandlerCtx<'_>) {
     use crate::doc::Ingested;
 
     let ChannelEvent {
@@ -1353,7 +1354,7 @@ fn gate_directed_to_us<F: Proof>(frame: &F, state: &EventLoopState, app: &dyn No
 /// body, or `None` when there is no key or the body is not a decryptable `enc`
 /// envelope (on a passworded mesh that means an unsealed/tampered body — the caller
 /// drops it).
-fn decrypt_broadcast<F: std::ops::Deref<Target = Message>>(
+fn decrypt_broadcast<F: ops::Deref<Target = Message>>(
     message: &F,
     state: &EventLoopState,
 ) -> Option<MessageBody> {
@@ -1375,7 +1376,7 @@ fn decrypt_broadcast<F: std::ops::Deref<Target = Message>>(
 /// Unseal a directed body sealed to us. Returns the plaintext body, or `None` when
 /// the frame fails to open (tampered / wrong key), so the caller drops it. The
 /// caller only calls this on the addressee's path.
-fn decrypt_directed<F: std::ops::Deref<Target = Message>>(
+fn decrypt_directed<F: ops::Deref<Target = Message>>(
     message: &F,
     state: &EventLoopState,
 ) -> Option<MessageBody> {
@@ -1602,7 +1603,7 @@ async fn handle_peer_info(
         if !peer_addr.addrs.is_empty() {
             let endpoint = context.endpoint.clone();
             let address = peer_addr.clone();
-            n0_future::task::spawn(async move {
+            n0future_task::spawn(async move {
                 if let Err(error) = endpoint.add_endpoint_addr(address).await {
                     tracing::debug!(target: "habilis_network::gossip", peer = %peer_id.fmt_short(), %error, "the endpoint did not take the peer address");
                 }
@@ -1921,6 +1922,7 @@ mod retain_own_broadcast_tests {
     use crate::protocol::{DedupKey, MeshId, Message, Nickname};
 
     use crate::gossip::app;
+    use crate::protocol;
     use crate::protocol::message;
     fn joined(state: &EventLoopState, author: &str) -> Verified {
         Message::new_joined(&MeshId::from("💬test"), &Nickname::from(author)).sign(&state.identity)
@@ -1948,7 +1950,7 @@ mod retain_own_broadcast_tests {
     fn own_unloggable_plumbing_is_not_retained() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = testing::fresh_state();
-        let body = crate::protocol::MessageBody::try_new("{}").expect("valid body");
+        let body = protocol::MessageBody::try_new("{}").expect("valid body");
         let peer_info =
             Message::new_peer_info(&MeshId::from("💬test"), &Nickname::from("me"), body)
                 .sign(&state.identity);
@@ -1965,10 +1967,10 @@ mod retain_own_broadcast_tests {
             &MeshId::from("💬test"),
             &Nickname::from("me"),
             message::AppFrameParams::new(
-                crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                 to.map(Nickname::from),
                 None,
-                crate::protocol::MessageBody::from("hello"),
+                protocol::MessageBody::from("hello"),
             ),
         )
         .sign(&state.identity)
@@ -2075,6 +2077,7 @@ mod evicted_orphan_tests {
     use crate::transport::MeshSender;
     use habilis_network_util::consts::DOC_PENDING_AUTHOR_MAX;
 
+    use iroh_gossip::proto;
     /// State frames never reach the app, so it only has to exist.
     struct Inert;
 
@@ -2157,7 +2160,7 @@ mod evicted_orphan_tests {
                 .expect("bind a local endpoint");
             let gossip = Gossip::builder().spawn(endpoint.clone());
             let topic = gossip
-                .subscribe(iroh_gossip::proto::TopicId::from_bytes([3u8; 32]), vec![])
+                .subscribe(proto::TopicId::from_bytes([3u8; 32]), vec![])
                 .await
                 .expect("subscribe to a peerless topic");
             let (gossip_sender, _receiver) = topic.split();
@@ -2248,14 +2251,22 @@ mod first_contact_tests {
     use crate::transport::MeshSender;
 
     use crate::daemon::state::DirectState;
+    #[cfg(feature = "multihop")]
+    use crate::gossip;
     use crate::gossip::split;
     use crate::lifecycle::heartbeat;
     use crate::protocol::message;
-    use crate::transport::webrtc;
+    use crate::transport::{PayloadPath, webrtc};
     use crate::util::{clock, tuning};
+    use crate::{lookup, protocol, transport};
+    use iroh_gossip::proto;
+    use n0_future::task;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, atomic};
+    use std::time::{Duration as std_Duration, Instant as std_Instant};
+    use std::{future, net};
     use tokio::sync::mpsc;
+    use tokio::{task as tokio_task, time as tokio_time};
     struct Inert;
 
     #[async_trait::async_trait]
@@ -2281,7 +2292,7 @@ mod first_contact_tests {
         sender: MeshSender,
         mesh: MeshId,
         identity: Identity,
-        our_pubkey: crate::protocol::AuthorKey,
+        our_pubkey: protocol::AuthorKey,
         author: Nickname,
         sink: SilentSink,
     }
@@ -2294,7 +2305,7 @@ mod first_contact_tests {
                 .expect("bind a local endpoint");
             let gossip = Gossip::builder().spawn(endpoint.clone());
             let topic = gossip
-                .subscribe(iroh_gossip::proto::TopicId::from_bytes([4u8; 32]), vec![])
+                .subscribe(proto::TopicId::from_bytes([4u8; 32]), vec![])
                 .await
                 .expect("subscribe to a peerless topic");
             let (gossip_sender, _receiver) = topic.split();
@@ -2339,8 +2350,7 @@ mod first_contact_tests {
             async {
                 let node = Node::spawn().await;
                 let context = node.context();
-                let silent =
-                    std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
+                let silent = net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
                 let bob = iroh::SecretKey::generate().public();
                 let bob_addr = iroh::EndpointAddr::from_parts(
                     bob,
@@ -2348,14 +2358,10 @@ mod first_contact_tests {
                         silent.local_addr().expect("silent addr"),
                     )],
                 );
-                crate::lookup::add_peer_addr(
-                    &crate::lookup::address_book(&node.endpoint),
-                    bob_addr.clone(),
-                );
+                lookup::add_peer_addr(&lookup::address_book(&node.endpoint), bob_addr.clone());
                 let mut state = fresh_state();
                 state.meshed = true;
-                state.unicast_pool =
-                    crate::transport::UnicastPool::new(node.endpoint.clone(), false);
+                state.unicast_pool = transport::UnicastPool::new(node.endpoint.clone(), false);
                 state.direct.insert(bob, DirectState::Direct);
                 state.peer_endpoints.insert(nick("bob"), bob_addr);
                 let (failed_tx, mut failed_rx) = mpsc::unbounded_channel();
@@ -2364,7 +2370,7 @@ mod first_contact_tests {
                     &node.mesh,
                     &node.author,
                     nick("bob"),
-                    &crate::protocol::MessageId::random(),
+                    &protocol::MessageId::random(),
                 )
                 .sign(&Identity::generate());
                 let bytes = frame.serialize().expect("serialize");
@@ -2373,10 +2379,10 @@ mod first_contact_tests {
                     "a pending frame is parked again after a failed dial"
                 );
 
-                let started = std::time::Instant::now();
+                let started = std_Instant::now();
                 super::flush_pending(&mut state, &context, "test").await;
                 assert!(
-                    started.elapsed() < std::time::Duration::from_millis(500),
+                    started.elapsed() < std_Duration::from_millis(500),
                     "the flush waited for the dial"
                 );
                 assert!(
@@ -2385,7 +2391,7 @@ mod first_contact_tests {
                 );
 
                 let (failed, returned) =
-                    tokio::time::timeout(std::time::Duration::from_secs(10), failed_rx.recv())
+                    tokio_time::timeout(std_Duration::from_secs(10), failed_rx.recv())
                         .await
                         .expect("the failed dial reports back to the loop")
                         .expect("the loop keeps its channel");
@@ -2469,7 +2475,7 @@ mod first_contact_tests {
                 &node.mesh,
                 &nick("alice"),
                 message::AppFrameParams::new(
-                    crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                    protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                     None,
                     None,
                     MessageBody::from("hello"),
@@ -2527,7 +2533,7 @@ mod first_contact_tests {
                     .expect("the splitter reads the topic");
             }
             while receiver.high_water() < frames.len() {
-                tokio::task::yield_now().await;
+                tokio_task::yield_now().await;
             }
 
             super::drain_queued(&mut receiver, &mut state, &mut Inert, &context).await;
@@ -2569,15 +2575,12 @@ mod first_contact_tests {
                         UNICAST_ALPN,
                         UnicastAcceptor::with_idle(
                             inbox,
-                            crate::transport::PayloadPath::DirectOnly,
-                            std::time::Duration::from_mins(1),
+                            PayloadPath::DirectOnly,
+                            std_Duration::from_mins(1),
                         ),
                     )
                     .spawn();
-                crate::lookup::add_peer_addr(
-                    &crate::lookup::address_book(&node.endpoint),
-                    bob.addr(),
-                );
+                lookup::add_peer_addr(&lookup::address_book(&node.endpoint), bob.addr());
                 let mut state = fresh_state();
                 state.unicast_pool = UnicastPool::new(node.endpoint.clone(), false);
                 state.peer_endpoints.insert(nick("bob"), bob.addr());
@@ -2596,7 +2599,7 @@ mod first_contact_tests {
                 feed(Event::NeighborUp(bob.id()), &mut state, &context).await;
 
                 let delivered =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), frames.recv()).await;
+                    tokio_time::timeout(std_Duration::from_secs(5), frames.recv()).await;
                 assert_eq!(
                     delivered.ok().flatten(),
                     Some(bytes.into_bytes()),
@@ -2705,15 +2708,15 @@ mod first_contact_tests {
             let context = node.context();
             let mut state = fresh_state();
             state.rendezvous_id = Some(context.rendezvous_id);
-            let hub = crate::lookup::build_webrtc_handle(node.endpoint.id());
+            let hub = lookup::build_webrtc_handle(node.endpoint.id());
             let held_round = state
                 .webrtc_admission
                 .try_admit(context.rendezvous_id, &hub)
                 .expect("a free slot");
             let epoch = held_round.epoch();
-            let task = n0_future::task::spawn(async move {
+            let task = task::spawn(async move {
                 let _held_round = held_round;
-                std::future::pending::<()>().await;
+                future::pending::<()>().await;
             });
             state
                 .webrtc_admission
@@ -2948,9 +2951,7 @@ mod first_contact_tests {
                 MultihopHandle::new(
                     secret,
                     underlay,
-                    crate::lookup::multihop_handle_config(
-                        crate::transport::PayloadPath::DirectOnly,
-                    ),
+                    lookup::multihop_handle_config(PayloadPath::DirectOnly),
                 )
                 .expect("underlay on the derived key")
             }
@@ -2964,7 +2965,7 @@ mod first_contact_tests {
             let mut state = fresh_state();
             state.multihop = Some(ours.clone());
 
-            let vector_body = crate::gossip::json_body(&theirs.link_vector(vec![(
+            let vector_body = gossip::json_body(&theirs.link_vector(vec![(
                 habilis_network_iroh_multihop_transport::AppId::new(other_key.public()),
                 10,
             )]))
@@ -3065,18 +3066,18 @@ mod first_contact_tests {
         F: FnMut() -> Fut,
         Fut: Future<Output = bool>,
     {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while std::time::Instant::now() < deadline {
+        let deadline = std_Instant::now() + std_Duration::from_secs(5);
+        while std_Instant::now() < deadline {
             if check().await {
                 return true;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio_time::sleep(std_Duration::from_millis(10)).await;
         }
         check().await
     }
 
     /// An address from a documentation range (RFC 5737): no interface carries it.
-    fn test_ip() -> std::net::SocketAddr {
+    fn test_ip() -> net::SocketAddr {
         "192.0.2.10:4000".parse().expect("an address")
     }
 
@@ -3330,8 +3331,8 @@ mod first_contact_tests {
             let node = Node::spawn().await;
             let context = node.context();
             let mut state = fresh_state();
-            state.webrtc = Some(crate::lookup::build_webrtc_handle(node.endpoint.id()));
-            state.relay_transport = crate::transport::PayloadPath::DirectOnly;
+            state.webrtc = Some(lookup::build_webrtc_handle(node.endpoint.id()));
+            state.relay_transport = PayloadPath::DirectOnly;
             state.local_udp_transport = UdpTransport::Present;
             state.rendezvous_linked = true;
 
@@ -3361,8 +3362,8 @@ mod first_contact_tests {
             let node = Node::spawn().await;
             let context = node.context();
             let mut state = fresh_state();
-            state.webrtc = Some(crate::lookup::build_webrtc_handle(node.endpoint.id()));
-            state.relay_transport = crate::transport::PayloadPath::DirectOnly;
+            state.webrtc = Some(lookup::build_webrtc_handle(node.endpoint.id()));
+            state.relay_transport = PayloadPath::DirectOnly;
             state.local_udp_transport = UdpTransport::Present;
             state.rendezvous_answers_jsep = false;
 
@@ -3386,6 +3387,8 @@ mod link_state_tests {
     use crate::protocol::{MeshId, Message};
     use crate::testing::{fresh_state, nick};
 
+    use crate::transport::PayloadPath;
+    use crate::{gossip, lookup, protocol};
     /// A handle over a loopback underlay on the key derived from `secret`.
     async fn handle_for(secret: &SecretKey) -> MultihopHandle {
         let underlay_builder = Endpoint::builder(presets::Minimal)
@@ -3395,7 +3398,7 @@ mod link_state_tests {
         MultihopHandle::new(
             secret,
             underlay,
-            crate::lookup::multihop_handle_config(crate::transport::PayloadPath::DirectOnly),
+            lookup::multihop_handle_config(PayloadPath::DirectOnly),
         )
         .expect("underlay on the derived key")
     }
@@ -3410,10 +3413,9 @@ mod link_state_tests {
             let secret = SecretKey::from_bytes(&[53; 32]);
             let handle = handle_for(&secret).await;
             let mut state = fresh_state();
-            let body =
-                crate::gossip::json_body(&handle.link_vector(Vec::new())).expect("serializes");
+            let body = gossip::json_body(&handle.link_vector(Vec::new())).expect("serializes");
             let message = Message::new_link_state(&MeshId::from("test"), &nick("alice-aa"), body)
-                .sign(&crate::protocol::Identity::generate());
+                .sign(&protocol::Identity::generate());
             super::retain_own_broadcast(&mut state, &message);
             assert_eq!(state.message_log.len(), 0, "nothing retains a link-state");
             handle.close().await;
@@ -3434,7 +3436,7 @@ mod link_state_tests {
             let mut state = fresh_state();
             state.multihop = Some(ours.clone());
 
-            let body = crate::gossip::json_body(&theirs.link_vector(vec![(
+            let body = gossip::json_body(&theirs.link_vector(vec![(
                 habilis_network_iroh_multihop_transport::AppId::new(bob.public()),
                 10,
             )]))
@@ -3494,7 +3496,10 @@ mod left_tests {
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
 
+    use crate::transport::PayloadPath;
     use iroh::endpoint::presets;
+    use iroh_gossip::proto;
+    use tokio::time;
     /// A `Left` never reaches the app's frame hook, so it only has to exist.
     struct Inert;
 
@@ -3522,7 +3527,7 @@ mod left_tests {
                 &lookups,
                 TransportOpts::default(),
                 None,
-                crate::transport::PayloadPath::DirectOnly,
+                PayloadPath::DirectOnly,
             )
             .await
             .expect("a multihop peer binds");
@@ -3530,7 +3535,7 @@ mod left_tests {
                 &lookups,
                 TransportOpts::default(),
                 None,
-                crate::transport::PayloadPath::DirectOnly,
+                PayloadPath::DirectOnly,
             )
             .await
             .expect("a second multihop peer binds");
@@ -3557,7 +3562,7 @@ mod left_tests {
 
             let gossip = Gossip::builder().spawn(endpoint.clone());
             let topic = gossip
-                .subscribe(iroh_gossip::proto::TopicId::from_bytes([5u8; 32]), vec![])
+                .subscribe(proto::TopicId::from_bytes([5u8; 32]), vec![])
                 .await
                 .expect("subscribe to a peerless topic");
             let (gossip_sender, _receiver) = topic.split();
@@ -3630,7 +3635,7 @@ mod left_tests {
                 &lookups,
                 TransportOpts::default(),
                 None,
-                crate::transport::PayloadPath::DirectOnly,
+                PayloadPath::DirectOnly,
             )
             .await
             .expect("a multihop peer binds");
@@ -3646,7 +3651,7 @@ mod left_tests {
                 &lookups,
                 TransportOpts::default(),
                 None,
-                crate::transport::PayloadPath::DirectOnly,
+                PayloadPath::DirectOnly,
             )
             .await
             .expect("a second multihop peer binds");
@@ -3668,7 +3673,7 @@ mod left_tests {
 
             let gossip = Gossip::builder().spawn(endpoint.clone());
             let topic = gossip
-                .subscribe(iroh_gossip::proto::TopicId::from_bytes([6u8; 32]), vec![])
+                .subscribe(proto::TopicId::from_bytes([6u8; 32]), vec![])
                 .await
                 .expect("subscribe to a peerless topic");
             let (gossip_sender, _receiver) = topic.split();
@@ -3692,7 +3697,7 @@ mod left_tests {
             };
 
             // The leaver says nothing more: wait out the max age, then tick.
-            tokio::time::sleep(Duration::from_millis(900)).await;
+            time::sleep(Duration::from_millis(900)).await;
             event_loop::linkstate_arm(&mut state, &context).await;
             assert!(
                 !advertises(&handle),
@@ -3712,6 +3717,7 @@ mod requeue_tests {
 
     use crate::testing::{LaneNode, nick};
 
+    use crate::transport;
     use crate::util::clock;
     /// A frame is parked before its addressee is known. The peer becomes known with a relay-only
     /// address, the flush delivers the frame again and it is held: the requeue asks for the session
@@ -3734,7 +3740,7 @@ mod requeue_tests {
                 let bytes = frame.serialize().expect("serialize");
                 let now = clock::Instant::now();
                 drop(
-                    crate::transport::resolve(&frame, bytes.clone(), &state)
+                    transport::resolve(&frame, bytes.clone(), &state)
                         .expect_err("no endpoint is known for bob yet"),
                 );
                 assert!(
@@ -3750,7 +3756,7 @@ mod requeue_tests {
 
                 state.note_peer_endpoint(nick("bob"), address);
                 drop(
-                    crate::transport::resolve(&frame, bytes.clone(), &state)
+                    transport::resolve(&frame, bytes.clone(), &state)
                         .expect_err("a lookup-only relay holds the frame"),
                 );
                 assert!(
@@ -3784,6 +3790,8 @@ mod parked_link_state_tests {
     use crate::protocol::{MeshId, Message};
     use crate::testing::{fresh_state, nick};
 
+    use crate::transport::PayloadPath;
+    use crate::{gossip, lookup};
     async fn handle_for(secret: &SecretKey) -> MultihopHandle {
         let underlay_builder = Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(secret))
@@ -3792,7 +3800,7 @@ mod parked_link_state_tests {
         MultihopHandle::new(
             secret,
             underlay,
-            crate::lookup::multihop_handle_config(crate::transport::PayloadPath::DirectOnly),
+            lookup::multihop_handle_config(PayloadPath::DirectOnly),
         )
         .expect("underlay on the derived key")
     }
@@ -3811,8 +3819,7 @@ mod parked_link_state_tests {
                 )
             })
             .collect();
-        let body =
-            crate::gossip::json_body(&handle.link_vector(links)).expect("a vector serializes");
+        let body = gossip::json_body(&handle.link_vector(links)).expect("a vector serializes");
         Message::new_link_state(&MeshId::from("test"), &nick(author), body)
     }
 

@@ -19,6 +19,8 @@
 //! or meta answer is the exception: it goes point-to-point to the linked
 //! neighbor that asked, see [`handle_state_digest`].
 
+use crate::transport;
+use std::iter;
 mod answered;
 mod digest_trigger;
 mod fast_rounds;
@@ -243,7 +245,7 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, me: 
         return;
     };
     // Only a few members answer one digest (see `answers_digest`).
-    let members = state.peers.iter().chain(std::iter::once(me));
+    let members = state.peers.iter().chain(iter::once(me));
     if !answers_digest(me, &message.author, message.id.as_str(), members) {
         return;
     }
@@ -306,7 +308,7 @@ fn resend_one(message: &Verified, state: &mut EventLoopState) -> bool {
     let Ok(bytes) = message.serialize() else {
         return false;
     };
-    match crate::transport::resolve(message, bytes, state) {
+    match transport::resolve(message, bytes, state) {
         Ok(resend) => {
             // The gossip layer drops a payload it has seen for 90 s, whether the app read it or
             // not. A broadcast resend therefore carries a new nonce, and so a new name.
@@ -513,7 +515,7 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, context: &Han
         let held: Vec<&[String]> = held_peers.map(|peer| peer.heads.as_slice()).collect();
         let answerable = ahead
             .iter()
-            .filter(|peer| crate::transport::unicast_answer_target(&peer.key, state).is_some());
+            .filter(|peer| transport::unicast_answer_target(&peer.key, state).is_some());
         let reachable: Vec<AuthorKey> = answerable.map(|peer| peer.key).collect();
         let ours = heads_key_of(state, channel);
         let target = state.fast_rounds.retry_target(
@@ -542,7 +544,7 @@ async fn ask(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) -> bool {
-    let Some(eid) = crate::transport::unicast_answer_target(key, state) else {
+    let Some(eid) = transport::unicast_answer_target(key, state) else {
         return false;
     };
     let origin = DigestOrigin {
@@ -604,7 +606,7 @@ pub(crate) async fn handle_state_digest(
     let heads = heads_key(message);
     let author = message.key();
     let serve = |plane| (author, channel, plane);
-    let target = crate::transport::unicast_answer_target(&author, state);
+    let target = transport::unicast_answer_target(&author, state);
     let plane = if target.is_some() {
         Plane::Unicast
     } else {
@@ -709,7 +711,9 @@ mod budget_tests {
         ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE, FAST_ROUND_RETRY, antientropy_max_resend,
     };
 
+    use crate::{protocol, testing, transport};
     use iroh::endpoint::presets;
+    use iroh_gossip::{net, proto};
     fn key() -> (AuthorKey, Channel, Plane) {
         (author_of("asker"), Channel::State, Plane::Unicast)
     }
@@ -835,14 +839,14 @@ mod budget_tests {
                 .bind()
                 .await
                 .expect("bind a local endpoint");
-            let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+            let gossip = net::Gossip::builder().spawn(endpoint.clone());
             let topic = gossip
-                .subscribe(iroh_gossip::proto::TopicId::from_bytes([5u8; 32]), vec![])
+                .subscribe(proto::TopicId::from_bytes([5u8; 32]), vec![])
                 .await
                 .expect("subscribe to a peerless topic");
             let (gossip_sender, _receiver) = topic.split();
-            let sender = crate::transport::MeshSender::new(gossip_sender);
-            let mut state = crate::testing::fresh_state();
+            let sender = transport::MeshSender::new(gossip_sender);
+            let mut state = testing::fresh_state();
             state.meshed = true;
             state
                 .fast_rounds
@@ -881,14 +885,14 @@ mod budget_tests {
                 .bind()
                 .await
                 .expect("bind a local endpoint");
-            let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+            let gossip = net::Gossip::builder().spawn(endpoint.clone());
             let topic = gossip
-                .subscribe(iroh_gossip::proto::TopicId::from_bytes([6u8; 32]), vec![])
+                .subscribe(proto::TopicId::from_bytes([6u8; 32]), vec![])
                 .await
                 .expect("subscribe to a peerless topic");
             let (gossip_sender, _receiver) = topic.split();
-            let sender = crate::transport::MeshSender::new(gossip_sender);
-            let mut state = crate::testing::fresh_state();
+            let sender = transport::MeshSender::new(gossip_sender);
+            let mut state = testing::fresh_state();
             state.meshed = true;
             state
                 .fast_rounds
@@ -924,7 +928,7 @@ mod budget_tests {
         use crate::protocol::MeshId;
 
         let _guard = ::habilis_network_test_tracing::init();
-        let mut state = crate::testing::fresh_state();
+        let mut state = testing::fresh_state();
         state.meshed = true;
         let (mesh, author) = (MeshId::from("test"), nick("alice"));
         let seed = *state.identity.public().as_bytes();
@@ -937,9 +941,8 @@ mod budget_tests {
             .doc(Channel::State)
             .compose_wire_body(&change, None)
             .expect("compose the wire body");
-        let frame =
-            crate::protocol::Message::new_channel_event(&mesh, &author, wire, Channel::State)
-                .sign(&state.identity);
+        let frame = protocol::Message::new_channel_event(&mesh, &author, wire, Channel::State)
+            .sign(&state.identity);
         let _ = state.doc_mut(Channel::State).ingest(&frame);
         let origin = DigestOrigin {
             mesh: &mesh,
@@ -1101,7 +1104,9 @@ mod tests {
     use crate::testing::{fresh_state, nick};
 
     use crate::protocol::message;
+    use crate::transport::Resend;
     use crate::util::{consts, tuning};
+    use crate::{gossip, protocol, transport};
     fn members(count: usize) -> Vec<Nickname> {
         (0..count)
             .map(|index| nick(&format!("member-{index:02}")))
@@ -1168,7 +1173,7 @@ mod tests {
             ids: Vec::new(),
             from_start: true,
         };
-        let body = crate::gossip::json_body(&DigestBody {
+        let body = gossip::json_body(&DigestBody {
             windows: vec![WireWindow::encode(&window)],
         })
         .expect("a digest serializes");
@@ -1192,7 +1197,7 @@ mod tests {
                 .push(chat_at(&format!("message {index}"), 1_700_000_000 + index));
         }
         // Nobody drains this outbox.
-        let (outbox, _undrained) = crate::transport::ResendOutbox::new(4);
+        let (outbox, _undrained) = transport::ResendOutbox::new(4);
         state.resend_outbox = outbox;
 
         super::handle_digest(&digest_of_an_empty_log(&asker), &mut state, &me);
@@ -1213,7 +1218,7 @@ mod tests {
     fn each_broadcast_resend_has_a_payload_of_its_own() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        let (outbox, mut resends) = crate::transport::ResendOutbox::new(4);
+        let (outbox, mut resends) = transport::ResendOutbox::new(4);
         state.resend_outbox = outbox;
         // A real signature: the test parses the resend and checks it verifies.
         let message = plain_chat_at("kept in the log", 1_700_000_000).sign(&Identity::generate());
@@ -1228,7 +1233,7 @@ mod tests {
         );
 
         let mut payloads = Vec::new();
-        while let Ok(crate::transport::Resend::Broadcast(bytes)) = resends.try_recv() {
+        while let Ok(Resend::Broadcast(bytes)) = resends.try_recv() {
             payloads.push(bytes);
         }
         assert_eq!(payloads.len(), 2, "both resends are broadcasts");
@@ -1426,7 +1431,7 @@ mod tests {
                 &MeshId::from("test"),
                 &Nickname::from("author"),
                 message::AppFrameParams::new(
-                    crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                    protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                     None,
                     None,
                     MessageBody::from(format!("m{index}").as_str()),
@@ -1580,7 +1585,7 @@ mod tests {
             &MeshId::from("test"),
             &Nickname::from("author"),
             message::AppFrameParams::new(
-                crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                 None,
                 None,
                 MessageBody::from(body),
@@ -2035,7 +2040,7 @@ mod tests {
             ids: vec![DedupKey::from([0x33; 16])],
             from_start: true,
         };
-        let body = crate::gossip::json_body(&DigestBody {
+        let body = gossip::json_body(&DigestBody {
             windows: vec![WireWindow::encode(&newest), WireWindow::encode(&older)],
         })
         .expect("a digest serializes");

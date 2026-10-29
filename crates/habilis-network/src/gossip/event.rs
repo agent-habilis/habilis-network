@@ -2,6 +2,7 @@ use crate::protocol::mesh::MeshName;
 use crate::protocol::message::Authored;
 use crate::protocol::{AuthorKey, Channel, MeshId, Nickname};
 
+use std::sync;
 #[cfg(test)]
 use std::sync::atomic;
 #[cfg(test)]
@@ -125,7 +126,7 @@ pub trait NodeSink: Send + Sync {
 }
 
 // a shared sink is a sink: the loop and the setup hold the same Arc
-impl<T: NodeSink + ?Sized> NodeSink for std::sync::Arc<T> {
+impl<T: NodeSink + ?Sized> NodeSink for sync::Arc<T> {
     fn emit(&self, event: NodeEvent) {
         (**self).emit(event);
     }

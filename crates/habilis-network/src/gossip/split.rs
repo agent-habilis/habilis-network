@@ -20,6 +20,7 @@ use iroh_gossip::proto::TopicId;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::util::tuning::MESH_TOPIC_EVENTS_CAP;
+use n0_future::task;
 
 mod mesh_receiver;
 mod route;
@@ -114,7 +115,7 @@ where
     let (data_tx, data) = mpsc::channel(capacity);
     let (control_tx, control) = mpsc::unbounded_channel();
     let (dead_tx, dead) = oneshot::channel();
-    n0_future::task::spawn(async move {
+    task::spawn(async move {
         let mut stream = stream;
         let mut dropped = 0u64;
         while let Some(item) = stream.next().await {
@@ -173,7 +174,9 @@ mod tests {
     use super::{MeshReceiver, TopicItem, spawn_split};
     use crate::testing;
 
+    use crate::protocol;
     use tokio::sync::mpsc;
+    use tokio::time;
     type Mesh = MeshReceiver<BoxStream<'static, TopicItem>>;
 
     /// A topic that the test feeds by hand.
@@ -210,7 +213,7 @@ mod tests {
             if handle.stats().frames_in >= frames {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            time::sleep(Duration::from_millis(10)).await;
         }
         panic!("only {} of {frames} frames read", handle.stats().frames_in);
     }
@@ -223,7 +226,7 @@ mod tests {
     }
 
     async fn next_within(mesh: &mut Mesh) -> Option<TopicItem> {
-        tokio::time::timeout(Duration::from_secs(2), mesh.next())
+        time::timeout(Duration::from_secs(2), mesh.next())
             .await
             .expect("an event within 2 s")
     }
@@ -402,7 +405,7 @@ mod tests {
                     .expect("send");
             }
             drop(tx);
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            time::sleep(Duration::from_millis(100)).await;
 
             for index in 0..3u8 {
                 let Some(Ok(Event::Received(item))) = next_within(&mut mesh).await else {
@@ -436,17 +439,17 @@ mod tests {
         use habilis_network_iroh_gossip_transport::frame::FRAME_KIND;
 
         let _guard = ::habilis_network_test_tracing::init();
-        let mesh = crate::protocol::MeshId::from("test");
+        let mesh = protocol::MeshId::from("test");
         let author = testing::nick("alice");
-        let answer = crate::protocol::Message::new_pong(
+        let answer = protocol::Message::new_pong(
             &mesh,
             &author,
             testing::nick("bob"),
-            &crate::protocol::MessageId::random(),
+            &protocol::MessageId::random(),
         )
-        .sign(&crate::protocol::Identity::generate());
-        let request = crate::protocol::Message::new_ping(&mesh, &author)
-            .sign(&crate::protocol::Identity::generate());
+        .sign(&protocol::Identity::generate());
+        let request =
+            protocol::Message::new_ping(&mesh, &author).sign(&protocol::Identity::generate());
         for message in [answer, request] {
             let bytes = message.serialize().expect("serialize");
             assert_ne!(bytes.as_bytes().first(), Some(&FRAME_KIND), "{bytes:?}");
@@ -476,6 +479,7 @@ mod real_gossip {
     use std::net::SocketAddr;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
+    use tokio::task::JoinHandle;
 
     use bytes::Bytes;
     use habilis_network_iroh_gossip_transport::GossipHandle;
@@ -493,12 +497,14 @@ mod real_gossip {
     use super::{is_frame, spawn_split_capped, subscribe_mesh_capped};
     use crate::util::tuning::MESH_TOPIC_EVENTS_CAP;
 
+    use std::{env, str, thread};
+    use tokio::time;
     /// The busy time of the loop in each period.
     const BUSY: Duration = Duration::from_millis(80);
     const PERIOD: Duration = Duration::from_millis(100);
 
-    fn setting<T: std::str::FromStr>(name: &str, default: T) -> T {
-        let raw = std::env::var(name).ok();
+    fn setting<T: str::FromStr>(name: &str, default: T) -> T {
+        let raw = env::var(name).ok();
         raw.and_then(|value| value.parse().ok()).unwrap_or(default)
     }
 
@@ -518,17 +524,14 @@ mod real_gossip {
     }
 
     /// The B side of an inline run: a reader that drains the topic itself, with the busy loop beside it.
-    fn spawn_inline_reader(
-        mut receiver: GossipReceiver,
-        handle: GossipHandle,
-    ) -> tokio::task::JoinHandle<()> {
+    fn spawn_inline_reader(mut receiver: GossipReceiver, handle: GossipHandle) -> JoinHandle<()> {
         tokio::spawn(async move {
             use futures_util::StreamExt as _;
-            let mut tick = tokio::time::interval(PERIOD);
+            let mut tick = time::interval(PERIOD);
             loop {
                 tokio::select! {
                     biased;
-                    _ = tick.tick() => std::thread::sleep(BUSY),
+                    _ = tick.tick() => thread::sleep(BUSY),
                     event = receiver.next() => match event {
                         None => break,
                         Some(Ok(Event::Received(message))) if is_frame(&message.content) => {
@@ -549,16 +552,16 @@ mod real_gossip {
         handle: GossipHandle,
         capacity: usize,
         // the splitter and the run share the gauge, so each holds a handle
-    ) -> (Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    ) -> (Arc<AtomicUsize>, JoinHandle<()>) {
         // the gauge is shared: the splitter writes it, the run reads it after the load
         let mut mesh = spawn_split_capped(receiver, Some(handle), capacity);
         let gauge = mesh.high_water_gauge();
         let reader = tokio::spawn(async move {
-            let mut tick = tokio::time::interval(PERIOD);
+            let mut tick = time::interval(PERIOD);
             loop {
                 tokio::select! {
                     biased;
-                    _ = tick.tick() => std::thread::sleep(BUSY),
+                    _ = tick.tick() => thread::sleep(BUSY),
                     event = mesh.next() => if event.is_none() { break },
                 }
             }
@@ -609,7 +612,7 @@ mod real_gossip {
                     .expect("b joins");
                 let (_b_sender, b_receiver) = b_topic.split();
                 let joining = a_gossip.subscribe_and_join(topic_id, vec![b_endpoint.id()]);
-                let a_topic = tokio::time::timeout(Duration::from_secs(20), joining)
+                let a_topic = time::timeout(Duration::from_secs(20), joining)
                     .await
                     .expect("a joins in time")
                     .expect("a joins");
@@ -632,7 +635,7 @@ mod real_gossip {
                     if rate_fps > 0.0 {
                         let due = started.elapsed().as_secs_f64() * rate_fps;
                         if u64_to_f64(sent) >= due {
-                            tokio::time::sleep(Duration::from_millis(1)).await;
+                            time::sleep(Duration::from_millis(1)).await;
                             continue;
                         }
                     }
@@ -652,7 +655,7 @@ mod real_gossip {
                     }
                 }
                 let elapsed = started.elapsed().as_secs_f64();
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                time::sleep(Duration::from_secs(2)).await;
 
                 let stats = b_handle.stats();
                 let frames = u64_to_f64(sent);
