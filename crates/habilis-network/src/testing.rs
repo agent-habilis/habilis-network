@@ -74,7 +74,7 @@ pub(crate) fn silent_relay_rung() -> (std::net::TcpListener, iroh::RelayUrl) {
     let silent = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .expect("a silent loopback listener");
     let address = silent.local_addr().expect("its address");
-    let rung = format!("http://{address}").parse().expect("a relay url");
+    let rung: iroh::RelayUrl = format!("http://{address}").parse().expect("a relay url");
     (silent, rung)
 }
 

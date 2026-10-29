@@ -984,10 +984,10 @@ mod tests {
 
         let kept = |log: &MessageLog| -> HashSet<String> {
             let messages = &log.messages;
-            messages
+            let bodies = messages
                 .iter()
-                .map(|message| message.body.as_str().to_owned())
-                .collect()
+                .map(|message| message.body.as_str().to_owned());
+            bodies.collect()
         };
         assert_eq!(
             kept(&forward),
