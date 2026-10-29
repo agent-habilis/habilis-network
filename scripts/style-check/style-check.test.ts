@@ -551,3 +551,11 @@ test("trait_import_scope: a top-level as _ import with no row fails", () => {
 test("trait_import_scope: an indented as _ import inside a fn passes", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f() {\n    use std::io::Write as _;\n}", 0, "");
 });
+
+// The pub_const_fn rule (Z7): a pub const fn is clean when a const or static initializer calls it.
+test("pub_const_fn: a pub const fn called from a const item is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub const fn seed() -> u8 {\n    1\n}\npub const SEED: u8 = seed();", 0, "");
+});
+test("pub_const_fn: a pub const fn no const item calls is flagged", () => {
+  expectExit("crates/demo/src/lib.rs", "pub const fn seed() -> u8 {\n    1\n}", 1, "");
+});

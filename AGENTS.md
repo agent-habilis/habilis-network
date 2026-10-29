@@ -222,6 +222,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - N7, generic parameter names: the `generic_name` rule of `scripts/style-check/style-check.ts` counts a generic that is not T, U, E, K, V, F, I, R or S and not a CamelCase word of three letters or more. Its 43 hits (A, C, D, H, W, X, O, Q) were renamed to words (Driver, Peer, Decoder, Handle, Writer, Link, Reply, Query, Cmd). A probe `pub struct Wrap<A>` makes the rule count 1 (red), and the renamed form counts 0.
 - N13, letter-deleted abbreviations: the `abbrev_name` rule of `scripts/style-check/style-check.ts` counts a declared or used identifier named ctx, addr, conn, msg, buf, opts, prev, req, resp, idx, cfg, tmp, attr, cmd, ident, rng, pos or sig (not in a string, comment, attribute or path). Its rows in `style-check.allow` may only go down. A probe `let ctx = 1;` makes it count 1 (red); `let context = 1;` counts 0. Serde fields keep the old JSON key with `#[serde(rename)]`.
 
+- A public fn is `const` only where a const or static initializer calls it: `pub_const_fn` reads every `const` and `static` line of the crates for the names they call, and flags a `pub const fn` none of them calls (Z7). A newtype or trivial accessor is not exempt by its shape.
 ### Rules we decline, or leave to the reviewer
 
 - `clippy::absolute_paths`: the owner set `absolute-paths-max-segments = 3` in `clippy.toml`. The lint is on in `[workspace.lints]`. `scripts/absolute-paths/` rewrote the hits to import the parent module.

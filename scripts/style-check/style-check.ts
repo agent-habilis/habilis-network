@@ -468,6 +468,28 @@ function countFnImports(raw: string): number {
   return count;
 }
 
+// The names that a const or static initializer calls, read from every const and static line of the crates.
+// A pub const fn is correct only where one of these names it (Z7). Multi-line initializers are not read.
+let constCalled: Set<string> | undefined;
+function constCalledNames(): Set<string> {
+  if (constCalled) return constCalled;
+  const names = new Set<string>();
+  const proc = spawnSync("git", ["grep", "-h", "--untracked", "-E", "^[[:space:]]*(pub(\\([^)]*\\))?[[:space:]]+)?(const|static)[[:space:]]+[A-Za-z_]", "--", "crates"], { cwd: ROOT, encoding: "utf8" });
+  for (const line of (proc.stdout ?? "").split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq < 0) continue;
+    for (const m of line.slice(eq + 1).matchAll(/\b([a-z_][a-z0-9_]*)\s*\(/g)) names.add(m[1] ?? "");
+  }
+  constCalled = names;
+  return names;
+}
+// The pub const fns of a file that no const or static initializer calls (Z7).
+function countPubConstFnNotInConst(text: string): number {
+  const used = constCalledNames();
+  const names = [...text.matchAll(/^\s*pub(?:\([^)]*\))?\s+const\s+fn\s+([a-z_][a-z0-9_]*)/gm)].map((m) => m[1] ?? "");
+  return names.filter((name) => !used.has(name)).length;
+}
+
 function countAnyhowPub(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   const bare = new Set<string>();
@@ -565,9 +587,9 @@ const RULES: Rule[] = [
   },
   {
     name: "pub_const_fn",
-    pattern: /^\s*pub(\([^)]*\))?\s+const\s+fn\b/,
+    scan: countPubConstFnNotInConst,
     glob: "crates/**/*.rs",
-    why: "Mark a public fn const only if it will stay const (a const context, a newtype accessor, or a trivial accessor). A new one needs a row in style-check.allow with that reason.",
+    why: "Mark a public fn const only where a const or static initializer calls it. A pub const fn that no const item calls is flagged: drop const (Z7).",
   },
   {
     name: "manual_eq_ord",
