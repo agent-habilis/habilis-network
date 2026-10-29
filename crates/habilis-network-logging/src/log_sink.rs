@@ -333,7 +333,7 @@ mod tests {
             std::env::temp_dir().join(format!("habilis-network-logsink-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("rot.log");
-        let file = fs::OpenOptions::new()
+        let file: fs::File = fs::OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)

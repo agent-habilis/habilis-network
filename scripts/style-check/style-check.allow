@@ -368,7 +368,6 @@ untyped_long_chain_let|crates/habilis-network-iroh-webrtc-transport/src/native/w
 untyped_long_chain_let|crates/habilis-network-iroh-webrtc-transport/src/web/pending_answer.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-webrtc-transport/src/web/pending_offer.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-iroh-webrtc-transport/src/web/transport.rs|3|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-logging/src/log_sink.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/native/game/src/app.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/tui/layout.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/web/wasm/src/app.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
