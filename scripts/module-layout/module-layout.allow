@@ -3,5 +3,3 @@
 
 
 # O11: a mod.rs or lib.rs that defines items. Each row goes when the items move to leaf files.
-crates/habilis-network/src/transport/webrtc/backend_native.rs|1|the native backend's own Offer and Answer, one per JSEP target; the file is the backend, not a type
-crates/habilis-network/src/transport/webrtc/backend_web.rs|1|the browser backend's own Offer and Answer, one per JSEP target; the file is the backend, not a type
