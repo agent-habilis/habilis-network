@@ -4,6 +4,11 @@
 //! made [`StateInit`] painful to extend: one new field meant editing six test
 //! modules that had no reason to know about it. One home instead.
 
+use crate::transport;
+#[cfg(feature = "host")]
+use std::net;
+#[cfg(feature = "host")]
+use tokio::runtime;
 mod lane_node;
 mod log_capture;
 
@@ -44,11 +49,9 @@ pub(crate) fn fresh_state_with_book(address_book: memory::MemoryLookup) -> Event
             identity: Arc::new(Identity::generate()),
             secrets: MeshSecrets::default(),
             per_peer_gate: None,
-            webrtc_admission: crate::transport::SignalAdmission::new(
-                crate::transport::MAX_DIRECT_PEERS,
-            ),
+            webrtc_admission: transport::SignalAdmission::new(transport::MAX_DIRECT_PEERS),
             address_book,
-            webrtc_ice: crate::transport::IceProfile::default(),
+            webrtc_ice: transport::IceProfile::default(),
         },
         Instant::now(),
     )
@@ -70,9 +73,9 @@ pub(crate) fn endpoint_id(seed: u8) -> EndpointId {
 /// handshake hangs, as it does on a rung that is slow to answer. Keep the
 /// listener alive for as long as the url is in use.
 #[cfg(feature = "host")]
-pub(crate) fn silent_relay_rung() -> (std::net::TcpListener, iroh::RelayUrl) {
-    let silent = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .expect("a silent loopback listener");
+pub(crate) fn silent_relay_rung() -> (net::TcpListener, iroh::RelayUrl) {
+    let silent =
+        net::TcpListener::bind((net::Ipv4Addr::LOCALHOST, 0)).expect("a silent loopback listener");
     let address = silent.local_addr().expect("its address");
     let rung: iroh::RelayUrl = format!("http://{address}").parse().expect("a relay url");
     (silent, rung)
@@ -85,7 +88,7 @@ pub(crate) fn silent_relay_rung() -> (std::net::TcpListener, iroh::RelayUrl) {
 #[cfg(feature = "host")]
 pub(crate) fn errors_through_runtime_drop(body: impl Future<Output = ()>) -> String {
     let (logs, _guard) = LogCapture::start(tracing::Level::ERROR);
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("a runtime");
@@ -101,6 +104,7 @@ pub(crate) fn errors_through_runtime_drop(body: impl Future<Output = ()>) -> Str
 mod log_capture_tests {
     use super::LogCapture;
 
+    use std::thread;
     fn first_event() {
         tracing::debug!(target: "log-capture-test", "first event");
     }
@@ -117,7 +121,7 @@ mod log_capture_tests {
     fn an_event_that_a_thread_without_a_subscriber_hit_first_still_reaches_the_capture() {
         let _trace_guard = ::habilis_network_test_tracing::init();
         let (logs, _guard) = LogCapture::start(tracing::Level::DEBUG);
-        std::thread::spawn(|| {
+        thread::spawn(|| {
             first_event();
             second_event();
             third_event();

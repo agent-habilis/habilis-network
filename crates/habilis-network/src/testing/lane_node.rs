@@ -13,6 +13,14 @@ use crate::gossip::event;
 #[cfg(feature = "host")]
 use crate::protocol::message;
 
+#[cfg(feature = "host")]
+use crate::protocol;
+#[cfg(feature = "host")]
+use crate::transport;
+#[cfg(feature = "host")]
+use iroh_gossip::net;
+#[cfg(feature = "host")]
+use iroh_gossip::proto;
 /// A real endpoint with a `WebRTC` handle, a gossip sender and everything a [`HandlerCtx`] borrows,
 /// for a test that goes through the code that offers a session. The peer `bob` is a lane peer: it
 /// has a relay address and no IP, so no frame can be sent to it before its session.
@@ -23,9 +31,9 @@ pub(crate) struct LaneNode {
     pub(crate) endpoint: iroh::Endpoint,
     pub(crate) handle: habilis_network_iroh_webrtc_transport::WebRtcHandle,
     pub(crate) bob: EndpointId,
-    pub(crate) gossip: iroh_gossip::net::Gossip,
-    pub(crate) sender: crate::transport::MeshSender,
-    pub(crate) mesh: crate::protocol::MeshId,
+    pub(crate) gossip: net::Gossip,
+    pub(crate) sender: transport::MeshSender,
+    pub(crate) mesh: protocol::MeshId,
     pub(crate) identity: Identity,
     pub(crate) our_pubkey: AuthorKey,
     pub(crate) author: Nickname,
@@ -47,9 +55,9 @@ impl LaneNode {
             .clear_address_lookup()
             .add_custom_transport(transport);
         let endpoint = builder.bind().await.expect("bind a loopback endpoint");
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let gossip = net::Gossip::builder().spawn(endpoint.clone());
         let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
             .await
             .expect("subscribe to a peerless topic");
         let (gossip_sender, _receiver) = topic.split();
@@ -59,8 +67,8 @@ impl LaneNode {
             handle,
             bob: super::endpoint_id(77),
             gossip,
-            sender: crate::transport::MeshSender::new(gossip_sender),
-            mesh: crate::protocol::MeshId::from("test"),
+            sender: transport::MeshSender::new(gossip_sender),
+            mesh: protocol::MeshId::from("test"),
             our_pubkey: identity.author_key(),
             identity,
             author: super::nick("alice"),
@@ -93,7 +101,7 @@ impl LaneNode {
         let mut state = super::fresh_state();
         state.webrtc = Some(self.handle.clone());
         state.local_udp_transport = UdpTransport::Absent;
-        state.unicast_pool = crate::transport::UnicastPool::new(self.endpoint.clone(), false);
+        state.unicast_pool = transport::UnicastPool::new(self.endpoint.clone(), false);
         state.peer_endpoints.insert(
             super::nick("bob"),
             iroh::EndpointAddr::new(self.bob)
@@ -103,11 +111,11 @@ impl LaneNode {
     }
 
     pub(crate) fn frame_to_bob(&self) -> message::Verified {
-        crate::protocol::Message::new_pong(
+        protocol::Message::new_pong(
             &self.mesh,
             &self.author,
             super::nick("bob"),
-            &crate::protocol::MessageId::random(),
+            &protocol::MessageId::random(),
         )
         .sign(&self.identity)
     }
