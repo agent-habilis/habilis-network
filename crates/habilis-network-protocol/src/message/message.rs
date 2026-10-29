@@ -548,7 +548,7 @@ impl Message {
             kind,
             mesh: MeshId::from("test"),
             author: "alice-bot".into(),
-            timestamp: UnixSecs::from_secs(1_700_000_000),
+            timestamp: UnixSecs::from(1_700_000_000),
             body: body.into(),
             signer: None,
             seq: None,

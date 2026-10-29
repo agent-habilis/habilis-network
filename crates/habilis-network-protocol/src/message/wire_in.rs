@@ -93,7 +93,7 @@ impl TryFrom<WireIn> for Message {
             kind: wire.kind,
             mesh: wire.mesh,
             author: wire.author,
-            timestamp: UnixSecs::from_secs(wire.timestamp),
+            timestamp: UnixSecs::from(wire.timestamp),
             body: wire.body,
             signer,
             seq: wire.seq,

@@ -182,7 +182,7 @@ impl InviteTicket {
         }
         let payload = &framed[2..];
         let mut position = 0;
-        let expiry = UnixSecs::from_le_bytes(
+        let expiry = UnixSecs::from(
             take_array::<8>(payload, &mut position)
                 .ok_or(InviteError::Truncated("missing expiry"))?,
         );
@@ -345,7 +345,7 @@ mod tests {
     fn fixed_ticket() -> InviteTicket {
         InviteTicket {
             mesh_hash: "fixed-mesh-hash".to_owned(),
-            expiry: UnixSecs::from_secs(1_700_000_000),
+            expiry: UnixSecs::from(1_700_000_000),
             password: true,
             signature: [5u8; 64],
             root_field: vec![6u8; 32],

@@ -142,7 +142,7 @@ mod tests {
         let update = compute(
             &MessageKind::app_broadcast("app_msg"),
             &nick("swift-cedar"),
-            UnixSecs::from_secs(0),
+            UnixSecs::from(0),
             &state,
         );
         assert!(
@@ -162,7 +162,7 @@ mod tests {
         let update = compute(
             &MessageKind::app_broadcast("app_msg"),
             &nick("swift-cedar"),
-            UnixSecs::from_secs(0),
+            UnixSecs::from(0),
             &state,
         );
         assert!(!update.joined_new, "a known author is not joined_new");
@@ -177,7 +177,7 @@ mod tests {
                 subtype: PresenceSubtype::Left,
             },
             &nick("swift-cedar"),
-            UnixSecs::from_secs(0),
+            UnixSecs::from(0),
             &state,
         );
         assert!(!update.joined_new, "a left message is never joined_new");
@@ -190,7 +190,7 @@ mod tests {
         let update = compute(
             &MessageKind::app_broadcast("app_msg"),
             &nick("swift-cedar"),
-            UnixSecs::from_secs(0),
+            UnixSecs::from(0),
             &state,
         );
         assert!(
@@ -212,7 +212,7 @@ mod tests {
                 subtype: PresenceSubtype::Alive,
             },
             &nick("swift-cedar"),
-            UnixSecs::from_secs(0),
+            UnixSecs::from(0),
             &state,
         );
         assert!(
@@ -261,7 +261,7 @@ mod tests {
     /// it must not bring the peer back into the roster.
     #[test]
     fn a_message_sent_in_the_second_of_a_goodbye_is_stale() {
-        let at = UnixSecs::from_secs(1_000);
+        let at = UnixSecs::from(1_000);
         let mut state = fresh_state();
         state.note_left(&nick("swift-cedar"), AuthorKey::from_bytes([1; 32]), at);
         let joined = MessageKind::Presence {
@@ -279,12 +279,7 @@ mod tests {
             let update = compute(&kind, &nick("swift-cedar"), at, &state);
             assert!(update.stale, "{kind:?} of the second of the goodbye");
             assert!(!update.joined_new, "{kind:?} brings the peer back");
-            let older = compute(
-                &kind,
-                &nick("swift-cedar"),
-                UnixSecs::from_secs(990),
-                &state,
-            );
+            let older = compute(&kind, &nick("swift-cedar"), UnixSecs::from(990), &state);
             assert!(older.stale && !older.joined_new, "{kind:?} sent before it");
         }
     }
@@ -293,19 +288,14 @@ mod tests {
     /// goodbye of another peer.
     #[test]
     fn a_message_stamped_after_a_goodbye_is_a_return() {
-        let at = UnixSecs::from_secs(1_000);
+        let at = UnixSecs::from(1_000);
         let mut state = fresh_state();
         state.note_left(&nick("swift-cedar"), AuthorKey::from_bytes([1; 32]), at);
         let joined = MessageKind::Presence {
             subtype: PresenceSubtype::Joined,
         };
 
-        let back = compute(
-            &joined,
-            &nick("swift-cedar"),
-            UnixSecs::from_secs(1_001),
-            &state,
-        );
+        let back = compute(&joined, &nick("swift-cedar"), UnixSecs::from(1_001), &state);
         assert!(
             !back.stale,
             "a message stamped after a goodbye is not stale"
@@ -324,38 +314,26 @@ mod tests {
     fn the_mark_of_a_goodbye_only_moves_forward() {
         let mut state = fresh_state();
         let who = nick("swift-cedar");
-        state.note_left(
-            &who,
-            AuthorKey::from_bytes([1; 32]),
-            UnixSecs::from_secs(1_000),
-        );
-        state.note_left(
-            &who,
-            AuthorKey::from_bytes([1; 32]),
-            UnixSecs::from_secs(900),
-        );
+        state.note_left(&who, AuthorKey::from_bytes([1; 32]), UnixSecs::from(1_000));
+        state.note_left(&who, AuthorKey::from_bytes([1; 32]), UnixSecs::from(900));
         assert!(
-            state.sent_before_goodbye(&who, UnixSecs::from_secs(1_000)),
+            state.sent_before_goodbye(&who, UnixSecs::from(1_000)),
             "a goodbye marks the messages sent before it"
         );
-        state.note_left(
-            &who,
-            AuthorKey::from_bytes([1; 32]),
-            UnixSecs::from_secs(1_200),
-        );
+        state.note_left(&who, AuthorKey::from_bytes([1; 32]), UnixSecs::from(1_200));
         assert!(
-            state.sent_before_goodbye(&who, UnixSecs::from_secs(1_100)),
+            state.sent_before_goodbye(&who, UnixSecs::from(1_100)),
             "messages sent just before the goodbye mark still count"
         );
         assert!(
-            !state.sent_before_goodbye(&who, UnixSecs::from_secs(1_201)),
+            !state.sent_before_goodbye(&who, UnixSecs::from(1_201)),
             "a message sent after the goodbye is not marked"
         );
         let left = MessageKind::Presence {
             subtype: PresenceSubtype::Left,
         };
         assert!(
-            !compute(&left, &who, UnixSecs::from_secs(1_200), &state).stale,
+            !compute(&left, &who, UnixSecs::from(1_200), &state).stale,
             "a left message stamped after the goodbye is not stale"
         );
     }
@@ -368,7 +346,7 @@ mod tests {
         let who = nick("swift-cedar");
         let leaver = Identity::generate();
         let mut state = fresh_state();
-        state.note_left(&who, leaver.author_key(), UnixSecs::from_secs(1_000));
+        state.note_left(&who, leaver.author_key(), UnixSecs::from(1_000));
 
         let replay = Message::new_joined(&mesh, &who).sign(&leaver);
         let update = compute_for(&replay, &state);

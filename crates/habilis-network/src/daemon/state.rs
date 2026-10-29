@@ -1301,7 +1301,7 @@ mod tests {
         let mut state = fresh_state();
         // First message (no parents) becomes the sole tip.
         assert!(
-            !state.note_dag(hash_of("h1"), &[], UnixSecs::from_secs(100)),
+            !state.note_dag(hash_of("h1"), &[], UnixSecs::from(100)),
             "a root node with no parents is not flagged"
         );
         let tips_h1: Vec<_> = state.dag_parents().collect();
@@ -1312,7 +1312,7 @@ mod tests {
         );
         // A child referencing h1 makes h1 no longer a tip; h2 is the new one.
         assert!(
-            !state.note_dag(hash_of("h2"), &[hash_of("h1")], UnixSecs::from_secs(101)),
+            !state.note_dag(hash_of("h2"), &[hash_of("h1")], UnixSecs::from(101)),
             "a child of h1 is not flagged"
         );
         let tips_h2: Vec<_> = state.dag_parents().collect();
@@ -1326,8 +1326,8 @@ mod tests {
     #[test]
     fn note_dag_keeps_concurrent_tips() {
         let mut state = fresh_state();
-        state.note_dag(hash_of("a"), &[], UnixSecs::from_secs(1));
-        state.note_dag(hash_of("b"), &[], UnixSecs::from_secs(1)); // concurrent: no shared parent
+        state.note_dag(hash_of("a"), &[], UnixSecs::from(1));
+        state.note_dag(hash_of("b"), &[], UnixSecs::from(1)); // concurrent: no shared parent
         let mut both = vec![hash_of("a"), hash_of("b")];
         both.sort();
         let tips: Vec<_> = state.dag_parents().collect();
@@ -1337,23 +1337,15 @@ mod tests {
     #[test]
     fn note_dag_flags_backdating() {
         let mut state = fresh_state();
-        state.note_dag(hash_of("parent"), &[], UnixSecs::from_secs(200));
+        state.note_dag(hash_of("parent"), &[], UnixSecs::from(200));
         // Child claims an earlier timestamp than a parent it references.
         assert!(
-            state.note_dag(
-                hash_of("child"),
-                &[hash_of("parent")],
-                UnixSecs::from_secs(100)
-            ),
+            state.note_dag(hash_of("child"), &[hash_of("parent")], UnixSecs::from(100)),
             "a child stamped before its parent is flagged as backdated"
         );
         // A forward timestamp is fine.
         assert!(
-            !state.note_dag(
-                hash_of("ok"),
-                &[hash_of("parent")],
-                UnixSecs::from_secs(300)
-            ),
+            !state.note_dag(hash_of("ok"), &[hash_of("parent")], UnixSecs::from(300)),
             "a child stamped after its parent is not flagged"
         );
     }
@@ -1361,7 +1353,7 @@ mod tests {
     #[test]
     fn forget_hash_prunes_dag() {
         let mut state = fresh_state();
-        state.note_dag(hash_of("h"), &[], UnixSecs::from_secs(1));
+        state.note_dag(hash_of("h"), &[], UnixSecs::from(1));
         state.forget_hash(&hash_of("h"));
         assert!(
             state.dag_parents().next().is_none(),

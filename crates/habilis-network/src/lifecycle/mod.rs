@@ -273,7 +273,7 @@ mod departed_tests {
         let who = nick("swift-cedar");
         let first_run = Identity::generate();
         let mut state = fresh_state();
-        state.note_left(&who, first_run.author_key(), UnixSecs::from_secs(1_000));
+        state.note_left(&who, first_run.author_key(), UnixSecs::from(1_000));
         // A second run took the nickname and went quiet.
         state.quiet.insert(who.clone());
 
@@ -318,7 +318,7 @@ mod departed_tests {
         let who = nick("swift-cedar");
         let departed = Identity::generate();
         let mut state = fresh_state();
-        state.note_left(&who, departed.author_key(), UnixSecs::from_secs(1_000));
+        state.note_left(&who, departed.author_key(), UnixSecs::from(1_000));
 
         let replay = Message::new_joined(&mesh, &who).sign(&departed);
         let observed = observe(&replay, &mut state, &context);

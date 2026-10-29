@@ -88,8 +88,8 @@ impl WireWindow {
     /// The window's bounds, or `None` if a key is malformed.
     fn range(&self) -> Option<WindowRange> {
         Some(WindowRange {
-            lo: (UnixSecs::from_secs(self.lo), decode_key(&self.lo_key)?),
-            hi: (UnixSecs::from_secs(self.hi), decode_key(&self.hi_key)?),
+            lo: (UnixSecs::from(self.lo), decode_key(&self.lo_key)?),
+            hi: (UnixSecs::from(self.hi), decode_key(&self.hi_key)?),
         })
     }
 
@@ -1418,7 +1418,7 @@ mod tests {
                     MessageBody::from(format!("m{index}").as_str()),
                 ),
             );
-            message.timestamp = UnixSecs::from_secs(1_700_000_000 + i64::try_from(index).unwrap());
+            message.timestamp = UnixSecs::from(1_700_000_000 + i64::try_from(index).unwrap());
             log.push(message.sign(&Identity::generate()));
         }
         let newest = log.recent_window(ANTIENTROPY_DIGEST_WINDOW_IDS).unwrap();
@@ -1456,7 +1456,7 @@ mod tests {
     fn wire_window_round_trips_ids() {
         let ids: Vec<DedupKey> = (0..5u8).map(|seed| DedupKey::from([seed; 16])).collect();
         let window = DigestWindow {
-            lo: (UnixSecs::from_secs(1), DedupKey::MIN),
+            lo: (UnixSecs::from(1), DedupKey::MIN),
             hi: (UnixSecs::MAX, DedupKey::MAX),
             ids: ids.clone(),
             from_start: false,
@@ -1571,7 +1571,7 @@ mod tests {
                 MessageBody::from(body),
             ),
         );
-        message.timestamp = UnixSecs::from_secs(timestamp);
+        message.timestamp = UnixSecs::from(timestamp);
         message
     }
 
@@ -1683,7 +1683,7 @@ mod tests {
             let all = scrambled_messages(seconds);
             let mut holder = MessageLog::new(1000);
             let mut node = fresh_state();
-            node.joined_at = UnixSecs::from_secs(1_699_999_999);
+            node.joined_at = UnixSecs::from(1_699_999_999);
             let mut lost = HashSet::new();
             for (index, message) in all.iter().enumerate() {
                 holder.push(message.clone());
@@ -1724,7 +1724,7 @@ mod tests {
         all.sort_by_key(|message| (message.timestamp, message.dedup_key()));
         let mut holder = MessageLog::new(1000);
         let mut node = fresh_state();
-        node.joined_at = UnixSecs::from_secs(1_699_999_999);
+        node.joined_at = UnixSecs::from(1_699_999_999);
         for (index, message) in all.iter().enumerate() {
             holder.push(message.clone());
             if index != ANTIENTROPY_DIGEST_WINDOW_IDS {
@@ -1756,7 +1756,7 @@ mod tests {
         holder.push(smaller.clone());
         holder.push(larger.clone());
         let mut node = fresh_state();
-        node.joined_at = UnixSecs::from_secs(second);
+        node.joined_at = UnixSecs::from(second);
         node.message_log.push(larger);
         let budget = tuning::antientropy_max_resend();
 
@@ -1783,7 +1783,7 @@ mod tests {
         holder.push(smaller.clone());
         holder.push(larger.clone());
         let mut node = fresh_state();
-        node.joined_at = UnixSecs::from_secs(second);
+        node.joined_at = UnixSecs::from(second);
         node.message_log.push(larger);
         let budget = tuning::antientropy_max_resend();
 
@@ -1827,7 +1827,7 @@ mod tests {
         let rounds_until_back = |lost_index: usize| {
             let mut holder = MessageLog::new(1000);
             let mut node = fresh_state();
-            node.joined_at = UnixSecs::from_secs(base - 1);
+            node.joined_at = UnixSecs::from(base - 1);
             let lost = all[lost_index].dedup_key();
             for (index, message) in all.iter().enumerate() {
                 holder.push(message.clone());
@@ -1882,10 +1882,10 @@ mod tests {
             .map(|index| chat_at(&format!("e{index}"), base + i64::from(index * 2 / 3)))
             .collect();
         let mut older = fresh_state();
-        older.joined_at = UnixSecs::from_secs(base - 1);
+        older.joined_at = UnixSecs::from(base - 1);
         older.message_log = MessageLog::new(100);
         let mut newer = fresh_state();
-        newer.joined_at = UnixSecs::from_secs(base + 1);
+        newer.joined_at = UnixSecs::from(base + 1);
         newer.message_log = MessageLog::new(100);
         for message in earlier.iter().chain(&common) {
             older.message_log.push(message.clone());
@@ -1926,7 +1926,7 @@ mod tests {
         let joined_at = 1_700_000_000;
         let own_joined = chat_at("own joined", joined_at + 5);
         let mut node = fresh_state();
-        node.joined_at = UnixSecs::from_secs(joined_at);
+        node.joined_at = UnixSecs::from(joined_at);
         node.message_log.push(own_joined.clone());
 
         let mut holder = MessageLog::new(10);
@@ -2002,20 +2002,14 @@ mod tests {
     #[test]
     fn a_digest_body_keeps_its_wire_form() {
         let newest = DigestWindow {
-            lo: (
-                UnixSecs::from_secs(1_700_000_100),
-                DedupKey::from([0x03; 16]),
-            ),
+            lo: (UnixSecs::from(1_700_000_100), DedupKey::from([0x03; 16])),
             hi: (UnixSecs::MAX, DedupKey::MAX),
             ids: vec![DedupKey::from([0x11; 16]), DedupKey::from([0x22; 16])],
             from_start: false,
         };
         let older = DigestWindow {
-            lo: (UnixSecs::from_secs(1_700_000_000), DedupKey::MIN),
-            hi: (
-                UnixSecs::from_secs(1_700_000_099),
-                DedupKey::from([0x04; 16]),
-            ),
+            lo: (UnixSecs::from(1_700_000_000), DedupKey::MIN),
+            hi: (UnixSecs::from(1_700_000_099), DedupKey::from([0x04; 16])),
             ids: vec![DedupKey::from([0x33; 16])],
             from_start: true,
         };
@@ -2037,10 +2031,7 @@ mod tests {
         let open_end = back.windows[0].range().expect("the keys decode");
         assert_eq!(
             open_end.lo,
-            (
-                UnixSecs::from_secs(1_700_000_100),
-                DedupKey::from([0x03; 16])
-            ),
+            (UnixSecs::from(1_700_000_100), DedupKey::from([0x03; 16])),
             "the open window's low bound keeps its wire form"
         );
         assert_eq!(
@@ -2057,15 +2048,12 @@ mod tests {
         let closed = back.windows[1].range().expect("the keys decode");
         assert_eq!(
             closed.lo,
-            (UnixSecs::from_secs(1_700_000_000), DedupKey::MIN),
+            (UnixSecs::from(1_700_000_000), DedupKey::MIN),
             "the closed window's low bound keeps its wire form"
         );
         assert_eq!(
             closed.hi,
-            (
-                UnixSecs::from_secs(1_700_000_099),
-                DedupKey::from([0x04; 16])
-            ),
+            (UnixSecs::from(1_700_000_099), DedupKey::from([0x04; 16])),
             "the closed window's high bound keeps its wire form"
         );
     }

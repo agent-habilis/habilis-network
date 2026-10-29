@@ -38,8 +38,8 @@ impl<T: Config> std::fmt::Debug for RollbackDriver<T> {
     }
 }
 
-impl<T: Config> RollbackDriver<T> {
-    pub(crate) fn from_mailboxes(mailboxes: Arc<Mailboxes<T>>) -> Self {
+impl<T: Config> From<Arc<Mailboxes<T>>> for RollbackDriver<T> {
+    fn from(mailboxes: Arc<Mailboxes<T>>) -> Self {
         Self { mailboxes }
     }
 }
@@ -62,7 +62,7 @@ impl<T: Config> RollbackDriver<T> {
     pub fn new() -> (Self, PendingTransport<T>) {
         let mailboxes = Arc::new(Mailboxes::new());
         (
-            Self::from_mailboxes(Arc::clone(&mailboxes)),
+            Self::from(Arc::clone(&mailboxes)),
             PendingTransport::new(mailboxes),
         )
     }

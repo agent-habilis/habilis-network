@@ -606,7 +606,7 @@ mod tests {
 
     fn plain_at(body: &str, ts: i64) -> Message {
         let mut message = plain(body);
-        message.timestamp = UnixSecs::from_secs(ts);
+        message.timestamp = UnixSecs::from(ts);
         message
     }
 
@@ -626,7 +626,7 @@ mod tests {
                 crate::protocol::MessageBody::from(body),
             ),
         );
-        message.timestamp = UnixSecs::from_secs(ts);
+        message.timestamp = UnixSecs::from(ts);
         message
     }
 
@@ -753,7 +753,7 @@ mod tests {
             .into_iter()
             .collect();
         let gap = log.missing_in_window(MissingQuery {
-            range: super::seconds(UnixSecs::from_secs(20), UnixSecs::from_secs(40)),
+            range: super::seconds(UnixSecs::from(20), UnixSecs::from(40)),
             have: &have,
             max: 10,
             requester: &nick(ANYONE),
@@ -963,7 +963,7 @@ mod tests {
                     // One author also stamps far ahead, the shape that used to
                     // buy immunity.
                     if index == 0 {
-                        message.timestamp = UnixSecs::from_secs(i64::MAX - step);
+                        message.timestamp = UnixSecs::from(i64::MAX - step);
                     }
                     batch.push(Verified::fixture_unchecked(
                         message,
