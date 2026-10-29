@@ -11,6 +11,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use super::session_registry::SessionRegistry;
 use crate::{WEBRTC_TRANSPORT_ID, parse_custom_addr};
 
+use std::fmt;
 pub(crate) struct WebRtcSender {
     // the sender shares the session registry with the endpoint
     registry: Arc<SessionRegistry>,
@@ -23,8 +24,8 @@ impl WebRtcSender {
     }
 }
 
-impl std::fmt::Debug for WebRtcSender {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for WebRtcSender {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("WebRtcSender")
             .finish_non_exhaustive()

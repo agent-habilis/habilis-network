@@ -9,6 +9,10 @@ use super::open_peer_connection::OpenPeerConnection;
 use super::pre_attach_backlog::PreAttachBacklog;
 use super::transport::BrowserHubTransport;
 
+use futures::future;
+use futures::future::Either;
+use std::{cell, fmt, rc};
+use web_sys::console;
 /// Answerer state between sending the answer and the channel opening.
 ///
 /// # Examples
@@ -28,12 +32,12 @@ pub struct PendingAnswer {
     pub(super) channel_rx: oneshot::Receiver<RtcDataChannel>,
     /// Datagrams that arrived before the hub's handler was installed, in
     /// arrival order — see the buffering handler in [`answer`](super::answer).
-    pub(super) backlog: std::rc::Rc<std::cell::RefCell<PreAttachBacklog>>,
+    pub(super) backlog: rc::Rc<cell::RefCell<PreAttachBacklog>>,
     pub(super) callbacks: Vec<JsValue>,
 }
 
-impl std::fmt::Debug for PendingAnswer {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for PendingAnswer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PendingAnswer")
             .finish_non_exhaustive()
@@ -60,7 +64,7 @@ impl PendingAnswer {
             callbacks,
         } = self;
 
-        let data_channel = match futures::future::select(
+        let data_channel = match future::select(
             channel_rx,
             Box::pin(async {
                 sleep_ms(CHANNEL_OPEN_DEADLINE_MS_I32).await;
@@ -68,11 +72,11 @@ impl PendingAnswer {
         )
         .await
         {
-            futures::future::Either::Left((Ok(channel), _)) => channel,
-            futures::future::Either::Left((Err(_), _)) => {
+            Either::Left((Ok(channel), _)) => channel,
+            Either::Left((Err(_), _)) => {
                 return Err(JsValue::from_str("data channel sender dropped"));
             }
-            futures::future::Either::Right(((), _)) => {
+            Either::Right(((), _)) => {
                 return Err(JsValue::from_str("timed out waiting for ondatachannel"));
             }
         };
@@ -92,12 +96,12 @@ impl PendingAnswer {
         // be delivered twice if this is ever called again.
         let (early, over_cap) = backlog.borrow_mut().take();
         if over_cap > 0 {
-            web_sys::console::warn_1(&JsValue::from_str(&format!(
+            console::warn_1(&JsValue::from_str(&format!(
                 "[habilis-network webrtc] pre-attach backlog refused {over_cap} datagram(s) over its cap for {remote}"
             )));
         }
         if !early.is_empty() {
-            web_sys::console::log_1(&JsValue::from_str(&format!(
+            console::log_1(&JsValue::from_str(&format!(
                 "[habilis-network webrtc] delivered {} datagram(s) buffered before attach for {remote}",
                 early.len()
             )));

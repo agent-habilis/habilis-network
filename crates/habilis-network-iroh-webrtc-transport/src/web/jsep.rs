@@ -28,6 +28,9 @@ use super::pending_offer::PendingOffer;
 use super::pre_attach_backlog::PreAttachBacklog;
 use iroh_base::EndpointId;
 
+use js_sys::Reflect;
+use std::{cell, fmt, rc};
+use web_sys::console;
 /// How long to wait for the data channel after the answer is applied.
 const CHANNEL_OPEN_DEADLINE_MS: f64 = 60_000.0;
 /// The same deadline for `sleep_ms`, which takes the browser's own `i32`
@@ -63,7 +66,7 @@ fn create_peer_connection(ice: &IceServers) -> Result<(RtcPeerConnection, bool),
     match RtcPeerConnection::new_with_configuration(&ice.to_configuration()) {
         Ok(peer_connection) => Ok((peer_connection, !ice.0.is_empty())),
         Err(error) => {
-            web_sys::console::warn_1(&JsValue::from_str(&format!(
+            console::warn_1(&JsValue::from_str(&format!(
                 "[habilis-network webrtc] the browser refused the ICE configuration \
                  ({error:?}); retrying with no ICE servers (host candidates only)"
             )));
@@ -174,7 +177,7 @@ pub async fn answer(
     let peer_connection = OpenPeerConnection::new(peer_connection);
 
     let (channel_tx, channel_rx) = oneshot::channel::<RtcDataChannel>();
-    let channel_tx = std::cell::RefCell::new(Some(channel_tx));
+    let channel_tx = cell::RefCell::new(Some(channel_tx));
     // Everything that arrives before the hub's own `onmessage` is installed.
     //
     // The offerer has no such gap: it owns the channel from `create_data_channel`
@@ -191,10 +194,10 @@ pub async fn answer(
     // `maxRetransmits: 0`, so SCTP will not resend, and QUIC's own recovery
     // rides the same lane. So the handler goes on immediately and buffers, and
     // `complete` hands the backlog to the hub in arrival order.
-    let backlog = std::rc::Rc::new(std::cell::RefCell::new(PreAttachBacklog::new()));
+    let backlog = rc::Rc::new(cell::RefCell::new(PreAttachBacklog::new()));
     let mut callbacks: Vec<JsValue> = Vec::new();
     let early = {
-        let backlog = std::rc::Rc::clone(&backlog);
+        let backlog = rc::Rc::clone(&backlog);
         Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
             if let Some(bytes) = super::transport::message_bytes(&event) {
                 backlog.borrow_mut().push(bytes);
@@ -267,18 +270,18 @@ pub async fn answer(
 pub fn log_signal_sdps(role: &str, local: &SignalEnvelope, remote: &SignalEnvelope) {
     let local_sdp = envelope_sdp(local).unwrap_or("");
     let remote_sdp = envelope_sdp(remote).unwrap_or("");
-    web_sys::console::log_1(&JsValue::from_str(&format!(
+    console::log_1(&JsValue::from_str(&format!(
         "[habilis-network webrtc] {role} local candidates: {}",
         format_candidate_counts(local_sdp)
     )));
-    web_sys::console::log_1(&JsValue::from_str(&format!(
+    console::log_1(&JsValue::from_str(&format!(
         "[habilis-network webrtc] {role} remote candidates: {}",
         format_candidate_counts(remote_sdp)
     )));
-    web_sys::console::log_1(&JsValue::from_str(&format!(
+    console::log_1(&JsValue::from_str(&format!(
         "[habilis-network webrtc] {role} local SDP:\n{local_sdp}"
     )));
-    web_sys::console::log_1(&JsValue::from_str(&format!(
+    console::log_1(&JsValue::from_str(&format!(
         "[habilis-network webrtc] {role} remote SDP:\n{remote_sdp}"
     )));
 }
@@ -294,7 +297,7 @@ pub(super) fn js_err(context: &str, error: &JsValue) -> JsValue {
     JsValue::from_str(&format!("{context}: {error:?}"))
 }
 
-pub(super) fn any_err(context: &str, error: impl std::fmt::Display) -> JsValue {
+pub(super) fn any_err(context: &str, error: impl fmt::Display) -> JsValue {
     JsValue::from_str(&format!("{context}: {error}"))
 }
 
@@ -364,7 +367,7 @@ pub(super) fn now_ms() -> f64 {
 fn require_candidates(role: &str, sdp: &str) -> Result<(), JsValue> {
     let (host, mdns, srflx, relay, other) = count_candidates(sdp);
     let total = host + mdns + srflx + relay + other;
-    web_sys::console::log_1(&JsValue::from_str(&format!(
+    console::log_1(&JsValue::from_str(&format!(
         "[habilis-network webrtc] {role} ICE candidates: host={host} mdns={mdns} srflx={srflx} relay={relay} other={other}"
     )));
     if total == 0 {
@@ -507,7 +510,7 @@ pub(super) async fn sleep_ms(millis: i32) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         use wasm_bindgen::JsCast as _;
         let global = js_sys::global();
-        match js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout")) {
+        match Reflect::get(&global, &JsValue::from_str("setTimeout")) {
             Ok(set_timeout) if set_timeout.is_function() => {
                 let set_timeout: js_sys::Function = set_timeout.unchecked_into();
                 let _ = set_timeout.call2(&global, &resolve, &JsValue::from(millis));

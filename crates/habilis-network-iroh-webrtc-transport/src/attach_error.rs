@@ -2,6 +2,7 @@
 
 use iroh::EndpointId;
 
+use std::{error, fmt};
 /// Why an attach was refused.
 ///
 /// # Examples
@@ -34,8 +35,8 @@ pub enum AttachError {
     Retired(EndpointId),
 }
 
-impl std::fmt::Display for AttachError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for AttachError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AlreadyAttached(remote) => {
                 write!(formatter, "a WebRTC session for {remote} already exists")
@@ -50,4 +51,4 @@ impl std::fmt::Display for AttachError {
     }
 }
 
-impl std::error::Error for AttachError {}
+impl error::Error for AttachError {}

@@ -2,6 +2,7 @@ use super::SessionHandle;
 
 use iroh::EndpointId;
 
+use crate::registry;
 /// A session that is attached but not yet proven to carry traffic.
 ///
 /// Attaching happens *before* the data channel opens — deliberately, because
@@ -24,7 +25,7 @@ use iroh::EndpointId;
 /// ```
 #[derive(Debug)]
 #[must_use = "an uncommitted session guard tears the session down when dropped"]
-pub struct BrowserSessionGuard(pub(super) crate::registry::SessionGuard<SessionHandle>);
+pub struct BrowserSessionGuard(pub(super) registry::SessionGuard<SessionHandle>);
 
 impl BrowserSessionGuard {
     /// The peer this session is for.

@@ -3,6 +3,8 @@
 
 use std::fmt;
 
+use iroh::endpoint;
+use std::{error, num};
 /// Why a benchmark step failed.
 ///
 /// # Examples
@@ -20,17 +22,17 @@ use std::fmt;
 #[must_use]
 pub enum BenchError {
     /// The endpoint could not bind.
-    Bind(iroh::endpoint::BindError),
+    Bind(endpoint::BindError),
     /// The connection failed before a stream opened.
-    Connection(iroh::endpoint::ConnectionError),
+    Connection(endpoint::ConnectionError),
     /// A write to the stream failed.
-    Write(iroh::endpoint::WriteError),
+    Write(endpoint::WriteError),
     /// The stream was closed before the request was finished.
-    Closed(iroh::endpoint::ClosedStream),
+    Closed(endpoint::ClosedStream),
     /// The reply could not be read.
-    Read(iroh::endpoint::ReadToEndError),
+    Read(endpoint::ReadToEndError),
     /// A size does not fit the wire header.
-    Size(std::num::TryFromIntError),
+    Size(num::TryFromIntError),
     /// The transfer asks for more bytes than the harness allows.
     TooLarge {
         /// The bytes asked for.
@@ -70,8 +72,8 @@ impl fmt::Display for BenchError {
     }
 }
 
-impl std::error::Error for BenchError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl error::Error for BenchError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Bind(error) => Some(error),
             Self::Connection(error) => Some(error),
@@ -87,38 +89,38 @@ impl std::error::Error for BenchError {
     }
 }
 
-impl From<iroh::endpoint::BindError> for BenchError {
-    fn from(error: iroh::endpoint::BindError) -> Self {
+impl From<endpoint::BindError> for BenchError {
+    fn from(error: endpoint::BindError) -> Self {
         Self::Bind(error)
     }
 }
 
-impl From<iroh::endpoint::ConnectionError> for BenchError {
-    fn from(error: iroh::endpoint::ConnectionError) -> Self {
+impl From<endpoint::ConnectionError> for BenchError {
+    fn from(error: endpoint::ConnectionError) -> Self {
         Self::Connection(error)
     }
 }
 
-impl From<iroh::endpoint::WriteError> for BenchError {
-    fn from(error: iroh::endpoint::WriteError) -> Self {
+impl From<endpoint::WriteError> for BenchError {
+    fn from(error: endpoint::WriteError) -> Self {
         Self::Write(error)
     }
 }
 
-impl From<iroh::endpoint::ClosedStream> for BenchError {
-    fn from(error: iroh::endpoint::ClosedStream) -> Self {
+impl From<endpoint::ClosedStream> for BenchError {
+    fn from(error: endpoint::ClosedStream) -> Self {
         Self::Closed(error)
     }
 }
 
-impl From<iroh::endpoint::ReadToEndError> for BenchError {
-    fn from(error: iroh::endpoint::ReadToEndError) -> Self {
+impl From<endpoint::ReadToEndError> for BenchError {
+    fn from(error: endpoint::ReadToEndError) -> Self {
         Self::Read(error)
     }
 }
 
-impl From<std::num::TryFromIntError> for BenchError {
-    fn from(error: std::num::TryFromIntError) -> Self {
+impl From<num::TryFromIntError> for BenchError {
+    fn from(error: num::TryFromIntError) -> Self {
         Self::Size(error)
     }
 }

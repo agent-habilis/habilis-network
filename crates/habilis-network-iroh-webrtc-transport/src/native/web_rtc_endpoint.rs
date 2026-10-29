@@ -11,6 +11,7 @@ use super::inbound_packet::InboundPacket;
 use super::session_registry::SessionRegistry;
 use super::web_rtc_sender::WebRtcSender;
 
+use std::{fmt, num};
 pub(crate) struct WebRtcEndpoint {
     local_addr: CustomAddr,
     watchable: Watchable<Vec<CustomAddr>>,
@@ -36,8 +37,8 @@ impl WebRtcEndpoint {
     }
 }
 
-impl std::fmt::Debug for WebRtcEndpoint {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for WebRtcEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("WebRtcEndpoint")
             .field("local_addr", &self.local_addr)
@@ -60,8 +61,8 @@ impl CustomEndpoint for WebRtcEndpoint {
     /// datagram. iroh sends with the smallest limit of every registered
     /// transport, so the default of 1 turned UDP GSO off for the whole
     /// endpoint, halving its UDP throughput on Linux. noq caps batches at 10.
-    fn max_transmit_segments(&self) -> std::num::NonZeroUsize {
-        std::num::NonZeroUsize::MAX
+    fn max_transmit_segments(&self) -> num::NonZeroUsize {
+        num::NonZeroUsize::MAX
     }
 
     fn poll_recv(

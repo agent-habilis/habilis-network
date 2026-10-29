@@ -20,6 +20,8 @@ use crate::attach_error::AttachError;
 use crate::registry::Registry;
 use crate::{IN_QUEUE, OUT_QUEUE, custom_addr};
 
+use std::fmt;
+use web_sys::console;
 /// Factory for the browser `WebRTC` datagram lane of one iroh endpoint.
 ///
 /// # Examples
@@ -134,7 +136,7 @@ impl BrowserHubTransport {
                 let sessions = Arc::clone(&sessions);
                 wasm_bindgen_futures::spawn_local(async move {
                     if sessions.remove_if_generation(&remote, generation) {
-                        web_sys::console::log_1(&JsValue::from_str(&format!(
+                        console::log_1(&JsValue::from_str(&format!(
                             "[habilis-network webrtc] session for {remote} detached (channel closed)"
                         )));
                     }
@@ -224,7 +226,7 @@ impl BrowserHubTransport {
                     }
                 }
                 if congested > 0 || refused > 0 {
-                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                    console::log_1(&JsValue::from_str(&format!(
                         "[habilis-network webrtc] session for {remote} dropped {congested} \
                          outbound datagrams to congestion and {refused} to refused \
                          sends over its lifetime"
@@ -422,7 +424,7 @@ impl BrowserHubTransport {
             }
         }
         if dropped > 0 {
-            web_sys::console::warn_1(&JsValue::from_str(&format!(
+            console::warn_1(&JsValue::from_str(&format!(
                 "[habilis-network webrtc] inbound queue full; dropped {dropped} \
                  pre-attach datagram(s) for {remote}"
             )));
@@ -467,8 +469,8 @@ impl BrowserHubTransport {
     }
 }
 
-impl std::fmt::Debug for BrowserHubTransport {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for BrowserHubTransport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let sessions = self.sessions.live_len();
         formatter
             .debug_struct("BrowserHubTransport")

@@ -19,6 +19,7 @@ use super::web_rtc_endpoint::WebRtcEndpoint;
 use crate::attach_error::AttachError;
 use crate::{IN_QUEUE, OUT_QUEUE, custom_addr};
 
+use std::fmt;
 /// Factory for the `WebRTC` datagram lane of one iroh endpoint.
 ///
 /// Sessions (one data channel per remote peer) are negotiated out of band
@@ -156,8 +157,8 @@ impl WebRtcTransport {
     }
 }
 
-impl std::fmt::Debug for WebRtcTransport {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for WebRtcTransport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let sessions = self.registry.live_len();
         formatter
             .debug_struct("WebRtcTransport")

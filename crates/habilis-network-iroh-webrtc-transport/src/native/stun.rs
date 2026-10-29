@@ -24,6 +24,8 @@ use tokio::net::UdpSocket;
 
 use super::ice_config::IceConfig;
 
+use std::{array, io};
+use tokio::{net, task, time};
 /// STUN message type for a Binding Request.
 const BINDING_REQUEST: u16 = 0x0001;
 /// STUN message type for a Binding Success Response.
@@ -138,7 +140,7 @@ fn decode_address(
                 .expect("4 bytes");
             let octets = if xored {
                 let mask = MAGIC_COOKIE.to_be_bytes();
-                std::array::from_fn(|index| raw[index] ^ mask[index])
+                array::from_fn(|index| raw[index] ^ mask[index])
             } else {
                 raw
             };
@@ -155,7 +157,7 @@ fn decode_address(
                 let mut mask = [0u8; 16];
                 mask[..4].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
                 mask[4..].copy_from_slice(transaction_id);
-                std::array::from_fn(|index| raw[index] ^ mask[index])
+                array::from_fn(|index| raw[index] ^ mask[index])
             } else {
                 raw
             };
@@ -195,7 +197,7 @@ fn decode_address(
 /// ```
 pub async fn gather_reflexive(socket: &UdpSocket, config: &IceConfig) -> Option<SocketAddr> {
     gather_with_resolver(socket, config, |server: String| async move {
-        match tokio::net::lookup_host(&*server).await {
+        match net::lookup_host(&*server).await {
             Ok(mut addrs) => Ok(addrs.next()),
             Err(error) => Err(error),
         }
@@ -208,16 +210,16 @@ pub async fn gather_reflexive(socket: &UdpSocket, config: &IceConfig) -> Option<
 /// real loopback socket reproduces that on macOS or Linux — a test fake
 /// implementing this can.
 trait ProbeSocket {
-    async fn send_to(&self, buffer: &[u8], target: SocketAddr) -> std::io::Result<usize>;
-    async fn recv_from(&self, buffer: &mut [u8]) -> std::io::Result<(usize, SocketAddr)>;
+    async fn send_to(&self, buffer: &[u8], target: SocketAddr) -> io::Result<usize>;
+    async fn recv_from(&self, buffer: &mut [u8]) -> io::Result<(usize, SocketAddr)>;
 }
 
 impl ProbeSocket for UdpSocket {
-    async fn send_to(&self, buffer: &[u8], target: SocketAddr) -> std::io::Result<usize> {
+    async fn send_to(&self, buffer: &[u8], target: SocketAddr) -> io::Result<usize> {
         UdpSocket::send_to(self, buffer, target).await
     }
 
-    async fn recv_from(&self, buffer: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+    async fn recv_from(&self, buffer: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         UdpSocket::recv_from(self, buffer).await
     }
 }
@@ -233,15 +235,15 @@ async fn gather_with_resolver<S, F, Fut>(
 where
     S: ProbeSocket,
     F: Fn(String) -> Fut,
-    Fut: Future<Output = std::io::Result<Option<SocketAddr>>> + Send + 'static,
+    Fut: Future<Output = io::Result<Option<SocketAddr>>> + Send + 'static,
 {
     if config.stun_servers.is_empty() {
         return None;
     }
-    let start = tokio::time::Instant::now();
+    let start = time::Instant::now();
     let deadline = start + config.stun_timeout;
 
-    let mut lookups = tokio::task::JoinSet::new();
+    let mut lookups = task::JoinSet::new();
     for server in config.stun_servers.clone() {
         let resolution = resolve(server.clone());
         lookups.spawn(async move { (server, resolution.await) });
@@ -264,7 +266,7 @@ where
     // hung resolver now costs only its own probe: the JoinSet is dropped on
     // every return, which aborts whatever never resolved.
     loop {
-        let now = tokio::time::Instant::now();
+        let now = time::Instant::now();
         if now >= deadline {
             tracing::debug!("no STUN server answered within {:?}", config.stun_timeout);
             return None;
@@ -310,7 +312,7 @@ where
                     }
                 }
             }
-            received = tokio::time::timeout(remaining, socket.recv_from(&mut buffer)) => {
+            received = time::timeout(remaining, socket.recv_from(&mut buffer)) => {
                 let received = match received {
                     Ok(Ok((len, _))) => len,
                     Ok(Err(error)) => {
@@ -322,7 +324,7 @@ where
                         // and the deadline already bounds the loop. The pause
                         // keeps a persistent error from spinning it hot.
                         tracing::debug!(%error, "transient error reading a STUN response");
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        time::sleep(Duration::from_millis(10)).await;
                         continue;
                     }
                     // The retransmit mark or the deadline; the loop head decides.

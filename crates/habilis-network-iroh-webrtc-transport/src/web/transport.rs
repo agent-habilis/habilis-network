@@ -4,6 +4,8 @@
 //! data channels, keyed by remote [`EndpointId`]. The consumer attaches one
 //! session after offering; the producer attaches each peer that signals in.
 
+use std::fmt;
+use web_sys::console;
 mod browser_hub_transport;
 mod browser_rtc_transport;
 mod browser_session_guard;
@@ -154,7 +156,7 @@ fn evict_if_generation(
     grace_ms: f64,
 ) {
     if sessions.remove_if_generation(&remote, generation) {
-        web_sys::console::log_1(&JsValue::from_str(&format!(
+        console::log_1(&JsValue::from_str(&format!(
             "[habilis-network webrtc] session for {remote} detached (peer connection {state:?} \
              after {grace_ms:.0} ms grace)"
         )));
@@ -329,8 +331,8 @@ struct BrowserHubEndpoint {
     sessions: SessionMap,
 }
 
-impl std::fmt::Debug for BrowserHubEndpoint {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for BrowserHubEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("BrowserHubEndpoint")
             .finish_non_exhaustive()
@@ -401,8 +403,8 @@ struct BrowserHubSender {
     sessions: SessionMap,
 }
 
-impl std::fmt::Debug for BrowserHubSender {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for BrowserHubSender {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("BrowserHubSender")
             .finish_non_exhaustive()
@@ -458,8 +460,8 @@ fn console_drop(total: u64, line: impl FnOnce() -> String) {
     }
     let line = JsValue::from_str(&line());
     if crate::drops_are_sustained(total) {
-        web_sys::console::warn_1(&line);
+        console::warn_1(&line);
     } else {
-        web_sys::console::debug_1(&line);
+        console::debug_1(&line);
     }
 }

@@ -4,6 +4,7 @@ use str0m::Rtc;
 use str0m::channel::ChannelId;
 use tokio::net::UdpSocket;
 
+use std::fmt;
 /// A `WebRTC` data channel negotiated via JSEP and ready to carry datagrams —
 /// the value handed to [`crate::WebRtcTransport::attach`].
 ///
@@ -25,8 +26,8 @@ pub struct NegotiatedSession {
     pub(crate) advertised: SocketAddr,
 }
 
-impl std::fmt::Debug for NegotiatedSession {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for NegotiatedSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("NegotiatedSession")
             .field("advertised", &self.advertised)

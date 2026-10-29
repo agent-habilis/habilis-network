@@ -14,6 +14,8 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 
 #[cfg(all(feature = "web", not(feature = "native")))]
 use iroh::endpoint::presets;
+use n0_future::time::Instant;
+use std::{io, time};
 /// The ALPN of the bench handler.
 pub const BENCH_ALPN: &[u8] = b"habilis-network-webrtc/test-bench/0";
 
@@ -158,7 +160,7 @@ impl ProtocolHandler for Bench {
             // The peer names the reply size, so the ceiling `exchange` keeps
             // on its side has to hold here too, or one header asks for 4 GiB.
             if head[0] > MODE_ECHO || wanted > MAX_TRANSFER_BYTES {
-                return Err(AcceptError::from_err(std::io::Error::other(format!(
+                return Err(AcceptError::from_err(io::Error::other(format!(
                     "refused request: mode {}, {wanted} bytes wanted",
                     head[0]
                 ))));
@@ -173,7 +175,7 @@ impl ProtocolHandler for Bench {
                     .await
                     .map_err(AcceptError::from_err)?;
                 if !is_payload(&uploaded) {
-                    return Err(AcceptError::from_err(std::io::Error::other(
+                    return Err(AcceptError::from_err(io::Error::other(
                         "uploaded body did not match the expected pattern",
                     )));
                 }
@@ -405,12 +407,12 @@ pub async fn rtt_samples(
     connection: &Connection,
     warmup: usize,
     rounds: usize,
-) -> Result<impl Iterator<Item = std::time::Duration>, BenchError> {
+) -> Result<impl Iterator<Item = time::Duration>, BenchError> {
     let probe = payload(RTT_PROBE_BYTES);
     let head = header_with_mode(MODE_ECHO, u32::try_from(RTT_PROBE_BYTES)?);
     let mut samples = Vec::with_capacity(rounds);
     for round in 0..warmup + rounds {
-        let started = n0_future::time::Instant::now();
+        let started = Instant::now();
         let (mut send, mut recv) = connection.open_bi().await?;
         send.write_all(&head).await?;
         send.write_all(&probe).await?;

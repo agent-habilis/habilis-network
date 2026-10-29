@@ -3,6 +3,7 @@ use web_sys::RtcConfiguration;
 
 use super::ice_server::IceServer;
 
+use js_sys::Reflect;
 /// ICE servers for the browser's own agent.
 ///
 /// # Examples
@@ -58,7 +59,7 @@ impl IceServers {
             if urls.length() == 0 {
                 continue;
             }
-            let _ = js_sys::Reflect::set(&entry, &JsValue::from_str("urls"), &urls);
+            let _ = Reflect::set(&entry, &JsValue::from_str("urls"), &urls);
             servers.push(&entry);
         }
         config.set_ice_servers(&servers);

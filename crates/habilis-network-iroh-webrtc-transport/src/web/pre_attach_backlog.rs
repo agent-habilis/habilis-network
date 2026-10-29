@@ -1,3 +1,4 @@
+use std::mem;
 /// The answerer's pre-attach buffer — see the buffering handler in [`answer`](super::answer).
 ///
 /// Bounded at [`IN_QUEUE`](crate::IN_QUEUE), the inbound queue's
@@ -32,9 +33,6 @@ impl PreAttachBacklog {
     /// Take everything held, plus how many datagrams were refused over the
     /// cap. The buffer is empty afterwards, so it cannot deliver twice.
     pub(crate) fn take(&mut self) -> (Vec<Vec<u8>>, usize) {
-        (
-            std::mem::take(&mut self.datagrams),
-            std::mem::take(&mut self.dropped),
-        )
+        (mem::take(&mut self.datagrams), mem::take(&mut self.dropped))
     }
 }

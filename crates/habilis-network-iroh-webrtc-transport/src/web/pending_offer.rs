@@ -8,6 +8,7 @@ use super::open_peer_connection::OpenPeerConnection;
 use super::transport::BrowserHubTransport;
 use crate::SignalEnvelope;
 
+use std::fmt;
 /// Offerer state between producing the offer and applying the answer.
 ///
 /// # Examples
@@ -27,8 +28,8 @@ pub struct PendingOffer {
     pub(super) callbacks: Vec<JsValue>,
 }
 
-impl std::fmt::Debug for PendingOffer {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for PendingOffer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PendingOffer")
             .finish_non_exhaustive()

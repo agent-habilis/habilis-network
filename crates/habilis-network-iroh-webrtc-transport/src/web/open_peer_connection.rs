@@ -1,5 +1,6 @@
 use web_sys::RtcPeerConnection;
 
+use std::{fmt, ops};
 /// An `RTCPeerConnection` that closes itself unless it is released.
 ///
 /// Every early return on the way to a session used to drop an open peer
@@ -29,7 +30,7 @@ impl OpenPeerConnection {
     }
 }
 
-impl std::ops::Deref for OpenPeerConnection {
+impl ops::Deref for OpenPeerConnection {
     type Target = RtcPeerConnection;
 
     fn deref(&self) -> &Self::Target {
@@ -45,8 +46,8 @@ impl Drop for OpenPeerConnection {
     }
 }
 
-impl std::fmt::Debug for OpenPeerConnection {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for OpenPeerConnection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OpenPeerConnection")
             .field("armed", &self.armed)

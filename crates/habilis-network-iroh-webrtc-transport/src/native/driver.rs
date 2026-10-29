@@ -17,6 +17,8 @@ use super::jsep_error::JsepError;
 use super::negotiated_session::NegotiatedSession;
 use super::session_registry::SessionRegistry;
 
+use std::{io, net};
+use tokio::time;
 /// Consecutive receive errors a live session tolerates before giving up. Sized
 /// to ride out a burst of ICMP port-unreachables (one per dead STUN server,
 /// which Windows surfaces here) while still ending a session whose socket has
@@ -34,10 +36,10 @@ pub(crate) fn build_rtc(now: Instant) -> Rtc {
 /// unspecified, advertise a non-loopback interface address so the single
 /// (vanilla-ICE) host candidate is reachable beyond this machine; the
 /// loopback fallback is what makes same-host tests work.
-pub(crate) async fn bind_ephemeral_udp() -> std::io::Result<(UdpSocket, SocketAddr)> {
+pub(crate) async fn bind_ephemeral_udp() -> io::Result<(UdpSocket, SocketAddr)> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
     let local = socket.local_addr()?;
-    let ip: std::net::IpAddr = if local.ip().is_unspecified() {
+    let ip: net::IpAddr = if local.ip().is_unspecified() {
         let mut interfaces = if_addrs::get_if_addrs().ok().into_iter().flatten();
         let external = interfaces.find(|iface| {
             let ip = iface.addr.ip();
@@ -119,7 +121,7 @@ pub(crate) async fn drive_until_channel_ready(
             .min(Duration::from_millis(50));
 
         tokio::select! {
-            () = tokio::time::sleep(sleep_for) => {
+            () = time::sleep(sleep_for) => {
                 rtc.handle_input(Input::Timeout(Instant::now()))
                     .map_err(JsepError::engine("str0m timeout input"))?;
             }
@@ -134,7 +136,7 @@ pub(crate) async fn drive_until_channel_ready(
                     Err(error) => {
                         tracing::debug!(%error, "transient error reading during the JSEP handshake");
                         noise.recv_errors += 1;
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        time::sleep(Duration::from_millis(10)).await;
                         continue;
                     }
                 };
@@ -299,7 +301,7 @@ pub(crate) async fn drive_session(
             .min(Duration::from_millis(100));
 
         tokio::select! {
-            () = tokio::time::sleep(sleep_for) => {
+            () = time::sleep(sleep_for) => {
                 if let Err(error) = rtc.handle_input(Input::Timeout(Instant::now())) {
                     break SessionEnd::Failed(error.into());
                 }
@@ -322,7 +324,7 @@ pub(crate) async fn drive_session(
                                 "session UDP socket failed repeatedly",
                             ));
                         }
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        time::sleep(Duration::from_millis(10)).await;
                         continue;
                     }
                 };

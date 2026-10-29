@@ -2,11 +2,14 @@
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio::time;
 
+use tokio::runtime;
 /// Aborts the session driver task when the handle leaves the registry, so
 /// a `detach` (or dropping the whole transport) reliably stops the str0m
 /// loop instead of detaching it.
@@ -17,15 +20,15 @@ use tokio::task::JoinHandle;
 /// driver still running after it is aborted.
 struct AbortOnDrop(JoinHandle<()>);
 
-const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+const CLOSE_GRACE: Duration = Duration::from_secs(1);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         let abort = self.0.abort_handle();
-        match tokio::runtime::Handle::try_current() {
+        match runtime::Handle::try_current() {
             Ok(runtime) => {
                 runtime.spawn(async move {
-                    tokio::time::sleep(CLOSE_GRACE).await;
+                    time::sleep(CLOSE_GRACE).await;
                     abort.abort();
                 });
             }

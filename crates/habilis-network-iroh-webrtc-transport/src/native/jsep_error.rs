@@ -1,5 +1,6 @@
 //! Why a JSEP negotiation failed.
 
+use std::{error, fmt};
 /// Why a JSEP negotiation failed. Each variant names the step that failed, so
 /// a caller can tell a bad envelope from a dead socket from a missed deadline.
 ///
@@ -49,12 +50,12 @@ pub enum JsepError {
     },
 }
 
-type BoxedError = Box<dyn std::error::Error + Send + Sync>;
+type BoxedError = Box<dyn error::Error + Send + Sync>;
 
 impl JsepError {
     pub(crate) fn engine<E>(step: &'static str) -> impl FnOnce(E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
+        E: error::Error + Send + Sync + 'static,
     {
         move |source| Self::Engine {
             step,
@@ -64,7 +65,7 @@ impl JsepError {
 
     pub(super) fn sdp<E>(step: &'static str) -> impl FnOnce(E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
+        E: error::Error + Send + Sync + 'static,
     {
         move |source| Self::Sdp {
             step,
@@ -73,8 +74,8 @@ impl JsepError {
     }
 }
 
-impl std::fmt::Display for JsepError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for JsepError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Bind(_) => formatter.write_str("could not bind the WebRTC UDP socket"),
             Self::NoOffer => formatter.write_str("str0m produced no offer for the pending change"),
@@ -90,8 +91,8 @@ impl std::fmt::Display for JsepError {
     }
 }
 
-impl std::error::Error for JsepError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl error::Error for JsepError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Bind(source) | Self::Sdp { source, .. } | Self::Engine { source, .. } => {
                 Some(source.as_ref())

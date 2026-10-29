@@ -9,14 +9,15 @@ use super::driver::{add_host_candidate, add_reflexive_candidate, bind_ephemeral_
 use super::ice_config::IceConfig;
 use super::jsep_error::JsepError;
 
+use std::fmt;
 pub(super) struct Negotiating {
     pub(super) rtc: Rtc,
     pub(super) socket: UdpSocket,
     pub(super) advertised: SocketAddr,
 }
 
-impl std::fmt::Debug for Negotiating {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Negotiating {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Negotiating")
             .field("advertised", &self.advertised)

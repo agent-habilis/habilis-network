@@ -1,5 +1,6 @@
 use iroh_base::EndpointId;
 
+use std::fmt;
 /// A negotiated browser session attached into a [`BrowserHubTransport`](super::BrowserHubTransport).
 ///
 /// # Examples
@@ -19,8 +20,8 @@ pub struct BrowserSession {
     pub remote: EndpointId,
 }
 
-impl std::fmt::Debug for BrowserSession {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for BrowserSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("BrowserSession")
             .field("remote", &self.remote)
