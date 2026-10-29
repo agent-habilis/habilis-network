@@ -3,6 +3,7 @@ use std::path::Path;
 
 use habilis_network_chunks::{CHUNK_BYTES_USIZE, ChunkSource, DiskOrigin, FileId, chunk_hash};
 
+use std::{env, fs, path, process, time};
 fn block_on<F: Future>(future: F) -> F::Output {
     use std::task::{Context, Poll, Waker};
 
@@ -14,25 +15,25 @@ fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
-struct TempDir(std::path::PathBuf);
+struct TempDir(path::PathBuf);
 
 impl TempDir {
     fn new(tag: &str) -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
+        let path = env::temp_dir().join(format!(
             "habilis-network-chunks-origin-{tag}-{}-{unique}",
-            std::process::id()
+            process::id()
         ));
-        std::fs::create_dir_all(&path).expect("a temp directory");
+        fs::create_dir_all(&path).expect("a temp directory");
         Self(path)
     }
 }
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -53,18 +54,18 @@ fn body(len: usize, seed: u8) -> Vec<u8> {
 /// compares against the real mtime and a made-up one would either never match
 /// or never differ.
 fn describe(path: &Path) -> FileId {
-    let meta = std::fs::metadata(path).expect("the file exists");
+    let meta = fs::metadata(path).expect("the file exists");
     let modified = meta.modified().ok();
-    let since = modified.and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+    let since = modified.and_then(|time| time.duration_since(time::UNIX_EPOCH).ok());
     let mtime: i64 = since
         .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
         .unwrap_or(0);
     FileId::new(path.display().to_string(), meta.len(), mtime)
 }
 
-fn write(dir: &TempDir, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+fn write(dir: &TempDir, name: &str, bytes: &[u8]) -> path::PathBuf {
     let path = dir.0.join(name);
-    std::fs::write(&path, bytes).expect("write");
+    fs::write(&path, bytes).expect("write");
     path
 }
 
@@ -103,7 +104,7 @@ fn an_origin_serves_by_address_without_copying() {
 
         // Nothing was written anywhere: the only file in the directory is the
         // one the user put there.
-        let listing = std::fs::read_dir(&dir.0).expect("readdir");
+        let listing = fs::read_dir(&dir.0).expect("readdir");
         let entries: Vec<_> = listing.flatten().map(|entry| entry.file_name()).collect();
         assert_eq!(entries.len(), 1, "an origin copies nothing: {entries:?}");
     });
@@ -126,7 +127,7 @@ fn coverage_is_all_or_nothing_and_follows_the_file() {
         );
 
         // Replace the contents with something a different length.
-        std::fs::write(&path, body(CHUNK_BYTES_USIZE, 3)).expect("rewrite");
+        fs::write(&path, body(CHUNK_BYTES_USIZE, 3)).expect("rewrite");
         let coverage = origin.coverage(root).await.expect("cov");
         assert_eq!(coverage.count(), 0, "a file that moved is served no more");
     });
@@ -151,7 +152,7 @@ fn a_changed_file_stops_answering_for_its_old_addresses() {
         );
 
         // A save that changes the length is caught by size alone.
-        std::fs::write(&path, body(CHUNK_BYTES_USIZE * 2 + 1, 4)).expect("rewrite");
+        fs::write(&path, body(CHUNK_BYTES_USIZE * 2 + 1, 4)).expect("rewrite");
         assert_eq!(
             origin.get(leaf).await.expect("get"),
             None,
@@ -184,7 +185,7 @@ fn bytes_that_changed_under_a_stable_stat_are_still_caught() {
         // stat-based gate sees nothing at all.
         let mut altered = bytes.clone();
         altered[0] ^= 0xff;
-        std::fs::write(&path, &altered).expect("rewrite");
+        fs::write(&path, &altered).expect("rewrite");
         set_mtime(&path, described.mtime);
         assert_eq!(
             describe(&path).size,
@@ -204,7 +205,7 @@ fn bytes_that_changed_under_a_stable_stat_are_still_caught() {
 /// changed. Uses `touch -t`, which is portable enough for the platforms this
 /// runs on and avoids a dependency for one syscall.
 fn set_mtime(path: &Path, mtime: i64) {
-    let mut command = std::process::Command::new("touch");
+    let mut command = process::Command::new("touch");
     command.arg("-t").arg(format_stamp(mtime)).arg(path);
     let stamp = command.status();
     assert!(stamp.is_ok_and(|status| status.success()), "touch");

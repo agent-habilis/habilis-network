@@ -17,6 +17,7 @@
 
 use std::path::Path;
 
+use std::fs;
 /// Dependency-name prefixes that would mean the seam has collapsed. Prefixes,
 /// not exact names: `agent-share` covers every sibling in this workspace,
 /// `habilis-network` covers the destination workspace's crates, and `iroh` covers
@@ -38,7 +39,7 @@ fn is_metadata(line: &str) -> bool {
 }
 
 fn manifest() -> String {
-    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+    fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
         .expect("this crate has a Cargo.toml")
 }
 

@@ -5,6 +5,7 @@ use habilis_network_chunks::{
     InMemoryStore, chunk_hash,
 };
 
+use std::{env, fs, path, process};
 /// Bytes that differ per position and per seed, so a chunk lifted from one file
 /// cannot accidentally equal a chunk from another — which would make the dedup
 /// assertions pass for the wrong reason.
@@ -734,25 +735,25 @@ async fn a_one_bit_difference_is_caught(harness: &impl Harness) {
 /// Hand-rolled rather than pulling `tempfile` in: a dev-dependency is still a
 /// dependency to audit, `tests/isolation.rs` scans for exactly that, and this
 /// is twelve lines.
-struct TempDir(std::path::PathBuf);
+struct TempDir(path::PathBuf);
 
 impl TempDir {
     fn new(tag: &str) -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
+        let path = env::temp_dir().join(format!(
             "habilis-network-chunks-{tag}-{}-{unique}",
-            std::process::id()
+            process::id()
         ));
-        std::fs::create_dir_all(&path).expect("a temp directory");
+        fs::create_dir_all(&path).expect("a temp directory");
         Self(path)
     }
 }
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
