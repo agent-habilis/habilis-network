@@ -9,13 +9,15 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use habilis_network_stream::{Producer, Reader, StreamHash, StreamNode, StreamOpts};
 
+use n0_future::time;
+use tokio::runtime::{Builder, Runtime, Runtime as tokio_Runtime};
 /// A stream node, driven synchronously from a foreign caller's thread.
 pub(crate) struct Streams {
     /// `None` after [`Streams::close`].
     node: Option<StreamNode>,
     /// Last in every handle here: fields drop in order, and what the handle
     /// holds must go while the runtime it needs still runs.
-    runtime: Arc<tokio::runtime::Runtime>,
+    runtime: Arc<tokio_Runtime>,
 }
 
 impl Streams {
@@ -95,7 +97,7 @@ pub(crate) struct Writer {
     producer: Option<Producer>,
     hash: String,
     // the writer shares the runtime that its stream runs on
-    runtime: Arc<tokio::runtime::Runtime>,
+    runtime: Arc<tokio_Runtime>,
 }
 
 impl Writer {
@@ -114,7 +116,7 @@ impl Writer {
     pub(crate) fn write(&mut self, bytes: &[u8], timeout: Duration) -> Result<bool> {
         let producer = self.producer.as_mut().context("this stream is closed")?;
         self.runtime.block_on(async {
-            match n0_future::time::timeout(timeout, producer.attached()).await {
+            match time::timeout(timeout, producer.attached()).await {
                 Err(_elapsed) => Ok(false),
                 Ok(attached) => {
                     attached?;
@@ -161,7 +163,7 @@ pub(crate) struct ReadEnd {
     leftover: Bytes,
     ended: bool,
     // the reader shares the runtime that its stream runs on
-    runtime: Arc<tokio::runtime::Runtime>,
+    runtime: Arc<tokio_Runtime>,
 }
 
 impl ReadEnd {
@@ -176,7 +178,7 @@ impl ReadEnd {
             // when it is created, and there is none out here.
             let next = self
                 .runtime
-                .block_on(async { n0_future::time::timeout(timeout, reader.read()).await });
+                .block_on(async { time::timeout(timeout, reader.read()).await });
             match next {
                 Err(_elapsed) => return Ok(Read::Timeout),
                 Ok(chunk) => match chunk? {
@@ -194,8 +196,8 @@ impl ReadEnd {
     }
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_multi_thread()
+fn runtime() -> Result<Runtime> {
+    Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("building the stream runtime")

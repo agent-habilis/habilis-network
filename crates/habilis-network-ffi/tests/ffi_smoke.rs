@@ -25,6 +25,7 @@ use habilis_network_ffi::ffi::{
     habilis_network_streams_close, habilis_network_version,
 };
 
+use std::ptr;
 /// Zeroed selectors: no id and no topic, so [`habilis_network_mesh_open`] mints a private
 /// loopback mesh — no discovery, no network, nothing to clean up but the handle.
 fn create_opts(nick: &CStr) -> HabilisNetworkOpts {
@@ -63,7 +64,7 @@ fn read_json(
 ) -> String {
     // SAFETY: a NULL buffer with a zero capacity is the documented "how long is
     // it?" query — the callee writes nothing.
-    let needed = unsafe { reader(handle, std::ptr::null_mut(), 0) };
+    let needed = unsafe { reader(handle, ptr::null_mut(), 0) };
     assert!(needed >= 0, "length query failed: {:?}", last_error());
     let mut buffer = vec![0_u8; usize::try_from(needed).expect("a sane length") + 1];
     // SAFETY: the buffer is writable for exactly the capacity being passed.
@@ -113,7 +114,7 @@ fn null_arguments_are_errors_not_crashes() {
     // point of this test is that it is rejected rather than dereferenced.
     unsafe {
         assert!(
-            habilis_network_mesh_open(std::ptr::null()).is_null(),
+            habilis_network_mesh_open(ptr::null()).is_null(),
             "a null mesh open is an error, not a crash"
         );
         assert!(
@@ -122,7 +123,7 @@ fn null_arguments_are_errors_not_crashes() {
         );
 
         assert_eq!(
-            habilis_network_msg_send(std::ptr::null_mut(), std::ptr::null(), c"hi".as_ptr()),
+            habilis_network_msg_send(ptr::null_mut(), ptr::null(), c"hi".as_ptr()),
             -1,
             "a null send is an error"
         );
@@ -132,7 +133,7 @@ fn null_arguments_are_errors_not_crashes() {
         );
 
         assert_eq!(
-            habilis_network_mesh_state_merge(std::ptr::null_mut(), std::ptr::null()),
+            habilis_network_mesh_state_merge(ptr::null_mut(), ptr::null()),
             -1,
             "a null state merge is an error"
         );
@@ -142,7 +143,7 @@ fn null_arguments_are_errors_not_crashes() {
         );
 
         assert_eq!(
-            habilis_network_mesh_state_json(std::ptr::null_mut(), std::ptr::null_mut(), 0),
+            habilis_network_mesh_state_json(ptr::null_mut(), ptr::null_mut(), 0),
             -1,
             "a null state json is an error"
         );
@@ -152,7 +153,7 @@ fn null_arguments_are_errors_not_crashes() {
         );
 
         assert_eq!(
-            habilis_network_mesh_peer_count(std::ptr::null_mut()),
+            habilis_network_mesh_peer_count(ptr::null_mut()),
             -1,
             "a null peer count is an error"
         );
@@ -162,22 +163,22 @@ fn null_arguments_are_errors_not_crashes() {
         );
 
         assert!(
-            habilis_network_mesh_id(std::ptr::null()).is_null(),
+            habilis_network_mesh_id(ptr::null()).is_null(),
             "a null mesh id is null"
         );
         assert!(
-            habilis_network_mesh_name(std::ptr::null()).is_null(),
+            habilis_network_mesh_name(ptr::null()).is_null(),
             "a null mesh name is null"
         );
         assert!(
-            habilis_network_mesh_nickname(std::ptr::null()).is_null(),
+            habilis_network_mesh_nickname(ptr::null()).is_null(),
             "a null nickname is null"
         );
 
         // Closing NULL is a no-op success, so a caller's cleanup path needs no
         // guard of its own — and succeeding clears the slot.
         assert_eq!(
-            habilis_network_mesh_close(std::ptr::null_mut()),
+            habilis_network_mesh_close(ptr::null_mut()),
             0,
             "a null close is an error"
         );
@@ -443,8 +444,7 @@ fn two_handles_exchange_messages() {
     }
 
     // SAFETY: live handle, NUL-terminated strings.
-    let broadcast =
-        unsafe { habilis_network_msg_send(alice, std::ptr::null(), c"hello mesh".as_ptr()) };
+    let broadcast = unsafe { habilis_network_msg_send(alice, ptr::null(), c"hello mesh".as_ptr()) };
     assert_eq!(broadcast, 0, "broadcast failed: {:?}", last_error());
     let (heard, heard_meta, heard_text) = recv(bob, 256);
     assert_eq!(heard, 1, "bob got no broadcast: {:?}", last_error());

@@ -20,10 +20,12 @@ use tokio::sync::{mpsc, oneshot};
 // door names `crate::mesh::…` only.
 pub(crate) use habilis_network::membership::{Inbound, JoinOptions, MAX_MSG};
 
+use habilis_network::membership;
+use tokio::{runtime, time};
 /// A live mesh membership, driven synchronously from a foreign caller's thread.
 /// Owns the tokio runtime the event loop runs on.
 pub(crate) struct Mesh {
-    runtime: tokio::runtime::Runtime,
+    runtime: runtime::Runtime,
     /// `None` after [`Mesh::close`] has taken it — `Node::leave` consumes it.
     node: Option<Node<MembershipApp>>,
     inbound: mpsc::Receiver<Inbound>,
@@ -41,7 +43,7 @@ impl Mesh {
     /// An unparseable id/topic/nickname, conflicting selectors, or a failure
     /// standing up the endpoint and gossip overlay.
     pub(crate) fn open(options: &JoinOptions) -> Result<Self> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
+        let runtime = runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .context("building the mesh runtime")?;
@@ -52,7 +54,7 @@ impl Mesh {
         // which is the one thing that differs between the two.
         let Membership { node, inbound, .. } = runtime.block_on(
             // join takes the sink as a shared handle, and the event loop keeps it
-            habilis_network::membership::join(options, Arc::new(SilentSink::default())),
+            membership::join(options, Arc::new(SilentSink::default())),
         )?;
 
         let habilis_network_id = node.mesh_id().as_str().to_owned();
@@ -94,8 +96,8 @@ impl Mesh {
     /// The message does not fit one frame, the addressee is not a nickname, the
     /// event loop has stopped, or the engine refused the frame.
     pub(crate) fn send(&self, to: Option<&str>, text: &str) -> Result<()> {
-        let to = habilis_network::membership::parse_to(to)?;
-        let body = habilis_network::membership::msg_body(text)?;
+        let to = membership::parse_to(to)?;
+        let body = membership::msg_body(text)?;
         let (reply, answer) = oneshot::channel();
         self.dispatch(Request::Send { to, body, reply })?;
         self.await_reply(answer)?
@@ -113,7 +115,7 @@ impl Mesh {
         }
         let inbound = &mut self.inbound;
         self.runtime.block_on(async move {
-            match tokio::time::timeout(timeout, inbound.recv()).await {
+            match time::timeout(timeout, inbound.recv()).await {
                 Err(_elapsed) => Ok(None),
                 Ok(Some(message)) => Ok(Some(message)),
                 Ok(None) => Err(anyhow::anyhow!("mesh event loop has stopped")),
@@ -184,7 +186,7 @@ impl Mesh {
             return Ok(());
         };
         self.runtime
-            .block_on(habilis_network::membership::depart(node))
+            .block_on(membership::depart(node))
             .map_err(anyhow::Error::from)
     }
 

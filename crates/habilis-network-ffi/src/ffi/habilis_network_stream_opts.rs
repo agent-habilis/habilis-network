@@ -1,5 +1,6 @@
 use std::ffi::c_char;
 
+use std::ptr;
 /// How a stream node reaches peers, mirroring `habilis_network_stream_opts` in the
 /// header: the same three lists `habilis_network_opts` carries, without the mesh
 /// selectors a stream has no use for.
@@ -20,9 +21,9 @@ impl HabilisNetworkStreamOpts {
     #[must_use]
     pub fn empty() -> Self {
         Self {
-            lookup: std::ptr::null(),
-            transport: std::ptr::null(),
-            relay_urls: std::ptr::null(),
+            lookup: ptr::null(),
+            transport: ptr::null(),
+            relay_urls: ptr::null(),
         }
     }
 }

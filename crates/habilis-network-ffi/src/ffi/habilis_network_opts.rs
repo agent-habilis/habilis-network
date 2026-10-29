@@ -1,5 +1,6 @@
 use std::ffi::c_char;
 
+use std::ptr;
 /// The mesh selectors, mirroring `habilis_network_opts` in the header. String fields are
 /// NUL-terminated C strings or NULL; `max_peers == 0` and `max_direct == 0` take
 /// the engine defaults (G is 32, C is 64).
@@ -34,13 +35,13 @@ impl HabilisNetworkOpts {
     #[must_use]
     pub fn empty() -> Self {
         Self {
-            mesh: std::ptr::null(),
-            topic: std::ptr::null(),
-            nick: std::ptr::null(),
-            name: std::ptr::null(),
-            lookup: std::ptr::null(),
-            transport: std::ptr::null(),
-            relay_urls: std::ptr::null(),
+            mesh: ptr::null(),
+            topic: ptr::null(),
+            nick: ptr::null(),
+            name: ptr::null(),
+            lookup: ptr::null(),
+            transport: ptr::null(),
+            relay_urls: ptr::null(),
             max_peers: 0,
             max_direct: 0,
         }

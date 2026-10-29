@@ -13,6 +13,7 @@
 )]
 
 mod habilis_network_mesh;
+use std::{fmt, panic, ptr, slice, str};
 mod habilis_network_msg;
 mod habilis_network_opts;
 mod habilis_network_producer;
@@ -64,7 +65,7 @@ fn clear_error() {
 /// entry point goes through this: unwinding into C is undefined behaviour.
 // C boundary: each extern "C" entry point runs its body through this helper.
 fn guard<T>(fallback: T, body: impl FnOnce() -> T) -> T {
-    match std::panic::catch_unwind(AssertUnwindSafe(body)) {
+    match panic::catch_unwind(AssertUnwindSafe(body)) {
         Ok(value) => value,
         Err(_panic) => {
             set_error("a panic crossed the FFI boundary");
@@ -84,11 +85,11 @@ unsafe fn borrowed_field(
     handle: *const HabilisNetworkMesh,
     field: impl FnOnce(&HabilisNetworkMesh) -> *const c_char,
 ) -> *const c_char {
-    guard(std::ptr::null(), || {
+    guard(ptr::null(), || {
         // SAFETY: live handle or NULL, forwarded from this function's contract.
         match unsafe { handle.as_ref() } {
             Some(handle) => field(handle),
-            None => std::ptr::null(),
+            None => ptr::null(),
         }
     })
 }
@@ -151,9 +152,9 @@ unsafe fn optional_str(ptr: *const c_char) -> Result<Option<&'static str>, ()> {
 /// Split a comma-separated C list into its parsed entries. NULL and the empty
 /// string are the empty list; a name that is not one of the type's choices
 /// puts that type's own message (`unknown lookup ...`) in the error slot.
-fn comma_list<T: std::str::FromStr>(text: Option<&str>) -> Result<Vec<T>, ()>
+fn comma_list<T: str::FromStr>(text: Option<&str>) -> Result<Vec<T>, ()>
 where
-    T::Err: std::fmt::Display,
+    T::Err: fmt::Display,
 {
     let entries = text.unwrap_or_default().split(',');
     let trimmed = entries.map(str::trim).filter(|entry| !entry.is_empty());
@@ -187,7 +188,7 @@ unsafe fn copy_out(text: &str, buffer: *mut c_char, cap: usize) -> c_long {
         // SAFETY: `needed + 1 <= cap` bytes are writable per the contract above,
         // and the source is a distinct Rust-owned allocation.
         unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.cast::<u8>(), needed);
+            ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.cast::<u8>(), needed);
             buffer.add(needed).write(0);
         }
     }
@@ -204,7 +205,7 @@ fn write_nick(field: &mut [c_char; NICK_CAP], nick: &str) {
     // SAFETY: `take < NICK_CAP` elements are written into an array of that size,
     // from a distinct Rust-owned allocation.
     unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), field.as_mut_ptr().cast::<u8>(), take);
+        ptr::copy_nonoverlapping(bytes.as_ptr(), field.as_mut_ptr().cast::<u8>(), take);
     }
     field[take] = 0;
 }
@@ -219,11 +220,11 @@ fn write_nick(field: &mut [c_char; NICK_CAP], nick: &str) {
 pub unsafe extern "C" fn habilis_network_mesh_open(
     options: *const HabilisNetworkOpts,
 ) -> *mut HabilisNetworkMesh {
-    guard(std::ptr::null_mut(), || {
+    guard(ptr::null_mut(), || {
         clear_error();
         if options.is_null() {
             set_error("habilis_network_mesh_open: opts is NULL");
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         }
         // SAFETY: non-NULL and readable per the contract above.
         let options = unsafe { &*options };
@@ -237,7 +238,7 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
             )
         };
         let (Ok(mesh), Ok(topic), Ok(nick), Ok(name)) = strings else {
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
         // SAFETY: NUL-terminated or NULL, per the header contract, for each
         // of the three comma lists.
@@ -249,10 +250,10 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
             )
         };
         let (Ok(lookup), Ok(transport), Ok(relay_urls)) = lists else {
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
         let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
         let relay_urls: Vec<String> = relay_urls.map(url_list).unwrap_or_default();
         let mesh_name = mesh.map(str::to_owned);
@@ -287,7 +288,7 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
             }
             Err(error) => {
                 set_error(&format!("{error:#}"));
-                std::ptr::null_mut()
+                ptr::null_mut()
             }
         }
     })
@@ -420,7 +421,7 @@ pub unsafe extern "C" fn habilis_network_msg_recv(
         // SAFETY: `text.len() + 1 <= cap` bytes are writable per the contract
         // above, and the source is a distinct Rust-owned allocation.
         unsafe {
-            std::ptr::copy_nonoverlapping(text.as_ptr(), buffer.cast::<u8>(), text.len());
+            ptr::copy_nonoverlapping(text.as_ptr(), buffer.cast::<u8>(), text.len());
             buffer.add(text.len()).write(0);
             out.write(meta);
         }
@@ -569,11 +570,11 @@ fn timeout_of(timeout_ms: c_int) -> Duration {
 pub unsafe extern "C" fn habilis_network_streams_bind(
     options: *const HabilisNetworkStreamOpts,
 ) -> *mut HabilisNetworkStreams {
-    guard(std::ptr::null_mut(), || {
+    guard(ptr::null_mut(), || {
         clear_error();
         if options.is_null() {
             set_error("habilis_network_streams_bind: opts is NULL");
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         }
         // SAFETY: non-NULL and readable per the contract above.
         let options = unsafe { &*options };
@@ -586,10 +587,10 @@ pub unsafe extern "C" fn habilis_network_streams_bind(
             )
         };
         let (Ok(lookup), Ok(transport), Ok(relay_urls)) = lists else {
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
         let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
         let relay_urls: Vec<String> = relay_urls.map(url_list).unwrap_or_default();
         let parsed = habilis_network_stream::StreamOpts::default()
@@ -609,12 +610,12 @@ pub unsafe extern "C" fn habilis_network_streams_bind(
 pub unsafe extern "C" fn habilis_network_streams_bind_for(
     hash: *const c_char,
 ) -> *mut HabilisNetworkStreams {
-    guard(std::ptr::null_mut(), || {
+    guard(ptr::null_mut(), || {
         clear_error();
         // SAFETY: NUL-terminated or NULL, per the contract above.
         let Ok(Some(hash)) = (unsafe { optional_str(hash) }) else {
             set_error("habilis_network_streams_bind_for: hash is NULL or not UTF-8");
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
         boxed(Streams::bind_for(hash).map(|streams| HabilisNetworkStreams { streams }))
     })
@@ -652,12 +653,12 @@ pub unsafe extern "C" fn habilis_network_streams_close(
 pub unsafe extern "C" fn habilis_network_stream_create(
     handle: *mut HabilisNetworkStreams,
 ) -> *mut HabilisNetworkProducer {
-    guard(std::ptr::null_mut(), || {
+    guard(ptr::null_mut(), || {
         clear_error();
         // SAFETY: live handle or NULL, per the contract above.
         let Some(handle) = (unsafe { handle.as_ref() }) else {
             set_error("habilis_network_stream_create: handle is NULL");
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
         boxed(
             handle
@@ -680,11 +681,11 @@ pub unsafe extern "C" fn habilis_network_stream_create(
 pub unsafe extern "C" fn habilis_network_stream_hash(
     handle: *const HabilisNetworkProducer,
 ) -> *const c_char {
-    guard(std::ptr::null(), || {
+    guard(ptr::null(), || {
         // SAFETY: live handle or NULL, per the contract above.
         match unsafe { handle.as_ref() } {
             Some(handle) => handle.hash.as_ptr(),
-            None => std::ptr::null(),
+            None => ptr::null(),
         }
     })
 }
@@ -718,7 +719,7 @@ pub unsafe extern "C" fn habilis_network_stream_write(
             &[][..]
         } else {
             // SAFETY: readable for `len` bytes per the contract above.
-            unsafe { std::slice::from_raw_parts(buffer, len) }
+            unsafe { slice::from_raw_parts(buffer, len) }
         };
         match handle.writer.write(bytes, timeout_of(timeout_ms)) {
             Ok(true) => 1,
@@ -763,17 +764,17 @@ pub unsafe extern "C" fn habilis_network_stream_open(
     handle: *mut HabilisNetworkStreams,
     hash: *const c_char,
 ) -> *mut HabilisNetworkReader {
-    guard(std::ptr::null_mut(), || {
+    guard(ptr::null_mut(), || {
         clear_error();
         // SAFETY: live handle or NULL, per the contract above.
         let Some(handle) = (unsafe { handle.as_ref() }) else {
             set_error("habilis_network_stream_open: handle is NULL");
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
         // SAFETY: NUL-terminated or NULL, per the contract above.
         let Ok(Some(hash)) = (unsafe { optional_str(hash) }) else {
             set_error("habilis_network_stream_open: hash is NULL or not UTF-8");
-            return std::ptr::null_mut();
+            return ptr::null_mut();
         };
         boxed(
             handle
@@ -810,7 +811,7 @@ pub unsafe extern "C" fn habilis_network_stream_read(
             return -1;
         }
         // SAFETY: writable for `cap` bytes per the contract above.
-        let buffer = unsafe { std::slice::from_raw_parts_mut(buffer, cap) };
+        let buffer = unsafe { slice::from_raw_parts_mut(buffer, cap) };
         match handle.reader.read(buffer, timeout_of(timeout_ms)) {
             Ok(Read::Bytes(read)) => c_long::try_from(read).unwrap_or(c_long::MAX),
             Ok(Read::Timeout) => 0,
@@ -845,7 +846,7 @@ fn boxed<T>(made: anyhow::Result<T>) -> *mut T {
         Ok(value) => Box::into_raw(Box::new(value)),
         Err(error) => {
             set_error(&format!("{error:#}"));
-            std::ptr::null_mut()
+            ptr::null_mut()
         }
     }
 }
@@ -854,10 +855,10 @@ fn boxed<T>(made: anyhow::Result<T>) -> *mut T {
 /// call succeeded. Borrowed until this thread's next `mesh_*` call.
 #[unsafe(no_mangle)]
 pub extern "C" fn habilis_network_last_error() -> *const c_char {
-    guard(std::ptr::null(), || {
+    guard(ptr::null(), || {
         LAST_ERROR.with_borrow(|slot| match slot {
             Some(message) => message.as_ptr(),
-            None => std::ptr::null(),
+            None => ptr::null(),
         })
     })
 }
@@ -866,7 +867,7 @@ pub extern "C" fn habilis_network_last_error() -> *const c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn habilis_network_version() -> *const c_char {
     static VERSION: OnceLock<CString> = OnceLock::new();
-    guard(std::ptr::null(), || {
+    guard(ptr::null(), || {
         VERSION
             .get_or_init(|| {
                 CString::new(habilis_network::VERSION).unwrap_or_else(|_| CString::default())
