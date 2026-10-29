@@ -12,6 +12,8 @@ use habilis_network_iroh_webrtc_transport::{
     BrowserPendingAnswer, BrowserPendingOffer, IceServers, SignalEnvelope, WebRtcHandle,
     browser_answer, browser_offer, custom_addr,
 };
+use std::fmt::Display;
+use std::mem;
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
 struct State {
@@ -36,7 +38,7 @@ thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
 
-fn js_error(error: impl std::fmt::Display) -> JsValue {
+fn js_error(error: impl Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }
 
@@ -122,7 +124,7 @@ pub async fn answer(offer_json: String) -> Result<String, JsValue> {
 pub async fn complete(answer_json: String) -> Result<String, JsValue> {
     let (pending, hub) = with_state(|state| {
         Ok((
-            std::mem::replace(&mut state.pending, Pending::None),
+            mem::replace(&mut state.pending, Pending::None),
             state.hub.clone(),
         ))
     })?;
