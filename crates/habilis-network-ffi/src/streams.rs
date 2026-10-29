@@ -27,6 +27,7 @@ impl Streams {
         let runtime = runtime()?;
         let node = runtime.block_on(StreamNode::bind(options))?;
         Ok(Self {
+            // the readers and writers of the stream keep the runtime alive
             runtime: Arc::new(runtime),
             node: Some(node),
         })
@@ -41,6 +42,7 @@ impl Streams {
         let runtime = runtime()?;
         let node = runtime.block_on(StreamNode::bind_for(&hash))?;
         Ok(Self {
+            // the readers and writers of the stream keep the runtime alive
             runtime: Arc::new(runtime),
             node: Some(node),
         })
@@ -92,6 +94,7 @@ pub(crate) struct Writer {
     /// `None` after [`Writer::close`].
     producer: Option<Producer>,
     hash: String,
+    // the writer shares the runtime that its stream runs on
     runtime: Arc<tokio::runtime::Runtime>,
 }
 
@@ -157,6 +160,7 @@ pub(crate) struct ReadEnd {
     reader: Reader,
     leftover: Bytes,
     ended: bool,
+    // the reader shares the runtime that its stream runs on
     runtime: Arc<tokio::runtime::Runtime>,
 }
 

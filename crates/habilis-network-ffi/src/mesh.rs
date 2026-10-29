@@ -51,6 +51,7 @@ impl Mesh {
         // the document. The browser peer passes `json_sink()`'s here instead,
         // which is the one thing that differs between the two.
         let Membership { node, inbound, .. } = runtime.block_on(
+            // join takes the sink as a shared handle, and the event loop keeps it
             habilis_network::membership::join(options, Arc::new(SilentSink::default())),
         )?;
 
