@@ -17,13 +17,14 @@ use std::sync::OnceLock;
 
 use habilis_network_protocol::{Message, MessageKind, PresenceSubtype};
 
+use habilis_network_util::log_config;
 /// Resolved once at first log: did the operator pass `--log-raw`?
 /// The CLI dispatcher installs the [`habilis_network_util::log_config::LogConfig`] before
 /// any message can flow, so a stale read is structurally impossible.
 static LOG_RAW: OnceLock<bool> = OnceLock::new();
 
 fn log_raw() -> bool {
-    *LOG_RAW.get_or_init(habilis_network_util::log_config::log_raw)
+    *LOG_RAW.get_or_init(log_config::log_raw)
 }
 
 /// Redacted stand-in for a message body: byte length + the first 8 hex

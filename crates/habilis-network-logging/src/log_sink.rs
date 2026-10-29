@@ -12,8 +12,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use habilis_network_util::log_config;
+use tracing_subscriber::fmt::MakeWriter;
 
 use habilis_network_protocol::{MeshId, Nickname};
+use std::fmt;
+use std::fmt::Debug;
 
 /// Pending-buffer ceiling. `create`/`join` attach within sub-second (a
 /// few KB); a long non-attaching process (`mcp`) hits this and flips
@@ -96,8 +99,8 @@ fn maybe_rotate_with(
 // the clones of the sink write to one state, and the global sink holds one
 pub struct LogSink(Arc<Mutex<State>>);
 
-impl std::fmt::Debug for LogSink {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for LogSink {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("LogSink").finish_non_exhaustive()
     }
 }
@@ -234,7 +237,7 @@ impl Write for LogSink {
 
 // `make_writer` returns a cheap `Arc`-clone (no per-event heap alloc /
 // dyn dispatch); interior mutability is the `Mutex<State>`.
-impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for LogSink {
+impl<'writer> MakeWriter<'writer> for LogSink {
     type Writer = Self;
     fn make_writer(&'writer self) -> Self::Writer {
         self.clone()
@@ -250,11 +253,12 @@ mod tests {
 
     use super::{LogSink, State};
 
-    fn failing_reopen(_: &std::path::Path) -> std::io::Result<fs::File> {
-        Err(std::io::Error::other("no space left on device"))
+    use std::{env, io, path, process};
+    fn failing_reopen(_: &path::Path) -> io::Result<fs::File> {
+        Err(io::Error::other("no space left on device"))
     }
 
-    fn backup_of(path: &std::path::Path) -> PathBuf {
+    fn backup_of(path: &path::Path) -> PathBuf {
         let mut backup = path.as_os_str().to_owned();
         backup.push(".1");
         PathBuf::from(backup)
@@ -263,10 +267,7 @@ mod tests {
     #[test]
     fn failed_reopen_keeps_the_handle_on_the_active_path() {
         let _guard = ::habilis_network_test_tracing::init();
-        let dir = std::env::temp_dir().join(format!(
-            "habilis-network-logsink-reopen-{}",
-            std::process::id()
-        ));
+        let dir = env::temp_dir().join(format!("habilis-network-logsink-reopen-{}", process::id()));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("rot.log");
         let mut file = fs::File::create(&path).expect("open test log");
@@ -286,10 +287,7 @@ mod tests {
     #[test]
     fn failed_reopen_leaves_a_stale_backup_when_the_first_rename_failed() {
         let _guard = ::habilis_network_test_tracing::init();
-        let dir = std::env::temp_dir().join(format!(
-            "habilis-network-logsink-stale-{}",
-            std::process::id()
-        ));
+        let dir = env::temp_dir().join(format!("habilis-network-logsink-stale-{}", process::id()));
         let _ = fs::create_dir_all(&dir);
         // No file at `path`, so the first rename fails; `.1` is from an
         // earlier rotation.
@@ -313,10 +311,7 @@ mod tests {
     #[test]
     fn failed_reopen_defers_the_next_rotation() {
         let _guard = ::habilis_network_test_tracing::init();
-        let dir = std::env::temp_dir().join(format!(
-            "habilis-network-logsink-defer-{}",
-            std::process::id()
-        ));
+        let dir = env::temp_dir().join(format!("habilis-network-logsink-defer-{}", process::id()));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("rot.log");
         let mut file = fs::File::create(&path).expect("open test log");
@@ -333,8 +328,7 @@ mod tests {
     #[test]
     fn attached_file_rotates_at_cap() {
         let _guard = ::habilis_network_test_tracing::init();
-        let dir =
-            std::env::temp_dir().join(format!("habilis-network-logsink-{}", std::process::id()));
+        let dir = env::temp_dir().join(format!("habilis-network-logsink-{}", process::id()));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("rot.log");
         let mut options = fs::OpenOptions::new();
