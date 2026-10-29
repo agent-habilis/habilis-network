@@ -92,6 +92,7 @@ impl Verified {
     /// calls it, from [`Message::sign`] and [`Message::verify`].
     pub(super) fn new(message: Message, key: AuthorKey) -> Self {
         Self {
+            // a copy of the proof and each view share one message
             message: Arc::new(message),
             key,
         }
@@ -150,6 +151,7 @@ impl Verified {
         let mut message = (*self.message).clone();
         message.body = body;
         Authored {
+            // the copy with the new body is shared by the proof and its views
             message: Arc::new(message),
             key: self.key,
         }
@@ -369,6 +371,7 @@ impl Authored {
     /// [`Verified::open_with`] and the reassembly that builds a logical message call it.
     pub(crate) fn new(message: Message, key: AuthorKey) -> Self {
         Self {
+            // a copy of the proof and each view share one message
             message: Arc::new(message),
             key,
         }
@@ -397,6 +400,7 @@ impl Authored {
         let mut message = (*self.message).clone();
         message.body = body;
         Authored {
+            // the copy with the new body is shared by the proof and its views
             message: Arc::new(message),
             key: self.key,
         }
