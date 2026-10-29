@@ -37,16 +37,17 @@ pub(crate) async fn build_rendezvous_endpoint(
         // Made before the endpoint: the endpoint reports its connections to it
         // from the first handshake on.
         let admission = crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS);
+        let transport_handles = TransportHandles {
+            webrtc: Some(webrtc.clone()),
+            admission: Some(admission.clone()),
+            ..TransportHandles::default()
+        };
         let endpoint = build_endpoint(
             &lookups,
             Some(params.secret.clone()),
             None,
             Vec::new(),
-            TransportHandles {
-                webrtc: Some(webrtc.clone()),
-                admission: Some(admission.clone()),
-                ..TransportHandles::default()
-            },
+            transport_handles,
         )
         .await
         .ok();

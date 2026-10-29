@@ -22,10 +22,9 @@ use tokio::sync::mpsc;
 fn ladder_of_two() -> (std::net::UdpSocket, Vec<u16>) {
     let first = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .expect("a loopback socket for the first rung");
-    let second = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .and_then(|socket| socket.local_addr())
-        .expect("a free loopback port")
-        .port();
+    let bound = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .and_then(|socket| socket.local_addr());
+    let second = bound.expect("a free loopback port").port();
     let ports = vec![first.local_addr().expect("its address").port(), second];
     (first, ports)
 }
@@ -139,10 +138,9 @@ async fn a_probe_tells_ours_from_foreign_from_no_answer() {
         answer
     }
 
-    let port = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-        .and_then(|socket| socket.local_addr())
-        .expect("a free loopback port")
-        .port();
+    let bound =
+        std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).and_then(|socket| socket.local_addr());
+    let port = bound.expect("a free loopback port").port();
     let mut params = public_params();
     params.bind_ports = vec![port];
     let holder = loopback_endpoint().await;
@@ -751,10 +749,9 @@ async fn the_walk_of_a_claim_tick_returns_at_once_on_a_rung_that_says_nothing() 
 async fn a_walk_that_reads_a_holder_of_our_mesh_says_so() {
     use super::{Held, claim};
 
-    let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .and_then(|socket| socket.local_addr())
-        .expect("a free loopback port")
-        .port();
+    let bound = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .and_then(|socket| socket.local_addr());
+    let port = bound.expect("a free loopback port").port();
     let mut params = public_params();
     params.bind_ports = vec![port];
 
@@ -1004,8 +1001,9 @@ async fn abort_and_close_waits_out_a_probe_mid_handshake() {
 async fn abort_and_close_lets_a_probe_finish_closing_its_own_endpoint() {
     let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .expect("a silent loopback socket");
-    let target = iroh::EndpointAddr::new(SecretKey::generate().public())
-        .with_ip_addr(silent.local_addr().expect("its address"));
+    let silent_socket = silent.local_addr().expect("its address");
+    let target =
+        iroh::EndpointAddr::new(SecretKey::generate().public()).with_ip_addr(silent_socket);
     let prober = loopback_endpoint().await;
     let dialer = prober.clone();
     let task = n0_future::task::spawn(async move {
@@ -1079,9 +1077,8 @@ async fn a_claim_leaves_the_endpoint_knowing_only_the_rung_it_bound() {
                 .expect("a free loopback port")
         })
         .collect();
-    let addrs = sockets
-        .iter()
-        .map(|socket| socket.local_addr().expect("its address"));
+    let socket_refs = sockets.iter();
+    let addrs = socket_refs.map(|socket| socket.local_addr().expect("its address"));
     let rungs: Vec<u16> = addrs.map(|address| address.port()).collect();
     drop(sockets);
     let mut params = public_params();
@@ -1096,10 +1093,8 @@ async fn a_claim_leaves_the_endpoint_knowing_only_the_rung_it_bound() {
 
     let claimed = claim::claim(&params, &peer, &book, &mut beacon).await;
 
-    let on = beacon
-        .as_ref()
-        .and_then(|held| held.rung_in(&rungs))
-        .map(|index| rungs[index]);
+    let held_rung = beacon.as_ref().and_then(|held| held.rung_in(&rungs));
+    let on = held_rung.map(|index| rungs[index]);
     let known: Vec<u16> = peer
         .remote_info(params.id)
         .await
@@ -1149,9 +1144,8 @@ async fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
                 .expect("a free loopback port")
         })
         .collect();
-    let addrs = sockets
-        .iter()
-        .map(|socket| socket.local_addr().expect("its address"));
+    let socket_refs = sockets.iter();
+    let addrs = socket_refs.map(|socket| socket.local_addr().expect("its address"));
     let rungs: Vec<u16> = addrs.map(|address| address.port()).collect();
     drop(sockets);
     let mut params = public_params();
@@ -1163,10 +1157,8 @@ async fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
         claim::claim(&params, &holder_peer, &holder_book, &mut beacon).await,
         "a member that knows a holder finds the rung it moved to"
     );
-    let on = beacon
-        .as_ref()
-        .and_then(|held| held.rung_in(&rungs))
-        .expect("the beacon is bound on a rung");
+    let held_rung = beacon.as_ref().and_then(|held| held.rung_in(&rungs));
+    let on = held_rung.expect("the beacon is bound on a rung");
     let stale = rungs[1 - on];
 
     let member = loopback_endpoint().await;
@@ -1179,9 +1171,8 @@ async fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
         let held = book
             .get_endpoint_info(params.id)
             .map(EndpointInfo::into_endpoint_addr);
-        let single = held
-            .as_ref()
-            .is_some_and(|address| address.ip_addrs().count() == 1);
+        let held_ref = held.as_ref();
+        let single = held_ref.is_some_and(|address| address.ip_addrs().count() == 1);
         let on_rung = |socket: &std::net::SocketAddr| socket.port() == rungs[on];
         let ours: bool = single
             && held
@@ -1493,10 +1484,9 @@ async fn a_rendezvous_does_not_dial_its_own_peer() {
     use futures_util::StreamExt as _;
     use iroh_gossip::api::Event;
 
-    let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .and_then(|socket| socket.local_addr())
-        .expect("a free loopback port")
-        .port();
+    let bound = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .and_then(|socket| socket.local_addr());
+    let port = bound.expect("a free loopback port").port();
     let mut params = public_params();
     params.bind_ports = vec![port];
 

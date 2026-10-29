@@ -4,7 +4,8 @@ use iroh::EndpointId;
 /// attach to its beacon's answerer as well, and no other peer hangs off the beacon
 /// through them: counted, they made each split holder defer its shed for the full wait.
 pub(crate) fn foreign_sessions(live: &[EndpointId], own: &[EndpointId]) -> Vec<EndpointId> {
-    let remote = live.iter().copied().filter(|id| !own.contains(id));
+    let live_ids = live.iter().copied();
+    let remote = live_ids.filter(|id| !own.contains(id));
     remote.collect()
 }
 
@@ -36,6 +37,7 @@ impl Dependents {
 }
 
 pub(crate) fn short_ids(ids: &[EndpointId]) -> Vec<String> {
-    let short = ids.iter().map(|id| id.fmt_short().to_string());
+    let id_refs = ids.iter();
+    let short = id_refs.map(|id| id.fmt_short().to_string());
     short.collect()
 }
