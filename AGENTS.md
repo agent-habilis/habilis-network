@@ -184,7 +184,7 @@ The `transport` target has no pin. Its lines appear only when `RUST_LOG` names t
 
 The Google Rust Style Guide is the reference for Rust style in this repository: https://google.github.io/styleguide/rustguide.html
 
-This file wins over the guide. If the two conflict, follow this file. Issue #29 records each decision.
+Issue #29 records each decision.
 
 ### What each gate refuses
 
@@ -227,7 +227,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - A public fn is `const` only where a const or static initializer calls it: `pub_const_fn` reads every `const` and `static` line of the crates for the names they call, and flags a `pub const fn` none of them calls (Z7). A newtype or trivial accessor is not exempt by its shape.
 ### Rules we decline, or leave to the reviewer
 
-- `clippy::absolute_paths`: gated. It is `warn` in `[workspace.lints]`, and CI runs clippy with `-D warnings`. The owner set `absolute-paths-max-segments = 3` in `clippy.toml`. The lint is on in `[workspace.lints]`. `scripts/absolute-paths/` rewrote the hits to import the parent module.
+- `clippy::absolute_paths`: gated. It is `warn` in `[workspace.lints]`, and CI runs clippy with `-D warnings`. It takes the guide's default: a path names at most two segments, so a type is imported and a function is called as `module::fn`. `clippy.toml` sets no override. `scripts/absolute-paths/` rewrites the hits to import the parent module.
 - `non_exhaustive_omitted_patterns`: gated by the `Omitted patterns` CI step. It is an unstable rustc lint. The project toolchain is a nightly. The `Omitted patterns` step in `.github/workflows/ci.yml` runs it with `-Zcrate-attr=feature(non_exhaustive_omitted_patterns_lint)` and `-D non_exhaustive_omitted_patterns`. The step checks three things: the workspace, `habilis-network-bench-wasm` on wasm32, and the `idb_browser`, `origin` and `conformance` tests of `habilis-network-chunks` on wasm32. A crate root gated by `target_arch` drops the crate attribute, so the wasm32 crates are checked on their own. Their test and bench bodies sit in modules for that reason. The step does not check the `wasm_runtime` test on wasm32, because `mio` does not build for wasm32.
 - `exhaustive_enums` and `exhaustive_structs`: gated. Both are `warn` in `[workspace.lints]`. The owner decided to mark public types `#[non_exhaustive]`. All public enums are marked. A public struct is marked too, except one that keeps a private field (`AppClass`). A struct that other crates build gets `new` with all fields (up to four, no two adjacent of one type), or `new` with the required fields and a `with_` method for each optional field that a call site sets. Never set a field after `Default`, because `field_reassign_with_default` refuses it.
 - A `match` on a foreign `#[non_exhaustive]` enum names every variant and keeps a wildcard arm last. Gated: `wildcard_enum_match_arm` is `warn` in `[workspace.lints]`. The compiler needs that arm and `wildcard_enum_match_arm` refuses it, so the arm carries `#[expect(clippy::wildcard_enum_match_arm, reason = "...")]` on the narrowest scope. Use `expect`, never `allow`: a stale `expect` is a warning.
