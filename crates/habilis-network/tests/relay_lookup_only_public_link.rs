@@ -111,6 +111,7 @@ async fn spawn_with(
     topic: &str,
     nick: &str,
     relay: &RelayUrl,
+    // each member's sink is shared with the node that writes to it, and the test reads it
     sink: Arc<Joined>,
     transports: TransportOpts,
 ) -> Node<Probe> {
@@ -145,7 +146,9 @@ fn two_ip_peers_link_through_the_gated_rendezvous() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let topic = format!("scratch-link-{}", rand::random::<u64>());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let bob_saw = Arc::new(Joined::default());
         let ip_only = TransportOpts::default()
             .with_udp(true)
@@ -185,7 +188,9 @@ fn a_webrtc_only_peer_links_through_the_beacon_lane() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let topic = format!("scratch-lane-{}", rand::random::<u64>());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let bob_saw = Arc::new(Joined::default());
         let alice = spawn_with(
             &topic,

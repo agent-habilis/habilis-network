@@ -53,6 +53,7 @@ async fn tasks_spawn() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    // the spawned task and the test share the counter
     let counter = Arc::new(AtomicUsize::new(0));
     let inner = Arc::clone(&counter);
     n0_future::task::spawn(async move {

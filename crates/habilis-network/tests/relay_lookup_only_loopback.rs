@@ -86,6 +86,7 @@ impl Joined {
     }
 }
 
+// each member's sink is shared with the node that writes to it, and the test reads it
 async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Probe> {
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
@@ -111,7 +112,9 @@ fn two_loopback_nodes_mesh_with_the_relay_lookup_only() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let topic = format!("relay-lookup-only-{}", rand::random::<u64>());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let bob_saw = Arc::new(Joined::default());
         let alice = spawn(&topic, "alice", Arc::clone(&alice_saw)).await;
         let bob = spawn(&topic, "bob", Arc::clone(&bob_saw)).await;
