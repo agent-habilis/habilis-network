@@ -5,9 +5,12 @@ use std::time::Duration;
 use iroh::endpoint::transports::{Addr, PathSelectionData, Transmit};
 
 #[cfg(feature = "test-hooks")]
+use std::sync;
+#[cfg(feature = "test-hooks")]
 use std::sync::atomic;
 #[cfg(feature = "test-hooks")]
 use std::sync::atomic::Ordering;
+use std::{iter, net};
 /// The lowest-RTT path in `iter`.
 ///
 /// A path whose stats are not readable yet — freshly added, not yet validated —
@@ -227,7 +230,7 @@ pub fn climb<'a>(
 /// # }
 /// ```
 #[must_use]
-pub fn ip_remote(path: &PathSelectionData<'_>) -> Option<std::net::SocketAddr> {
+pub fn ip_remote(path: &PathSelectionData<'_>) -> Option<net::SocketAddr> {
     match path.network_path().remote() {
         Addr::Ip(remote) => Some(remote),
         Addr::Relay(..) | Addr::Custom(_) => None,
@@ -319,11 +322,7 @@ pub fn blocked(local: iroh::EndpointId, rung: Rung, path: &PathSelectionData<'_>
 /// ```
 #[cfg(not(feature = "test-hooks"))]
 #[must_use]
-pub fn is_blocked(
-    _local: iroh::EndpointId,
-    _rung: Rung,
-    _remote: Option<std::net::SocketAddr>,
-) -> bool {
+pub fn is_blocked(_local: iroh::EndpointId, _rung: Rung, _remote: Option<net::SocketAddr>) -> bool {
     false
 }
 
@@ -345,7 +344,7 @@ pub fn is_blocked(
 pub fn is_blocked_to(
     _local: iroh::EndpointId,
     _rung: Rung,
-    _remote: Option<std::net::SocketAddr>,
+    _remote: Option<net::SocketAddr>,
     _remote_id: Option<iroh::EndpointId>,
 ) -> bool {
     false
@@ -355,19 +354,18 @@ pub fn is_blocked_to(
 static IP_BLOCKED: atomic::AtomicBool = atomic::AtomicBool::new(false);
 
 #[cfg(feature = "test-hooks")]
-type PortBlocks = std::sync::Mutex<Option<HashMap<iroh::EndpointId, HashSet<u16>>>>;
+type PortBlocks = sync::Mutex<Option<HashMap<iroh::EndpointId, HashSet<u16>>>>;
 
 #[cfg(feature = "test-hooks")]
-static IP_BLOCKED_TO: PortBlocks = std::sync::Mutex::new(None);
+static IP_BLOCKED_TO: PortBlocks = sync::Mutex::new(None);
 
 #[cfg(feature = "test-hooks")]
-static RUNGS_BLOCKED: std::sync::Mutex<Option<HashSet<(iroh::EndpointId, Rung)>>> =
-    std::sync::Mutex::new(None);
+static RUNGS_BLOCKED: sync::Mutex<Option<HashSet<(iroh::EndpointId, Rung)>>> =
+    sync::Mutex::new(None);
 
 #[cfg(feature = "test-hooks")]
-static RUNGS_BLOCKED_TO: std::sync::Mutex<
-    Option<HashSet<(iroh::EndpointId, Rung, iroh::EndpointId)>>,
-> = std::sync::Mutex::new(None);
+static RUNGS_BLOCKED_TO: sync::Mutex<Option<HashSet<(iroh::EndpointId, Rung, iroh::EndpointId)>>> =
+    sync::Mutex::new(None);
 
 /// The pure table behind [`blocked`]: whether `rung` is taken from `local`, for a
 /// path whose IP remote is `remote` (`None` for a path that has no IP address).
@@ -391,11 +389,7 @@ static RUNGS_BLOCKED_TO: std::sync::Mutex<
 /// ```
 #[cfg(feature = "test-hooks")]
 #[must_use]
-pub fn is_blocked(
-    local: iroh::EndpointId,
-    rung: Rung,
-    remote: Option<std::net::SocketAddr>,
-) -> bool {
+pub fn is_blocked(local: iroh::EndpointId, rung: Rung, remote: Option<net::SocketAddr>) -> bool {
     is_blocked_to(local, rung, remote, None)
 }
 
@@ -423,7 +417,7 @@ pub fn is_blocked(
 pub fn is_blocked_to(
     local: iroh::EndpointId,
     rung: Rung,
-    remote: Option<std::net::SocketAddr>,
+    remote: Option<net::SocketAddr>,
     remote_id: Option<iroh::EndpointId>,
 ) -> bool {
     let rung_blocked: bool = {
@@ -629,7 +623,7 @@ pub fn datagrams<'a>(transmit: &'a Transmit<'a>) -> impl Iterator<Item = &'a [u8
 pub fn split_segments(contents: &[u8], segment_size: Option<usize>) -> impl Iterator<Item = &[u8]> {
     let segment = segment_size.unwrap_or(contents.len()).max(1);
     let mut keepalive = contents.is_empty();
-    contents.chunks(segment).chain(std::iter::from_fn(move || {
+    contents.chunks(segment).chain(iter::from_fn(move || {
         keepalive.then(|| {
             keepalive = false;
             &contents[0..0]

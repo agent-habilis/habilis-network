@@ -1,5 +1,6 @@
 use iroh::protocol::{DynProtocolHandler, ProtocolHandler};
 
+use std::vec;
 /// The ALPNs that a multihop handle serves beside its own, each with its handler.
 ///
 /// Each handler is any [`ProtocolHandler`]. The set boxes it once, so a caller passes
@@ -35,7 +36,7 @@ impl ProtocolSet {
 
 impl IntoIterator for ProtocolSet {
     type Item = (Vec<u8>, Box<dyn DynProtocolHandler>);
-    type IntoIter = std::vec::IntoIter<Self::Item>;
+    type IntoIter = vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
