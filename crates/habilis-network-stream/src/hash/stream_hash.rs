@@ -55,13 +55,12 @@ impl PartialEq for StreamHash {
 
 impl fmt::Debug for StreamHash {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("StreamHash")
+        let mut debug = formatter.debug_struct("StreamHash");
+        debug
             .field("addr", &self.address)
             .field("lookups", &self.lookups)
-            .field("transport", &self.transport)
-            .field("id", &self.id)
-            .finish_non_exhaustive()
+            .field("transport", &self.transport);
+        debug.field("id", &self.id).finish_non_exhaustive()
     }
 }
 
@@ -151,16 +150,18 @@ impl StreamHash {
             .map_err(HashError::field("invalid stream hash address"))?;
         let (_id, address) = endpoint_addr_from_json(&value)
             .map_err(HashError::field("invalid stream hash address"))?;
+        let policy = TransportPolicy::default()
+            .with_udp(flags & NO_UDP_BIT == 0)
+            .with_webrtc(flags & NO_WEBRTC_BIT == 0);
+        // A stream is one direct lane: its node has no multi-hop.
+        let transport = policy
+            .with_multihop(false)
+            .with_gossip(false)
+            .with_relay_transport(flags & RELAY_TRANSPORT_BIT != 0);
         Ok(Self {
             address,
             lookups,
-            transport: TransportPolicy::default()
-                .with_udp(flags & NO_UDP_BIT == 0)
-                .with_webrtc(flags & NO_WEBRTC_BIT == 0)
-                // A stream is one direct lane: its node has no multi-hop.
-                .with_multihop(false)
-                .with_gossip(false)
-                .with_relay_transport(flags & RELAY_TRANSPORT_BIT != 0),
+            transport,
             id,
             secret,
         })

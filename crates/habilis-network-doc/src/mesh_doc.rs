@@ -246,10 +246,9 @@ impl MeshDoc {
             None => peer_entries(&self.doc, gate),
         };
         let after = peer_entries(&fork, gate);
-        before
-            .keys()
-            .chain(after.keys())
-            .any(|nick| nick.as_str() != author.as_str() && before.get(nick) != after.get(nick))
+        let author_name = author.as_str();
+        let mut nicks = before.keys().chain(after.keys());
+        nicks.any(|nick| nick.as_str() != author_name && before.get(nick) != after.get(nick))
     }
 
     /// Set this channel's encryption key (the daemon's per-channel
@@ -350,13 +349,10 @@ impl MeshDoc {
             .iter()
             .filter_map(|encoded| decode_hash(encoded))
             .collect();
-        self.doc
-            .get_changes(&have)
-            .into_iter()
-            .filter_map(|change| self.frames.get(&change.hash()))
-            .filter(move |frame| author.is_none_or(|skipped| &frame.key() != skipped))
-            .take(max)
-            .cloned()
+        let changes = self.doc.get_changes(&have).into_iter();
+        let frames = changes.filter_map(|change| self.frames.get(&change.hash()));
+        let kept = frames.filter(move |frame| author.is_none_or(|skipped| &frame.key() != skipped));
+        kept.take(max).cloned()
     }
 
     /// Whether this document holds every change in `heads`, Base58-encoded as
@@ -568,10 +564,11 @@ impl MeshDoc {
     /// equals. Keyed on the key rather than the nickname, which an author
     /// picks freely.
     fn highest_of(&self, author: &AuthorKey) -> Option<(ChangeHash, u64)> {
-        self.pending
+        let mine = self
+            .pending
             .iter()
-            .filter(|(_, entry)| entry.frame.key() == *author)
-            .max_by_key(|(_, entry)| (entry.change.seq(), entry.arrival))
+            .filter(|(_, entry)| entry.frame.key() == *author);
+        mine.max_by_key(|(_, entry)| (entry.change.seq(), entry.arrival))
             .map(|(hash, entry)| (*hash, entry.change.seq()))
     }
 
@@ -598,10 +595,8 @@ impl MeshDoc {
         for entry in self.pending.values() {
             *per_author.entry(entry.frame.key()).or_default() += 1;
         }
-        (
-            self.pending.len(),
-            per_author.values().copied().max().unwrap_or(0),
-        )
+        let longest = per_author.values().copied().max().unwrap_or(0);
+        (self.pending.len(), longest)
     }
 
     /// Apply every buffered frame whose change's deps are now met — through the
@@ -614,12 +609,11 @@ impl MeshDoc {
     /// else.
     fn drain_pending(&mut self) {
         loop {
-            let ready: Vec<ChangeHash> = self
+            let waiting = self
                 .pending
                 .iter()
-                .filter(|(_, entry)| self.deps_satisfied(entry.change.deps()))
-                .map(|(hash, _)| *hash)
-                .collect();
+                .filter(|(_, entry)| self.deps_satisfied(entry.change.deps()));
+            let ready: Vec<ChangeHash> = waiting.map(|(hash, _)| *hash).collect();
             if ready.is_empty() {
                 return;
             }
@@ -1706,8 +1700,9 @@ mod tests {
         // Author builds the change and seals the wire body, as the daemon does.
         let merge = json!({"secret": "value"});
         let author_doc = MeshDoc::new_ungated().with_key(Some(SymmetricKey::from(key)));
+        let seed = pad_seed(alice.as_str().as_bytes());
         let bytes: Vec<u8> = author_doc
-            .build_change(&merge, &pad_seed(alice.as_str().as_bytes()))
+            .build_change(&merge, &seed)
             .expect("builds")
             .expect("not a no-op");
         let (wire, _plain) = author_doc

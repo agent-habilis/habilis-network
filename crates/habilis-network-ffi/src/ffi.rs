@@ -154,10 +154,9 @@ fn comma_list<T: std::str::FromStr>(text: Option<&str>) -> Result<Vec<T>, ()>
 where
     T::Err: std::fmt::Display,
 {
-    text.unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
+    let entries = text.unwrap_or_default().split(',');
+    let trimmed = entries.map(str::trim).filter(|entry| !entry.is_empty());
+    trimmed
         .map(|entry| {
             let parsed: Result<T, _> = entry.parse();
             parsed.map_err(|error| {
@@ -165,6 +164,13 @@ where
             })
         })
         .collect()
+}
+
+/// The comma-separated URLs of `text`, each trimmed.
+fn url_list(text: &str) -> Vec<String> {
+    let parts = text.split(',');
+    let trimmed = parts.map(str::trim);
+    trimmed.map(str::to_owned).collect()
 }
 
 /// Copy `text` into a caller buffer, NUL-terminating it. Returns the length
@@ -247,17 +253,21 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
         let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
             return std::ptr::null_mut();
         };
-        let relay_urls: Vec<String> = relay_urls
-            .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
-            .unwrap_or_default();
-        let parsed: JoinOptions = JoinOptions::default()
-            .with_mesh(mesh.map(str::to_owned))
-            .with_topic(topic.map(str::to_owned))
-            .with_nick(nick.map(str::to_owned))
-            .with_name(name.map(str::to_owned))
+        let relay_urls: Vec<String> = relay_urls.map(url_list).unwrap_or_default();
+        let mesh_name = mesh.map(str::to_owned);
+        let topic_name = topic.map(str::to_owned);
+        let nick_name = nick.map(str::to_owned);
+        let display_name = name.map(str::to_owned);
+        let base = JoinOptions::default()
+            .with_mesh(mesh_name)
+            .with_topic(topic_name)
+            .with_nick(nick_name)
+            .with_name(display_name);
+        let limited = base
             .with_lookup(lookup)
             .with_transport(transport)
-            .with_relay_urls(relay_urls)
+            .with_relay_urls(relay_urls);
+        let parsed: JoinOptions = limited
             .with_max_peers(options.max_peers)
             .with_max_direct(options.max_direct);
         match Mesh::open(&parsed) {
@@ -580,9 +590,7 @@ pub unsafe extern "C" fn habilis_network_streams_bind(
         let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
             return std::ptr::null_mut();
         };
-        let relay_urls: Vec<String> = relay_urls
-            .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
-            .unwrap_or_default();
+        let relay_urls: Vec<String> = relay_urls.map(url_list).unwrap_or_default();
         let parsed = habilis_network_stream::StreamOpts::default()
             .with_lookup(lookup)
             .with_transport(transport)

@@ -296,9 +296,8 @@ impl Reader {
         };
         or(
             async {
-                reader
-                    .read()
-                    .await
+                let received = reader.read().await;
+                received
                     .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
                     .map_err(|error| js(&error))
             },

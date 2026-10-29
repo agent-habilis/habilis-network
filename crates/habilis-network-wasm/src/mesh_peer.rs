@@ -41,11 +41,15 @@ impl MeshPeer {
             .await
             .map_err(|error| to_js_error(&format!("{error:#}")))?;
         let node = membership.node;
+        let id = node.mesh_id().to_string();
+        let nick = node.nickname().to_string();
+        let name = node.name().to_string();
+        let sender = node.sender();
         Ok(MeshPeer {
-            id: node.mesh_id().to_string(),
-            nick: node.nickname().to_string(),
-            name: node.name().to_string(),
-            sender: node.sender(),
+            id,
+            nick,
+            name,
+            sender,
             inbound: Mutex::new(membership.inbound),
             events: Mutex::new(events),
             node: RefCell::new(Some(node)),

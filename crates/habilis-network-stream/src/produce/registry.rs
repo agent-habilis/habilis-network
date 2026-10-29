@@ -85,9 +85,10 @@ impl Registry {
 
 impl std::fmt::Debug for Registry {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let open = self.entries().len();
         formatter
             .debug_struct("Registry")
-            .field("open", &self.entries().len())
+            .field("open", &open)
             .finish()
     }
 }

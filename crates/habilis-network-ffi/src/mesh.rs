@@ -54,10 +54,13 @@ impl Mesh {
             habilis_network::membership::join(options, Arc::new(SilentSink::default())),
         )?;
 
+        let habilis_network_id = node.mesh_id().as_str().to_owned();
+        let nickname = node.nickname().to_string();
+        let name = node.name().as_str().to_owned();
         Ok(Self {
-            habilis_network_id: node.mesh_id().as_str().to_owned(),
-            nickname: node.nickname().to_string(),
-            name: node.name().as_str().to_owned(),
+            habilis_network_id,
+            nickname,
+            name,
             runtime,
             node: Some(node),
             inbound,

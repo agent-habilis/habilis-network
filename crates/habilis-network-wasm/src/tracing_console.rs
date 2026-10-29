@@ -12,10 +12,11 @@ pub fn init_tracing(filter: &str) {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     // The default fmt timer reads `std::time::SystemTime`, which panics on
     // wasm32-unknown; `without_time` sidesteps it.
-    let _: Result<(), _> = tracing_subscriber::fmt()
+    let subscriber = tracing_subscriber::fmt()
         .with_ansi(false)
         .without_time()
-        .with_span_events(FmtSpan::NONE)
+        .with_span_events(FmtSpan::NONE);
+    let _: Result<(), _> = subscriber
         .with_writer(console_writer::MakeConsoleWriter)
         .with_env_filter(env_filter)
         .try_init();

@@ -104,17 +104,15 @@ impl StreamNode {
             },
         );
         if transports.webrtc {
-            router = router.accept(
-                MESH_WEBRTC_SIGNAL_ALPN,
-                WebRtcSignalAcceptor::new(
-                    webrtc.clone(),
-                    endpoint.clone(),
-                    producers.clone(),
-                    endpoint.id(),
-                    SignalAdmission::new(MAX_DIRECT_PEERS),
-                    ice,
-                ),
+            let acceptor = WebRtcSignalAcceptor::new(
+                webrtc.clone(),
+                endpoint.clone(),
+                producers.clone(),
+                endpoint.id(),
+                SignalAdmission::new(MAX_DIRECT_PEERS),
+                ice,
             );
+            router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, acceptor);
             // The answerer of a session dials this when the session attaches.
             router = router.accept(NUDGE_ALPN, NudgeAcceptor::new());
         }
