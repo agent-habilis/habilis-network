@@ -94,7 +94,7 @@ impl Producer {
             .finish()
             .map_err(|error| StreamError::ConsumerGone(error.into()))?;
         let _ = n0_future::time::timeout(DRAIN, link.send.stopped()).await;
-        link.conn.close(code::DONE.into(), b"done");
+        link.connection.close(code::DONE.into(), b"done");
         self.closed = true;
         Ok(())
     }
@@ -130,7 +130,7 @@ impl Drop for Producer {
             .as_mut()
             .and_then(|attach| attach.try_recv().ok());
         if let Some(link) = self.link.as_ref().or(waiting.as_ref()) {
-            link.conn.close(code::ABANDONED.into(), b"abandoned");
+            link.connection.close(code::ABANDONED.into(), b"abandoned");
         }
     }
 }

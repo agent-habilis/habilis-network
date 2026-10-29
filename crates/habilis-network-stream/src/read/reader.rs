@@ -14,13 +14,13 @@ const CHUNK: usize = 64 * 1024;
 /// One stream's reading end.
 #[derive(Debug)]
 pub struct Reader {
-    conn: Connection,
+    connection: Connection,
     recv: RecvStream,
 }
 
 impl Reader {
-    pub(crate) fn new(conn: Connection, recv: RecvStream) -> Self {
-        Self { conn, recv }
+    pub(crate) fn new(connection: Connection, recv: RecvStream) -> Self {
+        Self { connection, recv }
     }
 
     /// The next bytes, in order; `None` once the producer closed the stream.
@@ -33,11 +33,11 @@ impl Reader {
         match self.recv.read_chunk(CHUNK).await {
             Ok(chunk) => {
                 if chunk.is_none() {
-                    self.conn.close(code::DONE.into(), b"done");
+                    self.connection.close(code::DONE.into(), b"done");
                 }
                 Ok(chunk)
             }
-            Err(error) => Err(match refused::refusal(&self.conn) {
+            Err(error) => Err(match refused::refusal(&self.connection) {
                 Some(refused) => StreamError::Refused(refused),
                 None => StreamError::Lost(error.into()),
             }),

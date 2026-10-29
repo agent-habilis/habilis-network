@@ -42,8 +42,8 @@ impl std::error::Error for Refused {}
 
 /// The refusal behind a connection the producer closed, if it closed it with
 /// one of the stream's codes.
-pub(crate) fn refusal(conn: &Connection) -> Option<Refused> {
-    let Some(ConnectionError::ApplicationClosed(close)) = conn.close_reason() else {
+pub(crate) fn refusal(connection: &Connection) -> Option<Refused> {
+    let Some(ConnectionError::ApplicationClosed(close)) = connection.close_reason() else {
         return None;
     };
     match u32::try_from(close.error_code.into_inner()).ok()? {

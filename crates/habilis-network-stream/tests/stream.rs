@@ -476,11 +476,11 @@ fn a_stream_node_with_webrtc_serves_the_nudge_of_a_peer() {
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
         let node = loopback().await;
         let producer = node.create().await;
-        let addr = producer.hash().addr.clone();
+        let address = producer.hash().address.clone();
         let dialer = habilis_network::iroh::Endpoint::bind(presets::Minimal)
             .await
             .expect("bind a dialer");
-        let nudge = dialer.connect(addr, direct::NUDGE_ALPN).await;
+        let nudge = dialer.connect(address, direct::NUDGE_ALPN).await;
         assert!(nudge.is_ok(), "the nudge was refused: {:?}", nudge.err());
         dialer.close().await;
         node.close().await;
@@ -546,9 +546,9 @@ fn a_hash_minted_by_a_bind_for_node_carries_its_relay() {
         let node = StreamNode::bind_for(&given).await.expect("bind for");
         let minted = node.create().await.hash().clone();
         assert!(
-            minted.addr.relay_urls().next().is_some(),
+            minted.address.relay_urls().next().is_some(),
             "no relay in {:?}",
-            minted.addr
+            minted.address
         );
         node.close().await;
         first.close().await;
@@ -566,8 +566,8 @@ fn a_stream_node_refuses_the_gossip_and_multihop_transports() {
             (Transport::Gossip, "a stream has no gossip"),
             (Transport::Multihop, "a stream has no multihop"),
         ] {
-            let opts = StreamOpts::default().with_transport(vec![Transport::Udp, transport]);
-            let error = StreamNode::bind(&opts)
+            let options = StreamOpts::default().with_transport(vec![Transport::Udp, transport]);
+            let error = StreamNode::bind(&options)
                 .await
                 .expect_err("the transport must be refused");
             assert!(

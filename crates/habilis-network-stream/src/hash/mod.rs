@@ -52,7 +52,7 @@ mod tests {
     fn sample(transport: TransportPolicy) -> StreamHash {
         let id = SecretKey::from_bytes(&[7; 32]).public();
         StreamHash {
-            addr: EndpointAddr::from_parts(
+            address: EndpointAddr::from_parts(
                 id,
                 [TransportAddr::Ip(
                     "127.0.0.1:4433".parse().expect("socket addr"),

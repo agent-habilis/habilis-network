@@ -28,7 +28,7 @@ use zeroize::Zeroizing;
 #[non_exhaustive]
 pub struct StreamHash {
     /// The producer's endpoint: its id, its relay, and its direct addresses.
-    pub addr: EndpointAddr,
+    pub address: EndpointAddr,
     /// How the producer is found, so a consumer binds a compatible endpoint.
     pub lookups: LookupOpts,
     /// The producer's transport list: which direct paths it runs, and whether
@@ -45,7 +45,7 @@ pub struct StreamHash {
 // secret-bearing type is not a map key.
 impl PartialEq for StreamHash {
     fn eq(&self, other: &Self) -> bool {
-        self.addr == other.addr
+        self.address == other.address
             && self.lookups == other.lookups
             && self.transport == other.transport
             && self.id == other.id
@@ -57,7 +57,7 @@ impl fmt::Debug for StreamHash {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("StreamHash")
-            .field("addr", &self.addr)
+            .field("addr", &self.address)
             .field("lookups", &self.lookups)
             .field("transport", &self.transport)
             .field("id", &self.id)
@@ -87,9 +87,9 @@ impl StreamHash {
         framed.extend_from_slice(self.id.as_bytes());
         framed.extend_from_slice(self.secret.as_bytes());
         self.lookups.encode_into(&mut framed);
-        let addr = serde_json::to_vec(&endpoint_addr_to_json(&self.addr))
+        let address = serde_json::to_vec(&endpoint_addr_to_json(&self.address))
             .expect("an EndpointAddr always serializes");
-        framed.extend_from_slice(&addr);
+        framed.extend_from_slice(&address);
         base58check::encode(&framed)
     }
 
@@ -149,10 +149,10 @@ impl StreamHash {
             .ok_or(HashError::Truncated("stream hash missing address"))?;
         let value: serde_json::Value = serde_json::from_slice(addr_json)
             .map_err(HashError::field("invalid stream hash address"))?;
-        let (_id, addr) = endpoint_addr_from_json(&value)
+        let (_id, address) = endpoint_addr_from_json(&value)
             .map_err(HashError::field("invalid stream hash address"))?;
         Ok(Self {
-            addr,
+            address,
             lookups,
             transport: TransportPolicy::default()
                 .with_udp(flags & NO_UDP_BIT == 0)

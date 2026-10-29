@@ -12,7 +12,7 @@ use crate::hash::{StreamId, StreamSecret};
 
 /// A consumer, admitted: the connection and the half the producer writes.
 pub(super) struct Link {
-    pub(super) conn: Connection,
+    pub(super) connection: Connection,
     pub(super) send: SendStream,
 }
 
@@ -96,7 +96,7 @@ impl std::fmt::Debug for Link {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Link")
-            .field("remote", &self.conn.remote_id())
+            .field("remote", &self.connection.remote_id())
             .finish_non_exhaustive()
     }
 }

@@ -25,11 +25,11 @@ pub(crate) struct StreamAcceptor {
 }
 
 impl ProtocolHandler for StreamAcceptor {
-    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         // Before reading a byte, and before the slot is taken: a consumer
         // refused here must not spend the hash.
         if !refuse_unless_direct(
-            &conn,
+            &connection,
             self.relay_transport,
             PROBE_DEADLINE,
             code::RELAY_REFUSED,
@@ -38,9 +38,9 @@ impl ProtocolHandler for StreamAcceptor {
         {
             return Ok(());
         }
-        let Ok(Ok((send, header))) = n0_future::time::timeout(PRE_AUTH, read_header(&conn)).await
+        let Ok(Ok((send, header))) = n0_future::time::timeout(PRE_AUTH, read_header(&connection)).await
         else {
-            conn.close(code::UNKNOWN.into(), b"no stream request");
+            connection.close(code::UNKNOWN.into(), b"no stream request");
             return Ok(());
         };
         let (id, secret) = header;
@@ -48,7 +48,7 @@ impl ProtocolHandler for StreamAcceptor {
             Ok(waiting) => {
                 if waiting
                     .send(Link {
-                        conn: conn.clone(),
+                        connection: connection.clone(),
                         send,
                     })
                     .is_err()
@@ -57,23 +57,23 @@ impl ProtocolHandler for StreamAcceptor {
                     // stream existed and this consumer was admitted, so
                     // abandoned, not unknown. The same answer `Producer::drop`
                     // gives when the link landed before it (its `try_recv`).
-                    conn.close(code::ABANDONED.into(), b"abandoned");
+                    connection.close(code::ABANDONED.into(), b"abandoned");
                     return Ok(());
                 }
                 // The producer owns the connection now; this task only keeps
                 // the handler alive for its lifetime.
-                conn.closed().await;
+                connection.closed().await;
             }
-            Err(refusal) => conn.close(refusal.into(), b"refused"),
+            Err(refusal) => connection.close(refusal.into(), b"refused"),
         }
         Ok(())
     }
 }
 
 async fn read_header(
-    conn: &Connection,
+    connection: &Connection,
 ) -> Result<(SendStream, (StreamId, StreamSecret)), Box<dyn std::error::Error + Send + Sync>> {
-    let (send, mut recv) = conn.accept_bi().await?;
+    let (send, mut recv) = connection.accept_bi().await?;
     let mut id = [0; ID_LEN];
     let mut secret = Zeroizing::new([0; SECRET_LEN]);
     recv.read_exact(&mut id).await?;

@@ -11,11 +11,11 @@ use super::{StreamNode, StreamOpts};
 // before anything binds.
 #[test]
 async fn a_stream_node_refuses_multihop() {
-    let opts = StreamOpts {
+    let options = StreamOpts {
         transport: vec![Transport::Udp, Transport::Multihop],
         ..StreamOpts::default()
     };
-    let refused = StreamNode::bind(&opts)
+    let refused = StreamNode::bind(&options)
         .await
         .expect_err("multihop is refused");
     assert!(
@@ -27,11 +27,11 @@ async fn a_stream_node_refuses_multihop() {
 // A stream node never joins a gossip mesh: a list that names `gossip` is refused too.
 #[test]
 async fn a_stream_node_refuses_gossip() {
-    let opts = StreamOpts {
+    let options = StreamOpts {
         transport: vec![Transport::Udp, Transport::Gossip],
         ..StreamOpts::default()
     };
-    let refused = StreamNode::bind(&opts)
+    let refused = StreamNode::bind(&options)
         .await
         .expect_err("gossip is refused");
     assert!(

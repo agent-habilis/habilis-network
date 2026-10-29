@@ -47,26 +47,26 @@ impl StreamNode {
     /// # Errors
     /// [`StreamError::Options`] for a transport a stream does not use,
     /// [`StreamError::Bind`] when the relay list or the node does not start.
-    pub async fn bind(opts: &StreamOpts) -> Result<Self, StreamError> {
-        if opts.transport.contains(&Transport::Multihop) {
+    pub async fn bind(options: &StreamOpts) -> Result<Self, StreamError> {
+        if options.transport.contains(&Transport::Multihop) {
             return Err(StreamError::Options(
                 "a stream has no multihop: it is one direct lane",
             ));
         }
-        if opts.transport.contains(&Transport::Gossip) {
+        if options.transport.contains(&Transport::Gossip) {
             return Err(StreamError::Options(
                 "a stream has no gossip: its node never joins a gossip mesh",
             ));
         }
         // An empty list is `udp,webrtc` for a stream: the mesh default has multihop.
-        let list = if opts.transport.is_empty() {
+        let list = if options.transport.is_empty() {
             &[Transport::Udp, Transport::WebRtc][..]
         } else {
-            &opts.transport
+            &options.transport
         };
         let relays =
-            relay_ladder(&opts.relay_urls).map_err(StreamError::bind("parse the relay list"))?;
-        let config = MeshConfig::resolve(&opts.lookup, relays, list)
+            relay_ladder(&options.relay_urls).map_err(StreamError::bind("parse the relay list"))?;
+        let config = MeshConfig::resolve(&options.lookup, relays, list)
             .map_err(StreamError::bind("resolve the mesh config"))?;
         let transports = TransportOpts::default().within(&config.transport);
         Self::bind_with(config.lookups, config.transport, transports).await
@@ -150,7 +150,7 @@ impl StreamNode {
         rand::rng().fill_bytes(&mut id);
         rand::rng().fill_bytes(&mut *secret);
         let hash = StreamHash {
-            addr: self.endpoint.addr(),
+            address: self.endpoint.addr(),
             lookups: self.lookups.clone(),
             transport: self.transport,
             id: StreamId::from_bytes(id),
@@ -167,7 +167,7 @@ impl StreamNode {
     /// a relay the stream refuses. [`StreamError::Open`] when the producer cannot be
     /// reached or the stream cannot be opened.
     pub async fn open(&self, hash: &StreamHash) -> Result<Reader, StreamError> {
-        let needs_lane = pair_needs_lane(&hash.addr, UdpTransport::from(self.transports.udp));
+        let needs_lane = pair_needs_lane(&hash.address, UdpTransport::from(self.transports.udp));
         // A data channel needs `webrtc` on both ends: the producer's list is in
         // the hash, and a producer without it answers no offer.
         let can_lane = self.transports.webrtc && hash.transport.webrtc;
@@ -180,17 +180,17 @@ impl StreamNode {
         if needs_lane && !can_lane && !relay_ok {
             return Err(StreamError::Refused(Refused::RelayRefused));
         }
-        add_peer_addr(&self.producers, hash.addr.clone());
+        add_peer_addr(&self.producers, hash.address.clone());
         // The WebRTC lane first: the connect below then finds the session's
         // path in the address book and can start on the data channel, rather
         // than on the relay a later attach would have to move it off.
         if can_lane
             && needs_lane
-            && !self.webrtc.has_session(&hash.addr.id)
+            && !self.webrtc.has_session(&hash.address.id)
             && let Err(error) = dial_signal(
                 &self.endpoint,
                 &self.producers,
-                hash.addr.clone(),
+                hash.address.clone(),
                 &self.webrtc,
                 self.ice,
             )
@@ -208,16 +208,16 @@ impl StreamNode {
                 source: error.into(),
             });
         }
-        let conn = self
+        let connection = self
             .endpoint
-            .connect(hash.addr.clone(), crate::STREAM_ALPN)
+            .connect(hash.address.clone(), crate::STREAM_ALPN)
             .await
             .map_err(StreamError::open("connect to the producer"))?;
-        if !relay_ok && !wait_direct(&conn, PROBE_DEADLINE).await {
-            conn.close(code::RELAY_REFUSED.into(), b"relay path refused");
+        if !relay_ok && !wait_direct(&connection, PROBE_DEADLINE).await {
+            connection.close(code::RELAY_REFUSED.into(), b"relay path refused");
             return Err(StreamError::Refused(Refused::RelayRefused));
         }
-        let (mut send, recv) = conn
+        let (mut send, recv) = connection
             .open_bi()
             .await
             .map_err(StreamError::open("open the stream"))?;
@@ -226,7 +226,7 @@ impl StreamNode {
             .map_err(StreamError::open("send the stream hash"))?;
         send.finish()
             .map_err(StreamError::open("send the stream hash"))?;
-        Ok(Reader::new(conn, recv))
+        Ok(Reader::new(connection, recv))
     }
 
     /// Shut the node down. Every stream still open is abandoned.
