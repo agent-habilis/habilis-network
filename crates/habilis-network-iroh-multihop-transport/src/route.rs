@@ -96,11 +96,11 @@ impl Route {
     /// Decode a multihop [`CustomAddr`] back into a route. Returns `None` for a
     /// wrong transport id or malformed bytes. The `underlay_id` of a decoded hop is an
     /// id to resolve, not an address: the forwarder looks up the address in its topology.
-    pub(crate) fn decode(addr: &CustomAddr) -> Option<Self> {
-        if addr.id() != MULTIHOP_TRANSPORT_ID {
+    pub(crate) fn decode(address: &CustomAddr) -> Option<Self> {
+        if address.id() != MULTIHOP_TRANSPORT_ID {
             return None;
         }
-        postcard::from_bytes(addr.data()).ok()
+        postcard::from_bytes(address.data()).ok()
     }
 
     /// The return route a terminal should hand back as its remote address, given
@@ -174,8 +174,8 @@ mod tests {
     #[test]
     fn encode_decode_roundtrips() {
         let route = Route::try_new(vec![hop(1), hop(2), hop(3)]).unwrap();
-        let addr = route.encode();
-        assert_eq!(Route::decode(&addr).expect("decodes"), route);
+        let address = route.encode();
+        assert_eq!(Route::decode(&address).expect("decodes"), route);
     }
 
     /// The route is a wire value: iroh dedupes a peer's path on these bytes, and a second
@@ -212,16 +212,16 @@ mod tests {
     #[test]
     fn wrong_transport_id_does_not_decode() {
         let route = Route::try_new(vec![hop(1)]).unwrap();
-        let addr = route.encode();
-        let foreign = iroh_base::CustomAddr::from_parts(0x99, addr.data());
+        let address = route.encode();
+        let foreign = iroh_base::CustomAddr::from_parts(0x99, address.data());
         assert!(Route::decode(&foreign).is_none());
     }
 
     #[test]
     fn empty_route_does_not_decode() {
         let bytes = postcard::to_allocvec(&Vec::<RouteHop>::new()).unwrap();
-        let addr = iroh_base::CustomAddr::from_parts(crate::MULTIHOP_TRANSPORT_ID, &bytes);
-        assert!(Route::decode(&addr).is_none());
+        let address = iroh_base::CustomAddr::from_parts(crate::MULTIHOP_TRANSPORT_ID, &bytes);
+        assert!(Route::decode(&address).is_none());
     }
 
     #[test]
@@ -271,16 +271,16 @@ mod tests {
             .map(|seed| hop(u8::try_from(seed).expect("seed fits")))
             .collect();
         let bytes = postcard::to_allocvec(&hops).unwrap();
-        let addr = iroh_base::CustomAddr::from_parts(crate::MULTIHOP_TRANSPORT_ID, &bytes);
-        assert!(Route::decode(&addr).is_none());
+        let address = iroh_base::CustomAddr::from_parts(crate::MULTIHOP_TRANSPORT_ID, &bytes);
+        assert!(Route::decode(&address).is_none());
     }
 
     #[test]
     fn a_cyclic_route_does_not_decode() {
         let hops = vec![hop(1), hop(2), hop(1)];
         let bytes = postcard::to_allocvec(&hops).unwrap();
-        let addr = iroh_base::CustomAddr::from_parts(crate::MULTIHOP_TRANSPORT_ID, &bytes);
-        assert!(Route::decode(&addr).is_none());
+        let address = iroh_base::CustomAddr::from_parts(crate::MULTIHOP_TRANSPORT_ID, &bytes);
+        assert!(Route::decode(&address).is_none());
     }
 
     #[test]

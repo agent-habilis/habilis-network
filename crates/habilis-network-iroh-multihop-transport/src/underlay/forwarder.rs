@@ -113,7 +113,7 @@ impl Forwarder {
             let topology = self.topology.read().expect("topology lock poisoned");
             let known = topology
                 .underlay_of(hop.app_id)
-                .filter(|addr| UnderlayId::new(addr.id) == hop.underlay_id);
+                .filter(|address| UnderlayId::new(address.id) == hop.underlay_id);
             (known, topology.is_gone(hop.app_id))
         };
         known.unwrap_or_else(|| {

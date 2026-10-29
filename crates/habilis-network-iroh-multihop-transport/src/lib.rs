@@ -939,8 +939,8 @@ mod tests {
     }
 
     fn first_hop_of(handle: &MultihopHandle, dst: AppId) -> AppId {
-        let addr = handle.route_addr(dst).expect("a route to dst");
-        Route::decode(&addr).expect("a route").hops()[0].app_id
+        let address = handle.route_addr(dst).expect("a route to dst");
+        Route::decode(&address).expect("a route").hops()[0].app_id
     }
 
     #[test]
@@ -998,8 +998,8 @@ mod tests {
             UnderlayId::new(underlay_secret(&dst).public()),
             AppId::new(dst.public()),
         );
-        let addr = handle.route_addr(dst_id).expect("a route to dst");
-        let hops: Vec<AppId> = Route::decode(&addr)
+        let address = handle.route_addr(dst_id).expect("a route to dst");
+        let hops: Vec<AppId> = Route::decode(&address)
             .expect("a route")
             .hops()
             .iter()
@@ -1101,9 +1101,9 @@ mod tests {
             let custom = item
                 .endpoint_info()
                 .addrs()
-                .find(|addr| addr.is_custom())
-                .map(|addr| {
-                    let iroh::TransportAddr::Custom(custom) = addr else {
+                .find(|address| address.is_custom())
+                .map(|address| {
+                    let iroh::TransportAddr::Custom(custom) = address else {
                         unreachable!("is_custom was true");
                     };
                     custom.clone()

@@ -121,7 +121,7 @@ impl Graph {
     ) -> Option<Path> {
         let Leg { src, dst } = leg;
         let mut best: HashMap<AppId, LinkMetric> = HashMap::new();
-        let mut prev: HashMap<AppId, AppId> = HashMap::new();
+        let mut previous: HashMap<AppId, AppId> = HashMap::new();
         let mut heap: BinaryHeap<Reverse<(LinkMetric, AppId)>> = BinaryHeap::new();
 
         best.insert(src, LinkMetric::ZERO);
@@ -130,7 +130,7 @@ impl Graph {
         while let Some(Reverse((cost, node))) = heap.pop() {
             if node == dst {
                 return Some(Path {
-                    hops: reconstruct(&prev, leg),
+                    hops: reconstruct(&previous, leg),
                     cost,
                 });
             }
@@ -150,7 +150,7 @@ impl Graph {
                     dst,
                     blocked,
                 };
-                relax(&mut best, &mut prev, &mut heap, candidate);
+                relax(&mut best, &mut previous, &mut heap, candidate);
             }
         }
         None
@@ -175,7 +175,7 @@ struct RelaxEdge<'blocked> {
 /// known cost to `next`.
 fn relax(
     best: &mut HashMap<AppId, LinkMetric>,
-    prev: &mut HashMap<AppId, AppId>,
+    previous: &mut HashMap<AppId, AppId>,
     heap: &mut BinaryHeap<Reverse<(LinkMetric, AppId)>>,
     candidate: RelaxEdge<'_>,
 ) {
@@ -199,17 +199,17 @@ fn relax(
         return;
     }
     best.insert(next, next_cost);
-    prev.insert(next, node);
+    previous.insert(next, node);
     heap.push(Reverse((next_cost, next)));
 }
 
 /// Walk `prev` from `dst` back to `src`, returning the hops after `src` in
 /// forward order (`[first_hop, …, dst]`).
-fn reconstruct(prev: &HashMap<AppId, AppId>, leg: Leg) -> Vec<AppId> {
+fn reconstruct(previous: &HashMap<AppId, AppId>, leg: Leg) -> Vec<AppId> {
     let Leg { src, dst } = leg;
     let mut hops = vec![dst];
     let mut cur = dst;
-    while let Some(&parent) = prev.get(&cur) {
+    while let Some(&parent) = previous.get(&cur) {
         if parent == src {
             break;
         }

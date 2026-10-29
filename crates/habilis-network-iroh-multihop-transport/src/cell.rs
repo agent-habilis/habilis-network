@@ -85,9 +85,11 @@ pub(crate) async fn read_cell(recv: &mut RecvStream) -> Result<Cell> {
     if len > MAX_CELL_BYTES {
         bail!("cell length {len} exceeds bound {MAX_CELL_BYTES}");
     }
-    let mut buf = vec![0u8; len];
-    recv.read_exact(&mut buf).await.context("read cell body")?;
-    let cell: Cell = postcard::from_bytes(&buf).context("deserialize cell")?;
+    let mut buffer = vec![0u8; len];
+    recv.read_exact(&mut buffer)
+        .await
+        .context("read cell body")?;
+    let cell: Cell = postcard::from_bytes(&buffer).context("deserialize cell")?;
     // `path` validated itself while deserializing; `pos` is the one field whose
     // legality is relative to it. Settling that here is what lets `next_hop()`
     // mean "I am the destination" and nothing else.

@@ -50,11 +50,11 @@ impl ProtocolHandler for EchoCountingPaths {
 }
 
 /// How many multihop custom paths `conn` holds open, selected or not.
-fn multihop_paths(conn: &Connection) -> usize {
-    conn.paths()
+fn multihop_paths(connection: &Connection) -> usize {
+    connection.paths()
         .iter()
         .filter(|path| {
-            matches!(path.remote_addr(), TransportAddr::Custom(addr) if addr.id() == MULTIHOP_TRANSPORT_ID)
+            matches!(path.remote_addr(), TransportAddr::Custom(address) if address.id() == MULTIHOP_TRANSPORT_ID)
         })
         .count()
 }
@@ -163,10 +163,10 @@ fn secret(seed: u8) -> SecretKey {
 
 /// Assert the connection's selected path is our multihop custom transport — i.e.
 /// the bytes really travelled over the relays, not some direct shortcut.
-fn assert_multihop_selected(conn: &Connection) {
-    let selected_is_multihop = conn.paths().iter().any(|path| {
+fn assert_multihop_selected(connection: &Connection) {
+    let selected_is_multihop = connection.paths().iter().any(|path| {
         path.is_selected()
-            && matches!(path.remote_addr(), TransportAddr::Custom(addr) if addr.id() == MULTIHOP_TRANSPORT_ID)
+            && matches!(path.remote_addr(), TransportAddr::Custom(address) if address.id() == MULTIHOP_TRANSPORT_ID)
     });
     assert!(
         selected_is_multihop,
@@ -174,12 +174,12 @@ fn assert_multihop_selected(conn: &Connection) {
     );
 }
 
-async fn echo_roundtrip(conn: &Connection, msg: &[u8]) {
-    let (mut send, mut recv) = conn.open_bi().await.expect("open bi stream");
-    send.write_all(msg).await.expect("write");
+async fn echo_roundtrip(connection: &Connection, message: &[u8]) {
+    let (mut send, mut recv) = connection.open_bi().await.expect("open bi stream");
+    send.write_all(message).await.expect("write");
     send.finish().expect("finish");
     let echoed = recv.read_to_end(64).await.expect("read echo");
-    assert_eq!(echoed, msg, "echo mismatch over multihop");
+    assert_eq!(echoed, message, "echo mismatch over multihop");
 }
 
 #[test]
@@ -205,7 +205,7 @@ fn connects_end_to_end_through_one_relay() {
             .accept(ECHO_ALPN, Echo)
             .spawn();
 
-        let conn = tokio::time::timeout(
+        let connection = tokio::time::timeout(
             Duration::from_secs(30),
             alice.app.connect(bob.id, ECHO_ALPN),
         )
@@ -213,10 +213,10 @@ fn connects_end_to_end_through_one_relay() {
         .expect("connect timed out")
         .expect("connect over one relay");
 
-        assert_multihop_selected(&conn);
-        echo_roundtrip(&conn, b"hello over one hop").await;
+        assert_multihop_selected(&connection);
+        echo_roundtrip(&connection, b"hello over one hop").await;
 
-        conn.close(0u32.into(), b"done");
+        connection.close(0u32.into(), b"done");
         echo.shutdown().await.expect("shutdown echo router");
         alice.app.close().await;
         alice.handle.close().await;
@@ -249,23 +249,23 @@ fn a_route_is_one_custom_path_at_each_end_of_the_connection() {
             .accept(ECHO_ALPN, EchoCountingPaths(counted))
             .spawn();
 
-        let conn = tokio::time::timeout(
+        let connection = tokio::time::timeout(
             Duration::from_secs(30),
             alice.app.connect(bob.id, ECHO_ALPN),
         )
         .await
         .expect("connect timed out")
         .expect("connect over one relay");
-        echo_roundtrip(&conn, b"cells both ways").await;
+        echo_roundtrip(&connection, b"cells both ways").await;
 
         let at_bob = tokio::time::timeout(Duration::from_secs(10), server_side.recv())
             .await
             .expect("bob reports his paths")
             .expect("the handler is alive");
-        assert_eq!(multihop_paths(&conn), 1, "alice's end");
+        assert_eq!(multihop_paths(&connection), 1, "alice's end");
         assert_eq!(at_bob, 1, "bob's end");
 
-        conn.close(0u32.into(), b"done");
+        connection.close(0u32.into(), b"done");
         echo.shutdown().await.expect("shutdown echo router");
         alice.app.close().await;
         alice.handle.close().await;
@@ -298,7 +298,7 @@ fn connects_end_to_end_through_two_relays() {
             .accept(ECHO_ALPN, Echo)
             .spawn();
 
-        let conn = tokio::time::timeout(
+        let connection = tokio::time::timeout(
             Duration::from_secs(30),
             alice.app.connect(bob.id, ECHO_ALPN),
         )
@@ -306,10 +306,10 @@ fn connects_end_to_end_through_two_relays() {
         .expect("connect timed out")
         .expect("connect over two relays");
 
-        assert_multihop_selected(&conn);
-        echo_roundtrip(&conn, b"hello across two hops").await;
+        assert_multihop_selected(&connection);
+        echo_roundtrip(&connection, b"hello across two hops").await;
 
-        conn.close(0u32.into(), b"done");
+        connection.close(0u32.into(), b"done");
         echo.shutdown().await.expect("shutdown echo router");
         alice.app.close().await;
         alice.handle.close().await;
@@ -353,7 +353,7 @@ fn connects_through_one_relay_with_webrtc_on_the_same_endpoint() {
             .accept(ECHO_ALPN, Echo)
             .spawn();
 
-        let conn = tokio::time::timeout(
+        let connection = tokio::time::timeout(
             Duration::from_secs(30),
             alice.app.connect(bob.id, ECHO_ALPN),
         )
@@ -361,12 +361,12 @@ fn connects_through_one_relay_with_webrtc_on_the_same_endpoint() {
         .expect("connect timed out")
         .expect("connect over one relay with WebRTC registered");
 
-        assert_multihop_selected(&conn);
-        echo_roundtrip(&conn, b"hello with both transports").await;
+        assert_multihop_selected(&connection);
+        echo_roundtrip(&connection, b"hello with both transports").await;
         assert_eq!(alice_webrtc.session_count(), 0);
         assert_eq!(bob_webrtc.session_count(), 0);
 
-        conn.close(0u32.into(), b"done");
+        connection.close(0u32.into(), b"done");
         echo.shutdown().await.expect("shutdown echo router");
         alice.app.close().await;
         alice.handle.close().await;

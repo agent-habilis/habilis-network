@@ -486,13 +486,6 @@ abbrev_name|crates/habilis-network-iroh-gossip-transport/src/lib.rs|2|existing l
 abbrev_name|crates/habilis-network-iroh-gossip-transport/src/recursion.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-gossip-transport/src/gossip_ladder.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-gossip-transport/src/gossip_handle.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-multihop-transport/src/route.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-multihop-transport/src/graph.rs|7|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-multihop-transport/src/multihop_ladder.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-multihop-transport/src/test_support.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-multihop-transport/src/multihop_transport.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-multihop-transport/src/underlay.rs|13|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-multihop-transport/src/cell.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-transport-util/src/rung.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/addr.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
@@ -620,7 +613,6 @@ abbrev_name|crates/habilis-network/src/lookup/transport_handles.rs|1|existing le
 abbrev_name|crates/habilis-network/src/lookup/transport_opts.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 anyhow_pub|crates/habilis-network/src/lookup/test_relay.rs|1|the test relay helper spawn_plain, behind the iroh-test-utils feature (a test helper, not library API)
 abbrev_name|crates/habilis-network/src/gossip/lan/lan_grafts.rs|7|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-multihop-transport/src/underlay/forwarder.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network-iroh-multihop-transport/src/underlay/forwarder.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 assert_no_message|crates/habilis-network-util/src/clock.rs|6|kept: assert without a message, to be given one (P13 rollout)
 long_chain|crates/habilis-network-util/src/clock.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)

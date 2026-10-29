@@ -95,7 +95,7 @@ fn paths_of(connection: &Connection) -> Vec<(TransportAddr, bool)> {
 fn direct_for_writer<'a>(paths: impl IntoIterator<Item = &'a (TransportAddr, bool)>) -> bool {
     paths
         .into_iter()
-        .any(|(addr, selected)| *selected && !matches!(addr, TransportAddr::Relay(_)))
+        .any(|(address, selected)| *selected && !matches!(address, TransportAddr::Relay(_)))
 }
 
 /// Whether a connection that we accepted has an open path that is not the relay.
@@ -109,7 +109,7 @@ fn direct_for_writer<'a>(paths: impl IntoIterator<Item = &'a (TransportAddr, boo
 fn direct_for_inbound<'a>(paths: impl IntoIterator<Item = &'a (TransportAddr, bool)>) -> bool {
     paths
         .into_iter()
-        .any(|(addr, _)| !matches!(addr, TransportAddr::Relay(_)))
+        .any(|(address, _)| !matches!(address, TransportAddr::Relay(_)))
 }
 
 /// The paths that a test has not taken from this node: `blocked` names the ones it took.
@@ -156,7 +156,7 @@ enum GateRole {
 fn path_list(paths: impl IntoIterator<Item = (TransportAddr, bool)>) -> String {
     let parts: Vec<String> = paths
         .into_iter()
-        .map(|(addr, selected)| format!("{addr:?}{}", if selected { "*" } else { "" }))
+        .map(|(address, selected)| format!("{address:?}{}", if selected { "*" } else { "" }))
         .collect();
     parts.join(" ")
 }
@@ -421,15 +421,18 @@ async fn drain_to_hop(
     pool: &WriterPool,
     rule: RelayRule,
 ) -> anyhow::Result<()> {
-    let conn = dial_with_retry(underlay, dst)
+    let connection = dial_with_retry(underlay, dst)
         .await
         .context("underlay dial gave up")?;
     #[cfg(feature = "test-hooks")]
     pool.connections
         .lock()
         .expect("connections mutex poisoned")
-        .insert(UnderlayId::new(dst.id), conn.clone());
-    let mut send = conn.open_uni().await.context("open underlay uni-stream")?;
+        .insert(UnderlayId::new(dst.id), connection.clone());
+    let mut send = connection
+        .open_uni()
+        .await
+        .context("open underlay uni-stream")?;
     let mut gate = RelayGate::new(rule.allow_relay, underlay.id(), GateRole::Writer);
     // Looks at the path once a second even when no cell comes, so a hop that was
     // withdrawn for staying on the relay (and so carries no cells) is a link
@@ -442,13 +445,13 @@ async fn drain_to_hop(
             // dead connection with no cell in flight is read by the tick below as
             // a connection with no direct path: the hop would be marked stuck and
             // the writer would never retire.
-            reason = conn.closed() => {
+            reason = connection.closed() => {
                 anyhow::bail!("underlay connection closed: {reason}");
             }
             next = rx.recv() => {
                 let Some(cell) = next else { break };
                 let cost = cell.packet.len();
-                if gate.admits(&conn) {
+                if gate.admits(&connection) {
                     pool.note_admitted(UnderlayId::new(dst.id));
                 } else {
                     // Dropped like any other loss: QUIC above retransmits, and a
@@ -463,7 +466,7 @@ async fn drain_to_hop(
                 written.context("underlay write failed")?;
             }
             _ = recheck.tick(), if !rule.allow_relay => {
-                if gate.admits(&conn) {
+                if gate.admits(&connection) {
                     pool.note_admitted(UnderlayId::new(dst.id));
                 } else {
                     pool.note_refused(UnderlayId::new(dst.id), rule.stuck_after);
@@ -478,7 +481,7 @@ async fn drain_to_hop(
 async fn dial_with_retry(underlay: &Endpoint, dst: &EndpointAddr) -> Option<Connection> {
     for attempt in 0..DIAL_ATTEMPTS {
         match underlay.connect(dst.clone(), FORWARD_ALPN).await {
-            Ok(conn) => return Some(conn),
+            Ok(connection) => return Some(connection),
             Err(error) => {
                 tracing::trace!(hop = %dst.id.fmt_short(), attempt, %error, "underlay dial attempt failed");
                 // Linear backoff; adjacent hops that are momentarily busy settle fast.

@@ -153,8 +153,8 @@ struct MultihopSender {
 impl CustomSender for MultihopSender {
     /// Decoding, not just tagging: a route iroh cannot actually be sent along is
     /// a path it should never select in the first place.
-    fn is_valid_send_addr(&self, addr: &CustomAddr) -> bool {
-        Route::decode(addr).is_some()
+    fn is_valid_send_addr(&self, address: &CustomAddr) -> bool {
+        Route::decode(address).is_some()
     }
 
     fn poll_send(
