@@ -79,6 +79,14 @@ fn create_peer_connection(ice: &IceServers) -> Result<(RtcPeerConnection, bool),
 /// # Errors
 /// The peer connection cannot be created, SDP generation fails, or ICE
 /// gathers no candidates.
+///
+/// # Examples
+///
+/// It creates an offer on a browser peer connection, so this is not compiled.
+///
+/// ```ignore
+/// let (pending, envelope) = offer(&connection).await?;
+/// ```
 pub async fn offer(
     local: EndpointId,
     ice: &IceServers,
@@ -130,6 +138,14 @@ pub async fn offer(
 /// # Errors
 /// A non-offer envelope, SDP / peer-connection setup fails, or ICE gathers
 /// no candidates.
+///
+/// # Examples
+///
+/// It creates an answer on a browser peer connection, so this is not compiled.
+///
+/// ```ignore
+/// let (pending, envelope) = answer(&connection, &offer).await?;
+/// ```
 pub async fn answer(
     local: EndpointId,
     offer: &SignalEnvelope,
@@ -222,6 +238,14 @@ pub async fn answer(
 }
 
 /// Log local/remote SDP snippets when a dial fails after envelopes were swapped.
+///
+/// # Examples
+///
+/// It logs the SDP of a live signal, so this is not compiled.
+///
+/// ```ignore
+/// log_signal_sdps(&envelope);
+/// ```
 pub fn log_signal_sdps(role: &str, local: &SignalEnvelope, remote: &SignalEnvelope) {
     let local_sdp = envelope_sdp(local).unwrap_or("");
     let remote_sdp = envelope_sdp(remote).unwrap_or("");

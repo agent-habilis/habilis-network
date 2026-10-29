@@ -34,6 +34,16 @@ pub const MAX_TRANSFER_BYTES: usize = 64 << 20;
 /// suite uses. The other two exist because "the send pump drops under load" and
 /// "the receive path drops under load" are different claims, and an exchange
 /// that is bulk in both directions cannot distinguish them.
+///
+/// # Examples
+///
+/// A direction label reads back to the same direction.
+///
+/// ```
+/// use habilis_network_iroh_webrtc_transport::bench::Direction;
+///
+/// assert_eq!(Direction::parse_label(Direction::Both.label()), Some(Direction::Both));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Direction {
@@ -110,6 +120,14 @@ fn header(direction: Direction, wanted: u32) -> [u8; HEADER_LEN] {
 /// Serves one exchange per bi-stream, as many streams as the client opens,
 /// until the connection closes. A benchmark reuses one connection so only its
 /// warm-up round pays the handshake and the congestion-window ramp.
+///
+/// # Examples
+///
+/// It runs a benchmark over live connections, so this is not compiled.
+///
+/// ```ignore
+/// let bench = Bench::new();
+/// ```
 #[derive(Debug, Clone, Default, Copy)]
 #[non_exhaustive]
 pub struct Bench;
@@ -186,6 +204,17 @@ const BLOCK: [u8; 251] = {
 
 /// A recognisable, position-dependent body, so a truncated or misordered
 /// transfer fails on content rather than only on length.
+///
+/// # Examples
+///
+/// A payload has the length it was asked for, and it is recognised as a payload.
+///
+/// ```
+/// use habilis_network_iroh_webrtc_transport::bench::{is_payload, payload};
+///
+/// assert_eq!(payload(8).len(), 8);
+/// assert!(is_payload(&payload(8)));
+/// ```
 #[must_use]
 pub fn payload(len: usize) -> Vec<u8> {
     let mut body = BLOCK.repeat(len.div_ceil(BLOCK.len()));
@@ -198,6 +227,17 @@ pub fn payload(len: usize) -> Vec<u8> {
 /// The matrix runs 8 `MiB` cells at concurrency 4; materialising an expected
 /// vector per check would double the tab's peak memory for no benefit, and an
 /// OOM-killed tab is not a transport finding.
+///
+/// # Examples
+///
+/// A body made by payload is recognised, and other bytes are not.
+///
+/// ```
+/// use habilis_network_iroh_webrtc_transport::bench::{is_payload, payload};
+///
+/// assert!(is_payload(&payload(8)));
+/// assert!(!is_payload(b"not a payload"));
+/// ```
 #[must_use]
 pub fn is_payload(body: &[u8]) -> bool {
     body.chunks(BLOCK.len())
@@ -208,6 +248,16 @@ pub fn is_payload(body: &[u8]) -> bool {
 ///
 /// A cell that claims to be `WebRTC` asserts this, so a future regression
 /// cannot silently reroute onto IP and call it a pass.
+///
+/// # Examples
+///
+/// It reads the selected path of a live connection, so this is not compiled.
+///
+/// ```ignore
+/// if on_webrtc(&connection) {
+///     println!("the connection runs over webrtc");
+/// }
+/// ```
 #[must_use]
 pub fn on_webrtc(connection: &Connection) -> bool {
     connection.paths().iter().any(|path| {
@@ -223,6 +273,14 @@ pub fn on_webrtc(connection: &Connection) -> bool {
 ///
 /// # Errors
 /// The endpoint cannot bind.
+///
+/// # Examples
+///
+/// It binds a browser endpoint on the network, so this is not compiled.
+///
+/// ```ignore
+/// let endpoint = browser_endpoint(local).await;
+/// ```
 #[cfg(all(feature = "web", not(feature = "native")))]
 pub async fn browser_endpoint(
     key: iroh::SecretKey,
@@ -249,6 +307,14 @@ pub async fn browser_endpoint(
 /// # Errors
 /// A `bulk` past [`MAX_TRANSFER_BYTES`], a stream or write failure, a short
 /// reply, or a reply whose bytes do not match [`payload`].
+///
+/// # Examples
+///
+/// It exchanges bytes over a live connection, so this is not compiled.
+///
+/// ```ignore
+/// let reply = exchange(&connection, &payload).await;
+/// ```
 pub async fn exchange(
     connection: &Connection,
     direction: Direction,
@@ -300,6 +366,14 @@ pub const RTT_PROBE_BYTES: usize = 1024;
 ///
 /// # Errors
 /// A stream or write failure, or a reply that is not the probe.
+///
+/// # Examples
+///
+/// It measures round trips over a live connection, so this is not compiled.
+///
+/// ```ignore
+/// let samples = rtt_samples(&connection).await;
+/// ```
 pub async fn rtt_samples(
     connection: &Connection,
     warmup: usize,

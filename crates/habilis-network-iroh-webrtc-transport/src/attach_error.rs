@@ -3,6 +3,19 @@
 use iroh::EndpointId;
 
 /// Why an attach was refused.
+///
+/// # Examples
+///
+/// A peer that already has a session returns this error.
+///
+/// ```
+/// use habilis_network_iroh_webrtc_transport::AttachError;
+/// use iroh_base::SecretKey;
+///
+/// let id = SecretKey::from_bytes(&[1u8; 32]).public();
+/// let error = AttachError::AlreadyAttached(id);
+/// assert!(matches!(error, AttachError::AlreadyAttached(_)));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[must_use]

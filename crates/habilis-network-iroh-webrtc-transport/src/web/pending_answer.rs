@@ -10,6 +10,14 @@ use super::pre_attach_backlog::PreAttachBacklog;
 use super::transport::BrowserHubTransport;
 
 /// Answerer state between sending the answer and the channel opening.
+///
+/// # Examples
+///
+/// It waits on a browser peer connection, so this is not compiled.
+///
+/// ```ignore
+/// let session = pending.complete(answer)?;
+/// ```
 pub struct PendingAnswer {
     pub(super) peer_connection: OpenPeerConnection,
     /// Filled by `ondatachannel` when the remote opens the channel.

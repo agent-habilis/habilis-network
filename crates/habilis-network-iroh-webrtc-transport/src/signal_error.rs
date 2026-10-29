@@ -1,6 +1,17 @@
 //! Why a signal envelope does not name a usable endpoint.
 
 /// Why a signal envelope does not name a usable endpoint.
+///
+/// # Examples
+///
+/// A remote error envelope returns the reason that the remote side gave.
+///
+/// ```
+/// use habilis_network_iroh_webrtc_transport::SignalError;
+///
+/// let error = SignalError::Remote { reason: "busy".to_owned() };
+/// assert!(error.to_string().contains("busy"));
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]

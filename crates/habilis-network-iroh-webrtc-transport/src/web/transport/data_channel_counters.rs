@@ -2,6 +2,17 @@
 /// because that is what `getStats` reports. Named fields rather than a
 /// positional tuple: every value shares one type, so a swapped pair would
 /// compile silently.
+///
+/// # Examples
+///
+/// New data channel counters start at zero. The web module is private, so this is not compiled.
+///
+/// ```ignore
+/// use habilis_network_iroh_webrtc_transport::web::DataChannelCounters;
+///
+/// let counters = DataChannelCounters::default();
+/// assert_eq!(counters.messages_sent, 0.0);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct DataChannelCounters {

@@ -5,6 +5,17 @@ use std::time::Duration;
 /// Configurable rather than hardcoded because the useful answer differs by
 /// deployment: a laptop on the open internet wants a public server, a private
 /// network wants its own, and the test suite wants none at all.
+///
+/// # Examples
+///
+/// A host-only configuration uses no STUN server.
+///
+/// ```
+/// use habilis_network_iroh_webrtc_transport::IceConfig;
+///
+/// let config = IceConfig::host_only();
+/// assert!(config.stun_servers.is_empty());
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct IceConfig {

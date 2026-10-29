@@ -9,6 +9,14 @@ use super::transport::BrowserHubTransport;
 use crate::SignalEnvelope;
 
 /// Offerer state between producing the offer and applying the answer.
+///
+/// # Examples
+///
+/// It waits on a browser peer connection, so this is not compiled.
+///
+/// ```ignore
+/// let session = pending.complete(answer)?;
+/// ```
 pub struct PendingOffer {
     pub(super) peer_connection: OpenPeerConnection,
     pub(super) data_channel: RtcDataChannel,

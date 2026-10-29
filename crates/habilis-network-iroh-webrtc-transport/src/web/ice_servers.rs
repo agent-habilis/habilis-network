@@ -4,6 +4,16 @@ use web_sys::RtcConfiguration;
 use super::ice_server::IceServer;
 
 /// ICE servers for the browser's own agent.
+///
+/// # Examples
+///
+/// A host-only set of ICE servers names none. The web module is private, so this is not compiled.
+///
+/// ```ignore
+/// use habilis_network_iroh_webrtc_transport::web::IceServers;
+///
+/// assert!(IceServers::host_only().0.is_empty());
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct IceServers(pub Vec<IceServer>);

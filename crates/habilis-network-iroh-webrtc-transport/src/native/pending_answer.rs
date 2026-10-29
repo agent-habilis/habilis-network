@@ -14,6 +14,14 @@ use crate::SignalEnvelope;
 
 /// Answerer-side JSEP state between sending the answer and the channel
 /// opening.
+///
+/// # Examples
+///
+/// It needs a live offer from a remote peer, so this is not compiled.
+///
+/// ```ignore
+/// let (pending, envelope) = answer(&offer)?;
+/// ```
 #[derive(Debug)]
 pub struct PendingAnswer {
     inner: Negotiating,
@@ -26,6 +34,14 @@ pub struct PendingAnswer {
 /// # Errors
 /// [`JsepError::Envelope`] for a non-offer envelope, [`JsepError::Sdp`] for a bad
 /// SDP, or [`JsepError::Bind`] when the socket cannot bind.
+///
+/// # Examples
+///
+/// It needs a live offer from a remote peer, so this is not compiled.
+///
+/// ```ignore
+/// let (pending, envelope) = answer(&offer)?;
+/// ```
 pub async fn answer(
     local: EndpointId,
     offer: &SignalEnvelope,
@@ -40,6 +56,14 @@ pub async fn answer(
 /// # Errors
 /// [`JsepError::Envelope`] for a non-offer envelope, [`JsepError::Sdp`] for a bad
 /// SDP, or [`JsepError::Bind`] when the socket cannot bind.
+///
+/// # Examples
+///
+/// It needs a live offer from a remote peer, so this is not compiled.
+///
+/// ```ignore
+/// let (pending, envelope) = answer_with(&offer, config)?;
+/// ```
 pub async fn answer_with(
     local: EndpointId,
     offer: &SignalEnvelope,

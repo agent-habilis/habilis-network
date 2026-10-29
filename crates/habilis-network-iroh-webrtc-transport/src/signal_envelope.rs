@@ -20,6 +20,19 @@ pub const MAX_ENVELOPE_BYTES: usize = 64 * 1024;
 /// (the browser HTTP endpoint) it is a claim — the QUIC handshake above the
 /// data channel authenticates the real identity, so a false claim only
 /// breaks the liar's own session.
+///
+/// # Examples
+///
+/// An offer envelope names the endpoint that sent it.
+///
+/// ```
+/// use habilis_network_iroh_webrtc_transport::SignalEnvelope;
+/// use iroh_base::SecretKey;
+///
+/// let id = SecretKey::from_bytes(&[1u8; 32]).public();
+/// let envelope = SignalEnvelope::offer(id, "v=0");
+/// assert_eq!(envelope.claimed_endpoint().expect("the endpoint parses"), id);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 #[non_exhaustive]

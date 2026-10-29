@@ -180,6 +180,14 @@ fn decode_address(
 /// media socket (see the module docs), which is why this is a single receive
 /// loop matching transaction ids rather than racing futures that would steal
 /// each other's datagrams.
+///
+/// # Examples
+///
+/// It asks a STUN server on the network, so this is not compiled.
+///
+/// ```ignore
+/// let address = gather_reflexive(socket).await?;
+/// ```
 pub async fn gather_reflexive(socket: &UdpSocket, config: &IceConfig) -> Option<SocketAddr> {
     gather_with_resolver(socket, config, |server: String| async move {
         match tokio::net::lookup_host(&*server).await {

@@ -25,6 +25,20 @@ use crate::{IN_QUEUE, OUT_QUEUE, custom_addr};
 /// via [`crate::offer`]/[`crate::answer`] and adopted with [`Self::attach`];
 /// iroh then sees the remote as reachable at its `WebRTC` [`CustomAddr`] and
 /// runs QUIC over the channel like over any other path.
+///
+/// # Examples
+///
+/// A new transport has its own endpoint id and no session.
+///
+/// ```
+/// use habilis_network_iroh_webrtc_transport::WebRtcTransport;
+/// use iroh_base::SecretKey;
+///
+/// let id = SecretKey::from_bytes(&[1u8; 32]).public();
+/// let transport = WebRtcTransport::new(id);
+/// assert_eq!(transport.local_id(), id);
+/// assert_eq!(transport.session_count(), 0);
+/// ```
 pub struct WebRtcTransport {
     local_id: EndpointId,
     // the transport and the endpoint share the session registry

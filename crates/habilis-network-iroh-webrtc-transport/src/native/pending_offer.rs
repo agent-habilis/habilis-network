@@ -15,6 +15,14 @@ use crate::{DATA_CHANNEL_LABEL, SignalEnvelope};
 
 /// Offerer-side JSEP state between sending the offer and applying the
 /// remote answer.
+///
+/// # Examples
+///
+/// It needs a live negotiation with a remote peer, so this is not compiled.
+///
+/// ```ignore
+/// let (pending, envelope) = offer(local)?;
+/// ```
 #[derive(Debug)]
 pub struct PendingOffer {
     inner: Negotiating,
@@ -30,6 +38,14 @@ pub struct PendingOffer {
 /// # Errors
 /// [`JsepError::Bind`] when the UDP socket cannot bind, or [`JsepError::Engine`]
 /// when str0m rejects the setup.
+///
+/// # Examples
+///
+/// It needs a live negotiation with a remote peer, so this is not compiled.
+///
+/// ```ignore
+/// let (pending, envelope) = offer(local)?;
+/// ```
 pub async fn offer(local: EndpointId) -> Result<(PendingOffer, SignalEnvelope), JsepError> {
     offer_with(local, &IceConfig::default()).await
 }
@@ -41,6 +57,14 @@ pub async fn offer(local: EndpointId) -> Result<(PendingOffer, SignalEnvelope), 
 /// # Errors
 /// [`JsepError::Bind`] when the UDP socket cannot bind, or [`JsepError::Engine`]
 /// when str0m rejects the setup.
+///
+/// # Examples
+///
+/// It needs a live negotiation with a remote peer, so this is not compiled.
+///
+/// ```ignore
+/// let (pending, envelope) = offer_with(local, config)?;
+/// ```
 pub async fn offer_with(
     local: EndpointId,
     ice: &IceConfig,

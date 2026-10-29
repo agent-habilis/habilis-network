@@ -10,6 +10,14 @@ use iroh::EndpointId;
 /// safe: dropping it without [`Self::commit`] removes the session and closes
 /// the peer connection, so a negotiation that never gets its channel open
 /// leaves nothing behind.
+///
+/// # Examples
+///
+/// It guards a browser session, so this is not compiled.
+///
+/// ```ignore
+/// let guard = BrowserSessionGuard::new(session);
+/// ```
 #[derive(Debug)]
 #[must_use = "an uncommitted session guard tears the session down when dropped"]
 pub struct BrowserSessionGuard(pub(super) crate::registry::SessionGuard<SessionHandle>);

@@ -1,6 +1,17 @@
 /// What crossed the selected ICE candidate pair, for the same reason
 /// [`DataChannelCounters`](super::DataChannelCounters) is named: the byte counters share one type, so a
 /// swapped pair would compile silently.
+///
+/// # Examples
+///
+/// A new set of pair statistics has no round trip yet. The web module is private, so this is not compiled.
+///
+/// ```ignore
+/// use habilis_network_iroh_webrtc_transport::web::SelectedPairStats;
+///
+/// let stats = SelectedPairStats::default();
+/// assert!(stats.round_trip.is_none());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct SelectedPairStats {

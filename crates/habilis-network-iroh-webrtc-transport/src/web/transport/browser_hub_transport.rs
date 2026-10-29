@@ -21,6 +21,14 @@ use crate::registry::Registry;
 use crate::{IN_QUEUE, OUT_QUEUE, custom_addr};
 
 /// Factory for the browser `WebRTC` datagram lane of one iroh endpoint.
+///
+/// # Examples
+///
+/// It runs on a browser hub, so this is not compiled.
+///
+/// ```ignore
+/// let transport = BrowserHubTransport::new(hub);
+/// ```
 pub struct BrowserHubTransport {
     local_id: EndpointId,
     sessions: SessionMap,

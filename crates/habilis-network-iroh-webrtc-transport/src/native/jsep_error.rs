@@ -2,6 +2,17 @@
 
 /// Why a JSEP negotiation failed. Each variant names the step that failed, so
 /// a caller can tell a bad envelope from a dead socket from a missed deadline.
+///
+/// # Examples
+///
+/// An answer with no offer to answer returns this error.
+///
+/// ```
+/// use habilis_network_iroh_webrtc_transport::JsepError;
+///
+/// let error = JsepError::NoOffer;
+/// assert!(matches!(error, JsepError::NoOffer));
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]

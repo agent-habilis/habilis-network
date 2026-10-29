@@ -4,6 +4,17 @@
 use std::fmt;
 
 /// Why a benchmark step failed.
+///
+/// # Examples
+///
+/// A benchmark whose echo does not match its payload returns this error. The `bench_error` module is private, so this is not compiled.
+///
+/// ```ignore
+/// use habilis_network_iroh_webrtc_transport::bench::BenchError;
+///
+/// let error = BenchError::EchoMismatch;
+/// assert!(matches!(error, BenchError::EchoMismatch));
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]

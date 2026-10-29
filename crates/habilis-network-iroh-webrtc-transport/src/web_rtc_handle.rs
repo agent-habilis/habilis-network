@@ -11,6 +11,19 @@ use crate::{NegotiatedSession, WebRtcTransport};
 /// The same name on both targets so a consumer's wiring code is written once:
 /// which backend it wraps is decided by the feature, not by the caller. Cheap
 /// to clone — it is a handle, and every clone shares one session registry.
+///
+/// # Examples
+///
+/// A handle wraps a transport, and it starts with no session.
+///
+/// ```
+/// use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
+/// use iroh_base::SecretKey;
+///
+/// let id = SecretKey::from_bytes(&[1u8; 32]).public();
+/// let handle = WebRtcHandle::new(WebRtcTransport::new(id));
+/// assert_eq!(handle.session_count(), 0);
+/// ```
 #[cfg(any(feature = "native", feature = "web"))]
 #[derive(Debug, Clone)]
 pub struct WebRtcHandle {

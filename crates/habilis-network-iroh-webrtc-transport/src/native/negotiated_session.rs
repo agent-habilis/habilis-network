@@ -6,6 +6,14 @@ use tokio::net::UdpSocket;
 
 /// A `WebRTC` data channel negotiated via JSEP and ready to carry datagrams —
 /// the value handed to [`crate::WebRtcTransport::attach`].
+///
+/// # Examples
+///
+/// It is the open data channel that a finished negotiation produces, so this is not compiled.
+///
+/// ```ignore
+/// let session = pending.complete(answer)?;
+/// ```
 pub struct NegotiatedSession {
     pub(crate) rtc: Rtc,
     pub(crate) socket: UdpSocket,

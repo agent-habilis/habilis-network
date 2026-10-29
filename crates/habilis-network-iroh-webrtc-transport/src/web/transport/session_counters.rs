@@ -13,6 +13,14 @@ use std::sync::atomic::AtomicU64;
 /// [`BrowserHubTransport::session_counters`](super::BrowserHubTransport::session_counters); a consumer deciding whether to
 /// demote a peer to the relay can then say *why* rather than inferring it from
 /// a transfer that did not finish.
+///
+/// # Examples
+///
+/// It counts the frames of a live session, so this is not compiled.
+///
+/// ```ignore
+/// let counters = SessionCounters::default();
+/// ```
 #[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct SessionCounters {
