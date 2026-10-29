@@ -127,6 +127,7 @@ mod tests {
     use crate::util::tuning;
     use std::time::Duration;
 
+    use crate::{protocol, testing};
     #[test]
     fn sweep_evicts_surfaced_peer_into_quiet() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -167,9 +168,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.rendezvous_release_links = 1;
-        state
-            .linked_endpoints
-            .insert(crate::testing::endpoint_id(1));
+        state.linked_endpoints.insert(testing::endpoint_id(1));
         assert!(!state.rendezvous_wanted(), "enough links: it let go");
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
@@ -190,9 +189,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.rendezvous_release_links = 1;
-        state
-            .linked_endpoints
-            .insert(crate::testing::endpoint_id(1));
+        state.linked_endpoints.insert(testing::endpoint_id(1));
         state.rendezvous_linked = true;
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
@@ -216,13 +213,13 @@ mod tests {
     fn the_flag_of_an_evicted_holder_is_forgotten() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        let holder = crate::testing::endpoint_id(7);
+        let holder = testing::endpoint_id(7);
         state
             .peer_endpoints
             .insert(nick("lost-heron"), iroh::EndpointAddr::new(holder));
         state
             .rival_holders
-            .insert(crate::protocol::AuthorKey::from([4u8; 32]), holder);
+            .insert(protocol::AuthorKey::from([4u8; 32]), holder);
         assert!(
             state.rival_holder_known(),
             "the evicted holder's flag is known before the sweep"
@@ -252,9 +249,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.rendezvous_release_links = 1;
-        state
-            .linked_endpoints
-            .insert(crate::testing::endpoint_id(1));
+        state.linked_endpoints.insert(testing::endpoint_id(1));
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
             .unwrap();

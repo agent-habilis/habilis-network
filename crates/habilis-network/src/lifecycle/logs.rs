@@ -1,3 +1,4 @@
+use iroh_gossip::proto;
 /// Developer log for the mesh-ready milestone. Mirrors the operator
 /// `ready` event but on the lifecycle log target (stderr, opt-in via
 /// `RUST_LOG`); the operator JSON/human event is unchanged.
@@ -7,12 +8,7 @@
 /// log file is written under a shared path — logging the id would leak full
 /// mesh membership to anyone who can read the file. The topic hash is enough
 /// to correlate a run without exposing the secret.
-pub(crate) fn log_ready(
-    topic: iroh_gossip::proto::TopicId,
-    name: &str,
-    nickname: &str,
-    network: &str,
-) {
+pub(crate) fn log_ready(topic: proto::TopicId, name: &str, nickname: &str, network: &str) {
     tracing::info!(target: "habilis_network::lifecycle", ?topic, name, nickname, network, "mesh ready");
 }
 

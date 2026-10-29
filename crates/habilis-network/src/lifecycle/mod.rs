@@ -71,6 +71,8 @@ mod departed_tests {
 
     use super::{PresenceEvent, handle_presence, membership_update, observe};
 
+    use crate::protocol;
+    use iroh_gossip::proto;
     struct Inert;
 
     #[async_trait::async_trait]
@@ -102,7 +104,7 @@ mod departed_tests {
         handle.close().await;
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
             .await
             .expect("subscribe to a peerless topic");
         let (gossip_sender, _receiver) = topic.split();
@@ -211,11 +213,11 @@ mod departed_tests {
             let chat = Message::new_app(
                 &mesh,
                 &who,
-                crate::protocol::AppFrameParams::new(
-                    crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                protocol::AppFrameParams::new(
+                    protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                     None,
                     None,
-                    crate::protocol::MessageBody::from("kept"),
+                    protocol::MessageBody::from("kept"),
                 ),
             )
             .sign(&departed);
