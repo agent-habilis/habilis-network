@@ -125,9 +125,12 @@ mod tests {
     struct Ladder;
 
     impl transports::PathSelector for Ladder {
-        fn select(&self, ctx: &transports::PathSelectionContext<'_>) -> transports::PathSelection {
+        fn select(
+            &self,
+            context: &transports::PathSelectionContext<'_>,
+        ) -> transports::PathSelection {
             use habilis_network_iroh_transport_util::{climb, custom_rung};
-            let paths: Vec<_> = ctx.paths().collect();
+            let paths: Vec<_> = context.paths().collect();
             let mut selection = transports::PathSelection::none();
             if let Some(path) = climb(&paths, custom_rung, |_, _| true) {
                 selection.set(path);
@@ -266,7 +269,7 @@ mod tests {
         assert_eq!(echoed, b"through the flood");
         let selected_is_gossip = connection.paths().iter().any(|path| {
             path.is_selected()
-                && matches!(path.remote_addr(), iroh::TransportAddr::Custom(addr) if addr.id() == crate::GOSSIP_TRANSPORT_ID)
+                && matches!(path.remote_addr(), iroh::TransportAddr::Custom(address) if address.id() == crate::GOSSIP_TRANSPORT_ID)
         });
         let paths: Vec<String> = connection
             .paths()

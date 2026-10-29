@@ -28,8 +28,8 @@ impl GossipLadder {
 }
 
 impl PathSelector for GossipLadder {
-    fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
-        let paths: Vec<PathSelectionData<'_>> = ctx.paths().collect();
+    fn select(&self, context: &PathSelectionContext<'_>) -> PathSelection {
+        let paths: Vec<PathSelectionData<'_>> = context.paths().collect();
         let chosen = climb(&paths, custom_rung, |rung, path| {
             !is_blocked_to(self.local, rung, ip_remote(path), remote_id(path))
         });

@@ -16,7 +16,7 @@ use crate::GOSSIP_TRANSPORT_ID;
 pub fn selected_is_gossip(connection: &Connection) -> bool {
     connection.paths().iter().any(|path| {
         path.is_selected()
-            && matches!(path.remote_addr(), TransportAddr::Custom(addr) if addr.id() == GOSSIP_TRANSPORT_ID)
+            && matches!(path.remote_addr(), TransportAddr::Custom(address) if address.id() == GOSSIP_TRANSPORT_ID)
     })
 }
 

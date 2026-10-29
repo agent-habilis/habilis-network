@@ -15,10 +15,10 @@ pub fn gossip_addr(endpoint: EndpointId) -> CustomAddr {
 /// The endpoint id in a gossip address, or `None` for another transport's address
 /// or for bytes that are not an endpoint id.
 #[must_use]
-pub fn parse_gossip_addr(addr: &CustomAddr) -> Option<EndpointId> {
-    if addr.id() != GOSSIP_TRANSPORT_ID {
+pub fn parse_gossip_addr(address: &CustomAddr) -> Option<EndpointId> {
+    if address.id() != GOSSIP_TRANSPORT_ID {
         return None;
     }
-    let raw: [u8; 32] = addr.data().try_into().ok()?;
+    let raw: [u8; 32] = address.data().try_into().ok()?;
     EndpointId::from_bytes(&raw).ok()
 }

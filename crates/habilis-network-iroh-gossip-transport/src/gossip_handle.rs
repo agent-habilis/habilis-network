@@ -306,8 +306,8 @@ struct GossipSender {
 impl CustomSender for GossipSender {
     /// Valid only for a gossip address, and only while a sink is attached: a path
     /// that cannot carry a packet must not be selected.
-    fn is_valid_send_addr(&self, addr: &CustomAddr) -> bool {
-        parse_gossip_addr(addr).is_some() && self.shared.path_is_valid()
+    fn is_valid_send_addr(&self, address: &CustomAddr) -> bool {
+        parse_gossip_addr(address).is_some() && self.shared.path_is_valid()
     }
 
     fn poll_send(
@@ -456,7 +456,7 @@ mod tests {
         echo_once(&connection, b"hello over gossip").await;
         let selected_is_gossip = connection.paths().iter().any(|path| {
             path.is_selected()
-                && matches!(path.remote_addr(), TransportAddr::Custom(addr) if addr.id() == GOSSIP_TRANSPORT_ID)
+                && matches!(path.remote_addr(), TransportAddr::Custom(address) if address.id() == GOSSIP_TRANSPORT_ID)
         });
         assert!(selected_is_gossip, "the selected path is not gossip");
         connection.close(0u32.into(), b"done");
