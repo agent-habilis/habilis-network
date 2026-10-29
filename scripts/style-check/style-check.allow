@@ -1,4 +1,4 @@
-# rule|file|matches allowed|reason
+# rule|file|NaN|reason
 # Used by scripts/style-check/style-check.ts. Keep the count exact: the check fails when it is too low as well.
 
 # A Drop that runs while a panic unwinds must not panic: a second panic aborts the process.
@@ -591,11 +591,6 @@ abbrev_name|crates/habilis-network-protocol/src/peer_addr_error.rs|10|existing l
 abbrev_name|crates/habilis-network-protocol/src/seal_error.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream-cli/src/args.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream-cli/src/main.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream/src/hash/stream_hash.rs|5|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream/src/read/reader.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream/src/read/refused.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream-cli/src/main.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-test-tracing-macros/src/expand.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-wasm/src/mesh_peer.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-wasm/src/stream_node.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-wasm/src/tracing_console.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
@@ -668,16 +663,9 @@ long_chain|crates/habilis-network-stream/src/hash/mod.rs|1|kept: statements with
 abbrev_name|crates/habilis-network/src/lifecycle/observed.rs|5|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lifecycle/presence_event.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/net.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream/src/node/stream_node.rs|13|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream/src/node/tests.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-pub_const_fn|crates/habilis-network/src/blob/blob_digest.rs|2|kept: newtype rule (BlobDigest from_bytes and as_bytes)
-abbrev_name|crates/habilis-network-stream/src/node/stream_node.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 assert_no_message|crates/habilis-network-stream/src/node/tests.rs|2|kept: assert without a message, to be given one (P13 rollout)
 long_chain|crates/habilis-network-stream/src/node/stream_node.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 turbofish_collect_parse|crates/habilis-network-stream/src/node/stream_node.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-abbrev_name|crates/habilis-network-stream/src/produce/registry.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream/src/produce/stream_acceptor.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-fn_import|crates/habilis-network-stream/src/produce/registry.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 long_chain|crates/habilis-network-stream/src/produce/registry.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 
 

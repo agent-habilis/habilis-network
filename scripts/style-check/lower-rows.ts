@@ -26,7 +26,22 @@ export function lowerRows(allow: string, output: string): { text: string; raised
       kept.push(`${rule}|${file}|${count}|${reason.join("|")}`);
     } else kept.push(line);
   }
-  return { text: kept.join("\n"), raised };
+  // Two rows for one rule and file come from a merge: keep the lower count.
+  const lowest = new Map<string, number>();
+  for (const line of kept) {
+    const [rule, file, count, ...reason] = line.split("|");
+    if (reason.length > 0) lowest.set(`${rule}|${file}`, Math.min(Number(count), lowest.get(`${rule}|${file}`) ?? Infinity));
+  }
+  const seen = new Set<string>();
+  const unique = kept.flatMap((line) => {
+    const [rule, file, , ...reason] = line.split("|");
+    if (reason.length === 0) return [line];
+    const key = `${rule}|${file}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [`${key}|${lowest.get(key)}|${reason.join("|")}`];
+  });
+  return { text: unique.join("\n"), raised };
 }
 
 if (import.meta.main) {

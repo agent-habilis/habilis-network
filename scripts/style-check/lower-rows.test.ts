@@ -18,3 +18,8 @@ test("lower-rows: a raised count is reported and not written", () => {
   expect(result.raised).toEqual(["long_chain crates/a/src/lib.rs"]);
   expect(result.text).toContain("long_chain|crates/a/src/lib.rs|5|kept: reason");
 });
+test("lower-rows: two rows of one rule and file become one row with the lower count", () => {
+  const twice = "long_chain|crates/a/src/lib.rs|5|kept: first\nlong_chain|crates/a/src/lib.rs|3|kept: second";
+  const text = lowerRows(twice, "").text;
+  expect(text.split("\n")).toEqual(["long_chain|crates/a/src/lib.rs|3|kept: first"]);
+});
