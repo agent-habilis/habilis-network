@@ -92,23 +92,21 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(
-            &membership::JoinOptions::default()
-                .with_nick(Some(nick.to_owned()))
-                .with_lookup(vec![Lookup::Relay])
-                .with_transport(vec![Transport::Udp])
-                .with_relay_urls(vec![relay.to_string()]),
-        )
-        .await
+        let options = membership::JoinOptions::default()
+            .with_nick(Some(nick.to_owned()))
+            .with_lookup(vec![Lookup::Relay]);
+        let options = options
+            .with_transport(vec![Transport::Udp])
+            .with_relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(
-            &membership::JoinOptions::default()
-                .with_nick(Some(nick.to_owned()))
-                .with_mesh(Some(creator.membership.node.mesh_id().to_string())),
-        )
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .with_nick(Some(nick.to_owned()))
+            .with_mesh(Some(mesh));
+        Self::open(&options).await
     }
 }
 
