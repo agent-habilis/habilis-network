@@ -112,10 +112,7 @@ pub async fn run(ticket: &str, nick: &str, webrtc: bool, host_ice: bool) -> Resu
         let endpoint_builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(relay_mode);
-        let endpoint = endpoint_builder
-            .bind()
-            .await
-            .context("bind the endpoint")?;
+        let endpoint = endpoint_builder.bind().await.context("bind the endpoint")?;
         if tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online())
             .await
             .is_err()
