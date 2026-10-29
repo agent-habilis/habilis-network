@@ -6,7 +6,7 @@
 
 use crate::gossip::PathSummary;
 use iroh::endpoint::TransportAddrUsage;
-use iroh::{Endpoint, EndpointId, RelayUrl, TransportAddr};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr};
 
 #[cfg(feature = "multihop")]
 pub use crate::lookup::multihop_handle_config;
@@ -100,4 +100,33 @@ pub async fn conn_path(
         (false, false) => PathSummary::Unknown,
     };
     (summary, relay_url)
+}
+
+/// The address that other peers dial to reach `endpoint`.
+#[must_use]
+pub fn endpoint_address(endpoint: &Endpoint) -> EndpointAddr {
+    endpoint.addr()
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use habilis_network_test_tracing::test;
+    use iroh::endpoint::presets;
+    use iroh::{Endpoint, RelayMode};
+
+    #[test]
+    async fn the_address_of_an_endpoint_names_its_id() {
+        let endpoint: Endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .expect("bind loopback endpoint");
+        assert_eq!(
+            super::endpoint_address(&endpoint).id,
+            endpoint.id(),
+            "the address carries the id of the endpoint"
+        );
+        endpoint.close().await;
+    }
 }
