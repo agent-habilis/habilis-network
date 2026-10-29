@@ -87,9 +87,9 @@ function indentBy(lines: string, extra: string): string {
 }
 
 // The arguments of `#[test(...)]`: `run`, `run_multi_thread`, or null when this form is not handled.
-function runCall(args: string | undefined): { call: string; workers?: string } | null {
+function runCall(args: string | undefined): { call: string; workers: string | undefined } | null {
   if (args === undefined || args.trim() === "" || args.replace(/\s/g, "") === 'flavor="current_thread"') {
-    return { call: "run" };
+    return { call: "run", workers: undefined };
   }
   const flavor = args.match(/flavor\s*=\s*"multi_thread"/);
   const workers = args.match(/worker_threads\s*=\s*(\d+)/);
