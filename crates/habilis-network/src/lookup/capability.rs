@@ -40,24 +40,27 @@ async fn probe_checked(timeout: Duration) -> Result<NetworkCapability> {
         Some(report) => {
             let preferred = report.preferred_relay.clone();
             let preferred_relay_latency_ms: Option<u64> = preferred.as_ref().and_then(|url| {
-                report
+                let latencies = report
                     .relay_latency
                     .iter()
                     .filter(|(_, relay, _)| *relay == url)
-                    .map(|(_, _, latency)| latency)
-                    .min()
-                    .map(clock::millis_saturating)
+                    .map(|(_, _, latency)| latency);
+                latencies.min().map(clock::millis_saturating)
             });
+            let mapping_varies_by_dest = report.mapping_varies_by_dest();
+            let public_v4 = report.global_v4.map(|address| address.to_string());
+            let public_v6 = report.global_v6.map(|address| address.to_string());
+            let preferred_relay = preferred.map(|url| url.to_string());
             NetworkCapability {
                 node_id,
                 local_addrs,
                 report_obtained: true,
                 udp_v4: Some(report.udp_v4),
                 udp_v6: Some(report.udp_v6),
-                mapping_varies_by_dest: report.mapping_varies_by_dest(),
-                public_v4: report.global_v4.map(|address| address.to_string()),
-                public_v6: report.global_v6.map(|address| address.to_string()),
-                preferred_relay: preferred.map(|url| url.to_string()),
+                mapping_varies_by_dest,
+                public_v4,
+                public_v6,
+                preferred_relay,
                 preferred_relay_latency_ms,
                 captive_portal: report.captive_portal,
             }

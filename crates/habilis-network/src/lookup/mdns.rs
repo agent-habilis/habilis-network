@@ -21,11 +21,11 @@ pub(super) fn wire(endpoint: &Endpoint) -> Result<MdnsAddressLookup> {
     let lookup = MdnsAddressLookup::builder()
         .build(endpoint.id())
         .context("building mDNS address-lookup")?;
-    endpoint
+    let services = endpoint
         .address_lookup()
         .map_err(|err| anyhow::anyhow!("{err:?}"))
-        .context("endpoint has no address-lookup services for mDNS")?
-        .add(lookup.clone());
+        .context("endpoint has no address-lookup services for mDNS")?;
+    services.add(lookup.clone());
     tracing::debug!("mDNS address-lookup wired (LAN multicast publish + resolve)");
     Ok(lookup)
 }

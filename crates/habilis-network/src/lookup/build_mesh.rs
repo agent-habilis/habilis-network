@@ -65,14 +65,12 @@ pub(crate) fn build_mesh(
     if let Some((_, admission, _)) = &webrtc {
         admission.watch_dialed_gossip(!relay_transport);
     }
+    let gated = webrtc.as_ref().filter(|_| needs_session);
     let session_gate: Option<(
         habilis_network_iroh_webrtc_transport::WebRtcHandle,
         crate::transport::SignalAdmission,
         iroh::PublicKey,
-    )> = webrtc
-        .as_ref()
-        .filter(|_| needs_session)
-        .map(|(handle, admission, _)| (handle.clone(), admission.clone(), local));
+    )> = gated.map(|(handle, admission, _)| (handle.clone(), admission.clone(), local));
     // Every router serves the nudge, the beacon's too: a session that attaches to the rendezvous
     // is followed by a nudge, and it does its work only when the connect completes.
     let mut builder = Router::builder(endpoint)

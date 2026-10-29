@@ -33,11 +33,6 @@ long_chain|crates/habilis-network/examples/mesh_peer.rs|3|kept: statements with 
 long_chain|crates/habilis-network/examples/mesh_peer_load.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/daemon/heal.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/daemon/shutdown.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/src/lookup/capability.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/src/lookup/mdns.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/src/lookup/peer.rs|2|moved from mod.rs with the peer builders; to be split by a named step (P15)
-long_chain|crates/habilis-network/src/lookup/build_mesh.rs|1|moved from mod.rs with build_mesh; to be split by a named step (P15)
-long_chain|crates/habilis-network/src/lookup/relay.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/transport/admission.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/transport/admission/inner.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/transport/admission/signal_admission.rs|7|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -118,5 +113,4 @@ long_chain|crates/habilis-network/src/beacon/rung_ladder.rs|1|kept: statements w
 
 long_chain|crates/habilis-network/src/beacon/tests.rs|5|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 
-long_chain|crates/habilis-network/src/lookup/tests.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 

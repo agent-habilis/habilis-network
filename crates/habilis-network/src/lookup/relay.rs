@@ -468,11 +468,10 @@ mod tests {
     /// dot, so a browser member could reach no dotted rung at all.
     #[test]
     fn no_ladder_rung_has_a_trailing_dot() {
-        let dotted: Vec<&str> = RENDEZVOUS_RELAY_LADDER_URLS
+        let hosts = RENDEZVOUS_RELAY_LADDER_URLS
             .iter()
-            .filter_map(|url| url.host_str())
-            .filter(|host| host.ends_with('.'))
-            .collect();
+            .filter_map(|url| url.host_str());
+        let dotted: Vec<&str> = hosts.filter(|host| host.ends_with('.')).collect();
         assert!(dotted.is_empty(), "dotted ladder hosts: {dotted:?}");
     }
 
@@ -583,9 +582,8 @@ mod tests {
     }
 
     fn short_host(url: &RelayUrl) -> String {
-        url.host_str()
-            .unwrap()
-            .trim_end_matches('.')
+        let host = url.host_str().unwrap();
+        host.trim_end_matches('.')
             .trim_end_matches(".example")
             .to_string()
     }

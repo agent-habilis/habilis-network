@@ -258,13 +258,11 @@ fn replacing_a_peer_address_leaves_exactly_the_new_one() {
 
     replace_peer_addr(&book, at(5000));
 
-    let ip_addrs: Vec<_> = book
+    let entry = book
         .get_endpoint_info(id)
         .expect("an entry")
-        .into_endpoint_addr()
-        .ip_addrs()
-        .copied()
-        .collect();
+        .into_endpoint_addr();
+    let ip_addrs: Vec<_> = entry.ip_addrs().copied().collect();
     assert_eq!(
         ip_addrs,
         vec![std::net::SocketAddr::from((
@@ -333,13 +331,12 @@ async fn a_receiver_that_never_reads_grants_the_whole_window_to_one_stream() {
     )
     .await
     .expect("bind the receiver");
+    let transport = iroh::endpoint::QuicTransportConfig::builder()
+        .send_window(SENDER_BUFFER as u64)
+        .build();
     let sender: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
         .relay_mode(iroh::RelayMode::Disabled)
-        .transport_config(
-            iroh::endpoint::QuicTransportConfig::builder()
-                .send_window(SENDER_BUFFER as u64)
-                .build(),
-        )
+        .transport_config(transport)
         .bind()
         .await
         .expect("bind the sender");
@@ -360,6 +357,7 @@ async fn a_receiver_that_never_reads_grants_the_whole_window_to_one_stream() {
         .await
         .expect("connect to the receiver");
     let mut stream = connection.open_uni().await.expect("open a stream");
+    // the writers and the test share the accepted count
     let accepted = Arc::new(AtomicUsize::new(0));
     let writing = tokio::spawn({
         let accepted = Arc::clone(&accepted);
@@ -412,13 +410,12 @@ async fn streams_that_nobody_reads_fit_in_the_connection_window() {
     )
     .await
     .expect("bind the receiver");
+    let transport = iroh::endpoint::QuicTransportConfig::builder()
+        .send_window(SENDER_BUFFER as u64)
+        .build();
     let sender: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
         .relay_mode(iroh::RelayMode::Disabled)
-        .transport_config(
-            iroh::endpoint::QuicTransportConfig::builder()
-                .send_window(SENDER_BUFFER as u64)
-                .build(),
-        )
+        .transport_config(transport)
         .bind()
         .await
         .expect("bind the sender");
@@ -438,6 +435,7 @@ async fn streams_that_nobody_reads_fit_in_the_connection_window() {
         .connect(receiver.addr(), ALPN)
         .await
         .expect("connect to the receiver");
+    // the writers and the test share the accepted count
     let accepted = Arc::new(AtomicUsize::new(0));
     let mut writers = Vec::new();
     for _ in 0..STREAMS {

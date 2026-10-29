@@ -321,6 +321,8 @@ pub(crate) async fn build_peer_multihop_with(
             crate::transport::SignalAdmission::new_route_table(cap),
         )
     });
+    let webrtc_leg = underlay_leg.as_ref().map(|(handle, _)| handle.clone());
+    let admission_leg = underlay_leg.as_ref().map(|(_, table)| table.clone());
     let underlay: Endpoint = super::build_endpoint(
         lookups,
         Some(underlay_secret),
@@ -328,8 +330,8 @@ pub(crate) async fn build_peer_multihop_with(
         Vec::new(),
         super::TransportHandles {
             underlay: true,
-            webrtc: underlay_leg.as_ref().map(|(handle, _)| handle.clone()),
-            admission: underlay_leg.as_ref().map(|(_, table)| table.clone()),
+            webrtc: webrtc_leg,
+            admission: admission_leg,
             // The underlay has IP sockets only when the node does: a node run without `udp`
             // has no IP on any of its endpoints, and its underlay rides WebRTC and the relay.
             options: super::TransportOpts {
@@ -350,12 +352,13 @@ pub(crate) async fn build_peer_multihop_with(
         // The underlay is an endpoint of its own, with lookup services of its own, so it has
         // an address book of its own.
         let book = super::address_book(&underlay);
+        let underlay_id = underlay.id();
         let acceptor: crate::transport::WebRtcSignalAcceptor =
             crate::transport::WebRtcSignalAcceptor::new(
                 handle.clone(),
                 underlay.clone(),
                 book.clone(),
-                underlay.id(),
+                underlay_id,
                 table.clone(),
                 ice,
             );
