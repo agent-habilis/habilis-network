@@ -1062,6 +1062,7 @@ mod tests {
     fn what_a_member_leaves_out_at_setup_follows_its_walk() {
         use super::{CoHostPolicy, ProbeAnswer, rungs_withheld_at_setup};
 
+        let _guard = ::habilis_network_test_tracing::init();
         let read = [
             (4161, ProbeAnswer::Foreign),
             (5511, ProbeAnswer::Refused),
@@ -1085,7 +1086,6 @@ mod tests {
         );
     }
 
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use crate::protocol::mesh::{LookupOpts, RelayChoice, Transport, TransportPolicy};
@@ -1101,6 +1101,7 @@ mod tests {
     use tokio::sync::mpsc;
     #[test]
     fn a_browser_refuses_a_mesh_with_no_relay_lookup() {
+        let _guard = ::habilis_network_test_tracing::init();
         let dht_only = LookupOpts::new(RelayChoice::Disabled).with_dht(true);
         let policy =
             TransportPolicy::try_from(&[Transport::Udp, Transport::WebRtc]).expect("valid");
@@ -1124,6 +1125,7 @@ mod tests {
     // narrower paths.
     #[test]
     fn a_node_without_udp_refuses_a_mesh_with_no_relay_lookup() {
+        let _guard = ::habilis_network_test_tracing::init();
         let dht_only = LookupOpts::new(RelayChoice::Disabled).with_dht(true);
         let policy =
             TransportPolicy::try_from(&[Transport::Udp, Transport::WebRtc]).expect("valid");
@@ -1140,6 +1142,7 @@ mod tests {
     // payload.
     #[test]
     fn a_browser_refuses_a_node_with_no_relay_transport() {
+        let _guard = ::habilis_network_test_tracing::init();
         let lookups = LookupOpts::new(RelayChoice::Pinned);
         let no_relay = |policy: &TransportPolicy| crate::lookup::TransportOpts {
             relay: false,
@@ -1166,29 +1169,32 @@ mod tests {
     // The mesh policy decides multi-hop: the default list has it, a list that
     // leaves it out has none, and no flag says otherwise.
     #[test]
-    async fn multihop_follows_the_mesh_policy() {
-        for (list, expected) in [
-            (vec![], true),
-            (vec![Transport::Udp, Transport::WebRtc], false),
-            (vec![Transport::Udp, Transport::Multihop], true),
-        ] {
-            let options = crate::membership::JoinOptions {
-                transport: list.clone(),
-                ..crate::membership::JoinOptions::default()
-            };
-            let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
-            let config = super::setup_mesh(
-                kind,
-                super::SetupParams::new(author, crate::embed::SilentSink).with_max_peers(8),
-            )
-            .await
-            .expect("a loopback mesh sets up");
-            assert_eq!(config.multihop.is_some(), expected, "{list:?}");
-            config.router.shutdown().await.expect("the router stops");
-            if let Some(handle) = config.multihop.as_ref() {
-                handle.close().await;
+    fn multihop_follows_the_mesh_policy() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            for (list, expected) in [
+                (vec![], true),
+                (vec![Transport::Udp, Transport::WebRtc], false),
+                (vec![Transport::Udp, Transport::Multihop], true),
+            ] {
+                let options = crate::membership::JoinOptions {
+                    transport: list.clone(),
+                    ..crate::membership::JoinOptions::default()
+                };
+                let (kind, author) =
+                    crate::membership::resolve_kind(&options, None).expect("a kind");
+                let config = super::setup_mesh(
+                    kind,
+                    super::SetupParams::new(author, crate::embed::SilentSink).with_max_peers(8),
+                )
+                .await
+                .expect("a loopback mesh sets up");
+                assert_eq!(config.multihop.is_some(), expected, "{list:?}");
+                config.router.shutdown().await.expect("the router stops");
+                if let Some(handle) = config.multihop.as_ref() {
+                    handle.close().await;
+                }
             }
-        }
+        });
     }
 
     // A node without UDP takes part in multihop when the policy has it: the rule is that
@@ -1197,26 +1203,59 @@ mod tests {
     // fewer transports than the policy names, which is how a list with `webrtc` and `multihop`
     // meets a node that has no `udp`.
     #[test]
-    async fn a_member_without_udp_gets_a_multihop_handle_when_it_has_webrtc() {
-        let (relay_url, _relay) = test_relay::spawn_plain().await.expect("a local relay");
-        for (transports, expected) in [
-            (
-                crate::lookup::TransportOpts {
-                    udp: false,
-                    ..crate::lookup::TransportOpts::default()
-                },
-                true,
-            ),
-            (
-                crate::lookup::TransportOpts {
-                    udp: false,
-                    webrtc: false,
-                    ..crate::lookup::TransportOpts::default()
-                },
-                false,
-            ),
-        ] {
-            // A node without UDP needs the relay: it carries the offers of its data channels.
+    fn a_member_without_udp_gets_a_multihop_handle_when_it_has_webrtc() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (relay_url, _relay) = test_relay::spawn_plain().await.expect("a local relay");
+            for (transports, expected) in [
+                (
+                    crate::lookup::TransportOpts {
+                        udp: false,
+                        ..crate::lookup::TransportOpts::default()
+                    },
+                    true,
+                ),
+                (
+                    crate::lookup::TransportOpts {
+                        udp: false,
+                        webrtc: false,
+                        ..crate::lookup::TransportOpts::default()
+                    },
+                    false,
+                ),
+            ] {
+                // A node without UDP needs the relay: it carries the offers of its data channels.
+                let options = crate::membership::JoinOptions {
+                    transport: vec![Transport::WebRtc, Transport::Multihop],
+                    lookup: vec![Lookup::Relay],
+                    relay_urls: vec![relay_url.to_string()],
+                    ..crate::membership::JoinOptions::default()
+                };
+                let (kind, author) =
+                    crate::membership::resolve_kind(&options, None).expect("a kind");
+                let config = super::setup_mesh(
+                    kind,
+                    super::SetupParams::new(author, crate::embed::SilentSink)
+                        .with_max_peers(8)
+                        .with_transports(transports),
+                )
+                .await
+                .expect("a mesh sets up");
+                assert_eq!(config.multihop.is_some(), expected, "{transports:?}");
+                if let Some(handle) = config.multihop.as_ref() {
+                    assert_eq!(handle.link_cost(), 10, "{transports:?}");
+                }
+                // Leave closes what setup bound, the endpoint, the underlay and the leg.
+                leave_and_keep_handles(config).await;
+            }
+        });
+    }
+
+    // A node run without `udp` has no IP on any of its endpoints. Its underlay rides WebRTC and
+    // the relay: it has no IP socket, and it has the WebRTC leg that carries its cells.
+    #[test]
+    fn the_underlay_of_a_member_without_udp_has_no_ip_socket_and_has_a_webrtc_leg() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (relay_url, _relay) = test_relay::spawn_plain().await.expect("a local relay");
             let options = crate::membership::JoinOptions {
                 transport: vec![Transport::WebRtc, Transport::Multihop],
                 lookup: vec![Lookup::Relay],
@@ -1228,90 +1267,66 @@ mod tests {
                 kind,
                 super::SetupParams::new(author, crate::embed::SilentSink)
                     .with_max_peers(8)
-                    .with_transports(transports),
+                    .with_transports(crate::lookup::TransportOpts {
+                        udp: false,
+                        ..crate::lookup::TransportOpts::default()
+                    }),
             )
             .await
             .expect("a mesh sets up");
-            assert_eq!(config.multihop.is_some(), expected, "{transports:?}");
-            if let Some(handle) = config.multihop.as_ref() {
-                assert_eq!(handle.link_cost(), 10, "{transports:?}");
-            }
+            let leg = config
+                .underlay_webrtc
+                .as_ref()
+                .expect("the underlay has a WebRTC leg");
+            assert!(
+                leg.endpoint.bound_sockets().is_empty(),
+                "the underlay has no IP socket: {:?}",
+                leg.endpoint.bound_sockets()
+            );
             // Leave closes what setup bound, the endpoint, the underlay and the leg.
             leave_and_keep_handles(config).await;
-        }
-    }
-
-    // A node run without `udp` has no IP on any of its endpoints. Its underlay rides WebRTC and
-    // the relay: it has no IP socket, and it has the WebRTC leg that carries its cells.
-    #[test]
-    async fn the_underlay_of_a_member_without_udp_has_no_ip_socket_and_has_a_webrtc_leg() {
-        let (relay_url, _relay) = test_relay::spawn_plain().await.expect("a local relay");
-        let options = crate::membership::JoinOptions {
-            transport: vec![Transport::WebRtc, Transport::Multihop],
-            lookup: vec![Lookup::Relay],
-            relay_urls: vec![relay_url.to_string()],
-            ..crate::membership::JoinOptions::default()
-        };
-        let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
-        let config = super::setup_mesh(
-            kind,
-            super::SetupParams::new(author, crate::embed::SilentSink)
-                .with_max_peers(8)
-                .with_transports(crate::lookup::TransportOpts {
-                    udp: false,
-                    ..crate::lookup::TransportOpts::default()
-                }),
-        )
-        .await
-        .expect("a mesh sets up");
-        let leg = config
-            .underlay_webrtc
-            .as_ref()
-            .expect("the underlay has a WebRTC leg");
-        assert!(
-            leg.endpoint.bound_sockets().is_empty(),
-            "the underlay has no IP socket: {:?}",
-            leg.endpoint.bound_sockets()
-        );
-        // Leave closes what setup bound, the endpoint, the underlay and the leg.
-        leave_and_keep_handles(config).await;
+        });
     }
 
     // G and C come from the caller, and `0` takes the default. Every option set
     // (`Opts`, the C struct, the browser object) ends in `setup_mesh`, so this is
     // the one place that has to hold.
     #[test]
-    async fn the_caps_follow_the_params_and_zero_takes_the_default() {
-        use crate::transport::MAX_DIRECT_PEERS;
-        use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
+    fn the_caps_follow_the_params_and_zero_takes_the_default() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::transport::MAX_DIRECT_PEERS;
+            use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
 
-        for (max_peers, max_direct, want_g, want_c) in [
-            (0, 0, GOSSIP_ACTIVE_VIEW_CAPACITY, MAX_DIRECT_PEERS),
-            (5, 3, 5, 3),
-        ] {
-            let options = crate::membership::JoinOptions::default();
-            let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
-            let config = super::setup_mesh(
-                kind,
-                super::SetupParams::new(author, crate::embed::SilentSink)
-                    .with_max_peers(max_peers)
-                    .with_max_direct(max_direct),
-            )
-            .await
-            .expect("a loopback mesh sets up");
-            assert_eq!(config.max_peers, want_g, "G for {max_peers}");
-            assert_eq!(config.webrtc_admission.cap(), want_c, "C for {max_direct}");
-            config.router.shutdown().await.expect("the router stops");
-            if let Some(handle) = config.multihop.as_ref() {
-                handle.close().await;
+            for (max_peers, max_direct, want_g, want_c) in [
+                (0, 0, GOSSIP_ACTIVE_VIEW_CAPACITY, MAX_DIRECT_PEERS),
+                (5, 3, 5, 3),
+            ] {
+                let options = crate::membership::JoinOptions::default();
+                let (kind, author) =
+                    crate::membership::resolve_kind(&options, None).expect("a kind");
+                let config = super::setup_mesh(
+                    kind,
+                    super::SetupParams::new(author, crate::embed::SilentSink)
+                        .with_max_peers(max_peers)
+                        .with_max_direct(max_direct),
+                )
+                .await
+                .expect("a loopback mesh sets up");
+                assert_eq!(config.max_peers, want_g, "G for {max_peers}");
+                assert_eq!(config.webrtc_admission.cap(), want_c, "C for {max_direct}");
+                config.router.shutdown().await.expect("the router stops");
+                if let Some(handle) = config.multihop.as_ref() {
+                    handle.close().await;
+                }
             }
-        }
+        });
     }
 
     // The defaults of the two bounds: G is 32 gossip neighbors, and C (decision D11) is 64
     // direct peers, counting `WebRTC` sessions and unicast connections.
     #[test]
     fn the_default_bounds_are_32_neighbors_and_64_direct_peers() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
             32,
@@ -1514,50 +1529,54 @@ mod tests {
     // list has no `multihop` is dropped, so it advertises no link-state and takes
     // none in.
     #[test]
-    async fn an_injected_multihop_handle_is_dropped_when_the_mesh_has_no_multihop() {
-        let first = injected(PayloadPath::DirectOnly).await;
-        let (first_endpoint, first_handle) = (first.endpoint.clone(), first.multihop.clone());
-        let config = setup_with(vec![Transport::Udp, Transport::WebRtc], first)
-            .await
-            .expect("a loopback mesh sets up");
-        assert!(
-            config.multihop.is_none(),
-            "no multihop on a udp,webrtc mesh"
-        );
-        config.router.shutdown().await.expect("the router stops");
-        if let Some(handle) = first_handle {
-            handle.close().await;
-        }
-        first_endpoint.close().await;
+    fn an_injected_multihop_handle_is_dropped_when_the_mesh_has_no_multihop() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let first = injected(PayloadPath::DirectOnly).await;
+            let (first_endpoint, first_handle) = (first.endpoint.clone(), first.multihop.clone());
+            let config = setup_with(vec![Transport::Udp, Transport::WebRtc], first)
+                .await
+                .expect("a loopback mesh sets up");
+            assert!(
+                config.multihop.is_none(),
+                "no multihop on a udp,webrtc mesh"
+            );
+            config.router.shutdown().await.expect("the router stops");
+            if let Some(handle) = first_handle {
+                handle.close().await;
+            }
+            first_endpoint.close().await;
 
-        let default_list = setup_with(Vec::new(), injected(PayloadPath::DirectOnly).await)
-            .await
-            .expect("a loopback mesh sets up");
-        assert!(default_list.multihop.is_some(), "the default list has it");
-        default_list
-            .router
-            .shutdown()
-            .await
-            .expect("the router stops");
-        if let Some(handle) = default_list.multihop.as_ref() {
-            handle.close().await;
-        }
+            let default_list = setup_with(Vec::new(), injected(PayloadPath::DirectOnly).await)
+                .await
+                .expect("a loopback mesh sets up");
+            assert!(default_list.multihop.is_some(), "the default list has it");
+            default_list
+                .router
+                .shutdown()
+                .await
+                .expect("the router stops");
+            if let Some(handle) = default_list.multihop.as_ref() {
+                handle.close().await;
+            }
+        });
     }
 
     // Whether the relay may carry cells is a rule of the mesh: a handle that lets
     // it, on a lookup-only mesh, is refused.
     #[test]
-    async fn an_injected_multihop_handle_that_lets_the_relay_carry_cells_is_refused() {
-        let refused = injected(PayloadPath::RelayAllowed).await;
-        let (endpoint, handle) = (refused.endpoint.clone(), refused.multihop.clone());
-        let error = setup_with(Vec::new(), refused)
-            .await
-            .expect_err("relay cells on a lookup-only mesh");
-        assert!(format!("{error:#}").contains("relay"), "{error:#}");
-        if let Some(handle) = handle {
-            handle.close().await;
-        }
-        endpoint.close().await;
+    fn an_injected_multihop_handle_that_lets_the_relay_carry_cells_is_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let refused = injected(PayloadPath::RelayAllowed).await;
+            let (endpoint, handle) = (refused.endpoint.clone(), refused.multihop.clone());
+            let error = setup_with(Vec::new(), refused)
+                .await
+                .expect_err("relay cells on a lookup-only mesh");
+            assert!(format!("{error:#}").contains("relay"), "{error:#}");
+            if let Some(handle) = handle {
+                handle.close().await;
+            }
+            endpoint.close().await;
+        });
     }
 
     /// Regression for `Endpoint dropped without calling Endpoint::close` on a
@@ -1567,6 +1586,7 @@ mod tests {
     /// drop took its endpoint down open.
     #[test]
     fn a_departure_during_the_startup_rung_probe_closes_its_endpoint() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (_silent, rung) = silent_relay_rung();
 
         let errors = errors_through_runtime_drop(async {
@@ -1606,36 +1626,40 @@ mod tests {
 
     // The node closes what its setup bound, so iroh has nothing to log as dropped.
     #[test]
-    async fn leave_closes_the_endpoint_and_the_underlay_that_setup_bound() {
-        let options = crate::membership::JoinOptions::default();
-        let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
-        let config = super::setup_mesh(
-            kind,
-            super::SetupParams::new(author, crate::embed::SilentSink).with_max_peers(8),
-        )
-        .await
-        .expect("a loopback mesh sets up");
-        let (endpoint, underlay) = leave_and_keep_handles(config).await;
-        assert!(endpoint.is_closed(), "the endpoint is closed after leave");
-        assert!(
-            underlay.expect("the default list has multihop").is_closed(),
-            "the underlay is closed after leave"
-        );
+    fn leave_closes_the_endpoint_and_the_underlay_that_setup_bound() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let options = crate::membership::JoinOptions::default();
+            let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
+            let config = super::setup_mesh(
+                kind,
+                super::SetupParams::new(author, crate::embed::SilentSink).with_max_peers(8),
+            )
+            .await
+            .expect("a loopback mesh sets up");
+            let (endpoint, underlay) = leave_and_keep_handles(config).await;
+            assert!(endpoint.is_closed(), "the endpoint is closed after leave");
+            assert!(
+                underlay.expect("the default list has multihop").is_closed(),
+                "the underlay is closed after leave"
+            );
+        });
     }
 
     // An injected endpoint is the caller's, and it may carry protocols of the caller.
     #[test]
-    async fn leave_keeps_an_injected_endpoint_and_its_underlay_open() {
-        let injected = injected(PayloadPath::DirectOnly).await;
-        let config = setup_with(Vec::new(), injected)
-            .await
-            .expect("a loopback mesh sets up");
-        let (endpoint, underlay) = leave_and_keep_handles(config).await;
-        assert!(!endpoint.is_closed(), "the caller's endpoint stays open");
-        let underlay = underlay.expect("the injected handle is used");
-        assert!(!underlay.is_closed(), "the caller's underlay stays open");
-        underlay.close().await;
-        endpoint.close().await;
+    fn leave_keeps_an_injected_endpoint_and_its_underlay_open() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let injected = injected(PayloadPath::DirectOnly).await;
+            let config = setup_with(Vec::new(), injected)
+                .await
+                .expect("a loopback mesh sets up");
+            let (endpoint, underlay) = leave_and_keep_handles(config).await;
+            assert!(!endpoint.is_closed(), "the caller's endpoint stays open");
+            let underlay = underlay.expect("the injected handle is used");
+            assert!(!underlay.is_closed(), "the caller's underlay stays open");
+            underlay.close().await;
+            endpoint.close().await;
+        });
     }
 }
 
@@ -1644,52 +1668,53 @@ mod tests {
 #[cfg(all(test, feature = "multihop", not(feature = "host")))]
 mod browser_tests {
     use crate::protocol::mesh::{Lookup, Transport};
-    use habilis_network_test_tracing::test;
 
     #[test]
-    async fn a_browser_member_has_a_multihop_handle_with_the_link_cost_of_a_browser() {
-        let (relay_url, _relay) = crate::lookup::test_relay::spawn_plain()
+    fn a_browser_member_has_a_multihop_handle_with_the_link_cost_of_a_browser() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (relay_url, _relay) = crate::lookup::test_relay::spawn_plain()
+                .await
+                .expect("a local relay");
+            let options = crate::membership::JoinOptions {
+                transport: vec![Transport::WebRtc, Transport::Multihop],
+                lookup: vec![Lookup::Relay],
+                relay_urls: vec![relay_url.to_string()],
+                ..crate::membership::JoinOptions::default()
+            };
+            let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
+            let mut config = super::setup_mesh(
+                kind,
+                super::SetupParams::new(author, crate::embed::SilentSink)
+                    .with_max_peers(8)
+                    .with_transports(crate::lookup::TransportOpts {
+                        udp: false,
+                        ..crate::lookup::TransportOpts::default()
+                    }),
+            )
             .await
-            .expect("a local relay");
-        let options = crate::membership::JoinOptions {
-            transport: vec![Transport::WebRtc, Transport::Multihop],
-            lookup: vec![Lookup::Relay],
-            relay_urls: vec![relay_url.to_string()],
-            ..crate::membership::JoinOptions::default()
-        };
-        let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
-        let mut config = super::setup_mesh(
-            kind,
-            super::SetupParams::new(author, crate::embed::SilentSink)
-                .with_max_peers(8)
-                .with_transports(crate::lookup::TransportOpts {
-                    udp: false,
-                    ..crate::lookup::TransportOpts::default()
-                }),
-        )
-        .await
-        .expect("a mesh sets up");
-        assert_eq!(
-            config
-                .multihop
-                .as_ref()
-                .expect("a multihop handle")
-                .link_cost(),
-            100,
-            "a browser member's multihop handle carries the browser link cost"
-        );
-        // The router closes the endpoint that it serves on. The handle closes the underlay, the
-        // WebRTC leg of the underlay has an endpoint of its own, and so has the startup rung probe.
-        if let Some(probe) = config.rung_probe.take() {
-            probe.stop_and_wait().await;
-        }
-        config.router.shutdown().await.expect("the router stops");
-        if let Some(handle) = config.multihop.as_ref() {
-            handle.close().await;
-        }
-        if let Some(leg) = config.underlay_webrtc.as_ref() {
-            leg.endpoint.close().await;
-        }
-        config.endpoint.close().await;
+            .expect("a mesh sets up");
+            assert_eq!(
+                config
+                    .multihop
+                    .as_ref()
+                    .expect("a multihop handle")
+                    .link_cost(),
+                100,
+                "a browser member's multihop handle carries the browser link cost"
+            );
+            // The router closes the endpoint that it serves on. The handle closes the underlay, the
+            // WebRTC leg of the underlay has an endpoint of its own, and so has the startup rung probe.
+            if let Some(probe) = config.rung_probe.take() {
+                probe.stop_and_wait().await;
+            }
+            config.router.shutdown().await.expect("the router stops");
+            if let Some(handle) = config.multihop.as_ref() {
+                handle.close().await;
+            }
+            if let Some(leg) = config.underlay_webrtc.as_ref() {
+                leg.endpoint.close().await;
+            }
+            config.endpoint.close().await;
+        });
     }
 }

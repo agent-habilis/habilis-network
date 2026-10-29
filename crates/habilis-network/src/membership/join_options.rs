@@ -441,7 +441,6 @@ pub fn resolve_kind(
 mod tests {
     use crate::protocol::{LookupOpts, RelayChoice};
     use crate::runtime;
-    use habilis_network_test_tracing::test;
 
     use super::{JoinOptions, Lookup, MeshConfig, SetupKind, Transport, resolve_kind};
     fn options() -> JoinOptions {
@@ -467,6 +466,7 @@ mod tests {
     /// before the split is a typo now, not a silent no-op.
     #[test]
     fn the_json_shape_is_the_three_choices() {
+        let _guard = ::habilis_network_test_tracing::init();
         let parsed: JoinOptions = serde_json::from_str(
             r#"{"lookup":["mdns","relay"],"transport":["webrtc","relay"],
                 "relayUrls":["http://127.0.0.1:3340/"]}"#,
@@ -507,6 +507,7 @@ mod tests {
     /// the derivation mixes the lookups in, so this is not a formality.
     #[test]
     fn a_topic_derives_the_public_preset_mesh() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (kind, _author) = resolve_kind(
             &JoinOptions {
                 topic: Some("standup".to_owned()),
@@ -542,6 +543,7 @@ mod tests {
 
     #[test]
     fn naming_both_selectors_is_an_error_rather_than_a_precedence_rule() {
+        let _guard = ::habilis_network_test_tracing::init();
         let conflicting = JoinOptions {
             mesh: Some("whatever".to_owned()),
             topic: Some("standup".to_owned()),
@@ -553,6 +555,7 @@ mod tests {
 
     #[test]
     fn a_bare_create_is_loopback_and_naming_lookups_is_not() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             create_config(&options()).lookups.is_loopback(),
             "a bare create uses loopback lookups"
@@ -574,6 +577,7 @@ mod tests {
     /// off unless named, and meaningless without the first.
     #[test]
     fn relay_transport_is_off_unless_named_and_needs_the_relay_lookup() {
+        let _guard = ::habilis_network_test_tracing::init();
         let lookup_only = create_config(&JoinOptions {
             lookup: all_lookups(),
             ..options()
@@ -611,6 +615,7 @@ mod tests {
     /// On a create, on a topic, and with a custom ladder alike.
     #[test]
     fn the_relay_can_serve_lookup_alone() {
+        let _guard = ::habilis_network_test_tracing::init();
         let create = create_config(&JoinOptions {
             lookup: vec![Lookup::Relay],
             transport: vec![Transport::Udp],
@@ -648,6 +653,7 @@ mod tests {
 
     #[test]
     fn udp_cannot_be_left_out_of_the_transports() {
+        let _guard = ::habilis_network_test_tracing::init();
         let error = resolve_kind(
             &JoinOptions {
                 lookup: vec![Lookup::Relay],
@@ -666,6 +672,7 @@ mod tests {
     /// relay and nothing more: it does not turn the relay lookup on.
     #[test]
     fn relay_urls_replace_the_ladder_and_change_a_topic_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let urls = vec!["http://127.0.0.1:3340/".to_owned()];
         let config = create_config(&JoinOptions {
             lookup: vec![Lookup::Relay],
@@ -742,6 +749,7 @@ mod tests {
     /// boundary" instead of a diagnostic.
     #[test]
     fn an_oversize_relay_ladder_is_an_error_not_a_panic() {
+        let _guard = ::habilis_network_test_tracing::init();
         let urls: Vec<String> = (0..300)
             .map(|index| format!("https://r{index}.example"))
             .collect();
@@ -766,6 +774,7 @@ mod tests {
     /// than the plain public-preset topic — and inherits the policy.
     #[test]
     fn relay_transport_changes_a_topic_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (plain, _) = resolve_kind(
             &JoinOptions {
                 topic: Some("standup".to_owned()),
@@ -805,6 +814,7 @@ mod tests {
 
     #[test]
     fn naming_one_lookup_selects_only_that_one() {
+        let _guard = ::habilis_network_test_tracing::init();
         let config = create_config(&JoinOptions {
             lookup: vec![Lookup::Mdns],
             ..options()
@@ -827,13 +837,13 @@ mod tests {
 mod resolve_tests {
     use super::{JoinOptions, Resolved, SetupKind, resolve_kind};
     use crate::runtime::TopicParams;
-    use habilis_network_test_tracing::test;
 
     /// The collapse of the bare-topic early return rests on this identity: a
     /// tab and a terminal meet only if the no-override arm keeps deriving the
     /// exact id `TopicParams::resolve` always produced.
     #[test]
     fn a_bare_topic_still_derives_the_public_preset_mesh() {
+        let _guard = ::habilis_network_test_tracing::init();
         let options = JoinOptions {
             topic: Some("standup".to_owned()),
             ..JoinOptions::default()

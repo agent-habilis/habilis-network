@@ -89,12 +89,12 @@ impl Error for SetupError {
 mod tests {
     use super::SetupError;
     use crate::protocol::UnlockError;
-    use habilis_network_test_tracing::test;
 
     /// The texts the agent-gossip skills grep the daemon stderr for. Changing one
     /// breaks them, so each is pinned here.
     #[test]
     fn the_grepped_texts_are_pinned() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             SetupError::PasswordRequired.to_string(),
             "this mesh is password-protected — pass --password",
@@ -110,12 +110,12 @@ mod tests {
 
 #[cfg(test)]
 mod chain_tests {
-    use habilis_network_test_tracing::test;
 
     use super::SetupError;
 
     #[test]
     fn an_internal_cause_keeps_its_chain() {
+        let _guard = ::habilis_network_test_tracing::init();
         let io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
         let cause = anyhow::Error::new(io).context("bind the endpoint");
         let error = anyhow::Error::new(SetupError::internal(cause));

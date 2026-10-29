@@ -100,7 +100,6 @@ pub(crate) fn errors_through_runtime_drop(body: impl Future<Output = ()>) -> Str
 #[cfg(feature = "multihop")]
 mod log_capture_tests {
     use super::LogCapture;
-    use habilis_network_test_tracing::test;
 
     fn first_event() {
         tracing::debug!(target: "log-capture-test", "first event");
@@ -116,6 +115,7 @@ mod log_capture_tests {
 
     #[test]
     fn an_event_that_a_thread_without_a_subscriber_hit_first_still_reaches_the_capture() {
+        let _trace_guard = ::habilis_network_test_tracing::init();
         let (logs, _guard) = LogCapture::start(tracing::Level::DEBUG);
         std::thread::spawn(|| {
             first_event();

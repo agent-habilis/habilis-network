@@ -107,12 +107,12 @@ mod topic_derivation_tests {
         LookupOpts, MeshConfig, TransportPolicy, derive_topic_mesh, derive_topic_mesh_config,
         derive_topic_mesh_with,
     };
-    use habilis_network_test_tracing::test;
 
     /// The no-argument form must stay exactly what it always was, because the
     /// `--topic` id it derives is public API for every frontend that calls it.
     #[test]
     fn the_bare_form_is_the_public_preset_form() {
+        let _guard = ::habilis_network_test_tracing::init();
         let bare = derive_topic_mesh("standup").expect("derive");
         let explicit =
             derive_topic_mesh_with("standup", LookupOpts::public_preset()).expect("derive");
@@ -132,6 +132,7 @@ mod topic_derivation_tests {
     /// `public_preset()`, which is byte-identical to the old behaviour.
     #[test]
     fn stating_a_narrower_reach_changes_the_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let public =
             derive_topic_mesh_with("standup", LookupOpts::public_preset()).expect("derive");
         let private = derive_topic_mesh_with("standup", LookupOpts::loopback()).expect("derive");
@@ -147,6 +148,7 @@ mod topic_derivation_tests {
     /// has no transport to reach.
     #[test]
     fn a_loopback_reach_derives_a_loopback_mesh() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = derive_topic_mesh_with("standup", LookupOpts::loopback()).expect("derive");
         assert!(
             mesh.is_loopback(),
@@ -165,6 +167,7 @@ mod topic_derivation_tests {
     /// in.
     #[test]
     fn both_forms_reject_an_empty_string() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             derive_topic_mesh("   ").is_err(),
             "an empty topic is refused in the public form"
@@ -179,6 +182,7 @@ mod topic_derivation_tests {
     /// only in it are different meshes, so members provably agree on it.
     #[test]
     fn relay_transport_changes_the_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let lookup_only =
             derive_topic_mesh_with("standup", LookupOpts::public_preset()).expect("derive");
         let relayed = derive_topic_mesh_config(
@@ -210,6 +214,7 @@ mod topic_derivation_tests {
     /// otherwise the creator would run a mesh whose id every joiner rejects.
     #[test]
     fn a_relay_transport_without_a_relay_lookup_is_rejected_on_mint() {
+        let _guard = ::habilis_network_test_tracing::init();
         let config = MeshConfig::new(
             LookupOpts::loopback(),
             None,
@@ -244,6 +249,7 @@ mod join_password_tests {
 
     #[test]
     fn a_passworded_id_without_a_password_is_password_required() {
+        let _guard = ::habilis_network_test_tracing::init();
         let params = JoinParams::new(passworded_id().parse().unwrap(), None, None);
         let error = params.resolve().unwrap_err();
         assert!(

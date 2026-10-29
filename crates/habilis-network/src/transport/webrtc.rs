@@ -71,7 +71,6 @@ use backend_web::{build_answer, build_offer};
 // *share's* signal ALPN, not this one.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use habilis_network_iroh_webrtc_transport::WebRtcTransport;
@@ -132,6 +131,7 @@ mod tests {
     /// latency of the QUIC path they already had.
     #[test]
     fn a_udp_pair_races_until_udp_is_selected() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             session_policy::wants_session(false, None, false),
             "a udp pair races the punch"
@@ -154,6 +154,7 @@ mod tests {
     // idled-out pool must not start the race again on every alive tick.
     #[test]
     fn a_proven_udp_pair_is_not_raced_again() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             !session_policy::wants_session(false, None, true),
             "proven direct, no live connection to read"
@@ -169,6 +170,7 @@ mod tests {
     // selected path, the proof is stale: the pair offers, as one that was never proven.
     #[test]
     fn a_proven_pair_that_reads_as_relay_is_offered_a_session() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             session_policy::wants_session(false, Some(PathKind::Relay), true),
             "a proven pair that reads as relay is offered a session"
@@ -180,6 +182,7 @@ mod tests {
     // by itself, once its own reading contradicts the proof; the lower id wins a crossing.
     #[test]
     fn the_higher_id_offers_when_the_proof_of_a_direct_path_is_stale() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             session_policy::waits_for_the_offer(true, false, None, false),
             "nothing to say"
@@ -211,6 +214,7 @@ mod tests {
     // session round reports at once, not after it judges the connection for UDP.
     #[test]
     fn a_proven_pair_on_gossip_is_demoted_as_one_on_the_relay() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             session_policy::reads_below_a_session(Some(PathKind::Relay), true),
             "a proven pair on gossip is demoted as one on the relay"
@@ -235,6 +239,7 @@ mod tests {
     // stale, and it asks for a session.
     #[test]
     fn a_pair_on_gossip_is_offered_a_session_even_when_proven_direct() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             session_policy::proof_is_stale(Some(PathKind::Gossip), true),
             "the proof of a pair on gossip is stale"
@@ -251,6 +256,7 @@ mod tests {
     // table when the pool has closed an idle connection.
     #[test]
     fn a_pair_on_multihop_is_offered_a_session_even_when_proven_direct() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             session_policy::wants_session(false, Some(PathKind::Multihop), true),
             "a pair on multihop is offered a session even when proven direct"
@@ -269,6 +275,7 @@ mod tests {
 
     #[test]
     fn only_a_peer_without_ip_needs_the_webrtc_lane() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id = SecretKey::from_bytes(&[5u8; 32]).public();
         assert!(
             lane_needs::needs_webrtc_lane(&browser_shaped(id)),
@@ -307,6 +314,7 @@ mod tests {
     /// them, spending the direct-peer slots that browsers actually need.
     #[test]
     fn an_address_with_no_transports_is_unknown_not_a_browser() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id = SecretKey::from_bytes(&[7u8; 32]).public();
         assert!(
             !lane_needs::needs_webrtc_lane(&EndpointAddr::new(id)),
@@ -321,6 +329,7 @@ mod tests {
 
     #[test]
     fn a_mixed_pair_needs_the_lane_from_either_side() {
+        let _guard = ::habilis_network_test_tracing::init();
         let browser = browser_shaped(SecretKey::from_bytes(&[6u8; 32]).public());
         let native = native_shaped(SecretKey::from_bytes(&[7u8; 32]).public());
 
@@ -354,6 +363,7 @@ mod tests {
     /// probe timed out and the peer stayed relay-only for good.
     #[test]
     fn a_node_without_ip_needs_the_lane_even_while_its_own_address_is_empty() {
+        let _guard = ::habilis_network_test_tracing::init();
         let native = native_shaped(SecretKey::from_bytes(&[7u8; 32]).public());
         // The address is not consulted at all for the local end; a node
         // without IP transports needs the lane, full stop.
@@ -447,36 +457,42 @@ mod tests {
     /// forever — the peer's QUIC keep-alives meant the connection never idled
     /// out — and the task was detached from the Router's `JoinSet`, so nothing
     /// reaped it.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_connection_that_never_opens_a_stream_is_released() {
-        let (server, server_hub) = endpoint().await;
-        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let router = serve(&server, &server_hub, &admission);
+    #[test]
+    fn a_connection_that_never_opens_a_stream_is_released() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, server_hub) = endpoint().await;
+                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let router = serve(&server, &server_hub, &admission);
 
-        let (client, _client_hub) = endpoint().await;
-        let connection = client
-            .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
-            .await
-            .expect("dial the signal ALPN");
-        assert!(
-            until(|| admission.in_flight() == 1).await,
-            "the offer should have been admitted"
-        );
+                let (client, _client_hub) = endpoint().await;
+                let connection = client
+                    .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
+                    .await
+                    .expect("dial the signal ALPN");
+                assert!(
+                    until(|| admission.in_flight() == 1).await,
+                    "the offer should have been admitted"
+                );
 
-        // Never open a bi-stream; just hold the connection open.
-        assert!(
-            until(|| admission.in_flight() == 0).await,
-            "a stalled offer must release its slot on the exchange deadline"
-        );
-        assert_eq!(
-            server_hub.session_count(),
-            0,
-            "a connection that never opens a stream holds no session"
-        );
+                // Never open a bi-stream; just hold the connection open.
+                assert!(
+                    until(|| admission.in_flight() == 0).await,
+                    "a stalled offer must release its slot on the exchange deadline"
+                );
+                assert_eq!(
+                    server_hub.session_count(),
+                    0,
+                    "a connection that never opens a stream holds no session"
+                );
 
-        connection.close(0u32.into(), b"done");
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
+                connection.close(0u32.into(), b"done");
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
+        );
     }
 
     /// One peer, many connections, one task.
@@ -485,38 +501,44 @@ mod tests {
     /// spawn, so a peer cannot multiply our task count by reconnecting. It used
     /// to be able to: every connection spawned its own detached task holding
     /// its own `Connection`, with nothing bounding either.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn many_connections_from_one_peer_yield_one_task() {
-        let (server, server_hub) = endpoint().await;
-        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let router = serve(&server, &server_hub, &admission);
+    #[test]
+    fn many_connections_from_one_peer_yield_one_task() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, server_hub) = endpoint().await;
+                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let router = serve(&server, &server_hub, &admission);
 
-        let (client, _client_hub) = endpoint().await;
-        let mut conns = Vec::new();
-        for _ in 0..5 {
-            conns.push(
-                client
-                    .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
-                    .await
-                    .expect("dial the signal ALPN"),
-            );
-        }
+                let (client, _client_hub) = endpoint().await;
+                let mut conns = Vec::new();
+                for _ in 0..5 {
+                    conns.push(
+                        client
+                            .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
+                            .await
+                            .expect("dial the signal ALPN"),
+                    );
+                }
 
-        // Give every accept a chance to run, then assert the ceiling held
-        // throughout rather than only at the end.
-        for _ in 0..12 {
-            assert!(
-                admission.in_flight() <= 1,
-                "one peer must never hold more than one slot"
-            );
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
+                // Give every accept a chance to run, then assert the ceiling held
+                // throughout rather than only at the end.
+                for _ in 0..12 {
+                    assert!(
+                        admission.in_flight() <= 1,
+                        "one peer must never hold more than one slot"
+                    );
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
 
-        for connection in conns {
-            connection.close(0u32.into(), b"done");
-        }
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
+                for connection in conns {
+                    connection.close(0u32.into(), b"done");
+                }
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
+        );
     }
 
     /// **A node with a ceiling of two holds two sessions, and the third offer is answered.**
@@ -524,100 +546,112 @@ mod tests {
     /// The ceiling is the setting of the node (C). No offer is refused for it. The session
     /// that was used least recently is detached when the third attaches, so the node keeps
     /// two sessions.
-    #[test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_node_with_a_ceiling_of_two_answers_a_third_offer_and_detaches_the_oldest() {
-        let (server, server_hub) = endpoint().await;
-        let admission = SignalAdmission::new(2);
-        let router = serve(&server, &server_hub, &admission);
+    #[test]
+    fn a_node_with_a_ceiling_of_two_answers_a_third_offer_and_detaches_the_oldest() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            4,
+            async {
+                let (server, server_hub) = endpoint().await;
+                let admission = SignalAdmission::new(2);
+                let router = serve(&server, &server_hub, &admission);
 
-        let mut clients = Vec::new();
-        for _ in 0..3 {
-            let (client, client_hub) = endpoint().await;
-            dial_signal::dial_signal_with(
-                &client,
-                &crate::lookup::address_book(&client),
-                server.addr(),
-                &client_hub,
-                quick(),
-                IceProfile { host_only: true },
-            )
-            .await
-            .expect("every offer attaches");
-            clients.push((client, client_hub));
-        }
+                let mut clients = Vec::new();
+                for _ in 0..3 {
+                    let (client, client_hub) = endpoint().await;
+                    dial_signal::dial_signal_with(
+                        &client,
+                        &crate::lookup::address_book(&client),
+                        server.addr(),
+                        &client_hub,
+                        quick(),
+                        IceProfile { host_only: true },
+                    )
+                    .await
+                    .expect("every offer attaches");
+                    clients.push((client, client_hub));
+                }
 
-        assert!(
-            until(|| !server_hub.has_session(&clients[0].0.id())).await,
-            "the least recently used session is detached"
-        );
-        assert!(
-            server_hub.has_session(&clients[1].0.id()),
-            "the first offer's session is still attached at a ceiling of two"
-        );
-        assert!(
-            server_hub.has_session(&clients[2].0.id()),
-            "the second offer's session is still attached at a ceiling of two"
-        );
-        assert_eq!(server_hub.session_count(), 2, "the node holds two sessions");
+                assert!(
+                    until(|| !server_hub.has_session(&clients[0].0.id())).await,
+                    "the least recently used session is detached"
+                );
+                assert!(
+                    server_hub.has_session(&clients[1].0.id()),
+                    "the first offer's session is still attached at a ceiling of two"
+                );
+                assert!(
+                    server_hub.has_session(&clients[2].0.id()),
+                    "the second offer's session is still attached at a ceiling of two"
+                );
+                assert_eq!(server_hub.session_count(), 2, "the node holds two sessions");
 
-        router.shutdown().await.expect("shutdown");
-        for (client, _) in clients {
-            client.close().await;
-        }
-        server.close().await;
+                router.shutdown().await.expect("shutdown");
+                for (client, _) in clients {
+                    client.close().await;
+                }
+                server.close().await;
+            },
+        );
     }
 
     /// **The evicted peer reads code 11 on its offer.** At a ceiling of one, the second session
     /// evicts the first. The first peer offers again at once, and the dialer reads the refusal as the
     /// `EVICTED` code, so it can wait instead of taking the place back.
-    #[test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_peer_whose_session_was_evicted_reads_the_evicted_code_on_its_next_offer() {
-        let (server, server_hub) = endpoint().await;
-        let admission = SignalAdmission::new(1);
-        let router = serve(&server, &server_hub, &admission);
+    #[test]
+    fn a_peer_whose_session_was_evicted_reads_the_evicted_code_on_its_next_offer() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            4,
+            async {
+                let (server, server_hub) = endpoint().await;
+                let admission = SignalAdmission::new(1);
+                let router = serve(&server, &server_hub, &admission);
 
-        let (first, first_hub) = endpoint().await;
-        let (second, second_hub) = endpoint().await;
-        for (client, hub) in [(&first, &first_hub), (&second, &second_hub)] {
-            dial_signal::dial_signal_with(
-                client,
-                &crate::lookup::address_book(client),
-                server.addr(),
-                hub,
-                quick(),
-                IceProfile { host_only: true },
-            )
-            .await
-            .expect("an offer attaches");
-        }
-        assert!(
-            until(|| !server_hub.has_session(&first.id())).await,
-            "the first session was evicted"
-        );
+                let (first, first_hub) = endpoint().await;
+                let (second, second_hub) = endpoint().await;
+                for (client, hub) in [(&first, &first_hub), (&second, &second_hub)] {
+                    dial_signal::dial_signal_with(
+                        client,
+                        &crate::lookup::address_book(client),
+                        server.addr(),
+                        hub,
+                        quick(),
+                        IceProfile { host_only: true },
+                    )
+                    .await
+                    .expect("an offer attaches");
+                }
+                assert!(
+                    until(|| !server_hub.has_session(&first.id())).await,
+                    "the first session was evicted"
+                );
 
-        let error = dial_signal::dial_signal_with(
-            &first,
-            &crate::lookup::address_book(&first),
-            server.addr(),
-            &first_hub,
-            quick(),
-            IceProfile { host_only: true },
-        )
-        .await
-        .expect_err("the evicted peer is refused for a minute");
-        assert!(
-            matches!(error, EndpointError::CapRefused { .. }),
-            "the dialer reads the refusal as a code to wait on: {error:#}"
-        );
-        assert!(
-            server_hub.has_session(&second.id()),
-            "the newcomer keeps its place"
-        );
+                let error = dial_signal::dial_signal_with(
+                    &first,
+                    &crate::lookup::address_book(&first),
+                    server.addr(),
+                    &first_hub,
+                    quick(),
+                    IceProfile { host_only: true },
+                )
+                .await
+                .expect_err("the evicted peer is refused for a minute");
+                assert!(
+                    matches!(error, EndpointError::CapRefused { .. }),
+                    "the dialer reads the refusal as a code to wait on: {error:#}"
+                );
+                assert!(
+                    server_hub.has_session(&second.id()),
+                    "the newcomer keeps its place"
+                );
 
-        router.shutdown().await.expect("shutdown");
-        first.close().await;
-        second.close().await;
-        server.close().await;
+                router.shutdown().await.expect("shutdown");
+                first.close().await;
+                second.close().await;
+                server.close().await;
+            },
+        );
     }
 
     /// `Router::shutdown` must reach the spawned answer tasks.
@@ -647,46 +681,52 @@ mod tests {
     /// resolve to the custom-transport path and connect over the data
     /// channel. No relay and no IP address exist in this test, so a success
     /// here is that resolution working and nothing else.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_bare_id_dial_resolves_to_the_attached_session() {
-        let (server, server_hub) = endpoint_with_lookup().await;
-        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let router = serve(&server, &server_hub, &admission);
+    #[test]
+    fn a_bare_id_dial_resolves_to_the_attached_session() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, server_hub) = endpoint_with_lookup().await;
+                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let router = serve(&server, &server_hub, &admission);
 
-        let (client, client_hub) = endpoint_with_lookup().await;
-        dial_signal::dial_signal_with(
-            &client,
-            &crate::lookup::address_book(&client),
-            server.addr(),
-            &client_hub,
-            quick(),
-            IceProfile { host_only: true },
-        )
-        .await
-        .expect("the signal round must attach a session");
-        assert!(
-            client_hub.has_session(&server.id()),
-            "a bare id dial resolves to the attached session"
+                let (client, client_hub) = endpoint_with_lookup().await;
+                dial_signal::dial_signal_with(
+                    &client,
+                    &crate::lookup::address_book(&client),
+                    server.addr(),
+                    &client_hub,
+                    quick(),
+                    IceProfile { host_only: true },
+                )
+                .await
+                .expect("the signal round must attach a session");
+                assert!(
+                    client_hub.has_session(&server.id()),
+                    "a bare id dial resolves to the attached session"
+                );
+
+                web_rtc_signal_acceptor::register_session_addr(
+                    &crate::lookup::address_book(&client),
+                    server.id(),
+                );
+
+                let connection: Connection = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    client.connect(EndpointAddr::new(server.id()), MESH_WEBRTC_SIGNAL_ALPN),
+                )
+                .await
+                .expect("a bare-id dial must not hang")
+                .expect("a bare-id dial must resolve through the registered custom address");
+                let direct = super::super::payload_path::selected_is_direct(&connection);
+                connection.close(0u32.into(), b"done");
+                assert!(direct, "the connection's selected path must be the session");
+
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
         );
-
-        web_rtc_signal_acceptor::register_session_addr(
-            &crate::lookup::address_book(&client),
-            server.id(),
-        );
-
-        let connection: Connection = tokio::time::timeout(
-            Duration::from_secs(10),
-            client.connect(EndpointAddr::new(server.id()), MESH_WEBRTC_SIGNAL_ALPN),
-        )
-        .await
-        .expect("a bare-id dial must not hang")
-        .expect("a bare-id dial must resolve through the registered custom address");
-        let direct = super::super::payload_path::selected_is_direct(&connection);
-        connection.close(0u32.into(), b"done");
-        assert!(direct, "the connection's selected path must be the session");
-
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
     }
 
     /// The **reverse** of [`a_bare_id_dial_resolves_to_the_attached_session`],
@@ -696,48 +736,56 @@ mod tests {
     /// so this dial must ride the session exactly like the forward one. In the
     /// matrix, every conn dialed in this direction sat on the relay until the
     /// accept gate refused it.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_bare_id_dial_rides_the_session_from_the_answerer_too() {
-        let (server, server_hub) = endpoint_with_lookup().await;
-        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let router = serve(&server, &server_hub, &admission);
+    #[test]
+    fn a_bare_id_dial_rides_the_session_from_the_answerer_too() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, server_hub) = endpoint_with_lookup().await;
+                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let router = serve(&server, &server_hub, &admission);
 
-        let (client, client_hub) = endpoint_with_lookup().await;
-        let client_admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let client_router = serve(&client, &client_hub, &client_admission);
-        dial_signal::dial_signal_with(
-            &client,
-            &crate::lookup::address_book(&client),
-            server.addr(),
-            &client_hub,
-            quick(),
-            IceProfile { host_only: true },
-        )
-        .await
-        .expect("the signal round must attach a session");
-        assert!(
-            until(|| server_hub.has_session(&client.id())).await,
-            "the answerer's hub must hold the session"
+                let (client, client_hub) = endpoint_with_lookup().await;
+                let client_admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let client_router = serve(&client, &client_hub, &client_admission);
+                dial_signal::dial_signal_with(
+                    &client,
+                    &crate::lookup::address_book(&client),
+                    server.addr(),
+                    &client_hub,
+                    quick(),
+                    IceProfile { host_only: true },
+                )
+                .await
+                .expect("the signal round must attach a session");
+                assert!(
+                    until(|| server_hub.has_session(&client.id())).await,
+                    "the answerer's hub must hold the session"
+                );
+                // `register_session_addr` runs in the acceptor task right after the
+                // attach the poll above observed; give it a beat to land.
+                tokio::time::sleep(Duration::from_millis(200)).await;
+
+                let connection: Connection = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    server.connect(EndpointAddr::new(client.id()), MESH_WEBRTC_SIGNAL_ALPN),
+                )
+                .await
+                .expect("an answerer's bare-id dial must not hang")
+                .expect(
+                    "an answerer's bare-id dial must resolve through the registered custom address",
+                );
+                let direct = super::super::payload_path::selected_is_direct(&connection);
+                connection.close(0u32.into(), b"done");
+                assert!(direct, "the connection's selected path must be the session");
+
+                router.shutdown().await.expect("shutdown");
+                client_router.shutdown().await.expect("shutdown");
+                server.close().await;
+                client.close().await;
+            },
         );
-        // `register_session_addr` runs in the acceptor task right after the
-        // attach the poll above observed; give it a beat to land.
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        let connection: Connection = tokio::time::timeout(
-            Duration::from_secs(10),
-            server.connect(EndpointAddr::new(client.id()), MESH_WEBRTC_SIGNAL_ALPN),
-        )
-        .await
-        .expect("an answerer's bare-id dial must not hang")
-        .expect("an answerer's bare-id dial must resolve through the registered custom address");
-        let direct = super::super::payload_path::selected_is_direct(&connection);
-        connection.close(0u32.into(), b"done");
-        assert!(direct, "the connection's selected path must be the session");
-
-        router.shutdown().await.expect("shutdown");
-        client_router.shutdown().await.expect("shutdown");
-        server.close().await;
-        client.close().await;
     }
 
     /// The whole lookup-only browser story in one offline test: with a
@@ -746,92 +794,98 @@ mod tests {
     /// accept gate. This is the layer above [`a_bare_id_dial_resolves_to_the_attached_session`]:
     /// the gossip actor does its own dialing, and it is the actor's dial —
     /// not ours — that the rendezvous link depends on.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_gossip_graft_by_bare_id_rides_the_attached_session() {
-        use futures_util::StreamExt as _;
-        use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
+    #[test]
+    fn a_gossip_graft_by_bare_id_rides_the_attached_session() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use futures_util::StreamExt as _;
+                use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 
-        let (server, server_hub) = endpoint_with_lookup().await;
-        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let server_gossip = Gossip::builder().spawn(server.clone());
-        // One Router for both ALPNs: `Router::spawn` overrides the endpoint's
-        // ALPN list, so a second Router silently unregisters the first's.
-        let book = crate::lookup::address_book(&server.clone());
-        let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
-            server_hub.clone(),
-            server.clone(),
-            book,
-            server.id(),
-            admission.clone(),
-            IceProfile { host_only: true },
-        );
-        let signal = signal.with_deadlines(quick());
-        let router = Router::builder(server.clone());
-        let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
-        let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
-        let router = router.accept(
-            GOSSIP_ALPN,
-            super::super::DirectOnlyGossip::new(
-                server_gossip.clone(),
-                crate::transport::PayloadPath::DirectOnly,
-                None,
-            ),
-        );
-        let router: Router = router.spawn();
+                let (server, server_hub) = endpoint_with_lookup().await;
+                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let server_gossip = Gossip::builder().spawn(server.clone());
+                // One Router for both ALPNs: `Router::spawn` overrides the endpoint's
+                // ALPN list, so a second Router silently unregisters the first's.
+                let book = crate::lookup::address_book(&server.clone());
+                let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
+                    server_hub.clone(),
+                    server.clone(),
+                    book,
+                    server.id(),
+                    admission.clone(),
+                    IceProfile { host_only: true },
+                );
+                let signal = signal.with_deadlines(quick());
+                let router = Router::builder(server.clone());
+                let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
+                let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
+                let router = router.accept(
+                    GOSSIP_ALPN,
+                    super::super::DirectOnlyGossip::new(
+                        server_gossip.clone(),
+                        crate::transport::PayloadPath::DirectOnly,
+                        None,
+                    ),
+                );
+                let router: Router = router.spawn();
 
-        let (client, client_hub) = endpoint_with_lookup().await;
-        let client_gossip = Gossip::builder().spawn(client.clone());
+                let (client, client_hub) = endpoint_with_lookup().await;
+                let client_gossip = Gossip::builder().spawn(client.clone());
 
-        dial_signal::dial_signal_with(
-            &client,
-            &crate::lookup::address_book(&client),
-            server.addr(),
-            &client_hub,
-            quick(),
-            IceProfile { host_only: true },
-        )
-        .await
-        .expect("the signal round must attach a session");
-        web_rtc_signal_acceptor::register_session_addr(
-            &crate::lookup::address_book(&client),
-            server.id(),
-        );
+                dial_signal::dial_signal_with(
+                    &client,
+                    &crate::lookup::address_book(&client),
+                    server.addr(),
+                    &client_hub,
+                    quick(),
+                    IceProfile { host_only: true },
+                )
+                .await
+                .expect("the signal round must attach a session");
+                web_rtc_signal_acceptor::register_session_addr(
+                    &crate::lookup::address_book(&client),
+                    server.id(),
+                );
 
-        let topic = iroh_gossip::proto::TopicId::from_bytes([9u8; 32]);
-        let mut server_topic = server_gossip
-            .subscribe(topic, vec![])
-            .await
-            .expect("server subscribes");
-        let mut client_topic = client_gossip
-            .subscribe(topic, vec![server.id()])
-            .await
-            .expect("client subscribes and grafts by bare id");
+                let topic = iroh_gossip::proto::TopicId::from_bytes([9u8; 32]);
+                let mut server_topic = server_gossip
+                    .subscribe(topic, vec![])
+                    .await
+                    .expect("server subscribes");
+                let mut client_topic = client_gossip
+                    .subscribe(topic, vec![server.id()])
+                    .await
+                    .expect("client subscribes and grafts by bare id");
 
-        let linked = tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                tokio::select! {
-                    event = client_topic.next() => {
-                        if matches!(
-                            event,
-                            Some(Ok(iroh_gossip::api::Event::NeighborUp(id))) if id == server.id()
-                        ) {
-                            return;
+                let linked = tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    tokio::select! {
+                        event = client_topic.next() => {
+                            if matches!(
+                                event,
+                                Some(Ok(iroh_gossip::api::Event::NeighborUp(id))) if id == server.id()
+                            ) {
+                                return;
+                            }
+                        }
+                        event = server_topic.next() => {
+                            let _ = event;
                         }
                     }
-                    event = server_topic.next() => {
-                        let _ = event;
-                    }
                 }
-            }
-        })
-        .await;
-        assert!(
-            linked.is_ok(),
-            "the graft dial must ride the attached session through the lookup-only gate"
-        );
+            })
+            .await;
+                assert!(
+                    linked.is_ok(),
+                    "the graft dial must ride the attached session through the lookup-only gate"
+                );
 
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
+        );
     }
 
     /// The failing browser topology, natively: both ends also hold a relay
@@ -841,123 +895,130 @@ mod tests {
     /// failing; everything below the relay's presence is covered by
     /// [`a_gossip_graft_by_bare_id_rides_the_attached_session`].
     #[cfg(feature = "iroh-test-utils")]
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_gossip_graft_prefers_the_session_over_the_relay() {
-        use futures_util::StreamExt as _;
-        use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
+    #[test]
+    fn a_gossip_graft_prefers_the_session_over_the_relay() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use futures_util::StreamExt as _;
+                use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .with_test_writer()
-            .try_init();
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                    .with_test_writer()
+                    .try_init();
 
-        let (relay_url, _relay_server) = test_relay::spawn_plain().await.expect("local relay");
-        let with_relay = |key: SecretKey, handle: &WebRtcHandle, browser_shaped: bool| {
-            let relay_url = relay_url.clone();
-            let transport = handle.transport();
-            let selector = handle.path_selector();
-            async move {
-                let builder = Endpoint::builder(presets::Minimal)
-                    .secret_key(key)
-                    .relay_mode(RelayMode::custom([relay_url]));
-                let builder = builder
-                    .add_custom_transport(transport)
-                    .path_selector(selector);
-                // A browser has no IP stack: without this, localhost punches
-                // a UDP path inside the held connection and the gate passes
-                // on a path a tab could never have.
-                let builder = if browser_shaped {
-                    builder.clear_ip_transports()
-                } else {
-                    builder
+                let (relay_url, _relay_server) =
+                    test_relay::spawn_plain().await.expect("local relay");
+                let with_relay = |key: SecretKey, handle: &WebRtcHandle, browser_shaped: bool| {
+                    let relay_url = relay_url.clone();
+                    let transport = handle.transport();
+                    let selector = handle.path_selector();
+                    async move {
+                        let builder = Endpoint::builder(presets::Minimal)
+                            .secret_key(key)
+                            .relay_mode(RelayMode::custom([relay_url]));
+                        let builder = builder
+                            .add_custom_transport(transport)
+                            .path_selector(selector);
+                        // A browser has no IP stack: without this, localhost punches
+                        // a UDP path inside the held connection and the gate passes
+                        // on a path a tab could never have.
+                        let builder = if browser_shaped {
+                            builder.clear_ip_transports()
+                        } else {
+                            builder
+                        };
+                        builder.bind().await.expect("bind endpoint with relay")
+                    }
                 };
-                builder.bind().await.expect("bind endpoint with relay")
-            }
-        };
-        let server_key = SecretKey::generate();
-        let server_hub = WebRtcHandle::new(WebRtcTransport::new(server_key.public()));
-        let server = with_relay(server_key, &server_hub, false).await;
-        let client_key = SecretKey::generate();
-        let client_hub = WebRtcHandle::new(WebRtcTransport::new(client_key.public()));
-        let client = with_relay(client_key, &client_hub, true).await;
+                let server_key = SecretKey::generate();
+                let server_hub = WebRtcHandle::new(WebRtcTransport::new(server_key.public()));
+                let server = with_relay(server_key, &server_hub, false).await;
+                let client_key = SecretKey::generate();
+                let client_hub = WebRtcHandle::new(WebRtcTransport::new(client_key.public()));
+                let client = with_relay(client_key, &client_hub, true).await;
 
-        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let server_gossip = Gossip::builder().spawn(server.clone());
-        let book = crate::lookup::address_book(&server.clone());
-        let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
-            server_hub.clone(),
-            server.clone(),
-            book,
-            server.id(),
-            admission.clone(),
-            IceProfile { host_only: true },
-        );
-        let router = Router::builder(server.clone());
-        let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
-        let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
-        let router = router.accept(
-            GOSSIP_ALPN,
-            super::super::DirectOnlyGossip::new(
-                server_gossip.clone(),
-                crate::transport::PayloadPath::DirectOnly,
-                None,
-            ),
-        );
-        let router: Router = router.spawn();
+                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let server_gossip = Gossip::builder().spawn(server.clone());
+                let book = crate::lookup::address_book(&server.clone());
+                let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
+                    server_hub.clone(),
+                    server.clone(),
+                    book,
+                    server.id(),
+                    admission.clone(),
+                    IceProfile { host_only: true },
+                );
+                let router = Router::builder(server.clone());
+                let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
+                let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
+                let router = router.accept(
+                    GOSSIP_ALPN,
+                    super::super::DirectOnlyGossip::new(
+                        server_gossip.clone(),
+                        crate::transport::PayloadPath::DirectOnly,
+                        None,
+                    ),
+                );
+                let router: Router = router.spawn();
 
-        let client_gossip = Gossip::builder().spawn(client.clone());
-        // The relay-homed address, as `register_rendezvous` hands a joiner.
-        let relay_addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
-        dial_signal::dial_signal_with(
-            &client,
-            &crate::lookup::address_book(&client),
-            relay_addr,
-            &client_hub,
-            SignalDeadlines::DEFAULT,
-            IceProfile { host_only: true },
-        )
-        .await
-        .expect("the signal round must attach a session over the relay");
-        web_rtc_signal_acceptor::register_session_addr(
-            &crate::lookup::address_book(&client),
-            server.id(),
-        );
+                let client_gossip = Gossip::builder().spawn(client.clone());
+                // The relay-homed address, as `register_rendezvous` hands a joiner.
+                let relay_addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
+                dial_signal::dial_signal_with(
+                    &client,
+                    &crate::lookup::address_book(&client),
+                    relay_addr,
+                    &client_hub,
+                    SignalDeadlines::DEFAULT,
+                    IceProfile { host_only: true },
+                )
+                .await
+                .expect("the signal round must attach a session over the relay");
+                web_rtc_signal_acceptor::register_session_addr(
+                    &crate::lookup::address_book(&client),
+                    server.id(),
+                );
 
-        let topic = iroh_gossip::proto::TopicId::from_bytes([11u8; 32]);
-        let mut server_topic = server_gossip
-            .subscribe(topic, vec![])
-            .await
-            .expect("server subscribes");
-        let mut client_topic = client_gossip
-            .subscribe(topic, vec![server.id()])
-            .await
-            .expect("client subscribes and grafts by bare id");
+                let topic = iroh_gossip::proto::TopicId::from_bytes([11u8; 32]);
+                let mut server_topic = server_gossip
+                    .subscribe(topic, vec![])
+                    .await
+                    .expect("server subscribes");
+                let mut client_topic = client_gossip
+                    .subscribe(topic, vec![server.id()])
+                    .await
+                    .expect("client subscribes and grafts by bare id");
 
-        let linked = tokio::time::timeout(Duration::from_secs(40), async {
-            loop {
-                tokio::select! {
-                    event = client_topic.next() => {
-                        if matches!(
-                            event,
-                            Some(Ok(iroh_gossip::api::Event::NeighborUp(id))) if id == server.id()
-                        ) {
-                            return;
+                let linked = tokio::time::timeout(Duration::from_secs(40), async {
+                loop {
+                    tokio::select! {
+                        event = client_topic.next() => {
+                            if matches!(
+                                event,
+                                Some(Ok(iroh_gossip::api::Event::NeighborUp(id))) if id == server.id()
+                            ) {
+                                return;
+                            }
+                        }
+                        event = server_topic.next() => {
+                            let _ = event;
                         }
                     }
-                    event = server_topic.next() => {
-                        let _ = event;
-                    }
                 }
-            }
-        })
-        .await;
-        assert!(
-            linked.is_ok(),
-            "with a session attached, the graft must not stay pinned to the relay"
-        );
+            })
+            .await;
+                assert!(
+                    linked.is_ok(),
+                    "with a session attached, the graft must not stay pinned to the relay"
+                );
 
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
+        );
     }
 
     /// A pair with no UDP: the higher id (the answerer of the session round)
@@ -969,109 +1030,118 @@ mod tests {
     /// the answerer must nudge once after its attach. Without it the accepted
     /// connection stays on the relay and the relay policy closes it.
     #[cfg(feature = "iroh-test-utils")]
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_connection_dialed_by_the_answerer_leaves_the_relay_when_the_session_attaches() {
-        use iroh::protocol::{AcceptError, ProtocolHandler};
+    #[test]
+    fn a_connection_dialed_by_the_answerer_leaves_the_relay_when_the_session_attaches() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::protocol::{AcceptError, ProtocolHandler};
 
-        const HOLD_ALPN: &[u8] = b"habilis-mesh/test-hold/0";
+                const HOLD_ALPN: &[u8] = b"habilis-mesh/test-hold/0";
 
-        #[derive(Debug, Clone)]
-        struct Hold(mpsc::Sender<bool>);
-        impl ProtocolHandler for Hold {
-            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                let direct =
-                    super::super::payload_path::wait_direct(&connection, Duration::from_secs(12))
+                #[derive(Debug, Clone)]
+                struct Hold(mpsc::Sender<bool>);
+                impl ProtocolHandler for Hold {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        let direct = super::super::payload_path::wait_direct(
+                            &connection,
+                            Duration::from_secs(12),
+                        )
                         .await;
-                let _ = self.0.send(direct).await;
-                connection.closed().await;
-                Ok(())
-            }
-        }
+                        let _ = self.0.send(direct).await;
+                        connection.closed().await;
+                        Ok(())
+                    }
+                }
 
-        let (relay_url, _relay_server) = test_relay::spawn_plain().await.expect("local relay");
-        let bind = |key: SecretKey, handle: &WebRtcHandle| {
-            let relay_url = relay_url.clone();
-            let transport = handle.transport();
-            let selector = handle.path_selector();
-            async move {
-                let builder = Endpoint::builder(presets::Minimal)
-                    .secret_key(key)
-                    .relay_mode(RelayMode::custom([relay_url]))
-                    .add_custom_transport(transport);
-                builder
-                    .path_selector(selector)
-                    .clear_ip_transports()
-                    .bind()
+                let (relay_url, _relay_server) =
+                    test_relay::spawn_plain().await.expect("local relay");
+                let bind = |key: SecretKey, handle: &WebRtcHandle| {
+                    let relay_url = relay_url.clone();
+                    let transport = handle.transport();
+                    let selector = handle.path_selector();
+                    async move {
+                        let builder = Endpoint::builder(presets::Minimal)
+                            .secret_key(key)
+                            .relay_mode(RelayMode::custom([relay_url]))
+                            .add_custom_transport(transport);
+                        builder
+                            .path_selector(selector)
+                            .clear_ip_transports()
+                            .bind()
+                            .await
+                            .expect("bind endpoint with relay")
+                    }
+                };
+                let (mut low_key, mut high_key) = (SecretKey::generate(), SecretKey::generate());
+                if low_key.public() > high_key.public() {
+                    std::mem::swap(&mut low_key, &mut high_key);
+                }
+                let low_hub = WebRtcHandle::new(WebRtcTransport::new(low_key.public()));
+                let low = bind(low_key, &low_hub).await;
+                let high_hub = WebRtcHandle::new(WebRtcTransport::new(high_key.public()));
+                let high = bind(high_key, &high_hub).await;
+
+                let (held_tx, mut held_rx) = mpsc::channel(1);
+                let low_router: Router = Router::builder(low.clone())
+                    .accept(NUDGE_ALPN, NudgeAcceptor)
+                    .accept(HOLD_ALPN, Hold(held_tx))
+                    .spawn();
+                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let book = crate::lookup::address_book(&high.clone());
+                let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
+                    high_hub.clone(),
+                    high.clone(),
+                    book,
+                    high.id(),
+                    admission,
+                    IceProfile { host_only: true },
+                );
+                let router = Router::builder(high.clone());
+                let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
+                let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
+                let high_router: Router = router.spawn();
+
+                let low_on_relay = EndpointAddr::new(low.id()).with_relay_url(relay_url.clone());
+                let high_on_relay = EndpointAddr::new(high.id()).with_relay_url(relay_url.clone());
+                let held = high
+                    .connect(low_on_relay, HOLD_ALPN)
                     .await
-                    .expect("bind endpoint with relay")
-            }
-        };
-        let (mut low_key, mut high_key) = (SecretKey::generate(), SecretKey::generate());
-        if low_key.public() > high_key.public() {
-            std::mem::swap(&mut low_key, &mut high_key);
-        }
-        let low_hub = WebRtcHandle::new(WebRtcTransport::new(low_key.public()));
-        let low = bind(low_key, &low_hub).await;
-        let high_hub = WebRtcHandle::new(WebRtcTransport::new(high_key.public()));
-        let high = bind(high_key, &high_hub).await;
+                    .expect("the answerer dials the offerer over the relay");
 
-        let (held_tx, mut held_rx) = mpsc::channel(1);
-        let low_router: Router = Router::builder(low.clone())
-            .accept(NUDGE_ALPN, NudgeAcceptor)
-            .accept(HOLD_ALPN, Hold(held_tx))
-            .spawn();
-        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let book = crate::lookup::address_book(&high.clone());
-        let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
-            high_hub.clone(),
-            high.clone(),
-            book,
-            high.id(),
-            admission,
-            IceProfile { host_only: true },
+                dial_signal::dial_signal_with(
+                    &low,
+                    &crate::lookup::address_book(&low),
+                    high_on_relay,
+                    &low_hub,
+                    SignalDeadlines::DEFAULT,
+                    IceProfile { host_only: true },
+                )
+                .await
+                .expect("the offerer attaches a session");
+                web_rtc_signal_acceptor::register_session_addr(
+                    &crate::lookup::address_book(&low),
+                    high.id(),
+                );
+                nudge_acceptor::nudge(&low, high.id()).await;
+
+                let direct = tokio::time::timeout(Duration::from_secs(20), held_rx.recv())
+                    .await
+                    .expect("the held connection reports in time")
+                    .expect("the channel is open");
+                assert!(
+                    direct,
+                    "the connection that the answerer dialed must leave the relay once the session is attached"
+                );
+
+                held.close(0u32.into(), b"done");
+                high_router.shutdown().await.expect("shutdown");
+                low_router.shutdown().await.expect("shutdown");
+                low.close().await;
+                high.close().await;
+            },
         );
-        let router = Router::builder(high.clone());
-        let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
-        let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
-        let high_router: Router = router.spawn();
-
-        let low_on_relay = EndpointAddr::new(low.id()).with_relay_url(relay_url.clone());
-        let high_on_relay = EndpointAddr::new(high.id()).with_relay_url(relay_url.clone());
-        let held = high
-            .connect(low_on_relay, HOLD_ALPN)
-            .await
-            .expect("the answerer dials the offerer over the relay");
-
-        dial_signal::dial_signal_with(
-            &low,
-            &crate::lookup::address_book(&low),
-            high_on_relay,
-            &low_hub,
-            SignalDeadlines::DEFAULT,
-            IceProfile { host_only: true },
-        )
-        .await
-        .expect("the offerer attaches a session");
-        web_rtc_signal_acceptor::register_session_addr(
-            &crate::lookup::address_book(&low),
-            high.id(),
-        );
-        nudge_acceptor::nudge(&low, high.id()).await;
-
-        let direct = tokio::time::timeout(Duration::from_secs(20), held_rx.recv())
-            .await
-            .expect("the held connection reports in time")
-            .expect("the channel is open");
-        assert!(
-            direct,
-            "the connection that the answerer dialed must leave the relay once the session is attached"
-        );
-
-        held.close(0u32.into(), b"done");
-        high_router.shutdown().await.expect("shutdown");
-        low_router.shutdown().await.expect("shutdown");
-        low.close().await;
-        high.close().await;
     }
 
     /// A relayed connection still open when the session attaches, which is
@@ -1081,92 +1151,100 @@ mod tests {
     /// alone left every later bare-id dial on the relay. Observed as a
     /// browser-first mesh cell that never linked.
     #[cfg(feature = "iroh-test-utils")]
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_bare_id_dial_rides_the_session_past_a_held_relay_link() {
-        use iroh::endpoint::Connection;
-        use iroh::protocol::{AcceptError, ProtocolHandler};
+    #[test]
+    fn a_bare_id_dial_rides_the_session_past_a_held_relay_link() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::endpoint::Connection;
+                use iroh::protocol::{AcceptError, ProtocolHandler};
 
-        /// Keeps every accepted connection open until the dialer closes it.
-        #[derive(Debug, Clone)]
-        struct Hold;
-        impl ProtocolHandler for Hold {
-            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                connection.closed().await;
-                Ok(())
-            }
-        }
-        const HOLD_ALPN: &[u8] = b"habilis-network/test-hold";
+                /// Keeps every accepted connection open until the dialer closes it.
+                #[derive(Debug, Clone)]
+                struct Hold;
+                impl ProtocolHandler for Hold {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        connection.closed().await;
+                        Ok(())
+                    }
+                }
+                const HOLD_ALPN: &[u8] = b"habilis-network/test-hold";
 
-        let (relay_url, _relay_server) = test_relay::spawn_plain().await.expect("local relay");
-        // No IP on either side, as between a tab and a tab-held beacon: the
-        // relay and the session are the only paths there are.
-        let relay_only = |key: SecretKey, handle: &WebRtcHandle| {
-            let builder = Endpoint::builder(presets::Minimal);
-            let builder = builder.secret_key(key);
-            let builder = builder.relay_mode(RelayMode::custom([relay_url.clone()]));
-            let builder = builder.add_custom_transport(handle.transport());
-            let builder = builder.path_selector(handle.path_selector());
-            let builder = builder.clear_ip_transports();
-            async move { builder.bind().await.expect("bind relay-only endpoint") }
-        };
-        let server_key = SecretKey::generate();
-        let server_hub = WebRtcHandle::new(WebRtcTransport::new(server_key.public()));
-        let server = relay_only(server_key, &server_hub).await;
-        let client_key = SecretKey::generate();
-        let client_hub = WebRtcHandle::new(WebRtcTransport::new(client_key.public()));
-        let client = relay_only(client_key, &client_hub).await;
+                let (relay_url, _relay_server) =
+                    test_relay::spawn_plain().await.expect("local relay");
+                // No IP on either side, as between a tab and a tab-held beacon: the
+                // relay and the session are the only paths there are.
+                let relay_only = |key: SecretKey, handle: &WebRtcHandle| {
+                    let builder = Endpoint::builder(presets::Minimal);
+                    let builder = builder.secret_key(key);
+                    let builder = builder.relay_mode(RelayMode::custom([relay_url.clone()]));
+                    let builder = builder.add_custom_transport(handle.transport());
+                    let builder = builder.path_selector(handle.path_selector());
+                    let builder = builder.clear_ip_transports();
+                    async move { builder.bind().await.expect("bind relay-only endpoint") }
+                };
+                let server_key = SecretKey::generate();
+                let server_hub = WebRtcHandle::new(WebRtcTransport::new(server_key.public()));
+                let server = relay_only(server_key, &server_hub).await;
+                let client_key = SecretKey::generate();
+                let client_hub = WebRtcHandle::new(WebRtcTransport::new(client_key.public()));
+                let client = relay_only(client_key, &client_hub).await;
 
-        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let book = crate::lookup::address_book(&server.clone());
-        let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
-            server_hub.clone(),
-            server.clone(),
-            book,
-            server.id(),
-            admission.clone(),
-            IceProfile { host_only: true },
+                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let book = crate::lookup::address_book(&server.clone());
+                let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
+                    server_hub.clone(),
+                    server.clone(),
+                    book,
+                    server.id(),
+                    admission.clone(),
+                    IceProfile { host_only: true },
+                );
+                let router = Router::builder(server.clone());
+                let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
+                let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
+                let router = router.accept(HOLD_ALPN, Hold);
+                let router: Router = router.spawn();
+
+                let relay_addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
+                let held = client
+                    .connect(relay_addr.clone(), HOLD_ALPN)
+                    .await
+                    .expect("a relayed connection before any session");
+                dial_signal::dial_signal_with(
+                    &client,
+                    &crate::lookup::address_book(&client),
+                    relay_addr,
+                    &client_hub,
+                    quick(),
+                    IceProfile { host_only: true },
+                )
+                .await
+                .expect("the signal round must attach a session");
+
+                let connection: Connection = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    client.connect(EndpointAddr::new(server.id()), HOLD_ALPN),
+                )
+                .await
+                .expect("a bare-id dial must not hang")
+                .expect("a bare-id dial must connect");
+                let direct =
+                    super::super::payload_path::wait_direct(&connection, Duration::from_secs(10))
+                        .await;
+                connection.close(0u32.into(), b"done");
+                held.close(0u32.into(), b"done");
+                assert!(
+                    direct,
+                    "a dial after the attach must reach the session, not only the relay"
+                );
+
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+                server.close().await;
+            },
         );
-        let router = Router::builder(server.clone());
-        let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
-        let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
-        let router = router.accept(HOLD_ALPN, Hold);
-        let router: Router = router.spawn();
-
-        let relay_addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
-        let held = client
-            .connect(relay_addr.clone(), HOLD_ALPN)
-            .await
-            .expect("a relayed connection before any session");
-        dial_signal::dial_signal_with(
-            &client,
-            &crate::lookup::address_book(&client),
-            relay_addr,
-            &client_hub,
-            quick(),
-            IceProfile { host_only: true },
-        )
-        .await
-        .expect("the signal round must attach a session");
-
-        let connection: Connection = tokio::time::timeout(
-            Duration::from_secs(10),
-            client.connect(EndpointAddr::new(server.id()), HOLD_ALPN),
-        )
-        .await
-        .expect("a bare-id dial must not hang")
-        .expect("a bare-id dial must connect");
-        let direct =
-            super::super::payload_path::wait_direct(&connection, Duration::from_secs(10)).await;
-        connection.close(0u32.into(), b"done");
-        held.close(0u32.into(), b"done");
-        assert!(
-            direct,
-            "a dial after the attach must reach the session, not only the relay"
-        );
-
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
-        server.close().await;
     }
 
     /// The real join order: the graft is attempted *before* any session
@@ -1174,176 +1252,194 @@ mod tests {
     /// closes it — and only then does the session attach. The re-graft after
     /// the refusal must still link; if a refused connection poisons later
     /// dials to the same peer, this is the test that says so.
-    #[cfg(feature = "iroh-test-utils")]
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_graft_recovers_after_a_refused_relay_attempt() {
-        use futures_util::StreamExt as _;
-        use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
-
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .with_test_writer()
-            .try_init();
-
-        let (relay_url, _relay_server) = test_relay::spawn_plain().await.expect("local relay");
-        let with_relay = |key: SecretKey, handle: &WebRtcHandle, browser_shaped: bool| {
-            let relay_url = relay_url.clone();
-            let transport = handle.transport();
-            let selector = handle.path_selector();
-            async move {
-                let builder = Endpoint::builder(presets::Minimal)
-                    .secret_key(key)
-                    .relay_mode(RelayMode::custom([relay_url]));
-                let builder = builder
-                    .add_custom_transport(transport)
-                    .path_selector(selector);
-                // A browser has no IP stack: without this, localhost punches
-                // a UDP path inside the held connection and the gate passes
-                // on a path a tab could never have.
-                let builder = if browser_shaped {
-                    builder.clear_ip_transports()
-                } else {
-                    builder
-                };
-                builder.bind().await.expect("bind endpoint with relay")
-            }
+    /// An endpoint on the local relay, with its transports from `handle`. A browser-shaped one has
+    /// no IP stack: without `clear_ip_transports`, localhost punches a UDP path inside the held
+    /// connection and the gate passes on a path a tab could never have.
+    async fn bind_with_relay(
+        relay_url: iroh::RelayUrl,
+        key: SecretKey,
+        handle: &WebRtcHandle,
+        browser_shaped: bool,
+    ) -> Endpoint {
+        let transport = handle.transport();
+        let selector = handle.path_selector();
+        let builder = Endpoint::builder(presets::Minimal)
+            .secret_key(key)
+            .relay_mode(RelayMode::custom([relay_url]));
+        let builder = builder
+            .add_custom_transport(transport)
+            .path_selector(selector);
+        let builder = if browser_shaped {
+            builder.clear_ip_transports()
+        } else {
+            builder
         };
-        let server_key = SecretKey::generate();
-        let server_hub = WebRtcHandle::new(WebRtcTransport::new(server_key.public()));
-        let server = with_relay(server_key, &server_hub, false).await;
-        let client_key = SecretKey::generate();
-        let client_hub = WebRtcHandle::new(WebRtcTransport::new(client_key.public()));
-        let client = with_relay(client_key, &client_hub, true).await;
+        builder.bind().await.expect("bind endpoint with relay")
+    }
 
-        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let server_gossip = Gossip::builder().spawn(server.clone());
-        let book = crate::lookup::address_book(&server.clone());
-        let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
-            server_hub.clone(),
-            server.clone(),
-            book,
-            server.id(),
-            admission.clone(),
-            IceProfile { host_only: true },
-        );
-        let router = Router::builder(server.clone());
-        let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
-        let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
-        let router = router.accept(
-            GOSSIP_ALPN,
-            super::super::DirectOnlyGossip::new(
-                server_gossip.clone(),
-                crate::transport::PayloadPath::DirectOnly,
-                None,
-            ),
-        );
-        let router: Router = router.spawn();
+    #[cfg(feature = "iroh-test-utils")]
+    #[test]
+    fn a_graft_recovers_after_a_refused_relay_attempt() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use futures_util::StreamExt as _;
+                use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 
-        let client_gossip = Gossip::builder().spawn(client.clone());
-        // What register_rendezvous does for a joiner: the relay-homed
-        // address, registered before the first graft dial.
-        crate::lookup::add_peer_addr(
-            &crate::lookup::address_book(&client),
-            EndpointAddr::new(server.id()).with_relay_url(relay_url.clone()),
-        );
-        let topic = iroh_gossip::proto::TopicId::from_bytes([13u8; 32]);
-        let mut server_topic = server_gossip
-            .subscribe(topic, vec![])
-            .await
-            .expect("server subscribes");
-        // The graft attempt with nothing but the relay: held, then refused.
-        let (client_sender, mut client_rx) = client_gossip
-            .subscribe(topic, vec![server.id()])
-            .await
-            .expect("client subscribes")
-            .split();
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                    .with_test_writer()
+                    .try_init();
 
-        // Outlast the gate's hold (15 s) so the refusal has happened.
-        tokio::time::sleep(Duration::from_secs(17)).await;
+                let (relay_url, _relay_server) =
+                    test_relay::spawn_plain().await.expect("local relay");
+                let server_key = SecretKey::generate();
+                let server_hub = WebRtcHandle::new(WebRtcTransport::new(server_key.public()));
+                let server =
+                    bind_with_relay(relay_url.clone(), server_key, &server_hub, false).await;
+                let client_key = SecretKey::generate();
+                let client_hub = WebRtcHandle::new(WebRtcTransport::new(client_key.public()));
+                let client =
+                    bind_with_relay(relay_url.clone(), client_key, &client_hub, true).await;
 
-        // Now the session, as the heal tick would drive it.
-        let relay_addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
-        dial_signal::dial_signal_with(
-            &client,
-            &crate::lookup::address_book(&client),
-            relay_addr,
-            &client_hub,
-            SignalDeadlines::DEFAULT,
-            IceProfile { host_only: true },
-        )
-        .await
-        .expect("the signal round must attach a session over the relay");
-        web_rtc_signal_acceptor::register_session_addr(
-            &crate::lookup::address_book(&client),
-            server.id(),
-        );
+                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let server_gossip = Gossip::builder().spawn(server.clone());
+                let book = crate::lookup::address_book(&server.clone());
+                let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
+                    server_hub.clone(),
+                    server.clone(),
+                    book,
+                    server.id(),
+                    admission.clone(),
+                    IceProfile { host_only: true },
+                );
+                let router = Router::builder(server.clone());
+                let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
+                let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
+                let router = router.accept(
+                    GOSSIP_ALPN,
+                    super::super::DirectOnlyGossip::new(
+                        server_gossip.clone(),
+                        crate::transport::PayloadPath::DirectOnly,
+                        None,
+                    ),
+                );
+                let router: Router = router.spawn();
 
-        let linked = tokio::time::timeout(Duration::from_secs(40), async {
-            loop {
-                client_sender
-                    .join_peers(vec![server.id()])
+                let client_gossip = Gossip::builder().spawn(client.clone());
+                // What register_rendezvous does for a joiner: the relay-homed
+                // address, registered before the first graft dial.
+                crate::lookup::add_peer_addr(
+                    &crate::lookup::address_book(&client),
+                    EndpointAddr::new(server.id()).with_relay_url(relay_url.clone()),
+                );
+                let topic = iroh_gossip::proto::TopicId::from_bytes([13u8; 32]);
+                let mut server_topic = server_gossip
+                    .subscribe(topic, vec![])
                     .await
-                    .expect("re-graft");
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                    .expect("server subscribes");
+                // The graft attempt with nothing but the relay: held, then refused.
+                let (client_sender, mut client_rx) = client_gossip
+                    .subscribe(topic, vec![server.id()])
+                    .await
+                    .expect("client subscribes")
+                    .split();
+
+                // Outlast the gate's hold (15 s) so the refusal has happened.
+                tokio::time::sleep(Duration::from_secs(17)).await;
+
+                // Now the session, as the heal tick would drive it.
+                let relay_addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
+                dial_signal::dial_signal_with(
+                    &client,
+                    &crate::lookup::address_book(&client),
+                    relay_addr,
+                    &client_hub,
+                    SignalDeadlines::DEFAULT,
+                    IceProfile { host_only: true },
+                )
+                .await
+                .expect("the signal round must attach a session over the relay");
+                web_rtc_signal_acceptor::register_session_addr(
+                    &crate::lookup::address_book(&client),
+                    server.id(),
+                );
+
+                let linked = tokio::time::timeout(Duration::from_secs(40), async {
                 loop {
-                    tokio::select! {
-                        event = client_rx.next() => {
-                            if matches!(
-                                event,
-                                Some(Ok(iroh_gossip::api::Event::NeighborUp(id))) if id == server.id()
-                            ) {
-                                return;
+                    client_sender
+                        .join_peers(vec![server.id()])
+                        .await
+                        .expect("re-graft");
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                    loop {
+                        tokio::select! {
+                            event = client_rx.next() => {
+                                if matches!(
+                                    event,
+                                    Some(Ok(iroh_gossip::api::Event::NeighborUp(id))) if id == server.id()
+                                ) {
+                                    return;
+                                }
                             }
-                        }
-                        event = server_topic.next() => {
-                            let _ = event;
-                        }
-                        () = tokio::time::sleep_until(deadline) => {
-                            break;
+                            event = server_topic.next() => {
+                                let _ = event;
+                            }
+                            () = tokio::time::sleep_until(deadline) => {
+                                break;
+                            }
                         }
                     }
                 }
-            }
-        })
-        .await;
-        assert!(
-            linked.is_ok(),
-            "a refused relay-only graft must not poison the re-graft over the session"
-        );
+            })
+            .await;
+                assert!(
+                    linked.is_ok(),
+                    "a refused relay-only graft must not poison the re-graft over the session"
+                );
 
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
+        );
     }
 
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn router_shutdown_cancels_rounds_in_flight() {
-        let (server, server_hub) = endpoint().await;
-        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let router = serve(&server, &server_hub, &admission);
+    #[test]
+    fn router_shutdown_cancels_rounds_in_flight() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (server, server_hub) = endpoint().await;
+                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let router = serve(&server, &server_hub, &admission);
 
-        let (client, _client_hub) = endpoint().await;
-        let connection = client
-            .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
-            .await
-            .expect("dial the signal ALPN");
-        assert!(
-            until(|| admission.in_flight() == 1).await,
-            "the offer should have been admitted"
+                let (client, _client_hub) = endpoint().await;
+                let connection = client
+                    .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
+                    .await
+                    .expect("dial the signal ALPN");
+                assert!(
+                    until(|| admission.in_flight() == 1).await,
+                    "the offer should have been admitted"
+                );
+
+                // Well inside the round deadline, so a pass here is the abort working
+                // and not the timeout firing.
+                tokio::time::timeout(Duration::from_millis(500), router.shutdown())
+                    .await
+                    .expect("shutdown must not wait out the round deadline")
+                    .expect("shutdown");
+                assert!(
+                    until(|| admission.in_flight() == 0).await,
+                    "an aborted round must give its slot back"
+                );
+
+                connection.close(0u32.into(), b"done");
+                client.close().await;
+            },
         );
-
-        // Well inside the round deadline, so a pass here is the abort working
-        // and not the timeout firing.
-        tokio::time::timeout(Duration::from_millis(500), router.shutdown())
-            .await
-            .expect("shutdown must not wait out the round deadline")
-            .expect("shutdown");
-        assert!(
-            until(|| admission.in_flight() == 0).await,
-            "an aborted round must give its slot back"
-        );
-
-        connection.close(0u32.into(), b"done");
-        client.close().await;
     }
 
     /// The dialer's half: a peer that accepts the connection and reads the
@@ -1353,54 +1449,60 @@ mod tests {
     /// in `dial_signal` was bounded — `JSEP_DEADLINE` wrapped only `complete()`,
     /// which runs after the answer arrives — so the in-flight marker was never
     /// cleared and every later retry skipped that peer.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_dial_gives_up_when_the_answer_never_comes() {
-        /// Reads the offer and then says nothing, keeping the connection alive.
-        #[derive(Debug, Clone)]
-        struct BlackHole;
+    #[test]
+    fn a_dial_gives_up_when_the_answer_never_comes() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                /// Reads the offer and then says nothing, keeping the connection alive.
+                #[derive(Debug, Clone)]
+                struct BlackHole;
 
-        impl ProtocolHandler for BlackHole {
-            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                let (_send, mut recv) = connection.accept_bi().await?;
-                let _ = recv.read_to_end(MAX_ENVELOPE_BYTES).await;
-                // Hold the connection open, answering nothing.
-                connection.closed().await;
-                Ok(())
-            }
-        }
+                impl ProtocolHandler for BlackHole {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        let (_send, mut recv) = connection.accept_bi().await?;
+                        let _ = recv.read_to_end(MAX_ENVELOPE_BYTES).await;
+                        // Hold the connection open, answering nothing.
+                        connection.closed().await;
+                        Ok(())
+                    }
+                }
 
-        let (server, _server_hub) = endpoint().await;
-        let router: Router = Router::builder(server.clone())
-            .accept(NUDGE_ALPN, NudgeAcceptor)
-            .accept(MESH_WEBRTC_SIGNAL_ALPN, BlackHole)
-            .spawn();
+                let (server, _server_hub) = endpoint().await;
+                let router: Router = Router::builder(server.clone())
+                    .accept(NUDGE_ALPN, NudgeAcceptor)
+                    .accept(MESH_WEBRTC_SIGNAL_ALPN, BlackHole)
+                    .spawn();
 
-        let (client, client_hub) = endpoint().await;
-        let started = std::time::Instant::now();
-        let outcome = dial_signal::dial_signal_with(
-            &client,
-            &crate::lookup::address_book(&client),
-            server.addr(),
-            &client_hub,
-            quick(),
-            IceProfile { host_only: true },
-        )
-        .await;
+                let (client, client_hub) = endpoint().await;
+                let started = std::time::Instant::now();
+                let outcome = dial_signal::dial_signal_with(
+                    &client,
+                    &crate::lookup::address_book(&client),
+                    server.addr(),
+                    &client_hub,
+                    quick(),
+                    IceProfile { host_only: true },
+                )
+                .await;
 
-        assert!(outcome.is_err(), "a silent peer must not succeed");
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "the dial must give up on its own deadline, not hang: took {:?}",
-            started.elapsed()
+                assert!(outcome.is_err(), "a silent peer must not succeed");
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "the dial must give up on its own deadline, not hang: took {:?}",
+                    started.elapsed()
+                );
+                assert_eq!(
+                    client_hub.session_count(),
+                    0,
+                    "the client hub holds no session after close"
+                );
+
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
         );
-        assert_eq!(
-            client_hub.session_count(),
-            0,
-            "the client hub holds no session after close"
-        );
-
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
     }
 
     /// A dial by the bare id carries no ip address, so the connection waits for the first retransmit
@@ -1409,6 +1511,7 @@ mod tests {
     /// the id now (a claim replaces the entry, a shed removes it).
     #[test]
     fn the_offer_to_the_rendezvous_dials_with_the_addresses_of_the_book() {
+        let _guard = ::habilis_network_test_tracing::init();
         let book = MemoryLookup::new();
         let id = SecretKey::generate().public();
         let at = |port: u16| std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
@@ -1455,36 +1558,42 @@ mod tests {
     /// An id that nobody serves never answers the connect, and the connect had no bound of its own:
     /// the round held the slot of the peer for the whole round deadline, and every later offer was
     /// refused `InFlight`. The connect now ends at the exchange deadline.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_dial_to_an_id_that_nobody_serves_ends_at_the_exchange_deadline() {
-        // Bound, and never read: packets to it vanish, and nothing answers.
-        let silent =
-            std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("a socket");
-        let nobody: EndpointAddr = EndpointAddr::new(SecretKey::generate().public())
-            .with_ip_addr(silent.local_addr().expect("its address"));
-        let (client, client_hub) = endpoint().await;
-        let deadlines = SignalDeadlines {
-            exchange: Duration::from_millis(400),
-            round: Duration::from_secs(8),
-        };
-        let started = n0_future::time::Instant::now();
-        let outcome = dial_signal::dial_signal_with(
-            &client,
-            &crate::lookup::address_book(&client),
-            nobody,
-            &client_hub,
-            deadlines,
-            IceProfile { host_only: true },
-        )
-        .await;
+    #[test]
+    fn a_dial_to_an_id_that_nobody_serves_ends_at_the_exchange_deadline() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                // Bound, and never read: packets to it vanish, and nothing answers.
+                let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                    .expect("a socket");
+                let nobody: EndpointAddr = EndpointAddr::new(SecretKey::generate().public())
+                    .with_ip_addr(silent.local_addr().expect("its address"));
+                let (client, client_hub) = endpoint().await;
+                let deadlines = SignalDeadlines {
+                    exchange: Duration::from_millis(400),
+                    round: Duration::from_secs(8),
+                };
+                let started = n0_future::time::Instant::now();
+                let outcome = dial_signal::dial_signal_with(
+                    &client,
+                    &crate::lookup::address_book(&client),
+                    nobody,
+                    &client_hub,
+                    deadlines,
+                    IceProfile { host_only: true },
+                )
+                .await;
 
-        assert!(outcome.is_err(), "nobody answers");
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "the connect must end at the exchange deadline, not the round deadline: took {:?}",
-            started.elapsed()
+                assert!(outcome.is_err(), "nobody answers");
+                assert!(
+                    started.elapsed() < Duration::from_secs(3),
+                    "the connect must end at the exchange deadline, not the round deadline: took {:?}",
+                    started.elapsed()
+                );
+                client.close().await;
+            },
         );
-        client.close().await;
     }
 
     /// Off the heal tick, only a node that already offers offers again: a
@@ -1492,6 +1601,7 @@ mod tests {
     /// once the heal tick armed its fallback.
     #[test]
     fn only_a_node_that_already_offers_offers_off_the_heal_tick() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = crate::testing::fresh_state();
         state.local_udp_transport = UdpTransport::Absent;
         assert!(rendezvous::offers_off_tick(&state), "a lane-needing node");
@@ -1519,6 +1629,7 @@ mod tests {
     /// held for it: that frame is the send.
     #[test]
     fn a_cold_non_neighbor_pair_waits_for_a_send_unless_a_frame_is_held_for_a_lane_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let peer = crate::testing::endpoint_id(7);
         let ip_pair = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
         let lane_pair = EndpointAddr::new(peer)
@@ -1560,6 +1671,7 @@ mod tests {
     fn a_pair_whose_probe_failed_on_a_lookup_only_relay_is_offered_a_session() {
         use crate::daemon::state::DirectState;
 
+        let _guard = ::habilis_network_test_tracing::init();
         let peer = crate::testing::endpoint_id(7);
         let ip_pair = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
         let mut state = crate::testing::fresh_state();
@@ -1604,6 +1716,7 @@ mod tests {
     fn a_peer_that_evicted_us_is_not_offered_a_session_unless_a_frame_is_held() {
         use crate::daemon::state::DirectState;
 
+        let _guard = ::habilis_network_test_tracing::init();
         let peer = crate::testing::endpoint_id(7);
         let pair = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
         let mut state = crate::testing::fresh_state();
@@ -1627,23 +1740,35 @@ mod tests {
 
     /// A session nothing uses is detached once the idle window has passed, and
     /// the pair then waits for a send.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_session_nothing_uses_is_detached_and_its_pair_waits_for_a_send() {
-        idle_session_detaches(|id| {
-            EndpointAddr::new(id).with_ip_addr("127.0.0.1:4000".parse().expect("addr"))
-        })
-        .await;
+    #[test]
+    fn a_session_nothing_uses_is_detached_and_its_pair_waits_for_a_send() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                idle_session_detaches(|id| {
+                    EndpointAddr::new(id).with_ip_addr("127.0.0.1:4000".parse().expect("addr"))
+                })
+                .await;
+            },
+        );
     }
 
     /// The same for a lane peer: its session is no longer kept for ever. It goes at the backstop
     /// like any other, and the pair waits for a held frame to be offered one again.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_lane_session_nothing_uses_is_detached_at_the_backstop() {
-        idle_session_detaches(|id| {
-            EndpointAddr::new(id)
-                .with_relay_url("https://relay.invalid".parse().expect("relay url"))
-        })
-        .await;
+    #[test]
+    fn a_lane_session_nothing_uses_is_detached_at_the_backstop() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                idle_session_detaches(|id| {
+                    EndpointAddr::new(id)
+                        .with_relay_url("https://relay.invalid".parse().expect("relay url"))
+                })
+                .await;
+            },
+        );
     }
 
     async fn idle_session_detaches(bob_addr: fn(EndpointId) -> EndpointAddr) {
@@ -1720,103 +1845,112 @@ mod tests {
 
     /// The retry pass offers a session to a cold pair with an IP path only after
     /// a send: while no pooled connection exists, the pair is left alone.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_retry_pass_offers_a_session_only_to_a_pair_that_sent() {
-        use crate::protocol::MeshId;
-        use crate::protocol::identity::Identity;
-        use iroh::endpoint::Connection;
-        use iroh::protocol::{AcceptError, ProtocolHandler};
+    #[test]
+    fn the_retry_pass_offers_a_session_only_to_a_pair_that_sent() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::protocol::MeshId;
+                use crate::protocol::identity::Identity;
+                use iroh::endpoint::Connection;
+                use iroh::protocol::{AcceptError, ProtocolHandler};
 
-        #[derive(Debug, Clone)]
-        struct Hold;
-        impl ProtocolHandler for Hold {
-            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                connection.closed().await;
-                Ok(())
-            }
-        }
+                #[derive(Debug, Clone)]
+                struct Hold;
+                impl ProtocolHandler for Hold {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        connection.closed().await;
+                        Ok(())
+                    }
+                }
 
-        let (endpoint, handle) = endpoint().await;
-        // Only the lower id offers, so the peer's key must be above ours.
-        // The id of our endpoint is random: with 255 seeds, one run in 256 found no key above it.
-        let key = (1u16..=u16::MAX)
-            .map(|seed| {
-                let mut bytes = [0u8; 32];
-                bytes[..2].copy_from_slice(&seed.to_le_bytes());
-                SecretKey::from_bytes(&bytes)
-            })
-            .find(|key| key.public() > endpoint.id())
-            .expect("a key above ours");
-        let builder = Endpoint::builder(presets::Minimal)
-            .secret_key(key)
-            .relay_mode(RelayMode::Disabled)
-            .clear_address_lookup();
-        let server: Endpoint = builder.bind().await.expect("bind a loopback server");
-        let router: Router = Router::builder(server.clone())
-            .accept(NUDGE_ALPN, NudgeAcceptor)
-            .accept(crate::transport::UNICAST_ALPN, Hold)
-            .spawn();
-        crate::lookup::add_peer_addr(&crate::lookup::address_book(&endpoint), server.addr());
+                let (endpoint, handle) = endpoint().await;
+                // Only the lower id offers, so the peer's key must be above ours.
+                // The id of our endpoint is random: with 255 seeds, one run in 256 found no key above it.
+                let key = (1u16..=u16::MAX)
+                    .map(|seed| {
+                        let mut bytes = [0u8; 32];
+                        bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                        SecretKey::from_bytes(&bytes)
+                    })
+                    .find(|key| key.public() > endpoint.id())
+                    .expect("a key above ours");
+                let builder = Endpoint::builder(presets::Minimal)
+                    .secret_key(key)
+                    .relay_mode(RelayMode::Disabled)
+                    .clear_address_lookup();
+                let server: Endpoint = builder.bind().await.expect("bind a loopback server");
+                let router: Router = Router::builder(server.clone())
+                    .accept(NUDGE_ALPN, NudgeAcceptor)
+                    .accept(crate::transport::UNICAST_ALPN, Hold)
+                    .spawn();
+                crate::lookup::add_peer_addr(
+                    &crate::lookup::address_book(&endpoint),
+                    server.addr(),
+                );
 
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
-        let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
-            .await
-            .expect("subscribe to a peerless topic");
-        let (gossip_sender, _receiver) = topic.split();
-        let sender = crate::transport::MeshSender::new(gossip_sender);
-        let mesh = MeshId::from("test");
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let author = crate::testing::nick("alice");
-        let sink = event::SilentSink;
-        let context = handler_ctx::HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &author,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: crate::testing::endpoint_id(9),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let mut state = crate::testing::fresh_state();
-        state.webrtc = Some(handle);
-        state.local_udp_transport = UdpTransport::Present;
-        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
-        state
-            .peer_endpoints
-            .insert(crate::testing::nick("bob"), server.addr());
+                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let topic = gossip
+                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let identity = Identity::generate();
+                let our_pubkey = identity.author_key();
+                let author = crate::testing::nick("alice");
+                let sink = event::SilentSink;
+                let context = handler_ctx::HandlerCtx {
+                    sender: &sender,
+                    endpoint: &endpoint,
+                    mesh: &mesh,
+                    author: &author,
+                    identity: &identity,
+                    our_pubkey,
+                    max_peers: 16,
+                    rendezvous_id: crate::testing::endpoint_id(9),
+                    external_msg_tx: None,
+                    sink: &sink,
+                };
+                let mut state = crate::testing::fresh_state();
+                state.webrtc = Some(handle);
+                state.local_udp_transport = UdpTransport::Present;
+                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+                state
+                    .peer_endpoints
+                    .insert(crate::testing::nick("bob"), server.addr());
 
-        retry::retry_sessions(&mut state, &context);
-        assert_eq!(
-            state.webrtc_admission.in_flight(),
-            0,
-            "a cold pair is not offered a session"
+                retry::retry_sessions(&mut state, &context);
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    0,
+                    "a cold pair is not offered a session"
+                );
+
+                state
+                    .unicast_pool
+                    .warm_or_dial(server.id())
+                    .await
+                    .expect("a send dials the peer");
+                retry::retry_sessions(&mut state, &context);
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    1,
+                    "after a send, the pair is offered a session"
+                );
+
+                // The dial to a closed signal port would hold its slot for a long deadline.
+                state.webrtc_admission.close();
+                assert!(
+                    until(|| state.webrtc_admission.in_flight() == 0).await,
+                    "closing the table cancels the round"
+                );
+                router.shutdown().await.expect("shutdown");
+                endpoint.close().await;
+            },
         );
-
-        state
-            .unicast_pool
-            .warm_or_dial(server.id())
-            .await
-            .expect("a send dials the peer");
-        retry::retry_sessions(&mut state, &context);
-        assert_eq!(
-            state.webrtc_admission.in_flight(),
-            1,
-            "after a send, the pair is offered a session"
-        );
-
-        // The dial to a closed signal port would hold its slot for a long deadline.
-        state.webrtc_admission.close();
-        assert!(
-            until(|| state.webrtc_admission.in_flight() == 0).await,
-            "closing the table cancels the round"
-        );
-        router.shutdown().await.expect("shutdown");
-        endpoint.close().await;
     }
 
     /// Only the lower id has a path watcher, so a pair that loses IP while the higher id sends
@@ -1825,846 +1959,915 @@ mod tests {
     /// offers by itself and takes the proof back, so that a frame is parked for the session
     /// instead of being refused on the relay. A pair that reads as UDP keeps its proof and gets
     /// no offer.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_higher_id_offers_and_demotes_a_proven_pair_that_reads_as_relay() {
-        use crate::daemon::state::DirectState;
-        use crate::protocol::MeshId;
-        use crate::protocol::identity::Identity;
-        use crate::transport::probe::PathKind;
-        use iroh::endpoint::Connection;
-        use iroh::protocol::{AcceptError, ProtocolHandler};
+    #[test]
+    fn the_higher_id_offers_and_demotes_a_proven_pair_that_reads_as_relay() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::daemon::state::DirectState;
+                use crate::protocol::MeshId;
+                use crate::protocol::identity::Identity;
+                use crate::transport::probe::PathKind;
+                use iroh::endpoint::Connection;
+                use iroh::protocol::{AcceptError, ProtocolHandler};
 
-        #[derive(Debug, Clone)]
-        struct Hold;
-        impl ProtocolHandler for Hold {
-            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                connection.closed().await;
-                Ok(())
-            }
-        }
+                #[derive(Debug, Clone)]
+                struct Hold;
+                impl ProtocolHandler for Hold {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        connection.closed().await;
+                        Ok(())
+                    }
+                }
 
-        let (endpoint, handle) = endpoint().await;
-        // The peer's key must be below ours, so that we are the higher id and wait to be dialled.
-        let key = (1u16..=u16::MAX)
-            .map(|seed| {
-                let mut bytes = [0u8; 32];
-                bytes[..2].copy_from_slice(&seed.to_le_bytes());
-                SecretKey::from_bytes(&bytes)
-            })
-            .find(|key| key.public() < endpoint.id())
-            .expect("a key below ours");
-        let builder = Endpoint::builder(presets::Minimal)
-            .secret_key(key)
-            .relay_mode(RelayMode::Disabled)
-            .clear_address_lookup();
-        let server: Endpoint = builder.bind().await.expect("bind a loopback server");
-        let router: Router = Router::builder(server.clone())
-            .accept(NUDGE_ALPN, NudgeAcceptor)
-            .accept(crate::transport::UNICAST_ALPN, Hold)
-            .spawn();
-        crate::lookup::add_peer_addr(&crate::lookup::address_book(&endpoint), server.addr());
+                let (endpoint, handle) = endpoint().await;
+                // The peer's key must be below ours, so that we are the higher id and wait to be dialled.
+                let key = (1u16..=u16::MAX)
+                    .map(|seed| {
+                        let mut bytes = [0u8; 32];
+                        bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                        SecretKey::from_bytes(&bytes)
+                    })
+                    .find(|key| key.public() < endpoint.id())
+                    .expect("a key below ours");
+                let builder = Endpoint::builder(presets::Minimal)
+                    .secret_key(key)
+                    .relay_mode(RelayMode::Disabled)
+                    .clear_address_lookup();
+                let server: Endpoint = builder.bind().await.expect("bind a loopback server");
+                let router: Router = Router::builder(server.clone())
+                    .accept(NUDGE_ALPN, NudgeAcceptor)
+                    .accept(crate::transport::UNICAST_ALPN, Hold)
+                    .spawn();
+                crate::lookup::add_peer_addr(
+                    &crate::lookup::address_book(&endpoint),
+                    server.addr(),
+                );
 
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
-        let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
-            .await
-            .expect("subscribe to a peerless topic");
-        let (gossip_sender, _receiver) = topic.split();
-        let sender = crate::transport::MeshSender::new(gossip_sender);
-        let mesh = MeshId::from("test");
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let author = crate::testing::nick("alice");
-        let sink = event::SilentSink;
-        let context = handler_ctx::HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &author,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: crate::testing::endpoint_id(9),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let mut state = crate::testing::fresh_state();
-        state.webrtc = Some(handle);
-        state.local_udp_transport = UdpTransport::Present;
-        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
-        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
-        state
-            .peer_endpoints
-            .insert(crate::testing::nick("bob"), server.addr());
-        let bob = server.id();
-        state
-            .unicast_pool
-            .warm_or_dial(bob)
-            .await
-            .expect("a send dials the peer");
-        state.direct.insert(bob, DirectState::Direct);
+                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let topic = gossip
+                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let identity = Identity::generate();
+                let our_pubkey = identity.author_key();
+                let author = crate::testing::nick("alice");
+                let sink = event::SilentSink;
+                let context = handler_ctx::HandlerCtx {
+                    sender: &sender,
+                    endpoint: &endpoint,
+                    mesh: &mesh,
+                    author: &author,
+                    identity: &identity,
+                    our_pubkey,
+                    max_peers: 16,
+                    rendezvous_id: crate::testing::endpoint_id(9),
+                    external_msg_tx: None,
+                    sink: &sink,
+                };
+                let mut state = crate::testing::fresh_state();
+                state.webrtc = Some(handle);
+                state.local_udp_transport = UdpTransport::Present;
+                state.relay_transport = crate::transport::PayloadPath::DirectOnly;
+                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+                state
+                    .peer_endpoints
+                    .insert(crate::testing::nick("bob"), server.addr());
+                let bob = server.id();
+                state
+                    .unicast_pool
+                    .warm_or_dial(bob)
+                    .await
+                    .expect("a send dials the peer");
+                state.direct.insert(bob, DirectState::Direct);
 
-        state.path_kinds.insert(bob, PathKind::Ip);
-        retry::retry_sessions(&mut state, &context);
-        assert_eq!(
-            state.webrtc_admission.in_flight(),
-            0,
-            "UDP is selected: no offer"
+                state.path_kinds.insert(bob, PathKind::Ip);
+                retry::retry_sessions(&mut state, &context);
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    0,
+                    "UDP is selected: no offer"
+                );
+                assert_eq!(
+                    state.direct.get(&bob),
+                    Some(&DirectState::Direct),
+                    "bob is direct in the state after the verdict"
+                );
+
+                state.path_kinds.insert(bob, PathKind::Relay);
+                retry::retry_sessions(&mut state, &context);
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    1,
+                    "the proof is stale: the higher id offers"
+                );
+                assert_eq!(
+                    state.direct.get(&bob),
+                    Some(&DirectState::RelayOnly),
+                    "and takes the proof back, so that a frame is parked"
+                );
+
+                state.webrtc_admission.close();
+                assert!(
+                    until(|| state.webrtc_admission.in_flight() == 0).await,
+                    "closing the table cancels the round"
+                );
+                router.shutdown().await.expect("shutdown");
+                endpoint.close().await;
+            },
         );
-        assert_eq!(
-            state.direct.get(&bob),
-            Some(&DirectState::Direct),
-            "bob is direct in the state after the verdict"
-        );
-
-        state.path_kinds.insert(bob, PathKind::Relay);
-        retry::retry_sessions(&mut state, &context);
-        assert_eq!(
-            state.webrtc_admission.in_flight(),
-            1,
-            "the proof is stale: the higher id offers"
-        );
-        assert_eq!(
-            state.direct.get(&bob),
-            Some(&DirectState::RelayOnly),
-            "and takes the proof back, so that a frame is parked"
-        );
-
-        state.webrtc_admission.close();
-        assert!(
-            until(|| state.webrtc_admission.in_flight() == 0).await,
-            "closing the table cancels the round"
-        );
-        router.shutdown().await.expect("shutdown");
-        endpoint.close().await;
     }
 
     /// The retry pass offers a session to an idle lane peer only when a frame is held for it
     /// (decision D11): without one, the pair is left alone.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_retry_pass_offers_a_session_to_an_idle_lane_peer_only_for_a_held_frame() {
-        use crate::protocol::MeshId;
-        use crate::protocol::identity::Identity;
-        use iroh::endpoint::Connection;
-        use iroh::protocol::{AcceptError, ProtocolHandler};
+    #[test]
+    fn the_retry_pass_offers_a_session_to_an_idle_lane_peer_only_for_a_held_frame() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::protocol::MeshId;
+                use crate::protocol::identity::Identity;
+                use iroh::endpoint::Connection;
+                use iroh::protocol::{AcceptError, ProtocolHandler};
 
-        #[derive(Debug, Clone)]
-        struct Hold;
-        impl ProtocolHandler for Hold {
-            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                connection.closed().await;
-                Ok(())
-            }
-        }
+                #[derive(Debug, Clone)]
+                struct Hold;
+                impl ProtocolHandler for Hold {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        connection.closed().await;
+                        Ok(())
+                    }
+                }
 
-        let (endpoint, handle) = endpoint().await;
-        // Only the lower id offers, so the peer's key must be above ours.
-        // The id of our endpoint is random: with 255 seeds, one run in 256 found no key above it.
-        let key = (1u16..=u16::MAX)
-            .map(|seed| {
-                let mut bytes = [0u8; 32];
-                bytes[..2].copy_from_slice(&seed.to_le_bytes());
-                SecretKey::from_bytes(&bytes)
-            })
-            .find(|key| key.public() > endpoint.id())
-            .expect("a key above ours");
-        let builder = Endpoint::builder(presets::Minimal)
-            .secret_key(key)
-            .relay_mode(RelayMode::Disabled)
-            .clear_address_lookup();
-        let server: Endpoint = builder.bind().await.expect("bind a loopback server");
-        let router: Router = Router::builder(server.clone())
-            .accept(NUDGE_ALPN, NudgeAcceptor)
-            .accept(crate::transport::UNICAST_ALPN, Hold)
-            .spawn();
-        crate::lookup::add_peer_addr(&crate::lookup::address_book(&endpoint), server.addr());
+                let (endpoint, handle) = endpoint().await;
+                // Only the lower id offers, so the peer's key must be above ours.
+                // The id of our endpoint is random: with 255 seeds, one run in 256 found no key above it.
+                let key = (1u16..=u16::MAX)
+                    .map(|seed| {
+                        let mut bytes = [0u8; 32];
+                        bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                        SecretKey::from_bytes(&bytes)
+                    })
+                    .find(|key| key.public() > endpoint.id())
+                    .expect("a key above ours");
+                let builder = Endpoint::builder(presets::Minimal)
+                    .secret_key(key)
+                    .relay_mode(RelayMode::Disabled)
+                    .clear_address_lookup();
+                let server: Endpoint = builder.bind().await.expect("bind a loopback server");
+                let router: Router = Router::builder(server.clone())
+                    .accept(NUDGE_ALPN, NudgeAcceptor)
+                    .accept(crate::transport::UNICAST_ALPN, Hold)
+                    .spawn();
+                crate::lookup::add_peer_addr(
+                    &crate::lookup::address_book(&endpoint),
+                    server.addr(),
+                );
 
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
-        let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
-            .await
-            .expect("subscribe to a peerless topic");
-        let (gossip_sender, _receiver) = topic.split();
-        let sender = crate::transport::MeshSender::new(gossip_sender);
-        let mesh = MeshId::from("test");
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let author = crate::testing::nick("alice");
-        let sink = event::SilentSink;
-        let context = handler_ctx::HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &author,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: crate::testing::endpoint_id(9),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let mut state = crate::testing::fresh_state();
-        state.webrtc = Some(handle);
-        state.local_udp_transport = UdpTransport::Present;
-        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
-        let relay_url: iroh::RelayUrl = "https://relay.invalid".parse().expect("relay url");
-        state.peer_endpoints.insert(
-            crate::testing::nick("bob"),
-            EndpointAddr::new(server.id()).with_relay_url(relay_url),
+                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let topic = gossip
+                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let identity = Identity::generate();
+                let our_pubkey = identity.author_key();
+                let author = crate::testing::nick("alice");
+                let sink = event::SilentSink;
+                let context = handler_ctx::HandlerCtx {
+                    sender: &sender,
+                    endpoint: &endpoint,
+                    mesh: &mesh,
+                    author: &author,
+                    identity: &identity,
+                    our_pubkey,
+                    max_peers: 16,
+                    rendezvous_id: crate::testing::endpoint_id(9),
+                    external_msg_tx: None,
+                    sink: &sink,
+                };
+                let mut state = crate::testing::fresh_state();
+                state.webrtc = Some(handle);
+                state.local_udp_transport = UdpTransport::Present;
+                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+                let relay_url: iroh::RelayUrl = "https://relay.invalid".parse().expect("relay url");
+                state.peer_endpoints.insert(
+                    crate::testing::nick("bob"),
+                    EndpointAddr::new(server.id()).with_relay_url(relay_url),
+                );
+
+                retry::retry_sessions(&mut state, &context);
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    0,
+                    "an idle lane peer is not offered a session"
+                );
+
+                state.want_lane_session(server.id(), clock::Instant::now());
+                retry::retry_sessions(&mut state, &context);
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    1,
+                    "a frame is held for the peer: it is offered a session"
+                );
+
+                // The dial to a closed signal port would hold its slot for a long deadline.
+                state.webrtc_admission.close();
+                assert!(
+                    until(|| state.webrtc_admission.in_flight() == 0).await,
+                    "closing the table cancels the round"
+                );
+                router.shutdown().await.expect("shutdown");
+                endpoint.close().await;
+            },
         );
-
-        retry::retry_sessions(&mut state, &context);
-        assert_eq!(
-            state.webrtc_admission.in_flight(),
-            0,
-            "an idle lane peer is not offered a session"
-        );
-
-        state.want_lane_session(server.id(), clock::Instant::now());
-        retry::retry_sessions(&mut state, &context);
-        assert_eq!(
-            state.webrtc_admission.in_flight(),
-            1,
-            "a frame is held for the peer: it is offered a session"
-        );
-
-        // The dial to a closed signal port would hold its slot for a long deadline.
-        state.webrtc_admission.close();
-        assert!(
-            until(|| state.webrtc_admission.in_flight() == 0).await,
-            "closing the table cancels the round"
-        );
-        router.shutdown().await.expect("shutdown");
-        endpoint.close().await;
     }
 
     /// **A graft that this node asks for opens the session of a lane peer.** In a mesh where every
     /// pair needs the lane and nothing is sent, no frame is held. The graft of a member is the
     /// reason for its session: without it the pair stays `Pending` for ever and no member links
     /// to another member.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_graft_of_a_cold_lane_peer_opens_its_session() {
-        use crate::protocol::MeshId;
-        use crate::protocol::identity::Identity;
+    #[test]
+    fn a_graft_of_a_cold_lane_peer_opens_its_session() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::protocol::MeshId;
+                use crate::protocol::identity::Identity;
 
-        let (endpoint, handle) = endpoint().await;
-        // Only the lower id offers, so the peer's key must be above ours.
-        let key = (1u16..=u16::MAX)
-            .map(|seed| {
-                let mut bytes = [0u8; 32];
-                bytes[..2].copy_from_slice(&seed.to_le_bytes());
-                SecretKey::from_bytes(&bytes)
-            })
-            .find(|key| key.public() > endpoint.id())
-            .expect("a key above ours");
-        let (server, _server_hub) = endpoint_with(key).await;
-        let peer = server.id();
+                let (endpoint, handle) = endpoint().await;
+                // Only the lower id offers, so the peer's key must be above ours.
+                let key = (1u16..=u16::MAX)
+                    .map(|seed| {
+                        let mut bytes = [0u8; 32];
+                        bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                        SecretKey::from_bytes(&bytes)
+                    })
+                    .find(|key| key.public() > endpoint.id())
+                    .expect("a key above ours");
+                let (server, _server_hub) = endpoint_with(key).await;
+                let peer = server.id();
 
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
-        let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
-            .await
-            .expect("subscribe to a peerless topic");
-        let (gossip_sender, _receiver) = topic.split();
-        let sender = crate::transport::MeshSender::new(gossip_sender);
-        let mesh = MeshId::from("test");
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let author = crate::testing::nick("alice");
-        let sink = event::SilentSink;
-        let context = handler_ctx::HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &author,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: crate::testing::endpoint_id(9),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let mut state = crate::testing::fresh_state();
-        state.webrtc = Some(handle);
-        state.local_udp_transport = UdpTransport::Present;
-        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
-        let address = EndpointAddr::new(peer)
-            .with_relay_url("https://relay.invalid".parse().expect("relay url"));
-        state
-            .peer_endpoints
-            .insert(crate::testing::nick("bob"), address.clone());
-        assert!(
-            retry::held_back(&state, &address),
-            "cold: nothing asks for the session yet"
+                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let topic = gossip
+                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let identity = Identity::generate();
+                let our_pubkey = identity.author_key();
+                let author = crate::testing::nick("alice");
+                let sink = event::SilentSink;
+                let context = handler_ctx::HandlerCtx {
+                    sender: &sender,
+                    endpoint: &endpoint,
+                    mesh: &mesh,
+                    author: &author,
+                    identity: &identity,
+                    our_pubkey,
+                    max_peers: 16,
+                    rendezvous_id: crate::testing::endpoint_id(9),
+                    external_msg_tx: None,
+                    sink: &sink,
+                };
+                let mut state = crate::testing::fresh_state();
+                state.webrtc = Some(handle);
+                state.local_udp_transport = UdpTransport::Present;
+                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+                let address = EndpointAddr::new(peer)
+                    .with_relay_url("https://relay.invalid".parse().expect("relay url"));
+                state
+                    .peer_endpoints
+                    .insert(crate::testing::nick("bob"), address.clone());
+                assert!(
+                    retry::held_back(&state, &address),
+                    "cold: nothing asks for the session yet"
+                );
+
+                let grafted = probe::ensure_direct(&mut state, &context, peer, &address);
+                assert!(!grafted, "the graft waits for the session");
+                assert!(
+                    !retry::held_back(&state, &address),
+                    "the graft asks for the session of the lane peer"
+                );
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    1,
+                    "the session is offered at once"
+                );
+
+                // The dial to a closed signal port would hold its slot for a long deadline.
+                state.webrtc_admission.close();
+                server.close().await;
+                endpoint.close().await;
+            },
         );
-
-        let grafted = probe::ensure_direct(&mut state, &context, peer, &address);
-        assert!(!grafted, "the graft waits for the session");
-        assert!(
-            !retry::held_back(&state, &address),
-            "the graft asks for the session of the lane peer"
-        );
-        assert_eq!(
-            state.webrtc_admission.in_flight(),
-            1,
-            "the session is offered at once"
-        );
-
-        // The dial to a closed signal port would hold its slot for a long deadline.
-        state.webrtc_admission.close();
-        server.close().await;
-        endpoint.close().await;
     }
 
     /// **A frame held on the higher-id node opens the session.** The lower id has no reason to
     /// offer, so the higher id offers when a frame is held for the peer, and the session attaches
     /// on both nodes.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_frame_held_on_the_higher_id_node_opens_the_session() {
-        use crate::protocol::MeshId;
-        use crate::protocol::identity::Identity;
+    #[test]
+    fn a_frame_held_on_the_higher_id_node_opens_the_session() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::protocol::MeshId;
+                use crate::protocol::identity::Identity;
 
-        let (endpoint, handle) = endpoint().await;
-        // Only the lower id offers unless a frame is held, and here the peer is the lower id.
-        // The id of our endpoint is random, so many seeds are tried.
-        let key = (1u16..=u16::MAX)
-            .map(|seed| {
-                let mut bytes = [0u8; 32];
-                bytes[..2].copy_from_slice(&seed.to_le_bytes());
-                SecretKey::from_bytes(&bytes)
-            })
-            .find(|key| key.public() < endpoint.id())
-            .expect("a key below ours");
-        let (server, server_hub) = endpoint_with(key).await;
-        let server_admission = SignalAdmission::new(8);
-        let router = serve(&server, &server_hub, &server_admission);
+                let (endpoint, handle) = endpoint().await;
+                // Only the lower id offers unless a frame is held, and here the peer is the lower id.
+                // The id of our endpoint is random, so many seeds are tried.
+                let key = (1u16..=u16::MAX)
+                    .map(|seed| {
+                        let mut bytes = [0u8; 32];
+                        bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                        SecretKey::from_bytes(&bytes)
+                    })
+                    .find(|key| key.public() < endpoint.id())
+                    .expect("a key below ours");
+                let (server, server_hub) = endpoint_with(key).await;
+                let server_admission = SignalAdmission::new(8);
+                let router = serve(&server, &server_hub, &server_admission);
 
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
-        let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
-            .await
-            .expect("subscribe to a peerless topic");
-        let (gossip_sender, _receiver) = topic.split();
-        let sender = crate::transport::MeshSender::new(gossip_sender);
-        let mesh = MeshId::from("test");
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let author = crate::testing::nick("alice");
-        let sink = event::SilentSink;
-        let context = handler_ctx::HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &author,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: crate::testing::endpoint_id(9),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let mut state = crate::testing::fresh_state();
-        state.webrtc = Some(handle.clone());
-        state.local_udp_transport = UdpTransport::Absent;
-        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
-        state
-            .peer_endpoints
-            .insert(crate::testing::nick("bob"), server.addr());
+                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let topic = gossip
+                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let identity = Identity::generate();
+                let our_pubkey = identity.author_key();
+                let author = crate::testing::nick("alice");
+                let sink = event::SilentSink;
+                let context = handler_ctx::HandlerCtx {
+                    sender: &sender,
+                    endpoint: &endpoint,
+                    mesh: &mesh,
+                    author: &author,
+                    identity: &identity,
+                    our_pubkey,
+                    max_peers: 16,
+                    rendezvous_id: crate::testing::endpoint_id(9),
+                    external_msg_tx: None,
+                    sink: &sink,
+                };
+                let mut state = crate::testing::fresh_state();
+                state.webrtc = Some(handle.clone());
+                state.local_udp_transport = UdpTransport::Absent;
+                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+                state
+                    .peer_endpoints
+                    .insert(crate::testing::nick("bob"), server.addr());
 
-        retry::retry_sessions(&mut state, &context);
-        assert_eq!(
-            state.webrtc_admission.in_flight(),
-            0,
-            "an idle lane peer is not offered a session"
+                retry::retry_sessions(&mut state, &context);
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    0,
+                    "an idle lane peer is not offered a session"
+                );
+
+                state.want_lane_session(server.id(), clock::Instant::now());
+                retry::retry_sessions(&mut state, &context);
+                assert!(
+                    until(|| handle.has_session(&server.id())
+                        && server_hub.has_session(&endpoint.id()))
+                    .await,
+                    "a frame is held for the lower id: the higher id offers, and the session attaches"
+                );
+
+                router.shutdown().await.expect("shutdown");
+                server.close().await;
+                endpoint.close().await;
+            },
         );
-
-        state.want_lane_session(server.id(), clock::Instant::now());
-        retry::retry_sessions(&mut state, &context);
-        assert!(
-            until(|| handle.has_session(&server.id()) && server_hub.has_session(&endpoint.id()))
-                .await,
-            "a frame is held for the lower id: the higher id offers, and the session attaches"
-        );
-
-        router.shutdown().await.expect("shutdown");
-        server.close().await;
-        endpoint.close().await;
     }
 
     /// A session carries the pair whatever one connection reads: a connection opened before the
     /// attach reads `Relay` until a path event moves it. With a session attached the proof stands:
     /// no demotion, no offer.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_pair_with_a_session_keeps_its_proof_when_a_connection_reads_as_relay() {
-        use crate::daemon::state::DirectState;
-        use crate::protocol::MeshId;
-        use crate::protocol::identity::Identity;
-        use crate::transport::probe::PathKind;
+    #[test]
+    fn a_pair_with_a_session_keeps_its_proof_when_a_connection_reads_as_relay() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::daemon::state::DirectState;
+                use crate::protocol::MeshId;
+                use crate::protocol::identity::Identity;
+                use crate::transport::probe::PathKind;
 
-        let (endpoint, handle) = endpoint().await;
-        // The answerer of the session nudges this endpoint, the offerer, on the nudge ALPN.
-        let nudge_router = Router::builder(endpoint.clone())
-            .accept(NUDGE_ALPN, NudgeAcceptor)
-            .spawn();
-        // The peer's key must be below ours: we are the higher id, so a session is offered here
-        // only for a held frame, which the test uses to attach one.
-        let key = (1u16..=u16::MAX)
-            .map(|seed| {
-                let mut bytes = [0u8; 32];
-                bytes[..2].copy_from_slice(&seed.to_le_bytes());
-                SecretKey::from_bytes(&bytes)
-            })
-            .find(|key| key.public() < endpoint.id())
-            .expect("a key below ours");
-        let (server, server_hub) = endpoint_with(key).await;
-        let server_admission = SignalAdmission::new(8);
-        let router = serve(&server, &server_hub, &server_admission);
+                let (endpoint, handle) = endpoint().await;
+                // The answerer of the session nudges this endpoint, the offerer, on the nudge ALPN.
+                let nudge_router = Router::builder(endpoint.clone())
+                    .accept(NUDGE_ALPN, NudgeAcceptor)
+                    .spawn();
+                // The peer's key must be below ours: we are the higher id, so a session is offered here
+                // only for a held frame, which the test uses to attach one.
+                let key = (1u16..=u16::MAX)
+                    .map(|seed| {
+                        let mut bytes = [0u8; 32];
+                        bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                        SecretKey::from_bytes(&bytes)
+                    })
+                    .find(|key| key.public() < endpoint.id())
+                    .expect("a key below ours");
+                let (server, server_hub) = endpoint_with(key).await;
+                let server_admission = SignalAdmission::new(8);
+                let router = serve(&server, &server_hub, &server_admission);
 
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
-        let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
-            .await
-            .expect("subscribe to a peerless topic");
-        let (gossip_sender, _receiver) = topic.split();
-        let sender = crate::transport::MeshSender::new(gossip_sender);
-        let mesh = MeshId::from("test");
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let author = crate::testing::nick("alice");
-        let sink = event::SilentSink;
-        let context = handler_ctx::HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &author,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: crate::testing::endpoint_id(9),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let mut state = crate::testing::fresh_state();
-        state.webrtc = Some(handle.clone());
-        state.local_udp_transport = UdpTransport::Present;
-        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
-        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
-        state
-            .peer_endpoints
-            .insert(crate::testing::nick("bob"), server.addr());
-        let bob = server.id();
+                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let topic = gossip
+                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let identity = Identity::generate();
+                let our_pubkey = identity.author_key();
+                let author = crate::testing::nick("alice");
+                let sink = event::SilentSink;
+                let context = handler_ctx::HandlerCtx {
+                    sender: &sender,
+                    endpoint: &endpoint,
+                    mesh: &mesh,
+                    author: &author,
+                    identity: &identity,
+                    our_pubkey,
+                    max_peers: 16,
+                    rendezvous_id: crate::testing::endpoint_id(9),
+                    external_msg_tx: None,
+                    sink: &sink,
+                };
+                let mut state = crate::testing::fresh_state();
+                state.webrtc = Some(handle.clone());
+                state.local_udp_transport = UdpTransport::Present;
+                state.relay_transport = crate::transport::PayloadPath::DirectOnly;
+                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+                state
+                    .peer_endpoints
+                    .insert(crate::testing::nick("bob"), server.addr());
+                let bob = server.id();
 
-        // Attach a session: a frame is held for the peer, and the higher id offers for it.
-        state.want_lane_session(bob, clock::Instant::now());
-        state.direct.insert(bob, DirectState::RelayOnly);
-        state.path_kinds.insert(bob, PathKind::Relay);
-        // The server serves no unicast ALPN: a cooldown stands for the failed dial that keeps UDP
-        // from winning the race, without the WARN of a refused ALPN.
-        state.unicast_pool.note_dial_failure(bob).await;
-        retry::retry_sessions(&mut state, &context);
-        assert!(
-            until(|| handle.has_session(&bob) && server_hub.has_session(&endpoint.id())).await,
-            "the session attaches"
+                // Attach a session: a frame is held for the peer, and the higher id offers for it.
+                state.want_lane_session(bob, clock::Instant::now());
+                state.direct.insert(bob, DirectState::RelayOnly);
+                state.path_kinds.insert(bob, PathKind::Relay);
+                // The server serves no unicast ALPN: a cooldown stands for the failed dial that keeps UDP
+                // from winning the race, without the WARN of a refused ALPN.
+                state.unicast_pool.note_dial_failure(bob).await;
+                retry::retry_sessions(&mut state, &context);
+                assert!(
+                    until(|| handle.has_session(&bob) && server_hub.has_session(&endpoint.id()))
+                        .await,
+                    "the session attaches"
+                );
+
+                // The session is up and the proof is back, but a connection still reads as the relay. The
+                // frame is still held, so that the pair is not left alone for want of a send.
+                state.direct.insert(bob, DirectState::Direct);
+                state.path_kinds.insert(bob, PathKind::Relay);
+                let address = server.addr();
+                negotiate_session::negotiate_session(&mut state, &context, bob, address);
+                assert_eq!(
+                    state.direct.get(&bob),
+                    Some(&DirectState::Direct),
+                    "a session carries the pair: the reading of one connection does not take the proof back"
+                );
+
+                // The same for a connection that reads the gossip rung: the graft is not skipped, as the
+                // gossip link will ride the session and not the rung.
+                state.path_kinds.insert(bob, PathKind::Gossip);
+                assert!(
+                    !state.rides_gossip_rung(bob),
+                    "a session carries the pair: a connection on the gossip rung does not stop the graft"
+                );
+
+                router.shutdown().await.expect("shutdown");
+                server.close().await;
+                nudge_router
+                    .shutdown()
+                    .await
+                    .expect("shutdown the nudge router");
+                endpoint.close().await;
+            },
         );
-
-        // The session is up and the proof is back, but a connection still reads as the relay. The
-        // frame is still held, so that the pair is not left alone for want of a send.
-        state.direct.insert(bob, DirectState::Direct);
-        state.path_kinds.insert(bob, PathKind::Relay);
-        let address = server.addr();
-        negotiate_session::negotiate_session(&mut state, &context, bob, address);
-        assert_eq!(
-            state.direct.get(&bob),
-            Some(&DirectState::Direct),
-            "a session carries the pair: the reading of one connection does not take the proof back"
-        );
-
-        // The same for a connection that reads the gossip rung: the graft is not skipped, as the
-        // gossip link will ride the session and not the rung.
-        state.path_kinds.insert(bob, PathKind::Gossip);
-        assert!(
-            !state.rides_gossip_rung(bob),
-            "a session carries the pair: a connection on the gossip rung does not stop the graft"
-        );
-
-        router.shutdown().await.expect("shutdown");
-        server.close().await;
-        nudge_router
-            .shutdown()
-            .await
-            .expect("shutdown the nudge router");
-        endpoint.close().await;
     }
 
     /// **UDP returns on a pair that only gossips.** Such a pair has no path watcher, so the session
     /// that the race attached would stay until the backstop. The reading of the admission table
     /// detaches it, on the fast ticker: a relay reading keeps it, an IP reading drops it.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_session_is_detached_once_udp_is_selected_again() {
-        use crate::daemon::state::DirectState;
-        use crate::protocol::MeshId;
-        use crate::protocol::identity::Identity;
-        use crate::transport::probe::PathKind;
+    #[test]
+    fn a_session_is_detached_once_udp_is_selected_again() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::daemon::state::DirectState;
+                use crate::protocol::MeshId;
+                use crate::protocol::identity::Identity;
+                use crate::transport::probe::PathKind;
 
-        let (endpoint, handle) = endpoint().await;
-        // The answerer of the session nudges this endpoint, the offerer, on the nudge ALPN.
-        let nudge_router = Router::builder(endpoint.clone())
-            .accept(NUDGE_ALPN, NudgeAcceptor)
-            .spawn();
-        let key = (1u16..=u16::MAX)
-            .map(|seed| {
-                let mut bytes = [0u8; 32];
-                bytes[..2].copy_from_slice(&seed.to_le_bytes());
-                SecretKey::from_bytes(&bytes)
-            })
-            .find(|key| key.public() < endpoint.id())
-            .expect("a key below ours");
-        let (server, server_hub) = endpoint_with(key).await;
-        let server_admission = SignalAdmission::new(8);
-        let router = serve(&server, &server_hub, &server_admission);
+                let (endpoint, handle) = endpoint().await;
+                // The answerer of the session nudges this endpoint, the offerer, on the nudge ALPN.
+                let nudge_router = Router::builder(endpoint.clone())
+                    .accept(NUDGE_ALPN, NudgeAcceptor)
+                    .spawn();
+                let key = (1u16..=u16::MAX)
+                    .map(|seed| {
+                        let mut bytes = [0u8; 32];
+                        bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                        SecretKey::from_bytes(&bytes)
+                    })
+                    .find(|key| key.public() < endpoint.id())
+                    .expect("a key below ours");
+                let (server, server_hub) = endpoint_with(key).await;
+                let server_admission = SignalAdmission::new(8);
+                let router = serve(&server, &server_hub, &server_admission);
 
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
-        let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
-            .await
-            .expect("subscribe to a peerless topic");
-        let (gossip_sender, _receiver) = topic.split();
-        let sender = crate::transport::MeshSender::new(gossip_sender);
-        let mesh = MeshId::from("test");
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let author = crate::testing::nick("alice");
-        let sink = event::SilentSink;
-        let context = handler_ctx::HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &author,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: crate::testing::endpoint_id(9),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let mut state = crate::testing::fresh_state();
-        state.webrtc = Some(handle.clone());
-        state.local_udp_transport = UdpTransport::Present;
-        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
-        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
-        state
-            .peer_endpoints
-            .insert(crate::testing::nick("bob"), server.addr());
-        let bob = server.id();
+                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let topic = gossip
+                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let identity = Identity::generate();
+                let our_pubkey = identity.author_key();
+                let author = crate::testing::nick("alice");
+                let sink = event::SilentSink;
+                let context = handler_ctx::HandlerCtx {
+                    sender: &sender,
+                    endpoint: &endpoint,
+                    mesh: &mesh,
+                    author: &author,
+                    identity: &identity,
+                    our_pubkey,
+                    max_peers: 16,
+                    rendezvous_id: crate::testing::endpoint_id(9),
+                    external_msg_tx: None,
+                    sink: &sink,
+                };
+                let mut state = crate::testing::fresh_state();
+                state.webrtc = Some(handle.clone());
+                state.local_udp_transport = UdpTransport::Present;
+                state.relay_transport = crate::transport::PayloadPath::DirectOnly;
+                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+                state
+                    .peer_endpoints
+                    .insert(crate::testing::nick("bob"), server.addr());
+                let bob = server.id();
 
-        state.want_lane_session(bob, clock::Instant::now());
-        state.direct.insert(bob, DirectState::RelayOnly);
-        state.path_kinds.insert(bob, PathKind::Relay);
-        // The server serves no unicast ALPN: a cooldown stands for the failed dial that keeps UDP
-        // from winning the race, without the WARN of a refused ALPN.
-        state.unicast_pool.note_dial_failure(bob).await;
-        retry::retry_sessions(&mut state, &context);
-        assert!(
-            until(|| handle.has_session(&bob) && server_hub.has_session(&endpoint.id())).await,
-            "the session attaches"
+                state.want_lane_session(bob, clock::Instant::now());
+                state.direct.insert(bob, DirectState::RelayOnly);
+                state.path_kinds.insert(bob, PathKind::Relay);
+                // The server serves no unicast ALPN: a cooldown stands for the failed dial that keeps UDP
+                // from winning the race, without the WARN of a refused ALPN.
+                state.unicast_pool.note_dial_failure(bob).await;
+                retry::retry_sessions(&mut state, &context);
+                assert!(
+                    until(|| handle.has_session(&bob) && server_hub.has_session(&endpoint.id()))
+                        .await,
+                    "the session attaches"
+                );
+
+                state.path_kinds.insert(bob, PathKind::Relay);
+                session_policy::detach_sessions_under_udp(&mut state, &context).await;
+                assert!(
+                    handle.has_session(&bob),
+                    "the pair still reads as the relay"
+                );
+
+                state.path_kinds.insert(bob, PathKind::Ip);
+                session_policy::detach_sessions_under_udp(&mut state, &context).await;
+                assert!(!handle.has_session(&bob), "UDP is selected again");
+                assert_eq!(
+                    state.direct.get(&bob),
+                    Some(&DirectState::Direct),
+                    "the pair is proven direct again"
+                );
+
+                router.shutdown().await.expect("shutdown");
+                server.close().await;
+                nudge_router
+                    .shutdown()
+                    .await
+                    .expect("shutdown the nudge router");
+                endpoint.close().await;
+            },
         );
-
-        state.path_kinds.insert(bob, PathKind::Relay);
-        session_policy::detach_sessions_under_udp(&mut state, &context).await;
-        assert!(
-            handle.has_session(&bob),
-            "the pair still reads as the relay"
-        );
-
-        state.path_kinds.insert(bob, PathKind::Ip);
-        session_policy::detach_sessions_under_udp(&mut state, &context).await;
-        assert!(!handle.has_session(&bob), "UDP is selected again");
-        assert_eq!(
-            state.direct.get(&bob),
-            Some(&DirectState::Direct),
-            "the pair is proven direct again"
-        );
-
-        router.shutdown().await.expect("shutdown");
-        server.close().await;
-        nudge_router
-            .shutdown()
-            .await
-            .expect("shutdown the nudge router");
-        endpoint.close().await;
     }
 
     /// **A pass paces the lane offers.** Six lane members, none linked: the pass offers a session
     /// to `LANE_OFFERS_IN_FLIGHT` of them. The others are not touched: no `Pending` mark, so the
     /// next pass picks them.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_retry_pass_offers_to_the_budget_of_lane_members_and_leaves_the_others_alone() {
-        use crate::protocol::MeshId;
-        use crate::protocol::identity::Identity;
-        use crate::util::tuning::LANE_OFFERS_IN_FLIGHT;
+    #[test]
+    fn a_retry_pass_offers_to_the_budget_of_lane_members_and_leaves_the_others_alone() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::protocol::MeshId;
+                use crate::protocol::identity::Identity;
+                use crate::util::tuning::LANE_OFFERS_IN_FLIGHT;
 
-        let (endpoint, handle) = endpoint().await;
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
-        let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
-            .await
-            .expect("subscribe to a peerless topic");
-        let (gossip_sender, _receiver) = topic.split();
-        let sender = crate::transport::MeshSender::new(gossip_sender);
-        let mesh = MeshId::from("test");
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let author = crate::testing::nick("alice");
-        let sink = event::SilentSink;
-        let context = handler_ctx::HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &author,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: crate::testing::endpoint_id(99),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let mut state = crate::testing::fresh_state();
-        state.webrtc = Some(handle);
-        state.local_udp_transport = UdpTransport::Present;
-        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
-        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
-        let members: Vec<EndpointId> = (1..=6).map(crate::testing::endpoint_id).collect();
-        for (index, id) in members.iter().enumerate() {
-            let address = EndpointAddr::new(*id)
-                .with_relay_url("https://relay.invalid".parse().expect("relay url"));
-            state
-                .peer_endpoints
-                .insert(crate::testing::nick(&format!("member{index}")), address);
-        }
+                let (endpoint, handle) = endpoint().await;
+                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let topic = gossip
+                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let identity = Identity::generate();
+                let our_pubkey = identity.author_key();
+                let author = crate::testing::nick("alice");
+                let sink = event::SilentSink;
+                let context = handler_ctx::HandlerCtx {
+                    sender: &sender,
+                    endpoint: &endpoint,
+                    mesh: &mesh,
+                    author: &author,
+                    identity: &identity,
+                    our_pubkey,
+                    max_peers: 16,
+                    rendezvous_id: crate::testing::endpoint_id(99),
+                    external_msg_tx: None,
+                    sink: &sink,
+                };
+                let mut state = crate::testing::fresh_state();
+                state.webrtc = Some(handle);
+                state.local_udp_transport = UdpTransport::Present;
+                state.relay_transport = crate::transport::PayloadPath::DirectOnly;
+                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+                let members: Vec<EndpointId> = (1..=6).map(crate::testing::endpoint_id).collect();
+                for (index, id) in members.iter().enumerate() {
+                    let address = EndpointAddr::new(*id)
+                        .with_relay_url("https://relay.invalid".parse().expect("relay url"));
+                    state
+                        .peer_endpoints
+                        .insert(crate::testing::nick(&format!("member{index}")), address);
+                }
 
-        probe::retry_direct(&mut state, &context, false).await;
+                probe::retry_direct(&mut state, &context, false).await;
 
-        assert_eq!(
-            state.webrtc_admission.in_flight(),
-            LANE_OFFERS_IN_FLIGHT,
-            "the budget of rounds, not one per member"
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    LANE_OFFERS_IN_FLIGHT,
+                    "the budget of rounds, not one per member"
+                );
+                let touched: usize = members
+                    .iter()
+                    .filter(|id| state.direct.contains_key(*id))
+                    .count();
+                assert_eq!(
+                    touched, LANE_OFFERS_IN_FLIGHT,
+                    "the members left out have no mark"
+                );
+
+                // The dials to a closed signal port would hold their slots for a long deadline.
+                state.webrtc_admission.close();
+                endpoint.close().await;
+            },
         );
-        let touched: usize = members
-            .iter()
-            .filter(|id| state.direct.contains_key(*id))
-            .count();
-        assert_eq!(
-            touched, LANE_OFFERS_IN_FLIGHT,
-            "the members left out have no mark"
-        );
-
-        // The dials to a closed signal port would hold their slots for a long deadline.
-        state.webrtc_admission.close();
-        endpoint.close().await;
     }
 
     /// **A freed slot is filled.** With the budget spent, the top-up offers nothing. When one
     /// round ends, it offers to exactly one more of the members that were left out.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_top_up_fills_the_slot_that_a_round_freed() {
-        use crate::protocol::MeshId;
-        use crate::protocol::identity::Identity;
-        use crate::util::tuning::LANE_OFFERS_IN_FLIGHT;
+    #[test]
+    fn the_top_up_fills_the_slot_that_a_round_freed() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::protocol::MeshId;
+                use crate::protocol::identity::Identity;
+                use crate::util::tuning::LANE_OFFERS_IN_FLIGHT;
 
-        let (endpoint, handle) = endpoint().await;
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
-        let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
-            .await
-            .expect("subscribe to a peerless topic");
-        let (gossip_sender, _receiver) = topic.split();
-        let sender = crate::transport::MeshSender::new(gossip_sender);
-        let mesh = MeshId::from("test");
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let author = crate::testing::nick("alice");
-        let sink = event::SilentSink;
-        let context = handler_ctx::HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &author,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: crate::testing::endpoint_id(99),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let mut state = crate::testing::fresh_state();
-        state.webrtc = Some(handle);
-        state.local_udp_transport = UdpTransport::Present;
-        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
-        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
-        let members: Vec<EndpointId> = (1..=6).map(crate::testing::endpoint_id).collect();
-        for (index, id) in members.iter().enumerate() {
-            let address = EndpointAddr::new(*id)
-                .with_relay_url("https://relay.invalid".parse().expect("relay url"));
-            state
-                .peer_endpoints
-                .insert(crate::testing::nick(&format!("member{index}")), address);
-        }
+                let (endpoint, handle) = endpoint().await;
+                let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+                let topic = gossip
+                    .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = crate::transport::MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let identity = Identity::generate();
+                let our_pubkey = identity.author_key();
+                let author = crate::testing::nick("alice");
+                let sink = event::SilentSink;
+                let context = handler_ctx::HandlerCtx {
+                    sender: &sender,
+                    endpoint: &endpoint,
+                    mesh: &mesh,
+                    author: &author,
+                    identity: &identity,
+                    our_pubkey,
+                    max_peers: 16,
+                    rendezvous_id: crate::testing::endpoint_id(99),
+                    external_msg_tx: None,
+                    sink: &sink,
+                };
+                let mut state = crate::testing::fresh_state();
+                state.webrtc = Some(handle);
+                state.local_udp_transport = UdpTransport::Present;
+                state.relay_transport = crate::transport::PayloadPath::DirectOnly;
+                state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+                let members: Vec<EndpointId> = (1..=6).map(crate::testing::endpoint_id).collect();
+                for (index, id) in members.iter().enumerate() {
+                    let address = EndpointAddr::new(*id)
+                        .with_relay_url("https://relay.invalid".parse().expect("relay url"));
+                    state
+                        .peer_endpoints
+                        .insert(crate::testing::nick(&format!("member{index}")), address);
+                }
 
-        probe::retry_direct(&mut state, &context, false).await;
-        let touched = |node: &state::EventLoopState| {
-            let direct = &node.direct;
-            members.iter().filter(|id| direct.contains_key(*id)).count()
-        };
-        assert_eq!(touched(&state), LANE_OFFERS_IN_FLIGHT, "the first pass");
+                probe::retry_direct(&mut state, &context, false).await;
+                let touched = |node: &state::EventLoopState| {
+                    let direct = &node.direct;
+                    members.iter().filter(|id| direct.contains_key(*id)).count()
+                };
+                assert_eq!(touched(&state), LANE_OFFERS_IN_FLIGHT, "the first pass");
 
-        probe::top_up_lane_offers(&mut state, &context).await;
-        assert_eq!(
-            touched(&state),
-            LANE_OFFERS_IN_FLIGHT,
-            "the budget is spent: the top-up offers nothing"
+                probe::top_up_lane_offers(&mut state, &context).await;
+                assert_eq!(
+                    touched(&state),
+                    LANE_OFFERS_IN_FLIGHT,
+                    "the budget is spent: the top-up offers nothing"
+                );
+
+                // One round ends: its slot is free.
+                let offered: EndpointId = *members
+                    .iter()
+                    .find(|id| state.direct.contains_key(*id))
+                    .expect("an offered member");
+                assert!(
+                    state.webrtc_admission.preempt_offer(offered),
+                    "a round to end"
+                );
+                probe::top_up_lane_offers(&mut state, &context).await;
+                assert_eq!(
+                    touched(&state),
+                    LANE_OFFERS_IN_FLIGHT + 1,
+                    "one more member is offered"
+                );
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    LANE_OFFERS_IN_FLIGHT,
+                    "the budget is spent again"
+                );
+
+                state.webrtc_admission.close();
+                endpoint.close().await;
+            },
         );
-
-        // One round ends: its slot is free.
-        let offered: EndpointId = *members
-            .iter()
-            .find(|id| state.direct.contains_key(*id))
-            .expect("an offered member");
-        assert!(
-            state.webrtc_admission.preempt_offer(offered),
-            "a round to end"
-        );
-        probe::top_up_lane_offers(&mut state, &context).await;
-        assert_eq!(
-            touched(&state),
-            LANE_OFFERS_IN_FLIGHT + 1,
-            "one more member is offered"
-        );
-        assert_eq!(
-            state.webrtc_admission.in_flight(),
-            LANE_OFFERS_IN_FLIGHT,
-            "the budget is spent again"
-        );
-
-        state.webrtc_admission.close();
-        endpoint.close().await;
     }
 
     /// **Glare.** Both nodes of a pair offer at once. The lower id wins: the higher id gives its
     /// offer up when the offer of the lower id arrives, and answers it. The pair ends with exactly
     /// one session, and the offer that was given up is cancelled.
-    #[test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_crossed_pair_ends_with_one_session_and_the_lower_id_wins() {
-        let (first, first_hub) = endpoint().await;
-        let (second, second_hub) = endpoint().await;
-        let ((lower, lower_hub), (higher, higher_hub)) = if first.id() < second.id() {
-            ((first, first_hub), (second, second_hub))
-        } else {
-            ((second, second_hub), (first, first_hub))
-        };
-        let lower_admission = SignalAdmission::new(8);
-        let higher_admission = SignalAdmission::new(8);
-        let lower_router = serve(&lower, &lower_hub, &lower_admission);
-        let higher_router = serve(&higher, &higher_hub, &higher_admission);
+    #[test]
+    fn a_crossed_pair_ends_with_one_session_and_the_lower_id_wins() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            4,
+            async {
+                let (first, first_hub) = endpoint().await;
+                let (second, second_hub) = endpoint().await;
+                let ((lower, lower_hub), (higher, higher_hub)) = if first.id() < second.id() {
+                    ((first, first_hub), (second, second_hub))
+                } else {
+                    ((second, second_hub), (first, first_hub))
+                };
+                let lower_admission = SignalAdmission::new(8);
+                let higher_admission = SignalAdmission::new(8);
+                let lower_router = serve(&lower, &lower_hub, &lower_admission);
+                let higher_router = serve(&higher, &higher_hub, &higher_admission);
 
-        // The higher id has an offer to the lower id in flight that never ends on its own.
-        let offer = higher_admission
-            .try_admit_offer(lower.id(), &higher_hub)
-            .expect("the higher id offers");
-        let epoch = offer.epoch();
-        let offering = tokio::spawn(async move {
-            let _offer = offer;
-            std::future::pending::<()>().await;
-        });
-        higher_admission.track(lower.id(), epoch, offering.abort_handle());
+                // The higher id has an offer to the lower id in flight that never ends on its own.
+                let offer = higher_admission
+                    .try_admit_offer(lower.id(), &higher_hub)
+                    .expect("the higher id offers");
+                let epoch = offer.epoch();
+                let offering = tokio::spawn(async move {
+                    let _offer = offer;
+                    std::future::pending::<()>().await;
+                });
+                higher_admission.track(lower.id(), epoch, offering.abort_handle());
 
-        dial_signal::dial_signal_with(
-            &lower,
-            &crate::lookup::address_book(&lower),
-            higher.addr(),
-            &lower_hub,
-            quick(),
-            IceProfile { host_only: true },
-        )
-        .await
-        .expect("the offer of the lower id is answered");
-
-        assert!(
-            until(|| higher_hub.has_session(&lower.id())).await,
-            "the higher id answered"
-        );
-        assert!(
-            lower_hub.has_session(&higher.id()),
-            "the lower hub keeps the session with the higher peer"
-        );
-        assert_eq!(
-            lower_hub.session_count(),
-            1,
-            "the lower hub holds exactly one session"
-        );
-        assert_eq!(
-            higher_hub.session_count(),
-            1,
-            "the higher hub holds exactly one session"
-        );
-        assert!(
-            offering
+                dial_signal::dial_signal_with(
+                    &lower,
+                    &crate::lookup::address_book(&lower),
+                    higher.addr(),
+                    &lower_hub,
+                    quick(),
+                    IceProfile { host_only: true },
+                )
                 .await
-                .expect_err("the offer is cancelled")
-                .is_cancelled(),
-            "the higher id gave its offer up"
-        );
+                .expect("the offer of the lower id is answered");
 
-        higher_router.shutdown().await.expect("shutdown");
-        lower_router.shutdown().await.expect("shutdown");
-        higher.close().await;
-        lower.close().await;
+                assert!(
+                    until(|| higher_hub.has_session(&lower.id())).await,
+                    "the higher id answered"
+                );
+                assert!(
+                    lower_hub.has_session(&higher.id()),
+                    "the lower hub keeps the session with the higher peer"
+                );
+                assert_eq!(
+                    lower_hub.session_count(),
+                    1,
+                    "the lower hub holds exactly one session"
+                );
+                assert_eq!(
+                    higher_hub.session_count(),
+                    1,
+                    "the higher hub holds exactly one session"
+                );
+                assert!(
+                    offering
+                        .await
+                        .expect_err("the offer is cancelled")
+                        .is_cancelled(),
+                    "the higher id gave its offer up"
+                );
+
+                higher_router.shutdown().await.expect("shutdown");
+                lower_router.shutdown().await.expect("shutdown");
+                higher.close().await;
+                lower.close().await;
+            },
+        );
     }
 
     /// **The answering side reports the attach.** A frame parked on the higher id of a crossed pair
     /// is flushed when the session attaches, although the node answered and did not offer: the
     /// answerer tells the event loop, through the table, which flushes what is held for the peer.
-    #[test(flavor = "multi_thread", worker_threads = 4)]
-    async fn the_answering_side_reports_the_attach_to_the_event_loop() {
-        let (first, first_hub) = endpoint().await;
-        let (second, second_hub) = endpoint().await;
-        let ((lower, lower_hub), (higher, higher_hub)) = if first.id() < second.id() {
-            ((first, first_hub), (second, second_hub))
-        } else {
-            ((second, second_hub), (first, first_hub))
-        };
-        let higher_admission = SignalAdmission::new(8);
-        let (sink, mut attached) = mpsc::unbounded_channel();
-        higher_admission.set_proven_sink(sink);
-        let higher_router = serve(&higher, &higher_hub, &higher_admission);
+    #[test]
+    fn the_answering_side_reports_the_attach_to_the_event_loop() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            4,
+            async {
+                let (first, first_hub) = endpoint().await;
+                let (second, second_hub) = endpoint().await;
+                let ((lower, lower_hub), (higher, higher_hub)) = if first.id() < second.id() {
+                    ((first, first_hub), (second, second_hub))
+                } else {
+                    ((second, second_hub), (first, first_hub))
+                };
+                let higher_admission = SignalAdmission::new(8);
+                let (sink, mut attached) = mpsc::unbounded_channel();
+                higher_admission.set_proven_sink(sink);
+                let higher_router = serve(&higher, &higher_hub, &higher_admission);
 
-        dial_signal::dial_signal_with(
-            &lower,
-            &crate::lookup::address_book(&lower),
-            higher.addr(),
-            &lower_hub,
-            quick(),
-            IceProfile { host_only: true },
-        )
-        .await
-        .expect("the offer of the lower id is answered");
+                dial_signal::dial_signal_with(
+                    &lower,
+                    &crate::lookup::address_book(&lower),
+                    higher.addr(),
+                    &lower_hub,
+                    quick(),
+                    IceProfile { host_only: true },
+                )
+                .await
+                .expect("the offer of the lower id is answered");
 
-        let outcome = tokio::time::timeout(Duration::from_secs(5), attached.recv())
-            .await
-            .expect("the answerer reports the attach")
-            .expect("the sink stays open");
-        assert_eq!(
-            outcome.peer,
-            lower.id(),
-            "the answering side reports the attach with the lower peer's id"
+                let outcome = tokio::time::timeout(Duration::from_secs(5), attached.recv())
+                    .await
+                    .expect("the answerer reports the attach")
+                    .expect("the sink stays open");
+                assert_eq!(
+                    outcome.peer,
+                    lower.id(),
+                    "the answering side reports the attach with the lower peer's id"
+                );
+                assert!(
+                    outcome.direct && outcome.answered,
+                    "the answering side reports a direct, answered attach"
+                );
+
+                higher_router.shutdown().await.expect("shutdown");
+                higher.close().await;
+                lower.close().await;
+            },
         );
-        assert!(
-            outcome.direct && outcome.answered,
-            "the answering side reports a direct, answered attach"
-        );
-
-        higher_router.shutdown().await.expect("shutdown");
-        higher.close().await;
-        lower.close().await;
     }
 
     /// The loop acts on an answered session only when a frame is held for the peer.
@@ -2672,6 +2875,7 @@ mod tests {
     fn an_answered_session_is_applied_only_when_a_frame_is_held_for_the_peer() {
         use crate::transport::probe::DirectOutcome;
 
+        let _guard = ::habilis_network_test_tracing::init();
         let peer = crate::testing::endpoint_id(7);
         let now = clock::Instant::now();
         let mut state = crate::testing::fresh_state();
@@ -2702,47 +2906,54 @@ mod tests {
 
     /// The offer of the lower id is refused as before when the round that runs is an answer, not
     /// an offer of the higher id.
-    #[test(flavor = "multi_thread", worker_threads = 4)]
-    async fn the_lower_id_still_refuses_a_crossed_offer() {
-        let (first, first_hub) = endpoint().await;
-        let (second, second_hub) = endpoint().await;
-        let ((lower, lower_hub), (higher, higher_hub)) = if first.id() < second.id() {
-            ((first, first_hub), (second, second_hub))
-        } else {
-            ((second, second_hub), (first, first_hub))
-        };
-        let lower_admission = SignalAdmission::new(8);
-        let lower_router = serve(&lower, &lower_hub, &lower_admission);
+    #[test]
+    fn the_lower_id_still_refuses_a_crossed_offer() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            4,
+            async {
+                let (first, first_hub) = endpoint().await;
+                let (second, second_hub) = endpoint().await;
+                let ((lower, lower_hub), (higher, higher_hub)) = if first.id() < second.id() {
+                    ((first, first_hub), (second, second_hub))
+                } else {
+                    ((second, second_hub), (first, first_hub))
+                };
+                let lower_admission = SignalAdmission::new(8);
+                let lower_router = serve(&lower, &lower_hub, &lower_admission);
 
-        // The lower id has its own offer to the higher id in flight.
-        let _offer = lower_admission
-            .try_admit_offer(higher.id(), &lower_hub)
-            .expect("the lower id offers");
+                // The lower id has its own offer to the higher id in flight.
+                let _offer = lower_admission
+                    .try_admit_offer(higher.id(), &lower_hub)
+                    .expect("the lower id offers");
 
-        let outcome = dial_signal::dial_signal_with(
-            &higher,
-            &crate::lookup::address_book(&higher),
-            lower.addr(),
-            &higher_hub,
-            quick(),
-            IceProfile { host_only: true },
-        )
-        .await;
+                let outcome = dial_signal::dial_signal_with(
+                    &higher,
+                    &crate::lookup::address_book(&higher),
+                    lower.addr(),
+                    &higher_hub,
+                    quick(),
+                    IceProfile { host_only: true },
+                )
+                .await;
 
-        assert!(outcome.is_err(), "the lower id keeps its own offer");
-        assert_eq!(
-            lower_hub.session_count(),
-            0,
-            "the lower id holds no session after refusing a crossed offer"
+                assert!(outcome.is_err(), "the lower id keeps its own offer");
+                assert_eq!(
+                    lower_hub.session_count(),
+                    0,
+                    "the lower id holds no session after refusing a crossed offer"
+                );
+
+                lower_router.shutdown().await.expect("shutdown");
+                higher.close().await;
+                lower.close().await;
+            },
         );
-
-        lower_router.shutdown().await.expect("shutdown");
-        higher.close().await;
-        lower.close().await;
     }
 
     #[test]
     fn an_offer_fallback_holds_the_timer_graft() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = crate::testing::fresh_state();
         assert!(
             rendezvous::rendezvous_graftable(&state),

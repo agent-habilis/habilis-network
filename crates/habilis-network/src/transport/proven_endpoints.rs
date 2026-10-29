@@ -121,7 +121,6 @@ impl ProvenEndpoints {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use iroh::SecretKey;
@@ -135,6 +134,7 @@ mod tests {
 
     #[test]
     fn a_proof_holds_only_for_its_signer_and_mesh() {
+        let _guard = ::habilis_network_test_tracing::init();
         let endpoint_key = SecretKey::generate();
         let endpoint = endpoint_key.public();
         let mesh = MeshId::from("mesh-a");
@@ -159,6 +159,7 @@ mod tests {
 
     #[test]
     fn the_map_is_bounded_and_keeps_a_linked_endpoint() {
+        let _guard = ::habilis_network_test_tracing::init();
         let cap = 4;
         let mut proven = ProvenEndpoints::new(cap);
         let linked_one = SecretKey::generate().public();
@@ -186,7 +187,6 @@ mod tests {
 
 #[cfg(test)]
 mod one_signer_tests {
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use iroh::SecretKey;
@@ -200,6 +200,7 @@ mod one_signer_tests {
     /// other peer would get a binding.
     #[test]
     fn one_endpoint_keeps_one_signer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut proven = ProvenEndpoints::new(4);
         let attacker = SecretKey::generate().public();
         let linked: HashSet<_> = [attacker].into_iter().collect();

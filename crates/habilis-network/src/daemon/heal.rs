@@ -310,7 +310,6 @@ pub(super) fn apply_rung_change(
 #[cfg(test)]
 mod tests {
     use super::{is_resume, is_wall_resume};
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     #[cfg(feature = "host")]
@@ -331,97 +330,100 @@ mod tests {
     /// inside the resubscribe ends the process.
     #[cfg(feature = "host")]
     #[test]
-    async fn a_fatal_resubscribe_leaves_the_exit_to_the_loop() {
-        use super::{GossipLink, ResubscribeEnv, resubscribe_tick};
-        use crate::daemon::event_loop::ctx_parts::CtxParts;
-        use crate::testing::LaneNode;
-        use crate::util::tuning::RESUBSCRIBE_MAX_ATTEMPTS;
+    fn a_fatal_resubscribe_leaves_the_exit_to_the_loop() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::{GossipLink, ResubscribeEnv, resubscribe_tick};
+            use crate::daemon::event_loop::ctx_parts::CtxParts;
+            use crate::testing::LaneNode;
+            use crate::util::tuning::RESUBSCRIBE_MAX_ATTEMPTS;
 
-        if std::env::var_os(FATAL_CHILD).is_some() {
-            let node = LaneNode::start().await;
-            let topic_id = iroh_gossip::proto::TopicId::from_bytes([8u8; 32]);
-            let topic = split::subscribe_mesh(
-                &node.gossip,
-                topic_id,
-                iroh::SecretKey::generate().public(),
-                [],
-            )
-            .await
-            .expect("subscribe while the actor lives");
-            let (gossip_sender, gossip_receiver) = topic.split();
-            let mut sender = crate::transport::MeshSender::new(gossip_sender);
-            let mut receiver = split::spawn_split(gossip_receiver, None);
-            node.stop_gossip().await;
-
-            let secret = iroh::SecretKey::generate();
-            let params = crate::beacon::RendezvousParams {
-                topic_id,
-                id: secret.public(),
-                secret,
-                bind_ports: Vec::new(),
-                lookups: mesh::LookupOpts::loopback(),
-                relay_transport: crate::transport::PayloadPath::DirectOnly,
-                bootstrap_relay: None,
-                rung_tx: watch::channel(None).0,
-            };
-            let parts = CtxParts {
-                endpoint: &node.endpoint,
-                mesh: &node.mesh,
-                author: &node.author,
-                identity: &node.identity,
-                our_pubkey: node.our_pubkey,
-                max_peers: 16,
-                rendezvous_id: crate::testing::endpoint_id(9),
-                external_msg_tx: None,
-                sink: &node.sink,
-            };
-            let env = ResubscribeEnv {
-                gossip: &node.gossip,
-                params: &params,
-                parts: &parts,
-            };
-            let mut state = node.state();
-            let (inbound, _unread) = mpsc::channel(1);
-            let mut app = crate::membership::MembershipApp::new(inbound);
-            let mut attempts = 0;
-            let mut outcome = Ok(());
-            for _ in 0..RESUBSCRIBE_MAX_ATTEMPTS {
-                outcome = resubscribe_tick(
-                    &env,
-                    &mut state,
-                    &mut app,
-                    GossipLink {
-                        sender: &mut sender,
-                        receiver: &mut receiver,
-                        attempts: &mut attempts,
-                    },
+            if std::env::var_os(FATAL_CHILD).is_some() {
+                let node = LaneNode::start().await;
+                let topic_id = iroh_gossip::proto::TopicId::from_bytes([8u8; 32]);
+                let topic = split::subscribe_mesh(
+                    &node.gossip,
+                    topic_id,
+                    iroh::SecretKey::generate().public(),
+                    [],
                 )
-                .await;
+                .await
+                .expect("subscribe while the actor lives");
+                let (gossip_sender, gossip_receiver) = topic.split();
+                let mut sender = crate::transport::MeshSender::new(gossip_sender);
+                let mut receiver = split::spawn_split(gossip_receiver, None);
+                node.stop_gossip().await;
+
+                let secret = iroh::SecretKey::generate();
+                let params = crate::beacon::RendezvousParams {
+                    topic_id,
+                    id: secret.public(),
+                    secret,
+                    bind_ports: Vec::new(),
+                    lookups: mesh::LookupOpts::loopback(),
+                    relay_transport: crate::transport::PayloadPath::DirectOnly,
+                    bootstrap_relay: None,
+                    rung_tx: watch::channel(None).0,
+                };
+                let parts = CtxParts {
+                    endpoint: &node.endpoint,
+                    mesh: &node.mesh,
+                    author: &node.author,
+                    identity: &node.identity,
+                    our_pubkey: node.our_pubkey,
+                    max_peers: 16,
+                    rendezvous_id: crate::testing::endpoint_id(9),
+                    external_msg_tx: None,
+                    sink: &node.sink,
+                };
+                let env = ResubscribeEnv {
+                    gossip: &node.gossip,
+                    params: &params,
+                    parts: &parts,
+                };
+                let mut state = node.state();
+                let (inbound, _unread) = mpsc::channel(1);
+                let mut app = crate::membership::MembershipApp::new(inbound);
+                let mut attempts = 0;
+                let mut outcome = Ok(());
+                for _ in 0..RESUBSCRIBE_MAX_ATTEMPTS {
+                    outcome = resubscribe_tick(
+                        &env,
+                        &mut state,
+                        &mut app,
+                        GossipLink {
+                            sender: &mut sender,
+                            receiver: &mut receiver,
+                            attempts: &mut attempts,
+                        },
+                    )
+                    .await;
+                }
+                println!("FATAL_RETURNED err={}", outcome.is_err());
+                node.endpoint.close().await;
+                return;
             }
-            println!("FATAL_RETURNED err={}", outcome.is_err());
-            node.endpoint.close().await;
-            return;
-        }
-        let mut command =
-            std::process::Command::new(std::env::current_exe().expect("the test binary"));
-        command
-            .args([
-                "--exact",
-                "daemon::heal::tests::a_fatal_resubscribe_leaves_the_exit_to_the_loop",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(FATAL_CHILD, "1");
-        let output = command.output().expect("run the test binary");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("FATAL_RETURNED err=true"),
-            "the process exited inside the resubscribe, before the loop released its endpoints: {stdout}"
-        );
+            let mut command =
+                std::process::Command::new(std::env::current_exe().expect("the test binary"));
+            command
+                .args([
+                    "--exact",
+                    "daemon::heal::tests::a_fatal_resubscribe_leaves_the_exit_to_the_loop",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(FATAL_CHILD, "1");
+            let output = command.output().expect("run the test binary");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("FATAL_RETURNED err=true"),
+                "the process exited inside the resubscribe, before the loop released its endpoints: {stdout}"
+            );
+        });
     }
 
     #[test]
     fn is_resume_only_past_threshold() {
+        let _guard = ::habilis_network_test_tracing::init();
         let threshold = Duration::from_mins(1);
         // A normal heal cadence (≤ ~15s) is never a resume.
         assert!(
@@ -456,6 +458,7 @@ mod tests {
     fn is_resume_respects_injected_threshold() {
         // The subprocess stall regression shortens the threshold via
         // the env knob; the comparison must track whatever is passed.
+        let _guard = ::habilis_network_test_tracing::init();
         let short = Duration::from_secs(4);
         assert!(
             !is_resume(Duration::from_secs(3), short),
@@ -469,6 +472,7 @@ mod tests {
 
     #[test]
     fn wall_resume_detects_macos_sleep_signature() {
+        let _guard = ::habilis_network_test_tracing::init();
         let threshold = Duration::from_mins(1);
         // macOS sleep: the monotonic clock froze (a few seconds of
         // real post-wake time) while the wall clock jumped a full day.
@@ -487,6 +491,7 @@ mod tests {
 
     #[test]
     fn wall_resume_ignores_clocks_advancing_together() {
+        let _guard = ::habilis_network_test_tracing::init();
         let threshold = Duration::from_mins(1);
         // Steady operation: wall and monotonic advance in lockstep, so
         // their divergence is ~0 — never a resume, whatever the cadence.

@@ -214,3 +214,16 @@ fn one() {}
   expect(flagged).toEqual([]);
   expect(text).toContain("fn one() {\n    let _guard");
 });
+
+test("a body that already binds _guard gets the guard under another name, so nothing is shadowed", () => {
+  const { text, flagged } = rewrite(`use habilis_network_test_tracing::test;
+
+#[test]
+fn already_binds() {
+    let (logs, _guard) = capture();
+    assert!(logs.is_empty() && _guard.is_some());
+}
+`);
+  expect(flagged).toEqual([]);
+  expect(text).toContain("    let _trace_guard = ::habilis_network_test_tracing::init();\n    let (logs, _guard) = capture();");
+});

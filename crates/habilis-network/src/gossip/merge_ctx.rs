@@ -517,7 +517,6 @@ fn offer_for_parked(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame:
 #[cfg(test)]
 mod tests {
     use crate::transport::UdpTransport;
-    use habilis_network_test_tracing::test;
 
     use super::{mark_parked, peer_info_json};
     use crate::protocol::{MeshId, Message};
@@ -527,6 +526,7 @@ mod tests {
     use crate::util::clock;
     #[test]
     fn our_peer_info_says_so_while_we_hold_the_rendezvous() {
+        let _guard = ::habilis_network_test_tracing::init();
         let address = iroh::EndpointAddr::new(iroh::SecretKey::generate().public());
 
         let holding = peer_info_json(&address, "proof".to_owned(), true);
@@ -551,6 +551,7 @@ mod tests {
     /// reading the address.
     #[test]
     fn a_reader_that_predates_the_flag_still_reads_the_address() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id = iroh::SecretKey::generate().public();
         let json = peer_info_json(&iroh::EndpointAddr::new(id), "proof".to_owned(), true);
 
@@ -566,6 +567,7 @@ mod tests {
     /// peer's session.
     #[test]
     fn an_unmeshed_directed_frame_to_a_lane_peer_marks_the_peer_wanted() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.meshed = false;
         state.local_udp_transport = UdpTransport::Present;
@@ -597,6 +599,7 @@ mod tests {
     /// A broadcast has no addressee, so parking it asks for nothing.
     #[test]
     fn an_unmeshed_broadcast_asks_for_no_session() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.meshed = false;
         let bob = endpoint_id(1);
@@ -624,41 +627,53 @@ mod tests {
     /// The offer goes out at once for a peer that is wanted, and a second call does not start a
     /// second one: the admission table keeps one round per peer.
     #[cfg(feature = "host")]
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn offering_for_a_parked_frame_starts_one_round_and_no_more() {
-        let node = crate::testing::LaneNode::start().await;
-        let context = node.context();
-        let mut state = node.state();
-        let frame = node.frame_to_bob();
-        assert_eq!(
-            state.webrtc_admission.in_flight(),
-            0,
-            "no admission slot is in flight after the offer for a parked frame"
+    #[test]
+    fn offering_for_a_parked_frame_starts_one_round_and_no_more() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let node = crate::testing::LaneNode::start().await;
+                let context = node.context();
+                let mut state = node.state();
+                let frame = node.frame_to_bob();
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    0,
+                    "no admission slot is in flight after the offer for a parked frame"
+                );
+
+                state.want_lane_session(node.bob, clock::Instant::now());
+                super::offer_for_parked(&mut state, &context, &frame);
+                assert_eq!(state.webrtc_admission.in_flight(), 1, "the offer is out");
+                super::offer_for_parked(&mut state, &context, &frame);
+                assert_eq!(state.webrtc_admission.in_flight(), 1, "not a second round");
+
+                state.webrtc_admission.close();
+                node.endpoint.close().await;
+            },
         );
-
-        state.want_lane_session(node.bob, clock::Instant::now());
-        super::offer_for_parked(&mut state, &context, &frame);
-        assert_eq!(state.webrtc_admission.in_flight(), 1, "the offer is out");
-        super::offer_for_parked(&mut state, &context, &frame);
-        assert_eq!(state.webrtc_admission.in_flight(), 1, "not a second round");
-
-        state.webrtc_admission.close();
-        node.endpoint.close().await;
     }
 
     /// A peer that nobody asked for is not offered a session.
     #[cfg(feature = "host")]
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn nothing_is_offered_for_a_peer_that_is_not_wanted() {
-        let node = crate::testing::LaneNode::start().await;
-        let context = node.context();
-        let mut state = node.state();
-        super::offer_for_parked(&mut state, &context, &node.frame_to_bob());
-        assert_eq!(
-            state.webrtc_admission.in_flight(),
-            0,
-            "no admission slot is in flight when nothing is offered"
+    #[test]
+    fn nothing_is_offered_for_a_peer_that_is_not_wanted() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let node = crate::testing::LaneNode::start().await;
+                let context = node.context();
+                let mut state = node.state();
+                super::offer_for_parked(&mut state, &context, &node.frame_to_bob());
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    0,
+                    "no admission slot is in flight when nothing is offered"
+                );
+                node.endpoint.close().await;
+            },
         );
-        node.endpoint.close().await;
     }
 }

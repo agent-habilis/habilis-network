@@ -128,7 +128,6 @@ pub(crate) fn apply(update: &MembershipUpdate, author: &Nickname, state: &mut Ev
 #[cfg(test)]
 mod tests {
     use crate::testing::{fresh_state, nick};
-    use habilis_network_test_tracing::test;
 
     use crate::protocol::identity::Identity;
     use crate::protocol::{AuthorKey, MeshId, Message};
@@ -139,6 +138,7 @@ mod tests {
 
     #[test]
     fn first_time_seeing_author_is_joined_new() {
+        let _guard = ::habilis_network_test_tracing::init();
         let state = fresh_state();
         let update = compute(
             &MessageKind::app_broadcast("app_msg"),
@@ -158,6 +158,7 @@ mod tests {
 
     #[test]
     fn known_author_is_not_joined_new() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.peers.insert(nick("swift-cedar"));
         let update = compute(
@@ -172,6 +173,7 @@ mod tests {
 
     #[test]
     fn left_is_never_joined_new() {
+        let _guard = ::habilis_network_test_tracing::init();
         let state = fresh_state();
         let update = compute(
             &MessageKind::Presence {
@@ -186,6 +188,7 @@ mod tests {
 
     #[test]
     fn quiet_peer_message_marks_returned() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.quiet.insert(nick("swift-cedar"));
         let update = compute(
@@ -207,6 +210,7 @@ mod tests {
     #[test]
     fn alive_from_unknown_author_is_joined_new() {
         // Regression: Alive keepalives must self-heal membership.
+        let _guard = ::habilis_network_test_tracing::init();
         let state = fresh_state();
         let update = compute(
             &MessageKind::Presence {
@@ -224,6 +228,7 @@ mod tests {
 
     #[test]
     fn apply_inserts_into_peers_on_joined_new() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let update = MembershipUpdate {
             returned: false,
@@ -239,6 +244,7 @@ mod tests {
 
     #[test]
     fn apply_removes_from_quiet_on_returned() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.quiet.insert(nick("swift-cedar"));
         let update = MembershipUpdate {
@@ -262,6 +268,7 @@ mod tests {
     /// it must not bring the peer back into the roster.
     #[test]
     fn a_message_sent_in_the_second_of_a_goodbye_is_stale() {
+        let _guard = ::habilis_network_test_tracing::init();
         let at = UnixSecs::from(1_000);
         let mut state = fresh_state();
         state.note_left(&nick("swift-cedar"), AuthorKey::from([1; 32]), at);
@@ -289,6 +296,7 @@ mod tests {
     /// goodbye of another peer.
     #[test]
     fn a_message_stamped_after_a_goodbye_is_a_return() {
+        let _guard = ::habilis_network_test_tracing::init();
         let at = UnixSecs::from(1_000);
         let mut state = fresh_state();
         state.note_left(&nick("swift-cedar"), AuthorKey::from([1; 32]), at);
@@ -313,6 +321,7 @@ mod tests {
     /// back: a peer that left, came back and left again stays gone for the first goodbye's copies.
     #[test]
     fn the_mark_of_a_goodbye_only_moves_forward() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let who = nick("swift-cedar");
         state.note_left(&who, AuthorKey::from([1; 32]), UnixSecs::from(1_000));
@@ -343,6 +352,7 @@ mod tests {
     /// when the timestamp lies after the goodbye. The nickname stays free for another key.
     #[test]
     fn a_key_that_said_goodbye_stays_gone_at_any_timestamp() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = MeshId::from("test");
         let who = nick("swift-cedar");
         let leaver = Identity::generate();

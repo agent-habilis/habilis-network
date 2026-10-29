@@ -74,7 +74,6 @@ mod tests {
     use crate::testing::{author_of, endpoint_id, fresh_state, fresh_state_with_book, nick};
     use crate::util::clock::Instant;
     use crate::util::tuning::{KNOWN_ENDPOINTS_CAP, QUIET_CAP, RELINK_COOLDOWN};
-    use habilis_network_test_tracing::test;
     use n0_future::time::Instant as TokioInstant;
 
     use crate::protocol::message;
@@ -95,6 +94,7 @@ mod tests {
     /// holder's flag must end the split now, not after the wait for the dependent.
     #[test]
     fn a_flag_from_a_lower_holder_makes_us_yield_at_once() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = lower_and_higher();
         let mut state = fresh_state();
         state.hosts_rendezvous = true;
@@ -126,6 +126,7 @@ mod tests {
     /// holder that never re-checks never finds a co-host it does not know of.
     #[test]
     fn a_flag_from_a_higher_holder_pushes_our_re_check_out() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = lower_and_higher();
         let mut state = fresh_state();
         state.hosts_rendezvous = true;
@@ -167,6 +168,7 @@ mod tests {
     /// rounds start from it again.
     #[test]
     fn a_sign_of_a_second_group_brings_the_re_check_to_the_brisk_base() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.hosts_rendezvous = true;
         state.rival_recheck_rounds = 7;
@@ -186,6 +188,7 @@ mod tests {
     /// A burst of members that arrive must not shed the beacon again and again.
     #[test]
     fn a_second_sign_inside_one_steady_interval_changes_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.hosts_rendezvous = true;
         let now = Instant::now();
@@ -214,6 +217,7 @@ mod tests {
 
     #[test]
     fn a_sign_changes_nothing_while_we_do_not_hold_the_beacon() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let now = Instant::now();
         let far = now + Duration::from_hours(1);
@@ -231,6 +235,7 @@ mod tests {
     /// A loopback room has no re-check, and the creator never has one: a sign arms nothing.
     #[test]
     fn a_sign_arms_no_re_check_where_none_applies() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.hosts_rendezvous = true;
         state.next_rival_recheck = None;
@@ -245,6 +250,7 @@ mod tests {
 
     #[test]
     fn a_sign_does_not_push_out_a_re_check_that_is_due_sooner() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.hosts_rendezvous = true;
         state.rival_recheck_rounds = 4;
@@ -269,6 +275,7 @@ mod tests {
     /// only while we hold the beacon.
     #[test]
     fn a_flag_that_does_not_count_changes_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = lower_and_higher();
         let signer = AuthorKey::from([9u8; 32]);
         let now = Instant::now();
@@ -332,6 +339,7 @@ mod tests {
     /// probing to claim. Its own re-check has nothing to move.
     #[test]
     fn a_flag_read_while_we_do_not_hold_is_remembered() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = lower_and_higher();
         let mut state = fresh_state();
 
@@ -364,6 +372,7 @@ mod tests {
     /// owes a return, and the debt opens the reclaim window that pays it.
     #[test]
     fn a_holder_outside_the_mesh_owes_a_return_to_a_released_member() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.rendezvous_release_links = 1;
         state.linked_endpoints.insert(endpoint_id(1));
@@ -380,6 +389,7 @@ mod tests {
     /// rendezvous for ever.
     #[test]
     fn a_holder_of_our_own_mesh_owes_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = lower_and_higher();
         let mut state = fresh_state();
         state.rendezvous_release_links = 1;
@@ -416,6 +426,7 @@ mod tests {
     /// a dwell longer at every start.
     #[test]
     fn a_member_that_has_the_link_or_wants_it_anyway_owes_no_return() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut linked = fresh_state();
         linked.rendezvous_release_links = 1;
         linked.linked_endpoints.insert(endpoint_id(1));
@@ -446,6 +457,7 @@ mod tests {
     /// tick would hold the debt open for ever.
     #[test]
     fn a_second_read_inside_the_window_does_not_move_it() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.rendezvous_release_links = 1;
         state.linked_endpoints.insert(endpoint_id(1));
@@ -465,6 +477,7 @@ mod tests {
     /// A holder that crashes never says that it let go. Its flag goes with the member.
     #[test]
     fn the_flag_of_a_forgotten_member_is_dropped() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = lower_and_higher();
         let mut state = fresh_state();
         state.note_rival_beacon_flag(
@@ -502,6 +515,7 @@ mod tests {
     /// happens once per holder, and exists only to hold our release until the higher one yields.
     #[test]
     fn a_holder_that_repeats_its_flag_pushes_our_re_check_out_once() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = lower_and_higher();
         let mut state = fresh_state();
         state.hosts_rendezvous = true;
@@ -540,6 +554,7 @@ mod tests {
     /// The push is to at least a steady round out. A re-check that is already later stays.
     #[test]
     fn a_push_never_brings_a_later_re_check_closer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = lower_and_higher();
         let mut state = fresh_state();
         state.hosts_rendezvous = true;
@@ -569,6 +584,7 @@ mod tests {
     /// rendezvous is no longer known to be held by it.
     #[test]
     fn a_holder_stops_counting_when_it_drops_the_flag_or_leaves() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = lower_and_higher();
         let signer = AuthorKey::from([9u8; 32]);
         let mut state = fresh_state();
@@ -623,6 +639,7 @@ mod tests {
     /// written through it is in the book of the endpoint.
     #[test]
     fn the_address_book_of_the_state_is_the_book_it_was_given() {
+        let _guard = ::habilis_network_test_tracing::init();
         let book = memory::MemoryLookup::new();
         let state = fresh_state_with_book(book.clone());
         let bob = endpoint_id(1);
@@ -647,6 +664,7 @@ mod tests {
     #[test]
     fn a_proven_pair_on_the_relay_is_raced_again_when_its_link_goes_down() {
         use crate::transport::probe::PathKind;
+        let _guard = ::habilis_network_test_tracing::init();
         let (bob, now) = (endpoint_id(1), Instant::now());
         let address = iroh::EndpointAddr::new(bob)
             .with_relay_url("https://relay.invalid".parse().expect("relay url"));
@@ -696,6 +714,7 @@ mod tests {
     #[test]
     fn a_proven_pair_on_the_gossip_rung_is_raced_again_when_its_link_goes_down() {
         use crate::transport::probe::PathKind;
+        let _guard = ::habilis_network_test_tracing::init();
         let (bob, now) = (endpoint_id(1), Instant::now());
         let address = iroh::EndpointAddr::new(bob)
             .with_relay_url("https://relay.invalid".parse().expect("relay url"));
@@ -720,6 +739,7 @@ mod tests {
     /// not at the heal tick (10 to 15 s). A pair that flaps is paced by the relink cooldown.
     #[test]
     fn a_proven_peer_that_lost_its_link_is_regrafted_in_about_a_second() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (bob, carol) = (endpoint_id(1), endpoint_id(2));
         let now = Instant::now();
         let after = |millis: u64| now + Duration::from_millis(millis);
@@ -797,6 +817,7 @@ mod tests {
     #[test]
     fn a_pair_that_reads_as_the_relay_is_not_regrafted_quickly() {
         use crate::transport::probe::PathKind;
+        let _guard = ::habilis_network_test_tracing::init();
         let (bob, now) = (endpoint_id(1), Instant::now());
         let lost = |kind: PathKind| {
             let mut node = fresh_state();
@@ -820,6 +841,7 @@ mod tests {
     #[test]
     fn a_pair_that_rides_the_gossip_rung_is_not_regrafted() {
         use crate::transport::probe::PathKind;
+        let _guard = ::habilis_network_test_tracing::init();
         let (bob, now) = (endpoint_id(1), Instant::now());
         let mut node = fresh_state();
         node.direct.insert(bob, DirectState::Direct);
@@ -844,6 +866,7 @@ mod tests {
 
     #[test]
     fn a_node_below_the_release_count_wants_the_rendezvous() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
         state.rendezvous_linked = true;
         state.linked_endpoints.insert(endpoint_id(1));
@@ -859,6 +882,7 @@ mod tests {
 
     #[test]
     fn a_node_at_the_release_count_lets_go_and_stops_wanting_it() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
         state.rendezvous_linked = true;
         state.linked_endpoints.insert(endpoint_id(1));
@@ -884,6 +908,7 @@ mod tests {
     /// due again, or it tells gossip to leave a second time and logs it twice.
     #[test]
     fn a_node_that_has_released_is_not_due_again_while_the_link_is_still_up() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
         state.rendezvous_linked = true;
         state.linked_endpoints.insert(endpoint_id(1));
@@ -906,6 +931,7 @@ mod tests {
     /// while, and the beacon introduces the islands to each other.
     #[test]
     fn a_node_that_let_go_wants_the_rendezvous_again_when_its_return_falls_due() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
         state.rendezvous_linked = true;
         state.linked_endpoints.insert(endpoint_id(1));
@@ -934,6 +960,7 @@ mod tests {
     /// like an owed one, or a member whose visit cannot link grafts and offers at every tick.
     #[test]
     fn a_return_that_fell_due_and_got_no_link_is_not_wanted_after_the_comeback_window() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
@@ -951,6 +978,7 @@ mod tests {
     /// window, due again one period later, and not paid twice.
     #[test]
     fn a_periodic_return_that_fell_due_is_paid_once_and_set_again_one_period_later() {
+        let _guard = ::habilis_network_test_tracing::init();
         let local = endpoint_id(9);
         let mut state = two_link_node();
         state.linked_endpoints.insert(endpoint_id(1));
@@ -979,6 +1007,7 @@ mod tests {
 
     #[test]
     fn the_return_of_a_node_that_let_go_falls_due_one_period_later_at_the_earliest() {
+        let _guard = ::habilis_network_test_tracing::init();
         let period = tuning::RENDEZVOUS_PERIODIC_RETURN;
         for seed in 1..=8 {
             let after = super::rendezvous_return_after(endpoint_id(seed));
@@ -1000,6 +1029,7 @@ mod tests {
 
     #[test]
     fn a_visit_that_the_period_asked_for_lasts_its_dwell_time_before_the_node_lets_go() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
@@ -1022,6 +1052,7 @@ mod tests {
 
     #[test]
     fn a_link_that_comes_up_before_the_return_is_due_asks_for_no_dwell() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
@@ -1038,6 +1069,7 @@ mod tests {
 
     #[test]
     fn a_link_that_comes_back_ends_the_wait_for_the_return() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
         state.mark_rendezvous_released(endpoint_id(9));
         assert!(
@@ -1055,6 +1087,7 @@ mod tests {
 
     #[test]
     fn a_node_that_falls_below_the_count_comes_back() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
@@ -1073,6 +1106,7 @@ mod tests {
 
     #[test]
     fn the_node_that_hosts_the_rendezvous_keeps_its_link() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
         state.hosts_rendezvous = true;
         state.rendezvous_linked = true;
@@ -1091,6 +1125,7 @@ mod tests {
 
     #[test]
     fn an_owed_return_makes_a_node_with_enough_links_want_it() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
@@ -1105,6 +1140,7 @@ mod tests {
     /// stops offering when the return it owed expires.
     #[test]
     fn an_owed_return_ends_at_its_deadline() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
@@ -1124,6 +1160,7 @@ mod tests {
     /// trigger it.
     #[test]
     fn a_node_that_came_back_lets_go_again_after_its_dwell_time() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
@@ -1154,6 +1191,7 @@ mod tests {
     /// A first visit has no dwell: a joiner lets go as soon as it has the links.
     #[test]
     fn a_first_visit_has_no_dwell_time() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
@@ -1192,6 +1230,7 @@ mod tests {
 
     #[test]
     fn note_msg_seq_detects_equivocation_once() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let key = author_of("alice-key");
         // First sighting at a seq → recorded, no fork.
@@ -1217,6 +1256,7 @@ mod tests {
 
     #[test]
     fn note_msg_seq_is_per_key_and_per_seq() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         assert!(
             !state.note_msg_seq(&author_of("alice"), 0, hash_of("h0")),
@@ -1241,6 +1281,7 @@ mod tests {
 
     #[test]
     fn forget_msg_seq_prunes_author_and_fork_flag() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.note_msg_seq(&author_of("alice"), 0, hash_of("h0"));
         assert!(
@@ -1268,6 +1309,7 @@ mod tests {
         // A fork keeps two twins at one (author, seq). Evicting the twin we did
         // NOT record must not clear the recorded slot / fork flag — otherwise a
         // later resend of the still-retained twin re-detects the fork as new.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.note_msg_seq(&author_of("alice"), 0, hash_of("recorded"));
         assert!(
@@ -1298,6 +1340,7 @@ mod tests {
 
     #[test]
     fn note_dag_moves_tip_set() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         // First message (no parents) becomes the sole tip.
         assert!(
@@ -1325,6 +1368,7 @@ mod tests {
 
     #[test]
     fn note_dag_keeps_concurrent_tips() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.note_dag(hash_of("a"), &[], UnixSecs::from(1));
         state.note_dag(hash_of("b"), &[], UnixSecs::from(1)); // concurrent: no shared parent
@@ -1336,6 +1380,7 @@ mod tests {
 
     #[test]
     fn note_dag_flags_backdating() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.note_dag(hash_of("parent"), &[], UnixSecs::from(200));
         // Child claims an earlier timestamp than a parent it references.
@@ -1352,6 +1397,7 @@ mod tests {
 
     #[test]
     fn forget_hash_prunes_dag() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.note_dag(hash_of("h"), &[], UnixSecs::from(1));
         state.forget_hash(&hash_of("h"));
@@ -1368,6 +1414,7 @@ mod tests {
     // `bounded_fifo_set`; these only assert the state wires the right cap.
     #[test]
     fn known_endpoints_field_is_capped() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let first = endpoint_id(0);
         state.known_endpoints.insert(first);
@@ -1388,6 +1435,7 @@ mod tests {
 
     #[test]
     fn roster_reach_tags_only_live_links_direct() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let linked_ep = endpoint_id(1);
         let stale_ep = endpoint_id(2);
@@ -1442,6 +1490,7 @@ mod tests {
     #[test]
     fn direct_state_follows_conn_path_readings_and_counts() {
         use crate::gossip::PathSummary;
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         // The mapping only reaches `RelayOnly` on a mesh whose relay may carry
         // payload; the lookup-only half is
@@ -1466,6 +1515,7 @@ mod tests {
     #[test]
     fn a_mixed_or_unknown_reading_never_changes_what_is_known() {
         use crate::gossip::PathSummary;
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.observe_path(endpoint_id(1), PathSummary::Mixed);
         state.observe_path(endpoint_id(2), PathSummary::Unknown);
@@ -1499,6 +1549,7 @@ mod tests {
     #[test]
     fn a_relay_reading_never_demotes_a_proven_peer_on_a_lookup_only_mesh() {
         use crate::gossip::PathSummary;
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         state.direct.insert(endpoint_id(1), DirectState::Direct);
@@ -1526,6 +1577,7 @@ mod tests {
         // it is the rendezvous link (kept out of `linked_endpoints`). The
         // beacon's `PeerInfo` advertises the rendezvous endpoint, so the
         // roster must still tag it `direct` while we're rendezvous-linked.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let rendezvous_ep = endpoint_id(7);
         state.rendezvous_id = Some(rendezvous_ep);
@@ -1553,6 +1605,7 @@ mod tests {
     #[test]
     fn roster_transport_mirrors_the_send_decision() {
         use crate::transport::Lane;
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.meshed = true;
         // Known endpoint while meshed → unicast (the send path would dial it).
@@ -1600,6 +1653,7 @@ mod tests {
     fn quiet_field_is_capped() {
         // `quiet` is drained only on return, so the cap is what stops a churn /
         // sybil stream of one-shot nicknames from growing it without bound.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         for index in 0..(QUIET_CAP + 5) {
             state.quiet.insert(nick(&format!("ghost-{index}")));
@@ -1615,6 +1669,7 @@ mod tests {
     fn mark_seen_delegates_dedup() {
         // Smoke test the `EventLoopState` -> `BoundedFifoSet` delegation; the
         // bounded-FIFO/eviction logic itself is covered in `habilis-network-util`.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let message = msg_with_id(&MessageId::random());
         assert!(
@@ -1631,6 +1686,7 @@ mod tests {
     fn a_retained_frame_stays_a_duplicate_after_seen_forgets_it() {
         use crate::util::tuning::SEEN_IDS_CAP;
 
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let message = msg_with_id(&MessageId::random());
         assert!(
@@ -1655,6 +1711,7 @@ mod tests {
     /// so the cost grew with the mesh rather than with the attacker.
     #[test]
     fn an_unreadable_digest_is_reported_once_per_author_and_window() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let now = Instant::now();
         assert!(
@@ -1680,6 +1737,7 @@ mod tests {
 
     #[test]
     fn a_peer_is_served_one_digest_per_window() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let now = Instant::now();
         let window = tuning::ANTIENTROPY_SERVE_COOLDOWN;
@@ -1707,6 +1765,7 @@ mod tests {
         // Two messages sharing an id but signed by different keys must NOT
         // dedup against each other — the fix for the id-collision suppression
         // attack. Distinct pubkeys ⇒ distinct `dedup_key`s.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let id = MessageId::random();
         let victim =
@@ -1728,6 +1787,7 @@ mod tests {
     // `cpu-runaway-membership-amplifier`.
     #[test]
     fn relink_cooldown_caps_a_flapping_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let peer = endpoint_id(7);
         let start = Instant::now();
 
@@ -1773,6 +1833,7 @@ mod tests {
     // changed address of our own must therefore call for a flood of its own.
     #[test]
     fn a_changed_own_address_is_due_a_flood_and_an_unchanged_one_is_not() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id = endpoint_id(1);
         let relay: iroh::RelayUrl = "https://relay.example".parse().expect("a relay url");
         let ip: std::net::SocketAddr = "192.0.2.1:4000".parse().expect("an address");
@@ -1817,6 +1878,7 @@ mod tests {
 
     #[test]
     fn the_order_of_the_addresses_does_not_make_an_address_differ() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id = endpoint_id(1);
         let first: std::net::SocketAddr = "192.0.2.1:4000".parse().expect("an address");
         let second: std::net::SocketAddr = "192.0.2.2:4000".parse().expect("an address");
@@ -1845,6 +1907,7 @@ mod tests {
     // once per window.
     #[test]
     fn neighbors_up_in_one_window_flood_peerinfo_once() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
 
         let mut flapping = fresh_state();
@@ -1885,6 +1948,7 @@ mod tests {
     // paid once the window ends.
     #[test]
     fn a_held_back_neighbor_up_floods_peerinfo_when_the_window_ends() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut state = fresh_state();
         state.peerinfo_flooded_at = Some(start);
@@ -1909,6 +1973,7 @@ mod tests {
 
     #[test]
     fn nothing_is_due_when_no_neighbor_up_was_held_back() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut state = fresh_state();
         state.peerinfo_flooded_at = Some(start);
@@ -1920,6 +1985,7 @@ mod tests {
 
     #[test]
     fn joined_refloods_peerinfo_once_per_window() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut state = fresh_state();
 
@@ -1956,6 +2022,7 @@ mod tests {
     /// the peer is not one when it goes down.
     #[test]
     fn a_session_counts_against_the_ceiling_only_while_its_peer_is_not_a_neighbor() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let bob = endpoint_id(1);
         state.webrtc_admission.note_success(bob);
@@ -1976,6 +2043,7 @@ mod tests {
     /// not before: a link closed on purpose, or a heal on its way, shows the same zero.
     #[test]
     fn a_meshed_member_without_links_is_a_silent_partition_only_after_a_heal() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (bob, roster) = (endpoint_id(1), 3);
         let after = tuning::silent_partition_after();
         let mut state = fresh_state();
@@ -2023,6 +2091,7 @@ mod tests {
     /// the state a silent partition once the gap outlasts a heal.
     #[test]
     fn a_degraded_node_that_heals_without_a_link_starts_counting_the_gap() {
+        let _guard = ::habilis_network_test_tracing::init();
         let roster = 3;
         let after = tuning::silent_partition_after();
         let mut state = fresh_state();
@@ -2044,6 +2113,7 @@ mod tests {
     /// A heal does not restart a gap that already runs: the unlink that began it is the start.
     #[test]
     fn a_heal_does_not_restart_a_gap_that_already_runs() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (bob, roster) = (endpoint_id(1), 3);
         let after = tuning::silent_partition_after();
         let mut state = fresh_state();
@@ -2066,6 +2136,7 @@ mod tests {
 
     #[test]
     fn unlinking_a_peer_keeps_its_path_verdict() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let bob = endpoint_id(1);
         state.linked_endpoints.insert(bob);
@@ -2084,6 +2155,7 @@ mod tests {
 
     #[test]
     fn a_late_unproven_verdict_only_demotes_a_pending_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let pending = endpoint_id(1);
         let proven = endpoint_id(2);
@@ -2121,6 +2193,7 @@ mod tests {
 
     #[test]
     fn forgetting_a_peer_endpoint_drops_its_path_verdict() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let bob = endpoint_id(1);
         state
@@ -2148,6 +2221,7 @@ mod tests {
     fn a_new_rendezvous_verdict_starts_the_refusal_wait_over() {
         use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
 
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let rendezvous = endpoint_id(7);
         state.rendezvous_id = Some(rendezvous);
@@ -2169,6 +2243,7 @@ mod tests {
     // A departed peer read as riding WebRTC was nudged on every alive tick.
     #[test]
     fn forgetting_a_peer_endpoint_drops_its_path_watch() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let bob = endpoint_id(1);
         state
@@ -2192,6 +2267,7 @@ mod tests {
     // ordinary churn starve the two-verdict rule until nobody claims.
     #[test]
     fn only_a_rendezvous_change_drops_a_free_verdict() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.rendezvous_probe_read_free = true;
 
@@ -2217,6 +2293,7 @@ mod tests {
     // any other peer does not end it.
     #[test]
     fn the_events_that_reopen_the_rendezvous_end_the_probe_wait() {
+        let _guard = ::habilis_network_test_tracing::init();
         let now = Instant::now();
         let rendezvous = endpoint_id(9);
         let stranger = endpoint_id(8);
@@ -2263,6 +2340,7 @@ mod tests {
     // `handle_peer_info` make, for many flaps over simulated hours.
     #[test]
     fn app_state_stays_bounded_under_flap_churn() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let start = Instant::now();
         // A small, *steady* roster (the soak's shape: ~10 members, ~7.4k flaps),
@@ -2304,6 +2382,7 @@ mod tests {
 
     #[test]
     fn relink_cooldown_is_per_peer_and_bounded() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let start = Instant::now();
         let flapping = endpoint_id(7);
@@ -2338,6 +2417,7 @@ mod tests {
 
         // The cap relationship itself is asserted at compile time where both
         // consts live; this covers the behaviour it exists for.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let earliest = msg_with_id(&MessageId::random());
         assert!(
@@ -2364,6 +2444,7 @@ mod tests {
     // by construction, not starved.
     #[test]
     fn starvation_due_requires_announce_known_peers_and_silence() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let past_threshold = Instant::now() + STARVE + Duration::from_secs(1);
         assert!(
@@ -2394,6 +2475,7 @@ mod tests {
 
     #[test]
     fn starvation_recovery_backs_off_then_resets_on_inbound() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.announced = true;
         state.known_endpoints.insert(endpoint_id(1));
@@ -2442,6 +2524,7 @@ mod tests {
 
     #[test]
     fn starvation_backoff_caps_at_eight_threshold() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.announced = true;
         state.known_endpoints.insert(endpoint_id(1));
@@ -2468,6 +2551,7 @@ mod tests {
     // job — while a degraded node heals on the first proof of traffic.
     #[test]
     fn note_inbound_restores_meshed_only_when_degraded() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let now = Instant::now();
         assert!(
@@ -2494,6 +2578,7 @@ mod tests {
     /// The second probe of a round is due at the middle of the window, and only once.
     #[test]
     fn the_second_probe_is_due_at_the_middle_of_the_window_and_only_once() {
+        let _guard = ::habilis_network_test_tracing::init();
         let t1 = TokioInstant::now();
         let first = Message::new_ping(&MeshId::from("test"), &nick("alice"));
         let mut round = PingRound::new(&first, t1, t1 + Duration::from_secs(10), None);
@@ -2516,6 +2601,7 @@ mod tests {
     /// probe gets a true RTT.
     #[test]
     fn a_pong_reads_its_rtt_from_the_probe_it_names() {
+        let _guard = ::habilis_network_test_tracing::init();
         let t1 = TokioInstant::now();
         let mesh = MeshId::from("test");
         let first = Message::new_ping(&mesh, &nick("alice"));
@@ -2551,6 +2637,7 @@ mod tests {
     /// it.
     #[test]
     fn the_first_pong_of_a_peer_is_kept() {
+        let _guard = ::habilis_network_test_tracing::init();
         let t1 = TokioInstant::now();
         let mesh = MeshId::from("test");
         let first = Message::new_ping(&mesh, &nick("alice"));
@@ -2578,6 +2665,7 @@ mod tests {
     /// dropped.
     #[test]
     fn a_pong_that_names_no_probe_of_the_round_is_dropped() {
+        let _guard = ::habilis_network_test_tracing::init();
         let t1 = TokioInstant::now();
         let first = Message::new_ping(&MeshId::from("test"), &nick("alice"));
         let mut round = PingRound::new(&first, t1, t1 + Duration::from_secs(10), None);

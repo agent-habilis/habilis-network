@@ -6,12 +6,12 @@ pub use endpoint_error::EndpointError;
 
 #[cfg(test)]
 mod chain_tests {
-    use habilis_network_test_tracing::test;
 
     use super::EndpointError;
 
     #[test]
     fn an_internal_cause_keeps_its_chain() {
+        let _guard = ::habilis_network_test_tracing::init();
         let io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
         let cause = anyhow::Error::new(io).context("bind the endpoint");
         let error = anyhow::Error::new(EndpointError::internal(cause));
@@ -25,7 +25,6 @@ mod chain_tests {
 
 #[cfg(test)]
 mod refusal_tests {
-    use habilis_network_test_tracing::test;
     use iroh::SecretKey;
 
     use super::EndpointError;
@@ -33,6 +32,7 @@ mod refusal_tests {
     /// A refusal names the exchange error it came from, so the log shows both.
     #[test]
     fn a_refusal_keeps_the_exchange_error_as_its_source() {
+        let _guard = ::habilis_network_test_tracing::init();
         let remote = SecretKey::from_bytes(&[7; 32]).public();
         let exchange = std::io::Error::other("connection reset by peer");
         let refusal = EndpointError::CapRefused {

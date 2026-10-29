@@ -1455,7 +1455,6 @@ async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use tokio::sync::oneshot;
@@ -1469,48 +1468,53 @@ mod tests {
     }
 
     #[test]
-    async fn no_shed_does_not_wake_the_loop() {
-        assert!(
-            !wakes_within_a_moment(&mut None).await,
-            "no shed does not wake the loop"
-        );
+    fn no_shed_does_not_wake_the_loop() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            assert!(
+                !wakes_within_a_moment(&mut None).await,
+                "no shed does not wake the loop"
+            );
+        });
     }
 
     #[test]
-    async fn the_close_of_the_shed_beacon_wakes_the_loop() {
-        let (done, closed) = oneshot::channel();
-        let mut closing = Some(closed);
-        assert!(
-            !wakes_within_a_moment(&mut closing).await,
-            "pends while it closes"
-        );
+    fn the_close_of_the_shed_beacon_wakes_the_loop() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (done, closed) = oneshot::channel();
+            let mut closing = Some(closed);
+            assert!(
+                !wakes_within_a_moment(&mut closing).await,
+                "pends while it closes"
+            );
 
-        done.send(()).expect("the receiver is held");
+            done.send(()).expect("the receiver is held");
 
-        assert!(
-            wakes_within_a_moment(&mut closing).await,
-            "the close of the shed beacon wakes the loop"
-        );
+            assert!(
+                wakes_within_a_moment(&mut closing).await,
+                "the close of the shed beacon wakes the loop"
+            );
+        });
     }
 
     #[test]
-    async fn a_lost_close_task_does_not_hold_the_re_probe_back() {
-        let (done, closed) = oneshot::channel::<()>();
-        let mut closing = Some(closed);
+    fn a_lost_close_task_does_not_hold_the_re_probe_back() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (done, closed) = oneshot::channel::<()>();
+            let mut closing = Some(closed);
 
-        drop(done);
+            drop(done);
 
-        assert!(
-            wakes_within_a_moment(&mut closing).await,
-            "a lost close task does not hold the re-probe back"
-        );
+            assert!(
+                wakes_within_a_moment(&mut closing).await,
+                "a lost close task does not hold the re-probe back"
+            );
+        });
     }
 }
 
 #[cfg(all(test, feature = "host"))]
 mod route_wake_tests {
     use habilis_network_iroh_multihop_transport::{HandleConfig, MultihopHandle, underlay_secret};
-    use habilis_network_test_tracing::test;
     use iroh::endpoint::presets;
     use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
 
@@ -1572,46 +1576,58 @@ mod route_wake_tests {
 
     /// The cost on the links that a node advertises is the one of its handle, so that a browser
     /// (a handle made with `for_browser`) costs more as a hop in the middle of a route.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_link_state_arm_advertises_the_link_cost_of_its_handle() {
-        for (config, expected) in [
-            (HandleConfig::default(), 10),
-            (HandleConfig::for_browser(), 100),
-        ] {
-            let secret = SecretKey::generate();
-            let underlay = loopback_underlay(&secret).await;
-            assert_eq!(
-                own_links_after_a_tick(underlay, &secret, config).await,
-                vec![expected],
-                "{config:?}"
-            );
-        }
+    #[test]
+    fn the_link_state_arm_advertises_the_link_cost_of_its_handle() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                for (config, expected) in [
+                    (HandleConfig::default(), 10),
+                    (HandleConfig::for_browser(), 100),
+                ] {
+                    let secret = SecretKey::generate();
+                    let underlay = loopback_underlay(&secret).await;
+                    assert_eq!(
+                        own_links_after_a_tick(underlay, &secret, config).await,
+                        vec![expected],
+                        "{config:?}"
+                    );
+                }
+            },
+        );
     }
 
     /// A vector names the address of the underlay, and a neighbor dials that address. An
     /// underlay with no IP and no relay yet has none: a vector that names it points nowhere, so
     /// the tick says nothing until the underlay has one.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_link_state_arm_says_nothing_while_the_underlay_has_no_address() {
-        // A browser underlay: no IP socket, and a relay that it has not reached yet, so it
-        // binds and has no address. (An endpoint with neither does not bind at all.) The relay
-        // here is a listener that never answers.
-        let (_silent, relay) = crate::testing::silent_relay_rung();
-        let secret = SecretKey::generate();
-        let builder = Endpoint::builder(presets::Minimal)
-            .secret_key(underlay_secret(&secret))
-            .relay_mode(iroh::RelayMode::custom([relay]));
-        let underlay: Endpoint = builder
-            .clear_ip_transports()
-            .bind()
-            .await
-            .expect("bind an underlay with no address yet");
-        assert!(underlay.addr().addrs.is_empty(), "the premise: no address");
-        assert!(
-            own_links_after_a_tick(underlay, &secret, HandleConfig::default())
-                .await
-                .is_empty(),
-            "no link of ours is advertised"
+    #[test]
+    fn the_link_state_arm_says_nothing_while_the_underlay_has_no_address() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                // A browser underlay: no IP socket, and a relay that it has not reached yet, so it
+                // binds and has no address. (An endpoint with neither does not bind at all.) The relay
+                // here is a listener that never answers.
+                let (_silent, relay) = crate::testing::silent_relay_rung();
+                let secret = SecretKey::generate();
+                let builder = Endpoint::builder(presets::Minimal)
+                    .secret_key(underlay_secret(&secret))
+                    .relay_mode(iroh::RelayMode::custom([relay]));
+                let underlay: Endpoint = builder
+                    .clear_ip_transports()
+                    .bind()
+                    .await
+                    .expect("bind an underlay with no address yet");
+                assert!(underlay.addr().addrs.is_empty(), "the premise: no address");
+                assert!(
+                    own_links_after_a_tick(underlay, &secret, HandleConfig::default())
+                        .await
+                        .is_empty(),
+                    "no link of ours is advertised"
+                );
+            },
         );
     }
 
@@ -1619,66 +1635,70 @@ mod route_wake_tests {
     /// destination as a first hop: the wake makes the pass dial the route through a
     /// third member within the same turn, without waiting for the stuck deadline and a
     /// link-state tick.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_refused_first_hop_moves_the_dial_of_a_pair_on_the_relay_to_a_route_through_a_third()
-    {
-        let node = LaneNode::start().await;
-        let context = node.context();
-        let mut state = node.state();
-        let (me, via, dst) = (
-            multihop_handle().await,
-            multihop_handle().await,
-            multihop_handle().await,
-        );
-        assert!(
-            me.feed_topology(via.link_vector(vec![(dst.app_id(), 1)])),
-            "a refused first hop moves the relay dial to a route through a third peer"
-        );
-        assert!(
-            me.feed_topology(dst.link_vector(vec![])),
-            "the route through the third peer is fed to the topology"
-        );
-        assert!(
-            me.feed_topology(me.link_vector(vec![(dst.app_id(), 1), (via.app_id(), 1)])),
-            "the topology carries the route through the third peer"
-        );
-        state.multihop = Some(me.clone());
-        state.note_peer_endpoint(nick("dst"), EndpointAddr::new(dst.app_id().get()));
-        state.path_kinds.insert(dst.app_id().get(), PathKind::Relay);
+    #[test]
+    fn a_refused_first_hop_moves_the_dial_of_a_pair_on_the_relay_to_a_route_through_a_third() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let node = LaneNode::start().await;
+                let context = node.context();
+                let mut state = node.state();
+                let (me, via, dst) = (
+                    multihop_handle().await,
+                    multihop_handle().await,
+                    multihop_handle().await,
+                );
+                assert!(
+                    me.feed_topology(via.link_vector(vec![(dst.app_id(), 1)])),
+                    "a refused first hop moves the relay dial to a route through a third peer"
+                );
+                assert!(
+                    me.feed_topology(dst.link_vector(vec![])),
+                    "the route through the third peer is fed to the topology"
+                );
+                assert!(
+                    me.feed_topology(me.link_vector(vec![(dst.app_id(), 1), (via.app_id(), 1)])),
+                    "the topology carries the route through the third peer"
+                );
+                state.multihop = Some(me.clone());
+                state.note_peer_endpoint(nick("dst"), EndpointAddr::new(dst.app_id().get()));
+                state.path_kinds.insert(dst.app_id().get(), PathKind::Relay);
 
-        nudge_climbing_pairs(&mut state, &context, true);
-        let dst_key = dst.app_id().get();
-        let direct: TransportAddr = state
-            .route_dialed
-            .get(&dst_key)
-            .cloned()
-            .expect("the direct route is dialed");
+                nudge_climbing_pairs(&mut state, &context, true);
+                let dst_key = dst.app_id().get();
+                let direct: TransportAddr = state
+                    .route_dialed
+                    .get(&dst_key)
+                    .cloned()
+                    .expect("the direct route is dialed");
 
-        me.refuse_hop_for_test(dst.app_id());
-        route_wake_arm(&mut state, &context);
+                me.refuse_hop_for_test(dst.app_id());
+                route_wake_arm(&mut state, &context);
 
-        let dialed: TransportAddr = state
-            .route_dialed
-            .get(&dst_key)
-            .cloned()
-            .expect("a route is dialed");
-        assert_ne!(dialed, direct, "the route through the third is dialed");
-        assert_eq!(
-            Some(dialed),
-            me.route_addr(dst.app_id()).map(TransportAddr::Custom),
-            "and it is the route that the handle chooses now"
+                let dialed: TransportAddr = state
+                    .route_dialed
+                    .get(&dst_key)
+                    .cloned()
+                    .expect("a route is dialed");
+                assert_ne!(dialed, direct, "the route through the third is dialed");
+                assert_eq!(
+                    Some(dialed),
+                    me.route_addr(dst.app_id()).map(TransportAddr::Custom),
+                    "and it is the route that the handle chooses now"
+                );
+                state.webrtc_admission.close();
+                me.close().await;
+                via.close().await;
+                dst.close().await;
+                node.endpoint.close().await;
+            },
         );
-        state.webrtc_admission.close();
-        me.close().await;
-        via.close().await;
-        dst.close().await;
-        node.endpoint.close().await;
     }
 }
 
 #[cfg(all(test, feature = "multihop"))]
 mod advertised_changed_tests {
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use iroh::{EndpointId, SecretKey};
@@ -1691,6 +1711,7 @@ mod advertised_changed_tests {
 
     #[test]
     fn a_node_that_advertised_nothing_yet_has_a_new_set() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             advertised_changed(None, &[(id(1), 10)]),
             "a node that advertised nothing has a new set"
@@ -1701,6 +1722,7 @@ mod advertised_changed_tests {
     /// out at once: held back to the tick, the route over its edge would wait 15 s.
     #[test]
     fn a_second_link_that_comes_up_is_a_new_set() {
+        let _guard = ::habilis_network_test_tracing::init();
         let first = [(id(1), 10)];
         let both = [(id(1), 10), (id(2), 10)];
         assert!(
@@ -1713,6 +1735,7 @@ mod advertised_changed_tests {
     /// set changes, and the vector follows the end of the round. Without a change, nothing goes.
     #[test]
     fn a_session_that_attached_is_a_new_set() {
+        let _guard = ::habilis_network_test_tracing::init();
         let linked = HashSet::from([id(1)]);
         let before = advertised_links(&linked, &[], 10);
         let after = advertised_links(&linked, &[id(2)], 10);
@@ -1729,6 +1752,7 @@ mod advertised_changed_tests {
     /// A link that flaps and comes back leaves the set that went out: no second broadcast.
     #[test]
     fn a_link_that_comes_back_is_the_set_that_went_out() {
+        let _guard = ::habilis_network_test_tracing::init();
         let both = [(id(1), 10), (id(2), 10)];
         assert!(
             !advertised_changed(Some(&both), &both),
@@ -1739,7 +1763,6 @@ mod advertised_changed_tests {
 
 #[cfg(all(test, feature = "multihop"))]
 mod advertised_links_tests {
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use iroh::{EndpointId, SecretKey};
@@ -1759,6 +1782,7 @@ mod advertised_links_tests {
     /// member exists, and the pair is locked out until the gossip link comes back.
     #[test]
     fn a_member_with_a_held_session_and_no_gossip_link_is_an_edge() {
+        let _guard = ::habilis_network_test_tracing::init();
         let linked = HashSet::from([id(1)]);
         let links = super::advertised_links(&linked, &[id(2)], 10);
         assert_eq!(
@@ -1770,6 +1794,7 @@ mod advertised_links_tests {
 
     #[test]
     fn a_member_that_is_linked_and_held_is_one_edge() {
+        let _guard = ::habilis_network_test_tracing::init();
         let linked = HashSet::from([id(1)]);
         let links = super::advertised_links(&linked, &[id(1)], 10);
         assert_eq!(
@@ -1781,6 +1806,7 @@ mod advertised_links_tests {
 
     #[test]
     fn with_no_held_session_the_edges_are_the_gossip_links() {
+        let _guard = ::habilis_network_test_tracing::init();
         let linked = HashSet::from([id(1), id(2)]);
         let links = super::advertised_links(&linked, &[], 100);
         assert_eq!(
@@ -1793,12 +1819,12 @@ mod advertised_links_tests {
 
 #[cfg(test)]
 mod chain_tests {
-    use habilis_network_test_tracing::test;
 
     use super::EventLoopError;
 
     #[test]
     fn an_internal_cause_keeps_its_chain() {
+        let _guard = ::habilis_network_test_tracing::init();
         let io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
         let cause = anyhow::Error::new(io).context("bind the endpoint");
         let error = anyhow::Error::new(EventLoopError::internal(cause));

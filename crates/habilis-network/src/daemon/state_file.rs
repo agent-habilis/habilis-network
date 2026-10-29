@@ -412,7 +412,6 @@ fn tmp_sibling(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::path::PathBuf;
 
     use super::StateFileError;
@@ -421,6 +420,7 @@ mod tests {
     /// the public API. This builds them that way.
     #[test]
     fn the_state_file_variants_hold_boxed_sources() {
+        let _guard = ::habilis_network_test_tracing::init();
         let parse = serde_json::from_str::<u8>("x").expect_err("not a number");
         let unparsable = StateFileError::Unparsable {
             path: PathBuf::from("state.json"),
@@ -459,6 +459,7 @@ mod tests {
 
     #[test]
     fn failed_write_removes_temp_file() {
+        let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("failed");
         // A non-empty directory at the target makes the final rename fail
         // after the temp file is fully written.
@@ -492,6 +493,7 @@ mod tests {
 
     #[test]
     fn owner_pid_round_trips_through_the_session_entry() {
+        let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("owner");
         let state_file = StateFile::new(
             path.clone(),
@@ -519,6 +521,7 @@ mod tests {
 
     #[test]
     fn writes_expected_shape() {
+        let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("shape");
         let mesh = MeshId::from("abcd");
         let state_file = StateFile::new(
@@ -568,6 +571,7 @@ mod tests {
     fn topic_string_round_trips_whole() {
         // The derived name is lossy (`www.youtube.com/watch`); the raw string
         // must survive verbatim, query string and all, so leave can echo it.
+        let _guard = ::habilis_network_test_tracing::init();
         let raw = "https://www.youtube.com/watch?v=jSqCL7Npln0";
         let path = unique_path("topic");
         let state_file = StateFile::new(
@@ -600,6 +604,7 @@ mod tests {
 
     #[test]
     fn overwrites_on_subsequent_writes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("overwrite");
         let state_file = StateFile::new(
             path.clone(),
@@ -622,6 +627,7 @@ mod tests {
 
     #[test]
     fn remove_clears_file() {
+        let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("remove");
         let state_file = StateFile::new(
             path.clone(),
@@ -637,6 +643,7 @@ mod tests {
 
     #[test]
     fn drop_removes_file() {
+        let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("drop");
         {
             let state_file = StateFile::new(
@@ -653,6 +660,7 @@ mod tests {
 
     #[test]
     fn creates_parent_dir() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut path = std::env::temp_dir();
         path.push(format!(
             "habilis-network-state-test-parent-{}",
@@ -678,6 +686,7 @@ mod tests {
 
     #[test]
     fn replaces_existing_file() {
+        let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("replace");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         // A pre-existing file with stale/foreign keys is fully replaced —
@@ -727,6 +736,7 @@ mod tests {
 
     #[test]
     fn read_snapshot_round_trips_write() {
+        let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("snapshot");
         let state_file = StateFile::new(
             path.clone(),
@@ -755,6 +765,7 @@ mod tests {
 
     #[test]
     fn read_identity_carries_session_fields() {
+        let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("identity");
         let mesh = MeshId::from("round");
         let state_file = StateFile::new(
@@ -785,6 +796,7 @@ mod tests {
 
     #[test]
     fn read_session_entry_round_trips_write() {
+        let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("session-entry");
         let mesh = MeshId::from("round");
         let state_file = StateFile::new(
@@ -820,6 +832,7 @@ mod tests {
 
     #[test]
     fn read_session_entry_tolerates_a_pre_pid_file() {
+        let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("session-entry-old");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
@@ -843,6 +856,7 @@ mod tests {
         // `session`/`leave`/`ready` must still map (and reap) it. Pins the
         // `mesh_field` fallback — deleting it must go red here, not in the
         // field as an unreapable orphan daemon.
+        let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("session-entry-legacy-room");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
@@ -867,6 +881,7 @@ mod tests {
 
     #[test]
     fn read_session_entry_is_none_on_missing_or_malformed() {
+        let _guard = ::habilis_network_test_tracing::init();
         let missing = unique_path("session-entry-missing");
         assert!(
             super::read_session_entry(&missing).is_none(),
@@ -886,6 +901,7 @@ mod tests {
     fn read_identity_is_all_none_on_a_missing_file() {
         // Best-effort: a missing/identity-less file yields all-None, so the
         // gate's JSON omits the keys rather than printing nulls.
+        let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("identity-missing");
         let identity = super::read_identity(&path);
         assert!(
@@ -904,6 +920,7 @@ mod tests {
 
     #[test]
     fn read_snapshot_errors_on_malformed() {
+        let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("malformed");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         // Not JSON.

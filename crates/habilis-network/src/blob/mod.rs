@@ -52,7 +52,6 @@ mod tests {
     use super::{BlobServer, ContentId, fetch};
     use crate::protocol::mesh::LookupOpts;
     use crate::transport::PayloadPath;
-    use habilis_network_test_tracing::test;
     use rand::RngCore;
     use std::fs;
     use std::path::PathBuf;
@@ -69,6 +68,7 @@ mod tests {
         use crate::protocol::crypto::{SymmetricKey, TicketSecret};
         use zeroize::Zeroizing;
 
+        let _guard = ::habilis_network_test_tracing::init();
         let secret = TicketSecret::from(Zeroizing::new([5u8; super::SECRET_LEN]));
         assert_eq!(
             secret.as_bytes(),
@@ -109,6 +109,7 @@ mod tests {
     /// and asks for a new decision.
     #[test]
     fn a_blob_endpoint_is_built_with_no_custom_transport() {
+        let _guard = ::habilis_network_test_tracing::init();
         let defaults = crate::lookup::TransportHandles::default();
         assert!(
             defaults.gossip.is_none() && defaults.webrtc.is_none(),
@@ -170,42 +171,49 @@ mod tests {
     /// A loopback fetch runs on a direct path, so a producer whose mesh keeps
     /// the relay for lookup only (the default) serves it — and the ticket
     /// carries the policy to the consumer.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn relay_lookup_only_still_serves_a_direct_fetch() {
-        let server = BlobServer::start(
-            LookupOpts::loopback(),
-            temp_spool(),
-            None,
-            PayloadPath::DirectOnly,
-        )
-        .await
-        .expect("start producer");
-        let src = temp_file(b"direct bytes");
-        let ticket = server
-            .register(&src, ContentId::new("blob-test-direct"))
-            .await
-            .expect("register");
-        assert_eq!(
-            ticket.relay_transport,
-            PayloadPath::DirectOnly,
-            "a relay lookup-only ticket keeps the direct payload path"
+    #[test]
+    fn relay_lookup_only_still_serves_a_direct_fetch() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::DirectOnly,
+                )
+                .await
+                .expect("start producer");
+                let src = temp_file(b"direct bytes");
+                let ticket = server
+                    .register(&src, ContentId::new("blob-test-direct"))
+                    .await
+                    .expect("register");
+                assert_eq!(
+                    ticket.relay_transport,
+                    PayloadPath::DirectOnly,
+                    "a relay lookup-only ticket keeps the direct payload path"
+                );
+                let decoded =
+                    super::BlobTicket::decode(&ticket.encode()).expect("ticket round-trips");
+                assert_eq!(
+                    decoded.relay_transport,
+                    PayloadPath::DirectOnly,
+                    "the decoded ticket keeps the direct payload path"
+                );
+                let mut out = Vec::new();
+                fetch(&decoded, &mut out, None)
+                    .await
+                    .expect("fetch over a direct path");
+                assert_eq!(
+                    out, b"direct bytes",
+                    "the direct fetch still returns the bytes"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
         );
-        let decoded = super::BlobTicket::decode(&ticket.encode()).expect("ticket round-trips");
-        assert_eq!(
-            decoded.relay_transport,
-            PayloadPath::DirectOnly,
-            "the decoded ticket keeps the direct payload path"
-        );
-        let mut out = Vec::new();
-        fetch(&decoded, &mut out, None)
-            .await
-            .expect("fetch over a direct path");
-        assert_eq!(
-            out, b"direct bytes",
-            "the direct fetch still returns the bytes"
-        );
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
     }
 
     /// **A peer that connects and goes quiet must not accumulate serve tasks.**
@@ -216,80 +224,99 @@ mod tests {
     /// inside the request being awaited. So a connection that never sends parks
     /// a task, and nothing bounded how many could park at once or freed the
     /// ones that had.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_peer_that_never_sends_does_not_pin_serve_tasks() {
-        use super::produce::ServeLimits;
+    #[test]
+    fn a_peer_that_never_sends_does_not_pin_serve_tasks() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use super::produce::ServeLimits;
 
-        let limits = ServeLimits {
-            pre_auth: Duration::from_millis(300),
-            max_inflight: 4,
-        };
-        let server = BlobServer::start_with_limits(
-            LookupOpts::loopback(),
-            temp_spool(),
-            None,
-            PayloadPath::RelayAllowed,
-            limits,
-        )
-        .await
-        .expect("start producer");
-
-        // Connect and then do nothing at all — never open a stream, never send.
-        let mut clients = Vec::new();
-        let mut idle = Vec::new();
-        for _ in 0..12u8 {
-            let client = iroh::Endpoint::builder(presets::Minimal)
-                .relay_mode(iroh::RelayMode::Disabled)
-                .bind()
+                let limits = ServeLimits {
+                    pre_auth: Duration::from_millis(300),
+                    max_inflight: 4,
+                };
+                let server = BlobServer::start_with_limits(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                    limits,
+                )
                 .await
-                .expect("bind client");
-            if let Ok(connection) = client.connect(server.address(), super::BLOB_ALPN).await {
-                idle.push(connection);
-            }
-            clients.push(client);
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(
-            server.inflight() <= limits.max_inflight,
-            "{} serves in flight, over the {} ceiling",
-            server.inflight(),
-            limits.max_inflight
-        );
+                .expect("start producer");
 
-        // Past the deadline they must be gone, or the ceiling above is just a
-        // slower way to run out.
-        tokio::time::sleep(limits.pre_auth + Duration::from_millis(400)).await;
-        assert_eq!(
-            server.inflight(),
-            0,
-            "a silent peer still holds serve tasks after the pre-auth deadline"
-        );
+                // Connect and then do nothing at all — never open a stream, never send.
+                let mut clients = Vec::new();
+                let mut idle = Vec::new();
+                for _ in 0..12u8 {
+                    let client = iroh::Endpoint::builder(presets::Minimal)
+                        .relay_mode(iroh::RelayMode::Disabled)
+                        .bind()
+                        .await
+                        .expect("bind client");
+                    if let Ok(connection) = client.connect(server.address(), super::BLOB_ALPN).await
+                    {
+                        idle.push(connection);
+                    }
+                    clients.push(client);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                assert!(
+                    server.inflight() <= limits.max_inflight,
+                    "{} serves in flight, over the {} ceiling",
+                    server.inflight(),
+                    limits.max_inflight
+                );
 
-        for connection in idle {
-            connection.close(0u32.into(), b"done");
-        }
-        for client in clients {
-            client.close().await;
-        }
-        server.shutdown().await;
+                // Past the deadline they must be gone, or the ceiling above is just a
+                // slower way to run out.
+                tokio::time::sleep(limits.pre_auth + Duration::from_millis(400)).await;
+                assert_eq!(
+                    server.inflight(),
+                    0,
+                    "a silent peer still holds serve tasks after the pre-auth deadline"
+                );
+
+                for connection in idle {
+                    connection.close(0u32.into(), b"done");
+                }
+                for client in clients {
+                    client.close().await;
+                }
+                server.shutdown().await;
+            },
+        );
     }
 
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn round_trips_a_blob_byte_for_byte() {
-        let payload = vec![7u8; 200_000];
-        assert_eq!(
-            round_trip(&payload).await,
-            payload,
-            "a blob round trips byte for byte"
+    #[test]
+    fn round_trips_a_blob_byte_for_byte() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let payload = vec![7u8; 200_000];
+                assert_eq!(
+                    round_trip(&payload).await,
+                    payload,
+                    "a blob round trips byte for byte"
+                );
+            },
         );
     }
 
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn round_trips_an_empty_blob() {
-        assert_eq!(
-            round_trip(b"").await,
-            b"",
-            "an empty blob round trips to empty bytes"
+    #[test]
+    fn round_trips_an_empty_blob() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                assert_eq!(
+                    round_trip(b"").await,
+                    b"",
+                    "an empty blob round trips to empty bytes"
+                );
+            },
         );
     }
 
@@ -298,218 +325,255 @@ mod tests {
     /// string an application would ship over gossip, and [`fetch`] streams the
     /// bytes back. Nothing here names an application type, which is the point —
     /// this is the shape any consumer writes, whatever its data model.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn offload_to_fetch_needs_no_application_type() {
-        let payload: Vec<u8> = (0..40_000_u32).map(|byte| byte.to_le_bytes()[0]).collect();
-        let src = temp_file(&payload);
-        let mut server: Option<BlobServer> = None;
+    #[test]
+    fn offload_to_fetch_needs_no_application_type() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let payload: Vec<u8> = (0..40_000_u32).map(|byte| byte.to_le_bytes()[0]).collect();
+                let src = temp_file(&payload);
+                let mut server: Option<BlobServer> = None;
 
-        let ticket = super::offload(
-            &mut server,
-            &LookupOpts::loopback(),
-            PayloadPath::RelayAllowed,
-            super::OffloadRequest {
-                path: src.clone(),
-                spool_dir: temp_spool(),
-                content_id: ContentId::new("generic-consumer-group"),
-                password: None,
+                let ticket = super::offload(
+                    &mut server,
+                    &LookupOpts::loopback(),
+                    PayloadPath::RelayAllowed,
+                    super::OffloadRequest {
+                        path: src.clone(),
+                        spool_dir: temp_spool(),
+                        content_id: ContentId::new("generic-consumer-group"),
+                        password: None,
+                    },
+                )
+                .await
+                .expect("offload");
+
+                // Raw bytes, so no base64/UTF-8 detour: the payload cycles 0..=255,
+                // which a frame body would reject outright.
+                let wire = ticket.encode();
+                let decoded =
+                    super::BlobTicket::decode(&wire).expect("ticket round-trips as a string");
+
+                let mut out = Vec::new();
+                fetch(&decoded, &mut out, None).await.expect("fetch");
+                assert_eq!(out, payload, "bytes must survive byte-for-byte");
+
+                // Content-addressed dedup: the same bytes offload to the same ticket
+                // without re-hashing.
+                let again = super::offload(
+                    &mut server,
+                    &LookupOpts::loopback(),
+                    PayloadPath::RelayAllowed,
+                    super::OffloadRequest {
+                        path: src.clone(),
+                        spool_dir: temp_spool(),
+                        content_id: ContentId::new("generic-consumer-group"),
+                        password: None,
+                    },
+                )
+                .await
+                .expect("second offload");
+                assert_eq!(
+                    again.sha256_hex(),
+                    ticket.sha256_hex(),
+                    "offloading to fetch needs no application type and keeps the digest"
+                );
+
+                fs::remove_file(&src).ok();
+                if let Some(server) = server {
+                    server.shutdown().await;
+                }
             },
-        )
-        .await
-        .expect("offload");
-
-        // Raw bytes, so no base64/UTF-8 detour: the payload cycles 0..=255,
-        // which a frame body would reject outright.
-        let wire = ticket.encode();
-        let decoded = super::BlobTicket::decode(&wire).expect("ticket round-trips as a string");
-
-        let mut out = Vec::new();
-        fetch(&decoded, &mut out, None).await.expect("fetch");
-        assert_eq!(out, payload, "bytes must survive byte-for-byte");
-
-        // Content-addressed dedup: the same bytes offload to the same ticket
-        // without re-hashing.
-        let again = super::offload(
-            &mut server,
-            &LookupOpts::loopback(),
-            PayloadPath::RelayAllowed,
-            super::OffloadRequest {
-                path: src.clone(),
-                spool_dir: temp_spool(),
-                content_id: ContentId::new("generic-consumer-group"),
-                password: None,
-            },
-        )
-        .await
-        .expect("second offload");
-        assert_eq!(
-            again.sha256_hex(),
-            ticket.sha256_hex(),
-            "offloading to fetch needs no application type and keeps the digest"
         );
-
-        fs::remove_file(&src).ok();
-        if let Some(server) = server {
-            server.shutdown().await;
-        }
     }
 
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn passworded_blob_requires_the_password() {
-        use crate::protocol::crypto::Password;
-        let password = Password::new("hunter2".to_owned());
-        let server = BlobServer::start(
-            LookupOpts::loopback(),
-            temp_spool(),
-            Some(password.clone()),
-            PayloadPath::RelayAllowed,
-        )
-        .await
-        .unwrap();
-        let src = temp_file(b"secret bytes");
-        let ticket = server
-            .register(&src, ContentId::new("blob-test-content"))
-            .await
-            .unwrap();
-        assert!(ticket.password, "the ticket must be password-protected");
-
-        // Missing password and a wrong password are both refused.
-        let mut out = Vec::new();
-        assert!(
-            fetch(&ticket, &mut out, None).await.is_err(),
-            "a passworded ticket must not redeem without the password"
-        );
-        out.clear();
-        assert!(
-            fetch(&ticket, &mut out, Some(Password::new("wrong".to_owned())))
+    #[test]
+    fn passworded_blob_requires_the_password() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::protocol::crypto::Password;
+                let password = Password::new("hunter2".to_owned());
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    Some(password.clone()),
+                    PayloadPath::RelayAllowed,
+                )
                 .await
-                .is_err(),
-            "a wrong password must be refused"
-        );
-        // The mesh password fetches byte-for-byte.
-        out.clear();
-        fetch(&ticket, &mut out, Some(password))
-            .await
-            .expect("fetch");
-        assert_eq!(
-            out, b"secret bytes",
-            "a passworded blob returns its bytes with the password"
-        );
+                .unwrap();
+                let src = temp_file(b"secret bytes");
+                let ticket = server
+                    .register(&src, ContentId::new("blob-test-content"))
+                    .await
+                    .unwrap();
+                assert!(ticket.password, "the ticket must be password-protected");
 
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
+                // Missing password and a wrong password are both refused.
+                let mut out = Vec::new();
+                assert!(
+                    fetch(&ticket, &mut out, None).await.is_err(),
+                    "a passworded ticket must not redeem without the password"
+                );
+                out.clear();
+                assert!(
+                    fetch(&ticket, &mut out, Some(Password::new("wrong".to_owned())))
+                        .await
+                        .is_err(),
+                    "a wrong password must be refused"
+                );
+                // The mesh password fetches byte-for-byte.
+                out.clear();
+                fetch(&ticket, &mut out, Some(password))
+                    .await
+                    .expect("fetch");
+                assert_eq!(
+                    out, b"secret bytes",
+                    "a passworded blob returns its bytes with the password"
+                );
+
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
+        );
     }
 
     /// The same bytes offloaded under two groups share one spool file, so
     /// evicting one group must leave the other's ticket redeemable.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn evicting_one_group_keeps_a_shared_blob_for_the_other() {
-        let server = BlobServer::start(
-            LookupOpts::loopback(),
-            temp_spool(),
-            None,
-            PayloadPath::RelayAllowed,
-        )
-        .await
-        .unwrap();
-        let src = temp_file(b"shared bytes");
-        let group_a = ContentId::new("blob-test-group-a");
-        let group_b = ContentId::new("blob-test-group-b");
-        server.register(&src, group_a.clone()).await.unwrap();
-        let ticket_b = server.register(&src, group_b.clone()).await.unwrap();
+    #[test]
+    fn evicting_one_group_keeps_a_shared_blob_for_the_other() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                )
+                .await
+                .unwrap();
+                let src = temp_file(b"shared bytes");
+                let group_a = ContentId::new("blob-test-group-a");
+                let group_b = ContentId::new("blob-test-group-b");
+                server.register(&src, group_a.clone()).await.unwrap();
+                let ticket_b = server.register(&src, group_b.clone()).await.unwrap();
 
-        server.evict_content(&group_a).await;
-        let mut out = Vec::new();
-        fetch(&ticket_b, &mut out, None)
-            .await
-            .expect("group B still holds the blob");
-        assert_eq!(
-            out, b"shared bytes",
-            "evicting one group keeps the shared blob for the other group"
-        );
+                server.evict_content(&group_a).await;
+                let mut out = Vec::new();
+                fetch(&ticket_b, &mut out, None)
+                    .await
+                    .expect("group B still holds the blob");
+                assert_eq!(
+                    out, b"shared bytes",
+                    "evicting one group keeps the shared blob for the other group"
+                );
 
-        server.evict_content(&group_b).await;
-        out.clear();
-        assert!(
-            fetch(&ticket_b, &mut out, None).await.is_err(),
-            "the blob goes once its last group is evicted"
+                server.evict_content(&group_b).await;
+                out.clear();
+                assert!(
+                    fetch(&ticket_b, &mut out, None).await.is_err(),
+                    "the blob goes once its last group is evicted"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
         );
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
     }
 
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_bad_secret_is_refused() {
-        let server = BlobServer::start(
-            LookupOpts::loopback(),
-            temp_spool(),
-            None,
-            PayloadPath::RelayAllowed,
-        )
-        .await
-        .unwrap();
-        let src = temp_file(b"secret payload");
-        let mut ticket = server
-            .register(&src, ContentId::new("blob-test-content"))
-            .await
-            .unwrap();
-        ticket.secret = crypto::TicketSecret::from([0u8; super::SECRET_LEN]);
-        let mut out = Vec::new();
-        assert!(
-            fetch(&ticket, &mut out, None).await.is_err(),
-            "a wrong secret must be refused"
+    #[test]
+    fn a_bad_secret_is_refused() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                )
+                .await
+                .unwrap();
+                let src = temp_file(b"secret payload");
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-content"))
+                    .await
+                    .unwrap();
+                ticket.secret = crypto::TicketSecret::from([0u8; super::SECRET_LEN]);
+                let mut out = Vec::new();
+                assert!(
+                    fetch(&ticket, &mut out, None).await.is_err(),
+                    "a wrong secret must be refused"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
         );
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
     }
 
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_unknown_hash_is_refused() {
-        let server = BlobServer::start(
-            LookupOpts::loopback(),
-            temp_spool(),
-            None,
-            PayloadPath::RelayAllowed,
-        )
-        .await
-        .unwrap();
-        let src = temp_file(b"real content");
-        let mut ticket = server
-            .register(&src, ContentId::new("blob-test-content"))
-            .await
-            .unwrap();
-        ticket.sha256 = super::BlobDigest::from([0xabu8; super::HASH_LEN]);
-        let mut out = Vec::new();
-        assert!(
-            fetch(&ticket, &mut out, None).await.is_err(),
-            "an unknown hash must be refused"
+    #[test]
+    fn an_unknown_hash_is_refused() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                )
+                .await
+                .unwrap();
+                let src = temp_file(b"real content");
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-content"))
+                    .await
+                    .unwrap();
+                ticket.sha256 = super::BlobDigest::from([0xabu8; super::HASH_LEN]);
+                let mut out = Vec::new();
+                assert!(
+                    fetch(&ticket, &mut out, None).await.is_err(),
+                    "an unknown hash must be refused"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
         );
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
     }
 
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_size_disagreement_is_rejected() {
-        let server = BlobServer::start(
-            LookupOpts::loopback(),
-            temp_spool(),
-            None,
-            PayloadPath::RelayAllowed,
-        )
-        .await
-        .unwrap();
-        let src = temp_file(b"exactly this many bytes");
-        let mut ticket = server
-            .register(&src, ContentId::new("blob-test-content"))
-            .await
-            .unwrap();
-        ticket.size += 1; // producer will offer the true size, which won't match
-        let mut out = Vec::new();
-        assert!(
-            fetch(&ticket, &mut out, None).await.is_err(),
-            "a size disagreement must be rejected"
+    #[test]
+    fn a_size_disagreement_is_rejected() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let server = BlobServer::start(
+                    LookupOpts::loopback(),
+                    temp_spool(),
+                    None,
+                    PayloadPath::RelayAllowed,
+                )
+                .await
+                .unwrap();
+                let src = temp_file(b"exactly this many bytes");
+                let mut ticket = server
+                    .register(&src, ContentId::new("blob-test-content"))
+                    .await
+                    .unwrap();
+                ticket.size += 1; // producer will offer the true size, which won't match
+                let mut out = Vec::new();
+                assert!(
+                    fetch(&ticket, &mut out, None).await.is_err(),
+                    "a size disagreement must be rejected"
+                );
+                fs::remove_file(&src).ok();
+                server.shutdown().await;
+            },
         );
-        fs::remove_file(&src).ok();
-        server.shutdown().await;
     }
 }

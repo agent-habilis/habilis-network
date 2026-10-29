@@ -244,7 +244,6 @@ pub(crate) fn note_tick_gap(
 #[cfg(test)]
 mod tests {
     use crate::testing;
-    use habilis_network_test_tracing::{expect_warn, test};
 
     use crate::gossip::event::CountingSink;
 
@@ -253,7 +252,8 @@ mod tests {
     // mutate anything else. A `0` threshold disables it entirely.
     #[test]
     fn resident_memory_warn_fires_once_then_latches() {
-        expect_warn(
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
             "habilis_network::lifecycle",
             "resident memory crossed the warn threshold",
         );
@@ -275,6 +275,7 @@ mod tests {
 
     #[test]
     fn resident_memory_warn_disabled_by_zero_threshold() {
+        let _guard = ::habilis_network_test_tracing::init();
         let sink = CountingSink::new();
         let mut state = testing::fresh_state();
         super::warn_on_high_resident_memory(&mut state, &sink, 0);

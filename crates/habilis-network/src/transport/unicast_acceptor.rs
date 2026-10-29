@@ -122,7 +122,6 @@ impl ProtocolHandler for UnicastAcceptor {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use iroh::endpoint::{Connection, ConnectionError};
@@ -192,65 +191,70 @@ mod tests {
     }
 
     #[test]
-    async fn an_accepted_connection_that_gets_no_stream_is_closed_after_the_idle_timeout() {
-        let (connection, router, client, _frames) = connected(Duration::from_secs(8)).await;
-        tokio::time::pause();
+    fn an_accepted_connection_that_gets_no_stream_is_closed_after_the_idle_timeout() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (connection, router, client, _frames) = connected(Duration::from_secs(8)).await;
+            tokio::time::pause();
 
-        advance_secs(6).await;
-        assert!(
-            connection.close_reason().is_none(),
-            "inside the idle timeout"
-        );
+            advance_secs(6).await;
+            assert!(
+                connection.close_reason().is_none(),
+                "inside the idle timeout"
+            );
 
-        advance_secs(6).await;
-        assert!(closed_soon(&connection).await, "never closed");
-        assert!(
-            closed_by_the_acceptor(&connection),
-            "{:?}",
-            connection.close_reason()
-        );
+            advance_secs(6).await;
+            assert!(closed_soon(&connection).await, "never closed");
+            assert!(
+                closed_by_the_acceptor(&connection),
+                "{:?}",
+                connection.close_reason()
+            );
 
-        tokio::time::resume();
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
+            tokio::time::resume();
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
     }
 
     #[test]
-    async fn a_stream_restarts_the_accept_side_idle_timeout() {
-        let (connection, router, client, mut frames) = connected(Duration::from_secs(8)).await;
-        tokio::time::pause();
+    fn a_stream_restarts_the_accept_side_idle_timeout() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (connection, router, client, mut frames) = connected(Duration::from_secs(8)).await;
+            tokio::time::pause();
 
-        advance_secs(5).await;
-        let mut stream = connection.open_uni().await.expect("open a stream");
-        stream.write_all(b"frame").await.expect("write");
-        stream.finish().expect("finish");
-        // Real I/O carries the frame to the acceptor: yield until it lands.
-        while frames.try_recv().is_err() {
-            tokio::task::yield_now().await;
-        }
+            advance_secs(5).await;
+            let mut stream = connection.open_uni().await.expect("open a stream");
+            stream.write_all(b"frame").await.expect("write");
+            stream.finish().expect("finish");
+            // Real I/O carries the frame to the acceptor: yield until it lands.
+            while frames.try_recv().is_err() {
+                tokio::task::yield_now().await;
+            }
 
-        advance_secs(5).await;
-        assert!(
-            connection.close_reason().is_none(),
-            "five seconds after a stream is inside the timeout"
-        );
+            advance_secs(5).await;
+            assert!(
+                connection.close_reason().is_none(),
+                "five seconds after a stream is inside the timeout"
+            );
 
-        advance_secs(7).await;
-        assert!(closed_soon(&connection).await, "never closed");
-        assert!(
-            closed_by_the_acceptor(&connection),
-            "{:?}",
-            connection.close_reason()
-        );
+            advance_secs(7).await;
+            assert!(closed_soon(&connection).await, "never closed");
+            assert!(
+                closed_by_the_acceptor(&connection),
+                "{:?}",
+                connection.close_reason()
+            );
 
-        tokio::time::resume();
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
+            tokio::time::resume();
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
     }
 
     /// The idle close of an accepted connection is the one backstop of the direct connections.
     #[test]
     fn an_acceptor_closes_an_idle_connection_after_the_one_backstop() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (tx, _frames) = mpsc::channel(1);
         assert_eq!(
             UnicastAcceptor::new(tx, PayloadPath::RelayAllowed).idle,

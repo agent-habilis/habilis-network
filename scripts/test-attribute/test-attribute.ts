@@ -16,7 +16,9 @@ const TEST_FN =
 const ITEM = /^(use|const|static|type|struct|enum|fn|impl|mod|trait)\b|^#\[/;
 function guardAfterItems(body: string, bodyIndent: string): string {
   const lines = body.split("\n");
-  const guard = `${bodyIndent}let _guard = ::habilis_network_test_tracing::init();`;
+  // A body that binds _guard already gets the guard under another name, so nothing is shadowed.
+  const name = /\b_guard\b/.test(body) ? "_trace_guard" : "_guard";
+  const guard = `${bodyIndent}let ${name} = ::habilis_network_test_tracing::init();`;
   let i = 0;
   while (i < lines.length) {
     const line = lines[i]!;

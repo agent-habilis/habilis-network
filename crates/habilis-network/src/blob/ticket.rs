@@ -38,7 +38,6 @@ mod tests {
     use crate::protocol::crypto::TicketSecret;
     use crate::protocol::mesh::LookupOpts;
     use crate::transport::PayloadPath;
-    use habilis_network_test_tracing::test;
     use iroh::{EndpointAddr, SecretKey};
 
     use crate::protocol::mesh;
@@ -61,6 +60,7 @@ mod tests {
 
     #[test]
     fn ticket_round_trips() {
+        let _guard = ::habilis_network_test_tracing::init();
         let ticket = sample(false);
         let encoded = ticket.encode();
         assert!(encoded.is_ascii(), "an encoded ticket is ascii");
@@ -104,6 +104,7 @@ mod tests {
 
     #[test]
     fn encode_matches_the_golden_string() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             sample(false).encode(),
             GOLDEN,
@@ -113,6 +114,7 @@ mod tests {
 
     #[test]
     fn decode_of_the_golden_string_gives_the_same_fields() {
+        let _guard = ::habilis_network_test_tracing::init();
         let decoded = BlobTicket::decode(GOLDEN).expect("decode");
         let expected = sample(false);
         assert_eq!(
@@ -148,6 +150,7 @@ mod tests {
 
     #[test]
     fn password_flag_round_trips() {
+        let _guard = ::habilis_network_test_tracing::init();
         let decoded = BlobTicket::decode(&sample(true).encode()).expect("decode");
         assert!(decoded.password, "the password flag round trips as set");
         assert_eq!(
@@ -159,6 +162,7 @@ mod tests {
 
     #[test]
     fn relay_transport_flag_round_trips_and_is_off_by_default() {
+        let _guard = ::habilis_network_test_tracing::init();
         let ticket = BlobTicket {
             relay_transport: PayloadPath::DirectOnly,
             ..sample(true)
@@ -185,6 +189,7 @@ mod tests {
     fn sha256_hex_is_the_lowercase_content_hash() {
         // The receiver lands the fetched bytes under this name, so it must equal
         // the producer's spool filename (lowercase hex of the SHA-256).
+        let _guard = ::habilis_network_test_tracing::init();
         let ticket = sample(false); // sha256 == [7u8; HASH_LEN]
         assert_eq!(
             ticket.sha256_hex(),
@@ -197,6 +202,7 @@ mod tests {
     fn rejects_a_mesh_token() {
         // A mesh id shares the bare-base58 shape but has a different payload;
         // blob decode must refuse it (wrong kind / structure).
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = mesh::Mesh::try_new(
             crate::protocol::Seed::new([1u8; 32]),
             mesh::MeshName::try_new("t").unwrap(),
@@ -218,6 +224,7 @@ mod tests {
         // crate depends on it and can see both.
         use crate::protocol::mesh::{Mesh, MeshConfig, MeshName};
 
+        let _guard = ::habilis_network_test_tracing::init();
         let mut creator = Mesh::try_new(
             crate::protocol::Seed::new([1u8; 32]),
             MeshName::try_new("t").unwrap(),
@@ -243,6 +250,7 @@ mod tests {
     fn debug_never_prints_the_secret() {
         // A byte array prints in decimal and a hex dump prints in hex, so the
         // check covers both forms, and it asks for the redaction itself.
+        let _guard = ::habilis_network_test_tracing::init();
         let shown = format!("{:?}", sample(false));
         assert!(
             !shown.contains(&format!("{:?}", [9u8; SECRET_LEN])),
@@ -260,6 +268,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_checksum() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut encoded = sample(false).encode();
         let last = encoded.pop().unwrap();
         encoded.push(if last == '1' { '2' } else { '1' });

@@ -1281,7 +1281,6 @@ mod tests {
     };
     use crate::protocol::{Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
     use crate::runtime;
-    use habilis_network_test_tracing::test;
 
     /// The longest nickname there is: 32 four-byte scalars.
     fn widest_nick(seed: char) -> Nickname {
@@ -1323,6 +1322,7 @@ mod tests {
 
     #[test]
     fn the_envelope_fits_its_reserve() {
+        let _guard = ::habilis_network_test_tracing::init();
         let envelope = signed_len("");
         assert!(envelope <= ENVELOPE_RESERVE, "envelope is {envelope} bytes");
     }
@@ -1331,6 +1331,7 @@ mod tests {
     /// either end of the escaping range.
     #[test]
     fn a_text_msg_fits_accepts_signs_within_one_frame() {
+        let _guard = ::habilis_network_test_tracing::init();
         for text in [
             "\"".repeat(MAX_MSG),
             "a".repeat(ESCAPED_BUDGET),
@@ -1355,6 +1356,7 @@ mod tests {
 
     #[test]
     fn a_body_round_trips_and_refuses_what_it_cannot_carry() {
+        let _guard = ::habilis_network_test_tracing::init();
         let text = "ol\u{e1}, \"mesh\"\n\ttab";
         assert_eq!(
             msg_body(text).expect("body").as_str(),
@@ -1373,6 +1375,7 @@ mod tests {
 
     #[test]
     fn a_stall_surfaces_once_until_the_queue_drains() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (inbound, _queue) = mpsc::channel(1);
         let mut app = MembershipApp::new(inbound);
         let surfaced: Vec<bool> = [true, false, false, false, true, false]

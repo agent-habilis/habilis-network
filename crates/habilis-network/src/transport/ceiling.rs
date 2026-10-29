@@ -365,10 +365,10 @@ impl Ceiling {
 mod tests {
     use super::{Admission, Ceiling, Duration, EvictionBackoff, HashSet, Instant};
     use crate::testing;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn an_eviction_holds_proactive_dials_for_a_minute_within_the_jitter() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let peer = testing::endpoint_id(1);
         for (spread, secs) in [(-1.0, 48), (0.0, 60), (1.0, 72)] {
@@ -395,6 +395,7 @@ mod tests {
 
     #[test]
     fn a_noted_eviction_forgets_the_expired_ones() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut backoff = EvictionBackoff::default();
         backoff.note(testing::endpoint_id(1), start, 0.0);
@@ -433,6 +434,7 @@ mod tests {
 
     #[test]
     fn the_newcomer_past_the_ceiling_evicts_the_least_recently_used_idle_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = full(4, start);
         let now = at(start, 200);
@@ -455,6 +457,7 @@ mod tests {
 
     #[test]
     fn a_peer_under_the_ceiling_evicts_nobody() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::new(4);
         for index in 0..4u8 {
@@ -475,6 +478,7 @@ mod tests {
 
     #[test]
     fn a_peer_younger_than_a_minute_is_kept_while_an_older_one_can_go() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::new(2);
         let (old, young) = (testing::endpoint_id(1), testing::endpoint_id(2));
@@ -492,6 +496,7 @@ mod tests {
 
     #[test]
     fn when_every_peer_is_young_the_least_recently_used_goes_anyway() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::new(2);
         ceiling.register_quic(testing::endpoint_id(1), start);
@@ -508,6 +513,7 @@ mod tests {
 
     #[test]
     fn a_busy_peer_is_never_evicted_and_a_ceiling_of_busy_peers_is_overrun_by_the_newcomer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = full(2, start);
         ceiling.busy_begin(testing::endpoint_id(0));
@@ -532,6 +538,7 @@ mod tests {
 
     #[test]
     fn a_batch_evicts_down_to_ninety_percent_once_per_five_seconds() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = full(10, start);
         let first = ceiling.register_quic(testing::endpoint_id(100), at(start, 200));
@@ -564,6 +571,7 @@ mod tests {
 
     #[test]
     fn the_count_never_exceeds_the_ceiling_over_a_long_run_of_admissions() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::new(8);
         let mut state = 12345_u64;
@@ -586,6 +594,7 @@ mod tests {
 
     #[test]
     fn a_refusing_ceiling_evicts_nobody_above_its_cap() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::refusing(2);
         for byte in 1..=4 {
@@ -617,6 +626,7 @@ mod tests {
 
     #[test]
     fn a_session_to_a_neighbor_does_not_count_until_the_peer_stops_being_one() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::new(2);
         let neighbor = testing::endpoint_id(1);
@@ -641,6 +651,7 @@ mod tests {
 
     #[test]
     fn two_peers_at_a_ceiling_of_two_and_a_newcomer_evict_exactly_one_then_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::new(2);
         ceiling.register_quic(testing::endpoint_id(1), start);
@@ -676,6 +687,7 @@ mod tests {
 
     #[test]
     fn a_session_and_its_connection_are_one_unit() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::new(1);
         ceiling.register_session(testing::endpoint_id(1), start);

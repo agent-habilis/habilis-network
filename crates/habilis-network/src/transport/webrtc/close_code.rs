@@ -44,11 +44,11 @@ mod tests {
         CAP_REFUSED, EVICTED, GOSSIP_ON_GOSSIP_PATH, GOSSIP_RELAY_REFUSED, IDLE, NOT_A_NEIGHBOR,
         SIGNAL_ABORTED, SIGNAL_FAILED, UNICAST_RELAY_REFUSED,
     };
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     #[test]
     fn no_two_codes_share_a_number() {
+        let _guard = ::habilis_network_test_tracing::init();
         let all = [
             CAP_REFUSED,
             SIGNAL_FAILED,

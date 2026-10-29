@@ -420,7 +420,6 @@ mod tests {
         RungRefresh, next_relay_backoff, plan_rung_refresh, relay_ladder, select_bootstrap_rung,
         select_first_reachable, should_evict_rung,
     };
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use crate::lookup::test_relay;
@@ -437,6 +436,7 @@ mod tests {
     #[test]
     fn pinned_ladder_matches_iroh_prod() {
         use iroh::defaults::prod;
+        let _guard = ::habilis_network_test_tracing::init();
         let expected = [
             prod::NA_EAST_RELAY_HOSTNAME,
             prod::NA_WEST_RELAY_HOSTNAME,
@@ -468,6 +468,7 @@ mod tests {
     /// dot, so a browser member could reach no dotted rung at all.
     #[test]
     fn no_ladder_rung_has_a_trailing_dot() {
+        let _guard = ::habilis_network_test_tracing::init();
         let hosts = RENDEZVOUS_RELAY_LADDER_URLS
             .iter()
             .filter_map(|url| url.host_str());
@@ -477,6 +478,7 @@ mod tests {
 
     #[test]
     fn pinned_ladder_resolves_to_prod_set() {
+        let _guard = ::habilis_network_test_tracing::init();
         let pinned: Vec<_> = relay_ladder(&RelayChoice::Pinned).collect();
         assert_eq!(
             pinned, *RENDEZVOUS_RELAY_LADDER_URLS,
@@ -496,17 +498,19 @@ mod tests {
     }
 
     #[test]
-    async fn select_bootstrap_rung_empty_ladder_is_none() {
-        // Relay disabled / private ⇒ empty ladder ⇒ no probing, `None`
-        // (joiners fall back to mDNS/DHT). The ordering/fall-through
-        // logic is unit-tested via `select_first_reachable` below; the
-        // down-detection primitive by `unreachable_rung_*` below.
-        assert!(
-            select_bootstrap_rung(&[], std::time::Duration::from_secs(1), None)
-                .await
-                .is_none(),
-            "an empty ladder selects no bootstrap rung"
-        );
+    fn select_bootstrap_rung_empty_ladder_is_none() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // Relay disabled / private ⇒ empty ladder ⇒ no probing, `None`
+            // (joiners fall back to mDNS/DHT). The ordering/fall-through
+            // logic is unit-tested via `select_first_reachable` below; the
+            // down-detection primitive by `unreachable_rung_*` below.
+            assert!(
+                select_bootstrap_rung(&[], std::time::Duration::from_secs(1), None)
+                    .await
+                    .is_none(),
+                "an empty ladder selects no bootstrap rung"
+            );
+        });
     }
 
     // --- liveness primitive (verify-first, CI-safe) -----------------
@@ -520,22 +524,25 @@ mod tests {
     // transition is the documented manual/local check.)
 
     #[test]
-    async fn unreachable_rung_is_detected_as_down() {
-        // RFC-5737 TEST-NET-1, never routable ⇒ the relay handshake can
-        // never connect ⇒ `select_bootstrap_rung` finds no reachable rung.
-        let bogus: RelayUrl = "https://192.0.2.1./".parse().unwrap();
-        let selected =
-            select_bootstrap_rung(&[bogus], std::time::Duration::from_secs(2), None).await;
-        assert!(
-            selected.is_none(),
-            "an unreachable relay must not be selected as a live rung"
-        );
+    fn unreachable_rung_is_detected_as_down() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // RFC-5737 TEST-NET-1, never routable ⇒ the relay handshake can
+            // never connect ⇒ `select_bootstrap_rung` finds no reachable rung.
+            let bogus: RelayUrl = "https://192.0.2.1./".parse().unwrap();
+            let selected =
+                select_bootstrap_rung(&[bogus], std::time::Duration::from_secs(2), None).await;
+            assert!(
+                selected.is_none(),
+                "an unreachable relay must not be selected as a live rung"
+            );
+        });
     }
 
     // --- liveness debounce (`should_evict_rung`) --------------------
 
     #[test]
     fn one_failed_poll_does_not_evict() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             !should_evict_rung(0),
             "one failed poll does not evict a rung"
@@ -545,6 +552,7 @@ mod tests {
 
     #[test]
     fn sustained_failures_evict() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             should_evict_rung(RELAY_LIVENESS_FAILS_TO_EVICT),
             "sustained failures evict a rung"
@@ -557,6 +565,7 @@ mod tests {
 
     #[test]
     fn backoff_doubles_then_saturates_at_max() {
+        let _guard = ::habilis_network_test_tracing::init();
         let max = super::RELAY_REPROBE_BACKOFF_MAX;
         let min = tuning::RELAY_REPROBE_BACKOFF_MIN;
         // Doubles each round...
@@ -608,77 +617,89 @@ mod tests {
     }
 
     #[test]
-    async fn ladder_picks_first_when_all_reachable() {
-        let ladder = rungs(&["a", "b", "c"]);
-        let (selected, probed) = walk(&ladder, &[]).await;
-        assert_eq!(
-            host_of(selected.as_ref()).as_deref(),
-            Some("a"),
-            "the first rung is picked when all are reachable"
-        );
-        assert_eq!(probed, vec!["a"], "stops at the first reachable rung");
+    fn ladder_picks_first_when_all_reachable() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let ladder = rungs(&["a", "b", "c"]);
+            let (selected, probed) = walk(&ladder, &[]).await;
+            assert_eq!(
+                host_of(selected.as_ref()).as_deref(),
+                Some("a"),
+                "the first rung is picked when all are reachable"
+            );
+            assert_eq!(probed, vec!["a"], "stops at the first reachable rung");
+        });
     }
 
     #[test]
-    async fn ladder_falls_through_to_next_reachable() {
-        let ladder = rungs(&["a", "b", "c"]);
-        // rung 0 down → rung 1 wins, having probed a then b.
-        let (selected, probed) = walk(&ladder, &["a"]).await;
-        assert_eq!(
-            host_of(selected.as_ref()).as_deref(),
-            Some("b"),
-            "the ladder falls through to the next reachable rung"
-        );
-        assert_eq!(
-            probed,
-            vec!["a", "b"],
-            "the ladder probes the dead first rung and then the second"
-        );
+    fn ladder_falls_through_to_next_reachable() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let ladder = rungs(&["a", "b", "c"]);
+            // rung 0 down → rung 1 wins, having probed a then b.
+            let (selected, probed) = walk(&ladder, &["a"]).await;
+            assert_eq!(
+                host_of(selected.as_ref()).as_deref(),
+                Some("b"),
+                "the ladder falls through to the next reachable rung"
+            );
+            assert_eq!(
+                probed,
+                vec!["a", "b"],
+                "the ladder probes the dead first rung and then the second"
+            );
+        });
     }
 
     #[test]
-    async fn ladder_skips_multiple_dead_prefix_rungs() {
-        let ladder = rungs(&["a", "b", "c"]);
-        let (selected, probed) = walk(&ladder, &["a", "b"]).await;
-        assert_eq!(
-            host_of(selected.as_ref()).as_deref(),
-            Some("c"),
-            "the ladder skips multiple dead prefix rungs"
-        );
-        assert_eq!(
-            probed,
-            vec!["a", "b", "c"],
-            "the ladder probes each dead rung in order"
-        );
+    fn ladder_skips_multiple_dead_prefix_rungs() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let ladder = rungs(&["a", "b", "c"]);
+            let (selected, probed) = walk(&ladder, &["a", "b"]).await;
+            assert_eq!(
+                host_of(selected.as_ref()).as_deref(),
+                Some("c"),
+                "the ladder skips multiple dead prefix rungs"
+            );
+            assert_eq!(
+                probed,
+                vec!["a", "b", "c"],
+                "the ladder probes each dead rung in order"
+            );
+        });
     }
 
     #[test]
-    async fn ladder_prefers_first_rung_when_it_recovers() {
-        // "reset and start from the first": the walk always re-picks the
-        // earliest reachable rung, so a recovered rung 0 wins over a
-        // still-up rung 1.
-        let ladder = rungs(&["a", "b", "c"]);
-        let (selected, _) = walk(&ladder, &[]).await;
-        assert_eq!(
-            host_of(selected.as_ref()).as_deref(),
-            Some("a"),
-            "the first rung is preferred again once it recovers"
-        );
+    fn ladder_prefers_first_rung_when_it_recovers() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // "reset and start from the first": the walk always re-picks the
+            // earliest reachable rung, so a recovered rung 0 wins over a
+            // still-up rung 1.
+            let ladder = rungs(&["a", "b", "c"]);
+            let (selected, _) = walk(&ladder, &[]).await;
+            assert_eq!(
+                host_of(selected.as_ref()).as_deref(),
+                Some("a"),
+                "the first rung is preferred again once it recovers"
+            );
+        });
     }
 
     #[test]
-    async fn ladder_all_down_is_none() {
-        let ladder = rungs(&["a", "b", "c"]);
-        let (selected, probed) = walk(&ladder, &["a", "b", "c"]).await;
-        assert!(selected.is_none(), "every rung down ⇒ None (use mDNS/DHT)");
-        assert_eq!(probed, vec!["a", "b", "c"], "probes the whole ladder");
+    fn ladder_all_down_is_none() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let ladder = rungs(&["a", "b", "c"]);
+            let (selected, probed) = walk(&ladder, &["a", "b", "c"]).await;
+            assert!(selected.is_none(), "every rung down ⇒ None (use mDNS/DHT)");
+            assert_eq!(probed, vec!["a", "b", "c"], "probes the whole ladder");
+        });
     }
 
     #[test]
-    async fn ladder_empty_is_none_without_probing() {
-        let (selected, probed) = walk(&[], &[]).await;
-        assert!(selected.is_none(), "an empty ladder selects nothing");
-        assert!(probed.is_empty(), "an empty ladder probes nothing");
+    fn ladder_empty_is_none_without_probing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (selected, probed) = walk(&[], &[]).await;
+            assert!(selected.is_none(), "an empty ladder selects nothing");
+            assert!(probed.is_empty(), "an empty ladder probes nothing");
+        });
     }
 
     // --- steady-state failover decision (`plan_rung_refresh`) -------
@@ -692,6 +713,7 @@ mod tests {
 
     #[test]
     fn refresh_no_op_when_current_rung_still_first_reachable() {
+        let _guard = ::habilis_network_test_tracing::init();
         let action = plan_rung_refresh(Some(rung("a")).as_ref(), Some(rung("a")));
         assert_eq!(
             action,
@@ -727,6 +749,7 @@ mod tests {
     #[test]
     fn refresh_rehomes_when_current_rung_died() {
         // current rung a is gone; the walk now returns b → re-home to b.
+        let _guard = ::habilis_network_test_tracing::init();
         let action = plan_rung_refresh(Some(rung("a")).as_ref(), Some(rung("b")));
         assert_eq!(
             action,
@@ -738,6 +761,7 @@ mod tests {
     #[test]
     fn refresh_rehomes_back_to_earlier_recovered_rung() {
         // we were on b (a had been down); a recovered → reset to a.
+        let _guard = ::habilis_network_test_tracing::init();
         let action = plan_rung_refresh(Some(rung("b")).as_ref(), Some(rung("a")));
         assert_eq!(
             action,
@@ -749,6 +773,7 @@ mod tests {
     #[test]
     fn refresh_rehomes_to_none_when_all_rungs_die() {
         // every rung unreachable → drop the relay, lean on mDNS/DHT.
+        let _guard = ::habilis_network_test_tracing::init();
         let action = plan_rung_refresh(Some(rung("a")).as_ref(), None);
         assert_eq!(
             action,
@@ -760,6 +785,7 @@ mod tests {
     #[test]
     fn refresh_rehomes_when_relay_recovers_from_none() {
         // we had no rung (all were down); one came back → adopt it.
+        let _guard = ::habilis_network_test_tracing::init();
         let action = plan_rung_refresh(None, Some(rung("a")));
         assert_eq!(
             action,

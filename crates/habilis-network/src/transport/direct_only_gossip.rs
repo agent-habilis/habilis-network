@@ -184,7 +184,6 @@ fn refuse_before_session(has_session: bool, negotiating: bool, we_offer: bool) -
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod watcher_tests {
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use iroh::endpoint::Connection;
@@ -199,108 +198,122 @@ mod watcher_tests {
     /// that starts the watch and returns drops the last strong handle, so the
     /// connection must close, and the dialer sees it close. A watcher that held
     /// the connection, or a path stream that did, would leave it up.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_relay_watcher_does_not_keep_a_connection_alive() {
-        const ALPN: &[u8] = b"habilis-mesh/test-watch/0";
+    #[test]
+    fn the_relay_watcher_does_not_keep_a_connection_alive() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                const ALPN: &[u8] = b"habilis-mesh/test-watch/0";
 
-        #[derive(Debug, Clone)]
-        struct WatchAndDrop;
-        impl ProtocolHandler for WatchAndDrop {
-            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                super::watch_relay_policy(&connection, None);
-                Ok(())
-            }
-        }
-        let bind = || async {
-            iroh::Endpoint::builder(presets::Minimal)
-                .relay_mode(iroh::RelayMode::Disabled)
-                .bind()
-                .await
-                .expect("bind a loopback endpoint")
-        };
-        let server = bind().await;
-        let router = Router::builder(server.clone())
-            .accept(ALPN, WatchAndDrop)
-            .spawn();
-        let client = bind().await;
-        crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
+                #[derive(Debug, Clone)]
+                struct WatchAndDrop;
+                impl ProtocolHandler for WatchAndDrop {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        super::watch_relay_policy(&connection, None);
+                        Ok(())
+                    }
+                }
+                let bind = || async {
+                    iroh::Endpoint::builder(presets::Minimal)
+                        .relay_mode(iroh::RelayMode::Disabled)
+                        .bind()
+                        .await
+                        .expect("bind a loopback endpoint")
+                };
+                let server = bind().await;
+                let router = Router::builder(server.clone())
+                    .accept(ALPN, WatchAndDrop)
+                    .spawn();
+                let client = bind().await;
+                crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
 
-        let connection = client.connect(server.id(), ALPN).await.expect("connect");
-        let closed = tokio::time::timeout(Duration::from_secs(10), connection.closed()).await;
+                let connection = client.connect(server.id(), ALPN).await.expect("connect");
+                let closed =
+                    tokio::time::timeout(Duration::from_secs(10), connection.closed()).await;
 
-        assert!(
-            closed.is_ok(),
-            "the connection stayed up after its handler dropped it: the watcher holds it"
+                assert!(
+                    closed.is_ok(),
+                    "the connection stayed up after its handler dropped it: the watcher holds it"
+                );
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
         );
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
     }
 
     /// A watch that starts on a link already off a direct path reports the relay
     /// at once, not after the deadline. The link is relay-only: neither end has an
     /// IP transport.
     #[cfg(feature = "iroh-test-utils")]
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_watch_that_starts_on_a_relay_link_reports_the_relay() {
-        use crate::transport::probe::{PathChange, PathKind};
+    #[test]
+    fn a_watch_that_starts_on_a_relay_link_reports_the_relay() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::transport::probe::{PathChange, PathKind};
 
-        const ALPN: &[u8] = b"habilis-mesh/test-watch-relay/0";
+                const ALPN: &[u8] = b"habilis-mesh/test-watch-relay/0";
 
-        #[derive(Debug, Clone)]
-        struct WatchAndHold(mpsc::UnboundedSender<PathChange>);
-        impl ProtocolHandler for WatchAndHold {
-            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                super::watch_relay_policy(&connection, Some(self.0.clone()));
-                connection.closed().await;
-                Ok(())
-            }
-        }
-        let (relay_url, _relay_server) = test_relay::spawn_plain().await.expect("local relay");
-        let bind = || {
-            let relay_url = relay_url.clone();
-            async move {
-                iroh::Endpoint::builder(presets::Minimal)
-                    .relay_mode(iroh::RelayMode::custom([relay_url]))
-                    .clear_ip_transports()
-                    .bind()
+                #[derive(Debug, Clone)]
+                struct WatchAndHold(mpsc::UnboundedSender<PathChange>);
+                impl ProtocolHandler for WatchAndHold {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        super::watch_relay_policy(&connection, Some(self.0.clone()));
+                        connection.closed().await;
+                        Ok(())
+                    }
+                }
+                let (relay_url, _relay_server) =
+                    test_relay::spawn_plain().await.expect("local relay");
+                let bind = || {
+                    let relay_url = relay_url.clone();
+                    async move {
+                        iroh::Endpoint::builder(presets::Minimal)
+                            .relay_mode(iroh::RelayMode::custom([relay_url]))
+                            .clear_ip_transports()
+                            .bind()
+                            .await
+                            .expect("bind a relay-only endpoint")
+                    }
+                };
+                let (sink, mut reports) = mpsc::unbounded_channel();
+                let server = bind().await;
+                let router = Router::builder(server.clone())
+                    .accept(ALPN, WatchAndHold(sink))
+                    .spawn();
+                let client = bind().await;
+
+                let relayed =
+                    iroh::EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
+                let _conn = client.connect(relayed, ALPN).await.expect("connect");
+                let report = tokio::time::timeout(Duration::from_secs(5), reports.recv())
                     .await
-                    .expect("bind a relay-only endpoint")
-            }
-        };
-        let (sink, mut reports) = mpsc::unbounded_channel();
-        let server = bind().await;
-        let router = Router::builder(server.clone())
-            .accept(ALPN, WatchAndHold(sink))
-            .spawn();
-        let client = bind().await;
+                    .expect("no report inside 5 s: the watch waits for the deadline")
+                    .expect("the sink stays open");
 
-        let relayed = iroh::EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
-        let _conn = client.connect(relayed, ALPN).await.expect("connect");
-        let report = tokio::time::timeout(Duration::from_secs(5), reports.recv())
-            .await
-            .expect("no report inside 5 s: the watch waits for the deadline")
-            .expect("the sink stays open");
-
-        assert_eq!(
-            report.kind,
-            PathKind::Relay,
-            "the report names the relay path kind"
+                assert_eq!(
+                    report.kind,
+                    PathKind::Relay,
+                    "the report names the relay path kind"
+                );
+                assert_eq!(report.peer, client.id(), "the report names the client peer");
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
         );
-        assert_eq!(report.peer, client.id(), "the report names the client peer");
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
     }
 }
 
 #[cfg(test)]
 mod tests {
 
-    use habilis_network_test_tracing::test;
-
     // The offerer attaches one DTLS trip before the answerer does, and grafts
     // the moment it attaches, so its dial can reach the answerer mid-round.
     #[test]
     fn a_dial_during_the_round_is_held_not_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             super::refuse_before_session(false, false, false),
             "no session, no round"
@@ -321,6 +334,7 @@ mod tests {
     // answerer's HyParView reply.
     #[test]
     fn the_offerer_refuses_a_dial_before_its_session() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             super::refuse_before_session(false, true, true),
             "mid-round, as the offerer"

@@ -6,10 +6,10 @@ use habilis_network::iroh::{EndpointAddr, SecretKey};
 use habilis_network::net::direct::PayloadPath;
 use habilis_network::ops::blob::{BlobDigest, BlobTicket, ContentId, OffloadRequest};
 use habilis_network::protocol::{LookupOpts, TicketSecret};
-use habilis_network_test_tracing::test;
 
 #[test]
 fn an_offload_request_is_built_from_outside_the_crate() {
+    let _guard = ::habilis_network_test_tracing::init();
     let request = OffloadRequest::new(
         PathBuf::from("/data/file.bin"),
         ContentId::new("group-1"),
@@ -25,6 +25,7 @@ fn an_offload_request_is_built_from_outside_the_crate() {
 
 #[test]
 fn a_blob_ticket_is_built_from_outside_the_crate() {
+    let _guard = ::habilis_network_test_tracing::init();
     let address = EndpointAddr::new(SecretKey::from_bytes(&[1; 32]).public());
     let ticket = BlobTicket::new(
         address.clone(),

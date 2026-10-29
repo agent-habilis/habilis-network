@@ -13,7 +13,6 @@ pub use no_daemon::NoDaemon;
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use serde::{Deserialize, Serialize};
 
     use super::{Addressed, client, json_reply, listener};
@@ -47,6 +46,7 @@ mod tests {
 
     #[test]
     fn json_ok_is_valid_json() {
+        let _guard = ::habilis_network_test_tracing::init();
         let json = json_reply::json_ok("abc-123");
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(
@@ -58,6 +58,7 @@ mod tests {
 
     #[test]
     fn json_error_is_valid_json() {
+        let _guard = ::habilis_network_test_tracing::init();
         let json = json_reply::json_error("something broke");
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(
@@ -72,6 +73,7 @@ mod tests {
 
     #[test]
     fn json_ok_escapes_special_chars() {
+        let _guard = ::habilis_network_test_tracing::init();
         let json = json_reply::json_ok(r#"id"with"quotes"#);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(
@@ -82,6 +84,7 @@ mod tests {
 
     #[test]
     fn json_error_escapes_special_chars() {
+        let _guard = ::habilis_network_test_tracing::init();
         let json = json_reply::json_error(r#"error: "bad input""#);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(
@@ -98,6 +101,7 @@ mod tests {
 
     #[test]
     fn socket_path_format() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = MeshId::from("abcdefghijkmnpqr");
         let base = test_base();
         let path = listener::socket_path(&base, &mesh, &Nickname::from("my-nick"));
@@ -119,7 +123,6 @@ mod tests {
 
     mod prop {
         use crate::util;
-        use habilis_network_test_tracing::test;
         use proptest::collection::vec as arb_vec;
         use proptest::strategy::Strategy;
         use proptest::{prop_assert, prop_assert_eq, proptest};
@@ -141,49 +144,55 @@ mod tests {
 
             #[test]
             fn prop_json_ok_always_valid(id in arb_ascii_body()) {
+                let _guard = ::habilis_network_test_tracing::init();
                 let json = json_reply::json_ok(&id);
                 let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
                 prop_assert!(parsed["ok"] == true);
                 prop_assert_eq!(&parsed["id"], &id as &str);
-            }
+                        }
 
             #[test]
             fn prop_json_error_always_valid(message in arb_ascii_body()) {
+                let _guard = ::habilis_network_test_tracing::init();
                 let json = json_reply::json_error(&message);
                 let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
                 prop_assert!(parsed["ok"] == false);
                 prop_assert_eq!(&parsed["error"], &message as &str);
-            }
+                        }
 
             // ── Injection safety ──────────────────────────────────
 
             #[test]
             fn prop_json_ok_injection_safe(id in r#"["\\/\n\r\t]{1,50}"#) {
+                let _guard = ::habilis_network_test_tracing::init();
                 let json = json_reply::json_ok(&id);
                 let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
                 prop_assert_eq!(&parsed["id"], &id as &str);
-            }
+                        }
 
             #[test]
             fn prop_json_error_injection_safe(message in r#"["\\/\n\r\t]{1,50}"#) {
+                let _guard = ::habilis_network_test_tracing::init();
                 let json = json_reply::json_error(&message);
                 let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
                 prop_assert_eq!(&parsed["error"], &message as &str);
-            }
+                        }
 
             // ── Socket prefix ─────────────────────────────────────
 
             #[test]
             fn prop_mesh_prefix_max_16_chars(mesh in arb_mesh()) {
+                let _guard = ::habilis_network_test_tracing::init();
                 let prefix = util::mesh_prefix(mesh.as_str());
                 prop_assert!(prefix.chars().count() <= 16);
-            }
+                        }
 
             #[test]
             fn prop_mesh_prefix_is_prefix_of_input(mesh in arb_mesh()) {
+                let _guard = ::habilis_network_test_tracing::init();
                 let prefix = util::mesh_prefix(mesh.as_str());
                 prop_assert!(mesh.as_str().starts_with(&prefix));
-            }
+                        }
         }
     }
 
@@ -207,53 +216,56 @@ mod tests {
     }
 
     #[test]
-    async fn ipc_listen_and_send_msg() {
-        // Base58-encode the pid so the mesh id passes strict charset validation.
-        let pid_b58 = bs58::encode(std::process::id().to_le_bytes()).into_string();
-        let mesh = MeshId::from(format!("ipctest{pid_b58}").as_str());
-        let nickname = Nickname::from("test-nick");
+    fn ipc_listen_and_send_msg() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // Base58-encode the pid so the mesh id passes strict charset validation.
+            let pid_b58 = bs58::encode(std::process::id().to_le_bytes()).into_string();
+            let mesh = MeshId::from(format!("ipctest{pid_b58}").as_str());
+            let nickname = Nickname::from("test-nick");
 
-        let (tx, rx) = mpsc::channel::<IpcMessage<TestCommand>>(8);
+            let (tx, rx) = mpsc::channel::<IpcMessage<TestCommand>>(8);
 
-        // Bind synchronously (no sleep needed — the socket is accepting the
-        // instant `bind` returns), then spawn the accept loop.
-        let listener = listener::bind(&test_base(), &mesh, &nickname).expect("bind IPC socket");
-        let listener_handle = tokio::spawn(listener::serve(
-            listener,
-            tx,
-            // trait object: the setup takes the silent sink as a shared handle
-            std::sync::Arc::new(event::SilentSink),
-        ));
+            // Bind synchronously (no sleep needed — the socket is accepting the
+            // instant `bind` returns), then spawn the accept loop.
+            let listener = listener::bind(&test_base(), &mesh, &nickname).expect("bind IPC socket");
+            let listener_handle = tokio::spawn(listener::serve(
+                listener,
+                tx,
+                // trait object: the setup takes the silent sink as a shared handle
+                std::sync::Arc::new(event::SilentSink),
+            ));
 
-        // Spawn a handler that responds to messages
-        let handler = tokio::spawn(respond_once(rx));
+            // Spawn a handler that responds to messages
+            let handler = tokio::spawn(respond_once(rx));
 
-        // Send a command
-        let command = TestCommand::Msg {
-            mesh: mesh.clone(),
-            body: "test message".to_owned(),
-        };
-        let response = client::send(&test_base(), &command, &nickname)
-            .await
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(
-            parsed["ok"], true,
-            "a message sent over ipc gets an ok reply"
-        );
-        assert_eq!(
-            parsed["id"], "got: test message",
-            "the ipc reply carries the echoed message"
-        );
+            // Send a command
+            let command = TestCommand::Msg {
+                mesh: mesh.clone(),
+                body: "test message".to_owned(),
+            };
+            let response = client::send(&test_base(), &command, &nickname)
+                .await
+                .unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(
+                parsed["ok"], true,
+                "a message sent over ipc gets an ok reply"
+            );
+            assert_eq!(
+                parsed["id"], "got: test message",
+                "the ipc reply carries the echoed message"
+            );
 
-        handler.await.unwrap();
-        listener_handle.abort();
+            handler.await.unwrap();
+            listener_handle.abort();
+        });
     }
 
     #[test]
     fn accept_backoff_doubles_to_cap() {
         use crate::util::tuning::{IPC_ACCEPT_BACKOFF_MAX, IPC_ACCEPT_BACKOFF_MIN};
 
+        let _guard = ::habilis_network_test_tracing::init();
         let cap = IPC_ACCEPT_BACKOFF_MAX;
         let mut backoff = IPC_ACCEPT_BACKOFF_MIN;
         let mut previous = backoff;
@@ -280,64 +292,66 @@ mod tests {
     // daemon's lifetime, and the listener must keep serving others
     // throughout. Real-time: waits out `IPC_IO_TIMEOUT` (10s).
     #[test]
-    async fn idle_connection_is_closed_at_the_read_deadline() {
-        use interprocess::local_socket::tokio::Stream;
-        use interprocess::local_socket::traits::tokio::Stream as _;
-        use interprocess::local_socket::{GenericFilePath, ToFsName};
-        use tokio::io::AsyncReadExt;
+    fn idle_connection_is_closed_at_the_read_deadline() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use interprocess::local_socket::tokio::Stream;
+            use interprocess::local_socket::traits::tokio::Stream as _;
+            use interprocess::local_socket::{GenericFilePath, ToFsName};
+            use tokio::io::AsyncReadExt;
 
-        let pid_b58 = bs58::encode(std::process::id().to_le_bytes()).into_string();
-        let mesh = MeshId::from(format!("ipcquiet{pid_b58}").as_str());
-        let nickname = Nickname::from("idle-nick");
-        let (tx, rx) = mpsc::channel::<IpcMessage<TestCommand>>(8);
-        let listener = listener::bind(&test_base(), &mesh, &nickname).expect("bind IPC socket");
-        let listener_handle = tokio::spawn(listener::serve(
-            listener,
-            tx,
-            // trait object: the setup takes the silent sink as a shared handle
-            std::sync::Arc::new(event::SilentSink),
-        ));
-        // Echo handler so a healthy command still round-trips while the
-        // idle connection is parked.
-        let handler = tokio::spawn(respond_healthy_forever(rx));
+            let pid_b58 = bs58::encode(std::process::id().to_le_bytes()).into_string();
+            let mesh = MeshId::from(format!("ipcquiet{pid_b58}").as_str());
+            let nickname = Nickname::from("idle-nick");
+            let (tx, rx) = mpsc::channel::<IpcMessage<TestCommand>>(8);
+            let listener = listener::bind(&test_base(), &mesh, &nickname).expect("bind IPC socket");
+            let listener_handle = tokio::spawn(listener::serve(
+                listener,
+                tx,
+                // trait object: the setup takes the silent sink as a shared handle
+                std::sync::Arc::new(event::SilentSink),
+            ));
+            // Echo handler so a healthy command still round-trips while the
+            // idle connection is parked.
+            let handler = tokio::spawn(respond_healthy_forever(rx));
 
-        // Park a silent connection.
-        let path = listener::socket_path(&test_base(), &mesh, &nickname);
-        let name = path.clone().to_fs_name::<GenericFilePath>().unwrap();
-        let mut idle = Stream::connect(name).await.unwrap();
+            // Park a silent connection.
+            let path = listener::socket_path(&test_base(), &mesh, &nickname);
+            let name = path.clone().to_fs_name::<GenericFilePath>().unwrap();
+            let mut idle = Stream::connect(name).await.unwrap();
 
-        // A healthy command still round-trips while the idle one is parked.
-        let command = TestCommand::Ping { mesh: mesh.clone() };
-        let response = client::send(&test_base(), &command, &nickname)
-            .await
-            .unwrap();
-        assert!(response.contains("healthy"), "listener stalled: {response}");
+            // A healthy command still round-trips while the idle one is parked.
+            let command = TestCommand::Ping { mesh: mesh.clone() };
+            let response = client::send(&test_base(), &command, &nickname)
+                .await
+                .unwrap();
+            assert!(response.contains("healthy"), "listener stalled: {response}");
 
-        // The parked connection is closed (EOF) at the deadline, with margin.
-        let mut sink = Vec::new();
-        let read = tokio::time::timeout(
-            tuning::IPC_IO_TIMEOUT + std::time::Duration::from_secs(5),
-            idle.read_to_end(&mut sink),
-        )
-        .await;
-        assert!(
-            matches!(read, Ok(Ok(0))),
-            "idle connection was not closed at the read deadline: {read:?}"
-        );
+            // The parked connection is closed (EOF) at the deadline, with margin.
+            let mut sink = Vec::new();
+            let read = tokio::time::timeout(
+                tuning::IPC_IO_TIMEOUT + std::time::Duration::from_secs(5),
+                idle.read_to_end(&mut sink),
+            )
+            .await;
+            assert!(
+                matches!(read, Ok(Ok(0))),
+                "idle connection was not closed at the read deadline: {read:?}"
+            );
 
-        handler.abort();
-        listener_handle.abort();
+            handler.abort();
+            listener_handle.abort();
+        });
     }
 }
 
 #[cfg(test)]
 mod chain_tests {
-    use habilis_network_test_tracing::test;
 
     use super::IpcError;
 
     #[test]
     fn an_internal_cause_keeps_its_chain() {
+        let _guard = ::habilis_network_test_tracing::init();
         let io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
         let cause = anyhow::Error::new(io).context("bind the endpoint");
         let error = anyhow::Error::new(IpcError::internal(cause));

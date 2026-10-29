@@ -56,7 +56,6 @@ mod tests {
     use super::{BlobStore, ContentMeta};
     use crate::blob::{BlobDigest, ContentId, HASH_LEN, SECRET_LEN};
     use crate::protocol::crypto::TicketSecret;
-    use habilis_network_test_tracing::test;
     use rand::RngCore;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -81,6 +80,7 @@ mod tests {
 
     #[test]
     fn snapshot_then_get_streams_from_spool() {
+        let _guard = ::habilis_network_test_tracing::init();
         let src_dir = temp_dir("src");
         let src = src_dir.join("payload.bin");
         fs::write(&src, vec![7u8; 4096]).unwrap();
@@ -121,6 +121,7 @@ mod tests {
 
     #[test]
     fn dedup_keeps_the_first_secret() {
+        let _guard = ::habilis_network_test_tracing::init();
         let src_dir = temp_dir("src");
         let src = src_dir.join("payload.bin");
         fs::write(&src, b"same content").unwrap();
@@ -165,6 +166,7 @@ mod tests {
 
     #[test]
     fn snapshot_replaces_a_partial_dest() {
+        let _guard = ::habilis_network_test_tracing::init();
         let dir = temp_dir("partial");
         let src = dir.join("src");
         let dest = dir.join("dest");
@@ -198,6 +200,7 @@ mod tests {
     /// check land in `snapshot` together; the second must still own the blob.
     #[test]
     fn a_snapshot_race_adds_the_second_group() {
+        let _guard = ::habilis_network_test_tracing::init();
         let src_dir = temp_dir("src");
         let src = src_dir.join("payload.bin");
         fs::write(&src, b"shared").unwrap();
@@ -229,6 +232,7 @@ mod tests {
 
     #[test]
     fn the_same_group_twice_is_one_owner() {
+        let _guard = ::habilis_network_test_tracing::init();
         let src_dir = temp_dir("src");
         let src = src_dir.join("payload.bin");
         fs::write(&src, b"twice").unwrap();
@@ -259,6 +263,7 @@ mod tests {
     /// first registration said: under disk pressure the next-oldest goes.
     #[test]
     fn a_claim_makes_the_blob_the_newest_under_disk_pressure() {
+        let _guard = ::habilis_network_test_tracing::init();
         let src_dir = temp_dir("src");
         let src = src_dir.join("payload.bin");
         fs::write(&src, b"x").unwrap();
@@ -306,6 +311,7 @@ mod tests {
 
     #[test]
     fn evict_task_unlinks_the_spool_file() {
+        let _guard = ::habilis_network_test_tracing::init();
         let src_dir = temp_dir("src");
         let src = src_dir.join("payload.bin");
         fs::write(&src, b"bye").unwrap();

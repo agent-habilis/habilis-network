@@ -26,6 +26,7 @@ mod tests {
 
     #[test]
     fn a_synthetic_presence_names_the_peer_apart_from_its_signer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = MeshId::from("test");
         let node = Identity::generate();
         let peer = Identity::generate();
@@ -54,7 +55,6 @@ mod tests {
 /// hold by then, and a stale frame of a departed key must not refresh that nickname's liveness.
 #[cfg(all(test, feature = "host"))]
 mod departed_tests {
-    use habilis_network_test_tracing::test;
     use iroh_gossip::net::Gossip;
 
     use crate::daemon::handler_ctx::HandlerCtx;
@@ -110,226 +110,234 @@ mod departed_tests {
     }
 
     #[test]
-    async fn a_replayed_left_leaves_the_nickname_to_its_new_holder() {
-        let (endpoint, sender) = endpoint_and_sender().await;
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let mesh = MeshId::from("test");
-        let us = nick("us");
-        let sink = SilentSink;
-        let context = HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &us,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: endpoint_id(9),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let who = nick("swift-cedar");
-        let first_run = Identity::generate();
-        let left = Message::new_left(&mesh, &who).sign(&first_run);
-        let mut state = fresh_state();
-        let mut app = Inert;
+    fn a_replayed_left_leaves_the_nickname_to_its_new_holder() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let who = nick("swift-cedar");
+            let first_run = Identity::generate();
+            let left = Message::new_left(&mesh, &who).sign(&first_run);
+            let mut state = fresh_state();
+            let mut app = Inert;
 
-        // The first run leaves.
-        state.peers.insert(who.clone());
-        let update = membership_update::compute_for(&left, &state);
-        handle_presence(
-            PresenceEvent {
-                message: &left,
-                subtype: PresenceSubtype::Left,
-                update: &update,
-                surfaceable: true,
-            },
-            &mut state,
-            &mut app,
-            &context,
-        )
-        .await;
-        assert!(!state.peers.contains(who.as_str()), "the first run left");
+            // The first run leaves.
+            state.peers.insert(who.clone());
+            let update = membership_update::compute_for(&left, &state);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &update,
+                    surfaceable: true,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            assert!(!state.peers.contains(who.as_str()), "the first run left");
 
-        // A second run takes the nickname, then a copy of the first run's goodbye lands.
-        state.peers.insert(who.clone());
-        state.surfaced.insert(who.clone());
-        let replay = membership_update::compute_for(&left, &state);
-        handle_presence(
-            PresenceEvent {
-                message: &left,
-                subtype: PresenceSubtype::Left,
-                update: &replay,
-                surfaceable: true,
-            },
-            &mut state,
-            &mut app,
-            &context,
-        )
-        .await;
-        assert!(
-            state.peers.contains(who.as_str()),
-            "a replayed goodbye of the first run removed the second run"
-        );
-        assert!(
-            state.surfaced.contains(who.as_str()),
-            "a replayed goodbye of the first run un-surfaced the second run"
-        );
-        endpoint.close().await;
+            // A second run takes the nickname, then a copy of the first run's goodbye lands.
+            state.peers.insert(who.clone());
+            state.surfaced.insert(who.clone());
+            let replay = membership_update::compute_for(&left, &state);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &replay,
+                    surfaceable: true,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            assert!(
+                state.peers.contains(who.as_str()),
+                "a replayed goodbye of the first run removed the second run"
+            );
+            assert!(
+                state.surfaced.contains(who.as_str()),
+                "a replayed goodbye of the first run un-surfaced the second run"
+            );
+            endpoint.close().await;
+        });
     }
 
     /// A departed key's `joined` frames serve nobody once it is gone, and the log never evicts a
     /// small author, so without this they stay resend subjects for the life of the node. Its chat
     /// stays: a node that missed it can still backfill it.
     #[test]
-    async fn a_departed_keys_presence_leaves_the_log() {
-        let (endpoint, sender) = endpoint_and_sender().await;
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let mesh = MeshId::from("test");
-        let us = nick("us");
-        let sink = SilentSink;
-        let context = HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &us,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: endpoint_id(9),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let who = nick("swift-cedar");
-        let departed = Identity::generate();
-        let joined = Message::new_joined(&mesh, &who).sign(&departed);
-        let chat = Message::new_app(
-            &mesh,
-            &who,
-            crate::protocol::AppFrameParams::new(
-                crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
-                None,
-                None,
-                crate::protocol::MessageBody::from("kept"),
-            ),
-        )
-        .sign(&departed);
-        let mut state = fresh_state();
-        state.peers.insert(who.clone());
-        state.message_log.push(joined.clone());
-        state.message_log.push(chat.clone());
+    fn a_departed_keys_presence_leaves_the_log() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let who = nick("swift-cedar");
+            let departed = Identity::generate();
+            let joined = Message::new_joined(&mesh, &who).sign(&departed);
+            let chat = Message::new_app(
+                &mesh,
+                &who,
+                crate::protocol::AppFrameParams::new(
+                    crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                    None,
+                    None,
+                    crate::protocol::MessageBody::from("kept"),
+                ),
+            )
+            .sign(&departed);
+            let mut state = fresh_state();
+            state.peers.insert(who.clone());
+            state.message_log.push(joined.clone());
+            state.message_log.push(chat.clone());
 
-        let left = Message::new_left(&mesh, &who).sign(&departed);
-        let update = membership_update::compute_for(&left, &state);
-        let mut app = Inert;
-        handle_presence(
-            PresenceEvent {
-                message: &left,
-                subtype: PresenceSubtype::Left,
-                update: &update,
-                surfaceable: true,
-            },
-            &mut state,
-            &mut app,
-            &context,
-        )
-        .await;
-        assert!(
-            !state.message_log.contains(&joined.dedup_key()),
-            "the departed key's joined is still in the log"
-        );
-        assert!(
-            state.message_log.contains(&chat.dedup_key()),
-            "the departed key's chat left the log"
-        );
-        endpoint.close().await;
+            let left = Message::new_left(&mesh, &who).sign(&departed);
+            let update = membership_update::compute_for(&left, &state);
+            let mut app = Inert;
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &update,
+                    surfaceable: true,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            assert!(
+                !state.message_log.contains(&joined.dedup_key()),
+                "the departed key's joined is still in the log"
+            );
+            assert!(
+                state.message_log.contains(&chat.dedup_key()),
+                "the departed key's chat left the log"
+            );
+            endpoint.close().await;
+        });
     }
 
     /// A copy of a goodbye reaches `observe` before `handle_presence`. If a later holder of the
     /// nickname has gone quiet, the copy must not read as that holder's return: it is a frame of a
     /// key that already said goodbye, and says nothing about whoever holds the nickname now.
     #[test]
-    async fn a_replayed_left_does_not_return_a_quiet_holder() {
-        let (endpoint, sender) = endpoint_and_sender().await;
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let mesh = MeshId::from("test");
-        let us = nick("us");
-        let sink = SilentSink;
-        let context = HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &us,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: endpoint_id(9),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let who = nick("swift-cedar");
-        let first_run = Identity::generate();
-        let mut state = fresh_state();
-        state.note_left(&who, first_run.author_key(), UnixSecs::from(1_000));
-        // A second run took the nickname and went quiet.
-        state.quiet.insert(who.clone());
+    fn a_replayed_left_does_not_return_a_quiet_holder() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let who = nick("swift-cedar");
+            let first_run = Identity::generate();
+            let mut state = fresh_state();
+            state.note_left(&who, first_run.author_key(), UnixSecs::from(1_000));
+            // A second run took the nickname and went quiet.
+            state.quiet.insert(who.clone());
 
-        let replay = Message::new_left(&mesh, &who).sign(&first_run);
-        let observed = observe(&replay, &mut state, &context);
-        assert!(observed.update.stale, "a copy of a goodbye is not stale");
-        assert!(
-            !state.peers.contains(who.as_str()),
-            "a replayed goodbye of the first run returned the quiet second run"
-        );
-        assert!(
-            state.quiet.contains(who.as_str()),
-            "a replayed goodbye of the first run took the second run out of quiet"
-        );
-        assert!(
-            !state.last_seen.contains_key(who.as_str()),
-            "a replayed goodbye refreshed the nickname's liveness"
-        );
-        endpoint.close().await;
+            let replay = Message::new_left(&mesh, &who).sign(&first_run);
+            let observed = observe(&replay, &mut state, &context);
+            assert!(observed.update.stale, "a copy of a goodbye is not stale");
+            assert!(
+                !state.peers.contains(who.as_str()),
+                "a replayed goodbye of the first run returned the quiet second run"
+            );
+            assert!(
+                state.quiet.contains(who.as_str()),
+                "a replayed goodbye of the first run took the second run out of quiet"
+            );
+            assert!(
+                !state.last_seen.contains_key(who.as_str()),
+                "a replayed goodbye refreshed the nickname's liveness"
+            );
+            endpoint.close().await;
+        });
     }
 
     #[test]
-    async fn a_stale_frame_of_a_departed_key_does_not_refresh_liveness() {
-        let (endpoint, sender) = endpoint_and_sender().await;
-        let identity = Identity::generate();
-        let our_pubkey = identity.author_key();
-        let mesh = MeshId::from("test");
-        let us = nick("us");
-        let sink = SilentSink;
-        let context = HandlerCtx {
-            sender: &sender,
-            endpoint: &endpoint,
-            mesh: &mesh,
-            author: &us,
-            identity: &identity,
-            our_pubkey,
-            max_peers: 16,
-            rendezvous_id: endpoint_id(9),
-            external_msg_tx: None,
-            sink: &sink,
-        };
-        let who = nick("swift-cedar");
-        let departed = Identity::generate();
-        let mut state = fresh_state();
-        state.note_left(&who, departed.author_key(), UnixSecs::from(1_000));
+    fn a_stale_frame_of_a_departed_key_does_not_refresh_liveness() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let who = nick("swift-cedar");
+            let departed = Identity::generate();
+            let mut state = fresh_state();
+            state.note_left(&who, departed.author_key(), UnixSecs::from(1_000));
 
-        let replay = Message::new_joined(&mesh, &who).sign(&departed);
-        let observed = observe(&replay, &mut state, &context);
-        assert!(
-            observed.update.stale,
-            "a stale frame of a departed key is stale"
-        );
-        assert!(
-            !state.last_seen.contains_key(who.as_str()),
-            "a stale frame refreshed the nickname's liveness"
-        );
-        endpoint.close().await;
+            let replay = Message::new_joined(&mesh, &who).sign(&departed);
+            let observed = observe(&replay, &mut state, &context);
+            assert!(
+                observed.update.stale,
+                "a stale frame of a departed key is stale"
+            );
+            assert!(
+                !state.last_seen.contains_key(who.as_str()),
+                "a stale frame refreshed the nickname's liveness"
+            );
+            endpoint.close().await;
+        });
     }
 }

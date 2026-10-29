@@ -15,7 +15,6 @@ mod tests {
     use super::track::Track;
     use crate::testing;
     use crate::util::clock::Instant;
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     fn after(start: Instant, secs: u64) -> Instant {
@@ -24,6 +23,7 @@ mod tests {
 
     #[test]
     fn a_connection_that_comes_back_soon_after_a_close_is_a_redial() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (mut track, peer, start) = (Track::default(), testing::endpoint_id(1), Instant::now());
         track.observe(start, peer, true);
         track.observe(after(start, 130), peer, false);
@@ -37,6 +37,7 @@ mod tests {
 
     #[test]
     fn a_connection_that_comes_back_after_the_window_is_not_a_redial() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (mut track, peer, start) = (Track::default(), testing::endpoint_id(1), Instant::now());
         track.observe(start, peer, true);
         track.observe(after(start, 130), peer, false);
@@ -50,6 +51,7 @@ mod tests {
 
     #[test]
     fn the_first_connection_of_a_peer_is_not_a_redial() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (mut track, peer, start) = (Track::default(), testing::endpoint_id(1), Instant::now());
         track.observe(start, peer, true);
         track.observe(after(start, 1), peer, true);
@@ -62,6 +64,7 @@ mod tests {
 
     #[test]
     fn each_peer_is_counted_on_its_own() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (mut track, start) = (Track::default(), Instant::now());
         let (one, two) = (testing::endpoint_id(1), testing::endpoint_id(2));
         track.observe(start, one, true);

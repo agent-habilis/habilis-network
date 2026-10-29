@@ -121,7 +121,6 @@ impl GraftBackoff {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use super::{Duration, EndpointId, GRAFT_BACKOFF_MAX, GraftBackoff, Instant};
@@ -138,6 +137,7 @@ mod tests {
     /// A request that brought no link in 20 s was refused, and the peer is left alone for 60 s.
     #[test]
     fn a_refused_request_blocks_the_peer_for_a_minute() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         let mut backoff = GraftBackoff::default();
         backoff.asked(peer, start);
@@ -166,6 +166,7 @@ mod tests {
     /// Each refusal in a row doubles the wait, up to 15 minutes.
     #[test]
     fn each_refusal_in_a_row_doubles_the_wait_up_to_fifteen_minutes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         let mut backoff = GraftBackoff::default();
         let mut now = start;
@@ -191,6 +192,7 @@ mod tests {
     /// A link that comes up, even 15 s after the request, is not a refusal: the wait starts over.
     #[test]
     fn a_link_that_comes_up_after_the_request_is_not_backed_off() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         let mut backoff = GraftBackoff::default();
         backoff.asked(peer, start);
@@ -207,6 +209,7 @@ mod tests {
     /// came in.
     #[test]
     fn a_linked_peer_is_not_read_as_a_refusal() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         let linked: HashSet<EndpointId> = [peer].into();
         let mut backoff = GraftBackoff::default();
@@ -222,6 +225,7 @@ mod tests {
     /// The link coming up, or a new address, takes the doubled wait back to a minute.
     #[test]
     fn a_reset_starts_the_wait_over() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         let mut backoff = GraftBackoff::default();
         backoff.asked(peer, start);
@@ -253,6 +257,7 @@ mod tests {
     /// The wait has a jitter of 20 percent either way.
     #[test]
     fn the_wait_has_a_jitter_of_twenty_percent() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         for (spread, secs) in [(-1.0, 48), (1.0, 72)] {
             let mut backoff = GraftBackoff::default();
@@ -273,6 +278,7 @@ mod tests {
     /// step, or an unlimited caller would extend the wait it should respect.
     #[test]
     fn an_ask_during_the_wait_does_not_extend_it() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         let mut backoff = GraftBackoff::default();
         backoff.asked(peer, start);
@@ -294,6 +300,7 @@ mod tests {
     /// A peer that was quiet for longer than the longest wait starts again at the first wait.
     #[test]
     fn a_step_decays_after_a_quiet_time_longer_than_the_longest_wait() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         let mut backoff = GraftBackoff::default();
         let mut now = start;
@@ -317,6 +324,7 @@ mod tests {
     /// A refusal is read once: the same silence does not extend the wait.
     #[test]
     fn a_refusal_is_read_once() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         let mut backoff = GraftBackoff::default();
         backoff.asked(peer, start);

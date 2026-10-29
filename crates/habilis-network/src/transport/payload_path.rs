@@ -283,7 +283,6 @@ pub(crate) async fn refuse_relayed(
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::net::SocketAddr;
     use std::time::Duration;
 
@@ -334,51 +333,58 @@ mod tests {
     }
 
     #[test]
-    async fn a_dialer_that_closes_while_the_wait_runs_is_not_a_timeout() {
-        let (client, server, dialed, accepted) = connected().await;
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            dialed.close(0u32.into(), b"gave up");
+    fn a_dialer_that_closes_while_the_wait_runs_is_not_a_timeout() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (client, server, dialed, accepted) = connected().await;
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                dialed.close(0u32.into(), b"gave up");
+            });
+
+            let outcome = wait_selected_outcome(&accepted, Duration::from_secs(5), |_| false).await;
+
+            assert_eq!(
+                outcome,
+                PathWait::Closed,
+                "a dialler that closes during the wait is a closed wait, not a timeout"
+            );
+            client.close().await;
+            server.close().await;
         });
-
-        let outcome = wait_selected_outcome(&accepted, Duration::from_secs(5), |_| false).await;
-
-        assert_eq!(
-            outcome,
-            PathWait::Closed,
-            "a dialler that closes during the wait is a closed wait, not a timeout"
-        );
-        client.close().await;
-        server.close().await;
     }
 
     #[test]
-    async fn a_wait_with_no_path_and_no_close_times_out() {
-        let (client, server, _dialed, accepted) = connected().await;
+    fn a_wait_with_no_path_and_no_close_times_out() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (client, server, _dialed, accepted) = connected().await;
 
-        let outcome = wait_selected_outcome(&accepted, Duration::from_millis(300), |_| false).await;
+            let outcome =
+                wait_selected_outcome(&accepted, Duration::from_millis(300), |_| false).await;
 
-        assert_eq!(
-            outcome,
-            PathWait::TimedOut,
-            "a wait with no path and no close times out"
-        );
-        client.close().await;
-        server.close().await;
+            assert_eq!(
+                outcome,
+                PathWait::TimedOut,
+                "a wait with no path and no close times out"
+            );
+            client.close().await;
+            server.close().await;
+        });
     }
 
     #[test]
-    async fn a_selected_path_ends_the_wait_at_once() {
-        let (client, server, _dialed, accepted) = connected().await;
+    fn a_selected_path_ends_the_wait_at_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (client, server, _dialed, accepted) = connected().await;
 
-        let outcome = wait_selected_outcome(&accepted, Duration::from_secs(5), |_| true).await;
+            let outcome = wait_selected_outcome(&accepted, Duration::from_secs(5), |_| true).await;
 
-        assert_eq!(
-            outcome,
-            PathWait::Selected,
-            "a selected path ends the wait at once"
-        );
-        client.close().await;
-        server.close().await;
+            assert_eq!(
+                outcome,
+                PathWait::Selected,
+                "a selected path ends the wait at once"
+            );
+            client.close().await;
+            server.close().await;
+        });
     }
 }

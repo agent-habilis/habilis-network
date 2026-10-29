@@ -169,42 +169,45 @@ pub fn endpoint_address(endpoint: &Endpoint) -> EndpointAddr {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use habilis_network_test_tracing::test;
     use iroh::endpoint::presets;
     use iroh::{Endpoint, RelayMode};
 
     #[test]
-    async fn the_address_of_an_endpoint_names_its_id() {
-        let endpoint: Endpoint = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Disabled)
-            .clear_address_lookup()
-            .bind()
-            .await
-            .expect("bind loopback endpoint");
-        assert_eq!(
-            super::endpoint_address(&endpoint).id,
-            endpoint.id(),
-            "the address carries the id of the endpoint"
-        );
-        endpoint.close().await;
+    fn the_address_of_an_endpoint_names_its_id() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let endpoint: Endpoint = Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::Disabled)
+                .clear_address_lookup()
+                .bind()
+                .await
+                .expect("bind loopback endpoint");
+            assert_eq!(
+                super::endpoint_address(&endpoint).id,
+                endpoint.id(),
+                "the address carries the id of the endpoint"
+            );
+            endpoint.close().await;
+        });
     }
 
     #[test]
-    async fn an_unknown_peer_has_no_active_addresses() {
-        let endpoint: Endpoint = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Disabled)
-            .clear_address_lookup()
-            .bind()
-            .await
-            .expect("bind loopback endpoint");
-        let stranger = iroh::SecretKey::generate().public();
-        assert!(
-            super::active_transport_addrs(&endpoint, stranger)
+    fn an_unknown_peer_has_no_active_addresses() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let endpoint: Endpoint = Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::Disabled)
+                .clear_address_lookup()
+                .bind()
                 .await
-                .next()
-                .is_none(),
-            "an endpoint that never met a peer reports no active address for it"
-        );
-        endpoint.close().await;
+                .expect("bind loopback endpoint");
+            let stranger = iroh::SecretKey::generate().public();
+            assert!(
+                super::active_transport_addrs(&endpoint, stranger)
+                    .await
+                    .next()
+                    .is_none(),
+                "an endpoint that never met a peer reports no active address for it"
+            );
+            endpoint.close().await;
+        });
     }
 }

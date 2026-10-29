@@ -27,7 +27,6 @@ pub(crate) use underlay_web_rtc::UnderlayWebRtc;
 #[cfg(test)]
 mod tests {
     use crate::transport::UdpTransport;
-    use habilis_network_test_tracing::test;
     use iroh::{EndpointId, SecretKey};
     use std::net::SocketAddr;
 
@@ -59,6 +58,7 @@ mod tests {
 
     #[test]
     fn the_lower_id_dials_a_wanted_neighbor_with_no_session() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = ordered();
         assert_eq!(
             plan::plan(low, &[high], &[high], &[], usize::MAX),
@@ -72,6 +72,7 @@ mod tests {
 
     #[test]
     fn the_higher_id_waits_to_be_dialed() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = ordered();
         assert_eq!(
             plan::plan(high, &[low], &[low], &[], usize::MAX),
@@ -82,6 +83,7 @@ mod tests {
 
     #[test]
     fn a_neighbor_that_has_a_session_is_not_dialed_again() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = ordered();
         assert_eq!(
             plan::plan(low, &[high], &[high], &[high], usize::MAX),
@@ -92,6 +94,7 @@ mod tests {
 
     #[test]
     fn a_session_with_a_peer_that_is_not_kept_is_detached() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = ordered();
         assert_eq!(
             plan::plan(low, &[], &[], &[high], usize::MAX),
@@ -105,6 +108,7 @@ mod tests {
 
     #[test]
     fn a_session_with_a_kept_peer_stays_even_when_it_is_not_wanted() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = ordered();
         assert_eq!(
             plan::plan(low, &[], &[high], &[high], usize::MAX),
@@ -133,6 +137,7 @@ mod tests {
 
     #[test]
     fn only_a_neighbor_whose_application_path_is_webrtc_is_wanted() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (webrtc, ip, relay, unknown) = (id(11), id(12), id(13), id(14));
         let neighbors: Vec<(EndpointId, EndpointAddr)> = [webrtc, ip, relay, unknown]
             .into_iter()
@@ -166,6 +171,7 @@ mod tests {
     /// A neighbor with an IP entry on the relay path is not wanted.
     #[test]
     fn a_neighbor_whose_underlay_has_no_ip_is_wanted_by_a_node_with_udp() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (no_ip, with_ip) = (id(41), id(42));
         let neighbors = vec![
             (no_ip, relay_only(id(51))),
@@ -183,6 +189,7 @@ mod tests {
     /// underlay id wants the session and waits for the offer.
     #[test]
     fn the_higher_underlay_id_wants_a_session_and_does_not_dial() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = ordered();
         assert_eq!(
             plan::plan(high, &[low], &[low], &[], usize::MAX),
@@ -201,6 +208,7 @@ mod tests {
     /// can leave the pair on the relay or unread).
     #[test]
     fn a_node_without_udp_wants_a_session_to_every_neighbor() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (webrtc, ip, relay, unknown) = (id(11), id(12), id(13), id(14));
         let neighbors: Vec<(EndpointId, EndpointAddr)> = [webrtc, ip, relay, unknown]
             .into_iter()
@@ -223,6 +231,7 @@ mod tests {
 
     #[test]
     fn a_denied_member_is_not_a_neighbor_of_the_underlay() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (kept, denied) = (id(21), id(22));
         let neighbors: Vec<(EndpointId, EndpointAddr)> = [kept, denied]
             .into_iter()
@@ -241,6 +250,7 @@ mod tests {
     /// the neighbor leaves the view or the pair climbs to IP.
     #[test]
     fn a_session_is_detached_only_when_the_neighbor_climbs_to_ip_or_leaves() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = ordered();
         let (member, other) = (id(31), id(32));
         let neighbor = vec![(member, EndpointAddr::new(high))];
@@ -291,6 +301,7 @@ mod tests {
     /// A session is named by the underlay id of its member, and the edge by the member id.
     #[test]
     fn a_member_whose_underlay_holds_a_session_is_listed_by_its_member_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (with_session, without) = (id(61), id(62));
         let neighbors = vec![
             (with_session, relay_only(id(71))),
@@ -309,6 +320,7 @@ mod tests {
 
     #[test]
     fn plan_dials_the_lowest_ids_that_the_room_allows() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut ids: Vec<EndpointId> = (1..=4).map(id).collect();
         ids.sort_unstable();
         let (low, higher) = (ids[0], ids[1..].to_vec());
@@ -346,121 +358,126 @@ mod tests {
     }
 
     #[test]
-    async fn the_gate_refuses_a_signal_from_an_endpoint_that_is_not_a_neighbor() {
-        let (logs, _log_guard) = crate::testing::LogCapture::start(tracing::Level::DEBUG);
-        let server = loopback_endpoint().await;
-        let allowed = Allowed::default();
-        let acceptor: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
-            crate::lookup::build_webrtc_handle(server.id()),
-            server.clone(),
-            crate::lookup::address_book(&server.clone()),
-            server.id(),
-            SignalAdmission::new(4),
-            IceProfile { host_only: true },
-        );
-        let router: Router = Router::builder(server.clone())
-            .accept(
-                MESH_WEBRTC_SIGNAL_ALPN,
-                UnderlaySignalGate::new(acceptor, allowed.clone()),
-            )
-            .spawn();
-        let client = loopback_endpoint().await;
+    fn the_gate_refuses_a_signal_from_an_endpoint_that_is_not_a_neighbor() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (logs, _log_guard) = crate::testing::LogCapture::start(tracing::Level::DEBUG);
+            let server = loopback_endpoint().await;
+            let allowed = Allowed::default();
+            let acceptor: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
+                crate::lookup::build_webrtc_handle(server.id()),
+                server.clone(),
+                crate::lookup::address_book(&server.clone()),
+                server.id(),
+                SignalAdmission::new(4),
+                IceProfile { host_only: true },
+            );
+            let router: Router = Router::builder(server.clone())
+                .accept(
+                    MESH_WEBRTC_SIGNAL_ALPN,
+                    UnderlaySignalGate::new(acceptor, allowed.clone()),
+                )
+                .spawn();
+            let client = loopback_endpoint().await;
 
-        let refused = client
-            .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
-            .await
-            .expect("the connection opens");
-        let reason = tokio::time::timeout(std::time::Duration::from_secs(5), refused.closed())
-            .await
-            .expect("the gate closes the connection of a stranger");
-        assert_eq!(closed_with(&reason), Some(9), "{reason:?}");
-        let logged = logs.text();
-        assert!(
-            logged.contains("underlay signal refused") && logged.contains(&client.id().to_string()),
-            "the refusal names the peer and the reason: {logged}"
-        );
-
-        // Once the client is a neighbor, the gate hands the connection to the
-        // acceptor, which waits for an offer and does not close it.
-        allowed.replace([client.id()].into_iter().collect());
-        let accepted = client
-            .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
-            .await
-            .expect("the connection opens");
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(700), accepted.closed())
+            let refused = client
+                .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
                 .await
-                .is_err(),
-            "a neighbor is not turned away"
-        );
-        router.shutdown().await.expect("the router stops");
+                .expect("the connection opens");
+            let reason = tokio::time::timeout(std::time::Duration::from_secs(5), refused.closed())
+                .await
+                .expect("the gate closes the connection of a stranger");
+            assert_eq!(closed_with(&reason), Some(9), "{reason:?}");
+            let logged = logs.text();
+            assert!(
+                logged.contains("underlay signal refused")
+                    && logged.contains(&client.id().to_string()),
+                "the refusal names the peer and the reason: {logged}"
+            );
+
+            // Once the client is a neighbor, the gate hands the connection to the
+            // acceptor, which waits for an offer and does not close it.
+            allowed.replace([client.id()].into_iter().collect());
+            let accepted = client
+                .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
+                .await
+                .expect("the connection opens");
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(700), accepted.closed())
+                    .await
+                    .is_err(),
+                "a neighbor is not turned away"
+            );
+            router.shutdown().await.expect("the router stops");
+        });
     }
 
     /// The offerer must tell a stranger's turn-away from a refusal at the cap: the first is a
     /// race that the next offer wins, the second backs off.
     #[test]
-    async fn an_offer_that_the_gate_turns_away_is_told_apart_from_a_cap_refusal() {
-        let server = loopback_endpoint().await;
-        let allowed = Allowed::default();
-        let acceptor: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
-            crate::lookup::build_webrtc_handle(server.id()),
-            server.clone(),
-            crate::lookup::address_book(&server.clone()),
-            server.id(),
-            SignalAdmission::new(4),
-            IceProfile { host_only: true },
-        );
-        let router: Router = Router::builder(server.clone())
-            .accept(
-                MESH_WEBRTC_SIGNAL_ALPN,
-                UnderlaySignalGate::new(acceptor, allowed.clone()),
-            )
-            .spawn();
-        let client = loopback_endpoint().await;
-        let handle = crate::lookup::build_webrtc_handle(client.id());
-        let book = crate::lookup::address_book(&client);
+    fn an_offer_that_the_gate_turns_away_is_told_apart_from_a_cap_refusal() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let server = loopback_endpoint().await;
+            let allowed = Allowed::default();
+            let acceptor: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
+                crate::lookup::build_webrtc_handle(server.id()),
+                server.clone(),
+                crate::lookup::address_book(&server.clone()),
+                server.id(),
+                SignalAdmission::new(4),
+                IceProfile { host_only: true },
+            );
+            let router: Router = Router::builder(server.clone())
+                .accept(
+                    MESH_WEBRTC_SIGNAL_ALPN,
+                    UnderlaySignalGate::new(acceptor, allowed.clone()),
+                )
+                .spawn();
+            let client = loopback_endpoint().await;
+            let handle = crate::lookup::build_webrtc_handle(client.id());
+            let book = crate::lookup::address_book(&client);
 
-        let error = webrtc::dial_signal::dial_signal(
-            &client,
-            &book,
-            server.addr(),
-            &handle,
-            IceProfile { host_only: true },
-        )
-        .await
-        .expect_err("the gate turns a stranger away");
-        assert!(
-            matches!(error, crate::lookup::EndpointError::NotANeighbor { .. }),
-            "the refusal is read from the close code: {error:#}"
-        );
-        assert!(
-            !matches!(error, crate::lookup::EndpointError::CapRefused { .. }),
-            "a stranger is not a cap refusal: {error:#}"
-        );
-
-        // Once the client is a neighbor the same dial is not turned away as one.
-        allowed.replace([client.id()].into_iter().collect());
-        if let Ok(Err(late_error)) = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            webrtc::dial_signal::dial_signal(
+            let error = webrtc::dial_signal::dial_signal(
                 &client,
                 &book,
                 server.addr(),
                 &handle,
                 IceProfile { host_only: true },
-            ),
-        )
-        .await
-        {
+            )
+            .await
+            .expect_err("the gate turns a stranger away");
             assert!(
-                !matches!(
-                    late_error,
-                    crate::lookup::EndpointError::NotANeighbor { .. }
-                ),
-                "a neighbor is not turned away: {late_error:#}"
+                matches!(error, crate::lookup::EndpointError::NotANeighbor { .. }),
+                "the refusal is read from the close code: {error:#}"
             );
-        }
-        router.shutdown().await.expect("the router stops");
-        client.close().await;
+            assert!(
+                !matches!(error, crate::lookup::EndpointError::CapRefused { .. }),
+                "a stranger is not a cap refusal: {error:#}"
+            );
+
+            // Once the client is a neighbor the same dial is not turned away as one.
+            allowed.replace([client.id()].into_iter().collect());
+            if let Ok(Err(late_error)) = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                webrtc::dial_signal::dial_signal(
+                    &client,
+                    &book,
+                    server.addr(),
+                    &handle,
+                    IceProfile { host_only: true },
+                ),
+            )
+            .await
+            {
+                assert!(
+                    !matches!(
+                        late_error,
+                        crate::lookup::EndpointError::NotANeighbor { .. }
+                    ),
+                    "a neighbor is not turned away: {late_error:#}"
+                );
+            }
+            router.shutdown().await.expect("the router stops");
+            client.close().await;
+        });
     }
 }

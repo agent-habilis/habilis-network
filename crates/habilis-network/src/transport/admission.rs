@@ -84,7 +84,6 @@ pub(crate) use victims::Victims;
 // runtime for the abort test. The logic under test is target-independent.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
     use std::net::SocketAddr;
 
@@ -117,6 +116,7 @@ mod tests {
     /// peer is offered again at once; a second one in a row is a refusal and waits.
     #[test]
     fn two_turn_aways_in_a_row_make_the_peer_wait_and_one_does_not() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(4);
         let stranger = peer(31);
         assert!(
@@ -145,6 +145,7 @@ mod tests {
 
     #[test]
     fn a_session_with_the_peer_starts_the_row_of_turn_aways_over() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(4);
         let stranger = peer(32);
         assert!(
@@ -162,6 +163,7 @@ mod tests {
     /// that two turn-aways in a row earned ends with it, and the next one is a first again.
     #[test]
     fn a_vector_that_this_node_sent_ends_the_wait_that_two_turn_aways_earned() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(4);
         let stranger = peer(33);
         assert!(
@@ -197,26 +199,28 @@ mod tests {
     /// The end of a round wakes the waiter of `slot_freed`, however the round ended, and a round
     /// that was given up for the offer of the peer does not: its guard no longer holds the slot.
     #[test]
-    async fn the_end_of_a_round_wakes_the_waiter_of_slot_freed() {
-        let admission = SignalAdmission::new(4);
-        let freed = admission.slot_freed();
-        let guard = admission
-            .try_admit_offer(peer(1), &hub())
-            .expect("a free slot");
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), freed.notified())
-                .await
-                .is_err(),
-            "a round in flight wakes nobody"
-        );
+    fn the_end_of_a_round_wakes_the_waiter_of_slot_freed() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let admission = SignalAdmission::new(4);
+            let freed = admission.slot_freed();
+            let guard = admission
+                .try_admit_offer(peer(1), &hub())
+                .expect("a free slot");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), freed.notified())
+                    .await
+                    .is_err(),
+                "a round in flight wakes nobody"
+            );
 
-        drop(guard);
-        assert!(
-            tokio::time::timeout(Duration::from_secs(1), freed.notified())
-                .await
-                .is_ok(),
-            "the end of the round wakes the waiter"
-        );
+            drop(guard);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), freed.notified())
+                    .await
+                    .is_ok(),
+                "the end of the round wakes the waiter"
+            );
+        });
     }
 
     /// An empty hub: `has_session` is always false and `session_count` is 0, so
@@ -229,32 +233,35 @@ mod tests {
     /// later, and held the slot for the whole round deadline: every later offer was refused
     /// `InFlight`. Cancelling the round frees the slot, and the refusals of the old holder are forgotten.
     #[test]
-    async fn a_cancelled_round_frees_the_slot_and_forgets_the_refusals() {
-        let admission = SignalAdmission::new(4);
-        let hub = hub();
-        let guard = admission.try_admit(peer(1), &hub).expect("a free slot");
-        let epoch = guard.epoch();
-        let task = n0_future::task::spawn(async move {
-            let _guard = guard;
-            std::future::pending::<()>().await;
+    fn a_cancelled_round_frees_the_slot_and_forgets_the_refusals() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let admission = SignalAdmission::new(4);
+            let hub = hub();
+            let guard = admission.try_admit(peer(1), &hub).expect("a free slot");
+            let epoch = guard.epoch();
+            let task = n0_future::task::spawn(async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+            });
+            admission.track(peer(1), epoch, task.abort_handle());
+            admission.note_refused(peer(1));
+            assert!(
+                matches!(admission.try_admit(peer(1), &hub), Err(Refusal::InFlight)),
+                "the peer is refused while its round is in flight"
+            );
+
+            assert!(admission.cancel_round(peer(1)), "a round was ended");
+
+            assert!(
+                admission.try_admit(peer(1), &hub).is_ok(),
+                "the slot is free and the old refusals are gone"
+            );
         });
-        admission.track(peer(1), epoch, task.abort_handle());
-        admission.note_refused(peer(1));
-        assert!(
-            matches!(admission.try_admit(peer(1), &hub), Err(Refusal::InFlight)),
-            "the peer is refused while its round is in flight"
-        );
-
-        assert!(admission.cancel_round(peer(1)), "a round was ended");
-
-        assert!(
-            admission.try_admit(peer(1), &hub).is_ok(),
-            "the slot is free and the old refusals are gone"
-        );
     }
 
     #[test]
     fn a_denied_peer_is_admitted_in_neither_role() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(16);
         let hub = hub();
         admission.deny(peer(1), true);
@@ -279,6 +286,7 @@ mod tests {
     /// denying more than the peer it names, and `deny(false)` from leaving the peer denied.
     #[test]
     fn a_deny_leaves_the_other_peers_alone_and_can_be_lifted() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(16);
         let hub = hub();
         admission.deny(peer(1), true);
@@ -299,6 +307,7 @@ mod tests {
 
     #[test]
     fn a_peer_being_dialled_is_refused_a_second_slot() {
+        let _trace_guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(16);
         let hub = hub();
         let _guard = admission.try_admit(peer(1), &hub).expect("first admit");
@@ -311,6 +320,7 @@ mod tests {
 
     #[test]
     fn dropping_the_guard_releases_the_slot() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(16);
         let hub = hub();
         drop(admission.try_admit(peer(1), &hub).expect("first admit"));
@@ -329,6 +339,7 @@ mod tests {
     /// attaches, so the retry tick may admit a round for every peer.
     #[test]
     fn rounds_in_flight_are_not_refused_by_a_ceiling() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(2);
         let hub = hub();
         let _one = admission.try_admit(peer(1), &hub).expect("first admit");
@@ -342,6 +353,7 @@ mod tests {
     /// The table of the underlay is a route table: at its cap it refuses and evicts nobody.
     #[test]
     fn a_route_table_refuses_at_its_cap_and_evicts_nobody() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new_route_table(2);
         let hub = hub();
         assert_eq!(
@@ -384,6 +396,7 @@ mod tests {
 
     #[test]
     fn a_peer_that_refused_at_its_cap_is_left_alone() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(16);
         let hub = hub();
         admission.note_refused(peer(1));
@@ -401,6 +414,7 @@ mod tests {
 
     #[test]
     fn close_refuses_everything_afterwards() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(16);
         let hub = hub();
         admission.close();
@@ -414,34 +428,36 @@ mod tests {
     /// The permanent-pin bug, under test: a task that is aborted rather than
     /// returning must still give its slot back.
     #[test]
-    async fn aborting_the_task_releases_the_slot() {
-        let admission = SignalAdmission::new(16);
-        let hub = hub();
-        let guard = admission.try_admit(peer(1), &hub).expect("admit");
-        let epoch = guard.epoch();
+    fn aborting_the_task_releases_the_slot() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let admission = SignalAdmission::new(16);
+            let hub = hub();
+            let guard = admission.try_admit(peer(1), &hub).expect("admit");
+            let epoch = guard.epoch();
 
-        let task = n0_future::task::spawn(async move {
-            let _guard = guard;
-            // Never returns on its own — only an abort ends this.
-            std::future::pending::<()>().await;
+            let task = n0_future::task::spawn(async move {
+                let _guard = guard;
+                // Never returns on its own — only an abort ends this.
+                std::future::pending::<()>().await;
+            });
+            admission.track(peer(1), epoch, task.abort_handle());
+            assert_eq!(
+                admission.in_flight(),
+                1,
+                "one slot is still held before the task is aborted"
+            );
+
+            admission.close();
+            // Let the aborted task's drop glue run.
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            assert_eq!(
+                admission.in_flight(),
+                0,
+                "an aborted round must release its slot"
+            );
         });
-        admission.track(peer(1), epoch, task.abort_handle());
-        assert_eq!(
-            admission.in_flight(),
-            1,
-            "one slot is still held before the task is aborted"
-        );
-
-        admission.close();
-        // Let the aborted task's drop glue run.
-        tokio::task::yield_now().await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        assert_eq!(
-            admission.in_flight(),
-            0,
-            "an aborted round must release its slot"
-        );
     }
 
     /// Sessions a test can hold without a negotiation. Clones share the set.
@@ -478,6 +494,7 @@ mod tests {
     /// third session is admitted, and the least recently used of the first two is detached.
     #[test]
     fn a_third_session_at_a_ceiling_of_two_detaches_the_least_recently_used() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(2);
         let hub = FakeHub::default();
         for byte in [1, 2, 3] {
@@ -506,6 +523,7 @@ mod tests {
     /// to a gossip neighbor, so at most G. Up to G sessions, nothing is evicted.
     #[test]
     fn a_ledger_with_g_as_its_ceiling_never_evicts_while_the_sessions_stay_within_g() {
+        let _guard = ::habilis_network_test_tracing::init();
         let ceiling = 4;
         let admission = SignalAdmission::new(ceiling);
         let hub = FakeHub::default();
@@ -534,6 +552,7 @@ mod tests {
     /// that was given up must not release the round that took its place.
     #[test]
     fn a_preempted_offer_does_not_release_the_round_that_replaced_it() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(8);
         let hub = FakeHub::default();
         let offer = admission.try_admit_offer(peer(1), &hub).expect("offer");
@@ -560,6 +579,7 @@ mod tests {
     /// A round that answers an offer is never given up for another offer of the same peer.
     #[test]
     fn a_round_that_answers_is_not_preempted() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(8);
         let hub = FakeHub::default();
         let _answer = admission.try_admit(peer(1), &hub).expect("answer");
@@ -584,6 +604,7 @@ mod tests {
     /// its offer, so that two peers at the ceiling do not offer sessions back and forth.
     #[test]
     fn a_peer_whose_session_was_evicted_is_refused_for_a_minute_and_answered_after() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(1);
         let hub = FakeHub::default();
         for byte in [1, 2] {
@@ -617,6 +638,7 @@ mod tests {
 
     #[test]
     fn a_slot_nothing_holds_is_dropped() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(2);
         let hub = FakeHub::default();
         for byte in [1, 2] {
@@ -638,6 +660,7 @@ mod tests {
     /// unused for the whole window, not before.
     #[test]
     fn a_session_nothing_uses_idles_out_after_the_window() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(4);
         let hub = FakeHub::default();
         drop(admission.try_admit(peer(1), &hub).expect("room"));
@@ -673,6 +696,7 @@ mod tests {
     /// its connection closed, which would add a second window to the idle close of the connection.
     #[test]
     fn a_session_idles_out_a_window_after_its_last_use_not_after_the_first_look() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(4);
         let hub = FakeHub::default();
         drop(admission.try_admit(peer(1), &hub).expect("room"));
@@ -697,6 +721,7 @@ mod tests {
     /// the round runs.
     #[test]
     fn a_round_in_flight_keeps_a_session_from_idling() {
+        let _trace_guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(4);
         let hub = FakeHub::default();
         let _guard = admission.try_admit(peer(1), &hub).expect("room");
@@ -719,6 +744,7 @@ mod tests {
     /// Only a peer with a session can idle out.
     #[test]
     fn a_peer_with_no_session_is_never_idle() {
+        let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(4);
         let hub = FakeHub::default();
         drop(admission.try_admit(peer(1), &hub).expect("room"));
@@ -740,6 +766,7 @@ mod tests {
     /// longest, and starts over once the peer has taken a round.
     #[test]
     fn the_wait_after_a_refusal_doubles_up_to_the_longest_and_a_success_resets_it() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut backoff = RefusalBackoff::default();
         let bob = peer(1);
         let start = Instant::now();
@@ -793,6 +820,7 @@ mod tests {
     /// One peer's refusals do not make another peer wait.
     #[test]
     fn a_refusal_makes_only_that_peer_wait() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut backoff = RefusalBackoff::default();
         let now = Instant::now();
         backoff.note(peer(1), now);
@@ -810,73 +838,80 @@ mod tests {
     /// Once the connection is gone, the session is idle a window after its last use, with no second
     /// window added for the connection.
     #[cfg(feature = "iroh-test-utils")]
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_live_connection_holds_a_session_until_it_closes() {
-        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+    #[test]
+    fn a_live_connection_holds_a_session_until_it_closes() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 
-        #[derive(Debug, Clone)]
-        struct Hold;
-        impl ProtocolHandler for Hold {
-            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                connection.closed().await;
-                Ok(())
-            }
-        }
-        let (relay_url, _relay_server) = test_relay::spawn_plain().await.expect("local relay");
-        let bind = |hook: Option<ConnectionHook>| {
-            let relay_url = relay_url.clone();
-            async move {
-                let mut builder: iroh::endpoint::Builder =
-                    iroh::Endpoint::builder(presets::Minimal)
-                        .relay_mode(iroh::RelayMode::custom([relay_url]))
-                        .clear_ip_transports();
-                if let Some(hook) = hook {
-                    builder = builder.hooks(hook);
+                #[derive(Debug, Clone)]
+                struct Hold;
+                impl ProtocolHandler for Hold {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        connection.closed().await;
+                        Ok(())
+                    }
                 }
-                builder.bind().await.expect("bind an endpoint on the relay")
-            }
-        };
-        let admission = SignalAdmission::new(2);
-        let hub = FakeHub::default();
-        let server = bind(None).await;
-        let router = Router::builder(server.clone())
-            .accept(iroh_gossip::net::GOSSIP_ALPN, Hold)
-            .spawn();
-        let client = bind(Some(admission.connection_hook())).await;
-        let neighbor = server.id();
-        drop(admission.try_admit(neighbor, &hub).expect("room"));
-        hub.attach(neighbor);
-        admission.note_success(neighbor);
-        let relayed = iroh::EndpointAddr::new(neighbor).with_relay_url(relay_url.clone());
-        let connection = client
-            .connect(relayed, iroh_gossip::net::GOSSIP_ALPN)
-            .await
-            .expect("dial over the relay");
-        let window = tuning::DIRECT_IDLE_BACKSTOP;
-        let start = Instant::now();
+                let (relay_url, _relay_server) =
+                    test_relay::spawn_plain().await.expect("local relay");
+                let bind = |hook: Option<ConnectionHook>| {
+                    let relay_url = relay_url.clone();
+                    async move {
+                        let mut builder: iroh::endpoint::Builder =
+                            iroh::Endpoint::builder(presets::Minimal)
+                                .relay_mode(iroh::RelayMode::custom([relay_url]))
+                                .clear_ip_transports();
+                        if let Some(hook) = hook {
+                            builder = builder.hooks(hook);
+                        }
+                        builder.bind().await.expect("bind an endpoint on the relay")
+                    }
+                };
+                let admission = SignalAdmission::new(2);
+                let hub = FakeHub::default();
+                let server = bind(None).await;
+                let router = Router::builder(server.clone())
+                    .accept(iroh_gossip::net::GOSSIP_ALPN, Hold)
+                    .spawn();
+                let client = bind(Some(admission.connection_hook())).await;
+                let neighbor = server.id();
+                drop(admission.try_admit(neighbor, &hub).expect("room"));
+                hub.attach(neighbor);
+                admission.note_success(neighbor);
+                let relayed = iroh::EndpointAddr::new(neighbor).with_relay_url(relay_url.clone());
+                let connection = client
+                    .connect(relayed, iroh_gossip::net::GOSSIP_ALPN)
+                    .await
+                    .expect("dial over the relay");
+                let window = tuning::DIRECT_IDLE_BACKSTOP;
+                let start = Instant::now();
 
-        assert!(
-            admission.lock().take_idle(start, window).is_empty(),
-            "no session is idle on a fresh table"
-        );
-        assert!(
-            admission
-                .lock()
-                .take_idle(start + window * 3, window)
-                .is_empty(),
-            "a live connection holds the session"
-        );
+                assert!(
+                    admission.lock().take_idle(start, window).is_empty(),
+                    "no session is idle on a fresh table"
+                );
+                assert!(
+                    admission
+                        .lock()
+                        .take_idle(start + window * 3, window)
+                        .is_empty(),
+                    "a live connection holds the session"
+                );
 
-        connection.close(0u32.into(), b"done");
-        connection.closed().await;
-        let later = start + window * 3;
-        assert_eq!(
-            admission.lock().take_idle(later, window),
-            vec![neighbor],
-            "a window after the last use, whatever the connection did"
+                connection.close(0u32.into(), b"done");
+                connection.closed().await;
+                let later = start + window * 3;
+                assert_eq!(
+                    admission.lock().take_idle(later, window),
+                    vec![neighbor],
+                    "a window after the last use, whatever the connection did"
+                );
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
         );
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
     }
 
     /// The accept side watches every gossip connection it holds, so one that
@@ -884,52 +919,61 @@ mod tests {
     /// the same watch, or a link can stay up on the relay for ever while its
     /// other end believes the policy keeps it off.
     #[cfg(feature = "iroh-test-utils")]
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_gossip_connection_this_node_dialed_is_closed_when_it_stays_on_the_relay() {
-        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+    #[test]
+    fn a_gossip_connection_this_node_dialed_is_closed_when_it_stays_on_the_relay() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 
-        #[derive(Debug, Clone)]
-        struct Hold;
-        impl ProtocolHandler for Hold {
-            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                connection.closed().await;
-                Ok(())
-            }
-        }
-        let (relay_url, _relay_server) = test_relay::spawn_plain().await.expect("local relay");
-        let bind = |hook: Option<ConnectionHook>| {
-            let relay_url = relay_url.clone();
-            async move {
-                let mut builder = iroh::Endpoint::builder(presets::Minimal)
-                    .relay_mode(iroh::RelayMode::custom([relay_url]))
-                    .clear_ip_transports();
-                if let Some(hook) = hook {
-                    builder = builder.hooks(hook);
+                #[derive(Debug, Clone)]
+                struct Hold;
+                impl ProtocolHandler for Hold {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        connection.closed().await;
+                        Ok(())
+                    }
                 }
-                builder.bind().await.expect("bind an endpoint on the relay")
-            }
-        };
-        let admission = SignalAdmission::new(2);
-        admission.watch_dialed_gossip(true);
-        let server = bind(None).await;
-        let router = Router::builder(server.clone())
-            .accept(iroh_gossip::net::GOSSIP_ALPN, Hold)
-            .spawn();
-        let client = bind(Some(admission.connection_hook())).await;
-        let relayed = iroh::EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
-        let connection = client
-            .connect(relayed, iroh_gossip::net::GOSSIP_ALPN)
-            .await
-            .expect("dial over the relay");
+                let (relay_url, _relay_server) =
+                    test_relay::spawn_plain().await.expect("local relay");
+                let bind = |hook: Option<ConnectionHook>| {
+                    let relay_url = relay_url.clone();
+                    async move {
+                        let mut builder = iroh::Endpoint::builder(presets::Minimal)
+                            .relay_mode(iroh::RelayMode::custom([relay_url]))
+                            .clear_ip_transports();
+                        if let Some(hook) = hook {
+                            builder = builder.hooks(hook);
+                        }
+                        builder.bind().await.expect("bind an endpoint on the relay")
+                    }
+                };
+                let admission = SignalAdmission::new(2);
+                admission.watch_dialed_gossip(true);
+                let server = bind(None).await;
+                let router = Router::builder(server.clone())
+                    .accept(iroh_gossip::net::GOSSIP_ALPN, Hold)
+                    .spawn();
+                let client = bind(Some(admission.connection_hook())).await;
+                let relayed =
+                    iroh::EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
+                let connection = client
+                    .connect(relayed, iroh_gossip::net::GOSSIP_ALPN)
+                    .await
+                    .expect("dial over the relay");
 
-        let closed = tokio::time::timeout(Duration::from_secs(25), connection.closed()).await;
+                let closed =
+                    tokio::time::timeout(Duration::from_secs(25), connection.closed()).await;
 
-        assert!(
-            closed.is_ok(),
-            "a dialed gossip connection left on the relay must be closed after the deadline"
+                assert!(
+                    closed.is_ok(),
+                    "a dialed gossip connection left on the relay must be closed after the deadline"
+                );
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
         );
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
     }
 
     /// A node with an admission table at ceiling `cap`, and servers that report how
@@ -1033,107 +1077,126 @@ mod tests {
     /// **Two live connections of one peer.** A session may be detached only when no connection
     /// of the pair reads below IP. The table reads every live connection, not the first.
     #[cfg(feature = "iroh-test-utils")]
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_table_reads_every_live_connection_of_a_peer() {
-        let mut fixture = Fixture::new(4).await;
-        let (peer, first) = fixture.dial().await;
-        assert!(
-            fixture.admission.any_connection_not_ip(peer),
-            "one relay connection reads below IP"
+    #[test]
+    fn the_table_reads_every_live_connection_of_a_peer() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let mut fixture = Fixture::new(4).await;
+                let (peer, first) = fixture.dial().await;
+                assert!(
+                    fixture.admission.any_connection_not_ip(peer),
+                    "one relay connection reads below IP"
+                );
+                let relayed =
+                    iroh::EndpointAddr::new(peer).with_relay_url(fixture.relay_url.clone());
+                let second = fixture
+                    .node
+                    .connect(relayed, super::super::UNICAST_ALPN)
+                    .await
+                    .expect("a second connection over the relay");
+                first.close(0u32.into(), b"done");
+                first.closed().await;
+                assert!(
+                    fixture.admission.any_connection_not_ip(peer),
+                    "the second connection is still live and reads below IP"
+                );
+                second.close(0u32.into(), b"done");
+                second.closed().await;
+                assert!(
+                    !fixture.admission.any_connection_not_ip(peer),
+                    "no live connection is left"
+                );
+                fixture.shutdown().await;
+            },
         );
-        let relayed = iroh::EndpointAddr::new(peer).with_relay_url(fixture.relay_url.clone());
-        let second = fixture
-            .node
-            .connect(relayed, super::super::UNICAST_ALPN)
-            .await
-            .expect("a second connection over the relay");
-        first.close(0u32.into(), b"done");
-        first.closed().await;
-        assert!(
-            fixture.admission.any_connection_not_ip(peer),
-            "the second connection is still live and reads below IP"
-        );
-        second.close(0u32.into(), b"done");
-        second.closed().await;
-        assert!(
-            !fixture.admission.any_connection_not_ip(peer),
-            "no live connection is left"
-        );
-        fixture.shutdown().await;
     }
 
     /// **The ceiling of direct connections.** A node whose ceiling is 4 dials five peers over
     /// the unicast protocol. The fifth connection is admitted, and the least recently used
     /// one is closed with the `EVICTED` code, which the peer reads.
     #[cfg(feature = "iroh-test-utils")]
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_fifth_unicast_connection_at_a_ceiling_of_four_evicts_the_least_recently_used() {
-        use super::super::webrtc::close_code::EVICTED;
+    #[test]
+    fn a_fifth_unicast_connection_at_a_ceiling_of_four_evicts_the_least_recently_used() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use super::super::webrtc::close_code::EVICTED;
 
-        let mut fixture = Fixture::new(4).await;
-        let mut conns = Vec::new();
-        for _ in 0..5 {
-            conns.push(fixture.dial().await);
-        }
-        let first = conns[0].0;
+                let mut fixture = Fixture::new(4).await;
+                let mut conns = Vec::new();
+                for _ in 0..5 {
+                    conns.push(fixture.dial().await);
+                }
+                let first = conns[0].0;
 
-        let (peer, reason) = fixture
-            .next_closed(Duration::from_secs(10))
-            .await
-            .expect("a connection must be evicted");
-        assert_eq!(peer, first, "the least recently used goes");
-        let iroh::endpoint::ConnectionError::ApplicationClosed(close) = &reason else {
-            panic!("expected the EVICTED code, got {reason:?}");
-        };
-        assert_eq!(
-            close.error_code.into_inner(),
-            u64::from(EVICTED),
-            "the least recently used connection is closed with the evicted code"
+                let (peer, reason) = fixture
+                    .next_closed(Duration::from_secs(10))
+                    .await
+                    .expect("a connection must be evicted");
+                assert_eq!(peer, first, "the least recently used goes");
+                let iroh::endpoint::ConnectionError::ApplicationClosed(close) = &reason else {
+                    panic!("expected the EVICTED code, got {reason:?}");
+                };
+                assert_eq!(
+                    close.error_code.into_inner(),
+                    u64::from(EVICTED),
+                    "the least recently used connection is closed with the evicted code"
+                );
+                assert!(
+                    fixture
+                        .next_closed(Duration::from_millis(500))
+                        .await
+                        .is_none(),
+                    "exactly one eviction"
+                );
+                for (_, connection) in &conns[1..] {
+                    assert!(connection.close_reason().is_none(), "the others stay open");
+                }
+                fixture.shutdown().await;
+            },
         );
-        assert!(
-            fixture
-                .next_closed(Duration::from_millis(500))
-                .await
-                .is_none(),
-            "exactly one eviction"
-        );
-        for (_, connection) in &conns[1..] {
-            assert!(connection.close_reason().is_none(), "the others stay open");
-        }
-        fixture.shutdown().await;
     }
 
     /// **The evicted peer backs off.** The node that reads the `EVICTED` code on a connection
     /// holds its proactive dials to the evictor for a while. The node that evicted does not
     /// back off.
     #[cfg(feature = "iroh-test-utils")]
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_peer_that_reads_the_evicted_code_backs_off_from_the_evictor() {
-        let mut fixture = Fixture::new(1).await;
-        let evicted = SignalAdmission::new(8);
-        let (first, _first_conn) = fixture.dial_with(Some(evicted.connection_hook())).await;
-        let _second = fixture.dial().await;
-        let (peer, _) = fixture
-            .next_closed(Duration::from_secs(10))
-            .await
-            .expect("a connection must be evicted");
-        assert_eq!(peer, first, "the first one is evicted");
+    #[test]
+    fn a_peer_that_reads_the_evicted_code_backs_off_from_the_evictor() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let mut fixture = Fixture::new(1).await;
+                let evicted = SignalAdmission::new(8);
+                let (first, _first_conn) = fixture.dial_with(Some(evicted.connection_hook())).await;
+                let _second = fixture.dial().await;
+                let (peer, _) = fixture
+                    .next_closed(Duration::from_secs(10))
+                    .await
+                    .expect("a connection must be evicted");
+                assert_eq!(peer, first, "the first one is evicted");
 
-        let me = fixture.node.id();
-        let mut backed_off = false;
-        for _ in 0..40 {
-            backed_off = evicted.evicted_recently(me);
-            if backed_off {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert!(backed_off, "the evicted peer holds its proactive dials");
-        assert!(
-            !fixture.admission.evicted_recently(first),
-            "the evictor does not back off"
+                let me = fixture.node.id();
+                let mut backed_off = false;
+                for _ in 0..40 {
+                    backed_off = evicted.evicted_recently(me);
+                    if backed_off {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                assert!(backed_off, "the evicted peer holds its proactive dials");
+                assert!(
+                    !fixture.admission.evicted_recently(first),
+                    "the evictor does not back off"
+                );
+                fixture.shutdown().await;
+            },
         );
-        fixture.shutdown().await;
     }
 
     /// **A connection that closes leaves the ledger.** Four connections at a ceiling of four; one
@@ -1141,107 +1204,127 @@ mod tests {
     /// evicts nobody. A unit that is a ghost keeps the count at the ceiling for ever, and every newcomer
     /// then evicts a live peer.
     #[cfg(feature = "iroh-test-utils")]
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_connection_that_closes_leaves_the_ledger() {
-        let mut fixture = Fixture::new(4).await;
-        let mut conns = Vec::new();
-        for _ in 0..4 {
-            conns.push(fixture.dial().await);
-        }
-        assert_eq!(
-            fixture.admission.direct_units(),
-            4,
-            "a closed connection leaves the ledger at four units"
-        );
+    #[test]
+    fn a_connection_that_closes_leaves_the_ledger() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let mut fixture = Fixture::new(4).await;
+                let mut conns = Vec::new();
+                for _ in 0..4 {
+                    conns.push(fixture.dial().await);
+                }
+                assert_eq!(
+                    fixture.admission.direct_units(),
+                    4,
+                    "a closed connection leaves the ledger at four units"
+                );
 
-        conns[0].1.close(0u32.into(), b"idle");
-        for _ in 0..40 {
-            fixture.admission.lock().sample();
-            if fixture.admission.direct_units() == 3 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert_eq!(
-            fixture.admission.direct_units(),
-            3,
-            "the closed connection left the ledger"
-        );
+                conns[0].1.close(0u32.into(), b"idle");
+                for _ in 0..40 {
+                    fixture.admission.lock().sample();
+                    if fixture.admission.direct_units() == 3 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                assert_eq!(
+                    fixture.admission.direct_units(),
+                    3,
+                    "the closed connection left the ledger"
+                );
 
-        let _fifth = fixture.dial().await;
-        // The first server saw its connection close by us, which is not an eviction.
-        let mut evicted = Vec::new();
-        while let Some((peer, reason)) = fixture.next_closed(Duration::from_millis(700)).await {
-            if let iroh::endpoint::ConnectionError::ApplicationClosed(close) = &reason
-                && close.error_code.into_inner()
-                    == u64::from(super::super::webrtc::close_code::EVICTED)
-            {
-                evicted.push(peer);
-            }
-        }
-        assert!(
-            evicted.is_empty(),
-            "a fifth dial at three units evicts nobody: {evicted:?}"
+                let _fifth = fixture.dial().await;
+                // The first server saw its connection close by us, which is not an eviction.
+                let mut evicted = Vec::new();
+                while let Some((peer, reason)) =
+                    fixture.next_closed(Duration::from_millis(700)).await
+                {
+                    if let iroh::endpoint::ConnectionError::ApplicationClosed(close) = &reason
+                        && close.error_code.into_inner()
+                            == u64::from(super::super::webrtc::close_code::EVICTED)
+                    {
+                        evicted.push(peer);
+                    }
+                }
+                assert!(
+                    evicted.is_empty(),
+                    "a fifth dial at three units evicts nobody: {evicted:?}"
+                );
+                fixture.shutdown().await;
+            },
         );
-        fixture.shutdown().await;
     }
 
     /// A connection with a send in flight is never evicted: the next least recently used
     /// one goes instead.
     #[cfg(feature = "iroh-test-utils")]
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_busy_connection_is_not_evicted() {
-        let mut fixture = Fixture::new(2).await;
-        let (first, first_conn) = fixture.dial().await;
-        let (second, _second_conn) = fixture.dial().await;
-        let _busy = fixture.admission.busy(first);
+    #[test]
+    fn a_busy_connection_is_not_evicted() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let mut fixture = Fixture::new(2).await;
+                let (first, first_conn) = fixture.dial().await;
+                let (second, _second_conn) = fixture.dial().await;
+                let _busy = fixture.admission.busy(first);
 
-        let _third = fixture.dial().await;
+                let _third = fixture.dial().await;
 
-        let (peer, _) = fixture
-            .next_closed(Duration::from_secs(10))
-            .await
-            .expect("a connection must be evicted");
-        assert_eq!(peer, second, "the busy first connection is skipped");
-        assert!(
-            first_conn.close_reason().is_none(),
-            "the busy one stays open"
+                let (peer, _) = fixture
+                    .next_closed(Duration::from_secs(10))
+                    .await
+                    .expect("a connection must be evicted");
+                assert_eq!(peer, second, "the busy first connection is skipped");
+                assert!(
+                    first_conn.close_reason().is_none(),
+                    "the busy one stays open"
+                );
+                fixture.shutdown().await;
+            },
         );
-        fixture.shutdown().await;
     }
 
     /// When every candidate is busy the newcomer is still admitted: the count is over the
     /// ceiling by the busy connections, the gauge says so, and nothing is evicted. When the
     /// sends end, the next admission evicts again.
     #[cfg(feature = "iroh-test-utils")]
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn when_every_connection_is_busy_the_newcomer_is_admitted_over_the_ceiling() {
-        let mut fixture = Fixture::new(1).await;
-        let (first, _first_conn) = fixture.dial().await;
-        let busy = fixture.admission.busy(first);
+    #[test]
+    fn when_every_connection_is_busy_the_newcomer_is_admitted_over_the_ceiling() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let mut fixture = Fixture::new(1).await;
+                let (first, _first_conn) = fixture.dial().await;
+                let busy = fixture.admission.busy(first);
 
-        let (_second, _second_conn) = fixture.dial().await;
+                let (_second, _second_conn) = fixture.dial().await;
 
-        assert!(
-            fixture
-                .next_closed(Duration::from_millis(1500))
-                .await
-                .is_none(),
-            "nobody is evicted while the only candidate is busy"
-        );
-        assert_eq!(
-            fixture.admission.over_ceiling(),
-            1,
-            "the newcomer is over the ceiling by one"
-        );
+                assert!(
+                    fixture
+                        .next_closed(Duration::from_millis(1500))
+                        .await
+                        .is_none(),
+                    "nobody is evicted while the only candidate is busy"
+                );
+                assert_eq!(
+                    fixture.admission.over_ceiling(),
+                    1,
+                    "the newcomer is over the ceiling by one"
+                );
 
-        drop(busy);
-        let _third = fixture.dial().await;
-        assert!(
-            fixture.next_closed(Duration::from_secs(10)).await.is_some(),
-            "once the send has ended an admission evicts again"
+                drop(busy);
+                let _third = fixture.dial().await;
+                assert!(
+                    fixture.next_closed(Duration::from_secs(10)).await.is_some(),
+                    "once the send has ended an admission evicts again"
+                );
+                fixture.shutdown().await;
+            },
         );
-        fixture.shutdown().await;
     }
 
     /// A gossip connection whose selected path is the gossip rung is closed by the hook, with the
@@ -1249,98 +1332,108 @@ mod tests {
     /// with a hook at both ends each end can close before it reads the close of the other, and
     /// then both read `LocallyClosed`. The rule reads no mesh policy: here the dialed gossip watch
     /// is off, which is its default.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_gossip_connection_on_the_gossip_path_is_closed_by_the_hook() {
-        use habilis_network_iroh_gossip_transport::hub::Hub;
-        use habilis_network_iroh_gossip_transport::{GossipHandle, gossip_addr};
-        use iroh::endpoint::ConnectionError;
-        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-        use iroh::{EndpointAddr, RelayMode, SecretKey, TransportAddr};
+    #[test]
+    fn a_gossip_connection_on_the_gossip_path_is_closed_by_the_hook() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use habilis_network_iroh_gossip_transport::hub::Hub;
+                use habilis_network_iroh_gossip_transport::{GossipHandle, gossip_addr};
+                use iroh::endpoint::ConnectionError;
+                use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+                use iroh::{EndpointAddr, RelayMode, SecretKey, TransportAddr};
 
-        #[derive(Debug, Clone)]
-        // the report is shared with the hook, which sends through it
-        struct Report(Arc<Mutex<Option<oneshot::Sender<ConnectionError>>>>);
-        impl ProtocolHandler for Report {
-            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                let reason = connection.closed().await;
-                if let Some(tx) = self.0.lock().expect("report lock").take() {
-                    let _ = tx.send(reason);
-                }
-                Ok(())
-            }
-        }
-
-        let (alice_key, bob_key) = (
-            SecretKey::from_bytes(&[11; 32]),
-            SecretKey::from_bytes(&[12; 32]),
-        );
-        let hub = Hub::new();
-        let (alice_handle, bob_handle) = (
-            GossipHandle::new(alice_key.public()),
-            GossipHandle::new(bob_key.public()),
-        );
-        hub.join(&alice_handle);
-        hub.join(&bob_handle);
-        let bind = |key: SecretKey, handle: GossipHandle, admission: Option<SignalAdmission>| async move {
-            let builder = iroh::Endpoint::builder(presets::Minimal);
-            let builder = builder.secret_key(key);
-            let builder = builder.relay_mode(RelayMode::Disabled);
-            let builder = builder.add_custom_transport(handle.custom_transport());
-            let builder = builder.clear_ip_transports();
-            let builder = builder.clear_relay_transports();
-            let builder = match admission {
-                Some(admission) => builder.hooks(admission.connection_hook()),
-                None => builder,
-            };
-            builder.bind().await.expect("bind a gossip-only endpoint")
-        };
-        let admission = SignalAdmission::new(8);
-        let alice = bind(alice_key, alice_handle, Some(admission.clone())).await;
-        let bob = bind(bob_key, bob_handle, None).await;
-        let (tx, rx) = oneshot::channel();
-        let router = Router::builder(bob.clone())
-            .accept(
-                iroh_gossip::net::GOSSIP_ALPN,
+                #[derive(Debug, Clone)]
                 // the report is shared with the hook, which sends through it
-                Report(Arc::new(Mutex::new(Some(tx)))),
-            )
-            .spawn();
-        let before = payload_path::gossip_recursion_closes();
+                struct Report(Arc<Mutex<Option<oneshot::Sender<ConnectionError>>>>);
+                impl ProtocolHandler for Report {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        let reason = connection.closed().await;
+                        if let Some(tx) = self.0.lock().expect("report lock").take() {
+                            let _ = tx.send(reason);
+                        }
+                        Ok(())
+                    }
+                }
 
-        let target =
-            EndpointAddr::from_parts(bob.id(), [TransportAddr::Custom(gossip_addr(bob.id()))]);
-        let connection = alice
-            .connect(target, iroh_gossip::net::GOSSIP_ALPN)
-            .await
-            .expect("connect over the gossip path");
+                let (alice_key, bob_key) = (
+                    SecretKey::from_bytes(&[11; 32]),
+                    SecretKey::from_bytes(&[12; 32]),
+                );
+                let hub = Hub::new();
+                let (alice_handle, bob_handle) = (
+                    GossipHandle::new(alice_key.public()),
+                    GossipHandle::new(bob_key.public()),
+                );
+                hub.join(&alice_handle);
+                hub.join(&bob_handle);
+                let bind = |key: SecretKey,
+                            handle: GossipHandle,
+                            admission: Option<SignalAdmission>| async move {
+                    let builder = iroh::Endpoint::builder(presets::Minimal);
+                    let builder = builder.secret_key(key);
+                    let builder = builder.relay_mode(RelayMode::Disabled);
+                    let builder = builder.add_custom_transport(handle.custom_transport());
+                    let builder = builder.clear_ip_transports();
+                    let builder = builder.clear_relay_transports();
+                    let builder = match admission {
+                        Some(admission) => builder.hooks(admission.connection_hook()),
+                        None => builder,
+                    };
+                    builder.bind().await.expect("bind a gossip-only endpoint")
+                };
+                let admission = SignalAdmission::new(8);
+                let alice = bind(alice_key, alice_handle, Some(admission.clone())).await;
+                let bob = bind(bob_key, bob_handle, None).await;
+                let (tx, rx) = oneshot::channel();
+                let router = Router::builder(bob.clone())
+                    .accept(
+                        iroh_gossip::net::GOSSIP_ALPN,
+                        // the report is shared with the hook, which sends through it
+                        Report(Arc::new(Mutex::new(Some(tx)))),
+                    )
+                    .spawn();
+                let before = payload_path::gossip_recursion_closes();
 
-        let at_alice = tokio::time::timeout(Duration::from_secs(5), connection.closed())
-            .await
-            .expect("the dialed end was not closed");
-        let at_bob = tokio::time::timeout(Duration::from_secs(5), rx)
-            .await
-            .expect("the accepted end was not closed")
-            .expect("the probe reported");
-        let code = u64::from(payload_path::GOSSIP_RECURSION_REFUSED_CODE);
-        assert!(
-            matches!(at_alice, ConnectionError::LocallyClosed),
-            "the dialer closed itself: {at_alice:?}"
+                let target = EndpointAddr::from_parts(
+                    bob.id(),
+                    [TransportAddr::Custom(gossip_addr(bob.id()))],
+                );
+                let connection = alice
+                    .connect(target, iroh_gossip::net::GOSSIP_ALPN)
+                    .await
+                    .expect("connect over the gossip path");
+
+                let at_alice = tokio::time::timeout(Duration::from_secs(5), connection.closed())
+                    .await
+                    .expect("the dialed end was not closed");
+                let at_bob = tokio::time::timeout(Duration::from_secs(5), rx)
+                    .await
+                    .expect("the accepted end was not closed")
+                    .expect("the probe reported");
+                let code = u64::from(payload_path::GOSSIP_RECURSION_REFUSED_CODE);
+                assert!(
+                    matches!(at_alice, ConnectionError::LocallyClosed),
+                    "the dialer closed itself: {at_alice:?}"
+                );
+                assert!(
+                    matches!(&at_bob, ConnectionError::ApplicationClosed(close) if u64::from(close.error_code) == code),
+                    "the accepted end reads the code: {at_bob:?}"
+                );
+                assert!(
+                    payload_path::gossip_recursion_closes() > before,
+                    "the close is counted"
+                );
+                assert_eq!(
+                    admission.selected_kind(bob.id()),
+                    Some(super::super::probe::PathKind::Gossip),
+                    "the pair still reads as the gossip rung once its closed connection left the table"
+                );
+                router.shutdown().await.expect("shutdown");
+                alice.close().await;
+            },
         );
-        assert!(
-            matches!(&at_bob, ConnectionError::ApplicationClosed(close) if u64::from(close.error_code) == code),
-            "the accepted end reads the code: {at_bob:?}"
-        );
-        assert!(
-            payload_path::gossip_recursion_closes() > before,
-            "the close is counted"
-        );
-        assert_eq!(
-            admission.selected_kind(bob.id()),
-            Some(super::super::probe::PathKind::Gossip),
-            "the pair still reads as the gossip rung once its closed connection left the table"
-        );
-        router.shutdown().await.expect("shutdown");
-        alice.close().await;
     }
 
     /// What the table tells the gossip transport about a peer: established when it has a live
@@ -1348,6 +1441,7 @@ mod tests {
     #[test]
     fn the_table_tells_the_gossip_transport_what_it_sees() {
         use super::super::probe::PathKind::{self, Gossip, Ip, Multihop, Relay, WebRtc};
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             sampler::gossip_view(&[]),
             (false, true),
@@ -1444,178 +1538,203 @@ mod tests {
 
     /// A pair that rides IP is blocked for gossip at BOTH ends, the dialer and the acceptor, and
     /// both are established: neither end needs a path watcher, which only the lower id has.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_pair_on_ip_is_blocked_for_gossip_at_both_ends() {
-        use habilis_network_iroh_gossip_transport;
-        use habilis_network_iroh_gossip_transport::hub::Hub;
-        use iroh::{EndpointAddr, TransportAddr};
+    #[test]
+    fn a_pair_on_ip_is_blocked_for_gossip_at_both_ends() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use habilis_network_iroh_gossip_transport;
+                use habilis_network_iroh_gossip_transport::hub::Hub;
+                use iroh::{EndpointAddr, TransportAddr};
 
-        let hub = Hub::new();
-        let (alice, alice_table, alice_handle) = ip_and_gossip_node(41, &hub, true).await;
-        let (bob, bob_table, bob_handle) = ip_and_gossip_node(42, &hub, true).await;
-        let router = iroh::protocol::Router::builder(bob.clone())
-            .accept(GOSSIP_TEST_ALPN, HoldConnections)
-            .spawn();
-        let custom =
-            TransportAddr::Custom(habilis_network_iroh_gossip_transport::gossip_addr(bob.id()));
-        let both = bob.addr().addrs.into_iter().chain([custom]);
-        let _connection = alice
-            .connect(EndpointAddr::from_parts(bob.id(), both), GOSSIP_TEST_ALPN)
-            .await
-            .expect("connect");
+                let hub = Hub::new();
+                let (alice, alice_table, alice_handle) = ip_and_gossip_node(41, &hub, true).await;
+                let (bob, bob_table, bob_handle) = ip_and_gossip_node(42, &hub, true).await;
+                let router = iroh::protocol::Router::builder(bob.clone())
+                    .accept(GOSSIP_TEST_ALPN, HoldConnections)
+                    .spawn();
+                let custom = TransportAddr::Custom(
+                    habilis_network_iroh_gossip_transport::gossip_addr(bob.id()),
+                );
+                let both = bob.addr().addrs.into_iter().chain([custom]);
+                let _connection = alice
+                    .connect(EndpointAddr::from_parts(bob.id(), both), GOSSIP_TEST_ALPN)
+                    .await
+                    .expect("connect");
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            alice_table.sync_gossip();
-            bob_table.sync_gossip();
-            if !alice_handle.is_allowed(bob.id()) && !bob_handle.is_allowed(alice.id()) {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "a pair on IP is blocked at both ends"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        assert!(alice_handle.is_established(bob.id()), "the dialer");
-        assert!(bob_handle.is_established(alice.id()), "the acceptor");
-        let sent = alice_handle.stats().frames_out + bob_handle.stats().frames_out;
-        tokio::time::sleep(Duration::from_secs(4)).await;
-        assert_eq!(
-            alice_handle.stats().frames_out + bob_handle.stats().frames_out,
-            sent,
-            "a pair on IP puts no frame on the topic"
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    alice_table.sync_gossip();
+                    bob_table.sync_gossip();
+                    if !alice_handle.is_allowed(bob.id()) && !bob_handle.is_allowed(alice.id()) {
+                        break;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "a pair on IP is blocked at both ends"
+                    );
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                assert!(alice_handle.is_established(bob.id()), "the dialer");
+                assert!(bob_handle.is_established(alice.id()), "the acceptor");
+                let sent = alice_handle.stats().frames_out + bob_handle.stats().frames_out;
+                tokio::time::sleep(Duration::from_secs(4)).await;
+                assert_eq!(
+                    alice_handle.stats().frames_out + bob_handle.stats().frames_out,
+                    sent,
+                    "a pair on IP puts no frame on the topic"
+                );
+                router.shutdown().await.expect("shutdown");
+                alice.close().await;
+            },
         );
-        router.shutdown().await.expect("shutdown");
-        alice.close().await;
     }
 
     /// A pair that only gossip carries is not blocked, and a peer whose connection is gone is
     /// established no more, and allowed again.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_pair_on_gossip_is_allowed_and_a_gone_peer_is_forgotten() {
-        use habilis_network_iroh_gossip_transport;
-        use habilis_network_iroh_gossip_transport::hub::Hub;
-        use iroh::{EndpointAddr, TransportAddr};
+    #[test]
+    fn a_pair_on_gossip_is_allowed_and_a_gone_peer_is_forgotten() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use habilis_network_iroh_gossip_transport;
+                use habilis_network_iroh_gossip_transport::hub::Hub;
+                use iroh::{EndpointAddr, TransportAddr};
 
-        let hub = Hub::new();
-        let (alice, alice_table, alice_handle) = ip_and_gossip_node(43, &hub, false).await;
-        let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(44, &hub, false).await;
-        let router = iroh::protocol::Router::builder(bob.clone())
-            .accept(GOSSIP_TEST_ALPN, HoldConnections)
-            .spawn();
-        let target = EndpointAddr::from_parts(
-            bob.id(),
-            [TransportAddr::Custom(
-                habilis_network_iroh_gossip_transport::gossip_addr(bob.id()),
-            )],
+                let hub = Hub::new();
+                let (alice, alice_table, alice_handle) = ip_and_gossip_node(43, &hub, false).await;
+                let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(44, &hub, false).await;
+                let router = iroh::protocol::Router::builder(bob.clone())
+                    .accept(GOSSIP_TEST_ALPN, HoldConnections)
+                    .spawn();
+                let target = EndpointAddr::from_parts(
+                    bob.id(),
+                    [TransportAddr::Custom(
+                        habilis_network_iroh_gossip_transport::gossip_addr(bob.id()),
+                    )],
+                );
+                let connection = alice
+                    .connect(target, GOSSIP_TEST_ALPN)
+                    .await
+                    .expect("connect over gossip");
+
+                alice_table.sync_gossip();
+                assert!(
+                    alice_handle.is_established(bob.id()),
+                    "a pair on gossip is allowed to establish and the gone peer is forgotten"
+                );
+                assert!(alice_handle.is_allowed(bob.id()), "gossip carries the pair");
+
+                alice_handle.allow(bob.id(), false);
+                connection.close(0u32.into(), b"done");
+                connection.closed().await;
+                alice_table.lock().sample();
+                assert!(!alice_handle.is_established(bob.id()), "no connection left");
+                assert!(alice_handle.is_allowed(bob.id()), "allowed again");
+                router.shutdown().await.expect("shutdown");
+                alice.close().await;
+            },
         );
-        let connection = alice
-            .connect(target, GOSSIP_TEST_ALPN)
-            .await
-            .expect("connect over gossip");
-
-        alice_table.sync_gossip();
-        assert!(
-            alice_handle.is_established(bob.id()),
-            "a pair on gossip is allowed to establish and the gone peer is forgotten"
-        );
-        assert!(alice_handle.is_allowed(bob.id()), "gossip carries the pair");
-
-        alice_handle.allow(bob.id(), false);
-        connection.close(0u32.into(), b"done");
-        connection.closed().await;
-        alice_table.lock().sample();
-        assert!(!alice_handle.is_established(bob.id()), "no connection left");
-        assert!(alice_handle.is_allowed(bob.id()), "allowed again");
-        router.shutdown().await.expect("shutdown");
-        alice.close().await;
     }
 
     /// A pair that a session carries is blocked for gossip though no connection is left to read.
     /// A gossip connection dialed now would be born on the gossip rung, and the recursion rule
     /// would close it before iroh moves it onto the session.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_pair_with_a_session_is_blocked_for_gossip_without_a_connection() {
-        use habilis_network_iroh_gossip_transport;
-        use habilis_network_iroh_gossip_transport::hub::Hub;
-        use iroh::{EndpointAddr, TransportAddr};
+    #[test]
+    fn a_pair_with_a_session_is_blocked_for_gossip_without_a_connection() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use habilis_network_iroh_gossip_transport;
+                use habilis_network_iroh_gossip_transport::hub::Hub;
+                use iroh::{EndpointAddr, TransportAddr};
 
-        let hub = Hub::new();
-        let (alice, alice_table, alice_handle) = ip_and_gossip_node(45, &hub, false).await;
-        let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(46, &hub, false).await;
-        let sessions = FakeHub::default();
-        // the table keeps the hub as a shared trait object
-        alice_table.lock().hub = Some(Arc::new(sessions.clone()));
-        let router = iroh::protocol::Router::builder(bob.clone())
-            .accept(GOSSIP_TEST_ALPN, HoldConnections)
-            .spawn();
-        let target = EndpointAddr::from_parts(
-            bob.id(),
-            [TransportAddr::Custom(
-                habilis_network_iroh_gossip_transport::gossip_addr(bob.id()),
-            )],
-        );
-        let connection = alice
-            .connect(target, GOSSIP_TEST_ALPN)
-            .await
-            .expect("connect over gossip");
-        connection.close(0u32.into(), b"done");
-        connection.closed().await;
+                let hub = Hub::new();
+                let (alice, alice_table, alice_handle) = ip_and_gossip_node(45, &hub, false).await;
+                let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(46, &hub, false).await;
+                let sessions = FakeHub::default();
+                // the table keeps the hub as a shared trait object
+                alice_table.lock().hub = Some(Arc::new(sessions.clone()));
+                let router = iroh::protocol::Router::builder(bob.clone())
+                    .accept(GOSSIP_TEST_ALPN, HoldConnections)
+                    .spawn();
+                let target = EndpointAddr::from_parts(
+                    bob.id(),
+                    [TransportAddr::Custom(
+                        habilis_network_iroh_gossip_transport::gossip_addr(bob.id()),
+                    )],
+                );
+                let connection = alice
+                    .connect(target, GOSSIP_TEST_ALPN)
+                    .await
+                    .expect("connect over gossip");
+                connection.close(0u32.into(), b"done");
+                connection.closed().await;
 
-        sessions.attach(bob.id());
-        alice_table.lock().sample();
-        assert!(
-            !alice_handle.is_allowed(bob.id()),
-            "the session carries the pair: the gossip rung is not allowed"
+                sessions.attach(bob.id());
+                alice_table.lock().sample();
+                assert!(
+                    !alice_handle.is_allowed(bob.id()),
+                    "the session carries the pair: the gossip rung is not allowed"
+                );
+                assert!(!alice_handle.is_established(bob.id()), "no connection left");
+                router.shutdown().await.expect("shutdown");
+                alice.close().await;
+            },
         );
-        assert!(!alice_handle.is_established(bob.id()), "no connection left");
-        router.shutdown().await.expect("shutdown");
-        alice.close().await;
     }
 
     /// A session is attached while a live connection still reads the gossip rung: gossip is not
     /// blocked. That connection carries the pair. A block would starve it, and iroh would give it
     /// up for the relay, though the session may carry nothing (its rung is cut).
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_pair_with_a_session_and_a_connection_on_the_gossip_rung_is_allowed_for_gossip() {
-        use habilis_network_iroh_gossip_transport;
-        use habilis_network_iroh_gossip_transport::hub::Hub;
-        use iroh::{EndpointAddr, TransportAddr};
+    #[test]
+    fn a_pair_with_a_session_and_a_connection_on_the_gossip_rung_is_allowed_for_gossip() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use habilis_network_iroh_gossip_transport;
+                use habilis_network_iroh_gossip_transport::hub::Hub;
+                use iroh::{EndpointAddr, TransportAddr};
 
-        let hub = Hub::new();
-        let (alice, alice_table, alice_handle) = ip_and_gossip_node(47, &hub, false).await;
-        let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(48, &hub, false).await;
-        let sessions = FakeHub::default();
-        // the table keeps the hub as a shared trait object
-        alice_table.lock().hub = Some(Arc::new(sessions.clone()));
-        let router = iroh::protocol::Router::builder(bob.clone())
-            .accept(GOSSIP_TEST_ALPN, HoldConnections)
-            .spawn();
-        let target = EndpointAddr::from_parts(
-            bob.id(),
-            [TransportAddr::Custom(
-                habilis_network_iroh_gossip_transport::gossip_addr(bob.id()),
-            )],
-        );
-        let connection = alice
-            .connect(target, GOSSIP_TEST_ALPN)
-            .await
-            .expect("connect over gossip");
+                let hub = Hub::new();
+                let (alice, alice_table, alice_handle) = ip_and_gossip_node(47, &hub, false).await;
+                let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(48, &hub, false).await;
+                let sessions = FakeHub::default();
+                // the table keeps the hub as a shared trait object
+                alice_table.lock().hub = Some(Arc::new(sessions.clone()));
+                let router = iroh::protocol::Router::builder(bob.clone())
+                    .accept(GOSSIP_TEST_ALPN, HoldConnections)
+                    .spawn();
+                let target = EndpointAddr::from_parts(
+                    bob.id(),
+                    [TransportAddr::Custom(
+                        habilis_network_iroh_gossip_transport::gossip_addr(bob.id()),
+                    )],
+                );
+                let connection = alice
+                    .connect(target, GOSSIP_TEST_ALPN)
+                    .await
+                    .expect("connect over gossip");
 
-        sessions.attach(bob.id());
-        alice_table.lock().sample();
-        assert!(
-            alice_handle.is_established(bob.id()),
-            "a connection is left"
+                sessions.attach(bob.id());
+                alice_table.lock().sample();
+                assert!(
+                    alice_handle.is_established(bob.id()),
+                    "a connection is left"
+                );
+                assert!(
+                    alice_handle.is_allowed(bob.id()),
+                    "a live connection reads the gossip rung: the session does not block it"
+                );
+                connection.close(0u32.into(), b"done");
+                connection.closed().await;
+                router.shutdown().await.expect("shutdown");
+                alice.close().await;
+            },
         );
-        assert!(
-            alice_handle.is_allowed(bob.id()),
-            "a live connection reads the gossip rung: the session does not block it"
-        );
-        connection.close(0u32.into(), b"done");
-        connection.closed().await;
-        router.shutdown().await.expect("shutdown");
-        alice.close().await;
     }
 }

@@ -120,7 +120,6 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
 #[cfg(test)]
 mod tests {
     use crate::testing::{fresh_state, nick};
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use super::{Instant, Nickname, tick_sweep};
@@ -130,6 +129,7 @@ mod tests {
 
     #[test]
     fn sweep_evicts_surfaced_peer_into_quiet() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
@@ -164,6 +164,7 @@ mod tests {
     /// is where the islands meet.
     #[test]
     fn sweeping_a_silent_known_peer_owes_a_return_to_the_rendezvous() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.rendezvous_release_links = 1;
         state
@@ -186,6 +187,7 @@ mod tests {
     /// after the next release, and make the node grab the link again.
     #[test]
     fn a_node_still_linked_to_the_rendezvous_owes_no_return() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.rendezvous_release_links = 1;
         state
@@ -212,6 +214,7 @@ mod tests {
     /// a flag that stays known shuts every debt to a new holder for as long as it lives.
     #[test]
     fn the_flag_of_an_evicted_holder_is_forgotten() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let holder = crate::testing::endpoint_id(7);
         state
@@ -246,6 +249,7 @@ mod tests {
 
     #[test]
     fn sweeping_a_ghost_owes_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.rendezvous_release_links = 1;
         state
@@ -269,6 +273,7 @@ mod tests {
     fn quiet_peer_reports_real_recency_in_roster() {
         // Regression: a quiet peer must still report how long ago it was
         // last heard (not `null`), even though eviction drops `last_seen`.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
@@ -297,6 +302,7 @@ mod tests {
 
     #[test]
     fn sweep_keeps_a_quiet_peers_endpoint_for_its_return() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
@@ -324,6 +330,7 @@ mod tests {
 
     #[test]
     fn sweep_prunes_endpoints_of_nicks_neither_active_nor_quiet() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let endpoint = iroh::SecretKey::from_bytes(&[8; 32]).public();
         // Not in `peers`, not in `quiet`: fell off the quiet FIFO or
@@ -342,6 +349,7 @@ mod tests {
 
     #[test]
     fn sweep_evicts_unsurfaced_peer_silently() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
@@ -370,6 +378,7 @@ mod tests {
 
     #[test]
     fn sweep_keeps_recent_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.last_seen.insert(nick("swift-cedar"), Instant::now());
         state.peers.insert(nick("swift-cedar"));
@@ -392,6 +401,7 @@ mod tests {
 
     #[test]
     fn sweep_noop_on_empty_last_seen() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         tick_sweep(&mut state, &SilentSink);
         assert!(
@@ -406,6 +416,7 @@ mod tests {
 
     #[test]
     fn sweep_preserves_other_peers() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))

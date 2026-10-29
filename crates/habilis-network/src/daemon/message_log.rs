@@ -415,7 +415,6 @@ fn eviction_key(message: &Verified) -> (UnixSecs, AuthorKey, Option<u64>, &str) 
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use super::{
@@ -515,6 +514,7 @@ mod tests {
     #[test]
     fn a_window_lists_every_message_inside_its_range() {
         // 300 messages in 12 seconds: about 25 per second, scrambled.
+        let _guard = ::habilis_network_test_tracing::init();
         assert_range_matches_ids(&shuffled_log(300, 12));
     }
 
@@ -522,12 +522,14 @@ mod tests {
     fn a_second_with_more_messages_than_a_window_is_still_listed() {
         // The join burst: every message in one second, far past the 70 a window
         // lists.
+        let _guard = ::habilis_network_test_tracing::init();
         assert_range_matches_ids(&shuffled_log(300, 1));
     }
 
     /// The same frame pushed twice is held once, and the digest lists it once.
     #[test]
     fn a_frame_pushed_twice_is_held_once() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(10);
         let frame = msg_at("once", 10);
         assert!(
@@ -552,6 +554,7 @@ mod tests {
     /// moment the log lets a frame go, or a re-send of an evicted frame is never processed.
     #[test]
     fn contains_follows_eviction() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(2);
         let first = message("m1");
         let second = message("m2");
@@ -585,6 +588,7 @@ mod tests {
 
     #[test]
     fn an_evicted_frame_can_be_held_again() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(1);
         assert!(
             log.push(msg_at("first", 10)).is_none(),
@@ -640,6 +644,7 @@ mod tests {
 
     #[test]
     fn window_at_returns_slice_with_ts_bounds() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(10);
         for ts in [10, 20, 30, 40, 50] {
             log.push(msg_at(&ts.to_string(), ts));
@@ -677,6 +682,7 @@ mod tests {
         // One copy of each frame, so both logs share ids. The holder has all
         // four; at the advertiser a late-stamped frame arrived first, then
         // the older ones, and the one at ts=20 never arrived at all.
+        let _guard = ::habilis_network_test_tracing::init();
         let frames: Vec<Verified> = [10, 20, 30, 50]
             .into_iter()
             .map(|ts| msg_at(&ts.to_string(), ts))
@@ -720,6 +726,7 @@ mod tests {
         // Sweeping the rolling cursor in `max`-sized steps must advertise
         // every id at least once over a full cycle — so a peer behind by
         // more than one window's worth still recovers across rounds.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(50);
         for index in 0..50 {
             log.push(msg_at(&format!("m{index}"), 100 + index));
@@ -740,6 +747,7 @@ mod tests {
 
     #[test]
     fn missing_in_window_excludes_out_of_window_and_have() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(10);
         for ts in [10, 20, 30, 40, 50] {
             log.push(msg_at(&ts.to_string(), ts));
@@ -771,6 +779,7 @@ mod tests {
 
     #[test]
     fn directed_frame_is_never_offered_to_a_third_party() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(10);
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob"));
@@ -788,6 +797,7 @@ mod tests {
         // The recovery property the gate must preserve: a small multipart body
         // has no repair path other than anti-entropy (see `repair_tickets`), so
         // dropping the addressee's own backfill would lose the message whole.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(10);
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob"));
@@ -806,6 +816,7 @@ mod tests {
         // iteration is newest-first and `max` is a shared budget, so a directed
         // frame filtered *after* the take would spend the only slot and starve
         // the broadcast the requester actually needs.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(10);
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob")); // newest → seen first
@@ -820,6 +831,7 @@ mod tests {
         // side ever filtered too, the addressee would stop listing a directed
         // frame it holds, the author would read that as a permanent gap, and
         // every round would re-send it forever.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(10);
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob"));
@@ -841,6 +853,7 @@ mod tests {
         // older messages advertises an open-ended newest window, and a
         // holder must offer everything *newer* it lacks. A closed `hi` at
         // the requester's own newest would miss exactly those.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut requester = MessageLog::new(100);
         let mut holder = MessageLog::new(100);
         let mut newer: HashSet<String> = HashSet::new();
@@ -888,6 +901,7 @@ mod tests {
     /// design.
     #[test]
     fn a_far_future_stamp_does_not_make_a_message_unevictable() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(4);
         for index in 0..4 {
             let flood = Verified::fixture_unchecked(
@@ -920,6 +934,7 @@ mod tests {
     fn the_author_counts_match_a_fresh_recount_after_churn() {
         use std::collections::HashMap;
 
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(8);
         // Three authors at different rates, well past capacity, so eviction
         // fires repeatedly and each author is both added and dropped.
@@ -953,6 +968,7 @@ mod tests {
     /// so any change to how the victim is chosen has to preserve it.
     #[test]
     fn retention_is_the_same_whatever_order_messages_arrive_in() {
+        let _guard = ::habilis_network_test_tracing::init();
         let authors = ["aa", "bb", "cc"];
         let build = || {
             let mut batch = Vec::new();
@@ -1000,6 +1016,7 @@ mod tests {
         // Eviction drops the smallest eviction key (here: oldest timestamp),
         // not the front, so retention is independent of push order. Push the
         // newest first to prove arrival order doesn't decide who survives.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(2);
         log.push(msg_at("c", 30));
         log.push(msg_at("a", 10));
@@ -1022,7 +1039,6 @@ mod tests {
     }
 
     mod prop {
-        use habilis_network_test_tracing::test;
         use proptest::{prop_assert, proptest};
 
         use super::{MessageLog, message};
@@ -1034,12 +1050,13 @@ mod tests {
                 cap in 1..50usize,
                 n_pushes in 0..200usize,
             ) {
+                let _guard = ::habilis_network_test_tracing::init();
                 let mut log = MessageLog::new(cap);
                 for i in 0..n_pushes {
                     log.push(message(&format!("m{i}")));
                 }
                 prop_assert!(log.messages.len() <= cap);
-            }
+                        }
         }
     }
 }

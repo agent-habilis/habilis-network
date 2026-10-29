@@ -58,7 +58,6 @@ async fn ask(address: EndpointAddr, state: &mut EventLoopState, context: &Handle
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use iroh::{EndpointAddr, SecretKey};
@@ -73,6 +72,7 @@ mod tests {
 
     #[test]
     fn a_member_is_asked_once_for_one_record() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
         let address = member(1);
@@ -88,6 +88,7 @@ mod tests {
 
     #[test]
     fn a_changed_record_is_asked_again() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
         let address = member(1);
@@ -104,6 +105,7 @@ mod tests {
 
     #[test]
     fn a_linked_member_is_not_asked() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut grafts = LanGrafts::default();
         assert!(
             !grafts.plan(&member(1), true, Instant::now()),
@@ -113,6 +115,7 @@ mod tests {
 
     #[test]
     fn a_member_that_left_is_asked_again_when_it_returns() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
         let address = member(1);
@@ -129,6 +132,7 @@ mod tests {
 
     #[test]
     fn a_member_that_is_still_not_a_neighbor_is_asked_again_after_a_wait() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
         let address = member(1);
@@ -152,6 +156,7 @@ mod tests {
 
     #[test]
     fn the_wait_between_two_requests_grows_to_a_steady_one() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
         let address = member(1);
@@ -176,6 +181,7 @@ mod tests {
 
     #[test]
     fn a_member_that_is_a_neighbor_is_not_asked_again() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
         let address = member(1);
@@ -191,6 +197,7 @@ mod tests {
 
     #[test]
     fn a_request_that_is_asked_again_counts_against_the_cap() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
         let first = member(1);
@@ -216,102 +223,109 @@ mod tests {
     /// logs: the record stays, and the tick of the heal arm asks the member again.
     #[cfg(all(feature = "host", feature = "multihop"))]
     #[test]
-    async fn a_request_that_returned_an_error_is_asked_again_after_the_wait() {
-        use crate::lookup::LanEvent;
-        use crate::testing::{LaneNode, LogCapture};
+    fn a_request_that_returned_an_error_is_asked_again_after_the_wait() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::lookup::LanEvent;
+            use crate::testing::{LaneNode, LogCapture};
 
-        const FAILED: &str = "the request to a member to be a neighbor failed";
-        let (logs, _guard) = LogCapture::start(tracing::Level::WARN);
-        let node = LaneNode::start().await;
-        node.stop_gossip().await;
-        let context = node.context();
-        let mut state = node.state();
-        let address = member(1);
+            const FAILED: &str = "the request to a member to be a neighbor failed";
+            let (logs, _guard) = LogCapture::start(tracing::Level::WARN);
+            let node = LaneNode::start().await;
+            node.stop_gossip().await;
+            let context = node.context();
+            let mut state = node.state();
+            let address = member(1);
 
-        super::on_lan_event(LanEvent::Seen(address.clone()), &mut state, &context).await;
-        assert_eq!(
-            logs.text().matches(FAILED).count(),
-            1,
-            "the first request returned an error"
-        );
+            super::on_lan_event(LanEvent::Seen(address.clone()), &mut state, &context).await;
+            assert_eq!(
+                logs.text().matches(FAILED).count(),
+                1,
+                "the first request returned an error"
+            );
 
-        super::ask_unlinked_again(&mut state, &context).await;
-        assert_eq!(
-            logs.text().matches(FAILED).count(),
-            1,
-            "the wait is not over, so nothing is asked"
-        );
+            super::ask_unlinked_again(&mut state, &context).await;
+            assert_eq!(
+                logs.text().matches(FAILED).count(),
+                1,
+                "the wait is not over, so nothing is asked"
+            );
 
-        let asked = state
-            .lan_grafts
-            .asked
-            .get_mut(&address.id)
-            .expect("the record stays after an error");
-        asked.at = asked
-            .at
-            .checked_sub(RETRY_FIRST)
-            .expect("an instant that is earlier");
-        super::ask_unlinked_again(&mut state, &context).await;
-        assert_eq!(
-            logs.text().matches(FAILED).count(),
-            2,
-            "the member is asked again once its wait is over"
-        );
+            let asked = state
+                .lan_grafts
+                .asked
+                .get_mut(&address.id)
+                .expect("the record stays after an error");
+            asked.at = asked
+                .at
+                .checked_sub(RETRY_FIRST)
+                .expect("an instant that is earlier");
+            super::ask_unlinked_again(&mut state, &context).await;
+            assert_eq!(
+                logs.text().matches(FAILED).count(),
+                2,
+                "the member is asked again once its wait is over"
+            );
+        });
     }
 
     /// A member of this mesh that the LAN names and that is not a neighbor is a sign that
     /// another group of the mesh may exist: the re-check of a holder comes back to its fast base.
     #[cfg(feature = "host")]
     #[test]
-    async fn a_member_of_the_lan_that_is_not_a_neighbor_is_a_sign_of_a_second_group() {
-        use crate::lookup::LanEvent;
-        use crate::testing::LaneNode;
+    fn a_member_of_the_lan_that_is_not_a_neighbor_is_a_sign_of_a_second_group() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::lookup::LanEvent;
+            use crate::testing::LaneNode;
 
-        let node = LaneNode::start().await;
-        let context = node.context();
-        let mut state = node.state();
-        state.hosts_rendezvous = true;
-        let far = Instant::now() + Duration::from_hours(1);
-        state.next_rival_recheck = Some(far);
+            let node = LaneNode::start().await;
+            let context = node.context();
+            let mut state = node.state();
+            state.hosts_rendezvous = true;
+            let far = Instant::now() + Duration::from_hours(1);
+            state.next_rival_recheck = Some(far);
 
-        super::on_lan_event(LanEvent::Seen(member(1)), &mut state, &context).await;
+            super::on_lan_event(LanEvent::Seen(member(1)), &mut state, &context).await;
 
-        assert!(
-            state.next_rival_recheck.is_some_and(|next| next < far),
-            "the re-check came back from an hour out"
-        );
-        node.stop_gossip().await;
-        node.endpoint.close().await;
+            assert!(
+                state.next_rival_recheck.is_some_and(|next| next < far),
+                "the re-check came back from an hour out"
+            );
+            node.stop_gossip().await;
+            node.endpoint.close().await;
+        });
     }
 
     #[cfg(feature = "host")]
     #[test]
-    async fn a_member_of_the_lan_that_is_a_neighbor_is_no_sign() {
-        use crate::lookup::LanEvent;
-        use crate::testing::LaneNode;
+    fn a_member_of_the_lan_that_is_a_neighbor_is_no_sign() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::lookup::LanEvent;
+            use crate::testing::LaneNode;
 
-        let node = LaneNode::start().await;
-        let context = node.context();
-        let mut state = node.state();
-        state.hosts_rendezvous = true;
-        let far = Instant::now() + Duration::from_hours(1);
-        state.next_rival_recheck = Some(far);
-        let address = member(1);
-        state.linked_endpoints.insert(address.id);
+            let node = LaneNode::start().await;
+            let context = node.context();
+            let mut state = node.state();
+            state.hosts_rendezvous = true;
+            let far = Instant::now() + Duration::from_hours(1);
+            state.next_rival_recheck = Some(far);
+            let address = member(1);
+            state.linked_endpoints.insert(address.id);
 
-        super::on_lan_event(LanEvent::Seen(address), &mut state, &context).await;
+            super::on_lan_event(LanEvent::Seen(address), &mut state, &context).await;
 
-        assert_eq!(
-            state.next_rival_recheck,
-            Some(far),
-            "the lan neighbor leaves the re-check time at its far value"
-        );
-        node.stop_gossip().await;
-        node.endpoint.close().await;
+            assert_eq!(
+                state.next_rival_recheck,
+                Some(far),
+                "the lan neighbor leaves the re-check time at its far value"
+            );
+            node.stop_gossip().await;
+            node.endpoint.close().await;
+        });
     }
 
     #[test]
     fn the_requests_of_one_minute_are_capped() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut grafts = LanGrafts::default();
         let now = Instant::now();
         for seed in 0..MAX_LAN_GRAFTS_PER_MINUTE {

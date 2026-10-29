@@ -160,7 +160,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::{expect_warn, test};
     use std::time::Duration;
 
     use bytes::Bytes;
@@ -233,188 +232,202 @@ mod tests {
     /// handle: the seen set, the log and the digests never see a frame, because `ingest` is not
     /// called for it.
     #[test]
-    async fn a_frame_goes_to_the_handle_and_a_mesh_message_to_the_loop() {
-        let handle = GossipHandle::new(testing::endpoint_id(1));
-        let (tx, events) = topic();
-        let mut mesh = spawn_split(events, Some(handle.clone()));
+    fn a_frame_goes_to_the_handle_and_a_mesh_message_to_the_loop() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let handle = GossipHandle::new(testing::endpoint_id(1));
+            let (tx, events) = topic();
+            let mut mesh = spawn_split(events, Some(handle.clone()));
 
-        tx.send(Ok(message(frame_for(testing::endpoint_id(1)))))
-            .expect("send");
-        tx.send(Ok(message(Bytes::from_static(b"a mesh message"))))
-            .expect("send");
+            tx.send(Ok(message(frame_for(testing::endpoint_id(1)))))
+                .expect("send");
+            tx.send(Ok(message(Bytes::from_static(b"a mesh message"))))
+                .expect("send");
 
-        let Some(Ok(Event::Received(forwarded))) = next_within(&mut mesh).await else {
-            panic!("the mesh message must reach the loop");
-        };
-        assert_eq!(
-            forwarded.content,
-            Bytes::from_static(b"a mesh message"),
-            "the first event of the loop is the mesh message: the frame was not forwarded"
-        );
-        assert_eq!(handle.stats().queued, 1, "the frame reached the transport");
-        assert_eq!(handle.stats().frames_in, 1, "and it was the only one");
+            let Some(Ok(Event::Received(forwarded))) = next_within(&mut mesh).await else {
+                panic!("the mesh message must reach the loop");
+            };
+            assert_eq!(
+                forwarded.content,
+                Bytes::from_static(b"a mesh message"),
+                "the first event of the loop is the mesh message: the frame was not forwarded"
+            );
+            assert_eq!(handle.stats().queued, 1, "the frame reached the transport");
+            assert_eq!(handle.stats().frames_in, 1, "and it was the only one");
+        });
     }
 
     /// `Lagged` raises `topic_lagged` and is still forwarded, so that the loop logs it.
     #[test]
-    async fn a_lagged_event_raises_topic_lagged_and_is_forwarded() {
-        let handle = GossipHandle::new(testing::endpoint_id(1));
-        let (tx, events) = topic();
-        let mut mesh = spawn_split(events, Some(handle.clone()));
+    fn a_lagged_event_raises_topic_lagged_and_is_forwarded() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let handle = GossipHandle::new(testing::endpoint_id(1));
+            let (tx, events) = topic();
+            let mut mesh = spawn_split(events, Some(handle.clone()));
 
-        tx.send(Ok(Event::Lagged)).expect("send");
+            tx.send(Ok(Event::Lagged)).expect("send");
 
-        assert!(
-            matches!(next_within(&mut mesh).await, Some(Ok(Event::Lagged))),
-            "the loop sees the lag"
-        );
-        assert_eq!(handle.stats().topic_lagged, 1, "and the handle counted it");
+            assert!(
+                matches!(next_within(&mut mesh).await, Some(Ok(Event::Lagged))),
+                "the loop sees the lag"
+            );
+            assert_eq!(handle.stats().topic_lagged, 1, "and the handle counted it");
+        });
     }
 
     /// The end of the topic reaches the loop as `None`, and the receiver is handed back for the
     /// drain of what it buffered.
     #[test]
-    async fn the_end_of_the_topic_is_forwarded_and_the_receiver_comes_back() {
-        let (tx, events) = topic();
-        let mut mesh = spawn_split(events, None);
+    fn the_end_of_the_topic_is_forwarded_and_the_receiver_comes_back() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (tx, events) = topic();
+            let mut mesh = spawn_split(events, None);
 
-        tx.send(Ok(message(Bytes::from_static(b"last"))))
-            .expect("send");
-        drop(tx);
+            tx.send(Ok(message(Bytes::from_static(b"last"))))
+                .expect("send");
+            drop(tx);
 
-        assert!(
-            matches!(next_within(&mut mesh).await, Some(Ok(Event::Received(_)))),
-            "the end of the topic is forwarded and the receiver comes back"
-        );
-        assert!(next_within(&mut mesh).await.is_none(), "the topic ended");
-        assert!(mesh.into_dead().is_some(), "the dead receiver comes back");
+            assert!(
+                matches!(next_within(&mut mesh).await, Some(Ok(Event::Received(_)))),
+                "the end of the topic is forwarded and the receiver comes back"
+            );
+            assert!(next_within(&mut mesh).await.is_none(), "the topic ended");
+            assert!(mesh.into_dead().is_some(), "the dead receiver comes back");
+        });
     }
 
     /// A loop that is busy does not make the topic lag: the splitter reads at once, and the mesh
     /// messages wait in order for the loop.
     #[test]
-    async fn a_busy_loop_does_not_stop_the_splitter_reading() {
-        let handle = GossipHandle::new(testing::endpoint_id(1));
-        let (tx, events) = topic();
-        let mut mesh = spawn_split(events, Some(handle.clone()));
+    fn a_busy_loop_does_not_stop_the_splitter_reading() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let handle = GossipHandle::new(testing::endpoint_id(1));
+            let (tx, events) = topic();
+            let mut mesh = spawn_split(events, Some(handle.clone()));
 
-        for index in 0..10u8 {
-            tx.send(Ok(message(Bytes::from(vec![b'm', index]))))
-                .expect("send");
-            for _ in 0..1000 {
-                tx.send(Ok(message(frame_for(testing::endpoint_id(1)))))
+            for index in 0..10u8 {
+                tx.send(Ok(message(Bytes::from(vec![b'm', index]))))
                     .expect("send");
+                for _ in 0..1000 {
+                    tx.send(Ok(message(frame_for(testing::endpoint_id(1)))))
+                        .expect("send");
+                }
             }
-        }
-        // The loop reads nothing; the splitter must read the whole topic meanwhile.
-        frames_in(&handle, 10_000).await;
-        assert_eq!(
-            handle.stats().frames_in,
-            10_000,
-            "every frame was read while the loop was busy"
-        );
-        for index in 0..10u8 {
-            let Some(Ok(Event::Received(forwarded))) = next_within(&mut mesh).await else {
-                panic!("a mesh message was lost");
-            };
+            // The loop reads nothing; the splitter must read the whole topic meanwhile.
+            frames_in(&handle, 10_000).await;
             assert_eq!(
-                forwarded.content,
-                Bytes::from(vec![b'm', index]),
-                "in order"
+                handle.stats().frames_in,
+                10_000,
+                "every frame was read while the loop was busy"
             );
-        }
+            for index in 0..10u8 {
+                let Some(Ok(Event::Received(forwarded))) = next_within(&mut mesh).await else {
+                    panic!("a mesh message was lost");
+                };
+                assert_eq!(
+                    forwarded.content,
+                    Bytes::from(vec![b'm', index]),
+                    "in order"
+                );
+            }
+        });
     }
 
     /// A storm of mesh messages beyond the queue: the splitter keeps reading, the frames still
     /// reach the transport, the newest mesh messages are dropped and counted, and the control
     /// events (a `NeighborDown`) are never dropped and come first.
     #[test]
-    async fn a_storm_of_mesh_messages_drops_the_newest_and_keeps_the_frames_and_control_events() {
-        use crate::util::tuning::MESH_TOPIC_EVENTS_CAP;
+    fn a_storm_of_mesh_messages_drops_the_newest_and_keeps_the_frames_and_control_events() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::util::tuning::MESH_TOPIC_EVENTS_CAP;
 
-        expect_warn(
-            "habilis_network::gossip",
-            "mesh message dropped: the queue to the event loop is full",
-        );
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::gossip",
+                "mesh message dropped: the queue to the event loop is full",
+            );
 
-        let handle = GossipHandle::new(testing::endpoint_id(1));
-        let (tx, events) = topic();
-        let mut mesh = spawn_split(events, Some(handle.clone()));
-        let storm = MESH_TOPIC_EVENTS_CAP + 100;
+            let handle = GossipHandle::new(testing::endpoint_id(1));
+            let (tx, events) = topic();
+            let mut mesh = spawn_split(events, Some(handle.clone()));
+            let storm = MESH_TOPIC_EVENTS_CAP + 100;
 
-        for index in 0..storm {
-            tx.send(Ok(message(numbered(index)))).expect("send");
-            tx.send(Ok(message(frame_for(testing::endpoint_id(1)))))
+            for index in 0..storm {
+                tx.send(Ok(message(numbered(index)))).expect("send");
+                tx.send(Ok(message(frame_for(testing::endpoint_id(1)))))
+                    .expect("send");
+            }
+            tx.send(Ok(Event::NeighborDown(testing::endpoint_id(7))))
                 .expect("send");
-        }
-        tx.send(Ok(Event::NeighborDown(testing::endpoint_id(7))))
-            .expect("send");
-        // The loop reads nothing from the mesh meanwhile.
-        frames_in(&handle, storm as u64).await;
+            // The loop reads nothing from the mesh meanwhile.
+            frames_in(&handle, storm as u64).await;
 
-        let stats = handle.stats();
-        assert_eq!(
-            stats.frames_in, storm as u64,
-            "every frame reached the transport"
-        );
-        assert_eq!(stats.topic_lagged, 0, "the topic did not lag");
-        assert_eq!(
-            mesh.high_water(),
-            MESH_TOPIC_EVENTS_CAP,
-            "the data queue was full at its peak"
-        );
-        assert_eq!(
-            stats.forward_dropped, 100,
-            "the newest 100 mesh messages were dropped"
-        );
-        assert!(
-            matches!(
-                next_within(&mut mesh).await,
-                Some(Ok(Event::NeighborDown(_)))
-            ),
-            "the control event comes first and was not dropped"
-        );
-        let Some(Ok(Event::Received(first))) = next_within(&mut mesh).await else {
-            panic!("the oldest mesh message is kept");
-        };
-        assert_eq!(first.content, numbered(0), "oldest first");
+            let stats = handle.stats();
+            assert_eq!(
+                stats.frames_in, storm as u64,
+                "every frame reached the transport"
+            );
+            assert_eq!(stats.topic_lagged, 0, "the topic did not lag");
+            assert_eq!(
+                mesh.high_water(),
+                MESH_TOPIC_EVENTS_CAP,
+                "the data queue was full at its peak"
+            );
+            assert_eq!(
+                stats.forward_dropped, 100,
+                "the newest 100 mesh messages were dropped"
+            );
+            assert!(
+                matches!(
+                    next_within(&mut mesh).await,
+                    Some(Ok(Event::NeighborDown(_)))
+                ),
+                "the control event comes first and was not dropped"
+            );
+            let Some(Ok(Event::Received(first))) = next_within(&mut mesh).await else {
+                panic!("the oldest mesh message is kept");
+            };
+            assert_eq!(first.content, numbered(0), "oldest first");
+        });
     }
 
     /// The end of the topic reaches the loop only after the mesh messages that were queued
     /// before it: none is lost behind the control channel.
     #[test]
-    async fn the_end_of_the_topic_comes_after_the_queued_mesh_messages() {
-        let (tx, events) = topic();
-        let mut mesh = spawn_split(events, None);
+    fn the_end_of_the_topic_comes_after_the_queued_mesh_messages() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (tx, events) = topic();
+            let mut mesh = spawn_split(events, None);
 
-        for index in 0..3u8 {
-            tx.send(Ok(message(numbered(usize::from(index)))))
-                .expect("send");
-        }
-        drop(tx);
-        tokio::time::sleep(Duration::from_millis(100)).await;
+            for index in 0..3u8 {
+                tx.send(Ok(message(numbered(usize::from(index)))))
+                    .expect("send");
+            }
+            drop(tx);
+            tokio::time::sleep(Duration::from_millis(100)).await;
 
-        for index in 0..3u8 {
-            let Some(Ok(Event::Received(item))) = next_within(&mut mesh).await else {
-                panic!("a queued mesh message was lost");
-            };
-            assert_eq!(
-                item.content,
-                numbered(usize::from(index)),
-                "the end of the topic comes after the queued mesh messages in order"
-            );
-        }
-        assert!(next_within(&mut mesh).await.is_none(), "then the end");
+            for index in 0..3u8 {
+                let Some(Ok(Event::Received(item))) = next_within(&mut mesh).await else {
+                    panic!("a queued mesh message was lost");
+                };
+                assert_eq!(
+                    item.content,
+                    numbered(usize::from(index)),
+                    "the end of the topic comes after the queued mesh messages in order"
+                );
+            }
+            assert!(next_within(&mut mesh).await.is_none(), "then the end");
+        });
     }
 
     /// The heal arm asks for the dead receiver without waiting: a subscription that has not ended
     /// yields none, at once.
     #[test]
-    async fn into_dead_does_not_wait_for_a_subscription_that_has_not_ended() {
-        let (_tx, events) = topic();
-        let mesh = spawn_split(events, None);
+    fn into_dead_does_not_wait_for_a_subscription_that_has_not_ended() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (_tx, events) = topic();
+            let mesh = spawn_split(events, None);
 
-        assert!(mesh.into_dead().is_none(), "the stream has not ended");
+            assert!(mesh.into_dead().is_none(), "the stream has not ended");
+        });
     }
 
     /// A message of the engine's own encoder is JSON: its first byte is never the frame kind.
@@ -422,6 +435,7 @@ mod tests {
     fn a_message_of_the_engine_does_not_start_with_the_frame_kind() {
         use habilis_network_iroh_gossip_transport::frame::FRAME_KIND;
 
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = crate::protocol::MeshId::from("test");
         let author = testing::nick("alice");
         let answer = crate::protocol::Message::new_pong(
@@ -459,7 +473,6 @@ mod tests {
 /// `MESH` is the number of mesh messages that A sends beside the frames.
 #[cfg(test)]
 mod real_gossip {
-    use habilis_network_test_tracing::{at_end, expect_warn, test};
     use std::net::SocketAddr;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
@@ -471,9 +484,11 @@ mod real_gossip {
     use iroh::endpoint::presets;
     use iroh::protocol::Router;
     use iroh::{Endpoint, RelayMode, SecretKey};
-    use iroh_gossip::api::Event;
+    use iroh_gossip::api::{Event, GossipReceiver};
     use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
     use iroh_gossip::proto::TopicId;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     use super::{is_frame, spawn_split_capped, subscribe_mesh_capped};
     use crate::util::tuning::MESH_TOPIC_EVENTS_CAP;
@@ -502,135 +517,163 @@ mod real_gossip {
         (endpoint, gossip, router)
     }
 
+    /// The B side of an inline run: a reader that drains the topic itself, with the busy loop beside it.
+    fn spawn_inline_reader(
+        mut receiver: GossipReceiver,
+        handle: GossipHandle,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            use futures_util::StreamExt as _;
+            let mut tick = tokio::time::interval(PERIOD);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = tick.tick() => std::thread::sleep(BUSY),
+                    event = receiver.next() => match event {
+                        None => break,
+                        Some(Ok(Event::Received(message))) if is_frame(&message.content) => {
+                            let _ = handle.deliver(&message.content);
+                        }
+                        Some(Ok(Event::Lagged)) => handle.note_lagged(),
+                        Some(_) => {}
+                    },
+                }
+            }
+        })
+    }
+
+    /// The B side of a splitter run: the splitter reads the topic, and a busy loop drains it. Returns the
+    /// splitter's high-water gauge with the loop.
+    fn spawn_splitter_reader(
+        receiver: GossipReceiver,
+        handle: GossipHandle,
+        capacity: usize,
+    ) -> (Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        // the gauge is shared: the splitter writes it, the run reads it after the load
+        let mut mesh = spawn_split_capped(receiver, Some(handle), capacity);
+        let gauge = mesh.high_water_gauge();
+        let reader = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(PERIOD);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = tick.tick() => std::thread::sleep(BUSY),
+                    event = mesh.next() => if event.is_none() { break },
+                }
+            }
+        });
+        (gauge, reader)
+    }
+
     #[ignore = "a load run for the host; see the doc of the module"]
-    #[test(flavor = "multi_thread", worker_threads = 4)]
-    async fn real_gossip_split_run() {
-        let capacity: usize = setting("SPLIT_PROOF_CAP", MESH_TOPIC_EVENTS_CAP);
-        let secs: u64 = setting("SPLIT_PROOF_SECS", 30);
-        let inline = setting("SPLIT_PROOF_INLINE", 0u8) == 1;
-        let mesh_total: usize = setting("SPLIT_PROOF_MESH", 0);
-        // 0 = as fast as the actor takes them; else the rate of A in MiB/s.
-        let rate_mib: f64 = setting("SPLIT_PROOF_RATE_MIB", 0.0);
-        let rate_fps =
-            rate_mib * 1_048_576.0 / u64_to_f64(u64::try_from(frame::MAX_FRAME_LEN).unwrap_or(1));
+    #[test]
+    fn real_gossip_split_run() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            4,
+            async {
+                let capacity: usize = setting("SPLIT_PROOF_CAP", MESH_TOPIC_EVENTS_CAP);
+                let secs: u64 = setting("SPLIT_PROOF_SECS", 30);
+                let inline = setting("SPLIT_PROOF_INLINE", 0u8) == 1;
+                let mesh_total: usize = setting("SPLIT_PROOF_MESH", 0);
+                // 0 = as fast as the actor takes them; else the rate of A in MiB/s.
+                let rate_mib: f64 = setting("SPLIT_PROOF_RATE_MIB", 0.0);
+                let rate_fps = rate_mib * 1_048_576.0
+                    / u64_to_f64(u64::try_from(frame::MAX_FRAME_LEN).unwrap_or(1));
 
-        // The flood is meant to overflow the send queue of the connection. A run at a set rate is
-        // not: a drop there is the finding of the sweep, so the guard fails it.
-        if rate_fps <= 0.0 {
-            expect_warn(
-                "iroh_gossip::net",
-                "dropped a data message: the send queue of the connection is full",
-            );
-        }
+                // The flood is meant to overflow the send queue of the connection. A run at a set rate is
+                // not: a drop there is the finding of the sweep, so the guard fails it.
+                if rate_fps <= 0.0 {
+                    ::habilis_network_test_tracing::expect_warn(
+                        "iroh_gossip::net",
+                        "dropped a data message: the send queue of the connection is full",
+                    );
+                }
 
-        let lookup = MemoryLookup::new();
-        let (a_endpoint, a_gossip, a_router) = member(1, &lookup).await;
-        let (b_endpoint, b_gossip, b_router) = member(2, &lookup).await;
-        // A dropped endpoint that was not closed logs an ERROR.
-        at_end(async move { a_router.shutdown().await.expect("a shuts down") });
-        at_end(async move { b_router.shutdown().await.expect("b shuts down") });
-        let topic_id = TopicId::from_bytes([42u8; 32]);
-        let b_handle = GossipHandle::new(b_endpoint.id());
+                let lookup = MemoryLookup::new();
+                let (a_endpoint, a_gossip, a_router) = member(1, &lookup).await;
+                let (b_endpoint, b_gossip, b_router) = member(2, &lookup).await;
+                // A dropped endpoint that was not closed logs an ERROR.
+                ::habilis_network_test_tracing::at_end(async move {
+                    a_router.shutdown().await.expect("a shuts down");
+                });
+                ::habilis_network_test_tracing::at_end(async move {
+                    b_router.shutdown().await.expect("b shuts down");
+                });
+                let topic_id = TopicId::from_bytes([42u8; 32]);
+                let b_handle = GossipHandle::new(b_endpoint.id());
 
-        let b_topic = subscribe_mesh_capped(&b_gossip, topic_id, [], capacity)
-            .await
-            .expect("b joins");
-        let (_b_sender, b_receiver) = b_topic.split();
-        let joining = a_gossip.subscribe_and_join(topic_id, vec![b_endpoint.id()]);
-        let a_topic = tokio::time::timeout(Duration::from_secs(20), joining)
-            .await
-            .expect("a joins in time")
-            .expect("a joins");
-        let (a_sender, _a_receiver) = a_topic.split();
+                let b_topic = subscribe_mesh_capped(&b_gossip, topic_id, [], capacity)
+                    .await
+                    .expect("b joins");
+                let (_b_sender, b_receiver) = b_topic.split();
+                let joining = a_gossip.subscribe_and_join(topic_id, vec![b_endpoint.id()]);
+                let a_topic = tokio::time::timeout(Duration::from_secs(20), joining)
+                    .await
+                    .expect("a joins in time")
+                    .expect("a joins");
+                let (a_sender, _a_receiver) = a_topic.split();
 
-        // B: the reader, and the busy loop.
-        let gauge;
-        let reader = if inline {
-            gauge = None;
-            let handle = b_handle.clone();
-            let mut receiver = b_receiver;
-            tokio::spawn(async move {
-                use futures_util::StreamExt as _;
-                let mut tick = tokio::time::interval(PERIOD);
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = tick.tick() => std::thread::sleep(BUSY),
-                        event = receiver.next() => match event {
-                            None => break,
-                            Some(Ok(Event::Received(message))) if is_frame(&message.content) => {
-                                let _ = handle.deliver(&message.content);
-                            }
-                            Some(Ok(Event::Lagged)) => handle.note_lagged(),
-                            Some(_) => {}
-                        },
+                // B: the reader, and the busy loop.
+                let (gauge, reader) = if inline {
+                    (None, spawn_inline_reader(b_receiver, b_handle.clone()))
+                } else {
+                    let (gauge, reader) =
+                        spawn_splitter_reader(b_receiver, b_handle.clone(), capacity);
+                    (Some(gauge), reader)
+                };
+
+                // A: the flood. Unique frames, because the topic drops a message it has seen.
+                let started = Instant::now();
+                let mut sent = 0u64;
+                let mut mesh_sent = 0usize;
+                while started.elapsed() < Duration::from_secs(secs) {
+                    if rate_fps > 0.0 {
+                        let due = started.elapsed().as_secs_f64() * rate_fps;
+                        if u64_to_f64(sent) >= due {
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                            continue;
+                        }
+                    }
+                    let mut datagram = vec![7u8; MAX_DATAGRAM_LEN];
+                    datagram[..8].copy_from_slice(&sent.to_le_bytes());
+                    let dst_id = b_endpoint.id();
+                    let src_id = a_endpoint.id();
+                    let frame = Frame::fixture(dst_id, src_id, &datagram)
+                        .encode()
+                        .expect("frame");
+                    a_sender.broadcast(frame).await.expect("send");
+                    sent += 1;
+                    if mesh_sent < mesh_total {
+                        let message = Bytes::from(format!("mesh message {mesh_sent}"));
+                        a_sender.broadcast(message).await.expect("send");
+                        mesh_sent += 1;
                     }
                 }
-            })
-        } else {
-            let mut mesh = spawn_split_capped(b_receiver, Some(b_handle.clone()), capacity);
-            gauge = Some(mesh.high_water_gauge());
-            tokio::spawn(async move {
-                let mut tick = tokio::time::interval(PERIOD);
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = tick.tick() => std::thread::sleep(BUSY),
-                        event = mesh.next() => if event.is_none() { break },
-                    }
-                }
-            })
-        };
+                let elapsed = started.elapsed().as_secs_f64();
+                tokio::time::sleep(Duration::from_secs(2)).await;
 
-        // A: the flood. Unique frames, because the topic drops a message it has seen.
-        let started = Instant::now();
-        let mut sent = 0u64;
-        let mut mesh_sent = 0usize;
-        while started.elapsed() < Duration::from_secs(secs) {
-            if rate_fps > 0.0 {
-                let due = started.elapsed().as_secs_f64() * rate_fps;
-                if u64_to_f64(sent) >= due {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                    continue;
-                }
-            }
-            let mut datagram = vec![7u8; MAX_DATAGRAM_LEN];
-            datagram[..8].copy_from_slice(&sent.to_le_bytes());
-            let dst_id = b_endpoint.id();
-            let src_id = a_endpoint.id();
-            let frame = Frame::fixture(dst_id, src_id, &datagram)
-                .encode()
-                .expect("frame");
-            a_sender.broadcast(frame).await.expect("send");
-            sent += 1;
-            if mesh_sent < mesh_total {
-                let message = Bytes::from(format!("mesh message {mesh_sent}"));
-                a_sender.broadcast(message).await.expect("send");
-                mesh_sent += 1;
-            }
-        }
-        let elapsed = started.elapsed().as_secs_f64();
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let stats = b_handle.stats();
-        let frames = u64_to_f64(sent);
-        println!(
-            "SPLITRUN {}",
-            serde_json::json!({
-                "mode": if inline { "inline" } else { "splitter" },
-                "capacity": capacity,
-                "rate_mib_set": rate_mib,
-                "secs": elapsed,
-                "frames_sent_by_a": sent,
-                "mb_per_s_sent": frames * u64_to_f64(u64::try_from(frame::MAX_FRAME_LEN).unwrap_or(0)) / elapsed / 1_048_576.0,
-                "mesh_messages_sent": mesh_sent,
-                "b_frames_in": stats.frames_in,
-                "b_topic_lagged": stats.topic_lagged,
-                "b_forward_dropped": stats.forward_dropped,
-                "b_data_queue_high_water": gauge.map(|gauge| gauge.load(Ordering::Relaxed)),
-            })
+                let stats = b_handle.stats();
+                let frames = u64_to_f64(sent);
+                println!(
+                    "SPLITRUN {}",
+                    serde_json::json!({
+                        "mode": if inline { "inline" } else { "splitter" },
+                        "capacity": capacity,
+                        "rate_mib_set": rate_mib,
+                        "secs": elapsed,
+                        "frames_sent_by_a": sent,
+                        "mb_per_s_sent": frames * u64_to_f64(u64::try_from(frame::MAX_FRAME_LEN).unwrap_or(0)) / elapsed / 1_048_576.0,
+                        "mesh_messages_sent": mesh_sent,
+                        "b_frames_in": stats.frames_in,
+                        "b_topic_lagged": stats.topic_lagged,
+                        "b_forward_dropped": stats.forward_dropped,
+                        "b_data_queue_high_water": gauge.map(|gauge| gauge.load(Ordering::Relaxed)),
+                    })
+                );
+                reader.abort();
+            },
         );
-        reader.abort();
     }
 
     /// A count as a float: counts of frames in a minute are far below 2^52.

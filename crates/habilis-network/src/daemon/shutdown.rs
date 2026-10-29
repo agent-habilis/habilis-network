@@ -244,7 +244,6 @@ pub(super) fn never_quit() -> mpsc::Receiver<()> {
 #[cfg(all(unix, feature = "host"))]
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::process::{Child, Command};
     use std::time::Duration;
 
@@ -271,61 +270,70 @@ mod tests {
     }
 
     #[test]
-    async fn owner_watch_stays_while_the_owner_lives() {
-        let mut child = spawn_owner();
-        let owner = Owner::try_new(child.id()).expect("live owner accepted");
-        assert!(
-            !watch_quits(owner, Duration::from_millis(300)).await,
-            "an owner watch stays while the owner lives"
-        );
-        child.kill().unwrap();
-        child.wait().unwrap();
+    fn owner_watch_stays_while_the_owner_lives() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut child = spawn_owner();
+            let owner = Owner::try_new(child.id()).expect("live owner accepted");
+            assert!(
+                !watch_quits(owner, Duration::from_millis(300)).await,
+                "an owner watch stays while the owner lives"
+            );
+            child.kill().unwrap();
+            child.wait().unwrap();
+        });
     }
 
     #[test]
-    async fn owner_watch_quits_when_the_owner_exits() {
-        let mut child = spawn_owner();
-        let owner = Owner::try_new(child.id()).expect("live owner accepted");
-        child.kill().unwrap();
-        child.wait().unwrap();
-        assert!(
-            watch_quits(owner, Duration::from_secs(2)).await,
-            "an owner watch quits when the owner exits"
-        );
+    fn owner_watch_quits_when_the_owner_exits() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut child = spawn_owner();
+            let owner = Owner::try_new(child.id()).expect("live owner accepted");
+            child.kill().unwrap();
+            child.wait().unwrap();
+            assert!(
+                watch_quits(owner, Duration::from_secs(2)).await,
+                "an owner watch quits when the owner exits"
+            );
+        });
     }
 
     #[test]
-    async fn owner_watch_quits_when_the_owner_is_an_unreaped_zombie() {
-        let mut child = spawn_owner();
-        let owner = Owner::try_new(child.id()).expect("live owner accepted");
-        child.kill().unwrap();
-        assert!(
-            watch_quits(owner, Duration::from_secs(2)).await,
-            "an owner watch quits for an unreaped zombie owner"
-        );
-        child.wait().unwrap();
+    fn owner_watch_quits_when_the_owner_is_an_unreaped_zombie() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut child = spawn_owner();
+            let owner = Owner::try_new(child.id()).expect("live owner accepted");
+            child.kill().unwrap();
+            assert!(
+                watch_quits(owner, Duration::from_secs(2)).await,
+                "an owner watch quits for an unreaped zombie owner"
+            );
+            child.wait().unwrap();
+        });
     }
 
     /// Simulates reuse with `start + 1`: that a real reissue changes the start
     /// time is a property of the OS, not something this test can show.
     #[test]
-    async fn owner_watch_quits_when_the_pid_is_reissued() {
-        let mut child = spawn_owner();
-        let owner = Owner::try_new(child.id()).expect("live owner accepted");
-        let reissued = Owner {
-            start: owner.start + 1,
-            ..owner
-        };
-        assert!(
-            watch_quits(reissued, Duration::from_secs(2)).await,
-            "an owner watch quits when the pid is reissued"
-        );
-        child.kill().unwrap();
-        child.wait().unwrap();
+    fn owner_watch_quits_when_the_pid_is_reissued() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut child = spawn_owner();
+            let owner = Owner::try_new(child.id()).expect("live owner accepted");
+            let reissued = Owner {
+                start: owner.start + 1,
+                ..owner
+            };
+            assert!(
+                watch_quits(reissued, Duration::from_secs(2)).await,
+                "an owner watch quits when the pid is reissued"
+            );
+            child.kill().unwrap();
+            child.wait().unwrap();
+        });
     }
 
     #[test]
     fn validate_owner_pid_accepts_only_a_live_other_process() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut child = spawn_owner();
         let pid = child.id();
         assert!(
@@ -352,6 +360,7 @@ mod tests {
 
     #[test]
     fn owner_refuses_init_self_and_a_dead_pid() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(Owner::try_new(0).is_err(), "pid 0 is refused as an owner");
         assert!(
             Owner::try_new(std::process::id()).is_err(),
@@ -373,6 +382,7 @@ mod tests {
     #[test]
     fn orphan_watch_fires_only_on_a_parent_change() {
         // The agent that spawned us is alive ⇒ same ppid ⇒ stay running.
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(!parent_lost(4242, 4242), "an unchanged parent is not lost");
         // The agent died ⇒ reparented to launchd (1) ⇒ orphaned, quit.
         assert!(
@@ -389,6 +399,7 @@ mod tests {
     #[test]
     fn orphan_watch_skips_an_already_detached_daemon() {
         // Spawned by a normal agent ⇒ worth watching.
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             orphan_watch_warranted(4242),
             "a daemon attached to a parent warrants the orphan watch"
@@ -409,49 +420,51 @@ mod tests {
     /// timeout, and its endpoints are never closed. The check runs in a child process, because
     /// an exit inside the announcement ends the process.
     #[test]
-    async fn a_cli_quit_leaves_the_exit_to_the_loop() {
-        use super::{QuitParams, announce_departure};
-        use crate::testing::LaneNode;
+    fn a_cli_quit_leaves_the_exit_to_the_loop() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::{QuitParams, announce_departure};
+            use crate::testing::LaneNode;
 
-        if std::env::var_os(QUIT_CHILD).is_some() {
-            let node = LaneNode::start().await;
-            let context = node.context();
-            let mut state = node.state();
-            let (inbound, _unread) = mpsc::channel(1);
-            let mut app = crate::membership::MembershipApp::new(inbound);
-            let name = crate::protocol::MeshName::try_new("test").expect("a name");
-            let exit = announce_departure(
-                &mut state,
-                &mut app,
-                &context,
-                QuitParams {
-                    name: &name,
-                    leave_label: "#test",
-                    exit_on_quit: true,
-                },
-            )
-            .await;
-            println!("QUIT_ANNOUNCED exit={exit}");
-            node.endpoint.close().await;
-            return;
-        }
-        let mut command = Command::new(std::env::current_exe().expect("the test binary"));
-        command
-            .args([
-                "--exact",
-                "daemon::shutdown::tests::a_cli_quit_leaves_the_exit_to_the_loop",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(QUIT_CHILD, "1");
-        let output = command.output().expect("run the test binary");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // A `dhat-heap` build does not exit the process on a quit, so that dhat can write its
-        // profile: the loop then gets `false`.
-        let exit = !cfg!(feature = "dhat-heap");
-        assert!(
-            stdout.contains(&format!("QUIT_ANNOUNCED exit={exit}")),
-            "the process exited inside the quit, before the loop released its endpoints: {stdout}"
-        );
+            if std::env::var_os(QUIT_CHILD).is_some() {
+                let node = LaneNode::start().await;
+                let context = node.context();
+                let mut state = node.state();
+                let (inbound, _unread) = mpsc::channel(1);
+                let mut app = crate::membership::MembershipApp::new(inbound);
+                let name = crate::protocol::MeshName::try_new("test").expect("a name");
+                let exit = announce_departure(
+                    &mut state,
+                    &mut app,
+                    &context,
+                    QuitParams {
+                        name: &name,
+                        leave_label: "#test",
+                        exit_on_quit: true,
+                    },
+                )
+                .await;
+                println!("QUIT_ANNOUNCED exit={exit}");
+                node.endpoint.close().await;
+                return;
+            }
+            let mut command = Command::new(std::env::current_exe().expect("the test binary"));
+            command
+                .args([
+                    "--exact",
+                    "daemon::shutdown::tests::a_cli_quit_leaves_the_exit_to_the_loop",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(QUIT_CHILD, "1");
+            let output = command.output().expect("run the test binary");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // A `dhat-heap` build does not exit the process on a quit, so that dhat can write its
+            // profile: the loop then gets `false`.
+            let exit = !cfg!(feature = "dhat-heap");
+            assert!(
+                stdout.contains(&format!("QUIT_ANNOUNCED exit={exit}")),
+                "the process exited inside the quit, before the loop released its endpoints: {stdout}"
+            );
+        });
     }
 }

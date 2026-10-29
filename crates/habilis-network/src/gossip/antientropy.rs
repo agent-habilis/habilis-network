@@ -699,7 +699,6 @@ fn missing_frames(channel: Channel, digest: &Verified, state: &EventLoopState) -
 
 #[cfg(test)]
 mod budget_tests {
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::{FastRounds, Plane, ServeBudget};
@@ -717,6 +716,7 @@ mod budget_tests {
 
     #[test]
     fn the_serve_budget_takes_new_heads_up_to_its_count() {
+        let _guard = ::habilis_network_test_tracing::init();
         let now = Instant::now();
         let mut budget = ServeBudget::default();
         let gossip = (author_of("asker"), Channel::State, Plane::Gossip);
@@ -758,6 +758,7 @@ mod budget_tests {
     /// then costs a retry interval, not a tick.
     #[test]
     fn a_peer_that_is_ahead_is_retried_once_asking_went_quiet() {
+        let _guard = ::habilis_network_test_tracing::init();
         let now = Instant::now();
         let mut rounds = FastRounds::default();
         let channel = Channel::State;
@@ -825,86 +826,92 @@ mod budget_tests {
     /// goes out: when the round's peers never answer, the tick is the only
     /// thing left that asks the whole mesh.
     #[test]
-    async fn the_tick_digest_goes_out_while_a_fast_round_runs() {
-        use super::{DigestTrigger, broadcast_state_digests};
-        use crate::protocol::MeshId;
+    fn the_tick_digest_goes_out_while_a_fast_round_runs() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::{DigestTrigger, broadcast_state_digests};
+            use crate::protocol::MeshId;
 
-        let endpoint = iroh::Endpoint::builder(presets::Minimal)
-            .bind()
-            .await
-            .expect("bind a local endpoint");
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
-        let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([5u8; 32]), vec![])
-            .await
-            .expect("subscribe to a peerless topic");
-        let (gossip_sender, _receiver) = topic.split();
-        let sender = crate::transport::MeshSender::new(gossip_sender);
-        let mut state = crate::testing::fresh_state();
-        state.meshed = true;
-        state
-            .fast_rounds
-            .note_asked(author_of("holder"), Channel::State, 1, 0, Instant::now());
-        let (mesh, author) = (MeshId::from("test"), nick("late"));
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(iroh_gossip::proto::TopicId::from_bytes([5u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            let sender = crate::transport::MeshSender::new(gossip_sender);
+            let mut state = crate::testing::fresh_state();
+            state.meshed = true;
+            state
+                .fast_rounds
+                .note_asked(author_of("holder"), Channel::State, 1, 0, Instant::now());
+            let (mesh, author) = (MeshId::from("test"), nick("late"));
 
-        let before = state.idle.broadcasts;
-        broadcast_state_digests(&mut state, &sender, &mesh, &author, DigestTrigger::Event).await;
-        assert_eq!(
-            state.idle.broadcasts - before,
-            1,
-            "only the meta digest: state waits"
-        );
-        let before_tick = state.idle.broadcasts;
-        broadcast_state_digests(&mut state, &sender, &mesh, &author, DigestTrigger::Tick).await;
-        assert_eq!(
-            state.idle.broadcasts - before_tick,
-            2,
-            "the tick sends both"
-        );
-        endpoint.close().await;
+            let before = state.idle.broadcasts;
+            broadcast_state_digests(&mut state, &sender, &mesh, &author, DigestTrigger::Event)
+                .await;
+            assert_eq!(
+                state.idle.broadcasts - before,
+                1,
+                "only the meta digest: state waits"
+            );
+            let before_tick = state.idle.broadcasts;
+            broadcast_state_digests(&mut state, &sender, &mesh, &author, DigestTrigger::Tick).await;
+            assert_eq!(
+                state.idle.broadcasts - before_tick,
+                2,
+                "the tick sends both"
+            );
+            endpoint.close().await;
+        });
     }
 
     /// A node that just got a change has a holder serving it, so a digest an
     /// event sends then waits: sent while the first answer arrives, it drew
     /// a second answer that overlapped the first. The tick still goes out.
     #[test]
-    async fn an_event_digest_waits_while_changes_arrive() {
-        use super::{DigestTrigger, broadcast_state_digests};
-        use crate::protocol::MeshId;
+    fn an_event_digest_waits_while_changes_arrive() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::{DigestTrigger, broadcast_state_digests};
+            use crate::protocol::MeshId;
 
-        let endpoint = iroh::Endpoint::builder(presets::Minimal)
-            .bind()
-            .await
-            .expect("bind a local endpoint");
-        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
-        let topic = gossip
-            .subscribe(iroh_gossip::proto::TopicId::from_bytes([6u8; 32]), vec![])
-            .await
-            .expect("subscribe to a peerless topic");
-        let (gossip_sender, _receiver) = topic.split();
-        let sender = crate::transport::MeshSender::new(gossip_sender);
-        let mut state = crate::testing::fresh_state();
-        state.meshed = true;
-        state
-            .fast_rounds
-            .note_change(Channel::State, Instant::now());
-        let (mesh, author) = (MeshId::from("test"), nick("late"));
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(iroh_gossip::proto::TopicId::from_bytes([6u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            let sender = crate::transport::MeshSender::new(gossip_sender);
+            let mut state = crate::testing::fresh_state();
+            state.meshed = true;
+            state
+                .fast_rounds
+                .note_change(Channel::State, Instant::now());
+            let (mesh, author) = (MeshId::from("test"), nick("late"));
 
-        let before = state.idle.broadcasts;
-        broadcast_state_digests(&mut state, &sender, &mesh, &author, DigestTrigger::Event).await;
-        assert_eq!(
-            state.idle.broadcasts - before,
-            1,
-            "only the meta digest: a state change just landed"
-        );
-        let before_tick = state.idle.broadcasts;
-        broadcast_state_digests(&mut state, &sender, &mesh, &author, DigestTrigger::Tick).await;
-        assert_eq!(
-            state.idle.broadcasts - before_tick,
-            2,
-            "the tick sends both"
-        );
-        endpoint.close().await;
+            let before = state.idle.broadcasts;
+            broadcast_state_digests(&mut state, &sender, &mesh, &author, DigestTrigger::Event)
+                .await;
+            assert_eq!(
+                state.idle.broadcasts - before,
+                1,
+                "only the meta digest: a state change just landed"
+            );
+            let before_tick = state.idle.broadcasts;
+            broadcast_state_digests(&mut state, &sender, &mesh, &author, DigestTrigger::Tick).await;
+            assert_eq!(
+                state.idle.broadcasts - before_tick,
+                2,
+                "the tick sends both"
+            );
+            endpoint.close().await;
+        });
     }
 
     /// The fast rounds compare our heads through two keys: the one stored
@@ -916,6 +923,7 @@ mod budget_tests {
         use super::{DigestOrigin, heads_key, heads_key_of, state_digest};
         use crate::protocol::MeshId;
 
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = crate::testing::fresh_state();
         state.meshed = true;
         let (mesh, author) = (MeshId::from("test"), nick("alice"));
@@ -950,6 +958,7 @@ mod budget_tests {
     /// counts from the last change that landed, not only from the ask.
     #[test]
     fn a_round_waits_while_an_answers_frames_still_arrive() {
+        let _guard = ::habilis_network_test_tracing::init();
         let t0 = Instant::now();
         let ms = Duration::from_millis;
         let state = Channel::State;
@@ -988,6 +997,7 @@ mod budget_tests {
     /// round forever: the wait is capped at `FAST_ROUND_ACTIVE` after the ask.
     #[test]
     fn the_wait_after_changes_is_capped() {
+        let _guard = ::habilis_network_test_tracing::init();
         let t0 = Instant::now();
         let ms = Duration::from_millis;
         let state = Channel::State;
@@ -1018,6 +1028,7 @@ mod budget_tests {
 
     #[test]
     fn a_fast_round_waits_for_a_full_answer_or_the_interval() {
+        let _guard = ::habilis_network_test_tracing::init();
         let now = Instant::now();
         let full = antientropy_max_resend();
         let mut rounds = FastRounds::default();
@@ -1074,7 +1085,6 @@ mod budget_tests {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use super::{
@@ -1102,6 +1112,7 @@ mod tests {
     /// member that holds what the asker lacks.
     #[test]
     fn one_digest_is_answered_by_k_members_not_by_all() {
+        let _guard = ::habilis_network_test_tracing::init();
         let members = members(48);
         let asker = &members[0];
         let others = members.iter().filter(|me| *me != asker);
@@ -1119,6 +1130,7 @@ mod tests {
     /// holds comes back once that member has had a turn.
     #[test]
     fn every_member_gets_a_turn_to_answer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let members = members(48);
         let asker = &members[0];
         let mut had_a_turn = HashSet::new();
@@ -1136,6 +1148,7 @@ mod tests {
     /// A mesh no larger than the answerers has nobody to hold back.
     #[test]
     fn a_small_mesh_is_answered_by_every_member() {
+        let _guard = ::habilis_network_test_tracing::init();
         let members = members(3);
         let asker = &members[0];
         for me in members.iter().filter(|me| *me != asker) {
@@ -1169,6 +1182,7 @@ mod tests {
     /// held the loop there for minutes.
     #[test]
     fn a_digest_answer_does_not_wait_for_a_full_outbox() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (me, asker) = (nick("holder"), nick("asker"));
         let mut state = fresh_state();
         state.peers.insert(asker.clone());
@@ -1197,6 +1211,7 @@ mod tests {
     /// trailer is outside the signature, and a reader that does not know it fails closed.
     #[test]
     fn each_broadcast_resend_has_a_payload_of_its_own() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let (outbox, mut resends) = crate::transport::ResendOutbox::new(4);
         state.resend_outbox = outbox;
@@ -1306,6 +1321,7 @@ mod tests {
     /// meta doc must converge to A's within two anti-entropy rounds.
     #[test]
     fn late_joiner_converges_meta_over_a_rendezvous_only_link() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = MeshId::from("test");
         let alice_nick = nick("alice");
         let bob_nick = nick("bob");
@@ -1358,6 +1374,7 @@ mod tests {
     /// degraded, when the overlay is suspected dead.
     #[test]
     fn state_digest_needs_some_gossip_path() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = MeshId::from("test");
         let author = nick("alice");
         let origin = DigestOrigin {
@@ -1401,6 +1418,7 @@ mod tests {
     fn digest_fits_gossip_cap() {
         // Enough messages that both a newest and a rolling older window are
         // full (each `ANTIENTROPY_DIGEST_WINDOW_IDS` ids).
+        let _guard = ::habilis_network_test_tracing::init();
         let total = ANTIENTROPY_DIGEST_WINDOW_IDS * 3;
         let mut log = MessageLog::new(total);
         for index in 0..total {
@@ -1450,6 +1468,7 @@ mod tests {
     /// would silently break cross-node reconciliation.
     #[test]
     fn wire_window_round_trips_ids() {
+        let _guard = ::habilis_network_test_tracing::init();
         let ids: Vec<DedupKey> = (0..5u8).map(|seed| DedupKey::from([seed; 16])).collect();
         let window = DigestWindow {
             lo: (UnixSecs::from(1), DedupKey::MIN),
@@ -1467,6 +1486,7 @@ mod tests {
     /// `hi_key`. It does not decode, and `handle_digest` reports its author once.
     #[test]
     fn a_digest_of_the_build_without_window_keys_does_not_decode() {
+        let _guard = ::habilis_network_test_tracing::init();
         let old = r#"{"windows":[{"lo":1,"hi":2,"ids":""}]}"#;
         assert!(
             serde_json::from_str::<DigestBody>(old).is_err(),
@@ -1479,6 +1499,7 @@ mod tests {
     #[test]
     fn decode_ids_rejects_malformed() {
         // Not valid Base58 (`0`, `O`, `I`, `l`, space are outside the alphabet).
+        let _guard = ::habilis_network_test_tracing::init();
         let bad_alphabet = WireWindow {
             lo: 0,
             lo_key: String::new(),
@@ -1518,6 +1539,7 @@ mod tests {
     /// chat digest there is no overflow risk as the doc's history grows.
     #[test]
     fn state_heads_digest_round_trips_and_is_small() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = MeshId::from(
             "6bLvZNPGxuqnsbaPVGwf277NyTp8cYPCMiBxXED8d6TyBZpDDzZADkKHL7tTB1EjFagbCXYZ",
         );
@@ -1620,6 +1642,7 @@ mod tests {
     /// across rounds: every round must be clean.
     #[test]
     fn nodes_with_identical_logs_of_more_than_140_messages_ask_each_other_for_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
         for seconds in [12, 1] {
             let (mut node, holder) = same_log_on_two_nodes(seconds);
             for round in 0..6 {
@@ -1669,6 +1692,7 @@ mod tests {
     /// hundreds with the same timestamp.
     #[test]
     fn a_node_that_lost_messages_recovers_them_and_only_them() {
+        let _guard = ::habilis_network_test_tracing::init();
         let budget = tuning::antientropy_max_resend();
         for seconds in [12, 1] {
             let all = scrambled_messages(seconds);
@@ -1711,6 +1735,7 @@ mod tests {
     /// when nothing else changes and no window moves.
     #[test]
     fn a_message_between_two_windows_is_asked_for() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut all = scrambled_messages(12);
         all.sort_by_key(|message| (message.timestamp, message.dedup_key()));
         let mut holder = MessageLog::new(1000);
@@ -1738,6 +1763,7 @@ mod tests {
     /// second, whatever its id key: the window must not start at the key of that first message.
     #[test]
     fn a_message_of_the_second_a_node_joined_in_is_asked_for_whatever_its_key() {
+        let _guard = ::habilis_network_test_tracing::init();
         let second = 1_700_000_000;
         let mut pair = [chat_at("first", second), chat_at("second", second)];
         pair.sort_by_key(|message| message.dedup_key());
@@ -1765,6 +1791,7 @@ mod tests {
     /// smaller key is in the range that the window must reach back to.
     #[test]
     fn a_message_of_the_second_of_the_first_logged_message_is_asked_for_whatever_its_key() {
+        let _guard = ::habilis_network_test_tracing::init();
         let second = 1_700_000_000;
         let mut pair = [chat_at("first", second - 1), chat_at("second", second - 1)];
         pair.sort_by_key(|message| message.dedup_key());
@@ -1795,6 +1822,7 @@ mod tests {
     /// the sweep brings them back.
     #[test]
     fn an_author_with_a_fast_clock_does_not_slow_the_newest_messages() {
+        let _guard = ::habilis_network_test_tracing::init();
         let budget = tuning::antientropy_max_resend();
         let base = UnixSecs::now().as_secs() - 3600;
         let ahead = 80;
@@ -1863,6 +1891,7 @@ mod tests {
     /// evicted, or the other keeps sending it and it evicts it again.
     #[test]
     fn two_full_logs_with_different_history_ask_each_other_for_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
         let budget = tuning::antientropy_max_resend();
         let base = 1_700_000_000;
         let common: Vec<Verified> = (0..300)
@@ -1913,6 +1942,7 @@ mod tests {
     /// for them would only spend the resend budget.
     #[test]
     fn a_digest_asks_for_everything_missed_since_joining() {
+        let _guard = ::habilis_network_test_tracing::init();
         let joined_at = 1_700_000_000;
         let own_joined = chat_at("own joined", joined_at + 5);
         let mut node = fresh_state();
@@ -1942,6 +1972,7 @@ mod tests {
     /// open-ended (`i64::MAX`) upper bound that drives reconnect recovery.
     #[test]
     fn digest_body_serde_round_trips() {
+        let _guard = ::habilis_network_test_tracing::init();
         let body = DigestBody {
             windows: vec![
                 WireWindow {
@@ -1991,6 +2022,7 @@ mod tests {
     /// The literal was captured at the base commit.
     #[test]
     fn a_digest_body_keeps_its_wire_form() {
+        let _guard = ::habilis_network_test_tracing::init();
         let newest = DigestWindow {
             lo: (UnixSecs::from(1_700_000_100), DedupKey::from([0x03; 16])),
             hi: (UnixSecs::MAX, DedupKey::MAX),
