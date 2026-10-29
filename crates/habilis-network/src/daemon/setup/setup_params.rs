@@ -72,6 +72,7 @@ impl SetupParams {
             max_direct: 0,
             runtime_base: None,
             state_file: None,
+            // trait object: the loop and the setup share the sink through this Arc
             sink: std::sync::Arc::new(sink),
             endpoint: None,
             protocols: habilis_network_iroh_transport_util::ProtocolSet::default(),
@@ -173,6 +174,7 @@ impl std::fmt::Debug for SetupParams {
 /// The shared live-peer count. The loop mirrors its roster size into it, and a directory advertiser
 /// re-broadcasts from it. Clones share one counter.
 #[derive(Debug, Default)]
+// the counter is shared by the setup and the caller, which reads it
 pub struct LiveCount(std::sync::Arc<atomic::AtomicUsize>);
 
 impl Clone for LiveCount {

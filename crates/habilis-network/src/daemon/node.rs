@@ -59,12 +59,11 @@ pub struct Node<Driver: NodeDriver> {
 // log line — surface the identity fields a reader cares about.
 impl<Driver: NodeDriver> fmt::Debug for Node<Driver> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Node")
-            .field("mesh_id", &self.mesh_id)
-            .field("name", &self.name)
-            .field("nickname", &self.nickname)
-            .finish_non_exhaustive()
+        let mut debug = formatter.debug_struct("Node");
+        debug.field("mesh_id", &self.mesh_id);
+        debug.field("name", &self.name);
+        debug.field("nickname", &self.nickname);
+        debug.finish_non_exhaustive()
     }
 }
 

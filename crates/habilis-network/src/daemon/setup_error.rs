@@ -70,17 +70,18 @@ impl Error for SetupError {
     /// The forwarding variants print their inner text, so the chain continues at the inner
     /// error's own source. Naming the inner error here would print its text twice.
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Unlock(error) => error.source(),
-            Self::Invite(error) => error.source(),
-            Self::Resolve(error) => error.source(),
-            Self::Config(error) => error.source(),
-            Self::Internal(error) => error.source(),
+        let inner: &dyn Error = match self {
+            Self::Unlock(error) => error,
+            Self::Invite(error) => error,
+            Self::Resolve(error) => error,
+            Self::Config(error) => error,
+            Self::Internal(error) => &**error,
             Self::PasswordRequired
             | Self::InviteNoPassword
             | Self::MeshAndTopic
-            | Self::EmptyTopic => None,
-        }
+            | Self::EmptyTopic => return None,
+        };
+        inner.source()
     }
 }
 

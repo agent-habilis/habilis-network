@@ -566,13 +566,15 @@ pub(super) fn shed_rival_beacon_if_due(
     if !state.yield_to_lower && defer_shed(dependents.count(), state.rival_recheck_deferrals) {
         state.rival_recheck_deferrals = state.rival_recheck_deferrals.saturating_add(1);
         state.next_rival_recheck = Some(Instant::now() + tuning::rival_recheck());
+        let live_ids = dependents.live_ids();
+        let own_ids = dependents.own_ids();
         tracing::info!(
             target: "habilis_network::gossip",
             node = %peer.fmt_short(),
             dependents = dependents.count(),
             dependent_ids = ?dependents.foreign_ids(),
-            live_ids = ?dependents.live_ids(),
-            own_ids = ?dependents.own_ids(),
+            live_ids = ?live_ids,
+            own_ids = ?own_ids,
             in_flight = dependents.in_flight,
             deferrals = state.rival_recheck_deferrals,
             "beacon rival re-check deferred: a data-channel peer is hanging off this beacon"

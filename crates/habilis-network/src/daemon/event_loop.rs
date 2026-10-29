@@ -175,10 +175,11 @@ async fn run_checked<Driver: NodeDriver>(
             })
         })
         .map(|path| {
-            StateFile::new(path, &mesh_str, &author, &mesh_name)
-                .with_base(runtime_base.clone())
-                .with_topic(topic_string.as_deref())
-                .with_owner_pid(owner.map(shutdown::Owner::pid))
+            let owner_pid = owner.map(shutdown::Owner::pid);
+            let file = StateFile::new(path, &mesh_str, &author, &mesh_name)
+                .with_base(runtime_base.clone());
+            file.with_topic(topic_string.as_deref())
+                .with_owner_pid(owner_pid)
         });
     #[cfg(not(feature = "host"))]
     drop(state_file);
@@ -663,6 +664,7 @@ struct EventLoop<Driver: NodeDriver> {
     /// gossip (the derived name is lossy), `#name` otherwise.
     leave_label: String,
     author: Nickname,
+    // trait object: the loop, its app output and the IPC server share one sink
     sink: Arc<dyn NodeSink>,
     max_peers: usize,
     state: EventLoopState,
@@ -1208,6 +1210,7 @@ fn spawn_ipc_rx<Cmd: serde::de::DeserializeOwned + Send + 'static>(
     runtime_base: Option<&std::path::Path>,
     mesh: &MeshId,
     author: &Nickname,
+    // the IPC server takes its own clone of the shared sink
     sink: &Arc<dyn NodeSink>,
 ) -> Option<mpsc::Receiver<IpcMessage<Cmd>>> {
     // In-process mode (in-process: library API or MCP): no socket. Returning `None` leaves
@@ -1260,8 +1263,10 @@ pub(crate) fn route_wake_arm(state: &mut EventLoopState, context: &HandlerCtx<'_
 /// The wake of the multihop handle, which rings when its relay rule starts to refuse a
 /// hop and when it admits one that it refused.
 #[cfg(feature = "multihop")]
+// the wake is the multihop handle's, which the loop and the handle share
 fn route_wake_of(state: &EventLoopState) -> Arc<tokio::sync::Notify> {
     state.multihop.as_ref().map_or_else(
+        // without a handle, a fresh wake that nothing rings
         || Arc::new(tokio::sync::Notify::new()),
         habilis_network_iroh_multihop_transport::MultihopHandle::route_wake,
     )
@@ -1269,15 +1274,19 @@ fn route_wake_of(state: &EventLoopState) -> Arc<tokio::sync::Notify> {
 
 /// Without the `multihop` feature there is no multihop transport: the wake never rings.
 #[cfg(not(feature = "multihop"))]
+// without the feature, a fresh wake that nothing rings
 fn route_wake_of(_state: &EventLoopState) -> Arc<tokio::sync::Notify> {
+    // without the feature, a fresh wake that nothing rings
     Arc::new(tokio::sync::Notify::new())
 }
 
 /// The wake of the admission table of the multihop underlay, which rings when a round of the
 /// underlay ends, whatever its end. It is the table of the underlay, not `webrtc_admission`.
 #[cfg(feature = "multihop")]
+// the wake is the underlay admission's, which the loop and the underlay share
 fn underlay_slot_freed_of(state: &EventLoopState) -> Arc<tokio::sync::Notify> {
     state.underlay_webrtc.as_ref().map_or_else(
+        // without an underlay, a fresh wake that nothing rings
         || Arc::new(tokio::sync::Notify::new()),
         |underlay| underlay.admission.slot_freed(),
     )
@@ -1285,7 +1294,9 @@ fn underlay_slot_freed_of(state: &EventLoopState) -> Arc<tokio::sync::Notify> {
 
 /// Without the `multihop` feature there is no underlay: the wake never rings.
 #[cfg(not(feature = "multihop"))]
+// without the feature, a fresh wake that nothing rings
 fn underlay_slot_freed_of(_state: &EventLoopState) -> Arc<tokio::sync::Notify> {
+    // without the feature, a fresh wake that nothing rings
     Arc::new(tokio::sync::Notify::new())
 }
 
@@ -1538,8 +1549,8 @@ mod route_wake_tests {
             .insert(SecretKey::generate().public());
         linkstate_arm(&mut state, &context).await;
         let own = me.app_id().to_string();
-        let costs: Vec<u32> = me
-            .topology_view()
+        let view = me.topology_view();
+        let costs: Vec<u32> = view
             .edges
             .iter()
             .filter(|edge| edge.from == own)
@@ -1588,9 +1599,10 @@ mod route_wake_tests {
         // here is a listener that never answers.
         let (_silent, relay) = crate::testing::silent_relay_rung();
         let secret = SecretKey::generate();
-        let underlay: Endpoint = Endpoint::builder(presets::Minimal)
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(&secret))
-            .relay_mode(iroh::RelayMode::custom([relay]))
+            .relay_mode(iroh::RelayMode::custom([relay]));
+        let underlay: Endpoint = builder
             .clear_ip_transports()
             .bind()
             .await
@@ -1636,9 +1648,10 @@ mod route_wake_tests {
         state.path_kinds.insert(dst.app_id().get(), PathKind::Relay);
 
         nudge_climbing_pairs(&mut state, &context, true);
+        let dst_key = dst.app_id().get();
         let direct: TransportAddr = state
             .route_dialed
-            .get(&dst.app_id().get())
+            .get(&dst_key)
             .cloned()
             .expect("the direct route is dialed");
 
@@ -1647,7 +1660,7 @@ mod route_wake_tests {
 
         let dialed: TransportAddr = state
             .route_dialed
-            .get(&dst.app_id().get())
+            .get(&dst_key)
             .cloned()
             .expect("a route is dialed");
         assert_ne!(dialed, direct, "the route through the third is dialed");

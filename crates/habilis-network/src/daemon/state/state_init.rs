@@ -13,6 +13,7 @@ use iroh::address_lookup::memory;
 pub(crate) struct StateInit {
     #[cfg(feature = "host")]
     pub(crate) state_file: Option<StateFile>,
+    // the identity is shared with the loop and its handlers, which hold clones
     pub(crate) identity: Arc<Identity>,
     pub secrets: MeshSecrets,
     /// The `meta` channel's per-peer write gate; `None` leaves it free-form.

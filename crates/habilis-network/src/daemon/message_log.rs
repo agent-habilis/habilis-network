@@ -134,10 +134,12 @@ impl MessageLog {
             })
             .map(|(author, _)| *author)
             .expect("over-capacity log is non-empty");
-        self.messages
+        let candidates = self
+            .messages
             .iter()
             .enumerate()
-            .filter(|(_, message)| message.key() == fullest)
+            .filter(|(_, message)| message.key() == fullest);
+        candidates
             .min_by(|(_, lhs), (_, rhs)| eviction_key(lhs).cmp(&eviction_key(rhs)))
             .map(|(index, _)| index)
             .expect("the fullest author holds at least one message")
@@ -861,19 +863,19 @@ mod tests {
             "newest window must be open-ended"
         );
         let have: HashSet<DedupKey> = window.ids.into_iter().collect();
-        let offered: HashSet<String> = holder
-            .missing_in_window(MissingQuery {
-                range: WindowRange {
-                    lo: window.lo,
-                    hi: window.hi,
-                },
-                have: &have,
-                max: 100,
-                requester: &nick(ANYONE),
-            })
-            .iter()
-            .map(|message| message.body.as_str().to_string())
-            .collect();
+        let missing = holder.missing_in_window(MissingQuery {
+            range: WindowRange {
+                lo: window.lo,
+                hi: window.hi,
+            },
+            have: &have,
+            max: 100,
+            requester: &nick(ANYONE),
+        });
+        let mut offered: HashSet<String> = HashSet::new();
+        for message in &missing {
+            offered.insert(message.body.as_str().to_string());
+        }
         assert_eq!(offered, newer, "holder offers exactly the newer messages");
     }
 

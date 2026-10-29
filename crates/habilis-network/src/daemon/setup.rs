@@ -247,11 +247,14 @@ async fn build_member_endpoint(
         )?;
         // The caller built the underlay of its handle itself, so there is no
         // `WebRTC` leg on it.
+        let held_endpoint = injected.endpoint.clone();
+        let held_webrtc = injected.webrtc.clone();
+        let held_admission = injected.admission.clone();
         return Ok((
-            injected.endpoint.clone(),
+            held_endpoint,
             multihop.cloned(),
-            injected.webrtc.clone(),
-            injected.admission.clone(),
+            held_webrtc,
+            held_admission,
             None,
             injected.mdns_handle(),
         ));
@@ -784,19 +787,19 @@ fn build_overlay(
     let ice = crate::transport::IceProfile {
         host_only: mesh.is_loopback(),
     };
+    let unicast = build
+        .unicast_acceptor
+        .clone()
+        .with_admission(admission.clone());
+    let webrtc_lane = build
+        .transports
+        .webrtc
+        .then(|| (webrtc.clone(), admission.clone(), ice));
     let (gossip, router, address_book) = build_mesh(
         endpoint.clone(),
         build.max_peers,
-        Some(
-            build
-                .unicast_acceptor
-                .clone()
-                .with_admission(admission.clone()),
-        ),
-        build
-            .transports
-            .webrtc
-            .then(|| (webrtc.clone(), admission.clone(), ice)),
+        Some(unicast),
+        webrtc_lane,
         build.take_protocols(),
         build.relay_transport.relay_allowed(),
         webrtc::lane_needs::local_needs_webrtc_lane(UdpTransport::from(build.transports.udp)),

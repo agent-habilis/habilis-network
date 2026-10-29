@@ -50,11 +50,10 @@ pub struct HandlerCtx<'node> {
 // about; the borrowed handles are elided.
 impl std::fmt::Debug for HandlerCtx<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("HandlerCtx")
-            .field("mesh", &self.mesh)
-            .field("author", &self.author)
-            .field("rendezvous_id", &self.rendezvous_id)
-            .finish_non_exhaustive()
+        let mut debug = formatter.debug_struct("HandlerCtx");
+        debug.field("mesh", &self.mesh);
+        debug.field("author", &self.author);
+        debug.field("rendezvous_id", &self.rendezvous_id);
+        debug.finish_non_exhaustive()
     }
 }

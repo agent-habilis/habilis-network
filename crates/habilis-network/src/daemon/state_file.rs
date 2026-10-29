@@ -74,12 +74,15 @@ pub struct StateFile {
 
 impl StateFile {
     pub(crate) fn new(path: PathBuf, mesh: &MeshId, nickname: &Nickname, name: &MeshName) -> Self {
+        let mesh = mesh.as_str().to_string();
+        let name = name.as_str().to_string();
+        let nickname = nickname.as_str().to_string();
         Self {
             path,
             base: None,
-            mesh: mesh.as_str().to_string(),
-            name: name.as_str().to_string(),
-            nickname: nickname.as_str().to_string(),
+            mesh,
+            name,
+            nickname,
             topic: None,
             owner_pid: None,
             discovery: std::sync::Mutex::new(serde_json::Map::new()),
@@ -213,12 +216,9 @@ impl StateFile {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt as _;
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&temp)?
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create(true).truncate(true).mode(0o600);
+                options.open(&temp)?
             }
             #[cfg(not(unix))]
             {
@@ -298,10 +298,11 @@ pub fn read_identity(path: &Path) -> SessionIdentity {
 /// `leave` must map its file. The one home for that rule — retire the
 /// fallback here when the compat window closes.
 fn mesh_field(doc: &serde_json::Value) -> Option<String> {
-    ["gossip", "room"]
+    let keys = ["gossip", "room"];
+    let spelling = keys
         .iter()
-        .find_map(|key| doc.get(key).and_then(serde_json::Value::as_str))
-        .map(str::to_owned)
+        .find_map(|key| doc.get(key).and_then(serde_json::Value::as_str));
+    spelling.map(str::to_owned)
 }
 
 /// One running daemon as seen through its state file — what a consumer's
