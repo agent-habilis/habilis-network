@@ -501,6 +501,12 @@ test("self_convention: a by-value to_ counts", () => {
 test("self_convention: an into_ by reference counts", () => {
   expectExit("crates/demo/src/lib.rs", selfConv("    pub fn into_x(&self) -> u8 {\n        1\n    }"), 1);
 });
+test("self_convention: a by-value to_ on a Copy type is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "#[derive(Clone, Copy)]\npub struct Demo(u8);\nimpl Demo {\n    pub fn to_x(self) -> u8 {\n        1\n    }\n}", 0);
+});
+test("self_convention: a by-value as_ on a non-Copy type still counts", () => {
+  expectExit("crates/demo/src/lib.rs", "#[derive(Clone)]\npub struct Demo(u8);\nimpl Demo {\n    pub fn as_x(self) -> u8 {\n        1\n    }\n}", 1);
+});
 test("self_convention: the guide's shapes are clean", () => {
   expectExit("crates/demo/src/lib.rs", selfConv("    pub fn as_x(&self) -> u8 {\n        1\n    }\n    pub fn to_x(&self) -> u8 {\n        1\n    }\n    pub fn into_x(self) -> u8 {\n        1\n    }"), 0);
 });

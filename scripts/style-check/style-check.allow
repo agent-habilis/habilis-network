@@ -492,12 +492,6 @@ crate_example|crates/habilis-network-test-tracing/src/lib.rs|1|kept: no doc exam
 crate_example|crates/habilis-network-wasm/src/lib.rs|1|kept: no doc example yet in this crate; its entry point is to get one (D2 rollout)
 
 # self_convention: a by-value as_ or to_ method. Each type is Copy, so self by value is the right form.
-self_convention|crates/habilis-network-protocol/src/author_key.rs|1|AuthorKey::to_bytes: a Copy type, so self by value
-self_convention|crates/habilis-network-protocol/src/dedup_key.rs|1|DedupKey::to_bytes: a Copy type, so self by value
-self_convention|crates/habilis-network-protocol/src/mesh/lookup.rs|1|Lookup::as_str: a Copy enum, so self by value
-self_convention|crates/habilis-network-protocol/src/mesh/transport.rs|1|Transport::as_str: a Copy enum, so self by value
-self_convention|crates/habilis-network-protocol/src/topic_id.rs|1|TopicId::to_bytes: a Copy type, so self by value
-self_convention|crates/habilis-network-util/src/unix_secs.rs|2|UnixSecs::as_secs and to_le_bytes: a Copy type, so self by value
 # fn_import: a top-level function imported by its bare name (O23). Each row is a count that may only go down.
 
 

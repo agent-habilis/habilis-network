@@ -304,14 +304,21 @@ function countBoolParamNoComment(raw: string): number {
 }
 
 // The receiver of a public as_, to_ or into_ method. The guide has as_ and to_ take a reference, and into_
-// take self. A by-value as_ or to_ is allowed on a Copy type, so each one has a counted row.
+// take self. A by-value as_ or to_ on a Copy type is the guide's own exception, so the check skips the impl of a
+// type that derives Copy in the same file.
 function countSelfConvention(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
+  const copyTypes = new Set<string>();
+  for (const m of text.matchAll(/#\[derive\([^\]]*\bCopy\b[^\]]*\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum)\s+(\w+)/g)) {
+    copyTypes.add(m[1]!);
+  }
+  const impls = [...text.matchAll(/^impl(?:<[^>]*>)?\s+(?:[\w:<>]+\s+for\s+)?(\w+)/gm)];
+  const typeAt = (index: number): string | undefined => impls.filter((i) => i.index! <= index).at(-1)?.[1];
   let count = 0;
   for (const m of text.matchAll(/^[ \t]*pub (?:const )?fn (as|to|into)_\w+\s*\(\s*(&\s*(?:mut\s+)?)?self\b/gm)) {
     const [, kind, ref] = m;
     if (kind === "into" && ref !== undefined) count++;
-    if ((kind === "as" || kind === "to") && ref === undefined) count++;
+    if ((kind === "as" || kind === "to") && ref === undefined && !copyTypes.has(typeAt(m.index!) ?? "")) count++;
   }
   return count;
 }
