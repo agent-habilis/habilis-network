@@ -39,7 +39,7 @@ async fn probe_checked(timeout: Duration) -> Result<NetworkCapability> {
     let capability = match report {
         Some(report) => {
             let preferred = report.preferred_relay.clone();
-            let preferred_relay_latency_ms = preferred.as_ref().and_then(|url| {
+            let preferred_relay_latency_ms: Option<u64> = preferred.as_ref().and_then(|url| {
                 report
                     .relay_latency
                     .iter()

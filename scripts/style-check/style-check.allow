@@ -99,9 +99,6 @@ untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/web/
 untyped_long_chain_let|crates/habilis-network-netplay/examples/light-cycles/web/wasm/src/lib.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/examples/mesh_peer.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/examples/mesh_peer_load.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/src/lookup/capability.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/src/lookup/peer.rs|2|moved from mod.rs with the peer builders; the type is to be named (P5)
-untyped_long_chain_let|crates/habilis-network/src/lookup/build_mesh.rs|1|moved from mod.rs with build_mesh; to be split by a named step (P15)
 untyped_long_chain_let|crates/habilis-network/src/transport/admission.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/transport/admission/inner.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/transport/admission/signal_admission.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
@@ -155,5 +152,4 @@ long_chain|crates/habilis-network/src/beacon/tests.rs|5|kept: statements with a 
 untyped_long_chain_let|crates/habilis-network/src/beacon/tests.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)abbrev_name|crates/habilis-network/src/beacon/rung_probe.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 
 long_chain|crates/habilis-network/src/lookup/tests.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-untyped_long_chain_let|crates/habilis-network/src/lookup/tests.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 

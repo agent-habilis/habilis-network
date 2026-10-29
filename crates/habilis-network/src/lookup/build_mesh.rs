@@ -65,7 +65,11 @@ pub(crate) fn build_mesh(
     if let Some((_, admission, _)) = &webrtc {
         admission.watch_dialed_gossip(!relay_transport);
     }
-    let session_gate = webrtc
+    let session_gate: Option<(
+        habilis_network_iroh_webrtc_transport::WebRtcHandle,
+        crate::transport::SignalAdmission,
+        iroh::PublicKey,
+    )> = webrtc
         .as_ref()
         .filter(|_| needs_session)
         .map(|(handle, admission, _)| (handle.clone(), admission.clone(), local));

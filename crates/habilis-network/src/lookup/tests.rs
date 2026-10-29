@@ -333,7 +333,7 @@ async fn a_receiver_that_never_reads_grants_the_whole_window_to_one_stream() {
     )
     .await
     .expect("bind the receiver");
-    let sender = iroh::Endpoint::builder(presets::Minimal)
+    let sender: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
         .relay_mode(iroh::RelayMode::Disabled)
         .transport_config(
             iroh::endpoint::QuicTransportConfig::builder()
@@ -412,7 +412,7 @@ async fn streams_that_nobody_reads_fit_in_the_connection_window() {
     )
     .await
     .expect("bind the receiver");
-    let sender = iroh::Endpoint::builder(presets::Minimal)
+    let sender: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
         .relay_mode(iroh::RelayMode::Disabled)
         .transport_config(
             iroh::endpoint::QuicTransportConfig::builder()

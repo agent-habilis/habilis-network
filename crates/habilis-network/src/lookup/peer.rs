@@ -321,7 +321,7 @@ pub(crate) async fn build_peer_multihop_with(
             crate::transport::SignalAdmission::new_route_table(cap),
         )
     });
-    let underlay = super::build_endpoint(
+    let underlay: Endpoint = super::build_endpoint(
         lookups,
         Some(underlay_secret),
         None,
@@ -350,14 +350,15 @@ pub(crate) async fn build_peer_multihop_with(
         // The underlay is an endpoint of its own, with lookup services of its own, so it has
         // an address book of its own.
         let book = super::address_book(&underlay);
-        let acceptor = crate::transport::WebRtcSignalAcceptor::new(
-            handle.clone(),
-            underlay.clone(),
-            book.clone(),
-            underlay.id(),
-            table.clone(),
-            ice,
-        );
+        let acceptor: crate::transport::WebRtcSignalAcceptor =
+            crate::transport::WebRtcSignalAcceptor::new(
+                handle.clone(),
+                underlay.clone(),
+                book.clone(),
+                underlay.id(),
+                table.clone(),
+                ice,
+            );
         protocols = protocols.with_protocol(
             crate::transport::MESH_WEBRTC_SIGNAL_ALPN.to_vec(),
             underlay_webrtc::UnderlaySignalGate::new(acceptor, allowed.clone()),
