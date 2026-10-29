@@ -250,7 +250,7 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
         let relay_urls: Vec<String> = relay_urls
             .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
             .unwrap_or_default();
-        let parsed = JoinOptions::default()
+        let parsed: JoinOptions = JoinOptions::default()
             .with_mesh(mesh.map(str::to_owned))
             .with_topic(topic.map(str::to_owned))
             .with_nick(nick.map(str::to_owned))
