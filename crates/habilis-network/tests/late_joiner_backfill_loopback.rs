@@ -145,7 +145,7 @@ async fn spawn(topic: &str, name: &str) -> (Node<Store>, Arc<Joined>) {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams::new(nick(name), Arc::clone(&sink) as Arc<dyn NodeSink>).with_max_peers(16),
+        SetupParams::new(nick(name), Arc::clone(&sink)).with_max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");

@@ -65,7 +65,7 @@ impl SetupParams {
     /// The params of one member with every other field at its default: the engine's own caps, no
     /// runtime files, no shared endpoint, no ALPNs, and the default transports.
     #[must_use]
-    pub fn new(author: Nickname, sink: std::sync::Arc<dyn NodeSink>) -> Self {
+    pub fn new<S: NodeSink + 'static>(author: Nickname, sink: std::sync::Arc<S>) -> Self {
         Self {
             author,
             max_peers: 0,

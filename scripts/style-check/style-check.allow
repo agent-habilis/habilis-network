@@ -336,11 +336,8 @@ long_chain|crates/habilis-network/tests/webrtc_full_roster_loopback.rs|3|kept: s
 
 
 # dyn_param: a public fn takes a trait object. Each row is a trait object that stays, with its reason.
-dyn_param|crates/habilis-network-iroh-gossip-transport/src/gossip_handle.rs|1|attach stores an Arc<dyn FrameSink>, so the transport holds one sink of any type
 dyn_param|crates/habilis-network-iroh-multihop-transport/src/lib.rs|1|the protocol list holds iroh's own DynProtocolHandler, a trait object that iroh owns
-dyn_param|crates/habilis-network/src/daemon/setup/setup_params.rs|2|the protocol list holds iroh's DynProtocolHandler, and the builder takes the NodeSink as a trait object
-dyn_param|crates/habilis-network/src/gossip/merge_ctx.rs|1|a public fn takes a &dyn NodeSink that the context keeps as a field
-dyn_param|crates/habilis-network/src/membership/join_options.rs|1|a public fn takes a &dyn NodeSink for the join path
+dyn_param|crates/habilis-network/src/daemon/setup/setup_params.rs|1|the protocol list holds iroh's DynProtocolHandler, and the builder takes the NodeSink as a trait object
 
 
 # turbofish_collect_parse: a collect or parse turbofish (P2). Each row is a count that may only go down.

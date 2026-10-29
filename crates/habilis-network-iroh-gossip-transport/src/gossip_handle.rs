@@ -176,7 +176,7 @@ impl GossipHandle {
     }
 
     /// Send frames to `sink` from now on, and make the path valid.
-    pub fn attach(&self, sink: Arc<dyn FrameSink>) {
+    pub fn attach<S: FrameSink + 'static>(&self, sink: Arc<S>) {
         *locked(&self.shared.sink) = Some(sink);
         self.shared.attached.store(true, Ordering::SeqCst);
     }
@@ -500,7 +500,7 @@ mod tests {
     fn a_datagram_over_the_frame_budget_is_dropped_by_the_sender() {
         let handle = GossipHandle::new(secret(1).public());
         let recorder = Arc::new(Recorder::default());
-        handle.attach(Arc::clone(&recorder) as Arc<dyn FrameSink>);
+        handle.attach(Arc::clone(&recorder));
         let bob = secret(2).public();
 
         handle
@@ -728,7 +728,7 @@ mod tests {
     fn a_destination_that_is_not_allowed_gets_no_frame() {
         let handle = GossipHandle::new(secret(1).public());
         let recorder = Arc::new(Recorder::default());
-        handle.attach(Arc::clone(&recorder) as Arc<dyn FrameSink>);
+        handle.attach(Arc::clone(&recorder));
         let (bob, carol) = (secret(2).public(), secret(3).public());
 
         handle.allow(bob, false);
@@ -750,7 +750,7 @@ mod tests {
     fn a_destination_that_was_never_named_is_allowed() {
         let handle = GossipHandle::new(secret(1).public());
         let recorder = Arc::new(Recorder::default());
-        handle.attach(Arc::clone(&recorder) as Arc<dyn FrameSink>);
+        handle.attach(Arc::clone(&recorder));
 
         handle.shared.send_datagram(secret(9).public(), &[1u8; 100]);
 
@@ -803,7 +803,7 @@ mod tests {
     fn an_established_destination_is_charged_and_a_handshake_is_exempt() {
         let handle = GossipHandle::new(secret(1).public());
         let recorder = Arc::new(Recorder::default());
-        handle.attach(Arc::clone(&recorder) as Arc<dyn FrameSink>);
+        handle.attach(Arc::clone(&recorder));
         let (bob, carol) = (secret(2).public(), secret(3).public());
         handle.set_budget(Some(1000));
         handle.set_established(bob, true);
@@ -831,7 +831,7 @@ mod tests {
     fn without_a_budget_nothing_is_dropped_for_bytes() {
         let handle = GossipHandle::new(secret(1).public());
         let recorder = Arc::new(Recorder::default());
-        handle.attach(Arc::clone(&recorder) as Arc<dyn FrameSink>);
+        handle.attach(Arc::clone(&recorder));
         let bob = secret(2).public();
         handle.set_established(bob, true);
 

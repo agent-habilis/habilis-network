@@ -189,7 +189,10 @@ pub fn blind_new_members(
 /// # Errors
 /// An unparseable id/topic/nickname, conflicting selectors, a mesh no peer on
 /// this target could reach, or a failure standing up the endpoint and overlay.
-pub async fn join(opts: &JoinOptions, sink: Arc<dyn NodeSink>) -> Result<Membership, SetupError> {
+pub async fn join<S: NodeSink + 'static>(
+    opts: &JoinOptions,
+    sink: Arc<S>,
+) -> Result<Membership, SetupError> {
     let nickname = opts
         .nick
         .as_deref()

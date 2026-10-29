@@ -184,27 +184,14 @@ pub struct MergeCtx<'mesh> {
     pub sink: &'mesh dyn NodeSink,
 }
 
-impl<'mesh> MergeCtx<'mesh> {
-    /// The four refs of a state write, in the order of the struct.
-    #[must_use]
-    pub fn new(
-        mesh: &'mesh MeshId,
-        author: &'mesh Nickname,
-        sender: &'mesh MeshSender,
-        sink: &'mesh dyn NodeSink,
-    ) -> Self {
-        Self {
-            mesh,
-            author,
-            sender,
-            sink,
-        }
-    }
-}
-
 impl<'ctx> From<&HandlerCtx<'ctx>> for MergeCtx<'ctx> {
     fn from(ctx: &HandlerCtx<'ctx>) -> Self {
-        Self::new(ctx.mesh, ctx.author, ctx.sender, ctx.sink)
+        Self {
+            mesh: ctx.mesh,
+            author: ctx.author,
+            sender: ctx.sender,
+            sink: ctx.sink,
+        }
     }
 }
 

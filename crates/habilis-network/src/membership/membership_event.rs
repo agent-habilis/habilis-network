@@ -199,7 +199,7 @@ impl NodeSink for JsonSink {
 /// message, where dropping a `left` leaves a phantom peer in the consumer's
 /// mirror forever. Events are small and rare.
 #[must_use]
-pub fn json_sink() -> (Arc<dyn NodeSink>, mpsc::UnboundedReceiver<String>) {
+pub fn json_sink() -> (Arc<impl NodeSink>, mpsc::UnboundedReceiver<String>) {
     let (events, queue) = mpsc::unbounded_channel();
     (Arc::new(JsonSink { events }), queue)
 }

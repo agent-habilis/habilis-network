@@ -122,7 +122,7 @@ fn nick(name: &str) -> Nickname {
 
 async fn spawn(mesh: &Mesh, name: &str, cohost: CoHostPolicy) -> (Node<Inert>, Arc<Joined>) {
     let sink = Arc::new(Joined::default());
-    let params = SetupParams::new(nick(name), Arc::clone(&sink) as Arc<dyn NodeSink>)
+    let params = SetupParams::new(nick(name), Arc::clone(&sink))
         .with_max_peers(16)
         .with_max_direct(0)
         .with_cohost(cohost);

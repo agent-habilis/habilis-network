@@ -16,8 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use habilis_network::embed::{
-    AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeSink, SilentSink,
-    TestDrop,
+    AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SilentSink, TestDrop,
 };
 use habilis_network::ops::{StateMergeParams, app_frame, broadcast_state_merge, send_app};
 use habilis_network::protocol::{
@@ -170,11 +169,7 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Arc<Mutex<Vec<String>>>)
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams::new(
-            nick(name),
-            Arc::new(SilentSink::default()) as Arc<dyn NodeSink>,
-        )
-        .with_max_peers(16),
+        SetupParams::new(nick(name), Arc::new(SilentSink::default())).with_max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
