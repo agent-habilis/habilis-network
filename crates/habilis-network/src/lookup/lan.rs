@@ -119,11 +119,13 @@ pub(crate) async fn build_endpoint_keeping_mdns(
         {
             let builder = Endpoint::builder(presets::Minimal);
             #[cfg(feature = "host")]
-            let bind_socket = SocketAddrV4::new(Ipv4Addr::LOCALHOST, bind_port.unwrap_or(0));
-            let builder = builder
-                .bind_addr(bind_socket)
-                .context("failed to set bind address")?
-                .portmapper_config(PortmapperConfig::Disabled);
+            let builder = {
+                let bind_socket = SocketAddrV4::new(Ipv4Addr::LOCALHOST, bind_port.unwrap_or(0));
+                builder
+                    .bind_addr(bind_socket)
+                    .context("failed to set bind address")?
+                    .portmapper_config(PortmapperConfig::Disabled)
+            };
             builder.relay_mode(RelayMode::Disabled)
         }
     } else {
