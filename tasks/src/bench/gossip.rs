@@ -284,6 +284,7 @@ async fn measure_flood(flood: &Flood, args: &Args) -> Result<Measured, String> {
     .await
     .map_err(|_| format!("the round trips stalled past {TRANSFER_TIMEOUT:?}"))?
     .map_err(|error| format!("round trips failed: {error:#}"))?;
+    let round_trips: Vec<_> = round_trips.collect();
     let after = all(handles);
     let lost_packets_a = connection
         .stats()

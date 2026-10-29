@@ -393,8 +393,11 @@ impl MultihopHandle {
     pub fn underlay_paths_for_test(
         &self,
         underlay_id: UnderlayId,
-    ) -> Option<Vec<(iroh::TransportAddr, bool)>> {
-        self.inner.forwarder.writer_paths(underlay_id)
+    ) -> Option<impl Iterator<Item = (iroh::TransportAddr, bool)>> {
+        self.inner
+            .forwarder
+            .writer_paths(underlay_id)
+            .map(Vec::into_iter)
     }
 
     /// Woken when the relay rule starts to refuse a hop, and when it admits one

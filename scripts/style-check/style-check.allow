@@ -456,10 +456,7 @@ untyped_long_chain_let|crates/habilis-network/tests/unknown_peer_requests_loopba
 # each one returns an owned byte buffer or an owned list that the caller keeps.
 pub_vec_return|crates/habilis-network-doc/src/mesh_doc.rs|1|build_change: the owned bytes of a change frame, the wire encoding
 pub_vec_return|crates/habilis-network-doc/src/wire.rs|1|parse_change_body: the owned decoded bytes of a change body
-pub_vec_return|crates/habilis-network-iroh-multihop-transport/src/lib.rs|1|underlay_paths_for_test: a test helper whose owned list the test compares
-pub_vec_return|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|2|benchmark harness behind the bench feature: payload is an owned byte buffer, rtt_samples an owned list
-pub_vec_return|crates/habilis-network-netplay/src/p2p_session.rs|1|advance_frame: the owned requests of this frame, which the caller takes
-pub_vec_return|crates/habilis-network-netplay/src/sync_test_session.rs|1|advance_frame: the owned requests of this frame, which the caller takes
+pub_vec_return|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|1|benchmark harness behind the bench feature: payload is an owned byte buffer, rtt_samples an owned list
 pub_vec_return|crates/habilis-network-protocol/src/base58_error.rs|1|decode: the owned decoded bytes
 pub_vec_return|crates/habilis-network-protocol/src/identity.rs|1|decode_hex: the owned decoded bytes
 pub_vec_return|crates/habilis-network-protocol/src/mesh/lookup.rs|1|to_bytes: the owned encoded byte buffer

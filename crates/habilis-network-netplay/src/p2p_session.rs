@@ -292,7 +292,9 @@ impl<T: Config, Link: Transport<T>> P2PSession<T, Link> {
     /// [`RollbackError::PredictionLimit`] if the session is too far ahead of
     /// confirmation, or is deliberately yielding so a peer can catch up. Not
     /// a failure: render the same frame again and retry next tick.
-    pub fn advance_frame(&mut self) -> Result<Vec<Request<T>>, RollbackError> {
+    pub fn advance_frame(
+        &mut self,
+    ) -> Result<impl Iterator<Item = Request<T>> + use<T, Link>, RollbackError> {
         if self.state != SessionState::Running {
             return Err(RollbackError::PredictionLimit);
         }
@@ -323,7 +325,7 @@ impl<T: Config, Link: Transport<T>> P2PSession<T, Link> {
             inputs: self.sync.synchronize_inputs(),
         });
         self.sync.advance_frame();
-        Ok(requests)
+        Ok(requests.into_iter())
     }
 
     /// Publish the checksum of a confirmed frame so peers can compare.

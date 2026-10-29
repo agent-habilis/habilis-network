@@ -302,7 +302,7 @@ pub async fn rtt_samples(
     connection: &Connection,
     warmup: usize,
     rounds: usize,
-) -> anyhow::Result<Vec<std::time::Duration>> {
+) -> anyhow::Result<impl Iterator<Item = std::time::Duration>> {
     let probe = payload(RTT_PROBE_BYTES);
     let head = header_with_mode(MODE_ECHO, u32::try_from(RTT_PROBE_BYTES)?);
     let mut samples = Vec::with_capacity(rounds);
@@ -319,7 +319,7 @@ pub async fn rtt_samples(
             samples.push(elapsed);
         }
     }
-    Ok(samples)
+    Ok(samples.into_iter())
 }
 
 #[cfg(all(test, feature = "native"))]
@@ -364,7 +364,10 @@ mod tests {
             .await
             .expect("connect over loopback");
 
-        let samples = rtt_samples(&connection, 3, 20).await.expect("rtt samples");
+        let samples: Vec<_> = rtt_samples(&connection, 3, 20)
+            .await
+            .expect("rtt samples")
+            .collect();
 
         assert_eq!(samples.len(), 20);
         assert!(samples.iter().all(|sample| !sample.is_zero()));

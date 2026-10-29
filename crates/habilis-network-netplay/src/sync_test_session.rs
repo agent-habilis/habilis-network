@@ -104,7 +104,9 @@ impl<T: Config> SyncTestSession<T> {
     /// checksum than it did originally — the failure this session exists to
     /// surface. [`RollbackError::InvalidPlayer`] if a player's input was not
     /// supplied for this frame.
-    pub fn advance_frame(&mut self) -> Result<Vec<Request<T>>, RollbackError> {
+    pub fn advance_frame(
+        &mut self,
+    ) -> Result<impl Iterator<Item = Request<T>> + use<T>, RollbackError> {
         // Read back what the *previous* call's requests produced, before this
         // call's rollback overwrites those cells.
         self.harvest_checksums()?;
@@ -134,7 +136,7 @@ impl<T: Config> SyncTestSession<T> {
             inputs: self.sync.synchronize_inputs(),
         });
         self.sync.advance_frame();
-        Ok(requests)
+        Ok(requests.into_iter())
     }
 
     /// Compare every saved cell's checksum against what that frame produced

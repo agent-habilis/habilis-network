@@ -140,6 +140,7 @@ pub(super) async fn ladder_measure(
     .await
     .map_err(|_| format!("the round trips stalled past {TRANSFER_TIMEOUT:?}"))?
     .map_err(|error| format!("round trips failed: {error:#}"))?;
+    let round_trips: Vec<_> = round_trips.collect();
     connection.close(0u32.into(), b"done");
     let mut measured = Measured::from_samples(negotiate_ms, samples)?;
     measured.rtt = Rtt::from_samples(&round_trips);
