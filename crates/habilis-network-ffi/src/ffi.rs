@@ -62,6 +62,7 @@ fn clear_error() {
 
 /// Run `body`, converting a panic into `fallback` plus an error message. Every
 /// entry point goes through this: unwinding into C is undefined behaviour.
+// C boundary: each extern "C" entry point runs its body through this helper.
 fn guard<T>(fallback: T, body: impl FnOnce() -> T) -> T {
     match std::panic::catch_unwind(AssertUnwindSafe(body)) {
         Ok(value) => value,

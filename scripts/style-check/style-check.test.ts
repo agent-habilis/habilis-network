@@ -623,3 +623,9 @@ test("arc_reason: Arc::clone of a shared handle is not counted", () => {
 test("arc_reason: a reason still maps to its line after a multi-line string", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn label() -> &'static str {\n    \"first\nsecond\"\n}\npub fn f(x: u8) -> std::sync::Arc<u8> { // shared across tasks\n    std::sync::Arc::new(x) // shared across tasks\n}", 0, "");
 });
+test("catch_unwind: a catch_unwind in the body of an extern C fn passes", () => {
+  expectExit("src/a.rs", 'pub extern "C" fn entry() -> i32 {\n    std::panic::catch_unwind(|| 1).unwrap_or(0)\n}', 0);
+});
+test("catch_unwind: a catch_unwind in a helper marked as a C boundary passes", () => {
+  expectExit("src/a.rs", "// C boundary: the extern \"C\" entry points call this\nfn guard() -> i32 {\n    std::panic::catch_unwind(|| 1).unwrap_or(0)\n}", 0);
+});

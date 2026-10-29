@@ -142,6 +142,25 @@ function argCount(args: string): number {
   return last === "" ? commas : commas + 1;
 }
 
+// catch_unwind (Z20): a panic must not cross into C, so the call is required inside an `extern "C"` fn, and in
+// a helper that a `// C boundary:` line marks above its fn. The nearest fn above the call decides it.
+function countCatchUnwindOutsideBoundary(raw: string): number {
+  const code = raw.replace(LEXEME, (lexeme) =>
+    /^(\/\/|\/\*|b?r?#*")/.test(lexeme) ? lexeme.replace(/[^\n]/g, " ") : lexeme,
+  );
+  const lines = raw.split("\n");
+  const codeLines = code.split("\n");
+  let count = 0;
+  for (const m of code.matchAll(/\bcatch_unwind\b/g)) {
+    const at = code.slice(0, m.index).split("\n").length - 1;
+    let fn = at;
+    while (fn >= 0 && !/\bfn\s+\w/.test(codeLines[fn] ?? "")) fn--;
+    const boundary = fn >= 0 && (/extern\s+"C"/.test(lines[fn] ?? "") || /\/\/\s*C boundary:/.test(lines[fn - 1] ?? ""));
+    if (!boundary) count++;
+  }
+  return count;
+}
+
 // The asserts with no message: assert! needs a condition and a message, assert_eq! and assert_ne! need
 // two values and a message. A macro with a message already counts as one argument more.
 // An Arc type or an Arc::new (Z28): a shared handle needs a one-line reason beside it, on its line or the
@@ -600,9 +619,9 @@ const RULES: Rule[] = [
   },
   {
     name: "catch_unwind",
-    pattern: /catch_unwind/,
+    scan: countCatchUnwindOutsideBoundary,
     glob: "*.rs",
-    why: "Do not call panic::catch_unwind in first-party code. A boundary with C is the exception.",
+    why: "Do not call panic::catch_unwind outside a C boundary. Inside an extern \"C\" fn, or in a helper that a `// C boundary:` line marks, it is required: a panic must not cross into C (Z20).",
   },
   {
     name: "ctor",
