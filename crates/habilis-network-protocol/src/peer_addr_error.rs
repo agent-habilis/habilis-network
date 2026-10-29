@@ -14,6 +14,19 @@ use std::fmt;
 use iroh_base::{EndpointAddr, EndpointId, RelayUrl};
 
 /// Serialize an `EndpointAddr` to a JSON value for `PeerInfo` messages.
+/// # Examples
+///
+/// The JSON that this writes reads back to the same endpoint id.
+///
+/// ```
+/// use habilis_network_protocol::iroh_base::{EndpointAddr, SecretKey};
+/// use habilis_network_protocol::peer_addr_error::{endpoint_addr_from_json, endpoint_addr_to_json};
+///
+/// let id = SecretKey::from_bytes(&[5u8; 32]).public();
+/// let json = endpoint_addr_to_json(&EndpointAddr::new(id));
+/// let (back, _) = endpoint_addr_from_json(&json).expect("the JSON round trips");
+/// assert_eq!(back, id);
+/// ```
 pub fn endpoint_addr_to_json(address: &EndpointAddr) -> serde_json::Value {
     let ips: Vec<String> = address.ip_addrs().map(ToString::to_string).collect();
     let relay: Option<String> = address.relay_urls().next().map(ToString::to_string);
@@ -25,6 +38,16 @@ pub fn endpoint_addr_to_json(address: &EndpointAddr) -> serde_json::Value {
 }
 
 /// Why a JSON value does not decode to an endpoint address.
+/// # Examples
+///
+/// JSON with no endpoint id returns this error.
+///
+/// ```
+/// use habilis_network_protocol::peer_addr_error::{PeerAddrError, endpoint_addr_from_json};
+///
+/// let error = endpoint_addr_from_json(&serde_json::json!({})).unwrap_err();
+/// assert!(matches!(error, PeerAddrError::Missing(_)));
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]
@@ -63,6 +86,14 @@ impl Error for PeerAddrError {
 /// # Errors
 /// [`PeerAddrError::Missing`] when the JSON has no endpoint id, or
 /// [`PeerAddrError::Source`] when the id does not parse.
+/// # Examples
+///
+/// ```
+/// use habilis_network_protocol::peer_addr_error::endpoint_addr_from_json;
+///
+/// let result = endpoint_addr_from_json(&serde_json::json!({}));
+/// assert!(result.is_err());
+/// ```
 pub fn endpoint_addr_from_json(
     json: &serde_json::Value,
 ) -> Result<(EndpointId, EndpointAddr), PeerAddrError> {

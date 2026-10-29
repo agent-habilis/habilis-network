@@ -9,6 +9,19 @@ use super::derive;
 /// byte; unlike [`SymmetricKey`] it is `Copy` and comparable, because it is
 /// public material of the id and not a key. It is not wiped on drop: the id
 /// carries these bytes in plain text, so a wipe would protect nothing.
+/// # Examples
+///
+/// A seed holds 32 bytes, and each label derives its own key from it.
+///
+/// ```
+/// use habilis_network_protocol::Seed;
+///
+/// let seed = Seed::new([3u8; 32]);
+/// assert_eq!(seed.as_bytes(), &[3u8; 32]);
+///
+/// let key = seed.derive(b"state");
+/// assert_ne!(key.as_bytes(), seed.as_bytes());
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Seed([u8; 32]);
 
