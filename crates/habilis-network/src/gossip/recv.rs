@@ -37,6 +37,39 @@ use crate::protocol::{message, peer_addr_error, seal_error};
 use crate::transport::underlay_webrtc;
 use crate::transport::{probe, proven_endpoints, webrtc};
 use tokio::sync::mpsc;
+
+/// The first link to a real peer: user content can be delivered now, so flush what was
+/// buffered while unmeshed, in order, and ask again for state and chat.
+async fn mesh_on_first_link(
+    state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
+    context: &HandlerCtx<'_>,
+) {
+    state.meshed = true;
+    state.degraded = false;
+    flush_pending(state, context, "first real-peer link up").await;
+    // Our first digests may have gone out over the rendezvous
+    // alone, and their answers re-send frames every hop there
+    // already saw: iroh-gossip drops a message id it has seen,
+    // so none of it reaches us. Ask again over a link that can
+    // carry the answer. The chat log asks too: a broadcast sent
+    // before this link could not reach us, and the tick that
+    // would ask for it can be an interval away.
+    tracing::debug!(target: "habilis_network::gossip", "asked for state and chat again on the first real-peer link");
+    antientropy::broadcast_state_digests(
+        state,
+        context.sender,
+        context.mesh,
+        context.author,
+        antientropy::DigestTrigger::Event,
+    )
+    .await;
+    antientropy::broadcast_digest(state, context.sender, context.mesh, context.author).await;
+    // Re-publish anything whose value depends on being meshed
+    // (the app's card dial hint); see `NodeApp::on_meshed`.
+    app.on_meshed(state, context).await;
+}
+
 /// Dispatch a single item from the gossip receiver stream:
 /// `Received` → `ingest`; `NeighborUp` →
 /// announce / `PeerInfo` re-send; `NeighborDown` → prune the link and
@@ -133,35 +166,7 @@ pub(crate) async fn handle_gossip_event(
                 // user content actually be delivered. Flush anything
                 // buffered while we were unmeshed, in order.
                 if !state.meshed {
-                    state.meshed = true;
-                    state.degraded = false;
-                    flush_pending(state, context, "first real-peer link up").await;
-                    // Our first digests may have gone out over the rendezvous
-                    // alone, and their answers re-send frames every hop there
-                    // already saw: iroh-gossip drops a message id it has seen,
-                    // so none of it reaches us. Ask again over a link that can
-                    // carry the answer. The chat log asks too: a broadcast sent
-                    // before this link could not reach us, and the tick that
-                    // would ask for it can be an interval away.
-                    tracing::debug!(target: "habilis_network::gossip", "asked for state and chat again on the first real-peer link");
-                    antientropy::broadcast_state_digests(
-                        state,
-                        context.sender,
-                        context.mesh,
-                        context.author,
-                        antientropy::DigestTrigger::Event,
-                    )
-                    .await;
-                    antientropy::broadcast_digest(
-                        state,
-                        context.sender,
-                        context.mesh,
-                        context.author,
-                    )
-                    .await;
-                    // Re-publish anything whose value depends on being meshed
-                    // (the app's card dial hint); see `NodeApp::on_meshed`.
-                    app.on_meshed(state, context).await;
+                    mesh_on_first_link(state, app, context).await;
                 }
                 // The vector names the address of our underlay, and a neighbor that holds it
                 // can offer a session at once: it does not wait for the 15 s tick, which would
