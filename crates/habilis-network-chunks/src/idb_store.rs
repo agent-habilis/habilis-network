@@ -33,6 +33,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{IdbDatabase, IdbFactory, IdbRequest, IdbTransaction, IdbTransactionMode};
 
 use crate::{ChunkHash, ChunkMap, ChunkSource, ChunkStore, Coverage, FileId, Root, chunk_hash};
+use js_sys::{Reflect, Reflect as jssys_Reflect};
 
 /// Object store holding one record per chunk, keyed by its address.
 const CHUNKS: &str = "chunks";
@@ -193,7 +194,7 @@ impl IdbStore {
     /// # Errors
     /// [`ChunkError::Store`] when the database cannot be opened.
     pub async fn open(name: &str) -> Result<Self, ChunkError> {
-        let factory: IdbFactory = js_sys::Reflect::get(&js_sys::global(), &"indexedDB".into())
+        let factory: IdbFactory = jssys_Reflect::get(&js_sys::global(), &"indexedDB".into())
             .map_err(|error| js_err("reaching indexedDB", &error))?
             .dyn_into()
             .map_err(|value| js_err("indexedDB was not a factory", &value))?;
@@ -306,12 +307,12 @@ impl IdbStore {
     /// # Errors
     /// [`ChunkError::Store`] when the database cannot be reached.
     pub async fn adopt(name: &str) -> Result<Option<Self>, ChunkError> {
-        let factory: IdbFactory = js_sys::Reflect::get(&js_sys::global(), &"indexedDB".into())
+        let factory: IdbFactory = jssys_Reflect::get(&js_sys::global(), &"indexedDB".into())
             .map_err(|error| js_err("reaching indexedDB", &error))?
             .dyn_into()
             .map_err(|value| js_err("indexedDB was not a factory", &value))?;
 
-        let listing = js_sys::Reflect::get(&factory, &"databases".into())
+        let listing = jssys_Reflect::get(&factory, &"databases".into())
             .map_err(|error| js_err("reaching indexedDB.databases", &error))?;
         let Ok(listing) = listing.dyn_into::<js_sys::Function>() else {
             // No `databases()` at all. Refusing is the safe answer: creating one
@@ -329,7 +330,7 @@ impl IdbStore {
         let entries = js_sys::Array::from(&found);
         for index in 0..entries.length() {
             let entry = entries.get(index);
-            let listed = js_sys::Reflect::get(&entry, &"name".into()).ok();
+            let listed = Reflect::get(&entry, &"name".into()).ok();
             if listed
                 .and_then(|value| value.as_string())
                 .is_some_and(|text| text == name)
