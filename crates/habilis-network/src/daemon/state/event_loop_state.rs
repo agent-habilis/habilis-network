@@ -1485,7 +1485,7 @@ impl EventLoopState {
         if !self.relay_transport.relay_allowed() && summary == crate::gossip::PathSummary::Relay {
             return;
         }
-        if let Some(state) = DirectState::from_summary(summary) {
+        if let Some(state) = DirectState::classify(summary) {
             self.direct.insert(peer, state);
         }
     }

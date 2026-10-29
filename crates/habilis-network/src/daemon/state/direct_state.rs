@@ -18,7 +18,7 @@ impl DirectState {
     /// `Mixed` is such a reading: iroh keeps the relay path open beside a
     /// punched one, and `conn_path` cannot tell which is selected, so a mixed
     /// link is neither proven direct nor known relay-only.
-    pub(crate) fn from_summary(summary: crate::gossip::PathSummary) -> Option<Self> {
+    pub(crate) fn classify(summary: crate::gossip::PathSummary) -> Option<Self> {
         use crate::gossip::PathSummary;
         match summary {
             PathSummary::Direct => Some(Self::Direct),

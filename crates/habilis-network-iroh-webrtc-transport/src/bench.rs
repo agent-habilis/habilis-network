@@ -58,7 +58,7 @@ impl Direction {
 
     /// The inverse of [`Self::label`].
     #[must_use]
-    pub fn from_label(label: &str) -> Option<Self> {
+    pub fn parse_label(label: &str) -> Option<Self> {
         [Self::Download, Self::Upload, Self::Both]
             .into_iter()
             .find(|direction| direction.label() == label)

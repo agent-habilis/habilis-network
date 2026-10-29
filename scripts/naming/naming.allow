@@ -4,14 +4,11 @@
 from_name|crates/habilis-network-chunks/src/chunk_hash.rs|1|no impl From in this file beside from_bits,from_bytes,from_hex,from_leaves (N12), to add the From impl or rename
 from_name|crates/habilis-network-chunks/src/chunk_map.rs|1|no impl From in this file beside from_bits,from_bytes,from_hex,from_leaves (N12), to add the From impl or rename
 from_name|crates/habilis-network-chunks/src/coverage.rs|1|no impl From in this file beside from_bits,from_bytes,from_hex,from_leaves (N12), to add the From impl or rename
-from_name|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|1|no impl From in this file beside from_label (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/crypto/seed.rs|1|no impl From in this file beside from_bytes (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/identity.rs|1|no impl From in this file beside from_hex (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/mesh/lookup.rs|1|no impl From in this file beside from_bytes,from_flag,from_lookups,from_str (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/mesh/name_error.rs|1|no impl From in this file beside from_topic_string,from_topic_string_passthrough_and_case_preserving (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/mesh/tests.rs|1|no impl From in this file beside from_topic_differs_by_string,from_topic_is_deterministic,from_topic_name_is_the_sanitized_string,from_topic_round_trips_through_from_str (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/mesh/transport.rs|1|no impl From in this file beside from_byte,from_str,from_transports (N12), to add the From impl or rename
-from_name|crates/habilis-network-protocol/src/message/shard.rs|1|no impl From in this file beside from_uuid_str (N12), to add the From impl or rename
-from_name|crates/habilis-network/src/daemon/state/direct_state.rs|1|no impl From in this file beside from_summary (N12), to add the From impl or rename
 from_name|crates/habilis-network-stream/src/hash/mod.rs|1|no impl From in this file: a from_ constructor of the stream hash types, split from hash.rs
 from_name|crates/habilis-network-protocol/src/mesh/mesh.rs|1|no impl From in this file: the from_ constructors of a mesh, split from mesh/mod.rs

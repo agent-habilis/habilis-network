@@ -27,7 +27,7 @@ mod tests {
         assert_transparent(&MessageBody::try_new("hello").expect("body"), "hello");
         assert_transparent(&AppTag::try_new("app_msg").expect("tag"), "app_msg");
         assert_transparent(&CorrId::try_new("corr-1").expect("corr"), "corr-1");
-        assert_transparent(&ShardGroup::from_uuid_str(uuid).expect("group"), uuid);
+        assert_transparent(&ShardGroup::parse_uuid(uuid).expect("group"), uuid);
         assert_transparent(
             &MeshName::try_new("kernel-parch").expect("name"),
             "kernel-parch",

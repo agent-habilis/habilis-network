@@ -68,7 +68,7 @@ impl ShardGroup {
     /// split body's group by its payload's own logical id, so the reassembled
     /// logical id *is* the payload's own id. `None` for a non-UUID.
     #[must_use]
-    pub fn from_uuid_str(raw: &str) -> Option<Self> {
+    pub fn parse_uuid(raw: &str) -> Option<Self> {
         Uuid::parse_str(raw).ok().map(|_| Self(raw.to_string()))
     }
 }
@@ -157,14 +157,14 @@ mod shard_tests {
             "a non-uuid shard group is refused on deserialize"
         );
         assert!(
-            ShardGroup::from_uuid_str("not-a-uuid").is_none(),
-            "a non-uuid shard group is refused by from_uuid_str"
+            ShardGroup::parse_uuid("not-a-uuid").is_none(),
+            "a non-uuid shard group is refused by parse_uuid"
         );
     }
 
     #[test]
     fn shard_rejects_out_of_range_total_and_idx() {
-        let group = ShardGroup::from_uuid_str(GROUP).expect("valid group");
+        let group = ShardGroup::parse_uuid(GROUP).expect("valid group");
         let group = group.as_str();
         // total < 2 (a single shard is never multipart).
         assert!(
@@ -213,7 +213,7 @@ mod shard_tests {
 
     #[test]
     fn shard_accepts_valid_header() {
-        let group = ShardGroup::from_uuid_str(GROUP).expect("valid group");
+        let group = ShardGroup::parse_uuid(GROUP).expect("valid group");
         let group = group.as_str();
         let shard: Shard =
             serde_json::from_str(&format!(r#"{{"group":"{group}","idx":1,"total":3}}"#)).unwrap();

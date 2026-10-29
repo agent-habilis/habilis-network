@@ -190,7 +190,7 @@ async fn connection_to(remote: EndpointId) -> Result<Connection, JsValue> {
 /// No `init`, a bad id or direction, or the exchange failing.
 #[wasm_bindgen]
 pub async fn download(remote: String, bytes: usize, direction: String) -> Result<String, JsValue> {
-    let direction = Direction::from_label(&direction)
+    let direction = Direction::parse_label(&direction)
         .ok_or_else(|| js_error(format!("unknown direction {direction:?}")))?;
     let remote: EndpointId = remote.parse().map_err(js_error)?;
     let connection = connection_to(remote).await?;

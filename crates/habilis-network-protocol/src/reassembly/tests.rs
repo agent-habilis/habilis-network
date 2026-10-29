@@ -13,7 +13,7 @@ use habilis_network_util::consts::{
 };
 
 fn group(uuid: &str) -> ShardGroup {
-    ShardGroup::from_uuid_str(uuid).expect("valid group")
+    ShardGroup::parse_uuid(uuid).expect("valid group")
 }
 
 fn group_a() -> ShardGroup {
