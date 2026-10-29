@@ -102,17 +102,17 @@ fn classify(event: NodeEvent) -> Option<MembershipEvent> {
             name: name.as_str().to_owned(),
             nick: nickname.to_string(),
         }),
-        NodeEvent::Presence { msg, .. } => {
+        NodeEvent::Presence { message, .. } => {
             // The engine emits this for a peer's own `joined` frame, for a
             // `Left`, and — the reliable case — for the *first frame of any
             // kind* from a peer it has not surfaced yet, since a one-shot
             // `joined` broadcast can be lost in the convergence window. See
             // `crates/habilis-network/src/lifecycle/mod.rs`. A `matches!` splits them; a
             // `match` would need a wildcard over every `MessageKind`.
-            let nick = msg.author.to_string();
+            let nick = message.author.to_string();
             Some(
                 if matches!(
-                    msg.kind,
+                    message.kind,
                     MessageKind::Presence {
                         subtype: PresenceSubtype::Left
                     }

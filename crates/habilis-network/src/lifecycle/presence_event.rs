@@ -68,7 +68,7 @@ pub(crate) async fn handle_presence(
         // already showed going quiet) is dropped.
         if state.surfaced.remove(message.author.as_str()) {
             ctx.sink.emit(NodeEvent::Presence {
-                msg: Box::new(message.authored()),
+                message: Box::new(message.authored()),
                 peer: message.key(),
                 synthetic: false,
             });
@@ -108,7 +108,7 @@ pub(crate) async fn handle_presence(
             if surfaceable && !update.returned {
                 state.surfaced.insert(message.author.clone());
                 ctx.sink.emit(NodeEvent::Presence {
-                    msg: Box::new(message.authored()),
+                    message: Box::new(message.authored()),
                     peer: message.key(),
                     synthetic: false,
                 });

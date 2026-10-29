@@ -651,13 +651,11 @@ abbrev_name|crates/habilis-network-netplay/src/transport.rs|1|existing letter-de
 abbrev_name|crates/habilis-network-protocol/src/lib.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/mesh/lookup.rs|12|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/mesh/name_error.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/message/build_msg_bytes.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/message/chain_ctx.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/message/message.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-protocol/src/message/build_msg_bytes.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-protocol/src/message/message.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/message/shard.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/message/tests.rs|95|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network-protocol/src/message/tests.rs|94|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/peer_addr_error.rs|10|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/reassembly/reassembly_store.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/seal_error.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream-cli/src/args.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream-cli/src/main.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
@@ -683,7 +681,6 @@ abbrev_name|crates/habilis-network/src/daemon/timers.rs|5|existing letter-delete
 abbrev_name|crates/habilis-network/src/gossip/antientropy.rs|24|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/app/node_app.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/merge_ctx.rs|60|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/gossip/event.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/heal.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/lan.rs|18|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/gossip/recv.rs|138|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
@@ -697,7 +694,6 @@ abbrev_name|crates/habilis-network/src/lookup/probe_answer.rs|8|moved from mod.r
 abbrev_name|crates/habilis-network/src/lookup/lan.rs|5|moved from mod.rs with the LAN code; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lookup/endpoint.rs|2|moved from mod.rs with the endpoint builders; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/membership_app.rs|60|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/membership/membership_event.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/membership/join_options.rs|15|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/testing/log_capture.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/testing/lane_node.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
@@ -737,8 +733,8 @@ turbofish_collect_parse|crates/habilis-network-chunks/src/fs/disk_store.rs|2|kep
 untyped_long_chain_let|crates/habilis-network-chunks/src/fs/disk_origin.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-chunks/src/fs/disk_store.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 long_chain|crates/habilis-network-stream/src/hash/mod.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-abbrev_name|crates/habilis-network/src/lifecycle/observed.rs|6|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/lifecycle/presence_event.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/lifecycle/observed.rs|5|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
+abbrev_name|crates/habilis-network/src/lifecycle/presence_event.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/net.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 pub_const_fn|crates/habilis-network/src/blob/blob_digest.rs|2|kept: newtype rule (BlobDigest from_bytes and as_bytes)
 abbrev_name|crates/habilis-network-stream/src/node/stream_node.rs|19|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
@@ -779,8 +775,6 @@ turbofish_collect_parse|crates/habilis-network-protocol/src/resolver/join_target
 turbofish_collect_parse|crates/habilis-network-protocol/src/resolver/resolve.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 pub_const_fn|crates/habilis-network-protocol/src/message/signer.rs|3|kept: trivial accessors of a signer and a constructor (moved from message/mod.rs)
 long_chain|crates/habilis-network/src/beacon/dependents.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-abbrev_name|crates/habilis-network-protocol/src/message/wire_in.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/message/wire_out.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network-protocol/src/message/wire_in.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/message/wire_out.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 pub_const_fn|crates/habilis-network-protocol/src/message/app_frame_params.rs|1|kept: the const constructor of an app frame parameter set (moved from message/mod.rs)

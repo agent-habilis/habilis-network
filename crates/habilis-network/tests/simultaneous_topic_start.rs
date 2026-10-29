@@ -163,14 +163,14 @@ struct Joined {
 
 impl NodeSink for Joined {
     fn emit(&self, event: NodeEvent) {
-        if let NodeEvent::Presence { msg, .. } = event
+        if let NodeEvent::Presence { message, .. } = event
             && let MessageKind::Presence {
                 subtype: PresenceSubtype::Joined,
-            } = msg.kind
+            } = message.kind
         {
             let mut seen = self.seen.lock().expect("no poison");
-            if !seen.contains(&msg.author) {
-                seen.push(msg.author.clone());
+            if !seen.contains(&message.author) {
+                seen.push(message.author.clone());
             }
             drop(seen);
             self.changed.notify_waiters();

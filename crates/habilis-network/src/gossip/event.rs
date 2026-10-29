@@ -57,7 +57,7 @@ pub enum NodeEvent {
     /// a synthetic presence cannot name the peer by a key it does not hold.
     Presence {
         /// The proof of the presence frame. For a synthetic presence, the proof that this node minted.
-        msg: Box<Authored>,
+        message: Box<Authored>,
         /// The key of the peer that the presence is about: the signer of the frame that triggered it.
         peer: AuthorKey,
         /// `true` when this node minted the presence for a peer's arrival, `false` when

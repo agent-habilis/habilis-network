@@ -400,7 +400,7 @@ mod chain {
             .with_chain(5, Some(prev))
             .sign(&Identity::generate());
         assert_eq!(signed.seq, Some(5));
-        assert_eq!(signed.prev, Some(prev));
+        assert_eq!(signed.previous, Some(prev));
         assert!(signed.verify_signature());
     }
 

@@ -29,8 +29,8 @@ pub(super) struct WireIn {
     pub(super) signature: String,
     #[serde(default)]
     pub(super) seq: Option<u64>,
-    #[serde(default)]
-    pub(super) prev: Option<String>,
+    #[serde(rename = "prev", default)]
+    pub(super) previous: Option<String>,
     #[serde(default)]
     pub(super) parents: Vec<String>,
     #[serde(default)]
@@ -66,8 +66,8 @@ impl TryFrom<WireIn> for Message {
         if !wire.signature.is_empty() && !is_lower_hex(&wire.signature, 64) {
             return Err("malformed signature");
         }
-        let prev = wire
-            .prev
+        let previous = wire
+            .previous
             .as_deref()
             .map(|hash| ContentHash::from_hex(hash).ok_or("malformed prev hash"))
             .transpose()?;
@@ -96,7 +96,7 @@ impl TryFrom<WireIn> for Message {
             body: wire.body,
             signer,
             seq: wire.seq,
-            prev,
+            previous,
             parents,
             shard: wire.shard,
             ext: wire.ext,

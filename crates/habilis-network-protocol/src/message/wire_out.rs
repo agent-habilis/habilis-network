@@ -28,8 +28,8 @@ pub(super) struct WireOut<'message> {
     signature: Option<HexOut<'message>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     seq: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prev: &'message Option<ContentHash>,
+    #[serde(rename = "prev", skip_serializing_if = "Option::is_none")]
+    previous: &'message Option<ContentHash>,
     #[serde(skip_serializing_if = "<[ContentHash]>::is_empty")]
     parents: &'message [ContentHash],
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,7 +72,7 @@ impl Serialize for Wire<'_> {
             pubkey: signer.map(|signed| HexOut(signed.key.as_bytes())),
             signature: sig_bytes.as_ref().map(|bytes| HexOut(bytes)),
             seq: message.seq,
-            prev: &message.prev,
+            previous: &message.previous,
             parents: &message.parents,
             shard: &message.shard,
             ext: &message.ext,

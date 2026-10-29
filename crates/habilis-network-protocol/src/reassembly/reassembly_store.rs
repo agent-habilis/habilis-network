@@ -316,7 +316,7 @@ pub fn synthesize_from(header: &Verified, body: MessageBody, group_id: &ShardGro
     envelope.body = body;
     envelope.shard = None;
     envelope.seq = None;
-    envelope.prev = None;
+    envelope.previous = None;
     envelope.parents = Vec::new();
     Authored::new(envelope, header.key())
 }

@@ -100,7 +100,7 @@ pub(crate) fn synthetic_arrival(
 ) -> NodeEvent {
     let arrival = Message::new_joined(mesh, &triggering.author).sign(identity);
     NodeEvent::Presence {
-        msg: Box::new(arrival.authored()),
+        message: Box::new(arrival.authored()),
         peer: triggering.key(),
         synthetic: true,
     }

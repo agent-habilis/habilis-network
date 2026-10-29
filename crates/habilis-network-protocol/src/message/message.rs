@@ -62,7 +62,7 @@ pub struct Message {
     /// `docs/history-integrity.md`.
     pub seq: Option<u64>,
     /// The hash of the previous message of the author.
-    pub prev: Option<ContentHash>,
+    pub previous: Option<ContentHash>,
     /// Cross-author DAG (Phase 3), `Msg` only: content hashes of the DAG
     /// tips this author had seen when authoring — the causal links. Signed.
     /// Empty for the very first message / messages with no observed
@@ -88,7 +88,7 @@ impl Message {
             body,
             signer: None,
             seq: None,
-            prev: None,
+            previous: None,
             parents: Vec::new(),
             shard: None,
             ext: default_ext(),
@@ -338,7 +338,7 @@ impl Message {
             Some(value) => field(&value.to_le_bytes()),
             None => field(&[]),
         }
-        match &self.prev {
+        match &self.previous {
             Some(value) => field(&value.hex()),
             None => field(&[]),
         }
@@ -382,9 +382,9 @@ impl Message {
     /// `Msg` (`None` at `seq 0`). Consuming-builder so it composes with
     /// [`sign`](Self::sign): `Message::new_app(..).with_chain(..).sign(..)`.
     #[must_use]
-    pub fn with_chain(mut self, seq: u64, prev: Option<ContentHash>) -> Self {
+    pub fn with_chain(mut self, seq: u64, previous: Option<ContentHash>) -> Self {
         self.seq = Some(seq);
-        self.prev = prev;
+        self.previous = previous;
         self
     }
 
@@ -552,7 +552,7 @@ impl Message {
             body: body.into(),
             signer: None,
             seq: None,
-            prev: None,
+            previous: None,
             parents: Vec::new(),
             shard: None,
             ext: serde_json::json!({}),

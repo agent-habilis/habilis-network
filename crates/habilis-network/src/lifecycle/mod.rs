@@ -31,7 +31,7 @@ mod tests {
         let peer = Identity::generate();
         let joined = Message::new_joined(&mesh, &nick("bob")).sign(&peer);
         let NodeEvent::Presence {
-            msg,
+            message,
             peer: key,
             synthetic,
         } = synthetic_arrival(&mesh, &node, &joined)
@@ -40,8 +40,8 @@ mod tests {
         };
         assert!(synthetic, "this node minted it");
         assert_eq!(key, peer.author_key(), "the peer is the triggering signer");
-        assert_eq!(msg.key(), node.author_key(), "the proof is this node's");
-        assert_eq!(msg.author.as_str(), "bob", "the nickname stays the peer's");
+        assert_eq!(message.key(), node.author_key(), "the proof is this node's");
+        assert_eq!(message.author.as_str(), "bob", "the nickname stays the peer's");
     }
 }
 

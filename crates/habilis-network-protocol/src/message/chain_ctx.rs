@@ -14,7 +14,7 @@ pub struct ChainCtx {
     /// The position of the message in its author's chain.
     pub seq: u64,
     /// The hash of the message before this one.
-    pub prev: Option<ContentHash>,
+    pub previous: Option<ContentHash>,
     /// The hashes of the other messages that this one follows.
     pub parents: Vec<ContentHash>,
 }
@@ -26,7 +26,7 @@ impl ChainCtx {
     pub fn genesis() -> Self {
         ChainCtx {
             seq: 0,
-            prev: None,
+            previous: None,
             parents: Vec::new(),
         }
     }

@@ -28,7 +28,7 @@ pub fn build_msg_bytes(
             body: params.body,
         },
     )
-    .with_chain(params.chain.seq, params.chain.prev)
+    .with_chain(params.chain.seq, params.chain.previous)
     .with_parents(params.chain.parents)
     .sign(identity);
     let raw = msg.serialize()?;
