@@ -121,10 +121,8 @@ mod tests {
             .expect("the server builder");
         let built = &server[start..];
         let call = &built[built.find("build_endpoint(").expect("the server builds")..];
-        let args: String = call[..call.find(".await?").expect("the call ends")]
-            .chars()
-            .filter(|ch| !ch.is_whitespace())
-            .collect();
+        let call_args = &call[..call.find(".await?").expect("the call ends")];
+        let args: String = call_args.chars().filter(|ch| !ch.is_whitespace()).collect();
         assert!(
             args.ends_with("crate::lookup::TransportHandles::default(),)"),
             "the blob server must pass no transport handle: {args}"

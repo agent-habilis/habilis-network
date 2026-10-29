@@ -98,7 +98,9 @@ impl BlobServer {
         if !lookups.is_loopback() {
             wait_online(&endpoint).await;
         }
+        // the accept loop and the server share the store
         let store = Arc::new(Mutex::new(BlobStore::try_new(spool_dir)?));
+        // the accept loop, its serve tasks and the server share the count
         let inflight = Arc::new(AtomicUsize::new(0));
         spawn_accept_loop(
             endpoint.clone(),
@@ -219,8 +221,10 @@ impl BlobServer {
 /// task so a slow transfer never blocks the next.
 fn spawn_accept_loop(
     endpoint: Endpoint,
+    // the accept loop hands each serve a clone of the shared store
     store: Arc<Mutex<BlobStore>>,
     limits: ServeLimits,
+    // the accept loop and each serve share the in-flight count
     inflight: Arc<AtomicUsize>,
     relay_transport: PayloadPath,
 ) {
@@ -251,8 +255,10 @@ fn spawn_accept_loop(
 /// spawned-within-spawned `while let`.
 async fn handle_incoming(
     incoming: Incoming,
+    // each serve holds a clone of the shared store
     store: Arc<Mutex<BlobStore>>,
     limits: ServeLimits,
+    // each serve and the accept loop share the in-flight count
     inflight: Arc<AtomicUsize>,
     relay_transport: PayloadPath,
 ) {

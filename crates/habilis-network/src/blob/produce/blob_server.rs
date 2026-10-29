@@ -14,6 +14,7 @@ use crate::blob::store::BlobStore;
 /// content-addressed store; both live for the daemon's process lifetime.
 pub struct BlobServer {
     pub(super) endpoint: Endpoint,
+    // the server and the accept loop share the store
     pub(super) store: Arc<Mutex<BlobStore>>,
     pub(super) lookups: LookupOpts,
     /// The mesh password, when the mesh is password-protected. Every minted
@@ -30,6 +31,7 @@ pub struct BlobServer {
         not(test),
         expect(dead_code, reason = "observed only by the serve-ceiling test")
     )]
+    // the server and the accept loop share the in-flight count, which a test reads
     pub(super) inflight: Arc<AtomicUsize>,
 }
 
