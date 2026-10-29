@@ -28,6 +28,21 @@ struct Borrowed {
 /// **lazily, per file, on first interest** — [`DiskOrigin::adopt`] reads one file
 /// once and keeps its row — so publishing a tree costs nothing until somebody
 /// actually asks for something in it.
+///
+/// # Examples
+///
+/// A disk origin serves the chunks of files on disk, and it forgets a file it no longer serves. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_chunks::{ChunkError, DiskOrigin, FileId};
+///
+/// # fn demo(file: &FileId) -> Result<(), ChunkError> {
+/// let origin = DiskOrigin::new();
+/// let root = origin.adopt(file, "/path/to/a.txt")?;
+/// origin.forget(root)?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Default)]
 pub struct DiskOrigin {
     files: Mutex<HashMap<Root, Borrowed>>,
@@ -259,6 +274,16 @@ impl ChunkSource for DiskOrigin {
 ///
 /// Exposed so a caller sizing its own buffers agrees with the chunking without
 /// restating the constant.
+///
+/// # Examples
+///
+/// The read window is never zero.
+///
+/// ```
+/// use habilis_network_chunks::fs::max_read_window;
+///
+/// assert!(max_read_window() > 0);
+/// ```
 #[must_use]
 pub fn max_read_window() -> u64 {
     CHUNK_BYTES

@@ -5,6 +5,21 @@ use crate::ChunkError;
 /// A plain bitmap over leaf indices. Deliberately not a range set: a peer that
 /// seeds what it happened to look at holds scattered singletons, which is the
 /// worst case for runs and the ordinary case here.
+///
+/// # Examples
+///
+/// Coverage records which chunks of a file a peer holds.
+///
+/// ```
+/// use habilis_network_chunks::Coverage;
+///
+/// let mut coverage = Coverage::empty(3);
+/// coverage.insert(1);
+/// assert!(coverage.contains(1));
+/// assert_eq!(coverage.count(), 1);
+/// assert!(!coverage.is_complete());
+/// assert!(Coverage::complete(2).is_complete());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Coverage {
     bits: Vec<u8>,
@@ -157,6 +172,18 @@ impl Coverage {
 /// interprets `key`. A native backend uses a path; a browser backend uses
 /// whatever it can reopen the bytes with. Keeping it opaque is what stops this
 /// crate learning about filesystems.
+///
+/// # Examples
+///
+/// Two file ids name the same version only when the key, size and time match.
+///
+/// ```
+/// use habilis_network_chunks::FileId;
+///
+/// let id = FileId::new("a.txt".to_owned(), 10, 5);
+/// assert!(id.same_version(&FileId::new("a.txt".to_owned(), 10, 5)));
+/// assert!(!id.same_version(&FileId::new("a.txt".to_owned(), 11, 5)));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FileId {

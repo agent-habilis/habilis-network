@@ -8,6 +8,17 @@ use std::fmt;
 type BoxedError = Box<dyn Error + Send + Sync>;
 
 /// Why a chunk store call failed.
+///
+/// # Examples
+///
+/// A chunk that does not parse returns this error with the reason.
+///
+/// ```
+/// use habilis_network_chunks::ChunkError;
+///
+/// let error = ChunkError::Malformed("bad length".to_owned());
+/// assert!(matches!(error, ChunkError::Malformed(_)));
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]

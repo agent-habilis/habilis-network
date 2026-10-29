@@ -11,6 +11,40 @@ use crate::{ChunkError, ChunkHash, ChunkMap, Coverage, FileId, Root};
 /// A source that only reads is the honest shape, and it means the conformance
 /// suite can hold every backend to the same read contract without carving out
 /// exceptions.
+///
+/// # Examples
+///
+/// A source that holds no chunk answers that it has none.
+///
+/// ```
+/// use std::future::{Future, ready};
+///
+/// use habilis_network_chunks::{ChunkError, ChunkHash, ChunkMap, ChunkSource, Coverage, FileId, Root};
+///
+/// struct Empty;
+///
+/// impl ChunkSource for Empty {
+///     fn get(&self, _hash: ChunkHash) -> impl Future<Output = Result<Option<Vec<u8>>, ChunkError>> {
+///         ready(Ok(None))
+///     }
+///
+///     fn has(&self, _hash: ChunkHash) -> impl Future<Output = Result<bool, ChunkError>> {
+///         ready(Ok(false))
+///     }
+///
+///     fn map(&self, _root: Root) -> impl Future<Output = Result<Option<ChunkMap>, ChunkError>> {
+///         ready(Ok(None))
+///     }
+///
+///     fn coverage(&self, _root: Root) -> impl Future<Output = Result<Coverage, ChunkError>> {
+///         ready(Ok(Coverage::empty(0)))
+///     }
+///
+///     fn bind(&self, _file: &FileId) -> impl Future<Output = Result<Option<Root>, ChunkError>> {
+///         ready(Ok(None))
+///     }
+/// }
+/// ```
 pub trait ChunkSource {
     /// One chunk's bytes, by address.
     ///
@@ -82,6 +116,21 @@ pub trait ChunkSource {
 /// peer that lies. **Write the chunk, then the coverage that claims it.** The
 /// reverse — chunks present but coverage lost — costs a re-fetch and nothing
 /// else.
+///
+/// # Examples
+///
+/// A store keeps chunks by their hash. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_chunks::{ChunkError, ChunkSource, ChunkStore, InMemoryStore, chunk_hash};
+///
+/// # async fn demo(store: &InMemoryStore) -> Result<(), ChunkError> {
+/// let hash = chunk_hash(b"hello");
+/// store.put(hash, b"hello").await?;
+/// assert!(store.has(hash).await?);
+/// # Ok(())
+/// # }
+/// ```
 pub trait ChunkStore: ChunkSource {
     /// Store one chunk, verifying it addresses what the caller claims.
     ///

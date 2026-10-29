@@ -165,6 +165,19 @@ fn version_of(db: &IdbDatabase) -> u32 {
 }
 
 /// A content-addressed store backed by `IndexedDB`. Not `Send`.
+///
+/// # Examples
+///
+/// A browser store keeps chunks in IndexedDB under a name. This item exists only on wasm32, so the doc test is not collected on other targets.
+///
+/// ```no_run
+/// use habilis_network_chunks::{ChunkError, IdbStore};
+///
+/// # async fn demo() -> Result<(), ChunkError> {
+/// let store = IdbStore::open("chunks").await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
 pub struct IdbStore {
     db: IdbDatabase,

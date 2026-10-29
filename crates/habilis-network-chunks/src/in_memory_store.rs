@@ -22,6 +22,17 @@ use crate::{ChunkHash, ChunkMap, ChunkSource, ChunkStore, Coverage, FileId, Root
 /// Poisoning is a panic in another thread, not a condition worth modelling
 /// separately at every call site.
 /// A store that keeps everything in memory and forgets it on drop.
+///
+/// # Examples
+///
+/// A new in-memory store holds no chunk.
+///
+/// ```
+/// use habilis_network_chunks::InMemoryStore;
+///
+/// let store = InMemoryStore::new();
+/// assert_eq!(store.stored_chunks(), 0);
+/// ```
 #[derive(Debug, Default)]
 pub struct InMemoryStore {
     chunks: Mutex<HashMap<ChunkHash, Vec<u8>>>,
