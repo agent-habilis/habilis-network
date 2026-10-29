@@ -196,7 +196,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - Constructor names (N10): `scripts/naming/naming.ts` refuses a file with a `fn new_<x>` and no plain `fn new`.
 - Conversion names (N12): the same script refuses a file with a `fn from_<x>` and no `impl From<` in it. `fn from_str` is the `FromStr` method and is not flagged.
 - Trait impls (R2, R4): clippy's default `should_implement_trait` and `derivable_impls` run under `-D warnings`, and no site silences either. A method named like a std trait method must implement the trait, and a hand impl that a derive gives must be the derive.
-- `scripts/style-check/style-check.ts` checks the rules that no compiler lint covers: the `name:` entries of the file, from `poison` to `abbrev_name` (`anyhow_pub` has its own bullet below). Each rule's `why` text says what it refuses. Each exception is a line in `style-check.allow`, with a count and a reason. A new violation fails the check. An exception whose count is too high fails it too.
+- `scripts/style-check/style-check.ts` checks the rules that no compiler lint covers: the `name:` entries of the file, from `poison` to `abbrev_name` (`anyhow_pub` has its own bullet below). Each rule's `why` text says what it refuses. A violation fails the check.
 - `pub_const_fn` in `scripts/style-check/style-check.ts`: a public `const fn` needs a reason that says why it stays const (a const context, a newtype accessor, or a trivial accessor).
 - `scripts/style-check/style-check.ts` rule `anyhow_pub`: a public function of a library file returns a typed error, not `anyhow`. It counts each public fn whose return type names `anyhow::Result` or `anyhow::Error` (also through a `use anyhow::Result as X` or a `pub type` alias, and a `pub trait` method), and it skips binaries, CLIs and `bin/` targets.
 - `scripts/script-language/script-language.ts` refuses a `.sh`, `.bash` or `.py` file, and a file with a shell or Python shebang. See the Scripts section.
@@ -250,9 +250,9 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - Context strings on `assert!`: `missing_assert_message` makes one required outside test code. Whether the string helps (a logged value, misuse versus bug) is for the reviewer. (P13)
 - An assertion message that only repeats the condition (gated by `assert_repeats_condition`): the rule of `style-check.ts` (P14) counts it. The reviewer asks for a message that adds the value or the reason.
 - Long or complex iterator chains (gated by `long_chain`): the rule of `style-check.ts` (P15) counts a statement with five or more calls in one chain. The reviewer asks for a `for` loop or a named step when a chain is short by that count but still hard to read. (P15)
-- Macros (M3, gated by `macro-rules.ts`): it refuses a `macro_rules!` or a proc macro that `scripts/macro-rules/macro-rules.allow` does not name.
+- Macros (M3, gated by `macro-rules.ts`): it refuses every `macro_rules!` and proc macro.
 - Macro order for an API (M1): a fn, a generic or a trait comes before a macro. No mechanical proxy: whether a macro is an API is a design call, which syntax does not show. The gate above holds the count.
-- Traits (R7, gated by `pub-trait.ts`): it accepts a `pub trait` that a crate file uses as a generic bound, a dyn object, an impl bound or a supertrait. Any other `pub trait` is refused unless `pub-trait.allow` names its file with the exact count and a reason (an extension trait is the only kind that needs one).
+- Traits (R7, gated by `pub-trait.ts`): it accepts a `pub trait` that a crate file uses as a generic bound, a dyn object, an impl bound or a supertrait. Any other `pub trait` is refused.
 - When to add an impl (R1): judgment only, because no gate can know which impls a future caller needs. Proxies tried: the derive lints of R2 and R4, `missing_debug_implementations`, `missing_copy_implementations`, and the Clone, Copy, Eq, Ord and Hash gates of the other branches. Red probe, 2026-10-28: a scratch crate with a hand `Default` and a `from_str(&str)` fires `derivable_impls` and `should_implement_trait` under `-D warnings`.
 - Cost of a macro (M2): the cost of a macro is read in review. No mechanical proxy: the cost of a macro is a reading of its use, which no gate measures. The proc macro sits on the test path only.
 
@@ -267,7 +267,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 
 ## Scripts
 
-Write every script in TypeScript, and run it with Bun (`bun scripts/<name>.ts`). CI fails on any `.sh`, `.bash` or `.py` file, or a shell or Python shebang file, unless `scripts/script-language/script-language.allow` names it with a reason. Do not write a new shell script or Python script. A test for a script is a `bun test` file next to it. A script in another language is a fault to port, not a model to copy.
+Write every script in TypeScript, and run it with Bun (`bun scripts/<name>.ts`). CI fails on any `.sh`, `.bash` or `.py` file, or a shell or Python shebang file. Do not write a new shell script or Python script. A test for a script is a `bun test` file next to it. A script in another language is a fault to port, not a model to copy.
 
 ## Newtypes
 
