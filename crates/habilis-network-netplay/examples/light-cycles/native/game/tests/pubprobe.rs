@@ -141,11 +141,7 @@ fn public_path_probe() {
             let outcomes: Vec<_> = pairs
                 .map(|(bot, snapshot)| (bot.game.outcome(), snapshot.world.tick))
                 .collect();
-            assert!(
-                agreed,
-                "the two bots never agreed on who won: {:?}",
-                outcomes
-            );
+            assert!(agreed, "the two bots never agreed on who won: {outcomes:?}");
 
             // A match that ends before it starts would satisfy every assertion
             // above vacuously, so pin down that one was actually simulated.
@@ -191,7 +187,7 @@ fn public_path_probe() {
                 .iter()
                 .map(|bot| bot.game.snapshot().match_number)
                 .collect();
-            assert!(rematched, "no rematch was agreed: {:?}", matches);
+            assert!(rematched, "no rematch was agreed: {matches:?}");
             assert_ne!(
                 spawns(&bots),
                 first_arena,
