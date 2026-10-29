@@ -40,19 +40,16 @@ pub(crate) fn plan(
     held: &[EndpointId],
     room: usize,
 ) -> Plan {
-    let mut dial: Vec<EndpointId> = wanted
+    let fresh = wanted
         .iter()
         .copied()
-        .filter(|peer| local < *peer && !held.contains(peer))
-        .collect();
+        .filter(|peer| local < *peer && !held.contains(peer));
+    let mut dial: Vec<EndpointId> = fresh.collect();
     // Sorted, so that a cap that bites picks the same peers on each run.
     dial.sort_unstable();
     dial.truncate(room);
-    let detach: Vec<EndpointId> = held
-        .iter()
-        .copied()
-        .filter(|peer| !kept.contains(peer))
-        .collect();
+    let unkept = held.iter().copied().filter(|peer| !kept.contains(peer));
+    let detach: Vec<EndpointId> = unkept.collect();
     Plan { dial, detach }
 }
 

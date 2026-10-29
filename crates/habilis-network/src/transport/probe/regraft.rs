@@ -49,12 +49,13 @@ pub(crate) fn next_fill(
     if state.linked_endpoints.len() >= max_peers {
         return None;
     }
-    let mut free: Vec<&iroh::EndpointAddr> = state
+    let candidates = state
         .peer_endpoints
         .values()
         .filter(|address| address.id != rendezvous_id)
-        .filter(|address| !state.linked_endpoints.contains(&address.id))
-        .filter(|address| !state.relink_on_cooldown(address.id, now))
+        .filter(|address| !state.linked_endpoints.contains(&address.id));
+    let cooled = candidates.filter(|address| !state.relink_on_cooldown(address.id, now));
+    let mut free: Vec<&iroh::EndpointAddr> = cooled
         .filter(|address| !state.graft_blocked(address.id, now))
         .collect();
     free.sort_unstable_by_key(|address| {
@@ -161,20 +162,23 @@ pub(crate) fn retry_candidates_at(
     if !distrust_links && state.linked_endpoints.len() >= max_peers {
         return Vec::new();
     }
-    let mut peers: Vec<iroh::EndpointAddr> = state
+    let candidates = state
         .peer_endpoints
         .values()
         .filter(|address| address.id != rendezvous_id)
-        .filter(|address| distrust_links || !state.linked_endpoints.contains(&address.id))
-        .filter(|address| {
-            state.direct.get(&address.id) != Some(&DirectState::Pending)
-                || (webrtc::lane_needs::needs_webrtc_lane(address)
-                    && state
-                        .webrtc
-                        .as_ref()
-                        .is_some_and(|handle| handle.has_session(&address.id)))
-        })
-        .filter(|address| !state.relink_on_cooldown(address.id, now))
+        .filter(|address| distrust_links || !state.linked_endpoints.contains(&address.id));
+    let webrtc_session = |address: &iroh::EndpointAddr| {
+        state
+            .webrtc
+            .as_ref()
+            .is_some_and(|handle| handle.has_session(&address.id))
+    };
+    let direct_ok = candidates.filter(|address| {
+        state.direct.get(&address.id) != Some(&DirectState::Pending)
+            || (webrtc::lane_needs::needs_webrtc_lane(address) && webrtc_session(address))
+    });
+    let cooled = direct_ok.filter(|address| !state.relink_on_cooldown(address.id, now));
+    let mut peers: Vec<iroh::EndpointAddr> = cooled
         .filter(|address| !state.graft_blocked(address.id, now))
         .cloned()
         .collect();

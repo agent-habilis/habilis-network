@@ -384,48 +384,45 @@ mod tests {
     async fn endpoint() -> (Endpoint, WebRtcHandle) {
         let key = SecretKey::generate();
         let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
-        let endpoint: Endpoint = Endpoint::builder(presets::Minimal)
+        let transport = handle.transport();
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
             .clear_address_lookup()
-            .add_custom_transport(handle.transport())
-            .bind()
-            .await
-            .expect("bind loopback endpoint");
+            .add_custom_transport(transport);
+        let endpoint: Endpoint = builder.bind().await.expect("bind loopback endpoint");
         (endpoint, handle)
     }
 
     /// [`endpoint`] with the key given.
     async fn endpoint_with(key: SecretKey) -> (Endpoint, WebRtcHandle) {
         let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
-        let endpoint: Endpoint = Endpoint::builder(presets::Minimal)
+        let transport = handle.transport();
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
             .clear_address_lookup()
-            .add_custom_transport(handle.transport())
-            .bind()
-            .await
-            .expect("bind loopback endpoint");
+            .add_custom_transport(transport);
+        let endpoint: Endpoint = builder.bind().await.expect("bind loopback endpoint");
         (endpoint, handle)
     }
 
     fn serve(endpoint: &Endpoint, handle: &WebRtcHandle, admission: &SignalAdmission) -> Router {
-        Router::builder(endpoint.clone())
-            .accept(NUDGE_ALPN, NudgeAcceptor)
-            .accept(
-                MESH_WEBRTC_SIGNAL_ALPN,
-                WebRtcSignalAcceptor::new(
-                    handle.clone(),
-                    endpoint.clone(),
-                    crate::lookup::address_book(&endpoint.clone()),
-                    endpoint.id(),
-                    admission.clone(),
-                    // Host candidates only: these tests must not touch STUN.
-                    IceProfile { host_only: true },
-                )
-                .with_deadlines(quick()),
-            )
-            .spawn()
+        let book = crate::lookup::address_book(&endpoint.clone());
+        let signal = WebRtcSignalAcceptor::new(
+            handle.clone(),
+            endpoint.clone(),
+            book,
+            endpoint.id(),
+            admission.clone(),
+            // Host candidates only: these tests must not touch STUN.
+            IceProfile { host_only: true },
+        );
+        let signal = signal.with_deadlines(quick());
+        let router = Router::builder(endpoint.clone());
+        let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
+        let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
+        router.spawn()
     }
 
     /// Wait for `check` to hold, or give up. Polling beats a fixed sleep: the
@@ -633,13 +630,12 @@ mod tests {
     async fn endpoint_with_lookup() -> (Endpoint, WebRtcHandle) {
         let key = SecretKey::generate();
         let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
-        let endpoint: Endpoint = Endpoint::builder(presets::Minimal)
+        let transport = handle.transport();
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
-            .add_custom_transport(handle.transport())
-            .bind()
-            .await
-            .expect("bind loopback endpoint");
+            .add_custom_transport(transport);
+        let endpoint: Endpoint = builder.bind().await.expect("bind loopback endpoint");
         (endpoint, handle)
     }
 
@@ -758,29 +754,28 @@ mod tests {
         let server_gossip = Gossip::builder().spawn(server.clone());
         // One Router for both ALPNs: `Router::spawn` overrides the endpoint's
         // ALPN list, so a second Router silently unregisters the first's.
-        let router: Router = Router::builder(server.clone())
-            .accept(NUDGE_ALPN, NudgeAcceptor)
-            .accept(
-                MESH_WEBRTC_SIGNAL_ALPN,
-                WebRtcSignalAcceptor::new(
-                    server_hub.clone(),
-                    server.clone(),
-                    crate::lookup::address_book(&server.clone()),
-                    server.id(),
-                    admission.clone(),
-                    IceProfile { host_only: true },
-                )
-                .with_deadlines(quick()),
-            )
-            .accept(
-                GOSSIP_ALPN,
-                super::super::DirectOnlyGossip::new(
-                    server_gossip.clone(),
-                    crate::transport::PayloadPath::DirectOnly,
-                    None,
-                ),
-            )
-            .spawn();
+        let book = crate::lookup::address_book(&server.clone());
+        let signal = WebRtcSignalAcceptor::new(
+            server_hub.clone(),
+            server.clone(),
+            book,
+            server.id(),
+            admission.clone(),
+            IceProfile { host_only: true },
+        );
+        let signal = signal.with_deadlines(quick());
+        let router = Router::builder(server.clone());
+        let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
+        let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
+        let router = router.accept(
+            GOSSIP_ALPN,
+            super::super::DirectOnlyGossip::new(
+                server_gossip.clone(),
+                crate::transport::PayloadPath::DirectOnly,
+                None,
+            ),
+        );
+        let router: Router = router.spawn();
 
         let (client, client_hub) = endpoint_with_lookup().await;
         let client_gossip = Gossip::builder().spawn(client.clone());
@@ -885,28 +880,27 @@ mod tests {
 
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let server_gossip = Gossip::builder().spawn(server.clone());
-        let router: Router = Router::builder(server.clone())
-            .accept(NUDGE_ALPN, NudgeAcceptor)
-            .accept(
-                MESH_WEBRTC_SIGNAL_ALPN,
-                WebRtcSignalAcceptor::new(
-                    server_hub.clone(),
-                    server.clone(),
-                    crate::lookup::address_book(&server.clone()),
-                    server.id(),
-                    admission.clone(),
-                    IceProfile { host_only: true },
-                ),
-            )
-            .accept(
-                GOSSIP_ALPN,
-                super::super::DirectOnlyGossip::new(
-                    server_gossip.clone(),
-                    crate::transport::PayloadPath::DirectOnly,
-                    None,
-                ),
-            )
-            .spawn();
+        let book = crate::lookup::address_book(&server.clone());
+        let signal = WebRtcSignalAcceptor::new(
+            server_hub.clone(),
+            server.clone(),
+            book,
+            server.id(),
+            admission.clone(),
+            IceProfile { host_only: true },
+        );
+        let router = Router::builder(server.clone());
+        let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
+        let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
+        let router = router.accept(
+            GOSSIP_ALPN,
+            super::super::DirectOnlyGossip::new(
+                server_gossip.clone(),
+                crate::transport::PayloadPath::DirectOnly,
+                None,
+            ),
+        );
+        let router: Router = router.spawn();
 
         let client_gossip = Gossip::builder().spawn(client.clone());
         // The relay-homed address, as `register_rendezvous` hands a joiner.
@@ -997,10 +991,11 @@ mod tests {
             let transport = handle.transport();
             let selector = handle.path_selector();
             async move {
-                Endpoint::builder(presets::Minimal)
+                let builder = Endpoint::builder(presets::Minimal)
                     .secret_key(key)
                     .relay_mode(RelayMode::custom([relay_url]))
-                    .add_custom_transport(transport)
+                    .add_custom_transport(transport);
+                builder
                     .path_selector(selector)
                     .clear_ip_transports()
                     .bind()
@@ -1023,20 +1018,19 @@ mod tests {
             .accept(HOLD_ALPN, Hold(held_tx))
             .spawn();
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let high_router: Router = Router::builder(high.clone())
-            .accept(NUDGE_ALPN, NudgeAcceptor)
-            .accept(
-                MESH_WEBRTC_SIGNAL_ALPN,
-                WebRtcSignalAcceptor::new(
-                    high_hub.clone(),
-                    high.clone(),
-                    crate::lookup::address_book(&high.clone()),
-                    high.id(),
-                    admission,
-                    IceProfile { host_only: true },
-                ),
-            )
-            .spawn();
+        let book = crate::lookup::address_book(&high.clone());
+        let signal = WebRtcSignalAcceptor::new(
+            high_hub.clone(),
+            high.clone(),
+            book,
+            high.id(),
+            admission,
+            IceProfile { host_only: true },
+        );
+        let router = Router::builder(high.clone());
+        let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
+        let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
+        let high_router: Router = router.spawn();
 
         let low_on_relay = EndpointAddr::new(low.id()).with_relay_url(relay_url.clone());
         let high_on_relay = EndpointAddr::new(high.id()).with_relay_url(relay_url.clone());
@@ -1120,21 +1114,20 @@ mod tests {
         let client = relay_only(client_key, &client_hub).await;
 
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let router: Router = Router::builder(server.clone())
-            .accept(NUDGE_ALPN, NudgeAcceptor)
-            .accept(
-                MESH_WEBRTC_SIGNAL_ALPN,
-                WebRtcSignalAcceptor::new(
-                    server_hub.clone(),
-                    server.clone(),
-                    crate::lookup::address_book(&server.clone()),
-                    server.id(),
-                    admission.clone(),
-                    IceProfile { host_only: true },
-                ),
-            )
-            .accept(HOLD_ALPN, Hold)
-            .spawn();
+        let book = crate::lookup::address_book(&server.clone());
+        let signal = WebRtcSignalAcceptor::new(
+            server_hub.clone(),
+            server.clone(),
+            book,
+            server.id(),
+            admission.clone(),
+            IceProfile { host_only: true },
+        );
+        let router = Router::builder(server.clone());
+        let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
+        let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
+        let router = router.accept(HOLD_ALPN, Hold);
+        let router: Router = router.spawn();
 
         let relay_addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
         let held = client
@@ -1220,28 +1213,27 @@ mod tests {
 
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let server_gossip = Gossip::builder().spawn(server.clone());
-        let router: Router = Router::builder(server.clone())
-            .accept(NUDGE_ALPN, NudgeAcceptor)
-            .accept(
-                MESH_WEBRTC_SIGNAL_ALPN,
-                WebRtcSignalAcceptor::new(
-                    server_hub.clone(),
-                    server.clone(),
-                    crate::lookup::address_book(&server.clone()),
-                    server.id(),
-                    admission.clone(),
-                    IceProfile { host_only: true },
-                ),
-            )
-            .accept(
-                GOSSIP_ALPN,
-                super::super::DirectOnlyGossip::new(
-                    server_gossip.clone(),
-                    crate::transport::PayloadPath::DirectOnly,
-                    None,
-                ),
-            )
-            .spawn();
+        let book = crate::lookup::address_book(&server.clone());
+        let signal = WebRtcSignalAcceptor::new(
+            server_hub.clone(),
+            server.clone(),
+            book,
+            server.id(),
+            admission.clone(),
+            IceProfile { host_only: true },
+        );
+        let router = Router::builder(server.clone());
+        let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
+        let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
+        let router = router.accept(
+            GOSSIP_ALPN,
+            super::super::DirectOnlyGossip::new(
+                server_gossip.clone(),
+                crate::transport::PayloadPath::DirectOnly,
+                None,
+            ),
+        );
+        let router: Router = router.spawn();
 
         let client_gossip = Gossip::builder().spawn(client.clone());
         // What register_rendezvous does for a joiner: the relay-homed
@@ -1751,13 +1743,11 @@ mod tests {
             })
             .find(|key| key.public() > endpoint.id())
             .expect("a key above ours");
-        let server: Endpoint = Endpoint::builder(presets::Minimal)
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
-            .clear_address_lookup()
-            .bind()
-            .await
-            .expect("bind a loopback server");
+            .clear_address_lookup();
+        let server: Endpoint = builder.bind().await.expect("bind a loopback server");
         let router: Router = Router::builder(server.clone())
             .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(crate::transport::UNICAST_ALPN, Hold)
@@ -1859,13 +1849,11 @@ mod tests {
             })
             .find(|key| key.public() < endpoint.id())
             .expect("a key below ours");
-        let server: Endpoint = Endpoint::builder(presets::Minimal)
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
-            .clear_address_lookup()
-            .bind()
-            .await
-            .expect("bind a loopback server");
+            .clear_address_lookup();
+        let server: Endpoint = builder.bind().await.expect("bind a loopback server");
         let router: Router = Router::builder(server.clone())
             .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(crate::transport::UNICAST_ALPN, Hold)
@@ -1976,13 +1964,11 @@ mod tests {
             })
             .find(|key| key.public() > endpoint.id())
             .expect("a key above ours");
-        let server: Endpoint = Endpoint::builder(presets::Minimal)
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
-            .clear_address_lookup()
-            .bind()
-            .await
-            .expect("bind a loopback server");
+            .clear_address_lookup();
+        let server: Endpoint = builder.bind().await.expect("bind a loopback server");
         let router: Router = Router::builder(server.clone())
             .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(crate::transport::UNICAST_ALPN, Hold)

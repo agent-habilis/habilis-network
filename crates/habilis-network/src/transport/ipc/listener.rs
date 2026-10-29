@@ -82,6 +82,7 @@ pub(crate) fn bind(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -
 pub(crate) async fn serve<Cmd>(
     listener: Listener,
     tx: mpsc::Sender<IpcMessage<Cmd>>,
+    // trait object: the listener and its connections share the sink
     sink: std::sync::Arc<dyn event::NodeSink>,
 ) where
     Cmd: DeserializeOwned + Send + 'static,

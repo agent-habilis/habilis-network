@@ -446,6 +446,7 @@ mod tests {
 
     /// Sessions a test can hold without a negotiation. Clones share the set.
     #[derive(Debug, Clone, Default)]
+    // the fake hub is shared by its handles
     struct FakeHub(Arc<Mutex<HashSet<EndpointId>>>);
 
     impl FakeHub {
@@ -464,7 +465,8 @@ mod tests {
         }
 
         fn live_peers(&self) -> Vec<EndpointId> {
-            self.0.lock().expect("fake hub").iter().copied().collect()
+            let live = self.0.lock().expect("fake hub");
+            live.iter().copied().collect()
         }
 
         fn detach(&self, peer: &EndpointId) -> bool {
@@ -1255,6 +1257,7 @@ mod tests {
         use iroh::{EndpointAddr, RelayMode, SecretKey, TransportAddr};
 
         #[derive(Debug, Clone)]
+        // the report is shared with the hook, which sends through it
         struct Report(Arc<Mutex<Option<oneshot::Sender<ConnectionError>>>>);
         impl ProtocolHandler for Report {
             async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
@@ -1297,6 +1300,7 @@ mod tests {
         let router = Router::builder(bob.clone())
             .accept(
                 iroh_gossip::net::GOSSIP_ALPN,
+                // the report is shared with the hook, which sends through it
                 Report(Arc::new(Mutex::new(Some(tx)))),
             )
             .spawn();
@@ -1405,12 +1409,16 @@ mod tests {
         hub.join(&handle);
         let admission = SignalAdmission::new(8);
         admission.set_gossip(handle.clone());
-        let mut builder: iroh::endpoint::Builder = iroh::Endpoint::builder(presets::Minimal)
+        let transport = handle.custom_transport();
+        let selector = handle.path_selector();
+        let hook = admission.connection_hook();
+        let base = iroh::Endpoint::builder(presets::Minimal)
             .secret_key(key)
-            .relay_mode(RelayMode::Disabled)
-            .add_custom_transport(handle.custom_transport())
-            .path_selector(handle.path_selector())
-            .hooks(admission.connection_hook());
+            .relay_mode(RelayMode::Disabled);
+        let mut builder: iroh::endpoint::Builder = base
+            .add_custom_transport(transport)
+            .path_selector(selector)
+            .hooks(hook);
         builder = if with_ip {
             builder
                 .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -1539,6 +1547,7 @@ mod tests {
         let (alice, alice_table, alice_handle) = ip_and_gossip_node(45, &hub, false).await;
         let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(46, &hub, false).await;
         let sessions = FakeHub::default();
+        // the table keeps the hub as a shared trait object
         alice_table.lock().hub = Some(Arc::new(sessions.clone()));
         let router = iroh::protocol::Router::builder(bob.clone())
             .accept(GOSSIP_TEST_ALPN, HoldConnections)
@@ -1582,6 +1591,7 @@ mod tests {
         let (alice, alice_table, alice_handle) = ip_and_gossip_node(47, &hub, false).await;
         let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(48, &hub, false).await;
         let sessions = FakeHub::default();
+        // the table keeps the hub as a shared trait object
         alice_table.lock().hub = Some(Arc::new(sessions.clone()));
         let router = iroh::protocol::Router::builder(bob.clone())
             .accept(GOSSIP_TEST_ALPN, HoldConnections)

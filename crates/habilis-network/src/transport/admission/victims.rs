@@ -12,6 +12,7 @@ use super::Sessions;
 #[derive(Default)]
 pub(crate) struct Victims {
     pub(crate) conns: Vec<Connection>,
+    // trait object: the sessions are shared with the table that hands them out
     pub(crate) sessions: Vec<(EndpointId, Arc<dyn Sessions>)>,
 }
 

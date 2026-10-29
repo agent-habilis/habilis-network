@@ -249,9 +249,10 @@ mod tests {
     /// A loopback endpoint with no relay, and a gossip sender on a peerless
     /// topic: the real pieces a directed send needs, and nothing reachable.
     async fn loopback_node() -> (iroh::Endpoint, crate::transport::MeshSender) {
+        let alpns = vec![crate::transport::UNICAST_ALPN.to_vec()];
         let endpoint: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
-            .alpns(vec![crate::transport::UNICAST_ALPN.to_vec()])
+            .alpns(alpns)
             .bind()
             .await
             .expect("bind a loopback endpoint");
@@ -886,10 +887,8 @@ mod tests {
                 .await
                 .expect("bob reads the answer in time")
                 .expect("reader task");
-        let expected: Vec<Vec<u8>> = frames
-            .iter()
-            .map(|bytes| bytes.as_bytes().to_vec())
-            .collect();
+        let as_bytes = frames.iter().map(WireFrame::as_bytes);
+        let expected: Vec<Vec<u8>> = as_bytes.map(<[u8]>::to_vec).collect();
         assert_eq!(got, expected, "every frame, in order");
         returned_endpoint.close().await;
         net.endpoint.close().await;
@@ -1309,11 +1308,11 @@ mod tests {
                 .expect("bob reads both batches in time")
                 .expect("reader task");
         got.sort();
-        let mut expected: Vec<Vec<u8>> = state_batch
+        let batches = state_batch
             .iter()
             .chain(&meta_batch)
-            .map(|frame| frame.as_bytes().to_vec())
-            .collect();
+            .map(WireFrame::as_bytes);
+        let mut expected: Vec<Vec<u8>> = batches.map(<[u8]>::to_vec).collect();
         expected.sort();
         assert_eq!(
             got, expected,
@@ -1366,10 +1365,8 @@ mod tests {
                 .await
                 .expect("bob reads the answer in time")
                 .expect("reader task");
-        let expected: Vec<Vec<u8>> = frames
-            .iter()
-            .map(|bytes| bytes.as_bytes().to_vec())
-            .collect();
+        let as_bytes = frames.iter().map(WireFrame::as_bytes);
+        let expected: Vec<Vec<u8>> = as_bytes.map(<[u8]>::to_vec).collect();
         assert_eq!(got[..3], expected[..], "the three frames first, in order");
         let last = Message::parse(&got[3]).expect("the last frame parses");
         assert_eq!(last.kind, MessageKind::StateDigest, "then a state digest");

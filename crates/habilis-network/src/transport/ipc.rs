@@ -221,6 +221,7 @@ mod tests {
         let listener_handle = tokio::spawn(listener::serve(
             listener,
             tx,
+            // trait object: the setup takes the silent sink as a shared handle
             std::sync::Arc::new(event::SilentSink),
         ));
 
@@ -293,6 +294,7 @@ mod tests {
         let listener_handle = tokio::spawn(listener::serve(
             listener,
             tx,
+            // trait object: the setup takes the silent sink as a shared handle
             std::sync::Arc::new(event::SilentSink),
         ));
         // Echo handler so a healthy command still round-trips while the

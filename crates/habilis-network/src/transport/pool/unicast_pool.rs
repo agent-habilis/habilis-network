@@ -32,6 +32,7 @@ use crate::protocol::message;
 
 #[derive(Clone)]
 pub(crate) struct UnicastPool {
+    // the pool and its clones share the inner state
     pub(in crate::transport::pool) inner: Arc<PoolInner>,
 }
 
@@ -95,6 +96,7 @@ pub(in crate::transport::pool) struct PoolInner {
     /// Tests only: the next dial waits on this before it connects, so a test can queue a send
     /// behind it.
     #[cfg(test)]
+    // the gate is shared by the dial and the test that holds it
     pub(in crate::transport::pool) dial_gate: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
     /// Each peer's full address, from its `PeerInfo`. Dialed instead of the
     /// bare id so the relay is in the address book before the handshake:
@@ -135,6 +137,7 @@ impl UnicastPool {
         probe_hold: Duration,
     ) -> Self {
         Self {
+            // the pool and its clones share the inner state
             inner: Arc::new(PoolInner {
                 endpoint: Some(endpoint),
                 conns: Mutex::new(HashMap::new()),
@@ -176,6 +179,7 @@ impl UnicastPool {
     /// lower-level unit tests (which never run the transport) get.
     pub(crate) fn disconnected() -> Self {
         Self {
+            // the pool and its clones share the inner state
             inner: Arc::new(PoolInner {
                 endpoint: None,
                 conns: Mutex::new(HashMap::new()),
@@ -251,9 +255,8 @@ impl UnicastPool {
     #[cfg(test)]
     pub(crate) fn connection(&self, eid: EndpointId) -> Option<Connection> {
         self.inner.conns.try_lock().ok().and_then(|conns| {
-            conns
-                .get(&eid)
-                .map(|pooled| &pooled.connection)
+            let pooled = conns.get(&eid).map(|pooled| &pooled.connection);
+            pooled
                 .filter(|connection| connection.close_reason().is_none())
                 .cloned()
         })
@@ -264,12 +267,11 @@ impl UnicastPool {
     /// never sent to. A contended lock reads as none.
     pub(crate) fn used_connection(&self, eid: EndpointId) -> Option<Connection> {
         self.inner.conns.try_lock().ok().and_then(|conns| {
-            conns
-                .get(&eid)
-                .filter(|pooled| pooled.hold == Hold::Used)
+            let used = conns.get(&eid).filter(|pooled| pooled.hold == Hold::Used);
+            let open = used
                 .map(|pooled| &pooled.connection)
-                .filter(|connection| connection.close_reason().is_none())
-                .cloned()
+                .filter(|connection| connection.close_reason().is_none());
+            open.cloned()
         })
     }
 
@@ -362,7 +364,9 @@ impl UnicastPool {
 
     /// Tests only: hold the next dial until the returned [`Notify`](tokio::sync::Notify) is notified.
     #[cfg(test)]
+    // the gate is shared by the dial and the test that holds it
     pub(crate) fn hold_next_dial(&self) -> Arc<tokio::sync::Notify> {
+        // the gate is shared by the dial and the test that holds it
         let gate = Arc::new(tokio::sync::Notify::new());
         if let Ok(mut slot) = self.inner.dial_gate.lock() {
             *slot = Some(Arc::clone(&gate));
@@ -608,15 +612,13 @@ impl UnicastPool {
         if self.inner.endpoint.is_none() {
             bail!("unicast pool has no endpoint");
         }
-        let existing: Option<Connection> = self
-            .inner
-            .conns
-            .lock()
-            .await
-            .get(&eid)
-            .map(|pooled| &pooled.connection)
-            .filter(|connection| connection.close_reason().is_none())
-            .cloned();
+        let existing: Option<Connection> = {
+            let conns = self.inner.conns.lock().await;
+            let pooled = conns.get(&eid).map(|pooled| &pooled.connection);
+            pooled
+                .filter(|connection| connection.close_reason().is_none())
+                .cloned()
+        };
         if let Some(connection) = existing {
             return Ok(connection);
         }
@@ -656,13 +658,12 @@ impl UnicastPool {
         {
             bail!("{COOLDOWN_REFUSED}");
         }
-        let address: EndpointAddr = self
-            .inner
-            .addrs
-            .lock()
-            .ok()
-            .and_then(|addrs| addrs.get(&eid).cloned())
-            .unwrap_or_else(|| EndpointAddr::new(eid));
+        let address: EndpointAddr = {
+            let addrs = self.inner.addrs.lock().ok();
+            addrs
+                .and_then(|addrs| addrs.get(&eid).cloned())
+                .unwrap_or_else(|| EndpointAddr::new(eid))
+        };
         #[cfg(test)]
         {
             let gate = self

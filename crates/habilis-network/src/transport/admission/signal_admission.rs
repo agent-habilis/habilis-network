@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 /// The one place a direct-peer slot is granted, for both roles.
 #[derive(Debug, Clone)]
 pub struct SignalAdmission {
+    // the table and the sampler share the inner state
     pub(crate) inner: Arc<Mutex<Inner>>,
     pub(crate) cap: usize,
     /// The mesh lets no payload ride the relay, so the hook keeps watch over the
@@ -59,6 +60,7 @@ impl SignalAdmission {
     #[must_use]
     pub fn new(cap: usize) -> Self {
         Self {
+            // the table and the sampler share the inner state
             inner: Arc::new(Mutex::new(Inner {
                 slots: HashMap::new(),
                 refused: RefusalBackoff::default(),
@@ -75,7 +77,9 @@ impl SignalAdmission {
                 closed_on_rung: HashMap::new(),
             })),
             cap,
+            // the flag is shared by the table and the gossip watch
             watch_dialed_gossip: Arc::new(AtomicBool::new(false)),
+            // the slot-freed signal is shared with the pool that waits on it
             freed: Arc::new(tokio::sync::Notify::new()),
         }
     }
@@ -96,10 +100,8 @@ impl SignalAdmission {
     /// Tests only: whether the hook recorded a live connection to `peer`.
     pub(crate) fn has_live_connection(&self, peer: EndpointId) -> bool {
         self.lock().slots.get(&peer).is_some_and(|slot| {
-            slot.conns
-                .iter()
-                .filter_map(WeakConnectionHandle::upgrade)
-                .any(|connection| connection.close_reason().is_none())
+            let mut live = slot.conns.iter().filter_map(WeakConnectionHandle::upgrade);
+            live.any(|connection| connection.close_reason().is_none())
         })
     }
 
@@ -120,20 +122,18 @@ impl SignalAdmission {
     /// session now reads as the session (`[Relay, WebRtc]` reads `WebRtc`), where the first
     /// connection used to decide.
     pub(crate) fn selected_kind(&self, peer: EndpointId) -> Option<probe::PathKind> {
-        let handles: Vec<WeakConnectionHandle> = self
-            .lock()
-            .slots
-            .get(&peer)
-            .map(|slot| slot.conns.clone())
-            .unwrap_or_default();
-        probe::best_kind(
-            handles
-                .iter()
-                .filter_map(WeakConnectionHandle::upgrade)
-                .filter(|connection| connection.close_reason().is_none())
-                .map(|connection| probe::selected_kind(&connection)),
-        )
-        .or_else(|| self.recently_closed_on_rung(peer))
+        let handles: Vec<WeakConnectionHandle> = {
+            let inner = self.lock();
+            inner
+                .slots
+                .get(&peer)
+                .map(|slot| slot.conns.clone())
+                .unwrap_or_default()
+        };
+        let connections = handles.iter().filter_map(WeakConnectionHandle::upgrade);
+        let live = connections.filter(|connection| connection.close_reason().is_none());
+        let kinds = live.map(|connection| probe::selected_kind(&connection));
+        probe::best_kind(kinds).or_else(|| self.recently_closed_on_rung(peer))
     }
 
     /// The recursion rule closed a gossip connection of `peer`: for a while, the pair reads as
@@ -153,19 +153,18 @@ impl SignalAdmission {
     /// Whether any live connection of `peer` with a selected path reads below IP: the relay, a
     /// session or a route (see [`any_not_ip`](probe::any_not_ip)).
     pub(crate) fn any_connection_not_ip(&self, peer: EndpointId) -> bool {
-        let handles: Vec<WeakConnectionHandle> = self
-            .lock()
-            .slots
-            .get(&peer)
-            .map(|slot| slot.conns.clone())
-            .unwrap_or_default();
-        probe::any_not_ip(
-            handles
-                .iter()
-                .filter_map(WeakConnectionHandle::upgrade)
-                .filter(|connection| connection.close_reason().is_none())
-                .map(|connection| probe::selected_kind(&connection)),
-        )
+        let handles: Vec<WeakConnectionHandle> = {
+            let inner = self.lock();
+            inner
+                .slots
+                .get(&peer)
+                .map(|slot| slot.conns.clone())
+                .unwrap_or_default()
+        };
+        let connections = handles.iter().filter_map(WeakConnectionHandle::upgrade);
+        let live = connections.filter(|connection| connection.close_reason().is_none());
+        let kinds = live.map(|connection| probe::selected_kind(&connection));
+        probe::any_not_ip(kinds)
     }
 
     /// The endpoint hook that reports every connection to this table. Install
@@ -252,6 +251,7 @@ impl SignalAdmission {
             return Err(Refusal::AtCapacity);
         }
         if inner.hub.is_none() {
+            // the table keeps the hub as a shared trait object
             inner.hub = Some(Arc::new(handle.clone()));
         }
         let slot = inner.slot(peer);
@@ -351,13 +351,13 @@ impl SignalAdmission {
     /// `epoch` names the round, from [`AdmissionGuard::epoch`]. A round that was given up before
     /// its task was recorded has its task aborted here.
     pub(crate) fn track(&self, peer: EndpointId, epoch: u64, abort: AbortHandle) {
-        match self
-            .lock()
+        let mut inner = self.lock();
+        let round = inner
             .slots
             .get_mut(&peer)
             .filter(|slot| slot.epoch == epoch)
-            .and_then(|slot| slot.round.as_mut())
-        {
+            .and_then(|slot| slot.round.as_mut());
+        match round {
             Some(round) => *round = Round::Running(abort),
             None => abort.abort(),
         }
@@ -437,13 +437,15 @@ impl SignalAdmission {
     }
 
     pub(crate) fn release(&self, peer: EndpointId, epoch: u64) {
-        let ended: bool = self
-            .lock()
-            .slots
-            .get_mut(&peer)
-            .filter(|slot| slot.epoch == epoch)
-            .map(|slot| slot.round = None)
-            .is_some();
+        let ended: bool = {
+            let mut inner = self.lock();
+            inner
+                .slots
+                .get_mut(&peer)
+                .filter(|slot| slot.epoch == epoch)
+                .map(|slot| slot.round = None)
+                .is_some()
+        };
         if ended {
             self.freed.notify_one();
         }

@@ -15,6 +15,7 @@ use super::resend::Resend;
 #[derive(Debug)]
 pub(crate) struct ResendOutbox {
     queue: mpsc::Sender<Resend>,
+    // the count is shared with the outbox handles that report drops
     dropped: Arc<AtomicU64>,
 }
 
@@ -23,6 +24,7 @@ impl ResendOutbox {
         let (queue, receiver) = mpsc::channel(capacity);
         let outbox = Self {
             queue,
+            // the count is shared with the outbox handles that report drops
             dropped: Arc::new(AtomicU64::new(0)),
         };
         (outbox, receiver)

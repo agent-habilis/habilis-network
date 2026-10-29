@@ -14,12 +14,14 @@ use crate::protocol::message::WireFrame;
 /// `ResendOutbox`) follows a resubscribe too.
 #[derive(Debug, Clone)]
 pub struct MeshSender {
+    // the sender is shared by the mesh handles, which swap the gossip under it
     gossip: Arc<RwLock<GossipSender>>,
 }
 
 impl MeshSender {
     pub(crate) fn new(gossip: GossipSender) -> Self {
         Self {
+            // the sender is shared by the mesh handles, which swap the gossip under it
             gossip: Arc::new(RwLock::new(gossip)),
         }
     }

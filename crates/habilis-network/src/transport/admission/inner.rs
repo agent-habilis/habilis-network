@@ -52,11 +52,10 @@ pub(crate) struct Inner {
 
 impl std::fmt::Debug for Inner {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Inner")
-            .field("peers", &self.slots.len())
-            .field("closed", &self.closed)
-            .finish_non_exhaustive()
+        let mut debug = formatter.debug_struct("Inner");
+        debug.field("peers", &self.slots.len());
+        debug.field("closed", &self.closed);
+        debug.finish_non_exhaustive()
     }
 }
 
@@ -85,12 +84,12 @@ impl Inner {
         let mut idle = Vec::new();
         for peer in self.ceiling.session_peers() {
             let held: bool = self.slots.get(&peer).is_some_and(|slot| {
-                slot.round.is_some()
-                    || slot
-                        .conns
-                        .iter()
-                        .filter_map(WeakConnectionHandle::upgrade)
-                        .any(|connection| connection.alpn() == iroh_gossip::net::GOSSIP_ALPN)
+                let on_gossip = slot
+                    .conns
+                    .iter()
+                    .filter_map(WeakConnectionHandle::upgrade)
+                    .any(|connection| connection.alpn() == iroh_gossip::net::GOSSIP_ALPN);
+                slot.round.is_some() || on_gossip
             });
             if held || !hub.has_session(&peer) {
                 continue;
@@ -164,11 +163,9 @@ impl Inner {
             return;
         };
         for (peer, slot) in &self.slots {
-            let kinds: Vec<probe::PathKind> = slot
-                .conns
-                .iter()
-                .filter_map(WeakConnectionHandle::upgrade)
-                .filter(|connection| connection.close_reason().is_none())
+            let open = slot.conns.iter().filter_map(WeakConnectionHandle::upgrade);
+            let live = open.filter(|connection| connection.close_reason().is_none());
+            let kinds: Vec<probe::PathKind> = live
                 .map(|connection| probe::selected_kind(&connection))
                 .collect();
             let (established, allowed) = sampler::gossip_view(&kinds);
@@ -210,9 +207,8 @@ impl Inner {
             }
         }
         self.slots.retain(|peer, slot| {
-            slot.round.is_some()
-                || !slot.conns.is_empty()
-                || hub.as_ref().is_some_and(|hub| hub.has_session(peer))
+            let session = hub.as_ref().is_some_and(|hub| hub.has_session(peer));
+            slot.round.is_some() || !slot.conns.is_empty() || session
         });
     }
 }

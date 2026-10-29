@@ -321,13 +321,11 @@ mod tests {
     }
 
     async fn loopback_endpoint() -> Endpoint {
-        Endpoint::builder(presets::Minimal)
+        let builder = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .expect("valid bind addr")
-            .bind()
-            .await
-            .expect("bind a loopback endpoint")
+            .expect("valid bind addr");
+        builder.bind().await.expect("bind a loopback endpoint")
     }
 
     /// The code that the gate closes a connection with when the dialer is not a

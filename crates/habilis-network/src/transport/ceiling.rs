@@ -335,14 +335,13 @@ impl Ceiling {
         if batch_due {
             let target = (self.cap * 9).div_ceil(10);
             let extra = units.saturating_sub(evict.len()).saturating_sub(target);
-            evict.extend(
-                candidates
-                    .iter()
-                    .skip(evict.len())
-                    .take_while(|candidate| candidate.class == 0)
-                    .take(extra)
-                    .map(|candidate| candidate.peer),
-            );
+            let already = evict.len();
+            let victims = candidates
+                .iter()
+                .skip(already)
+                .take_while(|candidate| candidate.class == 0)
+                .take(extra);
+            evict.extend(victims.map(|candidate| candidate.peer));
             self.last_batch = Some(now);
         }
         // The victims leave the count: a registered peer is still registered until the caller
@@ -350,12 +349,10 @@ impl Ceiling {
         if evict.len() < need {
             tracing::debug!(target: super::LOG_TARGET, units, cap = self.cap, "every other peer is busy: over the ceiling");
         }
-        if let Some(young) = candidates
+        let young_candidates = candidates
             .iter()
-            .filter(|candidate| candidate.class == 2 && evict.contains(&candidate.peer))
-            .map(|candidate| candidate.peer)
-            .next()
-        {
+            .filter(|candidate| candidate.class == 2 && evict.contains(&candidate.peer));
+        if let Some(young) = young_candidates.map(|candidate| candidate.peer).next() {
             tracing::info!(target: super::LOG_TARGET, peer = %young.fmt_short(), "evicting a peer younger than the minimum age: the ceiling holds");
         }
         Admission {

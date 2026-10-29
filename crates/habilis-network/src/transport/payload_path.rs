@@ -90,21 +90,17 @@ pub(crate) fn watch_gossip_recursion(
 /// path, or a custom transport (`WebRTC`, multihop), which is peer to peer as
 /// far as the relay is concerned. `false` while no path is selected yet.
 pub(crate) fn selected_is_direct(connection: &Connection) -> bool {
-    connection
-        .paths()
-        .iter()
-        .find(iroh::endpoint::Path::is_selected)
-        .is_some_and(|path| !path.is_relay())
+    let paths = connection.paths();
+    let selected = paths.iter().find(iroh::endpoint::Path::is_selected);
+    selected.is_some_and(|path| !path.is_relay())
 }
 
 /// Whether iroh's selected path to the remote is a direct UDP path: the race
 /// against `WebRTC` is won. `false` while no path is selected yet.
 pub(crate) fn selected_is_ip(connection: &Connection) -> bool {
-    connection
-        .paths()
-        .iter()
-        .find(iroh::endpoint::Path::is_selected)
-        .is_some_and(|path| path.is_ip())
+    let paths = connection.paths();
+    let selected = paths.iter().find(iroh::endpoint::Path::is_selected);
+    selected.is_some_and(|path| path.is_ip())
 }
 
 /// The rung of iroh's selected path on `conn`, for a test that shows a node
@@ -299,14 +295,13 @@ mod tests {
     const ALPN: &[u8] = b"test/path-wait";
 
     async fn loopback_endpoint() -> Endpoint {
-        Endpoint::builder(presets::Minimal)
+        let alpns = vec![ALPN.to_vec()];
+        let builder = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
-            .alpns(vec![ALPN.to_vec()])
+            .alpns(alpns)
             .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .expect("valid bind addr")
-            .bind()
-            .await
-            .expect("bind a loopback endpoint")
+            .expect("valid bind addr");
+        builder.bind().await.expect("bind a loopback endpoint")
     }
 
     /// A connection between two loopback endpoints: the dialer's end and the accepted end. The

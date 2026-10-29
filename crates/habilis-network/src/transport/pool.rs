@@ -675,9 +675,10 @@ mod tests {
             )
             .spawn();
         let admission = SignalAdmission::new(8);
+        let hook = admission.connection_hook();
         let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
-            .hooks(admission.connection_hook())
+            .hooks(hook)
             .bind()
             .await
             .expect("bind a loopback endpoint");
@@ -726,9 +727,10 @@ mod tests {
             )
             .spawn();
         let admission = SignalAdmission::new(8);
+        let hook = admission.connection_hook();
         let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
-            .hooks(admission.connection_hook())
+            .hooks(hook)
             .bind()
             .await
             .expect("bind a loopback endpoint");
@@ -796,9 +798,10 @@ mod tests {
             .accept(super::super::UNICAST_ALPN, SlowReader)
             .spawn();
         let admission = SignalAdmission::new(8);
+        let hook = admission.connection_hook();
         let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
-            .hooks(admission.connection_hook())
+            .hooks(hook)
             .bind()
             .await
             .expect("bind a loopback endpoint");

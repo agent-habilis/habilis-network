@@ -75,17 +75,25 @@ pub(crate) fn tick(state: &state::EventLoopState, underlay: &UnderlayWebRtc) {
         .iter()
         .map(|(member, _)| describe(member))
         .collect();
+    let local = underlay.endpoint.id().fmt_short();
+    let linked = state.linked_endpoints.len();
+    let members = neighbors.len();
+    let wanted_count = wanted.len();
+    let kept_count = kept.len();
+    let held_count = held.len();
+    let dial_count = dial.len();
+    let detach_count = detach.len();
     tracing::debug!(
         target: LOG_TARGET,
-        local = %underlay.endpoint.id().fmt_short(),
-        linked = state.linked_endpoints.len(),
-        members = neighbors.len(),
+        local = %local,
+        linked,
+        members,
         kinds = ?kinds,
-        wanted = wanted.len(),
-        kept = kept.len(),
-        held = held.len(),
-        dial = dial.len(),
-        detach = detach.len(),
+        wanted = wanted_count,
+        kept = kept_count,
+        held = held_count,
+        dial = dial_count,
+        detach = detach_count,
         "underlay tick"
     );
 
@@ -161,11 +169,10 @@ pub(crate) fn members_with_session(
     neighbors: &[(EndpointId, iroh::EndpointAddr)],
     held: &[EndpointId],
 ) -> Vec<EndpointId> {
-    neighbors
+    let sessions = neighbors
         .iter()
-        .filter(|(_, address)| held.contains(&address.id))
-        .map(|(member, _)| *member)
-        .collect()
+        .filter(|(_, address)| held.contains(&address.id));
+    sessions.map(|(member, _)| *member).collect()
 }
 
 /// The members with a live session on our underlay, by member id: the edges of the routing graph

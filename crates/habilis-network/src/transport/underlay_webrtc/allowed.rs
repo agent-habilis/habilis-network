@@ -8,6 +8,7 @@ use iroh::EndpointId;
 /// The underlay ids that may open a session with us now: the underlay ids of the
 /// members we hold a link vector from. The event loop refreshes it on each tick.
 #[derive(Debug, Clone, Default)]
+// the allowed set is shared by the plan and its clones
 pub(crate) struct Allowed(Arc<Mutex<HashSet<EndpointId>>>);
 
 impl Allowed {
