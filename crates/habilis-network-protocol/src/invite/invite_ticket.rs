@@ -485,7 +485,7 @@ mod tests {
         let root = mesh.invite_key().unwrap().clone();
         let expiry = UnixSecs::now() + Duration::from_hours(1);
         let attacker = SecretKey::from_bytes(&[9u8; 32]);
-        let forged = InviteTicket {
+        let forged: InviteTicket = InviteTicket {
             mesh_hash: hash.clone(),
             expiry,
             password: false,
@@ -532,7 +532,7 @@ mod tests {
         let root = mesh.invite_key().unwrap().clone();
         let past = UnixSecs::now() - Duration::from_secs(100);
         let issuer = mesh.issuer_secret().unwrap().clone();
-        let expired = InviteTicket {
+        let expired: InviteTicket = InviteTicket {
             mesh_hash: hash.clone(),
             expiry: past,
             password: false,

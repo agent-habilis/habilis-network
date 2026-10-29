@@ -194,7 +194,7 @@ impl TransportPolicy {
         if transports.is_empty() {
             return Ok(Self::default());
         }
-        let policy = Self {
+        let policy: Self = Self {
             udp: transports.contains(&Transport::Udp),
             webrtc: transports.contains(&Transport::WebRtc),
             multihop: transports.contains(&Transport::Multihop),

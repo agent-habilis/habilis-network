@@ -1301,7 +1301,7 @@ mod lookup_tests {
             (&[WebRtc, Multihop, Relay, Gossip], Ok(())),
             (&[Udp, WebRtc, Multihop, Relay, Gossip], Ok(())),
         ];
-        let mask = |list: &[Transport]| {
+        let mask: fn(&[Transport]) -> u8 = |list| {
             [Udp, WebRtc, Multihop, Gossip, Relay]
                 .iter()
                 .enumerate()

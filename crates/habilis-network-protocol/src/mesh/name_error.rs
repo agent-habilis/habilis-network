@@ -109,7 +109,7 @@ fn strip_url_scheme(input: &str) -> &str {
     if let Some(index) = input.find("://") {
         let scheme = &input[..index];
         let mut chars = scheme.chars();
-        let valid = chars
+        let valid: bool = chars
             .next()
             .is_some_and(|first| first.is_ascii_alphabetic())
             && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '.' | '-'));

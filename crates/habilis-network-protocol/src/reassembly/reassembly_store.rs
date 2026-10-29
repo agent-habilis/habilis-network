@@ -117,20 +117,20 @@ impl ReassemblyStore {
             return ShardIngest::Dropped;
         }
 
-        let group = self
-            .groups
-            .entry(key.clone())
-            .or_insert_with(|| PartialGroup {
-                total: shard.total,
-                kind: shard_msg.kind.clone(),
-                author: shard_msg.author.clone(),
-                slots: BTreeMap::new(),
-                header: None,
-                bytes: 0,
-                last_seen: now,
-                created_at: now,
-                last_repair: None,
-            });
+        let group: &mut PartialGroup =
+            self.groups
+                .entry(key.clone())
+                .or_insert_with(|| PartialGroup {
+                    total: shard.total,
+                    kind: shard_msg.kind.clone(),
+                    author: shard_msg.author.clone(),
+                    slots: BTreeMap::new(),
+                    header: None,
+                    bytes: 0,
+                    last_seen: now,
+                    created_at: now,
+                    last_repair: None,
+                });
         group.last_seen = now;
         group.bytes += charge;
         group
