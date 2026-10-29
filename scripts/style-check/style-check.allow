@@ -581,13 +581,7 @@ abbrev_name|crates/habilis-network-netplay/src/p2p_session.rs|24|existing letter
 abbrev_name|crates/habilis-network-netplay/src/event.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-netplay/src/transport.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/lib.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/mesh/lookup.rs|12|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-protocol/src/mesh/name_error.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/message/build_msg_bytes.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/message/message.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/message/shard.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/message/tests.rs|94|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/peer_addr_error.rs|10|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream-cli/src/args.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream-cli/src/main.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-wasm/src/mesh_peer.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
@@ -686,7 +680,6 @@ trait_import_scope|crates/habilis-network/src/daemon/event_loop.rs|1|kept: a tra
 trait_import_scope|crates/habilis-network/src/transport/direct_only_gossip.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
 trait_import_scope|crates/habilis-network/src/transport/payload_path.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
 trait_import_scope|crates/habilis-network/src/transport/probe/watchers.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
-abbrev_name|crates/habilis-network-protocol/src/mesh/mesh.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network-protocol/src/mesh/locked_mesh.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/mesh/mesh.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/beacon/dependents.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
