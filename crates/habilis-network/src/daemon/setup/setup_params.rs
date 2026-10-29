@@ -41,7 +41,7 @@ pub struct SetupParams {
     /// *overrides* the endpoint's ALPN list, and two `accept()` loops on one
     /// endpoint race for the same queue. One Router owns accept; everything
     /// else registers here.
-    pub protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+    pub protocols: habilis_network_iroh_transport_util::ProtocolSet,
     /// This node's own paths, narrowed to the mesh's list in `setup_mesh`.
     /// The shipped surfaces pass the default. Narrowing it by hand is the test
     /// harness's lever to force a relay-only path. Never part of the mesh id —
@@ -74,7 +74,7 @@ impl SetupParams {
             state_file: None,
             sink,
             endpoint: None,
-            protocols: Vec::new(),
+            protocols: habilis_network_iroh_transport_util::ProtocolSet::default(),
             transports: crate::lookup::TransportOpts::default(),
             per_peer_gate: None,
             cohost: None,
@@ -125,7 +125,7 @@ impl SetupParams {
     #[must_use]
     pub fn with_protocols(
         self,
-        protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+        protocols: habilis_network_iroh_transport_util::ProtocolSet,
     ) -> Self {
         Self { protocols, ..self }
     }

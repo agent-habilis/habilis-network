@@ -85,6 +85,7 @@ pub struct MultihopCounters {
     pub delivered: u64,
 }
 pub use app_id::{AppId, UnderlayId};
+pub use habilis_network_iroh_transport_util::ProtocolSet;
 pub use link_metric::LinkMetric;
 pub use topology::{LinkVector, Topology, TopologyEdge, TopologyView};
 
@@ -256,7 +257,7 @@ impl MultihopHandle {
         underlay: Endpoint,
         config: HandleConfig,
     ) -> Result<Self, HandleError> {
-        Self::with_protocols(secret, underlay, config, Vec::new())
+        Self::with_protocols(secret, underlay, config, ProtocolSet::default())
     }
 
     /// [`new`](Self::new), and the underlay also accepts `protocols`, each an ALPN
@@ -271,8 +272,9 @@ impl MultihopHandle {
         secret: &SecretKey,
         underlay: Endpoint,
         config: HandleConfig,
-        protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+        protocols: ProtocolSet,
     ) -> Result<Self, HandleError> {
+        let protocols: Vec<_> = protocols.into_iter().collect();
         if protocols
             .iter()
             .any(|(alpn, _)| alpn.as_slice() == underlay::FORWARD_ALPN)
@@ -631,7 +633,7 @@ mod tests {
     use iroh::endpoint::presets;
     use iroh::{Endpoint, RelayMode, SecretKey};
 
-    use super::{AppId, HandleConfig, MultihopHandle, UnderlayId, underlay_secret};
+    use super::{AppId, HandleConfig, MultihopHandle, ProtocolSet, UnderlayId, underlay_secret};
     use crate::cell::Cell;
     use crate::route::{Route, RouteHop};
     use crate::test_support;
@@ -811,10 +813,10 @@ mod tests {
             &secret,
             loopback_underlay(&secret).await,
             HandleConfig::default(),
-            vec![(
+            ProtocolSet::default().with_protocol(
                 EXTRA_ALPN.to_vec(),
-                Box::new(Counting(std::sync::Arc::clone(&accepted))),
-            )],
+                Counting(std::sync::Arc::clone(&accepted)),
+            ),
         )
         .expect("an extra ALPN is allowed");
 
@@ -843,10 +845,10 @@ mod tests {
             &secret,
             loopback_underlay(&secret).await,
             HandleConfig::default(),
-            vec![(
+            ProtocolSet::default().with_protocol(
                 crate::underlay::FORWARD_ALPN.to_vec(),
-                Box::new(Counting(std::sync::Arc::default())),
-            )],
+                Counting(std::sync::Arc::default()),
+            ),
         );
         assert!(result.is_err(), "the forwarder keeps its own ALPN");
     }

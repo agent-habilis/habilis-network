@@ -340,7 +340,7 @@ pub(crate) async fn build_peer_multihop_with(
         },
     )
     .await?;
-    let mut protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> = Vec::new();
+    let mut protocols = habilis_network_iroh_transport_util::ProtocolSet::default();
     let mut underlay_webrtc = None;
     if let Some((handle, table)) = underlay_leg {
         let allowed = underlay_webrtc::Allowed::default();
@@ -358,16 +358,13 @@ pub(crate) async fn build_peer_multihop_with(
             table.clone(),
             ice,
         );
-        protocols.push((
+        protocols = protocols.with_protocol(
             crate::transport::MESH_WEBRTC_SIGNAL_ALPN.to_vec(),
-            Box::new(underlay_webrtc::UnderlaySignalGate::new(
-                acceptor,
-                allowed.clone(),
-            )),
-        ));
+            underlay_webrtc::UnderlaySignalGate::new(acceptor, allowed.clone()),
+        );
         // A session that attached is used only after a connect that completes, and
         // the nudge is that connect: see `webrtc::nudge_acceptor::nudge_session`.
-        protocols.push((webrtc::NUDGE_ALPN.to_vec(), Box::new(webrtc::NudgeAcceptor)));
+        protocols = protocols.with_protocol(webrtc::NUDGE_ALPN.to_vec(), webrtc::NudgeAcceptor);
         underlay_webrtc = Some(underlay_webrtc::UnderlayWebRtc {
             handle,
             admission: table,

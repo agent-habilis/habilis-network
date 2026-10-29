@@ -499,7 +499,7 @@ impl SetupBuild<'_> {
 }
 
 /// The ALPN handlers a caller registers on the mesh's Router.
-type CallerProtocols = Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>;
+type CallerProtocols = habilis_network_iroh_transport_util::ProtocolSet;
 
 /// The freshly-assembled mesh handles a [`SetupKind`] arm produces.
 struct Assembled {

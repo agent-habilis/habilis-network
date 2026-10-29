@@ -908,7 +908,15 @@ async fn a_router_that_carries_no_unicast_completes_a_nudge() {
     )
     .await
     .expect("a beacon endpoint");
-    let (_gossip, router, _book) = build_mesh(beacon, 5, None, None, Vec::new(), true, false);
+    let (_gossip, router, _book) = build_mesh(
+        beacon,
+        5,
+        None,
+        None,
+        habilis_network_iroh_transport_util::ProtocolSet::default(),
+        true,
+        false,
+    );
     let dialer = build_endpoint(
         &LookupOpts::loopback(),
         None,

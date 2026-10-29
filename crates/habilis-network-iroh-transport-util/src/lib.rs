@@ -19,7 +19,10 @@
 //! assert_eq!(segments, [&b"abcd"[..], &b"ef"[..]], "the last segment holds the rest");
 //! ```
 
+mod protocol_set;
 mod rung;
+
+pub use protocol_set::ProtocolSet;
 
 pub use rung::{
     GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID, best_of, blocked, climb,

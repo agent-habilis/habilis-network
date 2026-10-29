@@ -1460,7 +1460,7 @@ async fn a_rendezvous_does_not_dial_its_own_peer() {
         tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
         None,
         None,
-        Vec::new(),
+        habilis_network_iroh_transport_util::ProtocolSet::default(),
         false,
         false,
     );
@@ -1516,7 +1516,7 @@ async fn a_holder_reaches_its_own_public_rendezvous_without_lookups() {
         tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
         None,
         None,
-        Vec::new(),
+        habilis_network_iroh_transport_util::ProtocolSet::default(),
         false,
         false,
     );
@@ -1573,7 +1573,7 @@ async fn a_member_that_links_to_the_beacon_is_reported_to_its_holder() {
         tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
         None,
         None,
-        Vec::new(),
+        habilis_network_iroh_transport_util::ProtocolSet::default(),
         false,
         false,
     );

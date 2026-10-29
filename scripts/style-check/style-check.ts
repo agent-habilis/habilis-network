@@ -712,7 +712,7 @@ const RULES: Rule[] = [
     scan: countDynParams,
     skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/[^/]+\/src\/)/,
     glob: "crates/**/*.rs",
-    why: "A library fn takes a generic (T: Trait or impl Trait), not a dyn Trait parameter. A counted row is a trait object that stays, with its reason.",
+    why: "A library fn takes a generic (T: Trait or impl Trait), not a dyn Trait parameter. A handler list that holds trait objects is a ProtocolSet, built by its generic with_protocol.",
   },
   {
     name: "pub_vec_return",

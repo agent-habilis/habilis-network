@@ -34,7 +34,7 @@ pub(crate) fn build_mesh(
         crate::transport::SignalAdmission,
         crate::transport::IceProfile,
     )>,
-    protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+    protocols: habilis_network_iroh_transport_util::ProtocolSet,
     // The mesh's `transport.relay_transport`: with it off, every inbound gossip
     // connection is held until iroh selects a direct path on it.
     relay_transport: bool,

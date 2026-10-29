@@ -127,7 +127,7 @@ pub(crate) async fn claim_holder(
         }),
         // The rendezvous serves no caller protocol either — it is a meeting
         // point, not somewhere an application is reachable.
-        Vec::new(),
+        habilis_network_iroh_transport_util::ProtocolSet::default(),
         params.relay_transport.relay_allowed(),
         // The rendezvous keeps the hold: a joiner grafts it only once their
         // session is attached, so a held dial here is not a second one.
