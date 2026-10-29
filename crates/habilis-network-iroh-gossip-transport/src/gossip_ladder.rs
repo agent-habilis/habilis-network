@@ -104,9 +104,8 @@ mod tests {
     /// say whether the selected one is IP.
     async fn selects_ip(alice: &Endpoint, bob: &Endpoint) -> bool {
         let router = Router::builder(bob.clone()).accept(ALPN, Hold).spawn();
-        let both = bob
-            .addr()
-            .addrs
+        let direct = bob.addr().addrs;
+        let both = direct
             .into_iter()
             .chain([TransportAddr::Custom(gossip_addr(bob.id()))]);
         let connection = alice
@@ -165,10 +164,11 @@ mod tests {
                 let handle = GossipHandle::new(key(seed).public());
                 hub.join(&handle);
                 async move {
+                    let transport = handle.custom_transport();
                     let builder = Endpoint::builder(presets::Minimal)
                         .secret_key(key(seed))
                         .relay_mode(RelayMode::Disabled)
-                        .add_custom_transport(handle.custom_transport());
+                        .add_custom_transport(transport);
                     let configured = builder.path_selector(handle.path_selector());
                     configured
                         .clear_ip_transports()
@@ -180,16 +180,9 @@ mod tests {
             };
             let (alice, bob) = (bind(35).await, bind(36).await);
             let router = Router::builder(bob.clone()).accept(ALPN, Hold).spawn();
-            let connection = alice
-                .connect(
-                    EndpointAddr::from_parts(
-                        bob.id(),
-                        [TransportAddr::Custom(gossip_addr(bob.id()))],
-                    ),
-                    ALPN,
-                )
-                .await
-                .expect("connect");
+            let target =
+                EndpointAddr::from_parts(bob.id(), [TransportAddr::Custom(gossip_addr(bob.id()))]);
+            let connection = alice.connect(target, ALPN).await.expect("connect");
             assert!(
                 crate::selected_is_gossip(&connection),
                 "the ladder selects gossip when it is the only path"

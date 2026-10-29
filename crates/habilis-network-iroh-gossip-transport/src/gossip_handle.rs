@@ -411,10 +411,11 @@ mod tests {
 
     /// An endpoint whose only transport is gossip.
     async fn endpoint(secret: SecretKey, handle: &GossipHandle) -> Endpoint {
+        let transport = handle.custom_transport();
         let builder = Endpoint::builder(presets::Minimal)
             .secret_key(secret)
             .relay_mode(RelayMode::Disabled)
-            .add_custom_transport(handle.custom_transport());
+            .add_custom_transport(transport);
         builder
             .clear_ip_transports()
             .clear_relay_transports()
@@ -461,13 +462,12 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (_hub, (alice, _), (bob, _), router) = pair().await;
 
-            let connection = tokio::time::timeout(
-                Duration::from_secs(10),
-                alice.connect(dial(bob.id()), ECHO_ALPN),
-            )
-            .await
-            .expect("connect timed out")
-            .expect("connect over gossip");
+            let target = dial(bob.id());
+            let connection =
+                tokio::time::timeout(Duration::from_secs(10), alice.connect(target, ECHO_ALPN))
+                    .await
+                    .expect("connect timed out")
+                    .expect("connect over gossip");
 
             echo_once(&connection, b"hello over gossip").await;
             let selected_is_gossip: bool = connection.paths().iter().any(|path| {
@@ -597,13 +597,12 @@ mod tests {
     fn a_frame_for_another_member_or_a_bad_frame_is_not_queued() {
         let _guard = ::habilis_network_test_tracing::init();
         let handle = GossipHandle::new(secret(1).public());
-        let for_carol = (Frame {
+        let frame = Frame {
             dst: secret(3).public(),
             src: secret(2).public(),
             datagram: &[1],
-        })
-        .encode()
-        .expect("frame");
+        };
+        let for_carol = frame.encode().expect("frame");
 
         assert_eq!(
             handle.deliver(&for_carol),
@@ -632,13 +631,12 @@ mod tests {
 
             let real = hub.sent().next().expect("a frame was sent");
             let real = frame::decode(&real).expect("a frame");
-            let forged = (Frame {
+            let frame = Frame {
                 dst: alice_handle.app_id(),
                 src: secret(9).public(),
                 datagram: real.datagram,
-            })
-            .encode()
-            .expect("a frame");
+            };
+            let forged = frame.encode().expect("a frame");
             for _ in 0..5 {
                 let _ = alice_handle.deliver(&forged);
             }
@@ -754,13 +752,12 @@ mod tests {
         })
         .encode()
         .expect("frame");
-        let for_carol = (Frame {
+        let frame = Frame {
             dst: secret(3).public(),
             src: secret(2).public(),
             datagram: &[1],
-        })
-        .encode()
-        .expect("frame");
+        };
+        let for_carol = frame.encode().expect("frame");
 
         let _ = handle.deliver(&for_me);
         let _ = handle.deliver(&for_carol);
@@ -880,8 +877,9 @@ mod tests {
             let bob = build(secret(2), bob_handle).await;
             let router = Router::builder(bob.clone()).accept(ECHO_ALPN, Echo).spawn();
 
+            let target = bob.id();
             let connection =
-                tokio::time::timeout(Duration::from_secs(10), alice.connect(bob.id(), ECHO_ALPN))
+                tokio::time::timeout(Duration::from_secs(10), alice.connect(target, ECHO_ALPN))
                     .await
                     .expect("connect timed out")
                     .expect("connect by id");

@@ -352,8 +352,8 @@ mod tests {
             let router = Router::builder(server.clone())
                 .accept(BENCH_ALPN, Bench::new())
                 .spawn();
-            let socket = server
-                .bound_sockets()
+            let sockets = server.bound_sockets();
+            let socket = sockets
                 .into_iter()
                 .find(SocketAddr::is_ipv4)
                 .expect("an IPv4 socket");

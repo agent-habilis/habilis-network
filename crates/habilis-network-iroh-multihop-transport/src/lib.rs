@@ -1164,10 +1164,8 @@ mod tests {
             let (handle, [(short, short_underlay), (long_a, _), _, (dst, _)]) =
                 handle_with_two_routes().await;
             let first_hop_resolved = || async {
-                let mut answers = handle
-                    .address_lookup()
-                    .resolve(dst.get())
-                    .expect("the lookup answers");
+                let lookup = handle.address_lookup();
+                let mut answers = lookup.resolve(dst.get()).expect("the lookup answers");
                 let item = answers.next().await.expect("an item").expect("no error");
                 let mut addrs = item.endpoint_info().addrs();
                 let custom_addr = addrs.find(|address| address.is_custom());
@@ -1241,22 +1239,18 @@ mod tests {
             }
 
             // Alice dials Bob; Bob gets the cell and builds the way back from it.
-            let forward = Route::decode(
-                &alice_handle
-                    .route_addr(AppId::new(bob.public()))
-                    .expect("a route"),
-            )
-            .expect("a route");
+            let route = alice_handle
+                .route_addr(AppId::new(bob.public()))
+                .expect("a route");
+            let forward = Route::decode(&route).expect("a route");
             let stamp = alice_handle.inner.transport.self_hop();
             let way_back = Route::reverse_from(forward.hops(), stamp).expect("a legal route");
 
             // Bob's own route to Alice, as his address lookup would hand it to iroh.
-            let dialed = Route::decode(
-                &bob_handle
-                    .route_addr(AppId::new(alice.public()))
-                    .expect("a route"),
-            )
-            .expect("a route");
+            let reply_route = bob_handle
+                .route_addr(AppId::new(alice.public()))
+                .expect("a route");
+            let dialed = Route::decode(&reply_route).expect("a route");
             assert_eq!(
                 way_back.encode(),
                 dialed.encode(),

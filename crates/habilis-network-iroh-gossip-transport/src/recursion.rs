@@ -95,10 +95,11 @@ mod tests {
     }
 
     async fn gossip_only_endpoint(key: SecretKey, handle: &GossipHandle) -> Endpoint {
+        let transport = handle.custom_transport();
         let builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
-            .add_custom_transport(handle.custom_transport());
+            .add_custom_transport(transport);
         builder
             .clear_ip_transports()
             .clear_relay_transports()
@@ -126,14 +127,10 @@ mod tests {
                 // the router owns the handler; the test keeps a clone to take the sender out
                 .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
                 .spawn();
+            let target =
+                EndpointAddr::from_parts(bob.id(), [TransportAddr::Custom(gossip_addr(bob.id()))]);
             let connection = alice
-                .connect(
-                    EndpointAddr::from_parts(
-                        bob.id(),
-                        [TransportAddr::Custom(gossip_addr(bob.id()))],
-                    ),
-                    ALPN,
-                )
+                .connect(target, ALPN)
                 .await
                 .expect("connect over gossip");
             assert!(
