@@ -489,7 +489,9 @@ impl MeshDoc {
     /// below it. A global breach refuses the newcomer instead: evicting across
     /// authors would let one hostile stream push a joiner's honest backfill out
     /// of the buffer, which is the failure the ceiling exists to prevent. Both
-    /// mirror the reassembly store.
+    /// mirror the reassembly store. A refused newcomer is recovered: its frame is
+    /// forgotten (see [`Self::take_dropped`]), so the author's re-send lands once
+    /// the lower seqs drain. The refusal is logged at debug, not as a warning.
     fn buffer_orphan(
         &mut self,
         author: AuthorKey,
@@ -504,9 +506,9 @@ impl MeshDoc {
             && let Some((victim, victim_seq)) = self.highest_of(&author)
         {
             if change.seq() >= victim_seq {
-                if let Some(changes) = self.warn_due("channel orphan buffer full for this author; incoming higher-seq orphan refused") {
-                    tracing::warn!(target: LOG_TARGET, changes, author = %frame.author, "channel orphan buffer full for this author; incoming higher-seq orphan refused");
-                }
+                // Back-pressure, not a fault: the frame is forgotten below, so the author's
+                // re-send lands once the lower seqs have drained.
+                tracing::debug!(target: LOG_TARGET, author = %frame.author, "channel orphan buffer full for this author; incoming higher-seq orphan refused, recovered by the re-send");
                 self.dropped.push(frame.dedup_key());
                 return Ingested::Ignored;
             }
@@ -852,9 +854,7 @@ fn put_number(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate, WARN_EVERY,
-    };
+    use super::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate};
     use automerge::Change;
     use habilis_network_protocol::message::Verified;
     use habilis_network_protocol::{
@@ -1146,10 +1146,6 @@ mod tests {
     /// never satisfied, so nothing drains and nothing expires.
     #[test]
     fn an_orphan_flood_from_one_author_stays_bounded() {
-        expect_warn(
-            super::LOG_TARGET,
-            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
-        );
         let alice = nick("alice");
         let mut source = MeshDoc::new_ungated();
         let chain: Vec<Verified> = (0..DOC_PENDING_AUTHOR_MAX + 32)
@@ -1168,77 +1164,6 @@ mod tests {
             "one author buffered {per_author} orphans, over the {DOC_PENDING_AUTHOR_MAX} ceiling"
         );
         assert!(total <= DOC_PENDING_TOTAL_MAX, "{total} orphans buffered");
-    }
-
-    /// Collects the `changes` field of every WARN that the thread logs while it is the default
-    /// subscriber. A subscriber of the thread, so the guard of the test sees none of these events.
-    struct WarnCounts(std::sync::Arc<std::sync::Mutex<Vec<u64>>>);
-
-    impl tracing::Subscriber for WarnCounts {
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-        fn event(&self, event: &tracing::Event<'_>) {
-            struct Changes(u64);
-            impl tracing::field::Visit for Changes {
-                fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-                    if field.name() == "changes" {
-                        self.0 = value;
-                    }
-                }
-                fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
-            }
-            if *event.metadata().level() == tracing::Level::WARN {
-                let mut changes = Changes(0);
-                event.record(&mut changes);
-                self.0.lock().expect("no poison").push(changes.0);
-            }
-        }
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
-    /// A flood of refused changes from one author logs the first refusal at once and then one WARN
-    /// for every `WARN_EVERY` refusals, each with the number of refusals since the last WARN. The
-    /// crate keeps no clock, so the window is a count of refusals.
-    #[test]
-    fn a_flood_of_refused_changes_logs_one_warn_per_window() {
-        let alice = nick("alice");
-        let mut source = MeshDoc::new_ungated();
-        let chain: Vec<Verified> = (0..DOC_PENDING_AUTHOR_MAX + 200)
-            .map(|step| author(&mut source, &alice, &json!({ "k": step })))
-            .collect();
-        // the subscriber holds a clone of the counts, and the test reads them after the scope
-        let mut sink = MeshDoc::new_ungated();
-        let counts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        // The root is withheld, so every change is an orphan: the first
-        // `DOC_PENDING_AUTHOR_MAX` fill the buffer and each later one is refused.
-        tracing::subscriber::with_default(WarnCounts(std::sync::Arc::clone(&counts)), || {
-            for frame in chain.iter().skip(1) {
-                sink.ingest(frame);
-            }
-        });
-        let logged = counts.lock().expect("no poison").clone();
-        let refused = u64::try_from(chain.len() - 1 - DOC_PENDING_AUTHOR_MAX).expect("fits");
-        assert_eq!(
-            logged.first(),
-            Some(&1),
-            "the first refusal is logged at once"
-        );
-        assert!(
-            logged.iter().skip(1).all(|&changes| changes == WARN_EVERY),
-            "every later WARN counts a full window: {logged:?}"
-        );
-        assert_eq!(
-            u64::try_from(logged.len()).expect("fits"),
-            1 + (refused - 1) / WARN_EVERY,
-            "{refused} refusals logged {logged:?}"
-        );
     }
 
     /// The global backstop **refuses the newcomer** rather than evicting across
@@ -1344,10 +1269,6 @@ mod tests {
     /// joiner's honest backfill out of the buffer.
     #[test]
     fn a_floods_orphans_do_not_evict_another_authors() {
-        expect_warn(
-            super::LOG_TARGET,
-            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
-        );
         let alice = nick("alice");
         let mallory = nick("mallory");
 
@@ -1418,10 +1339,6 @@ mod tests {
     /// cannot drain until every link below it arrives again.
     #[test]
     fn a_full_orphan_buffer_keeps_the_lowest_seqs_of_an_author() {
-        expect_warn(
-            super::LOG_TARGET,
-            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
-        );
         let chain = keyed_chain(300);
         let tail: Vec<usize> = (100..300).collect();
         let sink = deliver(&chain, &tail, 100);
@@ -1457,10 +1374,6 @@ mod tests {
             super::LOG_TARGET,
             "channel orphan buffer full for this author; highest-seq orphan evicted",
         );
-        expect_warn(
-            super::LOG_TARGET,
-            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
-        );
         let chain = keyed_chain(300);
         // 7919 shares no factor with 200, so it walks all 200 slots once each.
         let tail: Vec<usize> = (0..200).map(|slot| 100 + slot * 7919 % 200).collect();
@@ -1476,10 +1389,6 @@ mod tests {
     /// only those: the rest drain and must stay seen.
     #[test]
     fn a_full_orphan_buffer_reports_the_links_it_let_go() {
-        expect_warn(
-            super::LOG_TARGET,
-            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
-        );
         let chain = keyed_chain(300);
         let tail: Vec<usize> = (100..300).collect();
         let mut sink = deliver(&chain, &tail, 100);
@@ -1498,10 +1407,6 @@ mod tests {
     /// when its content differs: seq is the only order the buffer trusts.
     #[test]
     fn a_full_orphan_buffer_refuses_a_second_change_at_its_highest_seq() {
-        expect_warn(
-            super::LOG_TARGET,
-            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
-        );
         let chain = keyed_chain(DOC_PENDING_AUTHOR_MAX + 1);
         let alice = nick("alice");
         let mut fork = MeshDoc::new_ungated();
@@ -1659,6 +1564,33 @@ mod tests {
         }
         let backfilled: Vec<_> = source.heads().collect();
         assert!(joiner.holds_heads(&backfilled), "after the backfill");
+    }
+
+    #[test]
+    fn a_flood_past_the_author_cap_converges_on_the_author_re_send() {
+        let alice = nick("alice");
+        let mut source = MeshDoc::new_ungated();
+        let frames: Vec<_> = (0..200)
+            .map(|index| author(&mut source, &alice, &json!({ format!("k{index}"): index })))
+            .collect();
+        let heads: Vec<_> = source.heads().collect();
+        let mut joiner = MeshDoc::new_ungated();
+        // A relayed flood reaches the joiner tail first, so the author's cap refuses the excess.
+        for frame in frames[1..].iter().chain(&frames[..1]) {
+            joiner.ingest(frame);
+        }
+        assert!(
+            !joiner.holds_heads(&heads),
+            "the first pass leaves the refused tail out"
+        );
+        // The author re-sends in causal order, and the refused frames land now.
+        for frame in &frames {
+            joiner.ingest(frame);
+        }
+        assert!(
+            joiner.holds_heads(&heads),
+            "the re-send converges the joiner"
+        );
     }
 
     #[test]
