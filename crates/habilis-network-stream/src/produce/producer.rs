@@ -10,6 +10,7 @@ use crate::code;
 use crate::error::StreamError;
 use crate::hash::StreamHash;
 
+use n0_future::time;
 /// How long `close` waits for the consumer to acknowledge the last bytes.
 /// Closing the connection before that can cut the tail of the stream.
 const DRAIN: Duration = Duration::from_secs(5);
@@ -111,7 +112,7 @@ impl Producer {
         link.send
             .finish()
             .map_err(|error| StreamError::ConsumerGone(error.into()))?;
-        let _ = n0_future::time::timeout(DRAIN, link.send.stopped()).await;
+        let _ = time::timeout(DRAIN, link.send.stopped()).await;
         link.connection.close(code::DONE.into(), b"done");
         self.closed = true;
         Ok(())

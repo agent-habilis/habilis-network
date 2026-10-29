@@ -48,6 +48,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::{ID_LEN, KIND, SECRET_LEN, StreamHash, StreamId, StreamSecret, VERSION};
+    use habilis_network::runtime;
     fn sample(transport: TransportPolicy) -> StreamHash {
         let id = SecretKey::from_bytes(&[7; 32]).public();
         StreamHash {
@@ -196,8 +197,7 @@ mod tests {
     fn a_mesh_id_is_not_a_stream_hash() {
         let _guard = ::habilis_network_test_tracing::init();
         let mesh =
-            habilis_network::runtime::derive_topic_mesh_with("standup", LookupOpts::loopback())
-                .expect("mesh");
+            runtime::derive_topic_mesh_with("standup", LookupOpts::loopback()).expect("mesh");
         assert!(
             StreamHash::decode(&mesh.to_string()).is_err(),
             "a mesh id is not a stream hash"

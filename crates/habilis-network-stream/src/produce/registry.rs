@@ -10,6 +10,7 @@ use tokio::sync::oneshot;
 use crate::code;
 use crate::hash::{StreamId, StreamSecret};
 
+use std::{fmt, sync};
 /// A consumer, admitted: the connection and the half the producer writes.
 pub(super) struct Link {
     pub(super) connection: Connection,
@@ -28,7 +29,7 @@ pub(super) struct Entry {
 pub(crate) struct Registry(Mutex<HashMap<StreamId, Entry>>);
 
 impl Registry {
-    pub(super) fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<StreamId, Entry>> {
+    pub(super) fn entries(&self) -> sync::MutexGuard<'_, HashMap<StreamId, Entry>> {
         self.0.lock().expect("the stream registry is poisoned")
     }
 
@@ -83,8 +84,8 @@ impl Registry {
     }
 }
 
-impl std::fmt::Debug for Registry {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Registry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let open = self.entries().len();
         formatter
             .debug_struct("Registry")
@@ -93,8 +94,8 @@ impl std::fmt::Debug for Registry {
     }
 }
 
-impl std::fmt::Debug for Link {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Link {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Link")
             .field("remote", &self.connection.remote_id())

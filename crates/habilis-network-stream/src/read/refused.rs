@@ -5,6 +5,7 @@ use std::fmt;
 use habilis_network::iroh::endpoint::{Connection, ConnectionError};
 
 use crate::code;
+use std::error;
 /// Why a producer would not, or no longer will, give this consumer its stream.
 /// Reached as [`crate::error::StreamError::Refused`], so a caller can tell a refusal from a
 /// lost link.
@@ -48,7 +49,7 @@ impl fmt::Display for Refused {
     }
 }
 
-impl std::error::Error for Refused {}
+impl error::Error for Refused {}
 
 /// The refusal behind a connection the producer closed, if it closed it with
 /// one of the stream's codes.

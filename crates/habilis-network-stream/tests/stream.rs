@@ -11,8 +11,10 @@ use habilis_network_stream::{
     Producer, Reader, Refused, StreamError, StreamHash, StreamNode, StreamOpts, StreamSecret,
 };
 
+use habilis_network::iroh;
 use habilis_network::iroh::endpoint::presets;
 use habilis_network::net::direct;
+use tokio::time;
 /// Generous: a relay dial, a JSEP round and a hole punch all fit inside it.
 const BUDGET: Duration = Duration::from_mins(1);
 
@@ -75,7 +77,7 @@ fn ten_megabytes_arrive_complete_and_in_order() {
 
         let mut reader = consumer_node.open(&hash).await.expect("open");
         let started = Instant::now();
-        let got = tokio::time::timeout(BUDGET, read_all(&mut reader))
+        let got = time::timeout(BUDGET, read_all(&mut reader))
             .await
             .expect("within budget")
             .expect("read");
@@ -128,7 +130,7 @@ fn a_read_after_the_end_is_the_end_again() {
         );
         writer.await.expect("writer");
         // Past the reader's own `DONE` close, which the first end triggered.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
         assert!(
             reader.read().await.expect("a read after the end").is_none(),
             "the end of stream must repeat"
@@ -239,7 +241,7 @@ fn close_or_abandon_with_no_consumer_abandons_at_once() {
         let (producer_node, consumer_node) = (loopback().await, loopback().await);
         let producer = producer_node.create().await;
         let hash = producer.hash().clone();
-        tokio::time::timeout(Duration::from_secs(1), producer.close_or_abandon())
+        time::timeout(Duration::from_secs(1), producer.close_or_abandon())
             .await
             .expect("no wait for a consumer")
             .expect("abandoned");
@@ -318,9 +320,9 @@ fn a_producer_dropped_with_its_link_unclaimed_abandons_the_stream() {
         let hash = producer.hash().clone();
         let mut reader = consumer_node.open(&hash).await.expect("open");
         // Past the acceptor's hand-off, without ever calling `attached()`.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
         drop(producer);
-        let outcome = tokio::time::timeout(BUDGET, read_all(&mut reader))
+        let outcome = time::timeout(BUDGET, read_all(&mut reader))
             .await
             .expect("within budget");
         let error = outcome.expect_err("an abandoned stream must not read as ended");
@@ -342,7 +344,7 @@ fn a_consumer_that_leaves_fails_the_write_and_spends_the_hash() {
         drop(reader);
 
         let chunk = vec![0; 64 * 1024];
-        let failed = tokio::time::timeout(BUDGET, async {
+        let failed = time::timeout(BUDGET, async {
             loop {
                 if producer.write(&chunk).await.is_err() {
                     return;
@@ -425,7 +427,7 @@ fn a_relay_transport_stream_admits_a_consumer_with_no_direct_path() {
         );
         let hash = producer.hash().clone();
         let writer = tokio::spawn(produce(producer, b"over the relay".to_vec(), 64));
-        let mut reader = tokio::time::timeout(BUDGET, consumer_node.open(&hash))
+        let mut reader = time::timeout(BUDGET, consumer_node.open(&hash))
             .await
             .expect("within budget")
             .expect("open");
@@ -458,11 +460,11 @@ fn a_webrtc_only_consumer_reads_over_the_data_channel() {
         let hash = producer.hash().clone();
         let sent = payload(1024 * 1024);
         let writer = tokio::spawn(produce(producer, sent.clone(), 16 * 1024));
-        let mut reader = tokio::time::timeout(BUDGET, consumer_node.open(&hash))
+        let mut reader = time::timeout(BUDGET, consumer_node.open(&hash))
             .await
             .expect("within budget")
             .expect("open");
-        let got = tokio::time::timeout(BUDGET, read_all(&mut reader))
+        let got = time::timeout(BUDGET, read_all(&mut reader))
             .await
             .expect("within budget")
             .expect("read");
@@ -506,7 +508,7 @@ fn a_stream_node_with_webrtc_serves_the_nudge_of_a_peer() {
         let node = loopback().await;
         let producer = node.create().await;
         let address = producer.hash().address.clone();
-        let dialer = habilis_network::iroh::Endpoint::bind(presets::Minimal)
+        let dialer = iroh::Endpoint::bind(presets::Minimal)
             .await
             .expect("bind a dialer");
         let nudge = dialer.connect(address, direct::NUDGE_ALPN).await;

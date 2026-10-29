@@ -23,6 +23,8 @@ use crate::hash::{ID_LEN, SECRET_LEN, StreamHash, StreamId, StreamSecret};
 use crate::produce::{Producer, Registry, StreamAcceptor};
 use crate::read::{Reader, Refused};
 
+use habilis_network::net::EndpointError;
+use n0_future::time;
 /// One endpoint serving and opening streams. It never joins a gossip mesh.
 ///
 /// # Examples
@@ -161,7 +163,7 @@ impl StreamNode {
         // `online` resolves only once a home relay is reached, so without a
         // relay lookup it would cost the whole wait.
         if self.lookups.relay_lookup != RelayChoice::Disabled {
-            let _ = n0_future::time::timeout(ONLINE_WAIT, self.endpoint.online()).await;
+            let _ = time::timeout(ONLINE_WAIT, self.endpoint.online()).await;
         }
         let mut id = [0; ID_LEN];
         let mut secret = Zeroizing::new([0; SECRET_LEN]);
@@ -215,10 +217,7 @@ impl StreamNode {
             .await
             && !relay_ok
         {
-            if matches!(
-                error,
-                habilis_network::net::EndpointError::CapRefused { .. }
-            ) {
+            if matches!(error, EndpointError::CapRefused { .. }) {
                 return Err(StreamError::Refused(Refused::AtCap));
             }
             return Err(StreamError::Open {

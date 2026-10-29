@@ -12,6 +12,8 @@ use super::registry::{Link, Registry};
 use crate::code;
 use crate::hash::{ID_LEN, SECRET_LEN, StreamId, StreamSecret};
 
+use n0_future::time;
+use std::error;
 /// How long a connection may take to present `id ‖ secret`. Nothing the peer
 /// has proved yet, so it gets no more than a slow link needs.
 const PRE_AUTH: Duration = Duration::from_secs(10);
@@ -39,9 +41,7 @@ impl ProtocolHandler for StreamAcceptor {
         {
             return Ok(());
         }
-        let Ok(Ok((send, header))) =
-            n0_future::time::timeout(PRE_AUTH, read_header(&connection)).await
-        else {
+        let Ok(Ok((send, header))) = time::timeout(PRE_AUTH, read_header(&connection)).await else {
             connection.close(code::UNKNOWN.into(), b"no stream request");
             return Ok(());
         };
@@ -74,7 +74,7 @@ impl ProtocolHandler for StreamAcceptor {
 
 async fn read_header(
     connection: &Connection,
-) -> Result<(SendStream, (StreamId, StreamSecret)), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(SendStream, (StreamId, StreamSecret)), Box<dyn error::Error + Send + Sync>> {
     let (send, mut recv) = connection.accept_bi().await?;
     let mut id = [0; ID_LEN];
     let mut secret = Zeroizing::new([0; SECRET_LEN]);
