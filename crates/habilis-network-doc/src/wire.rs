@@ -149,8 +149,16 @@ mod tests {
         );
         // decrypt_body recovers the exact plaintext body, which then parses.
         let recovered = decrypt_body(enc.as_str(), Some(&key)).expect("decrypt");
-        assert_eq!(recovered, plain.as_str());
-        assert_eq!(parse_change_body(&recovered), Some(vec![1u8, 2, 3, 4]));
+        assert_eq!(
+            recovered,
+            plain.as_str(),
+            "an enc body round trips to the recovered plaintext"
+        );
+        assert_eq!(
+            parse_change_body(&recovered),
+            Some(vec![1u8, 2, 3, 4]),
+            "an enc body parses back to the plain change"
+        );
     }
 
     #[test]
@@ -162,7 +170,11 @@ mod tests {
         );
         assert!(decrypt_body(enc.as_str(), None).is_none(), "no key");
         // An `enc` body is not itself a change (must be decrypted first).
-        assert_eq!(parse_change_body(enc.as_str()), None);
+        assert_eq!(
+            parse_change_body(enc.as_str()),
+            None,
+            "an enc body needs the right key"
+        );
     }
 
     #[test]
@@ -171,11 +183,15 @@ mod tests {
         // Passwordless (no key): a non-`enc` body is returned verbatim.
         assert_eq!(
             decrypt_body(plain.as_str(), None).as_deref(),
-            Some(plain.as_str())
+            Some(plain.as_str()),
+            "decrypt enforces encryption only when keyed"
         );
         // Passworded (key set): a non-`enc` body is rejected — cleartext can't
         // slip past the encryption guarantee.
-        assert!(decrypt_body(plain.as_str(), Some(&key(7))).is_none());
+        assert!(
+            decrypt_body(plain.as_str(), Some(&key(7))).is_none(),
+            "a plain body is refused when keyed"
+        );
     }
 
     #[test]
@@ -184,9 +200,17 @@ mod tests {
         // The optional `m` delta does not affect change decoding either way.
         let with_merge =
             change_body(&change, Some(&serde_json::json!({"k": "v"}))).expect("compose");
-        assert_eq!(parse_change_body(with_merge.as_str()), Some(change.clone()));
+        assert_eq!(
+            parse_change_body(with_merge.as_str()),
+            Some(change.clone()),
+            "a change body round trips with a merge"
+        );
         let lean = change_body(&change, None).expect("compose");
-        assert_eq!(parse_change_body(lean.as_str()), Some(change));
+        assert_eq!(
+            parse_change_body(lean.as_str()),
+            Some(change),
+            "a lean change body round trips"
+        );
     }
 
     #[test]
@@ -194,7 +218,15 @@ mod tests {
         // A legacy `merge` body (or any non-`change` body) decodes to no change,
         // so the automerge engine ignores it — forward-compat with old binaries.
         let body = merge_body(serde_json::json!({"turn": "a"})).expect("compose");
-        assert_eq!(parse_change_body(body.as_str()), None);
-        assert_eq!(parse_change_body("not json"), None);
+        assert_eq!(
+            parse_change_body(body.as_str()),
+            None,
+            "a legacy merge body is a no-op change"
+        );
+        assert_eq!(
+            parse_change_body("not json"),
+            None,
+            "a non-json body is not a change"
+        );
     }
 }

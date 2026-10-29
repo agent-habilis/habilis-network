@@ -919,7 +919,8 @@ mod tests {
         let genesis = super::peers_genesis("peers");
         assert_eq!(
             format!("{:?}", genesis.hash()),
-            "ChangeHash(\"faf84e310070f1127948a680064551304e36a70d14ccff86f7ece64caf82908b\")"
+            "ChangeHash(\"faf84e310070f1127948a680064551304e36a70d14ccff86f7ece64caf82908b\")",
+            "the genesis change hash is pinned"
         );
     }
 
@@ -935,12 +936,14 @@ mod tests {
             .expect("the merge is not a no-op");
         assert_eq!(
             bs58::encode(&bytes).into_string(),
-            "BkyumvZ6ckpDpEVTTzvrfqoyymBWzN1qTVn2sqCJYU4TC7HQkarE1DSR52uEx1vZg2n6LotbD9"
+            "BkyumvZ6ckpDpEVTTzvrfqoyymBWzN1qTVn2sqCJYU4TC7HQkarE1DSR52uEx1vZg2n6LotbD9",
+            "a fixed change keeps its bytes"
         );
         let change = Change::from_bytes(bytes).expect("a change");
         assert_eq!(
             format!("{:?}", change.hash()),
-            "ChangeHash(\"c979bd7ef18f904ebbef0fb8fc381516074bbf9a68cdf28227661f35c7239cb6\")"
+            "ChangeHash(\"c979bd7ef18f904ebbef0fb8fc381516074bbf9a68cdf28227661f35c7239cb6\")",
+            "a fixed change keeps its hash"
         );
     }
 
@@ -956,7 +959,8 @@ mod tests {
             super::wire::change_body(&[1, 2, 3, 4], Some(&json!({"board": "x"})))
                 .expect("compose")
                 .as_str(),
-            plain
+            plain,
+            "a fixed enc body opens to the expected change body"
         );
         let enc = concat!(
             r#"{"k":"enc","d":"418rHy72Zv4wKRPXd4ff7MKEgNVoG1qe7RD94gp7a97VTVc5B4bEXa"#,
@@ -964,8 +968,15 @@ mod tests {
         );
         let key = SymmetricKey::from_bytes([3u8; 32]);
         let recovered = decrypt_body(enc, Some(&key)).expect("the key opens the body");
-        assert_eq!(recovered, plain);
-        assert_eq!(parse_change_body(&recovered), Some(vec![1u8, 2, 3, 4]));
+        assert_eq!(
+            recovered, plain,
+            "a fixed enc body decrypts to its plaintext"
+        );
+        assert_eq!(
+            parse_change_body(&recovered),
+            Some(vec![1u8, 2, 3, 4]),
+            "the decrypted body parses to the plaintext change"
+        );
     }
 
     /// The gate the application configures on its `meta` channel. Any
@@ -1020,8 +1031,16 @@ mod tests {
         right.ingest(&alice_frame);
 
         let want = json!({"a": 1, "b": 2});
-        assert_eq!(left.to_json(), want);
-        assert_eq!(right.to_json(), want);
+        assert_eq!(
+            left.to_json(),
+            want,
+            "the left replica converges to the wanted json"
+        );
+        assert_eq!(
+            right.to_json(),
+            want,
+            "the right replica converges to the wanted json"
+        );
     }
 
     #[test]
@@ -1040,8 +1059,16 @@ mod tests {
         right.ingest(&alice_frame);
 
         let want = json!({"peers": {"alice": {"m": 1}, "bob": {"m": 2}}});
-        assert_eq!(left.to_json(), want);
-        assert_eq!(right.to_json(), want);
+        assert_eq!(
+            left.to_json(),
+            want,
+            "the left peer report converges on the shared genesis"
+        );
+        assert_eq!(
+            right.to_json(),
+            want,
+            "the right peer report converges on the shared genesis"
+        );
     }
 
     #[test]
@@ -1065,7 +1092,8 @@ mod tests {
         );
         assert_eq!(
             doc.to_json(),
-            json!({"peers": {"alice": {"model": "sonnet"}}})
+            json!({"peers": {"alice": {"model": "sonnet"}}}),
+            "a null deletes its key and keeps the siblings"
         );
     }
 
@@ -1092,7 +1120,10 @@ mod tests {
         let second = author_as(&mut second_doc, &alice, seed, &json!({"b": 2}));
 
         let mut sink = MeshDoc::new_ungated();
-        assert!(matches!(sink.ingest(&first), Ingested::Applied { .. }));
+        assert!(
+            matches!(sink.ingest(&first), Ingested::Applied { .. }),
+            "a change that fails to apply is not recorded as applied"
+        );
 
         let outcome = sink.ingest(&second);
         if matches!(outcome, Ingested::Applied { .. }) {
@@ -1252,7 +1283,10 @@ mod tests {
             &honest_key,
             &json!({"b": 2}),
         );
-        assert!(matches!(sink.ingest(&honest), Ingested::Buffered));
+        assert!(
+            matches!(sink.ingest(&honest), Ingested::Buffered),
+            "an honest change is buffered under the global budget"
+        );
 
         // Sybil authors, each staying under the per-author ceiling, until the
         // global cap bites.
@@ -1332,7 +1366,10 @@ mod tests {
         let alice_orphan = author_as(&mut alices, &alice, &alice_key, &json!({"b": 2}));
 
         let mut sink = MeshDoc::new_ungated();
-        assert!(matches!(sink.ingest(&alice_orphan), Ingested::Buffered));
+        assert!(
+            matches!(sink.ingest(&alice_orphan), Ingested::Buffered),
+            "alice's orphan is buffered beside the flood"
+        );
 
         let mut mallorys = MeshDoc::new_ungated();
         let flood: Vec<Verified> = (0..DOC_PENDING_AUTHOR_MAX + 32)
@@ -1343,7 +1380,10 @@ mod tests {
         }
 
         let (_total, per_author) = sink.pending_stats();
-        assert!(per_author <= DOC_PENDING_AUTHOR_MAX);
+        assert!(
+            per_author <= DOC_PENDING_AUTHOR_MAX,
+            "one author's pending count stays within its cap"
+        );
 
         // Deliver the dep Alice's orphan was waiting on. It drains only if the
         // flood left it alone — re-ingesting the orphan would prove nothing,
@@ -1394,7 +1434,11 @@ mod tests {
         let chain = keyed_chain(300);
         let tail: Vec<usize> = (100..300).collect();
         let sink = deliver(&chain, &tail, 100);
-        assert_eq!(landed(&sink), 100 + DOC_PENDING_AUTHOR_MAX);
+        assert_eq!(
+            landed(&sink),
+            100 + DOC_PENDING_AUTHOR_MAX,
+            "a full orphan buffer keeps the lowest seqs of an author"
+        );
     }
 
     /// Guard: when the tail arrives lowest seq last, the old arrival order and
@@ -1408,7 +1452,11 @@ mod tests {
         let chain = keyed_chain(300);
         let tail: Vec<usize> = (100..300).rev().collect();
         let sink = deliver(&chain, &tail, 100);
-        assert_eq!(landed(&sink), 100 + DOC_PENDING_AUTHOR_MAX);
+        assert_eq!(
+            landed(&sink),
+            100 + DOC_PENDING_AUTHOR_MAX,
+            "a reversed tail keeps the lowest seqs of an author"
+        );
     }
 
     /// The arrival order does not change which links stay.
@@ -1426,7 +1474,11 @@ mod tests {
         // 7919 shares no factor with 200, so it walks all 200 slots once each.
         let tail: Vec<usize> = (0..200).map(|slot| 100 + slot * 7919 % 200).collect();
         let sink = deliver(&chain, &tail, 100);
-        assert_eq!(landed(&sink), 100 + DOC_PENDING_AUTHOR_MAX);
+        assert_eq!(
+            landed(&sink),
+            100 + DOC_PENDING_AUTHOR_MAX,
+            "a shuffled tail keeps the lowest seqs of an author"
+        );
     }
 
     /// Every link the buffer let go is handed back to the receive path, and
@@ -1445,7 +1497,10 @@ mod tests {
             .iter()
             .map(|frame| frame.dedup_key())
             .collect();
-        assert_eq!(dropped, let_go);
+        assert_eq!(
+            dropped, let_go,
+            "a full orphan buffer reports the links it let go"
+        );
     }
 
     /// A change at the highest buffered seq is refused, not swapped in, even
@@ -1466,11 +1521,21 @@ mod tests {
 
         let mut sink = MeshDoc::new_ungated();
         for frame in &chain[1..] {
-            assert!(matches!(sink.ingest(frame), Ingested::Buffered));
+            assert!(
+                matches!(sink.ingest(frame), Ingested::Buffered),
+                "a full orphan buffer refuses a second change at its highest seq"
+            );
         }
-        assert!(matches!(sink.ingest(&rival), Ingested::Ignored));
+        assert!(
+            matches!(sink.ingest(&rival), Ingested::Ignored),
+            "a full orphan buffer refuses a change at the same highest seq"
+        );
         let dropped_keys: Vec<_> = sink.take_dropped().collect();
-        assert_eq!(dropped_keys, vec![rival.dedup_key()]);
+        assert_eq!(
+            dropped_keys,
+            vec![rival.dedup_key()],
+            "the dropped keys are the ones let go"
+        );
     }
 
     /// automerge takes one change per `(actor, seq)`. A frame whose signer does
@@ -1488,19 +1553,36 @@ mod tests {
         let mut source = MeshDoc::new_ungated();
         let root = author_as(&mut source, &alice, &alice_key, &json!({"a": 1}));
         let mut sink = MeshDoc::new_ungated();
-        assert!(matches!(sink.ingest(&root), Ingested::Applied { .. }));
+        assert!(
+            matches!(sink.ingest(&root), Ingested::Applied { .. }),
+            "a change signed by another key is refused for the author's next seq"
+        );
 
         let forged = sink
             .build_change(&json!({"a": "forged"}), &alice_key)
             .expect("merge applies")
             .expect("merge is not a no-op");
         let forged = frame_as(&mallory, &forged, AuthorKey::from_bytes([0xbb; 32]));
-        assert!(matches!(sink.ingest(&forged), Ingested::Ignored));
-        assert_eq!(sink.pending_stats().0, 0);
+        assert!(
+            matches!(sink.ingest(&forged), Ingested::Ignored),
+            "the forged change is refused for the author's next seq"
+        );
+        assert_eq!(
+            sink.pending_stats().0,
+            0,
+            "no pending change is kept for the forged seq"
+        );
 
         let real = author_as(&mut source, &alice, &alice_key, &json!({"a": 2}));
-        assert!(matches!(sink.ingest(&real), Ingested::Applied { .. }));
-        assert_eq!(sink.to_json(), json!({"a": 2}));
+        assert!(
+            matches!(sink.ingest(&real), Ingested::Applied { .. }),
+            "a later change from the real author is accepted"
+        );
+        assert_eq!(
+            sink.to_json(),
+            json!({"a": 2}),
+            "the document holds only the real author's change"
+        );
     }
 
     /// A forged change whose parents are missing takes no place in the orphan
@@ -1521,8 +1603,15 @@ mod tests {
         let forged = frame_as(&nick("mallory"), &orphan, AuthorKey::from_bytes([0xbb; 32]));
 
         let mut sink = MeshDoc::new_ungated();
-        assert!(matches!(sink.ingest(&forged), Ingested::Ignored));
-        assert_eq!(sink.pending_stats().0, 0);
+        assert!(
+            matches!(sink.ingest(&forged), Ingested::Ignored),
+            "a change signed by another key is not buffered"
+        );
+        assert_eq!(
+            sink.pending_stats().0,
+            0,
+            "no pending change is kept for the forged key"
+        );
     }
 
     #[test]
@@ -1534,11 +1623,25 @@ mod tests {
 
         // Deliver the second change first: it depends on the first, so it buffers.
         let mut sink = MeshDoc::new_ungated();
-        assert!(matches!(sink.ingest(&second), Ingested::Buffered));
-        assert_eq!(sink.to_json(), json!({}));
+        assert!(
+            matches!(sink.ingest(&second), Ingested::Buffered),
+            "an out-of-order change is buffered first"
+        );
+        assert_eq!(
+            sink.to_json(),
+            json!({}),
+            "the document is empty while the change is pending"
+        );
         // The first change unblocks the buffered second in one ingest.
-        assert!(matches!(sink.ingest(&first), Ingested::Applied { .. }));
-        assert_eq!(sink.to_json(), json!({"a": 1, "b": 2}));
+        assert!(
+            matches!(sink.ingest(&first), Ingested::Applied { .. }),
+            "the first change drains the buffer"
+        );
+        assert_eq!(
+            sink.to_json(),
+            json!({"a": 1, "b": 2}),
+            "the drained buffer applies both changes in order"
+        );
     }
 
     #[test]
@@ -1583,10 +1686,17 @@ mod tests {
         for carrier in &missing {
             joiner.ingest(carrier);
         }
-        assert_eq!(joiner.to_json(), json!({"a": 1, "b": 2}));
+        assert_eq!(
+            joiner.to_json(),
+            json!({"a": 1, "b": 2}),
+            "the late joiner converges to the wanted json"
+        );
         // Now converged, the source has nothing more to offer.
         let converged: Vec<_> = joiner.heads().collect();
-        assert!(source.changes_since(&converged, 100).next().is_none());
+        assert!(
+            source.changes_since(&converged, 100).next().is_none(),
+            "the changes since the converged heads are empty"
+        );
     }
 
     #[test]
@@ -1617,22 +1727,43 @@ mod tests {
         // A peer holding the key applies it and converges; surface_body recovers
         // the plaintext for the delta.
         let mut with_key = MeshDoc::new_ungated().with_key(Some(SymmetricKey::from_bytes(key)));
-        assert!(matches!(
-            with_key.ingest(&carrier),
-            Ingested::Applied { .. }
-        ));
-        assert_eq!(with_key.to_json(), json!({"secret": "value"}));
-        assert!(with_key.surface_body(&carrier).unwrap().contains("secret"));
+        assert!(
+            matches!(with_key.ingest(&carrier), Ingested::Applied { .. }),
+            "an encrypted change converges with the key"
+        );
+        assert_eq!(
+            with_key.to_json(),
+            json!({"secret": "value"}),
+            "the keyed sink holds the change json"
+        );
+        assert!(
+            with_key.surface_body(&carrier).unwrap().contains("secret"),
+            "the keyed sink can surface the body"
+        );
 
         // A peer without the key (or with the wrong key) cannot read it — the
         // body is an opaque no-op, never applied.
         let mut no_key = MeshDoc::new_ungated();
-        assert!(matches!(no_key.ingest(&carrier), Ingested::Ignored));
-        assert_eq!(no_key.to_json(), json!({}));
+        assert!(
+            matches!(no_key.ingest(&carrier), Ingested::Ignored),
+            "an encrypted change is buffered without the key"
+        );
+        assert_eq!(
+            no_key.to_json(),
+            json!({}),
+            "the no-key sink holds no change json"
+        );
         let mut wrong_key =
             MeshDoc::new_ungated().with_key(Some(SymmetricKey::from_bytes([7u8; 32])));
-        assert!(matches!(wrong_key.ingest(&carrier), Ingested::Ignored));
-        assert_eq!(wrong_key.to_json(), json!({}));
+        assert!(
+            matches!(wrong_key.ingest(&carrier), Ingested::Ignored),
+            "an encrypted change is buffered with the wrong key"
+        );
+        assert_eq!(
+            wrong_key.to_json(),
+            json!({}),
+            "the wrong-key sink holds no change json"
+        );
     }
 
     #[test]
@@ -1655,11 +1786,18 @@ mod tests {
 
         // A gated victim accepts Bob's real card, then refuses Alice's forge.
         let mut victim = MeshDoc::new_gated(card_gate());
-        assert!(matches!(victim.ingest(&bob_card), Ingested::Applied { .. }));
-        assert!(matches!(victim.ingest(&forged), Ingested::Rejected));
+        assert!(
+            matches!(victim.ingest(&bob_card), Ingested::Applied { .. }),
+            "a foreign card write is rejected"
+        );
+        assert!(
+            matches!(victim.ingest(&forged), Ingested::Rejected),
+            "a forged card write is rejected"
+        );
         assert_eq!(
             victim.to_json(),
-            json!({"peers": {"bob": {"card": {"metadata": {"pubkey": "bb"}}}}})
+            json!({"peers": {"bob": {"card": {"metadata": {"pubkey": "bb"}}}}}),
+            "the victim keeps its card after a forged write"
         );
 
         // Alice writing her OWN card through the gate is allowed.
@@ -1671,10 +1809,13 @@ mod tests {
             )
             .expect("builds")
             .expect("not a no-op");
-        assert!(matches!(
-            alice_doc.ingest(&frame(&alice, &own_bytes)),
-            Ingested::Applied { .. }
-        ));
+        assert!(
+            matches!(
+                alice_doc.ingest(&frame(&alice, &own_bytes)),
+                Ingested::Applied { .. }
+            ),
+            "a card written by its own author is allowed"
+        );
     }
 
     #[test]
@@ -1695,14 +1836,14 @@ mod tests {
         let self_delete = author(&mut source, &alice, &json!({"peers": {"alice": null}}));
 
         let mut victim = MeshDoc::new_gated(card_gate());
-        assert!(matches!(
-            victim.ingest(&alice_card),
-            Ingested::Applied { .. }
-        ));
-        assert!(matches!(
-            victim.ingest(&self_delete),
-            Ingested::Applied { .. }
-        ));
+        assert!(
+            matches!(victim.ingest(&alice_card), Ingested::Applied { .. }),
+            "a self-entry delete passes the gate"
+        );
+        assert!(
+            matches!(victim.ingest(&self_delete), Ingested::Applied { .. }),
+            "a foreign delete is rejected"
+        );
         assert_eq!(
             victim.to_json().pointer("/peers/alice"),
             None,
@@ -1723,14 +1864,18 @@ mod tests {
             &json!({"peers": {"alice": null}}),
         );
         let mut gated = MeshDoc::new_gated(card_gate());
-        assert!(matches!(
-            gated.ingest(&card_frame),
-            Ingested::Applied { .. }
-        ));
-        assert!(matches!(gated.ingest(&foreign_delete), Ingested::Rejected));
+        assert!(
+            matches!(gated.ingest(&card_frame), Ingested::Applied { .. }),
+            "the gated sink accepts a self-entry card"
+        );
+        assert!(
+            matches!(gated.ingest(&foreign_delete), Ingested::Rejected),
+            "the gated sink rejects a foreign delete"
+        );
         assert_eq!(
             gated.to_json().pointer("/peers/alice/card/name"),
-            Some(&json!("alice"))
+            Some(&json!("alice")),
+            "the gated sink keeps the card after the rejected delete"
         );
     }
 
@@ -1763,9 +1908,19 @@ mod tests {
 
         // A staying peer applied both.
         let mut host = MeshDoc::new_gated(card_gate());
-        assert!(matches!(host.ingest(&old_card), Ingested::Applied { .. }));
-        assert!(matches!(host.ingest(&retraction), Ingested::Applied { .. }));
-        assert_eq!(host.to_json().pointer("/peers/alice"), None);
+        assert!(
+            matches!(host.ingest(&old_card), Ingested::Applied { .. }),
+            "a fresh republish is accepted after a prior self delete"
+        );
+        assert!(
+            matches!(host.ingest(&retraction), Ingested::Applied { .. }),
+            "the retraction is accepted"
+        );
+        assert_eq!(
+            host.to_json().pointer("/peers/alice"),
+            None,
+            "the republished card survives the prior self delete"
+        );
 
         // New session: fresh doc, fresh key, deps = genesis only.
         let mut new_session = MeshDoc::new_gated(card_gate());
@@ -1788,14 +1943,14 @@ mod tests {
             "the fresh publish must survive the earlier delete: {}",
             host.to_json()
         );
-        assert!(matches!(
-            new_session.ingest(&old_card),
-            Ingested::Applied { .. }
-        ));
-        assert!(matches!(
-            new_session.ingest(&retraction),
-            Ingested::Applied { .. }
-        ));
+        assert!(
+            matches!(new_session.ingest(&old_card), Ingested::Applied { .. }),
+            "a new session accepts the old card"
+        );
+        assert!(
+            matches!(new_session.ingest(&retraction), Ingested::Applied { .. }),
+            "a new session accepts the retraction"
+        );
         assert_eq!(
             new_session.to_json().pointer("/peers/alice/card/session"),
             Some(&json!("new")),

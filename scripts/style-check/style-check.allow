@@ -27,8 +27,6 @@ catch_unwind|crates/habilis-network-test-tracing/src/guard.rs|1|catch_panic, the
 # A hand-written Eq, Ord or PartialOrd: the compiler checks a derive, not a manual impl.
 
 # assert_no_message: an assert with no message (P13). Each row is a count that may only go down.
-assert_no_message|crates/habilis-network-doc/src/mesh_doc.rs|56|kept: assert without a message, to be given one (P13 rollout)
-assert_no_message|crates/habilis-network-doc/src/wire.rs|9|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-ffi/tests/ffi_smoke.rs|19|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-gossip-transport/src/budget.rs|3|kept: assert without a message, to be given one (P13 rollout)
 assert_no_message|crates/habilis-network-iroh-gossip-transport/src/frame.rs|20|kept: assert without a message, to be given one (P13 rollout)
