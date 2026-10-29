@@ -1107,7 +1107,7 @@ mod tests {
     fn a_browser_refuses_a_mesh_with_no_relay_lookup() {
         let dht_only = LookupOpts::new(RelayChoice::Disabled).with_dht(true);
         let policy =
-            TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
+            TransportPolicy::try_from(&[Transport::Udp, Transport::WebRtc]).expect("valid");
         let transports = crate::lookup::TransportOpts::default().within(&policy);
         let error = super::refuse_in_browser(&dht_only, policy, transports)
             .expect_err("no path to signal on");
@@ -1130,7 +1130,7 @@ mod tests {
     fn a_node_without_udp_refuses_a_mesh_with_no_relay_lookup() {
         let dht_only = LookupOpts::new(RelayChoice::Disabled).with_dht(true);
         let policy =
-            TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
+            TransportPolicy::try_from(&[Transport::Udp, Transport::WebRtc]).expect("valid");
         let webrtc_only = crate::lookup::TransportOpts::webrtc_only();
         super::member_transports(&dht_only, webrtc_only, policy).expect_err("no path to signal on");
         let relay = LookupOpts::new(RelayChoice::Pinned)
@@ -1150,13 +1150,13 @@ mod tests {
             ..crate::lookup::TransportOpts::default().within(policy)
         };
         let webrtc =
-            TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
+            TransportPolicy::try_from(&[Transport::Udp, Transport::WebRtc]).expect("valid");
         drop(
             super::refuse_in_browser(&lookups, webrtc, no_relay(&webrtc))
                 .expect_err("no relay to signal on"),
         );
         let relay_payload =
-            TransportPolicy::from_transports(&[Transport::Udp, Transport::Relay]).expect("valid");
+            TransportPolicy::try_from(&[Transport::Udp, Transport::Relay]).expect("valid");
         drop(
             super::refuse_in_browser(&lookups, relay_payload, no_relay(&relay_payload))
                 .expect_err("no relay to carry payload"),

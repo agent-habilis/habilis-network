@@ -452,7 +452,7 @@ impl MeshConfig {
             lookups: resolve_lookups(LookupSet::from_lookups(lookups, relay_urls)?),
             password: None,
             issuer_pubkey: None,
-            transport: TransportPolicy::from_transports(transports)?,
+            transport: TransportPolicy::try_from(transports)?,
         };
         config.validate()?;
         Ok(config)
@@ -504,7 +504,7 @@ impl MeshConfig {
             "missing transport policy byte: upgrade, this mesh id is from an older build",
         ))?;
         position += 1;
-        let transport = TransportPolicy::from_byte(transport_byte)?;
+        let transport = TransportPolicy::try_from(transport_byte)?;
         let (password, issuer_pubkey) = if position == bytes.len() {
             (None, None)
         } else {
@@ -1212,7 +1212,7 @@ mod lookup_tests {
 
     #[test]
     fn a_transport_list_turns_on_exactly_the_paths_it_names() {
-        let policy = |list: &[Transport]| TransportPolicy::from_transports(list).unwrap();
+        let policy = |list: &[Transport]| TransportPolicy::try_from(list).unwrap();
         assert_eq!(
             policy(&[]),
             TransportPolicy::default(),
@@ -1776,18 +1776,18 @@ mod choice_tests {
     #[test]
     fn an_empty_transport_list_and_udp_alone_keep_the_relay_off_payload() {
         assert_eq!(
-            TransportPolicy::from_transports(&[]).unwrap(),
+            TransportPolicy::try_from(&[]).unwrap(),
             TransportPolicy::default(),
             "an empty transport list keeps the relay off the payload path"
         );
         assert!(
-            !TransportPolicy::from_transports(&[Transport::Udp])
+            !TransportPolicy::try_from(&[Transport::Udp])
                 .unwrap()
                 .relay_transport,
             "udp alone keeps the relay off the payload path"
         );
         assert!(
-            TransportPolicy::from_transports(&[Transport::Udp, Transport::Relay])
+            TransportPolicy::try_from(&[Transport::Udp, Transport::Relay])
                 .unwrap()
                 .relay_transport,
             "a transport list with relay turns the relay on"
@@ -1796,7 +1796,7 @@ mod choice_tests {
 
     #[test]
     fn udp_cannot_be_disabled() {
-        let error = TransportPolicy::from_transports(&[Transport::Relay])
+        let error = TransportPolicy::try_from(&[Transport::Relay])
             .unwrap_err()
             .to_string();
         assert!(error.contains("udp"), "{error}");

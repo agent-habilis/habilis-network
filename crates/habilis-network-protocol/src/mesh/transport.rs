@@ -180,38 +180,6 @@ impl TransportPolicy {
         self.relay_transport = relay_transport;
         self
     }
-
-    /// The policy a `transport` list names. Empty ⇒ the default,
-    /// `udp,webrtc,multihop,gossip`. A list names exactly what it carries: `udp,webrtc,multihop`
-    /// has no gossip.
-    ///
-    /// # Errors
-    /// # Errors
-    /// A [`ConfigError::Invalid`] when the list is non-empty and names neither `udp`
-    /// nor `webrtc`. With `multihop` in it, the message says that multihop needs a direct
-    /// path.
-    pub fn from_transports(transports: &[Transport]) -> Result<Self, ConfigError> {
-        if transports.is_empty() {
-            return Ok(Self::default());
-        }
-        let has = |transport: Transport| transports.contains(&transport);
-        let policy: Self = Self {
-            udp: has(Transport::Udp),
-            webrtc: has(Transport::WebRtc),
-            multihop: has(Transport::Multihop),
-            gossip: has(Transport::Gossip),
-            relay_transport: has(Transport::Relay),
-        };
-        if policy.multihop_has_no_direct_path() {
-            return Err(ConfigError::Invalid(MULTIHOP_ALONE.to_owned()));
-        }
-        if !policy.udp && !policy.webrtc {
-            return Err(ConfigError::Invalid(
-                "a transport list needs a direct path: name `udp`, `webrtc`, or both".to_owned(),
-            ));
-        }
-        Ok(policy)
-    }
 }
 
 impl TransportPolicy {
@@ -242,13 +210,51 @@ impl TransportPolicy {
         }
         byte
     }
+}
+
+impl TryFrom<&[Transport]> for TransportPolicy {
+    type Error = ConfigError;
+
+    /// The policy a `transport` list names. Empty ⇒ the default,
+    /// `udp,webrtc,multihop,gossip`. A list names exactly what it carries: `udp,webrtc,multihop`
+    /// has no gossip.
+    ///
+    /// # Errors
+    /// A [`ConfigError::Invalid`] when the list is non-empty and names neither `udp`
+    /// nor `webrtc`. With `multihop` in it, the message says that multihop needs a direct
+    /// path.
+    fn try_from(transports: &[Transport]) -> Result<Self, Self::Error> {
+        if transports.is_empty() {
+            return Ok(Self::default());
+        }
+        let has = |transport: Transport| transports.contains(&transport);
+        let policy: Self = Self {
+            udp: has(Transport::Udp),
+            webrtc: has(Transport::WebRtc),
+            multihop: has(Transport::Multihop),
+            gossip: has(Transport::Gossip),
+            relay_transport: has(Transport::Relay),
+        };
+        if policy.multihop_has_no_direct_path() {
+            return Err(ConfigError::Invalid(MULTIHOP_ALONE.to_owned()));
+        }
+        if !policy.udp && !policy.webrtc {
+            return Err(ConfigError::Invalid(
+                "a transport list needs a direct path: name `udp`, `webrtc`, or both".to_owned(),
+            ));
+        }
+        Ok(policy)
+    }
+}
+
+impl TryFrom<u8> for TransportPolicy {
+    type Error = ConfigError;
 
     /// The policy a mesh id's byte names.
     ///
     /// # Errors
-    /// # Errors
     /// A [`ConfigError::Invalid`] when the byte sets a bit this build does not know.
-    pub(crate) fn from_byte(byte: u8) -> Result<Self, ConfigError> {
+    fn try_from(byte: u8) -> Result<Self, Self::Error> {
         if byte & !super::lookup::KNOWN_TRANSPORT_BITS != 0 {
             return Err(ConfigError::Invalid(format!(
                 "unsupported transport policy bits {byte:#04x}: upgrade to a newer build"
@@ -261,5 +267,13 @@ impl TransportPolicy {
             gossip: byte & super::lookup::TRANSPORT_GOSSIP != 0,
             relay_transport: byte & super::lookup::TRANSPORT_RELAY != 0,
         })
+    }
+}
+
+impl<const N: usize> TryFrom<&[Transport; N]> for TransportPolicy {
+    type Error = ConfigError;
+
+    fn try_from(transports: &[Transport; N]) -> Result<Self, Self::Error> {
+        Self::try_from(transports.as_slice())
     }
 }
