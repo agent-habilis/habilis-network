@@ -23,6 +23,17 @@ use crate::crypto::PASSWORD_VERIFIER_LEN;
 /// `Pinned`/`Custom` into an ordered relay ladder, and the beacon homes
 /// on the first reachable rung (see `lookup::relay_ladder` /
 /// `lookup::select_bootstrap_rung`).
+///
+/// # Examples
+///
+/// A relay choice sets how the relay finds peers, and a lookup set can have none of them.
+///
+/// ```
+/// use habilis_network_protocol::mesh::{LookupOpts, RelayChoice};
+///
+/// let opts = LookupOpts::new(RelayChoice::Disabled);
+/// assert!(opts.validate().is_ok());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RelayChoice {
@@ -38,6 +49,17 @@ pub enum RelayChoice {
 /// enabled iroh address-lookups (both resolve the same seed-derived
 /// `rendezvous_id`); `relay_lookup` is the connectivity relay (see
 /// [`RelayChoice`]). An all-off set is a loopback-only mesh.
+///
+/// # Examples
+///
+/// A loopback preset is local only, and the public preset is not.
+///
+/// ```
+/// use habilis_network_protocol::mesh::LookupOpts;
+///
+/// assert!(LookupOpts::loopback().is_loopback());
+/// assert!(!LookupOpts::public_preset().is_loopback());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LookupOpts {
@@ -328,6 +350,17 @@ const ISSUER_PUBKEY_LEN: usize = 32;
 /// The mesh-wide configuration carried in the id and mixed into the
 /// gossip topic, so every member that joins behaves identically. A
 /// different config is a different mesh (different topic).
+///
+/// # Examples
+///
+/// A config with no lookup named resolves to the loopback lookups.
+///
+/// ```
+/// use habilis_network_protocol::mesh::MeshConfig;
+///
+/// let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
+/// assert!(config.lookups.is_loopback());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MeshConfig {
@@ -587,6 +620,17 @@ impl TryFrom<&[u8]> for MeshConfig {
 /// One type for what were two identical enums — relay intent and directory
 /// intent — each with the same three variants and the same private `is_set`.
 /// The duplicate admitted it in a doc comment.
+///
+/// # Examples
+///
+/// A flag that is named or bare is set, and an absent flag is not.
+///
+/// ```
+/// use habilis_network_protocol::mesh::OptFlag;
+///
+/// assert!(OptFlag::Named(3).is_set());
+/// assert!(!OptFlag::<u8>::Unset.is_set());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Default, Copy)]
 #[non_exhaustive]
 pub enum OptFlag<T> {
@@ -611,6 +655,17 @@ impl<T> OptFlag<T> {
 /// Resolved into a `RelayChoice` by `resolve_lookups`. [`OptFlag::Named`]
 /// carries the ordered [`RelayLadder`] (iroh-free), so this is part of the
 /// public library API surface.
+///
+/// # Examples
+///
+/// An absent relay selection is not set.
+///
+/// ```
+/// use habilis_network_protocol::mesh::RelaySelection;
+///
+/// let flag: RelaySelection = RelaySelection::Unset;
+/// assert!(!flag.is_set());
+/// ```
 pub type RelaySelection = OptFlag<RelayLadder>;
 
 impl FromStr for OptFlag<RelayLadder> {
@@ -635,6 +690,19 @@ impl FromStr for OptFlag<RelayLadder> {
 /// directory; `Default` ⇒ the well-known `global` directory; `Named` ⇒ a
 /// custom one. The directory name is itself a [`MeshName`] (same charset),
 /// since the directory derives its mesh from it.
+///
+/// # Examples
+///
+/// A named directory selection gives back the name it was given.
+///
+/// ```
+/// use habilis_network_protocol::MeshName;
+/// use habilis_network_protocol::mesh::DirectorySelection;
+///
+/// let flag = DirectorySelection::from(Some(MeshName::try_new("directory-chat").expect("a name")));
+/// assert!(flag.is_set());
+/// assert_eq!(flag.directory().expect("a named directory").as_str(), "directory-chat");
+/// ```
 pub type DirectorySelection = OptFlag<MeshName>;
 
 /// The well-known default directory — used when `--advertise` is passed
@@ -684,6 +752,17 @@ impl From<Option<MeshName>> for OptFlag<MeshName> {
 /// requires a mesh reachable across machines, so this is a hard error
 /// (never a silent no-op). Typed so callers can classify it — the MCP
 /// server maps it to `invalid_params`, the CLI to an `anyhow` bail.
+///
+/// # Examples
+///
+/// A mesh that advertises on a loopback lookup set is refused, and this is the error.
+///
+/// ```
+/// use habilis_network_protocol::mesh::{DirectorySelection, LookupOpts, validate_advertise};
+///
+/// let error = validate_advertise(&DirectorySelection::Default, &LookupOpts::loopback()).unwrap_err();
+/// assert!(!error.to_string().is_empty());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 #[non_exhaustive]
 pub struct AdvertiseRequiresReachable;
@@ -700,6 +779,17 @@ impl std::error::Error for AdvertiseRequiresReachable {}
 /// mesh that is actually reachable across machines.
 /// # Errors
 /// The mesh advertises to a directory but is not reachable from one.
+///
+/// # Examples
+///
+/// Advertising is allowed only when the lookups can reach peers from outside the loopback.
+///
+/// ```
+/// use habilis_network_protocol::mesh::{DirectorySelection, LookupOpts, validate_advertise};
+///
+/// assert!(validate_advertise(&DirectorySelection::Unset, &LookupOpts::loopback()).is_ok());
+/// assert!(validate_advertise(&DirectorySelection::Default, &LookupOpts::loopback()).is_err());
+/// ```
 pub fn validate_advertise(
     advertise: &DirectorySelection,
     lookups: &LookupOpts,
@@ -716,6 +806,17 @@ pub fn validate_advertise(
 /// One way a mesh's members find each other — an entry of the `lookup` list
 /// a create names. Naming any restricts the mesh to exactly those; naming
 /// none is a loopback-only mesh.
+///
+/// # Examples
+///
+/// Each lookup has a name that parses back to the same lookup.
+///
+/// ```
+/// use habilis_network_protocol::mesh::Lookup;
+///
+/// let parsed: Lookup = Lookup::Dht.as_str().parse().expect("a lookup name parses");
+/// assert_eq!(parsed.as_str(), Lookup::Dht.as_str());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
@@ -765,6 +866,18 @@ impl fmt::Display for Lookup {
 /// The lookups a create selected, before they become the [`LookupOpts`] in
 /// the id. `mdns`/`dht` are address-lookups; `relay_lookup` is the
 /// rendezvous through a relay, bare or with a custom ladder.
+///
+/// # Examples
+///
+/// A set with a lookup in it resolves to lookups that are not loopback.
+///
+/// ```
+/// use habilis_network_protocol::mesh::{Lookup, LookupSet, resolve_lookups};
+///
+/// let set = LookupSet::choose(&[Lookup::Mdns], None).expect("a lookup set");
+/// assert!(set.any());
+/// assert!(!resolve_lookups(set).is_loopback());
+/// ```
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct LookupSet {
@@ -820,6 +933,17 @@ impl LookupSet {
 /// id. Naming **any** lookup uses *only* those named (so `mdns` alone is
 /// mDNS-only, relay/dht off); naming none is a loopback-only mesh. A bare
 /// relay ⇒ the pinned default ladder, a named one ⇒ that custom ladder.
+///
+/// # Examples
+///
+/// An empty lookup set resolves to the loopback lookups.
+///
+/// ```
+/// use habilis_network_protocol::mesh::{LookupSet, resolve_lookups};
+///
+/// let set = LookupSet::choose(&[], None).expect("an empty lookup set");
+/// assert!(resolve_lookups(set).is_loopback());
+/// ```
 #[must_use]
 pub fn resolve_lookups(lookups: LookupSet) -> LookupOpts {
     if !lookups.any() {
@@ -865,10 +989,32 @@ pub(crate) fn parse_relay_ladder(raw: &str) -> Result<Vec<RelayUrl>, String> {
 /// `parse_relay_ladder` — the same source of truth as the CLI value
 /// parser — and rejects empty entries, so a `RelayLadder` is never empty;
 /// "no custom ladder" is the `Option::None` case at the boundary.
+///
+/// # Examples
+///
+/// A relay ladder holds the relay URLs that it is given, in order.
+///
+/// ```
+/// use habilis_network_protocol::mesh::RelayLadder;
+///
+/// let ladder: RelayLadder = "https://relay.example.com".parse().expect("a relay ladder");
+/// assert_eq!(ladder.len(), 1);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayLadder(Vec<RelayUrl>);
 
 /// A relay ladder that couldn't be parsed (empty entry / invalid URL).
+///
+/// # Examples
+///
+/// Text that is not a relay URL returns an error that says why.
+///
+/// ```
+/// use habilis_network_protocol::mesh::RelayLadder;
+///
+/// let error = "not a relay".parse::<RelayLadder>().unwrap_err();
+/// assert!(!error.to_string().is_empty());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
 pub struct RelayLadderError(String);
