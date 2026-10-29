@@ -162,10 +162,10 @@ fn log(direction: &'static str, message: &Message) {
 #[cfg(test)]
 mod tests {
     use habilis_network_protocol::{Message, MessageKind};
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn redacted_body_omits_raw_text() {
+        let _guard = ::habilis_network_test_tracing::init();
         let secret = "totally private chat content";
         let message = Message::fixture(MessageKind::app_broadcast("app_msg"), secret);
         let redacted = super::redacted_body(&message);
@@ -177,6 +177,7 @@ mod tests {
 
     #[test]
     fn redacted_body_carries_length_and_hash_prefix() {
+        let _guard = ::habilis_network_test_tracing::init();
         let body = "hello world"; // 11 bytes
         let message = Message::fixture(MessageKind::app_broadcast("app_msg"), body);
         let redacted = super::redacted_body(&message);
@@ -201,6 +202,7 @@ mod tests {
 
     #[test]
     fn redacted_body_is_deterministic_for_the_same_message() {
+        let _guard = ::habilis_network_test_tracing::init();
         let message = Message::fixture(MessageKind::app_broadcast("app_msg"), "same body");
         assert_eq!(
             super::redacted_body(&message),
@@ -211,6 +213,7 @@ mod tests {
 
     #[test]
     fn redacted_body_differs_when_content_changes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let alpha = Message::fixture(MessageKind::app_broadcast("app_msg"), "alpha");
         let beta = Message::fixture(MessageKind::app_broadcast("app_msg"), "beta");
         // Different lengths *and* different hashes ⇒ different strings.

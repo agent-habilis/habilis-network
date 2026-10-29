@@ -243,7 +243,6 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for LogSink {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
@@ -263,6 +262,7 @@ mod tests {
 
     #[test]
     fn failed_reopen_keeps_the_handle_on_the_active_path() {
+        let _guard = ::habilis_network_test_tracing::init();
         let dir = std::env::temp_dir().join(format!(
             "habilis-network-logsink-reopen-{}",
             std::process::id()
@@ -285,6 +285,7 @@ mod tests {
 
     #[test]
     fn failed_reopen_leaves_a_stale_backup_when_the_first_rename_failed() {
+        let _guard = ::habilis_network_test_tracing::init();
         let dir = std::env::temp_dir().join(format!(
             "habilis-network-logsink-stale-{}",
             std::process::id()
@@ -311,6 +312,7 @@ mod tests {
 
     #[test]
     fn failed_reopen_defers_the_next_rotation() {
+        let _guard = ::habilis_network_test_tracing::init();
         let dir = std::env::temp_dir().join(format!(
             "habilis-network-logsink-defer-{}",
             std::process::id()
@@ -330,6 +332,7 @@ mod tests {
 
     #[test]
     fn attached_file_rotates_at_cap() {
+        let _guard = ::habilis_network_test_tracing::init();
         let dir =
             std::env::temp_dir().join(format!("habilis-network-logsink-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
