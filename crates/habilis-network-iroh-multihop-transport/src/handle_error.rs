@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use std::error;
 /// Why a multihop handle could not be built over its underlay.
 ///
 /// # Examples
@@ -34,4 +35,4 @@ impl fmt::Display for HandleError {
     }
 }
 
-impl std::error::Error for HandleError {}
+impl error::Error for HandleError {}

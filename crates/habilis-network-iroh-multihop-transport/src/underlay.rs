@@ -29,6 +29,9 @@ use tokio::sync::mpsc;
 use crate::app_id::{AppId, UnderlayId};
 use crate::cell::{Cell, write_cell};
 
+use n0_future::time as n0future_time;
+use std::mem;
+use tokio::sync;
 mod delivered;
 mod forward_acceptor;
 mod forwarder;
@@ -280,7 +283,7 @@ struct WriterPool {
     health: Mutex<HashMap<UnderlayId, HopHealth>>,
     /// Woken when the gate starts to refuse a hop, and when it admits one that it
     /// refused: the moments at which the best first hop to a peer can change.
-    route_wake: Arc<tokio::sync::Notify>,
+    route_wake: Arc<sync::Notify>,
     /// The connection of each live writer, keyed like `writers`, for a test that reads its paths.
     #[cfg(feature = "test-hooks")]
     connections: Mutex<HashMap<UnderlayId, Connection>>,
@@ -357,7 +360,7 @@ impl WriterPool {
         if hop.refused_since.take().is_some() {
             self.route_wake.notify_one();
         }
-        if std::mem::take(&mut hop.stuck) {
+        if mem::take(&mut hop.stuck) {
             tracing::info!(
                 hop = %underlay.fmt_short(),
                 app_id = %hop.app_id.fmt_short(),
@@ -430,7 +433,7 @@ async fn drain_to_hop(
     // Looks at the path once a second even when no cell comes, so a hop that was
     // withdrawn for staying on the relay (and so carries no cells) is a link
     // again once a direct path opens.
-    let mut recheck = n0_future::time::interval(Duration::from_secs(1));
+    let mut recheck = n0future_time::interval(Duration::from_secs(1));
     recheck.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
@@ -478,7 +481,7 @@ async fn dial_with_retry(underlay: &Endpoint, dst: &EndpointAddr) -> Option<Conn
             Err(error) => {
                 tracing::trace!(hop = %dst.id.fmt_short(), attempt, %error, "underlay dial attempt failed");
                 // Linear backoff; adjacent hops that are momentarily busy settle fast.
-                n0_future::time::sleep(Duration::from_millis(100 * (attempt as u64 + 1))).await;
+                n0future_time::sleep(Duration::from_millis(100 * (attempt as u64 + 1))).await;
             }
         }
     }
@@ -503,6 +506,11 @@ mod tests {
     use std::sync::RwLock;
     use tokio::sync::mpsc;
 
+    use crate::topology;
+    use iroh::protocol;
+    use std::time::Instant as std_Instant;
+    use tokio::{sync, time, time as tokio_time};
+    use tracing::{span, subscriber};
     fn stranger(seed: u8) -> RouteHop {
         let id: EndpointId = SecretKey::from_bytes(&[seed; 32]).public();
         RouteHop {
@@ -772,7 +780,7 @@ mod tests {
         /// The address that the node would advertise for its underlay.
         underlay_addr: EndpointAddr,
         received: mpsc::Receiver<Delivered>,
-        _router: iroh::protocol::Router,
+        _router: protocol::Router,
     }
 
     impl RelayNode {
@@ -782,7 +790,7 @@ mod tests {
         fn learns(&self, other: &RelayNode) {
             let vector = LinkVector::signed(
                 &other.app_secret,
-                crate::topology::wall_clock_ms(),
+                topology::wall_clock_ms(),
                 other.underlay_addr.clone(),
                 Vec::new(),
             );
@@ -804,7 +812,7 @@ mod tests {
             .await
             .expect("bind a relay-only underlay");
         close_at_end(&underlay);
-        tokio::time::timeout(Duration::from_secs(10), underlay.online())
+        tokio_time::timeout(Duration::from_secs(10), underlay.online())
             .await
             .expect("the underlay reaches the relay");
         let app_secret = SecretKey::from_bytes(&[seed.wrapping_add(100); 32]);
@@ -820,7 +828,7 @@ mod tests {
             // the topology is shared with the forwarder
             Arc::new(RwLock::new(Topology::default())),
         ));
-        let router = iroh::protocol::Router::builder(underlay.clone())
+        let router = protocol::Router::builder(underlay.clone())
             .accept(
                 super::FORWARD_ALPN,
                 super::ForwardAcceptor::new(Arc::clone(&forwarder)),
@@ -853,7 +861,7 @@ mod tests {
         // Retried: the first attempts can find the connection still being set up.
         for _ in 0..6 {
             from.forwarder.enqueue(&to.hop, subject.clone());
-            if tokio::time::timeout(Duration::from_millis(500), to.received.recv())
+            if tokio_time::timeout(Duration::from_millis(500), to.received.recv())
                 .await
                 .is_ok_and(|delivered| delivered.is_some())
             {
@@ -933,9 +941,9 @@ mod tests {
                 "a hop that stays on the relay becomes stuck"
             );
             // Refused for longer than the deadline: no longer a link.
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            while from.forwarder.stuck_hops().is_empty() && std::time::Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+            let deadline = std_Instant::now() + Duration::from_secs(5);
+            while from.forwarder.stuck_hops().is_empty() && std_Instant::now() < deadline {
+                tokio_time::sleep(Duration::from_millis(100)).await;
             }
             assert_eq!(
                 from.forwarder.stuck_hops(),
@@ -956,8 +964,8 @@ mod tests {
     }
 
     /// Whether `wake` holds a wake-up now.
-    async fn woke(wake: &tokio::sync::Notify) -> bool {
-        tokio::time::timeout(Duration::from_millis(20), wake.notified())
+    async fn woke(wake: &sync::Notify) -> bool {
+        tokio_time::timeout(Duration::from_millis(20), wake.notified())
             .await
             .is_ok()
     }
@@ -977,7 +985,7 @@ mod tests {
             .expect("topology lock poisoned")
             .ingest(LinkVector::signed(
                 &app,
-                crate::topology::wall_clock_ms(),
+                topology::wall_clock_ms(),
                 advertised.clone(),
                 Vec::new(),
             ));
@@ -1039,18 +1047,18 @@ mod tests {
         fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
             true
         }
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
+        fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
         }
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+        fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
         fn event(&self, event: &tracing::Event<'_>) {
             if *event.metadata().level() <= tracing::Level::WARN {
                 self.0.fetch_add(1, Ordering::Relaxed);
             }
         }
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
+        fn enter(&self, _: &span::Id) {}
+        fn exit(&self, _: &span::Id) {}
     }
 
     /// A reply goes back along the reversed route of a cell that this node delivered, so its first
@@ -1065,7 +1073,7 @@ mod tests {
             assert_eq!(forwarder.counters().delivered, 1, "the cell was delivered");
             // the test counts warnings from the code under test and reads the count after
             let warnings = Arc::new(AtomicUsize::new(0));
-            tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
                 forwarder.dial_addr(&sender);
             });
             assert_eq!(
@@ -1088,7 +1096,7 @@ mod tests {
             let own_key = SecretKey::from_bytes(&[99; 32]);
             let own_vector = LinkVector::signed(
                 &own_key,
-                crate::topology::wall_clock_ms(),
+                topology::wall_clock_ms(),
                 EndpointAddr::new(forwarder.underlay.id()),
                 vec![(neighbor.app_id, 1)],
             );
@@ -1102,7 +1110,7 @@ mod tests {
             );
             // the test counts warnings from the code under test and reads the count after
             let warnings = Arc::new(AtomicUsize::new(0));
-            tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
                 forwarder.dial_addr(&neighbor);
                 forwarder.dial_addr(&stranger(143));
             });
@@ -1123,7 +1131,7 @@ mod tests {
             let (forwarder, _app, _received) = forwarder().await;
             // the test counts warnings from the code under test and reads the count after
             let warnings = Arc::new(AtomicUsize::new(0));
-            tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
                 forwarder.dial_addr(&stranger(141));
                 forwarder.dial_addr(&stranger(141));
             });
@@ -1162,7 +1170,7 @@ mod tests {
             let own_key = SecretKey::from_bytes(&[99; 32]);
             let own_vector = LinkVector::signed(
                 &own_key,
-                crate::topology::wall_clock_ms(),
+                topology::wall_clock_ms(),
                 EndpointAddr::new(forwarder.underlay.id()),
                 vec![(neighbor.app_id, 1)],
             );
@@ -1176,7 +1184,7 @@ mod tests {
             );
             // the test counts warnings from the code under test and reads the count after
             let warnings = Arc::new(AtomicUsize::new(0));
-            tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
                 forwarder.dial_addr(&neighbor);
             });
             assert_eq!(warnings.load(Ordering::Relaxed), 0, "a link of ours");
@@ -1189,7 +1197,7 @@ mod tests {
                     .remove(forwarder.self_app_id),
                 "the vector of this node is removed"
             );
-            tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
                 forwarder.dial_addr(&neighbor);
                 forwarder.dial_addr(&neighbor);
             });
@@ -1216,7 +1224,7 @@ mod tests {
             };
             let vector = LinkVector::signed(
                 &gone_key,
-                crate::topology::wall_clock_ms(),
+                topology::wall_clock_ms(),
                 EndpointAddr::new(gone.underlay_id.get()),
                 vec![],
             );
@@ -1227,7 +1235,7 @@ mod tests {
             }
             // the test counts warnings from the code under test and reads the count after
             let warnings = Arc::new(AtomicUsize::new(0));
-            tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
                 forwarder.dial_addr(&gone);
                 forwarder.dial_addr(&stranger(146));
             });
@@ -1267,7 +1275,7 @@ mod tests {
             let newest = hop(cap);
             // the test counts warnings from the code under test and reads the count after
             let warnings = Arc::new(AtomicUsize::new(0));
-            tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
                 forwarder.dial_addr(&newest);
             });
             assert_eq!(
@@ -1384,7 +1392,7 @@ mod tests {
             // the topology is shared with the forwarder
             Arc::new(RwLock::new(Topology::default())),
         ));
-        let router = iroh::protocol::Router::builder(underlay.clone())
+        let router = protocol::Router::builder(underlay.clone())
             .accept(
                 super::FORWARD_ALPN,
                 super::ForwardAcceptor::new(Arc::clone(&forwarder)),
@@ -1589,9 +1597,9 @@ mod tests {
             to.forwarder.underlay.close().await;
 
             // Longer than the deadline and the one-second tick, twice over.
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            while live_writers(&from.forwarder) > 0 && std::time::Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+            let deadline = std_Instant::now() + Duration::from_secs(5);
+            while live_writers(&from.forwarder) > 0 && std_Instant::now() < deadline {
+                tokio_time::sleep(Duration::from_millis(100)).await;
             }
             assert_eq!(
                 live_writers(&from.forwarder),
@@ -1627,7 +1635,7 @@ mod tests {
                 if live_writers(&forwarder) == 0 {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                time::sleep(Duration::from_millis(100)).await;
             }
             assert_eq!(live_writers(&forwarder), 0, "writer retired its own entry");
             assert_eq!(

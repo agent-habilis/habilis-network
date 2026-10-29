@@ -14,6 +14,7 @@ use iroh::endpoint::transports::{
     PathSelection, PathSelectionContext, PathSelectionData, PathSelector,
 };
 
+use std::net;
 /// The ladder of one node. `local` is the endpoint this selector serves, so that a
 /// test can take a rung, or an IP port, away from this node alone: the underlay
 /// has an endpoint of its own, with its own id.
@@ -33,7 +34,7 @@ impl MultihopLadder {
     fn usable(
         &self,
         rung: Rung,
-        remote: Option<std::net::SocketAddr>,
+        remote: Option<net::SocketAddr>,
         remote_id: Option<iroh::EndpointId>,
     ) -> bool {
         !is_blocked_to(self.local, rung, remote, remote_id)
@@ -59,6 +60,7 @@ mod tests {
     use habilis_network_iroh_transport_util::{block_ip_to, block_rung, block_rung_to};
 
     use super::{MultihopLadder, Rung, custom_rung};
+    use std::net;
     /// The ladder names this crate's transport by the id that the transport uses.
     /// The ids are written twice, here and in the util crate, which is below this
     /// one; this is the guard that they stay equal.
@@ -76,8 +78,8 @@ mod tests {
         iroh::SecretKey::from_bytes(&[seed; 32]).public()
     }
 
-    fn at(port: u16) -> std::net::SocketAddr {
-        std::net::SocketAddr::from(([127, 0, 0, 1], port))
+    fn at(port: u16) -> net::SocketAddr {
+        net::SocketAddr::from(([127, 0, 0, 1], port))
     }
 
     /// The underlay has its own endpoint, and a test must be able to take its IP

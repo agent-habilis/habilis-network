@@ -50,6 +50,7 @@
 //! # }
 //! ```
 
+use iroh::protocol;
 use tokio::sync::mpsc;
 mod app_id;
 mod cell;
@@ -112,6 +113,7 @@ use crate::multihop_lookup::{MultihopLookup, RouteChooser};
 use crate::multihop_transport::{MultihopTransport, Shared};
 use crate::route::Route as RouteInner;
 use crate::underlay::{ForwardAcceptor, Forwarder};
+use tokio::sync::Notify;
 
 /// Transport-type id for the multihop transport, tagging every multihop
 /// [`CustomAddr`](iroh_base::CustomAddr) (see iroh's `TRANSPORTS.md` registry).
@@ -295,7 +297,7 @@ struct HandleInner {
     transport: Arc<MultihopTransport>,
     // Kept alive so the underlay's `FORWARD_ALPN` accept loop keeps running;
     // `close` shuts it down.
-    router: iroh::protocol::Router,
+    router: protocol::Router,
 }
 
 impl MultihopHandle {
@@ -369,7 +371,7 @@ impl MultihopHandle {
 
         // the endpoint and the handle share the one transport
         let transport = Arc::new(MultihopTransport::new(shared, inbound_rx));
-        let mut router = iroh::protocol::Router::builder(underlay.clone()).accept(
+        let mut router = protocol::Router::builder(underlay.clone()).accept(
             underlay::FORWARD_ALPN,
             ForwardAcceptor::new(Arc::clone(&forwarder)),
         );
@@ -470,7 +472,7 @@ impl MultihopHandle {
     /// dials by [`route_addr`](Self::route_addr) can choose again then.
     #[must_use]
     // the caller awaits the same Notify the topology signals
-    pub fn route_wake(&self) -> Arc<tokio::sync::Notify> {
+    pub fn route_wake(&self) -> Arc<Notify> {
         self.inner.forwarder.route_wake()
     }
 
@@ -718,8 +720,13 @@ mod tests {
     use crate::route::{Route, RouteHop};
     use crate::test_support;
 
-    use std::sync::atomic;
+    use crate::{link_metric, route, topology, underlay};
+    use iroh::{endpoint, protocol};
+    use std::net;
     use std::sync::atomic::Ordering;
+    use std::sync::{Arc as std_Arc, atomic};
+    use std::time::Instant as std_Instant;
+    use tokio::time;
     #[test]
     fn the_underlay_key_is_derived_from_the_peer_key() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -859,7 +866,7 @@ mod tests {
 
     /// An underlay on loopback only, bound to the derived key of `secret`.
     async fn loopback_underlay(secret: &SecretKey) -> Endpoint {
-        let loopback_addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("loopback");
+        let loopback_addr: net::SocketAddr = "127.0.0.1:0".parse().expect("loopback");
         let builder = Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(secret))
             .relay_mode(RelayMode::Disabled);
@@ -872,13 +879,13 @@ mod tests {
     /// Counts the connections it accepts, then waits for the dialer to close.
     #[derive(Debug, Clone)]
     // the test reads the count the handler increments
-    struct Counting(std::sync::Arc<atomic::AtomicUsize>);
+    struct Counting(std_Arc<atomic::AtomicUsize>);
 
-    impl iroh::protocol::ProtocolHandler for Counting {
+    impl protocol::ProtocolHandler for Counting {
         async fn accept(
             &self,
-            connection: iroh::endpoint::Connection,
-        ) -> Result<(), iroh::protocol::AcceptError> {
+            connection: endpoint::Connection,
+        ) -> Result<(), protocol::AcceptError> {
             self.0.fetch_add(1, Ordering::SeqCst);
             connection.closed().await;
             Ok(())
@@ -891,20 +898,18 @@ mod tests {
     fn an_extra_protocol_is_accepted_on_the_underlay() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             // the test reads the count after the accept loop runs
-            let accepted = std::sync::Arc::new(atomic::AtomicUsize::new(0));
+            let accepted = std_Arc::new(atomic::AtomicUsize::new(0));
             let secret = SecretKey::from_bytes(&[51; 32]);
             let handle = MultihopHandle::with_protocols(
                 &secret,
                 loopback_underlay(&secret).await,
                 HandleConfig::default(),
-                ProtocolSet::default().protocol(
-                    EXTRA_ALPN.to_vec(),
-                    Counting(std::sync::Arc::clone(&accepted)),
-                ),
+                ProtocolSet::default()
+                    .protocol(EXTRA_ALPN.to_vec(), Counting(std_Arc::clone(&accepted))),
             )
             .expect("an extra ALPN is allowed");
 
-            let loopback_addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("loopback");
+            let loopback_addr: net::SocketAddr = "127.0.0.1:0".parse().expect("loopback");
             let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
             let bound = builder.bind_addr(loopback_addr).expect("valid bind addr");
             let client: Endpoint = bound.bind().await.expect("bind a client");
@@ -914,7 +919,7 @@ mod tests {
                 .await
                 .expect("the underlay answers the extra ALPN");
             connection.close(0u32.into(), b"done");
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            time::sleep(Duration::from_millis(200)).await;
             assert_eq!(
                 accepted.load(Ordering::SeqCst),
                 1,
@@ -932,8 +937,8 @@ mod tests {
                 loopback_underlay(&secret).await,
                 HandleConfig::default(),
                 ProtocolSet::default().protocol(
-                    crate::underlay::FORWARD_ALPN.to_vec(),
-                    Counting(std::sync::Arc::default()),
+                    underlay::FORWARD_ALPN.to_vec(),
+                    Counting(std_Arc::default()),
                 ),
             );
             assert!(result.is_err(), "the forwarder keeps its own ALPN");
@@ -959,7 +964,7 @@ mod tests {
             let their_underlay = iroh::EndpointAddr::new(underlay_secret(&other).public());
             let vector = crate::LinkVector::signed(
                 &other,
-                crate::topology::wall_clock_ms(),
+                topology::wall_clock_ms(),
                 their_underlay.clone(),
                 Vec::new(),
             );
@@ -991,7 +996,7 @@ mod tests {
             .await
             .expect("bind a relay-only underlay");
         close_at_end(&underlay);
-        tokio::time::timeout(Duration::from_secs(10), underlay.online())
+        time::timeout(Duration::from_secs(10), underlay.online())
             .await
             .expect("the underlay reaches the relay");
         let config = HandleConfig {
@@ -1015,7 +1020,7 @@ mod tests {
             let underlay = iroh::EndpointAddr::new(underlay_secret(node).public());
             handle.feed_topology(crate::LinkVector::signed(
                 node,
-                crate::topology::wall_clock_ms(),
+                topology::wall_clock_ms(),
                 underlay,
                 links,
             ));
@@ -1092,7 +1097,7 @@ mod tests {
             let advertise = |node: &SecretKey, links: Vec<(AppId, u32)>| {
                 handle.feed_topology(crate::LinkVector::signed(
                     node,
-                    crate::topology::wall_clock_ms(),
+                    topology::wall_clock_ms(),
                     iroh::EndpointAddr::new(underlay_secret(node).public()),
                     links,
                 ));
@@ -1139,7 +1144,7 @@ mod tests {
             let underlay = iroh::EndpointAddr::new(underlay_secret(node).public());
             handle.feed_topology(crate::LinkVector::signed(
                 node,
-                crate::topology::wall_clock_ms(),
+                topology::wall_clock_ms(),
                 underlay,
                 links,
             ));
@@ -1170,7 +1175,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let native = u64::from(HandleConfig::default().link_cost);
         let browser = u64::from(HandleConfig::for_browser().link_cost);
-        let longest_native = native * u64::try_from(crate::route::MAX_ROUTE_HOPS).expect("small");
+        let longest_native = native * u64::try_from(route::MAX_ROUTE_HOPS).expect("small");
         assert!(
             native + browser > longest_native,
             "one browser hop ({native} + {browser}) must cost more than the longest native route ({longest_native})"
@@ -1296,7 +1301,7 @@ mod tests {
                 ] {
                     handle.feed_topology(crate::LinkVector::signed(
                         node,
-                        crate::topology::wall_clock_ms(),
+                        topology::wall_clock_ms(),
                         with_relay(node),
                         links,
                     ));
@@ -1348,7 +1353,7 @@ mod tests {
         );
         // It stays finite: the graph drops a link of infinite cost, and with it the browser as a hop.
         assert!(
-            crate::link_metric::LinkMetric::new(HandleConfig::for_browser().link_cost).is_usable(),
+            link_metric::LinkMetric::new(HandleConfig::for_browser().link_cost).is_usable(),
             "the browser link cost is ten times the native one"
         );
     }
@@ -1454,10 +1459,10 @@ mod tests {
                     source: hop(from, from_id),
                     packet: vec![1, 2, 3],
                 };
-                let deadline = std::time::Instant::now() + Duration::from_secs(8);
-                while from.stuck_hops().next().is_none() && std::time::Instant::now() < deadline {
+                let deadline = std_Instant::now() + Duration::from_secs(8);
+                while from.stuck_hops().next().is_none() && std_Instant::now() < deadline {
                     from.inner.forwarder.enqueue(&hop(to, to_id), cell.clone());
-                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    time::sleep(Duration::from_millis(150)).await;
                 }
             }
 

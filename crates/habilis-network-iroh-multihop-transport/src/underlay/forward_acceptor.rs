@@ -9,6 +9,8 @@ use crate::cell;
 use super::forwarder::Forwarder;
 use super::{GateRole, RelayGate};
 
+use iroh::endpoint;
+use n0_future::task;
 /// The `FORWARD_ALPN` accept side: read cells off each incoming uni-stream and
 /// hand them to the [`Forwarder`].
 #[derive(Debug, Clone)]
@@ -29,7 +31,7 @@ impl ForwardAcceptor {
         connection: Connection,
         // the accept loop and its connections share the gate
         gate: Arc<Mutex<RelayGate>>,
-        mut recv: iroh::endpoint::RecvStream,
+        mut recv: endpoint::RecvStream,
     ) {
         while let Ok(cell) = cell::read_cell(&mut recv).await {
             let admitted = gate
@@ -59,7 +61,7 @@ impl ProtocolHandler for ForwardAcceptor {
         )));
         // Loop ends when the upstream hop closes the connection: normal teardown.
         while let Ok(recv) = connection.accept_uni().await {
-            n0_future::task::spawn(self.clone().read_loop(
+            task::spawn(self.clone().read_loop(
                 upstream,
                 connection.clone(),
                 Arc::clone(&gate),

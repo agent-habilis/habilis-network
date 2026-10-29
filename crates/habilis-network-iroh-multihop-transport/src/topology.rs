@@ -19,6 +19,7 @@ use crate::graph::{Graph, Leg, Link};
 use crate::link_metric::LinkMetric;
 use crate::route::{Route, RouteHop};
 
+use crate::graph;
 /// How long a vector stays without a newer one, unless the handle says otherwise.
 pub(crate) const DEFAULT_VECTOR_MAX_AGE: Duration = Duration::from_secs(45);
 
@@ -356,7 +357,7 @@ impl Topology {
 
     /// `path` as a dialable [`Route`], or `None` if a hop has not advertised its
     /// underlay address yet (we can't dial a hop we can't reach).
-    fn route_of(&self, path: &crate::graph::Path) -> Option<Route> {
+    fn route_of(&self, path: &graph::Path) -> Option<Route> {
         let hops: Option<Vec<RouteHop>> = path
             .hops
             .iter()
@@ -469,6 +470,8 @@ mod tests {
     use crate::app_id::{AppId, UnderlayId};
     use iroh::{EndpointAddr, SecretKey};
 
+    use crate::link_metric;
+    use std::net;
     fn eid(seed: u8) -> AppId {
         AppId::new(SecretKey::from_bytes(&[seed; 32]).public())
     }
@@ -527,9 +530,7 @@ mod tests {
         let (na, nb, nc) = (eid(1), eid(2), eid(3));
         let mut store = Topology::default();
         let mut tampered = vector(na, 1, &[(nb, 10)]);
-        tampered
-            .links
-            .push((nc, crate::link_metric::LinkMetric::new(1)));
+        tampered.links.push((nc, link_metric::LinkMetric::new(1)));
         assert!(
             !ingest(&mut store, tampered),
             "a tampered vector is refused"
@@ -784,7 +785,7 @@ mod tests {
         let before = before_routes[0].encode();
 
         let relay: iroh::RelayUrl = "http://127.0.0.1:1/".parse().expect("a relay url");
-        let ip_addr: std::net::SocketAddr = "10.0.0.7:4000".parse().expect("an address");
+        let ip_addr: net::SocketAddr = "10.0.0.7:4000".parse().expect("an address");
         let moved: EndpointAddr = EndpointAddr::new(nc.get())
             .with_relay_url(relay)
             .with_ip_addr(ip_addr);
@@ -1079,10 +1080,10 @@ mod tests {
         let [tab, dst] = [1, 2].map(eid);
         let mut store = Topology::default();
         let mut cheaper = vector(tab, 1, &[(dst, BROWSER_COST)]);
-        cheaper.links[0].1 = crate::link_metric::LinkMetric::new(NATIVE_COST);
+        cheaper.links[0].1 = link_metric::LinkMetric::new(NATIVE_COST);
         assert!(!ingest(&mut store, cheaper), "a lowered cost");
         let mut dearer = vector(tab, 1, &[(dst, NATIVE_COST)]);
-        dearer.links[0].1 = crate::link_metric::LinkMetric::new(BROWSER_COST);
+        dearer.links[0].1 = link_metric::LinkMetric::new(BROWSER_COST);
         assert!(!ingest(&mut store, dearer), "a raised cost");
         assert!(
             ingest(&mut store, vector(tab, 1, &[(dst, BROWSER_COST)])),

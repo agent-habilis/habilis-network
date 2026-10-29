@@ -22,6 +22,7 @@ use super::{
     UNRESOLVED_SEEN_CAP, WRITER_QUEUE, WriterPool, path_list, paths_of, writer_task,
 };
 
+use tokio::sync;
 /// Routes cells outbound to next hops and delivers terminal cells locally.
 #[derive(Debug)]
 pub(crate) struct Forwarder {
@@ -248,7 +249,7 @@ impl Forwarder {
 
     /// Woken when the gate starts to refuse a hop, and when it admits one that it
     /// refused.
-    pub(crate) fn route_wake(&self) -> Arc<tokio::sync::Notify> {
+    pub(crate) fn route_wake(&self) -> Arc<sync::Notify> {
         Arc::clone(&self.pool.route_wake)
     }
 

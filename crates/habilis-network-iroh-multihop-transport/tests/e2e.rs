@@ -15,6 +15,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId, RelayMode, SecretKey, TransportAddr};
 
 use tokio::sync::mpsc;
+use tokio::{io, time};
 const ECHO_ALPN: &[u8] = b"multihop-test/echo/1";
 
 /// Uniform link cost; the exact value is irrelevant when there is one route.
@@ -26,7 +27,7 @@ struct Echo;
 impl ProtocolHandler for Echo {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let (mut send, mut recv) = connection.accept_bi().await?;
-        tokio::io::copy(&mut recv, &mut send).await?;
+        io::copy(&mut recv, &mut send).await?;
         send.finish()?;
         connection.closed().await;
         Ok(())
@@ -41,7 +42,7 @@ struct EchoCountingPaths(mpsc::UnboundedSender<usize>);
 impl ProtocolHandler for EchoCountingPaths {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let (mut send, mut recv) = connection.accept_bi().await?;
-        tokio::io::copy(&mut recv, &mut send).await?;
+        io::copy(&mut recv, &mut send).await?;
         send.finish()?;
         let _ = self.0.send(multihop_paths(&connection));
         connection.closed().await;
@@ -202,7 +203,7 @@ fn connects_end_to_end_through_one_relay() {
             .accept(ECHO_ALPN, Echo)
             .spawn();
 
-        let connection = tokio::time::timeout(
+        let connection = time::timeout(
             Duration::from_secs(30),
             alice.app.connect(bob.id, ECHO_ALPN),
         )
@@ -246,7 +247,7 @@ fn a_route_is_one_custom_path_at_each_end_of_the_connection() {
             .accept(ECHO_ALPN, EchoCountingPaths(counted))
             .spawn();
 
-        let connection = tokio::time::timeout(
+        let connection = time::timeout(
             Duration::from_secs(30),
             alice.app.connect(bob.id, ECHO_ALPN),
         )
@@ -255,7 +256,7 @@ fn a_route_is_one_custom_path_at_each_end_of_the_connection() {
         .expect("connect over one relay");
         echo_roundtrip(&connection, b"cells both ways").await;
 
-        let at_bob = tokio::time::timeout(Duration::from_secs(10), server_side.recv())
+        let at_bob = time::timeout(Duration::from_secs(10), server_side.recv())
             .await
             .expect("bob reports his paths")
             .expect("the handler is alive");
@@ -295,7 +296,7 @@ fn connects_end_to_end_through_two_relays() {
             .accept(ECHO_ALPN, Echo)
             .spawn();
 
-        let connection = tokio::time::timeout(
+        let connection = time::timeout(
             Duration::from_secs(30),
             alice.app.connect(bob.id, ECHO_ALPN),
         )
@@ -350,7 +351,7 @@ fn connects_through_one_relay_with_webrtc_on_the_same_endpoint() {
             .accept(ECHO_ALPN, Echo)
             .spawn();
 
-        let connection = tokio::time::timeout(
+        let connection = time::timeout(
             Duration::from_secs(30),
             alice.app.connect(bob.id, ECHO_ALPN),
         )

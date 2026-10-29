@@ -23,6 +23,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::MULTIHOP_TRANSPORT_ID;
 use crate::app_id::{AppId, UnderlayId};
 
+use serde::de::Error;
 /// Longest route this transport will build or relay. Routes come from Dijkstra
 /// over the link-state graph and multihop is a last-resort path, so real ones
 /// are short; the ceiling exists to bound what a *hostile* route can cost. It is
@@ -169,7 +170,7 @@ impl<'de> Deserialize<'de> for Route {
         DeserializerT: Deserializer<'de>,
     {
         let hops = Vec::<RouteHop>::deserialize(deserializer)?;
-        Self::try_new(hops).ok_or_else(|| serde::de::Error::custom("empty multihop route"))
+        Self::try_new(hops).ok_or_else(|| Error::custom("empty multihop route"))
     }
 }
 

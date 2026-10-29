@@ -241,6 +241,7 @@ mod tests {
 
     use super::{Graph, Leg, Link, LinkMetric};
 
+    use std::iter;
     fn eid(seed: u8) -> AppId {
         AppId::new(SecretKey::from_bytes(&[seed; 32]).public())
     }
@@ -304,7 +305,7 @@ mod tests {
         link(&mut graph, near, via, 1);
         link(&mut graph, via, dst, 1);
         link(&mut graph, src, via, 5);
-        let refused = std::iter::once(via).collect();
+        let refused = iter::once(via).collect();
         let path = graph
             .shortest_path_avoiding_first_hops(Leg { src, dst }, &refused)
             .expect("a route");
