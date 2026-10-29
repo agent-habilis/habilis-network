@@ -10,6 +10,7 @@ use crate::transport::PayloadPath;
 
 use crate::blob::{BlobDigest, HASH_LEN, SECRET_LEN};
 
+use crate::blob;
 /// A decoded blob ticket.
 ///
 /// # Examples
@@ -122,8 +123,8 @@ impl BlobTicket {
     /// # Errors
     /// Bad Base58/checksum, the wrong ticket kind, a bad version, or a
     /// malformed payload.
-    pub fn decode(ticket: &str) -> Result<Self, crate::blob::BlobError> {
-        Self::decode_checked(ticket).map_err(crate::blob::BlobError::internal)
+    pub fn decode(ticket: &str) -> Result<Self, blob::BlobError> {
+        Self::decode_checked(ticket).map_err(blob::BlobError::internal)
     }
 
     fn decode_checked(ticket: &str) -> Result<Self> {

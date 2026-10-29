@@ -2,6 +2,7 @@ use crate::protocol::identity;
 
 use super::HASH_LEN;
 
+use std::fmt;
 /// The SHA-256 of a blob's bytes: the name it is stored, ticketed and fetched
 /// under. Prints as lowercase hex, the same text as its spool file name.
 ///
@@ -33,14 +34,14 @@ impl BlobDigest {
     }
 }
 
-impl std::fmt::Display for BlobDigest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for BlobDigest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         identity::write_hex(formatter, &self.0)
     }
 }
 
-impl std::fmt::Debug for BlobDigest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for BlobDigest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "BlobDigest({self})")
     }
 }

@@ -57,8 +57,11 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    use crate::lookup;
     use crate::protocol::crypto;
     use iroh::endpoint::presets;
+    use std::env;
+    use tokio::time;
     /// A secret that is already in a wiped buffer (the blob salt, the token read off
     /// the wire) moves into its type whole, through the constructor that takes the
     /// buffer, with no plain `[u8; 32]` copy on the way. This does not compile
@@ -85,7 +88,7 @@ mod tests {
 
     /// A throwaway file under the OS temp dir holding `bytes`; the caller drops it.
     fn temp_file(bytes: &[u8]) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
+        let path = env::temp_dir().join(format!(
             "habilis-network-blob-src-{}",
             rand::rng().next_u64()
         ));
@@ -94,7 +97,7 @@ mod tests {
     }
 
     fn temp_spool() -> PathBuf {
-        std::env::temp_dir().join(format!(
+        env::temp_dir().join(format!(
             "habilis-network-blob-spool-{}",
             rand::rng().next_u64()
         ))
@@ -110,7 +113,7 @@ mod tests {
     #[test]
     fn a_blob_endpoint_is_built_with_no_custom_transport() {
         let _guard = ::habilis_network_test_tracing::init();
-        let defaults = crate::lookup::TransportHandles::default();
+        let defaults = lookup::TransportHandles::default();
         assert!(
             defaults.gossip.is_none() && defaults.webrtc.is_none(),
             "a blob endpoint has no custom transport by default"
@@ -261,7 +264,7 @@ mod tests {
                     }
                     clients.push(client);
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                time::sleep(Duration::from_millis(100)).await;
                 assert!(
                     server.inflight() <= limits.max_inflight,
                     "{} serves in flight, over the {} ceiling",
@@ -271,7 +274,7 @@ mod tests {
 
                 // Past the deadline they must be gone, or the ceiling above is just a
                 // slower way to run out.
-                tokio::time::sleep(limits.pre_auth + Duration::from_millis(400)).await;
+                time::sleep(limits.pre_auth + Duration::from_millis(400)).await;
                 assert_eq!(
                     server.inflight(),
                     0,

@@ -60,8 +60,9 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    use std::env;
     fn temp_dir(tag: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
+        let path = env::temp_dir().join(format!(
             "habilis-network-blob-{tag}-{}",
             rand::rng().next_u64()
         ));

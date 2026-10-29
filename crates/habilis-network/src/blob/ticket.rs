@@ -41,6 +41,8 @@ mod tests {
     use iroh::{EndpointAddr, SecretKey};
 
     use crate::protocol::mesh;
+    use crate::{invite, protocol};
+    use std::time;
     fn sample_addr(byte: u8) -> EndpointAddr {
         let id = SecretKey::from_bytes(&[byte; 32]).public();
         EndpointAddr::new(id).with_ip_addr("127.0.0.1:4242".parse().unwrap())
@@ -204,7 +206,7 @@ mod tests {
         // blob decode must refuse it (wrong kind / structure).
         let _guard = ::habilis_network_test_tracing::init();
         let mesh = mesh::Mesh::try_new(
-            crate::protocol::Seed::new([1u8; 32]),
+            protocol::Seed::new([1u8; 32]),
             mesh::MeshName::try_new("t").unwrap(),
             mesh::MeshConfig::loopback(),
         )
@@ -226,18 +228,18 @@ mod tests {
 
         let _guard = ::habilis_network_test_tracing::init();
         let mut creator = Mesh::try_new(
-            crate::protocol::Seed::new([1u8; 32]),
+            protocol::Seed::new([1u8; 32]),
             MeshName::try_new("t").unwrap(),
             MeshConfig::loopback(),
         )
         .unwrap();
         creator.set_invite();
-        let invite = crate::invite::mint(&creator, Some(std::time::Duration::from_hours(1)), None)
-            .expect("mint");
+        let invite =
+            invite::mint(&creator, Some(time::Duration::from_hours(1)), None).expect("mint");
         let blob = sample(false).encode();
 
         assert!(
-            crate::protocol::InviteTicket::decode(&blob).is_err(),
+            protocol::InviteTicket::decode(&blob).is_err(),
             "an invite does not parse as a blob ticket"
         );
         assert!(

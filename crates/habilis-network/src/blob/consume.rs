@@ -20,6 +20,8 @@ use super::error::BlobError;
 use super::ticket::BlobTicket;
 use super::{BLOB_ALPN, HASH_LEN, SECRET_LEN};
 
+use crate::transport;
+use tokio::time;
 /// How long the first dial keeps retrying while the producer's address
 /// propagates through the lookups (mirrors the application's bridge ticket).
 const DISCOVERY_DEADLINE: Duration = Duration::from_secs(90);
@@ -93,10 +95,10 @@ where
     // inside it, so this waits rather than refusing at once. The producer
     // waits too; refusing here first spares the round trip and names the
     // cause.
-    crate::transport::refuse_relayed(
+    transport::refuse_relayed(
         &connection,
         ticket.relay_transport,
-        crate::transport::PROBE_DEADLINE,
+        transport::PROBE_DEADLINE,
         super::RELAY_REFUSED_CODE,
     )
     .await?;
@@ -167,7 +169,7 @@ async fn dial(endpoint: &Endpoint, ticket: &BlobTicket) -> Result<Connection> {
             Ok(connection) => return Ok(connection),
             Err(error) if started.elapsed() < DISCOVERY_DEADLINE => {
                 tracing::debug!(%error, "blob dial retrying while the address propagates");
-                tokio::time::sleep(RETRY_DELAY).await;
+                time::sleep(RETRY_DELAY).await;
             }
             Err(error) => bail!("connecting to the blob producer failed: {error}"),
         }

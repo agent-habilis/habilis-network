@@ -10,6 +10,7 @@ use crate::transport::PayloadPath;
 
 use crate::blob::store::BlobStore;
 
+use std::fmt;
 /// The producer side of the blob channel. Owns the serving endpoint and the
 /// content-addressed store; both live for the daemon's process lifetime.
 ///
@@ -47,8 +48,8 @@ pub struct BlobServer {
     pub(super) inflight: Arc<AtomicUsize>,
 }
 
-impl std::fmt::Debug for BlobServer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for BlobServer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BlobServer").finish_non_exhaustive()
     }
 }

@@ -5,6 +5,8 @@
 //! from disk after a bearer-secret handshake. One endpoint, per-blob capability
 //! (the secret is stored with the blob), kept for the daemon's lifetime.
 
+use crate::transport;
+use tokio::{task, time};
 mod blob_server;
 mod serve_limits;
 
@@ -36,6 +38,9 @@ use super::{
     BAD_SECRET, BlobDigest, ContentId, DONE, HASH_LEN, RELAY_REFUSED_CODE, SECRET_LEN,
     UNKNOWN_BLOB, wait_online,
 };
+use std::fs::File;
+use tokio::fs::File as tokio_File;
+use tokio::time::{Instant, Instant as tokio_Instant};
 
 /// Chunk size for hashing and streaming — bounded, so memory is constant
 /// regardless of blob size.
@@ -180,11 +185,9 @@ impl BlobServer {
             Some(password) => {
                 // ~100ms of Argon2id off the async worker (mirrors mesh join).
                 let stretch_salt = salt.clone();
-                tokio::task::spawn_blocking(move || {
-                    TicketAuth::blob(&stretch_salt, Some(&password)).token
-                })
-                .await
-                .context("blob token stretch task panicked")?
+                task::spawn_blocking(move || TicketAuth::blob(&stretch_salt, Some(&password)).token)
+                    .await
+                    .context("blob token stretch task panicked")?
             }
             None => salt.clone(),
         };
@@ -279,22 +282,22 @@ async fn serve_connection(
     // One deadline across everything the requester controls. The secret that
     // authorizes this fetch is inside the request we are waiting for, so none
     // of it can be gated on the peer having proved anything.
-    let deadline = tokio::time::Instant::now() + limits.pre_auth;
-    let connection = tokio::time::timeout_at(deadline, incoming)
+    let deadline = tokio_Instant::now() + limits.pre_auth;
+    let connection = time::timeout_at(deadline, incoming)
         .await
         .context("no connection within the pre-authentication deadline")??;
     // Before the request is read, so a refused fetch costs no spool read and
     // the consumer sees the coded close instead of a size. The punch wait gets
     // what is left of the deadline: nested under the outer timer it could
     // outlive it, and a drop closes as `DONE`, not as a refusal.
-    crate::transport::refuse_relayed(
+    transport::refuse_relayed(
         &connection,
         relay_transport,
-        deadline.saturating_duration_since(tokio::time::Instant::now()),
+        deadline.saturating_duration_since(tokio_Instant::now()),
         RELAY_REFUSED_CODE,
     )
     .await?;
-    let (send, recv) = tokio::time::timeout_at(deadline, connection.accept_bi())
+    let (send, recv) = time::timeout_at(deadline, connection.accept_bi())
         .await
         .context("no fetch request within the pre-authentication deadline")??;
     serve_stream(&connection, send, recv, store, deadline).await
@@ -309,12 +312,12 @@ async fn serve_stream(
     mut send: SendStream,
     mut recv: RecvStream,
     store: &Mutex<BlobStore>,
-    deadline: tokio::time::Instant,
+    deadline: Instant,
 ) -> Result<()> {
     let mut request = Zeroizing::new([0u8; HASH_LEN + SECRET_LEN]);
     // Still inside the pre-auth deadline: a peer that opens a stream and then
     // sends 63 bytes is the same parked task as one that sends none.
-    match tokio::time::timeout_at(deadline, recv.read_exact(&mut *request)).await {
+    match time::timeout_at(deadline, recv.read_exact(&mut *request)).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) | Err(_) => return Ok(()),
     }
@@ -348,7 +351,7 @@ async fn serve_stream(
     stream_file(&path, &mut send).await?;
     let _ = send.finish();
     // Let the consumer read the tail before CONNECTION_CLOSE races it on a fast link.
-    let _ = tokio::time::timeout(Duration::from_secs(2), send.stopped()).await;
+    let _ = time::timeout(Duration::from_secs(2), send.stopped()).await;
     connection.close(DONE.into(), b"done");
     Ok(())
 }
@@ -356,7 +359,7 @@ async fn serve_stream(
 /// Stream `path` to `send` in bounded chunks — constant memory.
 async fn stream_file(path: &Path, send: &mut SendStream) -> Result<()> {
     use tokio::io::AsyncReadExt as _;
-    let mut file = tokio::fs::File::open(path)
+    let mut file = tokio_File::open(path)
         .await
         .with_context(|| format!("opening spooled blob {} failed", path.display()))?;
     let mut buffer = vec![0u8; CHUNK];
@@ -378,9 +381,9 @@ async fn stream_file(path: &Path, send: &mut SendStream) -> Result<()> {
 async fn hash_file(path: PathBuf) -> Result<(BlobDigest, u64)> {
     use sha2::Digest;
     use std::io::Read as _;
-    tokio::task::spawn_blocking(move || {
-        let mut file = std::fs::File::open(&path)
-            .with_context(|| format!("opening {} failed", path.display()))?;
+    task::spawn_blocking(move || {
+        let mut file =
+            File::open(&path).with_context(|| format!("opening {} failed", path.display()))?;
         let mut hasher = Sha256::new();
         let mut buffer = vec![0u8; CHUNK];
         let mut size = 0u64;
