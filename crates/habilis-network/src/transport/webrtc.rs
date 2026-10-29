@@ -384,7 +384,7 @@ mod tests {
     async fn endpoint() -> (Endpoint, WebRtcHandle) {
         let key = SecretKey::generate();
         let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
-        let endpoint = Endpoint::builder(presets::Minimal)
+        let endpoint: Endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
             .clear_address_lookup()
@@ -398,7 +398,7 @@ mod tests {
     /// [`endpoint`] with the key given.
     async fn endpoint_with(key: SecretKey) -> (Endpoint, WebRtcHandle) {
         let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
-        let endpoint = Endpoint::builder(presets::Minimal)
+        let endpoint: Endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
             .clear_address_lookup()
@@ -633,7 +633,7 @@ mod tests {
     async fn endpoint_with_lookup() -> (Endpoint, WebRtcHandle) {
         let key = SecretKey::generate();
         let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
-        let endpoint = Endpoint::builder(presets::Minimal)
+        let endpoint: Endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
             .add_custom_transport(handle.transport())
@@ -758,7 +758,7 @@ mod tests {
         let server_gossip = Gossip::builder().spawn(server.clone());
         // One Router for both ALPNs: `Router::spawn` overrides the endpoint's
         // ALPN list, so a second Router silently unregisters the first's.
-        let router = Router::builder(server.clone())
+        let router: Router = Router::builder(server.clone())
             .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
@@ -885,7 +885,7 @@ mod tests {
 
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let server_gossip = Gossip::builder().spawn(server.clone());
-        let router = Router::builder(server.clone())
+        let router: Router = Router::builder(server.clone())
             .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
@@ -1023,7 +1023,7 @@ mod tests {
             .accept(HOLD_ALPN, Hold(held_tx))
             .spawn();
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let high_router = Router::builder(high.clone())
+        let high_router: Router = Router::builder(high.clone())
             .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
@@ -1104,12 +1104,12 @@ mod tests {
         // No IP on either side, as between a tab and a tab-held beacon: the
         // relay and the session are the only paths there are.
         let relay_only = |key: SecretKey, handle: &WebRtcHandle| {
-            let builder = Endpoint::builder(presets::Minimal)
-                .secret_key(key)
-                .relay_mode(RelayMode::custom([relay_url.clone()]))
-                .add_custom_transport(handle.transport())
-                .path_selector(handle.path_selector())
-                .clear_ip_transports();
+            let builder = Endpoint::builder(presets::Minimal);
+            let builder = builder.secret_key(key);
+            let builder = builder.relay_mode(RelayMode::custom([relay_url.clone()]));
+            let builder = builder.add_custom_transport(handle.transport());
+            let builder = builder.path_selector(handle.path_selector());
+            let builder = builder.clear_ip_transports();
             async move { builder.bind().await.expect("bind relay-only endpoint") }
         };
         let server_key = SecretKey::generate();
@@ -1120,7 +1120,7 @@ mod tests {
         let client = relay_only(client_key, &client_hub).await;
 
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let router = Router::builder(server.clone())
+        let router: Router = Router::builder(server.clone())
             .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
@@ -1220,7 +1220,7 @@ mod tests {
 
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let server_gossip = Gossip::builder().spawn(server.clone());
-        let router = Router::builder(server.clone())
+        let router: Router = Router::builder(server.clone())
             .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
@@ -1374,7 +1374,7 @@ mod tests {
         }
 
         let (server, _server_hub) = endpoint().await;
-        let router = Router::builder(server.clone())
+        let router: Router = Router::builder(server.clone())
             .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(MESH_WEBRTC_SIGNAL_ALPN, BlackHole)
             .spawn();
@@ -1751,14 +1751,14 @@ mod tests {
             })
             .find(|key| key.public() > endpoint.id())
             .expect("a key above ours");
-        let server = Endpoint::builder(presets::Minimal)
+        let server: Endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
             .clear_address_lookup()
             .bind()
             .await
             .expect("bind a loopback server");
-        let router = Router::builder(server.clone())
+        let router: Router = Router::builder(server.clone())
             .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(crate::transport::UNICAST_ALPN, Hold)
             .spawn();
@@ -1859,14 +1859,14 @@ mod tests {
             })
             .find(|key| key.public() < endpoint.id())
             .expect("a key below ours");
-        let server = Endpoint::builder(presets::Minimal)
+        let server: Endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
             .clear_address_lookup()
             .bind()
             .await
             .expect("bind a loopback server");
-        let router = Router::builder(server.clone())
+        let router: Router = Router::builder(server.clone())
             .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(crate::transport::UNICAST_ALPN, Hold)
             .spawn();
@@ -1976,14 +1976,14 @@ mod tests {
             })
             .find(|key| key.public() > endpoint.id())
             .expect("a key above ours");
-        let server = Endpoint::builder(presets::Minimal)
+        let server: Endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
             .clear_address_lookup()
             .bind()
             .await
             .expect("bind a loopback server");
-        let router = Router::builder(server.clone())
+        let router: Router = Router::builder(server.clone())
             .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(crate::transport::UNICAST_ALPN, Hold)
             .spawn();
