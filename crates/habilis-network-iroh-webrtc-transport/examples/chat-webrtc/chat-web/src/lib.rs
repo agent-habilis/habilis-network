@@ -49,6 +49,10 @@ use habilis_network_iroh_webrtc_transport::{
 use serde::Serialize;
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
+use js_sys::JSON;
+use serde::de;
+use std::fmt;
+use web_sys::console;
 /// What the tab is told, as it happens.
 ///
 /// JSON over the wasm boundary rather than `serde-wasm-bindgen`: the shapes are
@@ -450,7 +454,7 @@ async fn write_msg<T: Serialize>(
     Ok(())
 }
 
-async fn read_msg<T: serde::de::DeserializeOwned>(recv: &mut RecvStream) -> Result<T, JsValue> {
+async fn read_msg<T: de::DeserializeOwned>(recv: &mut RecvStream) -> Result<T, JsValue> {
     let mut header = [0u8; FRAME_HEADER_LEN];
     recv.read_exact(&mut header)
         .await
@@ -499,16 +503,16 @@ impl Emitter {
         let Ok(json) = serde_json::to_string(event) else {
             return;
         };
-        let Ok(value) = js_sys::JSON::parse(&json) else {
+        let Ok(value) = JSON::parse(&json) else {
             return;
         };
         if let Err(error) = self.callback.call1(&JsValue::NULL, &value) {
-            web_sys::console::warn_1(&error);
+            console::warn_1(&error);
         }
     }
 }
 
-fn err(context: &str, error: &impl std::fmt::Display) -> JsValue {
+fn err(context: &str, error: &impl fmt::Display) -> JsValue {
     JsValue::from_str(&format!("failed to {context}: {error}"))
 }
 
