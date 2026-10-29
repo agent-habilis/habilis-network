@@ -32,6 +32,7 @@ use crate::grid::{Dir, Input};
 use crate::round::RoundDescriptor;
 use crate::sim::{self, Outcome, World};
 
+use std::mem;
 /// How far ahead of a confirmed input the simulation may speculate before
 /// it stalls instead. Eight ticks is 400ms at 20 Hz — comfortably more
 /// than a loopback or same-continent round trip, and a stall is far less
@@ -159,7 +160,7 @@ impl Game {
 
     /// Lobby joins and departures since the last call.
     pub fn drain_events(&mut self) -> Vec<GameEvent> {
-        std::mem::take(&mut self.pending_events)
+        mem::take(&mut self.pending_events)
     }
 
     /// Record where the player wants to go. Legality is not checked here:

@@ -17,6 +17,7 @@
 //! the same game. The accumulator below decouples the two: render as
 //! often as the browser likes, simulate at [`grid::TICK_MS`].
 
+use std::fmt;
 mod app;
 mod grid;
 mod round;
@@ -328,6 +329,6 @@ fn parse_dir(s: &str) -> Result<Dir, JsValue> {
     }
 }
 
-fn to_js_error(err: impl std::fmt::Display) -> JsValue {
+fn to_js_error(err: impl fmt::Display) -> JsValue {
     JsValue::from_str(&err.to_string())
 }
