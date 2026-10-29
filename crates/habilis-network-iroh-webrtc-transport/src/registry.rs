@@ -42,6 +42,7 @@ use std::sync::{Arc, Mutex};
 
 use iroh_base::EndpointId;
 
+use std::{mem, sync};
 /// One peer's slot: reserved while `value` is `None`, live once it is `Some`.
 #[derive(Debug)]
 struct Slot<T> {
@@ -163,7 +164,7 @@ impl<T> Registry<T> {
         live
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<EndpointId, Slot<T>>> {
+    fn lock(&self) -> sync::MutexGuard<'_, HashMap<EndpointId, Slot<T>>> {
         self.slots.lock().expect("session registry poisoned")
     }
 }
@@ -198,7 +199,7 @@ impl<T> Reservation<T> {
         let generation = self.generation;
         // Take the reservation apart without running its `Drop`, which would
         // release the very slot we are about to fill.
-        std::mem::forget(self);
+        mem::forget(self);
 
         {
             let mut sessions = registry.lock();

@@ -1,5 +1,6 @@
 //! Why a signal envelope does not name a usable endpoint.
 
+use std::{error, fmt};
 /// Why a signal envelope does not name a usable endpoint.
 ///
 /// # Examples
@@ -22,11 +23,11 @@ pub enum SignalError {
         reason: String,
     },
     /// The endpoint id in the envelope does not parse.
-    EndpointId(Box<dyn std::error::Error + Send + Sync>),
+    EndpointId(Box<dyn error::Error + Send + Sync>),
 }
 
-impl std::fmt::Display for SignalError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for SignalError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Remote { reason } => write!(formatter, "remote signaling error: {reason}"),
             Self::EndpointId(_) => {
@@ -36,8 +37,8 @@ impl std::fmt::Display for SignalError {
     }
 }
 
-impl std::error::Error for SignalError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl error::Error for SignalError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Remote { .. } => None,
             Self::EndpointId(source) => Some(source.as_ref()),
