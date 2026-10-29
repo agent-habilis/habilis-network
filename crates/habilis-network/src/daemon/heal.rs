@@ -402,17 +402,17 @@ mod tests {
             node.endpoint.close().await;
             return;
         }
-        let output: std::process::Output =
-            std::process::Command::new(std::env::current_exe().expect("the test binary"))
-                .args([
-                    "--exact",
-                    "daemon::heal::tests::a_fatal_resubscribe_leaves_the_exit_to_the_loop",
-                    "--nocapture",
-                    "--test-threads=1",
-                ])
-                .env(FATAL_CHILD, "1")
-                .output()
-                .expect("run the test binary");
+        let mut command =
+            std::process::Command::new(std::env::current_exe().expect("the test binary"));
+        command
+            .args([
+                "--exact",
+                "daemon::heal::tests::a_fatal_resubscribe_leaves_the_exit_to_the_loop",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(FATAL_CHILD, "1");
+        let output = command.output().expect("run the test binary");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             stdout.contains("FATAL_RETURNED err=true"),

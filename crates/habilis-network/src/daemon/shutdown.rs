@@ -435,17 +435,16 @@ mod tests {
             node.endpoint.close().await;
             return;
         }
-        let output: std::process::Output =
-            Command::new(std::env::current_exe().expect("the test binary"))
-                .args([
-                    "--exact",
-                    "daemon::shutdown::tests::a_cli_quit_leaves_the_exit_to_the_loop",
-                    "--nocapture",
-                    "--test-threads=1",
-                ])
-                .env(QUIT_CHILD, "1")
-                .output()
-                .expect("run the test binary");
+        let mut command = Command::new(std::env::current_exe().expect("the test binary"));
+        command
+            .args([
+                "--exact",
+                "daemon::shutdown::tests::a_cli_quit_leaves_the_exit_to_the_loop",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(QUIT_CHILD, "1");
+        let output = command.output().expect("run the test binary");
         let stdout = String::from_utf8_lossy(&output.stdout);
         // A `dhat-heap` build does not exit the process on a quit, so that dhat can write its
         // profile: the loop then gets `false`.
