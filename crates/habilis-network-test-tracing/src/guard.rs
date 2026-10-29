@@ -234,7 +234,7 @@ pub fn run<F: Future>(guard: Guard, future: F) -> F::Output {
 /// Panics if the runtime cannot be built.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_multi_thread<F: Future>(guard: Guard, worker_threads: usize, future: F) -> F::Output {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime: tokio::runtime::Runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(worker_threads)
         .thread_name(worker_name())
         .enable_all()
@@ -512,9 +512,12 @@ impl<S: Subscriber> Layer<S> for Catch {
         let live = LIVE.lock();
         let own: Vec<_> = live.iter().filter(|slot| slot.thread == test).collect();
         let shared = own.is_empty();
+        let metadata = event.metadata();
+        let level = *metadata.level();
+        let target = metadata.target().to_owned();
         let logged = || Logged {
-            level: *event.metadata().level(),
-            target: event.metadata().target().to_owned(),
+            level,
+            target: target.clone(),
             text: fields.text.clone(),
             thread: thread.to_owned(),
             shared,
