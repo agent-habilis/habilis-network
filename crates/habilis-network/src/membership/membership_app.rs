@@ -15,6 +15,8 @@ use crate::protocol::message::Authored;
 use crate::protocol::{AppFrameParams, AppTag, Channel, MessageBody, MessageKind, Nickname};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use crate::beacon;
 #[cfg(all(
     feature = "iroh-test-utils",
     feature = "host",
@@ -23,6 +25,12 @@ use crate::util::consts::MAX_MESSAGE_SIZE;
 use crate::daemon::event_loop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::daemon::state::DirectState;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use crate::ops;
+use crate::transport;
+use crate::transport::Delivered;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use crate::transport::Resend;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::transport::payload_path;
 #[cfg(all(
@@ -39,6 +47,13 @@ use crate::transport::webrtc;
     not(target_arch = "wasm32")
 ))]
 use crate::util::clock;
+use n0_future::task;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use std::error;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use std::fmt;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use std::net;
 /// The one `App`-frame tag a member sends: a whole UTF-8 text, broadcast or
 /// directed. Bulk bytes do not ride gossip; they take a stream.
 pub const MSG_TAG: &str = "msg";
@@ -102,13 +117,13 @@ pub fn msg_fits(text: &str) -> bool {
 /// assert!(!body.as_str().is_empty());
 /// assert!(msg_body(&"x".repeat(1 << 20)).is_err());
 /// ```
-pub fn msg_body(text: &str) -> Result<MessageBody, crate::transport::SendError> {
+pub fn msg_body(text: &str) -> Result<MessageBody, transport::SendError> {
     if !msg_fits(text) {
-        return Err(crate::transport::SendError::Oversize(
+        return Err(transport::SendError::Oversize(
             "message too large for one frame: send it as a stream instead".to_owned(),
         ));
     }
-    MessageBody::try_new(text).map_err(|error| crate::transport::SendError::Internal(error.into()))
+    MessageBody::try_new(text).map_err(|error| transport::SendError::Internal(error.into()))
 }
 
 /// Parse an optional addressee.
@@ -126,10 +141,10 @@ pub fn msg_body(text: &str) -> Result<MessageBody, crate::transport::SendError> 
 /// assert!(parse_to(None).expect("no addressee").is_none());
 /// assert!(parse_to(Some("bob")).expect("a nickname").is_some());
 /// ```
-pub fn parse_to(to: Option<&str>) -> Result<Option<Nickname>, crate::transport::SendError> {
+pub fn parse_to(to: Option<&str>) -> Result<Option<Nickname>, transport::SendError> {
     to.map(Nickname::try_new)
         .transpose()
-        .map_err(|error| crate::transport::SendError::InvalidAddressee(error.to_string()))
+        .map_err(|error| transport::SendError::InvalidAddressee(error.to_string()))
 }
 
 /// `text` as `serde_json` writes it inside quotes.
@@ -254,7 +269,7 @@ pub enum Request {
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     AddExternalAddr {
         /// The address to advertise as external.
-        address: std::net::SocketAddr,
+        address: net::SocketAddr,
         /// Gets `()` when the request is done.
         reply: oneshot::Sender<()>,
     },
@@ -682,13 +697,13 @@ impl NodeDriver for MembershipApp {
                 );
                 let class = self.classify(&frame.authored());
                 match send_app(state, context, frame, class).await {
-                    Ok(crate::transport::Delivered::Done) => {
+                    Ok(Delivered::Done) => {
                         let _ = reply.send(Ok(()));
                     }
-                    Ok(crate::transport::Delivered::Pending(handle)) => {
+                    Ok(Delivered::Pending(handle)) => {
                         // The dial runs on a task, and so does the wait for its outcome: the loop
                         // serves the next request meanwhile.
-                        n0_future::task::spawn(async move {
+                        task::spawn(async move {
                             let outcome = handle.await.unwrap_or_else(|_| {
                                 Err(anyhow::anyhow!("the send ended without an outcome"))
                             });
@@ -716,21 +731,20 @@ impl NodeDriver for MembershipApp {
                     .serialize()
                     .map_err(|error| error.to_string())
                     .and_then(|bytes| {
-                        crate::transport::resolve(&frame, bytes, state)
-                            .map_err(|error| error.to_string())
+                        transport::resolve(&frame, bytes, state).map_err(|error| error.to_string())
                     });
                 match routed {
-                    Ok(crate::transport::Resend::Unicast(eid, bytes)) => {
+                    Ok(Resend::Unicast(eid, bytes)) => {
                         let pool = state.unicast_pool.clone();
                         let registration = pool.register_dial(eid);
-                        n0_future::task::spawn(async move {
+                        task::spawn(async move {
                             let sent = pool
                                 .send_registered(registration, eid, bytes.into_bytes())
                                 .await;
                             let _ = reply.send(sent.map_err(|error| error.to_string()));
                         });
                     }
-                    Ok(crate::transport::Resend::Broadcast(_)) => {
+                    Ok(Resend::Broadcast(_)) => {
                         let _ = reply.send(Err("a cold send needs a directed message".to_owned()));
                     }
                     Err(error) => {
@@ -769,7 +783,7 @@ impl NodeDriver for MembershipApp {
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::BlindRungProbes { blind, reply } => {
-                crate::beacon::set_blind_rung_probes(context.endpoint.id(), blind);
+                beacon::set_blind_rung_probes(context.endpoint.id(), blind);
                 let _ = reply.send(());
                 false
             }
@@ -787,7 +801,7 @@ impl NodeDriver for MembershipApp {
                 for address in state.peer_endpoints.values() {
                     let endpoint = context.endpoint.clone();
                     let peer = address.id;
-                    n0_future::task::spawn(async move {
+                    task::spawn(async move {
                         webrtc::nudge_acceptor::nudge(&endpoint, peer).await;
                     });
                 }
@@ -796,7 +810,7 @@ impl NodeDriver for MembershipApp {
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::Ping { reply } => {
-                crate::ops::start_ping_round(state, context, Some(reply)).await;
+                ops::start_ping_round(state, context, Some(reply)).await;
                 true
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -815,7 +829,7 @@ impl NodeDriver for MembershipApp {
                 for address in state.peer_endpoints.values() {
                     let endpoint = context.endpoint.clone();
                     let peer = address.id;
-                    n0_future::task::spawn(async move {
+                    task::spawn(async move {
                         webrtc::nudge_acceptor::nudge(&endpoint, peer).await;
                     });
                 }
@@ -838,7 +852,7 @@ impl NodeDriver for MembershipApp {
                         blocked,
                     );
                     let endpoint = context.endpoint.clone();
-                    n0_future::task::spawn(async move {
+                    task::spawn(async move {
                         webrtc::nudge_acceptor::nudge(&endpoint, remote).await;
                     });
                 });
@@ -936,7 +950,7 @@ impl NodeDriver for MembershipApp {
                 let id = known_peer(state, &peer).ok().map(|address| address.id);
                 let pool = state.unicast_pool.clone();
                 // Off the event loop: a dial can take seconds.
-                n0_future::task::spawn(async move {
+                task::spawn(async move {
                     let rung = match id {
                         Some(id) => pool.warm_or_dial(id).await.ok().and_then(|connection| {
                             let rung = payload_path::selected_rung(&connection);
@@ -1120,7 +1134,7 @@ impl NodeDriver for MembershipApp {
                 for address in state.peer_endpoints.values() {
                     let endpoint = context.endpoint.clone();
                     let peer = address.id;
-                    n0_future::task::spawn(async move {
+                    task::spawn(async move {
                         webrtc::nudge_acceptor::nudge(&endpoint, peer).await;
                     });
                 }
@@ -1179,14 +1193,14 @@ impl UnknownPeer {
 }
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-impl std::fmt::Display for UnknownPeer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for UnknownPeer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "the member {:?} is not in the book of this node", self.0)
     }
 }
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-impl std::error::Error for UnknownPeer {}
+impl error::Error for UnknownPeer {}
 
 /// The address of the member `peer`, or [`UnknownPeer`]. The requests of the tests that name a
 /// member resolve it here, so that none of them answers for a member it does not know.
@@ -1285,9 +1299,10 @@ mod tests {
     use crate::protocol::{Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
     use crate::runtime;
 
+    use std::iter;
     /// The longest nickname there is: 32 four-byte scalars.
     fn widest_nick(seed: char) -> Nickname {
-        let text: String = std::iter::repeat_n(seed, 32).collect();
+        let text: String = iter::repeat_n(seed, 32).collect();
         Nickname::try_new(&text).expect("32 scalars")
     }
 

@@ -20,6 +20,9 @@ use tokio::sync::mpsc;
 use super::membership_app::{DEPARTURE_GRACE, INBOUND_CAP, Inbound, MembershipApp, Request};
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use crate::beacon;
+use n0_future::time;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use std::sync::atomic;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use std::sync::atomic::Ordering;
@@ -288,7 +291,7 @@ pub async fn join<S: NodeSink + 'static>(
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     if NEW_MEMBERS_ARE_BLIND.load(Ordering::SeqCst) {
         // Before the loop is spawned, so that the startup walk is blind too.
-        crate::beacon::set_blind_rung_probes(config.endpoint.id(), true);
+        beacon::set_blind_rung_probes(config.endpoint.id(), true);
     }
 
     // `SignalHandling::Leave` — this is a library inside somebody else's
@@ -352,7 +355,7 @@ impl Membership {
 /// # }
 /// ```
 pub async fn depart(node: Node<MembershipApp>) -> Result<(), SetupError> {
-    n0_future::time::sleep(DEPARTURE_GRACE).await;
+    time::sleep(DEPARTURE_GRACE).await;
     node.leave()
         .await
         .map_err(|error| SetupError::Internal(error.into()))
