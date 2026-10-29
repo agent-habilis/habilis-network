@@ -305,11 +305,8 @@ async fn stored_chunks_still_verify_against_their_map() {
 
     let mut rebuilt = Vec::new();
     for index in 0..map.len() {
-        let chunk: Vec<u8> = store
-            .get(map.leaf(index).expect("in range"))
-            .await
-            .expect("get")
-            .expect("held");
+        let leaf = map.leaf(index).expect("in range");
+        let chunk: Vec<u8> = store.get(leaf).await.expect("get").expect("held");
         assert!(
             map.verify(index, &chunk),
             "the chunk verifies against its index in the map"

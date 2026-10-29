@@ -143,10 +143,8 @@ impl ChunkStore for InMemoryStore {
     }
 
     async fn put_map(&self, map: &ChunkMap) -> Result<(), ChunkError> {
-        self.maps
-            .lock()
-            .map_err(|_| ChunkError::Poisoned("map"))?
-            .insert(map.root(), map.clone());
+        let mut maps = self.maps.lock().map_err(|_| ChunkError::Poisoned("map"))?;
+        maps.insert(map.root(), map.clone());
         Ok(())
     }
 

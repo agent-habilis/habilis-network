@@ -54,11 +54,10 @@ fn body(len: usize, seed: u8) -> Vec<u8> {
 /// or never differ.
 fn describe(path: &Path) -> FileId {
     let meta = std::fs::metadata(path).expect("the file exists");
-    let mtime: i64 = meta
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .and_then(|since| i64::try_from(since.as_secs()).ok())
+    let modified = meta.modified().ok();
+    let since = modified.and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+    let mtime: i64 = since
+        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
         .unwrap_or(0);
     FileId::new(path.display().to_string(), meta.len(), mtime)
 }
@@ -104,11 +103,8 @@ fn an_origin_serves_by_address_without_copying() {
 
         // Nothing was written anywhere: the only file in the directory is the
         // one the user put there.
-        let entries: Vec<_> = std::fs::read_dir(&dir.0)
-            .expect("readdir")
-            .flatten()
-            .map(|entry| entry.file_name())
-            .collect();
+        let listing = std::fs::read_dir(&dir.0).expect("readdir");
+        let entries: Vec<_> = listing.flatten().map(|entry| entry.file_name()).collect();
         assert_eq!(entries.len(), 1, "an origin copies nothing: {entries:?}");
     });
 }

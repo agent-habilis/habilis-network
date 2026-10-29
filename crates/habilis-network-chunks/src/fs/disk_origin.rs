@@ -153,11 +153,10 @@ impl DiskOrigin {
         let Ok(meta) = fs::metadata(&borrowed.path) else {
             return false;
         };
-        let mtime: i64 = meta
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .and_then(|since| i64::try_from(since.as_secs()).ok())
+        let modified = meta.modified().ok();
+        let since = modified.and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+        let mtime: i64 = since
+            .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
             .unwrap_or(0);
         // The recorded mtime is what the caller supplied at adopt time, which
         // may be 0 for "unknown"; size alone still catches the common case.

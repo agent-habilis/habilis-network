@@ -30,11 +30,11 @@ const FORBIDDEN: &[&str] = &["agent-share", "habilis-network", "iroh"];
 /// Lines that name the package rather than a dependency. Everything else in a
 /// `[dependencies]`-shaped line begins with the crate being depended on.
 fn is_metadata(line: &str) -> bool {
-    line.starts_with('#')
-        || line.starts_with('[')
-        || line.starts_with("name")
-        || line.starts_with("repository")
-        || line.starts_with("description")
+    let marker = line.starts_with('#') || line.starts_with('[');
+    let key = ["name", "repository", "description"]
+        .iter()
+        .any(|key| line.starts_with(key));
+    marker || key
 }
 
 fn manifest() -> String {

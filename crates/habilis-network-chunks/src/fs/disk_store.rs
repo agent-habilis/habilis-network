@@ -33,12 +33,11 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ChunkError> {
         .parent()
         .ok_or_else(|| ChunkError::Malformed("a chunk path has a parent".to_owned()))?;
     fs::create_dir_all(parent).map_err(store(|| format!("creating {}", parent.display())))?;
-    let temp: PathBuf = parent.join(format!(
-        ".{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("chunk")
-    ));
+    let stem = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("chunk");
+    let temp: PathBuf = parent.join(format!(".{stem}.tmp"));
     {
         let mut handle =
             fs::File::create(&temp).map_err(store(|| format!("creating {}", temp.display())))?;
@@ -336,9 +335,10 @@ impl ChunkStore for DiskStore {
             .marks
             .lock()
             .map_err(|_| ChunkError::Poisoned("mark"))?;
+        let leaves = map.leaves();
         marks
             .get_or_insert_with(HashSet::new)
-            .extend(map.leaves().iter().copied());
+            .extend(leaves.iter().copied());
         Ok(())
     }
 

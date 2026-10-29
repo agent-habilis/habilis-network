@@ -515,9 +515,11 @@ mod tests {
     #[test]
     fn a_root_is_not_its_own_leaf() {
         let map = ChunkMap::build(b"single chunk");
+        let root = map.root();
+        let leaf = map.leaf(0).expect("one");
         assert_ne!(
-            map.root().as_bytes(),
-            map.leaf(0).expect("one").as_bytes(),
+            root.as_bytes(),
+            leaf.as_bytes(),
             "a root is not its own leaf"
         );
     }

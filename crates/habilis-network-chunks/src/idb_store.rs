@@ -319,10 +319,10 @@ impl IdbStore {
         let entries = js_sys::Array::from(&found);
         for index in 0..entries.length() {
             let entry = entries.get(index);
-            if js_sys::Reflect::get(&entry, &"name".into())
-                .ok()
+            let listed = js_sys::Reflect::get(&entry, &"name".into()).ok();
+            if listed
                 .and_then(|value| value.as_string())
-                .is_some_and(|listed| listed == name)
+                .is_some_and(|text| text == name)
             {
                 exists = true;
             }
@@ -487,12 +487,11 @@ fn decode_map(bytes: &[u8]) -> Result<ChunkMap, ChunkError> {
     }
     let size = u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
     let count = u32::from_le_bytes(bytes[8..12].try_into().expect("4 bytes")) as usize;
+    let row_bytes = count
+        .checked_mul(32)
+        .ok_or_else(|| ChunkError::Malformed("row length overflows".to_owned()))?;
     let expected: usize = 12usize
-        .checked_add(
-            count
-                .checked_mul(32)
-                .ok_or_else(|| ChunkError::Malformed("row length overflows".to_owned()))?,
-        )
+        .checked_add(row_bytes)
         .ok_or_else(|| ChunkError::Malformed("row length overflows".to_owned()))?;
     if bytes.len() < expected {
         return Err(ChunkError::Malformed(format!(
@@ -652,21 +651,18 @@ impl ChunkStore for IdbStore {
             )
         })?;
         let mut marks = self.marks.borrow_mut();
+        let leaves = map.leaves();
         marks
             .get_or_insert_with(HashSet::new)
-            .extend(map.leaves().iter().copied());
+            .extend(leaves.iter().copied());
         Ok(())
     }
 
     async fn sweep(&self) -> Result<u64, ChunkError> {
         let live = self.marks.borrow_mut().take().unwrap_or_default();
-        let doomed: Vec<String> = self
-            .stored_addresses()
-            .await?
-            .into_iter()
-            .filter(|hash| !live.contains(hash))
-            .map(|hash| hash.to_hex())
-            .collect();
+        let stored = self.stored_addresses().await?;
+        let kept = stored.into_iter().filter(|hash| !live.contains(hash));
+        let doomed: Vec<String> = kept.map(|hash| hash.to_hex()).collect();
         let count = u64::try_from(doomed.len()).unwrap_or(u64::MAX);
         self.erase(CHUNKS, &doomed).await?;
         Ok(count)
