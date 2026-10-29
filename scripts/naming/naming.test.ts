@@ -13,12 +13,12 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const work = mkdtempSync(path.join(tmpdir(), "naming-"));
 afterAll(() => rmSync(work, { recursive: true, force: true }));
 
-// Plant each file in a fresh repository with `allow` as its allow list, then run the check.
+// Plant each file in a fresh repository and then run the check. `allow` is a file the check must ignore; it is written only when a test passes one.
 function check(files: Record<string, string>, allow = ""): { status: number; out: string } {
   const repo = mkdtempSync(path.join(work, "repo-"));
   mkdirSync(path.join(repo, "scripts", "naming"), { recursive: true });
   copyFileSync(path.join(here, "naming.ts"), path.join(repo, "scripts", "naming", "naming.ts"));
-  writeFileSync(path.join(repo, "scripts", "naming", "naming.allow"), `${allow}\n`);
+  if (allow) writeFileSync(path.join(repo, "scripts", "naming", "naming.allow"), `${allow}\n`);
   for (const [file, content] of Object.entries(files)) {
     mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
     writeFileSync(path.join(repo, file), `${content}\n`);
@@ -46,20 +46,8 @@ test("a plain new beside new_<x> is clean", () => {
   expectExit({ [file]: "impl A {\n    pub fn new() -> Self { A(0) }\n    pub fn new_with_id(id: u8) -> Self { A(id) }\n}" }, 0);
 });
 
-test("a counted new_<x> passes", () => {
-  expectExit({ [file]: "impl A {\n    pub fn new_with_id(id: u8) -> Self { A(id) }\n}" }, 0, `ctor_name|${file}|1|a fixture`);
-});
-
-test("a row with no reason is refused", () => {
-  expectExit({ [file]: "impl A {\n    pub fn new_with_id(id: u8) -> Self { A(id) }\n}" }, 1, `ctor_name|${file}|1|`);
-});
-
-test("a row for a file that is clean now is stale", () => {
-  expectExit({ [file]: "impl A {\n    pub fn new() -> Self { A(0) }\n}" }, 1, `ctor_name|${file}|1|a fixture`);
-});
-
-test("a row for an unknown rule is refused", () => {
-  expectExit({ [file]: "fn f() {}" }, 1, `no_such_rule|${file}|1|a fixture`);
+test("no allow lookup: a counted new_<x> still fails", () => {
+  expectExit({ [file]: "impl A {\n    pub fn new_with_id(id: u8) -> Self { A(id) }\n}" }, 1, `ctor_name|${file}|1|a fixture`);
 });
 
 test("a from_<x> fn with no impl From is refused", () => {
@@ -70,8 +58,8 @@ test("a from_<x> fn beside an impl From is clean", () => {
   expectExit({ [file]: "impl From<u8> for A {\n    fn from(b: u8) -> Self { A(b) }\n}\nimpl A {\n    pub fn from_bytes(b: u8) -> Self { A(b) }\n}" }, 0);
 });
 
-test("a counted from_<x> fn passes", () => {
-  expectExit({ [file]: "impl A {\n    pub fn from_bytes(b: u8) -> Self { A(b) }\n}" }, 0, `from_name|${file}|1|a fixture`);
+test("no allow lookup: a counted from_<x> fn still fails", () => {
+  expectExit({ [file]: "impl A {\n    pub fn from_bytes(b: u8) -> Self { A(b) }\n}" }, 1, `from_name|${file}|1|a fixture`);
 });
 
 test("a fn from_str is the FromStr method, not a constructor, and is clean", () => {

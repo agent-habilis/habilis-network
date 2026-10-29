@@ -1,18 +1,16 @@
 #!/usr/bin/env bun
 // Naming rules of the Rust style guide that no lint checks (issue #29). Each rule is a per-file
-// proxy. A file that breaks a rule needs a counted row in `naming.allow` with its reason, and the
-// row is exact: the check fails on a new hit, on a count that differs, and on a stale row.
+// proxy, and every file that breaks one fails the check.
 //   ctor_name: a file with `fn new_<x>` and no plain `fn new` (N10: `new` or `new_with_foo`).
 //   from_name: a file with `fn from_<x>` and no `impl From<` (N12: `from_foo` pairs with a From).
 // `naming.test.ts` plants one file of each kind.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const allowFile = process.env.NAMING_ALLOW || "scripts/naming/naming.allow";
 
 const rules: Record<string, (src: string) => boolean> = {
   ctor_name: (src) => /\bfn new_\w+\s*[(<]/.test(src) && !/\bfn new\s*[(<]/.test(src),
@@ -33,49 +31,15 @@ function listFiles(): string[] {
   return (proc.stdout ?? "").split("\0").filter((file) => file.endsWith(".rs"));
 }
 
-// rule|file|count|reason. Blank lines and `#` comments are skipped.
-function readAllow(): { allowed: Map<string, number>; problems: string[] } {
-  const allowed = new Map<string, number>();
-  const problems: string[] = [];
-  const file = path.join(ROOT, allowFile);
-  if (!existsSync(file)) return { allowed, problems };
-  for (const line of readFileSync(file, "utf8").split("\n")) {
-    if (/^\s*(#|$)/.test(line)) continue;
-    const [rule = "", target = "", count = "", reason = ""] = line.split("|");
-    const key = `${rule}|${target}`;
-    if (!(rule in rules)) problems.push(`naming: ${allowFile} has a row for an unknown rule ${rule}.`);
-    if (reason.trim() === "") problems.push(`naming: ${allowFile} has a row for ${key} with no reason.`);
-    if (allowed.has(key)) problems.push(`naming: ${allowFile} has two rows for ${key}. Merge them.`);
-    allowed.set(key, Number(count));
-  }
-  return { allowed, problems };
-}
-
 function main(): number {
-  const { allowed, problems } = readAllow();
-  const found = new Map<string, number>();
+  const problems: string[] = [];
   for (const file of listFiles()) {
     const src = readFileSync(path.join(ROOT, file), "utf8");
     for (const [rule, hits] of Object.entries(rules)) {
-      if (hits(src)) found.set(`${rule}|${file}`, 1);
+      if (hits(src)) problems.push(`naming: [${rule}] ${file}: ${HINT[rule] ?? ""}.`);
     }
   }
-  for (const [key, count] of [...found].sort()) {
-    const expected = allowed.get(key);
-    const [rule, file] = key.split("|");
-    if (expected === undefined) {
-      problems.push(`naming: [${rule}] ${file}: ${HINT[rule ?? ""] ?? ""}. Fix it, or add a row to ${allowFile} with the reason.`);
-    } else if (expected !== count) {
-      problems.push(`naming: [${rule}] ${file}: ${count} hit found, ${expected} allowed. Set the count in ${allowFile}.`);
-    }
-  }
-  for (const key of [...allowed.keys()].sort()) {
-    if (!found.has(key)) {
-      const [rule, file] = key.split("|");
-      problems.push(`naming: [${rule}] ${file}: stale row. The file no longer breaks the rule. Remove it from ${allowFile}.`);
-    }
-  }
-  for (const problem of problems) console.log(problem);
+  for (const problem of problems.sort()) console.log(problem);
   return problems.length > 0 ? 1 : 0;
 }
 
