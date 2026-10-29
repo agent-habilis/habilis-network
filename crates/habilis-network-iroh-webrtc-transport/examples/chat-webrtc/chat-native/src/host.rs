@@ -73,14 +73,15 @@ pub async fn run(nick: &str, relay: Option<RelayUrl>, host_ice: bool) -> Result<
     let ice = crate::ice_config(host_ice);
     let signal = SignalAcceptor::new(handle.clone(), id, ice);
     let chat = ChatAcceptor::new(room.clone(), handle.clone());
-    let router = Router::builder(endpoint.clone())
+    let accepting = Router::builder(endpoint.clone())
         .accept(SIGNAL_ALPN, signal)
-        .accept(CHAT_ALPN, chat)
-        .spawn();
+        .accept(CHAT_ALPN, chat);
+    let router = accepting.spawn();
 
+    let endpoint_addr = endpoint.addr();
     let ticket = Ticket {
         id,
-        relay: endpoint.addr().relay_urls().next().cloned(),
+        relay: endpoint_addr.relay_urls().next().cloned(),
     };
     banner(&ticket);
 

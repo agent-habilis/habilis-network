@@ -39,7 +39,10 @@ pub(crate) async fn bind_ephemeral_udp() -> std::io::Result<(UdpSocket, SocketAd
     let local = socket.local_addr()?;
     let ip: std::net::IpAddr = if local.ip().is_unspecified() {
         let mut interfaces = if_addrs::get_if_addrs().ok().into_iter().flatten();
-        let external = interfaces.find(|iface| !iface.is_loopback() && iface.addr.ip().is_ipv4());
+        let external = interfaces.find(|iface| {
+            let ip = iface.addr.ip();
+            !iface.is_loopback() && ip.is_ipv4()
+        });
         external.map_or(Ipv4Addr::LOCALHOST.into(), |iface| iface.addr.ip())
     } else {
         local.ip()

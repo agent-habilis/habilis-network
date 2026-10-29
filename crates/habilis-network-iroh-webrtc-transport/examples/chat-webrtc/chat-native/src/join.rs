@@ -96,8 +96,8 @@ pub async fn run(ticket: &str, nick: &str, webrtc: bool, host_ice: bool) -> Resu
         // and never move. Giving the chat an endpoint with no other path to
         // lose to is what makes `webrtc` the answer rather than a coin flip —
         // and it is the same reason a browser tab needs two endpoints.
-        let chat = Endpoint::builder(transport.preset())
-            .secret_key(key)
+        let chat_builder = Endpoint::builder(transport.preset()).secret_key(key);
+        let chat = chat_builder
             .bind()
             .await
             .context("bind the chat endpoint")?;
@@ -109,9 +109,10 @@ pub async fn run(ticket: &str, nick: &str, webrtc: bool, host_ice: bool) -> Resu
             EndpointAddr::from_parts(ticket.id, [TransportAddr::Custom(custom_addr(ticket.id))]);
         (chat, target)
     } else {
-        let endpoint = Endpoint::builder(presets::Minimal)
+        let endpoint_builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
-            .relay_mode(relay_mode)
+            .relay_mode(relay_mode);
+        let endpoint = endpoint_builder
             .bind()
             .await
             .context("bind the endpoint")?;

@@ -157,7 +157,8 @@ impl<T> Registry<T> {
     /// Drop every slot. Returns how many of them were live.
     pub(crate) fn clear(&self) -> usize {
         let mut slots = self.lock();
-        let live = slots.values().filter(|slot| slot.value.is_some()).count();
+        let filled = slots.values().filter(|slot| slot.value.is_some());
+        let live = filled.count();
         slots.clear();
         live
     }
@@ -337,11 +338,8 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let registry = Registry::new();
         let (payload, dropped) = probe();
-        let guard = registry
-            .reserve(peer(1))
-            .expect("first reserve")
-            .fulfil(payload)
-            .expect("slot is ours");
+        let reserved = registry.reserve(peer(1)).expect("first reserve");
+        let guard = reserved.fulfil(payload).expect("slot is ours");
 
         assert!(
             registry.is_live(&peer(1)),
@@ -382,11 +380,8 @@ mod tests {
         let registry = Registry::new();
 
         let (first, first_dropped) = probe();
-        let stale = registry
-            .reserve(peer(1))
-            .expect("first reserve")
-            .fulfil(first)
-            .expect("slot is ours");
+        let claimed = registry.reserve(peer(1)).expect("first reserve");
+        let stale = claimed.fulfil(first).expect("slot is ours");
         registry.remove(&peer(1));
         assert!(
             first_dropped.get(),
@@ -414,11 +409,8 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let registry = Registry::new();
         let stale_generation = {
-            let guard = registry
-                .reserve(peer(1))
-                .expect("first reserve")
-                .fulfil(probe().0)
-                .expect("slot is ours");
+            let reserved = registry.reserve(peer(1)).expect("first reserve");
+            let guard = reserved.fulfil(probe().0).expect("slot is ours");
             let generation = guard.generation();
             guard.commit();
             generation

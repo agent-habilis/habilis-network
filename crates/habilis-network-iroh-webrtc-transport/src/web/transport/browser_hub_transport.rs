@@ -342,10 +342,8 @@ impl BrowserHubTransport {
                 continue;
             }
             let number = |key: &str| {
-                Reflect::get(&stats, &JsValue::from_str(key))
-                    .ok()
-                    .and_then(|value| value.as_f64())
-                    .unwrap_or(0.0)
+                let field = Reflect::get(&stats, &JsValue::from_str(key)).ok();
+                field.and_then(|value| value.as_f64()).unwrap_or(0.0)
             };
             return Some(DataChannelCounters {
                 bytes_sent: number("bytesSent"),
@@ -470,12 +468,14 @@ impl std::fmt::Debug for BrowserHubTransport {
 
 impl CustomTransport for BrowserHubTransport {
     fn bind(&self) -> io::Result<Box<dyn CustomEndpoint>> {
-        let receiver = self
-            .inbound_rx
-            .lock()
-            .expect("inbound receiver mutex poisoned")
-            .take()
-            .ok_or_else(|| io::Error::other("BrowserHubTransport is already bound"))?;
+        let receiver = {
+            let mut slot = self
+                .inbound_rx
+                .lock()
+                .expect("inbound receiver mutex poisoned");
+            slot.take()
+                .ok_or_else(|| io::Error::other("BrowserHubTransport is already bound"))
+        }?;
         Ok(Box::new(BrowserHubEndpoint {
             local_addrs: self.local_addrs.clone(),
             receiver,

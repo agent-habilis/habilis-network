@@ -155,12 +155,14 @@ impl std::fmt::Debug for WebRtcTransport {
 
 impl CustomTransport for WebRtcTransport {
     fn bind(&self) -> io::Result<Box<dyn CustomEndpoint>> {
-        let receiver = self
-            .inbound_rx
-            .lock()
-            .expect("inbound receiver mutex poisoned")
-            .take()
-            .ok_or_else(|| io::Error::other("WebRtcTransport is already bound to an endpoint"))?;
+        let receiver = {
+            let mut slot = self
+                .inbound_rx
+                .lock()
+                .expect("inbound receiver mutex poisoned");
+            slot.take()
+                .ok_or_else(|| io::Error::other("WebRtcTransport is already bound to an endpoint"))
+        }?;
         Ok(Box::new(WebRtcEndpoint::new(
             custom_addr(self.local_id),
             self.local_addrs.clone(),

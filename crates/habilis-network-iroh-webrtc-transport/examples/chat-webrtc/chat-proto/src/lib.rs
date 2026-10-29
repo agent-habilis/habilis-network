@@ -215,8 +215,8 @@ impl Ticket {
     /// The string is not Base58Check, carries another version, is truncated, or
     /// holds an id or relay URL that does not parse.
     pub fn decode(encoded: &str) -> Result<Self> {
-        let payload = bs58::decode(encoded.trim())
-            .with_check(None)
+        let decoded = bs58::decode(encoded.trim()).with_check(None);
+        let payload = decoded
             .into_vec()
             .context("ticket is not valid Base58Check")?;
 

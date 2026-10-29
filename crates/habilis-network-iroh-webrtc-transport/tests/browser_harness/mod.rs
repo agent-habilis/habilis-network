@@ -285,8 +285,9 @@ impl Pair {
             let Ok(object) = pair.get(1).dyn_into::<js_sys::Object>() else {
                 continue;
             };
-            let kind = js_sys::Reflect::get(&object, &wasm_bindgen::JsValue::from_str("type"))
-                .ok()
+            let field =
+                js_sys::Reflect::get(&object, &wasm_bindgen::JsValue::from_str("type")).ok();
+            let kind = field
                 .and_then(|value| value.as_string())
                 .unwrap_or_default();
             if matches!(

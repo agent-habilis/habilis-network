@@ -88,10 +88,8 @@ fn pressure_level() -> u64 {
     let Some(search) = web_sys::window().and_then(|window| window.location().search().ok()) else {
         return 0;
     };
-    let pairs = search
-        .trim_start_matches('?')
-        .split('&')
-        .filter_map(|pair| pair.split_once('='));
+    let query = search.trim_start_matches('?');
+    let pairs = query.split('&').filter_map(|pair| pair.split_once('='));
     let pressure = pairs.find(|(key, _)| *key == "pressure");
     pressure
         .and_then(|(_, value)| -> Option<u64> { value.parse().ok() })

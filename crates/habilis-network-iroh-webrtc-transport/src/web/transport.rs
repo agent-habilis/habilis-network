@@ -244,10 +244,10 @@ fn selected_pair_id(by_id: &HashMap<String, js_sys::Object>) -> Option<String> {
             == Some(true)
     };
     let of_type = |wanted: &'static str| {
-        let mut rows: Vec<&js_sys::Object> = by_id
+        let candidates = by_id
             .values()
-            .filter(|stats| field(stats, "type").as_deref() == Some(wanted))
-            .collect();
+            .filter(|stats| field(stats, "type").as_deref() == Some(wanted));
+        let mut rows: Vec<&js_sys::Object> = candidates.collect();
         // A stable tie-break so a report with more than one candidate row
         // yields the same answer on every call.
         rows.sort_by_key(|stats| field(stats, "id").unwrap_or_default());

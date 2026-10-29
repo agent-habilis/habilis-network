@@ -119,10 +119,9 @@ fn decode_address(
     xored: bool,
 ) -> Result<SocketAddr> {
     let family = *value.get(1).context("address attribute too short")?;
-    let raw_port = u16::from_be_bytes([
-        *value.get(2).context("address attribute too short")?,
-        *value.get(3).context("address attribute too short")?,
-    ]);
+    let high = *value.get(2).context("address attribute too short")?;
+    let low = *value.get(3).context("address attribute too short")?;
+    let raw_port = u16::from_be_bytes([high, low]);
     // The port is masked with the top 16 bits of the cookie.
     let port = if xored {
         raw_port ^ u16::try_from(MAGIC_COOKIE >> 16).expect("the high half of a u32 fits a u16")

@@ -86,10 +86,8 @@ fn quic_echo_over_webrtc() -> anyhow::Result<()> {
         // a future regression can't silently reroute.
         let paths = connection.paths();
         let on_webrtc = paths.iter().any(|path| {
-            matches!(
-                path.remote_addr(),
-                TransportAddr::Custom(address) if address.id() == WEBRTC_TRANSPORT_ID
-            )
+            let remote = path.remote_addr();
+            matches!(remote, TransportAddr::Custom(address) if address.id() == WEBRTC_TRANSPORT_ID)
         });
         assert!(on_webrtc, "no WebRTC path on the connection: {paths:?}");
 
