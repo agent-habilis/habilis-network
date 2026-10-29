@@ -64,6 +64,21 @@ use tokio::sync::oneshot;
 /// # Errors
 /// Refuses a body too large for one frame, propagates a serialize/deliver
 /// failure, and errors if the unmeshed buffer is full.
+///
+/// # Examples
+///
+/// It sends an application frame to the peers that the class names, and it reports how the send went. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::{EventLoopState, HandlerCtx};
+/// use habilis_network::embed::AppClass;
+/// use habilis_network::ops::send_app;
+/// use habilis_network::protocol::Verified;
+///
+/// # async fn demo(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: Verified, class: AppClass) {
+/// let _ = send_app(state, context, frame, class).await;
+/// # }
+/// ```
 pub async fn send_app(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
@@ -115,6 +130,20 @@ pub async fn send_app(
 /// classify the frame (`app.classify(&frame)`) before the send and hold no reference to the app
 /// across the `await` of [`send_app`]: the app is not `Sync`, and a future that holds it is not
 /// `Send`.
+///
+/// # Examples
+///
+/// It builds a signed application frame from the handler context. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::HandlerCtx;
+/// use habilis_network::ops::app_frame;
+/// use habilis_network::protocol::{AppFrameParams, Verified};
+///
+/// # fn demo(context: &HandlerCtx<'_>, params: AppFrameParams) -> Verified {
+/// app_frame(context, params)
+/// # }
+/// ```
 #[must_use]
 pub fn app_frame(context: &HandlerCtx<'_>, params: AppFrameParams) -> Verified {
     Message::new_app(context.mesh, context.author, params).sign(context.identity)
@@ -125,6 +154,19 @@ pub fn app_frame(context: &HandlerCtx<'_>, params: AppFrameParams) -> Verified {
 /// failed serialize must not block the daemon. A failed *broadcast* is
 /// logged — it means the gossip actor refused the send (the wedge the
 /// roster-collapse soak hit silently), not a routine empty gossip.
+///
+/// # Examples
+///
+/// It broadcasts a signed message on the gossip, and a failure to send is only logged. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::ops::{MeshSender, broadcast_msg};
+/// use habilis_network::protocol::Verified;
+///
+/// # async fn demo(sender: &MeshSender, message: &Verified) {
+/// broadcast_msg(sender, message).await;
+/// # }
+/// ```
 pub async fn broadcast_msg(sender: &MeshSender, message: &Verified) {
     messages::log_out(message);
     if let Ok(bytes) = message.serialize()
@@ -141,6 +183,19 @@ pub async fn broadcast_msg(sender: &MeshSender, message: &Verified) {
 /// Start an RTT round: arm it and broadcast the first probe. The event loop sends the second probe
 /// at the middle of the window (`send_second_probe`); the round ends at its deadline and reports
 /// the first pong of each peer. This is the one place that starts a round.
+///
+/// # Examples
+///
+/// It starts a round of pings to the peers, and an optional channel gets the round trip times. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::{EventLoopState, HandlerCtx};
+/// use habilis_network::ops::start_ping_round;
+///
+/// # async fn demo(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+/// start_ping_round(state, context, None).await;
+/// # }
+/// ```
 pub async fn start_ping_round(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
@@ -168,6 +223,19 @@ pub(crate) async fn send_second_probe(state: &mut EventLoopState, context: &Hand
 
 /// The four refs that a state write needs from the loop: the mesh, the author, the sender of the
 /// topic, and the sink that reports the write. A [`HandlerCtx`] holds all four.
+///
+/// # Examples
+///
+/// A merge context names the mesh and the author of a write. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::ops::MergeCtx;
+///
+/// # fn demo(ctx: MergeCtx<'_>) {
+/// let _mesh = ctx.mesh;
+/// let _author = ctx.author;
+/// # }
+/// ```
 #[expect(
     missing_debug_implementations,
     reason = "sink is a &'a dyn NodeSink trait object with no Debug impl"
@@ -216,6 +284,18 @@ impl<'context> From<&HandlerCtx<'context>> for MergeCtx<'context> {
 
 /// Parameters for [`broadcast_state_merge`]. Agent-driven writes surface to the operator, so
 /// `surface` is `true` unless [`StateMergeParams::with_surface`] says otherwise.
+///
+/// # Examples
+///
+/// The parameters of a state merge name the context of the write and its channel. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::ops::StateMergeParams;
+///
+/// # fn demo(params: StateMergeParams<'_>) {
+/// let _channel = params.channel;
+/// # }
+/// ```
 #[expect(
     missing_debug_implementations,
     reason = "the ctx holds a &dyn NodeSink, which has no Debug impl"
@@ -279,6 +359,19 @@ impl<'mesh> StateMergeParams<'mesh> {
 /// # Errors
 /// Unrepresentable merge, oversize frame, a rejected foreign-card write, or a
 /// broadcast refusal.
+///
+/// # Examples
+///
+/// It applies a state merge and broadcasts it to the mesh. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::EventLoopState;
+/// use habilis_network::ops::{StateMergeParams, broadcast_state_merge};
+///
+/// # async fn demo(state: &mut EventLoopState, params: StateMergeParams<'_>) {
+/// let _ = broadcast_state_merge(state, params).await;
+/// # }
+/// ```
 pub async fn broadcast_state_merge(
     state: &mut EventLoopState,
     params: StateMergeParams<'_>,
@@ -389,6 +482,20 @@ pub async fn broadcast_state_merge(
 /// still holds the dying beacon's link, and the presence-driven fast-reclaim
 /// then re-stands the beacon into a stale connection and stalls
 /// (iroh-gossip#10).
+///
+/// # Examples
+///
+/// It sends a farewell frame to each peer that has an endpoint. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::EventLoopState;
+/// use habilis_network::ops::unicast_farewell;
+/// use habilis_network::protocol::message::WireFrame;
+///
+/// # fn demo(state: &EventLoopState, bytes: &WireFrame) {
+/// unicast_farewell(state, bytes);
+/// # }
+/// ```
 pub fn unicast_farewell(state: &EventLoopState, bytes: &WireFrame) {
     for (nick, endpoint_id) in &state.peer_endpoints {
         // The rendezvous pseudo-node is never a directed target, and a
