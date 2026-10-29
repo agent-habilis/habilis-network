@@ -8,5 +8,5 @@
 /// `let ... else { return; }` guards.
 pub(crate) fn json_body<T: serde::Serialize>(value: &T) -> Option<crate::protocol::MessageBody> {
     let json = serde_json::to_string(value).ok()?;
-    crate::protocol::MessageBody::try_new(json).ok()
+    crate::protocol::MessageBody::try_new(&json).ok()
 }

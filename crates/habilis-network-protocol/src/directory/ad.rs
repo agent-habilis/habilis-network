@@ -30,7 +30,7 @@ impl Ad {
     #[must_use]
     pub fn to_body(&self) -> MessageBody {
         let json = serde_json::to_string(self).expect("Ad always serializes to JSON");
-        MessageBody::try_new(json).expect("Ad JSON contains no control characters")
+        MessageBody::try_new(&json).expect("Ad JSON contains no control characters")
     }
 
     /// Parse a directory message body as an ad. Returns `None` for any

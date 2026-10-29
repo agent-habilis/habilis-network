@@ -37,8 +37,8 @@ impl CorrId {
     /// # Errors
     /// A [`CorrIdError::Invalid`] when the correlation id is empty or longer than 64
     /// bytes.
-    pub fn try_new(raw: impl Into<String>) -> Result<Self, CorrIdError> {
-        let raw: String = raw.into();
+    pub fn try_new(raw: &str) -> Result<Self, CorrIdError> {
+        let raw: String = raw.to_owned();
         if !Self::validate(&raw) {
             return Err(CorrIdError::Invalid);
         }
@@ -56,6 +56,6 @@ impl<'de> Deserialize<'de> for CorrId {
         // mints a 36-char UUID, so anything empty or wildly larger is a crafted
         // frame, not a correlation id. Mirrors [`AppTag`]'s bounded deserialize.
         let raw = String::deserialize(deserializer)?;
-        Self::try_new(raw).map_err(serde::de::Error::custom)
+        Self::try_new(&raw).map_err(serde::de::Error::custom)
     }
 }

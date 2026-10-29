@@ -41,8 +41,8 @@ impl AppTag {
     /// # Errors
     /// A [`AppTagError::Invalid`] when the tag is empty, longer than 32 bytes, or not
     /// an ASCII slug.
-    pub fn try_new(raw: impl Into<String>) -> Result<Self, AppTagError> {
-        let raw: String = raw.into();
+    pub fn try_new(raw: &str) -> Result<Self, AppTagError> {
+        let raw: String = raw.to_owned();
         if !Self::validate(&raw) {
             return Err(AppTagError::Invalid);
         }

@@ -94,7 +94,8 @@ pub(crate) async fn tick_heal_hard(
     // take seconds and this must never run on the sole event loop.
     let endpoint = endpoint.clone();
     n0_future::task::spawn(async move {
-        let _ = crate::lookup::probe_connect(&endpoint, rendezvous_id, HEAL_HARD_PROBE).await;
+        let _ =
+            crate::lookup::probe_connect(&endpoint, rendezvous_id.into(), HEAL_HARD_PROBE).await;
     });
     regraft(rendezvous_id, sender).await;
 }

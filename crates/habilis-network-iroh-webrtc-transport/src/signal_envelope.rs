@@ -57,30 +57,30 @@ pub enum SignalEnvelope {
 impl SignalEnvelope {
     /// An offer carrying `sdp`, stamped with the current [`SIGNAL_VERSION`].
     #[must_use]
-    pub fn offer(local: EndpointId, sdp: impl Into<String>) -> Self {
+    pub fn offer(local: EndpointId, sdp: &str) -> Self {
         Self::Offer {
             version: SIGNAL_VERSION,
             endpoint_id: local.to_string(),
-            sdp: sdp.into(),
+            sdp: sdp.to_owned(),
         }
     }
 
     /// The reply to an [`offer`](Self::offer), same shape.
     #[must_use]
-    pub fn answer(local: EndpointId, sdp: impl Into<String>) -> Self {
+    pub fn answer(local: EndpointId, sdp: &str) -> Self {
         Self::Answer {
             version: SIGNAL_VERSION,
             endpoint_id: local.to_string(),
-            sdp: sdp.into(),
+            sdp: sdp.to_owned(),
         }
     }
 
     /// An error envelope with the given reason.
     #[must_use]
-    pub fn error(reason: impl Into<String>) -> Self {
+    pub fn error(reason: &str) -> Self {
         Self::Error {
             version: SIGNAL_VERSION,
-            reason: reason.into(),
+            reason: reason.to_owned(),
         }
     }
 

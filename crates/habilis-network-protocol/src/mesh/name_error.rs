@@ -110,8 +110,8 @@ impl MeshName {
     /// Returns [`NameError`] if `value` is empty, longer than 32 scalar
     /// values, or contains a forbidden character (control, whitespace, bidi
     /// formatting, or any of `< > #`).
-    pub fn try_new(value: impl Into<String>) -> Result<Self, NameError> {
-        let value: String = value.into();
+    pub fn try_new(value: &str) -> Result<Self, NameError> {
+        let value: String = value.to_owned();
         let count = value.chars().count();
         if !(ident::MIN_CHARS..=ident::MAX_CHARS).contains(&count) {
             return Err(NameError::Length(count));
@@ -130,7 +130,7 @@ impl MeshName {
     /// constant, so selection and validation always succeed.
     #[must_use]
     pub fn random() -> Self {
-        Self::try_new(wordlist::random_pair()).expect("wordlist pair is always a valid mesh name")
+        Self::try_new(&wordlist::random_pair()).expect("wordlist pair is always a valid mesh name")
     }
 
     /// Derive a `topic` mesh's display name from its shared string. A leading
@@ -183,7 +183,7 @@ impl MeshName {
             head
         };
 
-        Self::try_new(name)
+        Self::try_new(&name)
             .unwrap_or_else(|_| Self::try_new("topic").expect("`topic` is a valid name"))
     }
 

@@ -151,7 +151,7 @@ fn a_joiner_meets_a_running_beacon_before_the_grace() {
         let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
         let mesh = Mesh::try_new(
             fresh_seed(),
-            MeshName::try_new("fast-join".to_owned()).expect("a name"),
+            MeshName::try_new("fast-join").expect("a name"),
             config,
         )
         .expect("a mesh");

@@ -63,7 +63,7 @@ macro_rules! string_newtype {
                 Decoder: ::serde::Deserializer<'de>,
             {
                 let raw = <String as ::serde::Deserialize>::deserialize(deserializer)?;
-                Self::try_new(raw).map_err(::serde::de::Error::custom)
+                Self::try_new(&raw).map_err(::serde::de::Error::custom)
             }
         }
     };

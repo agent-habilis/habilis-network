@@ -114,7 +114,7 @@ pub async fn offer(
         .sdp();
     require_candidates("offer", &local_sdp)?;
 
-    let envelope = SignalEnvelope::offer(local, local_sdp);
+    let envelope = SignalEnvelope::offer(local, &local_sdp);
     Ok((
         PendingOffer {
             peer_connection,
@@ -208,7 +208,7 @@ pub async fn answer(
         .sdp();
     require_candidates("answer", &local_sdp)?;
 
-    let envelope = SignalEnvelope::answer(local, local_sdp);
+    let envelope = SignalEnvelope::answer(local, &local_sdp);
     callbacks.push(ondatachannel.into_js_value());
     Ok((
         PendingAnswer {

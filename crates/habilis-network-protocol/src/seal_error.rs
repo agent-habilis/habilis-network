@@ -181,7 +181,7 @@ pub fn seal_to_body(recipient_pub: &PublicKey, plaintext: &str) -> Result<Messag
         ct: bs58::encode(sealed.ct).into_string(),
     };
     let json = serde_json::to_string(&envelope).expect("Envelope always serializes");
-    MessageBody::try_new(json).map_err(|error| SealError::Invalid(error.to_string()))
+    MessageBody::try_new(&json).map_err(|error| SealError::Invalid(error.to_string()))
 }
 
 /// Open a sealed directed `body` with our static X25519 secret, recovering the
@@ -343,8 +343,7 @@ mod tests {
                 r#""epk":"EuHtd9yCn95edmJqLKFeyXeoPw9nPzp1HTwdJEWEw9YL","#,
                 r#""n":"AtaLN3mCmEyUj5ur","#,
                 r#""ct":"79cUk28wvxuqaGBndLf5927gRbiTXuUAaSgPKp2Sho86SQcf1iSKCvXJnj9gvLrpDjSoUarapYeiR"}"#,
-            )
-            .to_owned(),
+            ),
         )
         .unwrap();
         assert_eq!(
@@ -375,7 +374,7 @@ mod tests {
         let last = chars.last_mut().unwrap();
         *last = if *last == '1' { '2' } else { '1' };
         json["ct"] = serde_json::Value::String(chars.into_iter().collect());
-        let tampered = crate::MessageBody::try_new(json.to_string()).unwrap();
+        let tampered = crate::MessageBody::try_new(&json.to_string()).unwrap();
         assert!(
             unseal_from_body(&secret, &tampered).is_err(),
             "a tampered ciphertext must fail the AEAD tag"
@@ -394,7 +393,7 @@ mod tests {
     #[test]
     fn a_plaintext_body_does_not_open_as_sealed() {
         let (secret, _) = keypair(5);
-        let body = crate::MessageBody::try_new(r#"{"kind":"message"}"#.to_owned()).unwrap();
+        let body = crate::MessageBody::try_new(r#"{"kind":"message"}"#).unwrap();
         assert!(
             unseal_from_body(&secret, &body).is_err(),
             "an un-sealed body must not be mistaken for an envelope"

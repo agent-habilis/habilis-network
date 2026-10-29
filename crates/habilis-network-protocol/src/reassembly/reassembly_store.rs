@@ -297,7 +297,7 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Auth
     for slot in group.slots.values() {
         body.push_str(slot);
     }
-    let body = MessageBody::try_new(body).ok()?;
+    let body = MessageBody::try_new(&body).ok()?;
     let header = group.header?;
     Some(synthesize_from(&header, body, group_id))
 }

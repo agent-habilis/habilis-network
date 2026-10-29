@@ -408,7 +408,7 @@ function iteratesOnly(body: string, name: string): boolean {
   return uses > 0 && uses === iters;
 }
 
-// A public fn with an `impl Into<...>` parameter. The guide allows it in a library when call-site ergonomics matter most.
+// A public fn with an `impl Into<...>` parameter. A library takes a concrete type instead.
 function countPubImplInto(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   let count = 0;
@@ -726,14 +726,14 @@ const RULES: Rule[] = [
     scan: countPubVecParam,
     skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
     glob: "crates/**/*.rs",
-    why: "A public function takes an impl IntoIterator, not a Vec, when it only iterates. A function that keeps the list takes a Vec, and each such function has a counted row with its reason.",
+    why: "A public function takes an impl IntoIterator, not a Vec, when it only iterates. A function that keeps the list takes a Vec.",
   },
   {
     name: "pub_impl_into",
     scan: countPubImplInto,
     skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
     glob: "crates/**/*.rs",
-    why: "A public function takes impl Into<T> only where call-site ergonomics matter most in a library. Each such function has a counted row with its reason.",
+    why: "A public function takes a concrete type, not impl Into<T>. A library fn takes &str or the owned type, so the caller sees what it stores.",
   },
   {
     name: "app_impl_into",

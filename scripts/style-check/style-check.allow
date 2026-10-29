@@ -287,7 +287,7 @@ long_chain|crates/habilis-network/src/lookup/mdns.rs|1|kept: statements with a c
 long_chain|crates/habilis-network/src/lookup/peer.rs|2|moved from mod.rs with the peer builders; to be split by a named step (P15)
 long_chain|crates/habilis-network/src/lookup/build_mesh.rs|1|moved from mod.rs with build_mesh; to be split by a named step (P15)
 long_chain|crates/habilis-network/src/lookup/relay.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/src/membership/membership_app.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network/src/membership/membership_app.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/membership/membership_event.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/testing/log_capture.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/src/testing/lane_node.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -458,15 +458,6 @@ untyped_long_chain_let|crates/habilis-network/tests/unknown_peer_requests_loopba
 # pub_impl_into: a public function takes impl Into<T>. A library may do so where call-site ergonomics
 # matter most. These are the validating constructors that take a &str or a String, and the signaling
 # builders that store an SDP string or a reason.
-pub_impl_into|crates/habilis-network-iroh-webrtc-transport/src/signal_envelope.rs|3|offer, answer and error: take a &str or a String and store it owned in the signal
-pub_impl_into|crates/habilis-network-protocol/src/mesh/mesh_id_error.rs|1|MeshId::new: a validating constructor that takes a &str or a String
-pub_impl_into|crates/habilis-network-protocol/src/mesh/name_error.rs|1|MeshName::new: a validating constructor that takes a &str or a String
-pub_impl_into|crates/habilis-network-protocol/src/message/body_error.rs|1|MessageBody::new: a validating constructor that takes a &str or a String
-pub_impl_into|crates/habilis-network-protocol/src/message/id_error.rs|1|MessageId::new: a validating constructor that takes a &str or a String
-pub_impl_into|crates/habilis-network-protocol/src/message/app_tag.rs|1|AppTag::new: a validating constructor that takes a &str or a String
-pub_impl_into|crates/habilis-network-protocol/src/message/corr_id.rs|1|CorrId::new: a validating constructor that takes a &str or a String
-pub_impl_into|crates/habilis-network-protocol/src/nickname_error.rs|1|Nickname::new: a validating constructor that takes a &str or a String
-pub_impl_into|crates/habilis-network/src/lookup/probe.rs|1|a function that takes an address or anything that converts into one
 
 # crate_example: a library crate with no doc example (D2). Each row is a count that may only go down.
 

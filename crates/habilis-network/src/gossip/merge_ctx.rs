@@ -450,7 +450,7 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &Handle
     let addr_data = serde_json::to_string(&addr_json)
         .expect("endpoint_addr_to_json produces a Value that always serializes");
     let addr_body =
-        MessageBody::try_new(addr_data).expect("endpoint address JSON has no control characters");
+        MessageBody::try_new(&addr_data).expect("endpoint address JSON has no control characters");
     broadcast_msg(
         ctx.sender,
         &Message::new_peer_info(ctx.mesh, ctx.author, addr_body).sign(ctx.identity),

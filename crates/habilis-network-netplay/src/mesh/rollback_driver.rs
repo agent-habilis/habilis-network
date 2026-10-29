@@ -173,7 +173,7 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                     );
                     return false;
                 };
-                let Some(frame) = frame_for(ctx, ROLLBACK_TAG, Some(nickname), payload) else {
+                let Some(frame) = frame_for(ctx, ROLLBACK_TAG, Some(nickname), &payload) else {
                     return false;
                 };
                 let class = self.classify(&frame.authored());
@@ -192,7 +192,7 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                     .collect();
                 let mut delivered = false;
                 for peer in peers {
-                    let Some(frame) = frame_for(ctx, LOBBY_TAG, Some(peer), payload.clone()) else {
+                    let Some(frame) = frame_for(ctx, LOBBY_TAG, Some(peer), &payload) else {
                         continue;
                     };
                     let class = self.classify(&frame.authored());
@@ -209,7 +209,7 @@ fn frame_for(
     ctx: &HandlerCtx<'_>,
     tag: &str,
     to: Option<Nickname>,
-    payload: String,
+    payload: &str,
 ) -> Option<Verified> {
     let (Ok(tag), Ok(body)) = (AppTag::try_new(tag), MessageBody::try_new(payload)) else {
         return None;

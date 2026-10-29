@@ -746,7 +746,7 @@ mod tests {
         heads: &serde_json::Value,
         asker: &Identity,
     ) -> Verified {
-        let body = MessageBody::try_new(serde_json::json!({ "heads": heads }).to_string())
+        let body = MessageBody::try_new(&serde_json::json!({ "heads": heads }).to_string())
             .expect("a JSON body");
         Message::new_channel_digest(mesh, &nick("bob"), body, channel).sign(asker)
     }
@@ -814,7 +814,7 @@ mod tests {
         let bob = Identity::generate();
         prove_identity(&mut state, &bob, bob_endpoint.id());
         let body = MessageBody::try_new(
-            serde_json::json!({ "heads": ["heads-we-do-not-hold"], "closing": true }).to_string(),
+            &serde_json::json!({ "heads": ["heads-we-do-not-hold"], "closing": true }).to_string(),
         )
         .expect("a JSON body");
         let closing =

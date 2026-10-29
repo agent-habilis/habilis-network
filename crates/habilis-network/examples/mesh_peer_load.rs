@@ -136,7 +136,7 @@ async fn send_to<'a>(
         let (reply, _) = oneshot::channel();
         let _ = sender
             .send(Request::Send {
-                to: Nickname::try_new(nick.clone()).ok(),
+                to: Nickname::try_new(&nick.clone()).ok(),
                 body: msg_body("load")?,
                 reply,
             })
@@ -160,7 +160,7 @@ async fn flood(
             let (reply, _) = oneshot::channel();
             if sender
                 .send(Request::Send {
-                    to: Nickname::try_new(nick.clone()).ok(),
+                    to: Nickname::try_new(&nick.clone()).ok(),
                     body: msg_body(&body)?,
                     reply,
                 })

@@ -594,7 +594,7 @@ mod prop {
     }
 
     fn arb_nickname() -> impl Strategy<Value = Nickname> {
-        "[a-z]{3,8}-[a-z]{3,8}".prop_map(|raw| Nickname::try_new(raw).unwrap())
+        "[a-z]{3,8}-[a-z]{3,8}".prop_map(|raw| Nickname::try_new(&raw).unwrap())
     }
 
     proptest! {
@@ -604,7 +604,7 @@ mod prop {
             body in arb_ascii_body(),
             author in arb_nickname(),
         ) {
-            let body = MessageBody::try_new(body).unwrap();
+            let body = MessageBody::try_new(&body).unwrap();
             let message = Message::new_app(&super::sid(), &author, AppFrameParams { tag: AppTag::try_new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
             let bytes = message.serialize().unwrap();
             let parsed = Message::parse(&bytes).unwrap();
@@ -632,7 +632,7 @@ mod prop {
             // C0 controls excluding the allowed tab/newline/cr.
             body in "[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f]{1,10}",
         ) {
-            prop_assert!(MessageBody::try_new(body).is_err());
+            prop_assert!(MessageBody::try_new(&body).is_err());
         }
 
         #[test]
@@ -643,7 +643,7 @@ mod prop {
             body in "\\P{C}{0,50}",
             author in arb_nickname(),
         ) {
-            let body = MessageBody::try_new(body).unwrap();
+            let body = MessageBody::try_new(&body).unwrap();
             let expected = body.clone();
             let message = Message::new_app(&super::sid(), &author, AppFrameParams { tag: AppTag::try_new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
             let bytes = message.serialize().unwrap();
@@ -662,7 +662,7 @@ mod prop {
                     tag: AppTag::try_new("app_msg").expect("a valid app tag"),
                     to: None,
                     corr: None,
-                    body: MessageBody::try_new(body).unwrap(),
+                    body: MessageBody::try_new(&body).unwrap(),
                 },
             );
             if let Ok(bytes) = message.serialize() {

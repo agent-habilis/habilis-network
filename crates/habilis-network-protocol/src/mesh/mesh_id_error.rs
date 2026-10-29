@@ -66,8 +66,8 @@ fn is_base58_char(ch: char) -> bool {
 impl MeshId {
     /// # Errors
     /// The value is empty, over-long, or not valid base58.
-    pub fn try_new(value: impl Into<String>) -> Result<Self, MeshIdError> {
-        let value: String = value.into();
+    pub fn try_new(value: &str) -> Result<Self, MeshIdError> {
+        let value: String = value.to_owned();
         let len = value.len();
         if !(MIN_LEN..=MAX_LEN).contains(&len) {
             return Err(MeshIdError::Length(len));
@@ -84,7 +84,7 @@ impl TryFrom<String> for MeshId {
     type Error = MeshIdError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_new(value)
+        Self::try_new(&value)
     }
 }
 
@@ -96,7 +96,7 @@ impl From<&str> for MeshId {
         }
         let mesh = super::Mesh::from_topic(label, super::MeshConfig::loopback())
             .expect("generated test mesh");
-        Self::try_new(mesh.to_string()).expect("generated test mesh id must be valid")
+        Self::try_new(&mesh.to_string()).expect("generated test mesh id must be valid")
     }
 }
 
@@ -118,7 +118,7 @@ mod mesh_id_tests {
 
     #[test]
     fn new_accepts_well_formed_id() {
-        MeshId::try_new(valid_id()).unwrap();
+        MeshId::try_new(&valid_id()).unwrap();
     }
 
     #[test]
@@ -143,7 +143,7 @@ mod mesh_id_tests {
     #[test]
     fn serde_transparent_round_trip() {
         let id_str = valid_id();
-        let id = MeshId::try_new(id_str.clone()).unwrap();
+        let id = MeshId::try_new(&id_str).unwrap();
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(json, format!("\"{id_str}\""));
         let parsed: MeshId = serde_json::from_str(&json).unwrap();
@@ -155,7 +155,7 @@ mod mesh_id_tests {
         let mut mistyped = valid_id();
         let replacement = if mistyped.ends_with('1') { "2" } else { "1" };
         mistyped.replace_range(mistyped.len() - 1.., replacement);
-        assert_eq!(MeshId::try_new(mistyped), Err(MeshIdError::InvalidHash));
+        assert_eq!(MeshId::try_new(&mistyped), Err(MeshIdError::InvalidHash));
     }
 
     #[test]
@@ -167,7 +167,7 @@ mod mesh_id_tests {
 
     #[test]
     fn every_mesh_id_decodes_as_a_mesh() {
-        let id = MeshId::try_new(valid_id()).unwrap();
+        let id = MeshId::try_new(&valid_id()).unwrap();
         let _: LockedMesh = id.as_str().parse().unwrap();
     }
 

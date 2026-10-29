@@ -13,11 +13,7 @@ use iroh::{Endpoint, EndpointAddr};
 /// effect. `true` iff a connection was established within `timeout`
 /// (a foreign / dead / unreachable target yields `false`); callers
 /// wanting only the resolution side effect ignore the bool.
-pub async fn probe_connect(
-    endpoint: &Endpoint,
-    target: impl Into<EndpointAddr>,
-    timeout: Duration,
-) -> bool {
+pub async fn probe_connect(endpoint: &Endpoint, target: EndpointAddr, timeout: Duration) -> bool {
     super::probe_answer::probe_answer(endpoint, target, timeout).await
         == super::probe_answer::ProbeAnswer::Ours
 }

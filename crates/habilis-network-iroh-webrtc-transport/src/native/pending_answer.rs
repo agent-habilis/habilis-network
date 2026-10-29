@@ -58,7 +58,7 @@ pub async fn answer_with(
         .sdp_api()
         .accept_offer(sdp_offer)
         .map_err(JsepError::sdp("accept SDP offer"))?;
-    let envelope = SignalEnvelope::answer(local, sdp_answer.to_sdp_string());
+    let envelope = SignalEnvelope::answer(local, &sdp_answer.to_sdp_string());
     Ok((PendingAnswer { inner }, envelope))
 }
 

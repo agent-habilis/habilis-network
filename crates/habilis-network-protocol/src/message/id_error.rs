@@ -43,8 +43,8 @@ impl std::error::Error for IdError {}
 impl MessageId {
     /// # Errors
     /// The value is not a valid UUID.
-    pub fn try_new(value: impl Into<String>) -> Result<Self, IdError> {
-        let value: String = value.into();
+    pub fn try_new(value: &str) -> Result<Self, IdError> {
+        let value: String = value.to_owned();
         Uuid::parse_str(&value).map_err(|_| IdError(value.clone()))?;
         Ok(Self(value))
     }

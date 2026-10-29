@@ -14,7 +14,7 @@ fn directory(name: &str) -> MeshName {
 
 /// The advertised mesh's id for a directory of the given name.
 fn advertised_id(name: &str) -> MeshId {
-    MeshId::try_new(directory_mesh(&directory(name), LookupOpts::public_preset()).to_string())
+    MeshId::try_new(&directory_mesh(&directory(name), LookupOpts::public_preset()).to_string())
         .expect("directory mesh id is valid")
 }
 

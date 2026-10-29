@@ -67,8 +67,8 @@ impl Nickname {
     /// Returns [`NicknameError`] if `value` is empty, longer than 32
     /// characters, or contains a forbidden scalar (see
     /// `is_forbidden`).
-    pub fn try_new(value: impl Into<String>) -> Result<Self, NicknameError> {
-        let value: String = value.into();
+    pub fn try_new(value: &str) -> Result<Self, NicknameError> {
+        let value: String = value.to_owned();
         let count = value.chars().count();
         if !(super::ident::MIN_CHARS..=super::ident::MAX_CHARS).contains(&count) {
             return Err(NicknameError::Length(count));
@@ -87,7 +87,7 @@ impl Nickname {
     /// succeed.
     #[must_use]
     pub fn random() -> Self {
-        Self::try_new(super::wordlist::random_pair())
+        Self::try_new(&super::wordlist::random_pair())
             .expect("wordlist combinations are always valid nicknames")
     }
 }
@@ -122,14 +122,14 @@ mod tests {
     fn new_rejects_empty_and_overlong() {
         assert!(Nickname::try_new("").is_err());
         let too_long = "a".repeat(super::super::ident::MAX_CHARS + 1);
-        assert!(Nickname::try_new(too_long).is_err());
+        assert!(Nickname::try_new(&too_long).is_err());
     }
 
     #[test]
     fn length_cap_counts_characters_not_bytes() {
         // 32 multibyte chars (96 bytes) is fine; 33 is not.
-        assert!(Nickname::try_new("あ".repeat(32)).is_ok());
-        assert!(Nickname::try_new("あ".repeat(33)).is_err());
+        assert!(Nickname::try_new(&"あ".repeat(32)).is_ok());
+        assert!(Nickname::try_new(&"あ".repeat(33)).is_err());
     }
 
     #[test]

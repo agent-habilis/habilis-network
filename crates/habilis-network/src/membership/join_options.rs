@@ -192,7 +192,7 @@ pub fn blind_new_members(
 pub async fn join(opts: &JoinOptions, sink: Arc<dyn NodeSink>) -> Result<Membership, SetupError> {
     let nickname = opts
         .nick
-        .clone()
+        .as_deref()
         .map(Nickname::try_new)
         .transpose()
         .map_err(|error| SetupError::internal(anyhow::anyhow!("{error}")))?;
@@ -348,7 +348,8 @@ pub fn resolve_kind(
             )
             .map_err(SetupError::Config)?;
             let name = MeshName::try_new(
-                opts.name
+                &opts
+                    .name
                     .clone()
                     .unwrap_or_else(|| "habilis-network".to_string()),
             )

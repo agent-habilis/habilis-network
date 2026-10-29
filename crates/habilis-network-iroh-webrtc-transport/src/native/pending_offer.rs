@@ -59,7 +59,7 @@ pub async fn offer_with(
         ..ChannelConfig::default()
     });
     let (sdp_offer, pending) = change.apply().ok_or(JsepError::NoOffer)?;
-    let envelope = SignalEnvelope::offer(local, sdp_offer.to_sdp_string());
+    let envelope = SignalEnvelope::offer(local, &sdp_offer.to_sdp_string());
     Ok((
         PendingOffer {
             inner,
