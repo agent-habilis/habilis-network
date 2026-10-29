@@ -858,7 +858,6 @@ mod tests {
     use habilis_network_protocol::{
         AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, SymmetricKey,
     };
-    use habilis_network_test_tracing::{expect_warn, test};
     use serde_json::{Value, json};
     use std::collections::HashSet;
 
@@ -904,6 +903,7 @@ mod tests {
     /// engine's, which is why `message::VERSION` is `12.0`.
     #[test]
     fn genesis_bytes_are_pinned() {
+        let _guard = ::habilis_network_test_tracing::init();
         let genesis = super::peers_genesis("peers");
         assert_eq!(
             format!("{:?}", genesis.hash()),
@@ -917,6 +917,7 @@ mod tests {
     /// change. The values were captured at the base commit.
     #[test]
     fn a_fixed_change_keeps_its_hash_and_bytes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let doc = MeshDoc::new_ungated();
         let bytes = doc
             .build_change(&json!({"board": "x", "n": 1}), b"alice")
@@ -942,6 +943,7 @@ mod tests {
     fn a_fixed_enc_body_opens_to_its_plaintext_change() {
         use super::wire::{decrypt_body, parse_change_body};
 
+        let _guard = ::habilis_network_test_tracing::init();
         let plain = r#"{"k":"change","c":"2VfUX","m":{"board":"x"}}"#;
         assert_eq!(
             super::wire::change_body(&[1, 2, 3, 4], Some(&json!({"board": "x"})))
@@ -1007,6 +1009,7 @@ mod tests {
 
     #[test]
     fn distinct_top_level_keys_converge_either_order() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Distinct keys at the always-shared document root merge with no genesis.
         let (alice, bob) = (nick("alice"), nick("bob"));
         let mut left = MeshDoc::new_ungated();
@@ -1033,6 +1036,7 @@ mod tests {
 
     #[test]
     fn concurrent_peer_reports_converge_via_shared_genesis() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Two peers each vivify their own `/peers/<nick>` entry concurrently. The
         // shared `/peers` genesis makes these distinct keys in one map, so both
         // survive — the case that erased a card before the genesis existed.
@@ -1061,6 +1065,7 @@ mod tests {
 
     #[test]
     fn null_deletes_key_and_preserves_siblings() {
+        let _guard = ::habilis_network_test_tracing::init();
         let alice = nick("alice");
         let mut doc = MeshDoc::new_ungated();
         author(
@@ -1095,7 +1100,8 @@ mod tests {
     /// answers `Duplicate`.
     #[test]
     fn a_change_that_fails_to_apply_is_not_recorded_as_applied() {
-        expect_warn(
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
             super::LOG_TARGET,
             "dropping a channel change automerge refused",
         );
@@ -1144,6 +1150,7 @@ mod tests {
     /// never satisfied, so nothing drains and nothing expires.
     #[test]
     fn an_orphan_flood_from_one_author_stays_bounded() {
+        let _guard = ::habilis_network_test_tracing::init();
         let alice = nick("alice");
         let mut source = MeshDoc::new_ungated();
         let chain: Vec<Verified> = (0..DOC_PENDING_AUTHOR_MAX + 32)
@@ -1175,7 +1182,8 @@ mod tests {
     /// which states the same rule over the other store.
     #[test]
     fn global_budget_refuses_the_newcomer() {
-        expect_warn(
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
             super::LOG_TARGET,
             "channel orphan buffer full; incoming orphan dropped",
         );
@@ -1238,7 +1246,8 @@ mod tests {
     /// evicted ones or the author's re-send is discarded as a repeat.
     #[test]
     fn an_orphan_refused_at_the_global_cap_is_reported_as_dropped() {
-        expect_warn(
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
             super::LOG_TARGET,
             "channel orphan buffer full; incoming orphan dropped",
         );
@@ -1267,6 +1276,7 @@ mod tests {
     /// joiner's honest backfill out of the buffer.
     #[test]
     fn a_floods_orphans_do_not_evict_another_authors() {
+        let _guard = ::habilis_network_test_tracing::init();
         let alice = nick("alice");
         let mallory = nick("mallory");
 
@@ -1337,6 +1347,7 @@ mod tests {
     /// cannot drain until every link below it arrives again.
     #[test]
     fn a_full_orphan_buffer_keeps_the_lowest_seqs_of_an_author() {
+        let _guard = ::habilis_network_test_tracing::init();
         let chain = keyed_chain(300);
         let tail: Vec<usize> = (100..300).collect();
         let sink = deliver(&chain, &tail, 100);
@@ -1351,7 +1362,8 @@ mod tests {
     /// the seq order keep the same links.
     #[test]
     fn a_reversed_tail_keeps_the_lowest_seqs_of_an_author() {
-        expect_warn(
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
             super::LOG_TARGET,
             "channel orphan buffer full for this author; highest-seq orphan evicted",
         );
@@ -1368,7 +1380,8 @@ mod tests {
     /// The arrival order does not change which links stay.
     #[test]
     fn a_shuffled_tail_keeps_the_lowest_seqs_of_an_author() {
-        expect_warn(
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
             super::LOG_TARGET,
             "channel orphan buffer full for this author; highest-seq orphan evicted",
         );
@@ -1387,6 +1400,7 @@ mod tests {
     /// only those: the rest drain and must stay seen.
     #[test]
     fn a_full_orphan_buffer_reports_the_links_it_let_go() {
+        let _guard = ::habilis_network_test_tracing::init();
         let chain = keyed_chain(300);
         let tail: Vec<usize> = (100..300).collect();
         let mut sink = deliver(&chain, &tail, 100);
@@ -1405,6 +1419,7 @@ mod tests {
     /// when its content differs: seq is the only order the buffer trusts.
     #[test]
     fn a_full_orphan_buffer_refuses_a_second_change_at_its_highest_seq() {
+        let _guard = ::habilis_network_test_tracing::init();
         let chain = keyed_chain(DOC_PENDING_AUTHOR_MAX + 1);
         let alice = nick("alice");
         let mut fork = MeshDoc::new_ungated();
@@ -1437,7 +1452,8 @@ mod tests {
     /// author's real change would then be refused on every replica.
     #[test]
     fn a_change_signed_by_another_key_cannot_take_an_authors_next_seq() {
-        expect_warn(
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
             super::LOG_TARGET,
             "dropping a channel change whose actor is not its signer's key",
         );
@@ -1483,7 +1499,8 @@ mod tests {
     /// buffer of its signer.
     #[test]
     fn a_change_signed_by_another_key_is_not_buffered() {
-        expect_warn(
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
             super::LOG_TARGET,
             "dropping a channel change whose actor is not its signer's key",
         );
@@ -1510,6 +1527,7 @@ mod tests {
 
     #[test]
     fn out_of_order_change_is_buffered_then_drains() {
+        let _guard = ::habilis_network_test_tracing::init();
         let alice = nick("alice");
         let mut source = MeshDoc::new_ungated();
         let first = author(&mut source, &alice, &json!({"a": 1}));
@@ -1540,6 +1558,7 @@ mod tests {
 
     #[test]
     fn a_doc_holds_its_own_and_earlier_heads_only() {
+        let _guard = ::habilis_network_test_tracing::init();
         let alice = nick("alice");
         let mut source = MeshDoc::new_ungated();
         author(&mut source, &alice, &json!({"a": 1}));
@@ -1566,6 +1585,7 @@ mod tests {
 
     #[test]
     fn a_flood_past_the_author_cap_converges_on_the_author_re_send() {
+        let _guard = ::habilis_network_test_tracing::init();
         let alice = nick("alice");
         let mut source = MeshDoc::new_ungated();
         let frames: Vec<_> = (0..200)
@@ -1593,6 +1613,7 @@ mod tests {
 
     #[test]
     fn heads_and_changes_since_reconcile_a_late_joiner() {
+        let _guard = ::habilis_network_test_tracing::init();
         // A source authors two changes; a fresh joiner advertises its (empty)
         // heads and pulls exactly the frames it lacks, then converges.
         let alice = nick("alice");
@@ -1622,6 +1643,7 @@ mod tests {
 
     #[test]
     fn encrypted_change_converges_with_the_key_and_is_opaque_without() {
+        let _guard = ::habilis_network_test_tracing::init();
         let alice = nick("alice");
         let key = [42u8; 32];
         // Author builds the change and seals the wire body, as the daemon does.
@@ -1689,6 +1711,7 @@ mod tests {
 
     #[test]
     fn foreign_card_write_is_rejected_own_is_allowed() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (alice, bob) = (nick("alice"), nick("bob"));
 
         // Craft both changes on one ungated replica so the forge is built atop
@@ -1741,6 +1764,7 @@ mod tests {
 
     #[test]
     fn self_entry_delete_passes_gate_foreign_delete_is_rejected() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The leave-time retraction: a peer nulls its own `/peers/<nick>`
         // entry. The gate must let the owner do it and refuse anyone else —
         // which is why departed peers can only ever be pruned by themselves.
@@ -1810,6 +1834,7 @@ mod tests {
     /// every replica rejects it as `DuplicateSeqNumber` equivocation.
     #[test]
     fn fresh_republish_survives_a_prior_self_delete() {
+        let _guard = ::habilis_network_test_tracing::init();
         let alice = nick("alice");
 
         // Old session: card, then the leave-time retraction.

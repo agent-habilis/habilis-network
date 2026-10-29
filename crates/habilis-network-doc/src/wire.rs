@@ -126,7 +126,6 @@ pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
 mod tests {
     use super::{change_body, decrypt_body, encrypt_body, merge_body, parse_change_body};
     use habilis_network_protocol::SymmetricKey;
-    use habilis_network_test_tracing::test;
 
     fn key(byte: u8) -> SymmetricKey {
         SymmetricKey::from([byte; 32])
@@ -134,6 +133,7 @@ mod tests {
 
     #[test]
     fn enc_body_round_trips_and_hides_the_delta() {
+        let _guard = ::habilis_network_test_tracing::init();
         let key = key(3);
         let plain =
             change_body(&[1, 2, 3, 4], Some(&serde_json::json!({"board": "x"}))).expect("compose");
@@ -163,6 +163,7 @@ mod tests {
 
     #[test]
     fn enc_body_needs_the_right_key() {
+        let _guard = ::habilis_network_test_tracing::init();
         let enc = encrypt_body(&change_body(&[9, 9], None).unwrap(), &key(1)).unwrap();
         assert!(
             decrypt_body(enc.as_str(), Some(&key(2))).is_none(),
@@ -179,6 +180,7 @@ mod tests {
 
     #[test]
     fn decrypt_enforces_encryption_only_when_keyed() {
+        let _guard = ::habilis_network_test_tracing::init();
         let plain = change_body(&[5], None).expect("compose");
         // Passwordless (no key): a non-`enc` body is returned verbatim.
         assert_eq!(
@@ -196,6 +198,7 @@ mod tests {
 
     #[test]
     fn change_body_round_trips() {
+        let _guard = ::habilis_network_test_tracing::init();
         let change = vec![1u8, 2, 3, 250, 0, 42];
         // The optional `m` delta does not affect change decoding either way.
         let with_merge =
@@ -215,6 +218,7 @@ mod tests {
 
     #[test]
     fn legacy_merge_body_is_a_no_op_change() {
+        let _guard = ::habilis_network_test_tracing::init();
         // A legacy `merge` body (or any non-`change` body) decodes to no change,
         // so the automerge engine ignores it — forward-compat with old binaries.
         let body = merge_body(serde_json::json!({"turn": "a"})).expect("compose");
