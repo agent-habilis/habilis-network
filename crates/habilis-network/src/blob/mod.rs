@@ -480,7 +480,7 @@ mod tests {
             .register(&src, ContentId::new("blob-test-content"))
             .await
             .unwrap();
-        ticket.sha256 = super::BlobDigest::from_bytes([0xabu8; super::HASH_LEN]);
+        ticket.sha256 = super::BlobDigest::from([0xabu8; super::HASH_LEN]);
         let mut out = Vec::new();
         assert!(
             fetch(&ticket, &mut out, None).await.is_err(),

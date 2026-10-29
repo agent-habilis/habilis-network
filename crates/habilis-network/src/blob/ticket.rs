@@ -51,7 +51,7 @@ mod tests {
         BlobTicket {
             address: sample_addr(3),
             secret: TicketSecret::from_bytes([9u8; SECRET_LEN]),
-            sha256: BlobDigest::from_bytes([7u8; HASH_LEN]),
+            sha256: BlobDigest::from([7u8; HASH_LEN]),
             size: 1_234_567,
             lookups: LookupOpts::public_preset(),
             password,
@@ -80,7 +80,7 @@ mod tests {
         );
         assert_eq!(
             decoded.sha256,
-            BlobDigest::from_bytes([7u8; HASH_LEN]),
+            BlobDigest::from([7u8; HASH_LEN]),
             "the decoded hash matches the digest"
         );
         assert_eq!(

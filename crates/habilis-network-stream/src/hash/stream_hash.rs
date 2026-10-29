@@ -134,7 +134,7 @@ impl StreamHash {
             return Err(HashError::UnknownFlags(flags));
         }
         let mut position = 1;
-        let id = StreamId::from_bytes(
+        let id = StreamId::from(
             take_array::<ID_LEN>(payload, &mut position)
                 .ok_or(HashError::Truncated("stream hash missing id"))?,
         );

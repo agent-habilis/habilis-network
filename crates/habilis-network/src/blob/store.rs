@@ -86,7 +86,7 @@ mod tests {
         fs::write(&src, vec![7u8; 4096]).unwrap();
 
         let mut store = BlobStore::try_new(temp_dir("spool")).unwrap();
-        let hash = BlobDigest::from_bytes([1u8; HASH_LEN]);
+        let hash = BlobDigest::from([1u8; HASH_LEN]);
         let registered = store
             .snapshot(
                 &src,
@@ -126,7 +126,7 @@ mod tests {
         fs::write(&src, b"same content").unwrap();
 
         let mut store = BlobStore::try_new(temp_dir("spool")).unwrap();
-        let hash = BlobDigest::from_bytes([2u8; HASH_LEN]);
+        let hash = BlobDigest::from([2u8; HASH_LEN]);
         let first = store
             .snapshot(
                 &src,
@@ -203,7 +203,7 @@ mod tests {
         fs::write(&src, b"shared").unwrap();
 
         let mut store = BlobStore::try_new(temp_dir("spool")).unwrap();
-        let hash = BlobDigest::from_bytes([4u8; HASH_LEN]);
+        let hash = BlobDigest::from([4u8; HASH_LEN]);
         let group_a = ContentId::new("blob-test-group-a");
         let group_b = ContentId::new("blob-test-group-b");
         snapshot_as(&mut store, &src, hash, &group_a);
@@ -234,7 +234,7 @@ mod tests {
         fs::write(&src, b"twice").unwrap();
 
         let mut store = BlobStore::try_new(temp_dir("spool")).unwrap();
-        let hash = BlobDigest::from_bytes([5u8; HASH_LEN]);
+        let hash = BlobDigest::from([5u8; HASH_LEN]);
         let group = ContentId::new("blob-test-group");
         snapshot_as(&mut store, &src, hash, &group);
         snapshot_as(&mut store, &src, hash, &group);
@@ -265,9 +265,9 @@ mod tests {
 
         let mut store = BlobStore::try_new(temp_dir("spool")).unwrap();
         let (oldest, next_oldest, filler) = (
-            BlobDigest::from_bytes([6u8; HASH_LEN]),
-            BlobDigest::from_bytes([7u8; HASH_LEN]),
-            BlobDigest::from_bytes([8u8; HASH_LEN]),
+            BlobDigest::from([6u8; HASH_LEN]),
+            BlobDigest::from([7u8; HASH_LEN]),
+            BlobDigest::from([8u8; HASH_LEN]),
         );
         let group_a = ContentId::new("blob-test-group-a");
         let group_b = ContentId::new("blob-test-group-b");
@@ -311,7 +311,7 @@ mod tests {
         fs::write(&src, b"bye").unwrap();
 
         let mut store = BlobStore::try_new(temp_dir("spool")).unwrap();
-        let hash = BlobDigest::from_bytes([3u8; HASH_LEN]);
+        let hash = BlobDigest::from([3u8; HASH_LEN]);
         let task = ContentId::new("blob-test-content");
         store
             .snapshot(

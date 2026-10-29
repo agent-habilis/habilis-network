@@ -29,7 +29,7 @@ fn a_blob_ticket_is_built_from_outside_the_crate() {
     let ticket = BlobTicket::new(
         address.clone(),
         TicketSecret::from_bytes([2; 32]),
-        BlobDigest::from_bytes([3; 32]),
+        BlobDigest::from([3; 32]),
         42,
         LookupOpts::loopback(),
         PayloadPath::DirectOnly,

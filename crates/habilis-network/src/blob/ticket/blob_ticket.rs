@@ -133,7 +133,7 @@ impl BlobTicket {
         position += 1;
         let password = flags & PASSWORD_BIT != 0;
         let relay_transport = PayloadPath::from(flags & RELAY_TRANSPORT_BIT != 0);
-        let sha256 = BlobDigest::from_bytes(
+        let sha256 = BlobDigest::from(
             take_array::<HASH_LEN>(payload, &mut position).context("ticket missing hash")?,
         );
         let size_bytes = take_array::<8>(payload, &mut position).context("ticket missing size")?;

@@ -81,9 +81,6 @@ async fn read_header(
     recv.read_exact(&mut *secret).await?;
     Ok((
         send,
-        (
-            StreamId::from_bytes(id),
-            StreamSecret::from_zeroizing(secret),
-        ),
+        (StreamId::from(id), StreamSecret::from_zeroizing(secret)),
     ))
 }

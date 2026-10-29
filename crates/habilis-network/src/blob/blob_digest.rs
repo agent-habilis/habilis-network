@@ -7,13 +7,13 @@ use super::HASH_LEN;
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlobDigest([u8; HASH_LEN]);
 
-impl BlobDigest {
-    /// Wrap the 32 bytes of a SHA-256.
-    #[must_use]
-    pub fn from_bytes(bytes: [u8; HASH_LEN]) -> Self {
+impl From<[u8; HASH_LEN]> for BlobDigest {
+    fn from(bytes: [u8; HASH_LEN]) -> Self {
         Self(bytes)
     }
+}
 
+impl BlobDigest {
     /// The raw bytes, borrowed.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; HASH_LEN] {

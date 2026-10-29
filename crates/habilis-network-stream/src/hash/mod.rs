@@ -60,7 +60,7 @@ mod tests {
             ),
             lookups: LookupOpts::loopback(),
             transport,
-            id: StreamId::from_bytes([1; ID_LEN]),
+            id: StreamId::from([1; ID_LEN]),
             secret: StreamSecret::from_bytes([2; SECRET_LEN]),
         }
     }

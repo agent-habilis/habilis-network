@@ -22,9 +22,7 @@ from_name|crates/habilis-network-protocol/src/message/shard.rs|1|no impl From in
 from_name|crates/habilis-network-util/src/unix_secs.rs|1|no impl From in this file beside from_le_bytes,from_secs (N12), to add the From impl or rename
 from_name|crates/habilis-network/src/daemon/state/direct_state.rs|1|no impl From in this file beside from_summary (N12), to add the From impl or rename
 from_name|crates/habilis-network-stream/src/hash/mod.rs|1|no impl From in this file: a from_ constructor of the stream hash types, split from hash.rs
-from_name|crates/habilis-network-stream/src/hash/stream_id.rs|1|no impl From in this file: a from_ constructor of the stream hash types, split from hash.rs
 from_name|crates/habilis-network-stream/src/hash/stream_secret.rs|1|no impl From in this file: a from_ constructor of the stream hash types, split from hash.rs
-from_name|crates/habilis-network/src/blob/blob_digest.rs|1|no impl From in this file beside from_bytes (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/mesh/mesh.rs|1|no impl From in this file: the from_ constructors of a mesh, split from mesh/mod.rs
 from_name|tasks/src/bench/run/measured.rs|1|Measured::from_samples builds a measurement from raw samples, not a From conversion; it has call sites in four bench files
 from_name|tasks/src/bench/run/rtt.rs|1|Rtt::from_samples builds an Rtt from raw samples, not a From conversion; it has call sites in four bench files

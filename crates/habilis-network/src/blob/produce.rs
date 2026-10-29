@@ -313,7 +313,7 @@ async fn serve_stream(
     }
     let mut hash_bytes = [0u8; HASH_LEN];
     hash_bytes.copy_from_slice(&request[..HASH_LEN]);
-    let hash = BlobDigest::from_bytes(hash_bytes);
+    let hash = BlobDigest::from(hash_bytes);
     let mut token_bytes = Zeroizing::new([0u8; SECRET_LEN]);
     token_bytes.copy_from_slice(&request[HASH_LEN..]);
     let token = TicketSecret::from_zeroizing(token_bytes);
@@ -390,7 +390,7 @@ async fn hash_file(path: PathBuf) -> Result<(BlobDigest, u64)> {
         let digest = hasher.finalize();
         let mut sha256 = [0u8; HASH_LEN];
         sha256.copy_from_slice(&digest);
-        Ok((BlobDigest::from_bytes(sha256), size))
+        Ok((BlobDigest::from(sha256), size))
     })
     .await
     .context("blob hash task panicked")?
