@@ -18,7 +18,7 @@ pub fn build_msg_bytes(
     params: BuildMsgParams<'_>,
     identity: &Identity,
 ) -> Result<(WireFrame, Verified), MessageError> {
-    let msg = Message::new_app(
+    let message = Message::new_app(
         params.mesh,
         params.author,
         AppFrameParams {
@@ -31,6 +31,6 @@ pub fn build_msg_bytes(
     .with_chain(params.chain.seq, params.chain.previous)
     .with_parents(params.chain.parents)
     .sign(identity);
-    let raw = msg.serialize()?;
-    Ok((raw, msg))
+    let raw = message.serialize()?;
+    Ok((raw, message))
 }

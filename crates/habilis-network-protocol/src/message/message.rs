@@ -309,14 +309,14 @@ impl Message {
     /// the signed bytes, so a message under signing has the key and not yet the signature.
     fn canonical_with_key(&self, key: Option<&AuthorKey>) -> Vec<u8> {
         const DOMAIN: &[u8] = b"habilis-mesh/msg";
-        let mut buf = Vec::new();
+        let mut buffer = Vec::new();
         let mut field = |bytes: &[u8]| {
-            buf.extend_from_slice(
+            buffer.extend_from_slice(
                 &u32::try_from(bytes.len())
                     .expect("a message field fits in u32")
                     .to_le_bytes(),
             );
-            buf.extend_from_slice(bytes);
+            buffer.extend_from_slice(bytes);
         };
         field(DOMAIN);
         field(self.version.as_bytes());
@@ -349,7 +349,7 @@ impl Message {
         // re-indexed by a relay. `None` (ordinary message) folds as `null`.
         field(&serde_json::to_vec(&self.shard).unwrap_or_default());
         field(&serde_json::to_vec(&self.ext).unwrap_or_default());
-        buf
+        buffer
     }
 
     /// This message's content hash (SHA-256 of [`Message::canonical_bytes`]) — the id used by

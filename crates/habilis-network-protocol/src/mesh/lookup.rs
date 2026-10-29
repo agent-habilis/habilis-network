@@ -167,7 +167,7 @@ impl LookupOpts {
     /// than `MAX_RELAY_URL_BYTES`, reaches here — [`validate`](Self::validate)
     /// rejects both, and every mint runs it, so this is a broken invariant
     /// rather than bad input.
-    pub fn encode_into(&self, buf: &mut Vec<u8>) {
+    pub fn encode_into(&self, buffer: &mut Vec<u8>) {
         let mut flags: u8 = 0;
         if self.mdns {
             flags |= 0b0001;
@@ -180,17 +180,19 @@ impl LookupOpts {
             RelayChoice::Pinned => flags |= 0b0100,
             RelayChoice::Custom(_) => flags |= 0b0100 | 0b1000,
         }
-        buf.push(flags);
+        buffer.push(flags);
         if let RelayChoice::Custom(ladder) = &self.relay_lookup {
             // The ladder is created locally and bounded by the CLI / library API,
             // so this cast and the lengths below always fit.
-            buf.push(u8::try_from(ladder.len()).expect("relay ladder bounded by MAX_RELAY_LADDER"));
+            buffer.push(
+                u8::try_from(ladder.len()).expect("relay ladder bounded by MAX_RELAY_LADDER"),
+            );
             for url in ladder {
                 let text = url.to_string();
                 let len =
                     u16::try_from(text.len()).expect("relay URL bounded by MAX_RELAY_URL_BYTES");
-                buf.extend_from_slice(&len.to_le_bytes());
-                buf.extend_from_slice(text.as_bytes());
+                buffer.extend_from_slice(&len.to_le_bytes());
+                buffer.extend_from_slice(text.as_bytes());
             }
         }
     }
@@ -463,9 +465,9 @@ impl MeshConfig {
     /// stays byte-for-byte what it was before features existed).
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(2);
-        self.lookups.encode_into(&mut buf);
-        buf.push(self.transport.to_byte());
+        let mut buffer = Vec::with_capacity(2);
+        self.lookups.encode_into(&mut buffer);
+        buffer.push(self.transport.to_byte());
         let mut features = 0u8;
         if self.password.is_some() {
             features |= FEATURE_PASSWORD;
@@ -474,17 +476,17 @@ impl MeshConfig {
             features |= FEATURE_INVITE_ONLY;
         }
         if features != 0 {
-            buf.push(features);
+            buffer.push(features);
             // Fixed field order so the encoding is canonical: password verifier
             // then issuer pubkey, each present iff its bit is set.
             if let Some(verifier) = &self.password {
-                buf.extend_from_slice(verifier);
+                buffer.extend_from_slice(verifier);
             }
             if let Some(pubkey) = &self.issuer_pubkey {
-                buf.extend_from_slice(pubkey);
+                buffer.extend_from_slice(pubkey);
             }
         }
-        buf
+        buffer
     }
 
     /// Decode a config region, requiring it to consume `bytes` exactly
@@ -958,32 +960,32 @@ mod lookup_tests {
         // Naming any lookup uses only those. A relay alone yields a reachable
         // (non-loopback) mesh.
         let ladder: RelayLadder = "https://a.example".parse().unwrap();
-        let opts = resolve_lookups(lookups(false, false, RelaySelection::Named(ladder)));
-        assert!(!opts.mdns && !opts.dht);
+        let options = resolve_lookups(lookups(false, false, RelaySelection::Named(ladder)));
+        assert!(!options.mdns && !options.dht);
         assert!(
-            !opts.is_loopback(),
+            !options.is_loopback(),
             "a named relay makes the mesh reachable"
         );
-        assert!(matches!(opts.relay_lookup, RelayChoice::Custom(_)));
+        assert!(matches!(options.relay_lookup, RelayChoice::Custom(_)));
     }
 
     #[test]
     fn mdns_alone_disables_dht_and_relay() {
-        let opts = resolve_lookups(lookups(true, false, RelaySelection::Unset));
-        assert!(opts.mdns && !opts.dht);
+        let options = resolve_lookups(lookups(true, false, RelaySelection::Unset));
+        assert!(options.mdns && !options.dht);
         assert_eq!(
-            opts.relay_lookup,
+            options.relay_lookup,
             RelayChoice::Disabled,
             "--mdns alone ⇒ relay off"
         );
-        assert!(!opts.is_loopback(), "any lookup ⇒ reachable");
+        assert!(!options.is_loopback(), "any lookup ⇒ reachable");
     }
 
     #[test]
     fn bare_relay_is_pinned_and_suppresses_lookups() {
-        let opts = resolve_lookups(lookups(false, false, RelaySelection::Default));
-        assert!(!opts.mdns && !opts.dht);
-        assert_eq!(opts.relay_lookup, RelayChoice::Pinned);
+        let options = resolve_lookups(lookups(false, false, RelaySelection::Default));
+        assert!(!options.mdns && !options.dht);
+        assert_eq!(options.relay_lookup, RelayChoice::Pinned);
     }
 
     #[test]
@@ -991,8 +993,11 @@ mod lookup_tests {
         let rung0: iroh_base::RelayUrl = "https://a.example".parse().unwrap();
         let rung1: iroh_base::RelayUrl = "https://b.example".parse().unwrap();
         let ladder: RelayLadder = "https://a.example,https://b.example".parse().unwrap();
-        let opts = resolve_lookups(lookups(false, false, RelaySelection::Named(ladder)));
-        assert_eq!(opts.relay_lookup, RelayChoice::Custom(vec![rung0, rung1]));
+        let options = resolve_lookups(lookups(false, false, RelaySelection::Named(ladder)));
+        assert_eq!(
+            options.relay_lookup,
+            RelayChoice::Custom(vec![rung0, rung1])
+        );
     }
 
     #[test]
@@ -1527,9 +1532,9 @@ mod choice_tests {
         let set = LookupSet::from_lookups(&[Lookup::Mdns], None).unwrap();
         assert!(set.mdns && !set.dht);
         assert_eq!(set.relay_lookup, RelaySelection::Unset);
-        let opts = resolve_lookups(set);
-        assert!(opts.mdns && !opts.dht);
-        assert_eq!(opts.relay_lookup, RelayChoice::Disabled);
+        let options = resolve_lookups(set);
+        assert!(options.mdns && !options.dht);
+        assert_eq!(options.relay_lookup, RelayChoice::Disabled);
     }
 
     #[test]
@@ -1622,8 +1627,8 @@ mod choice_tests {
 
     #[test]
     fn no_lookups_is_loopback_without_a_preset_switch() {
-        let opts = resolve_lookups(LookupSet::default());
-        assert!(opts.is_loopback());
-        assert_eq!(opts.network_label(), "private");
+        let options = resolve_lookups(LookupSet::default());
+        assert!(options.is_loopback());
+        assert_eq!(options.network_label(), "private");
     }
 }

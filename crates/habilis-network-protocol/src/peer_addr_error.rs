@@ -14,11 +14,11 @@ use std::fmt;
 use iroh_base::{EndpointAddr, EndpointId, RelayUrl};
 
 /// Serialize an `EndpointAddr` to a JSON value for `PeerInfo` messages.
-pub fn endpoint_addr_to_json(addr: &EndpointAddr) -> serde_json::Value {
-    let ips: Vec<String> = addr.ip_addrs().map(ToString::to_string).collect();
-    let relay: Option<String> = addr.relay_urls().next().map(ToString::to_string);
+pub fn endpoint_addr_to_json(address: &EndpointAddr) -> serde_json::Value {
+    let ips: Vec<String> = address.ip_addrs().map(ToString::to_string).collect();
+    let relay: Option<String> = address.relay_urls().next().map(ToString::to_string);
     serde_json::json!({
-        "id": addr.id.to_string(),
+        "id": address.id.to_string(),
         "ips": ips,
         "relay": relay,
     })
@@ -73,18 +73,18 @@ pub fn endpoint_addr_from_json(
         step: "invalid EndpointId",
         source: Box::new(error),
     })?;
-    let mut addr = EndpointAddr::new(endpoint_id);
+    let mut address = EndpointAddr::new(endpoint_id);
     if let Some(ips) = json["ips"].as_array() {
         for ip in ips {
             let socket: Option<SocketAddr> = ip.as_str().and_then(|text| text.parse().ok());
             if let Some(socket) = socket {
-                addr = addr.with_ip_addr(socket);
+                address = address.with_ip_addr(socket);
             }
         }
     }
     let url: Option<RelayUrl> = json["relay"].as_str().and_then(|relay| relay.parse().ok());
     if let Some(url) = url {
-        addr = addr.with_relay_url(url);
+        address = address.with_relay_url(url);
     }
-    Ok((endpoint_id, addr))
+    Ok((endpoint_id, address))
 }

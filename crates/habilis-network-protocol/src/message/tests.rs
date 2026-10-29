@@ -14,7 +14,7 @@ fn sid() -> MeshId {
 
 #[test]
 fn test_round_trip() {
-    let msg = Message::new_app(
+    let message = Message::new_app(
         &sid(),
         &nick("word-word"),
         AppFrameParams {
@@ -24,11 +24,11 @@ fn test_round_trip() {
             body: MessageBody::from("Hello, world!"),
         },
     );
-    let bytes = msg.serialize().unwrap();
+    let bytes = message.serialize().unwrap();
     let parsed = Message::parse(&bytes).unwrap();
-    assert_eq!(parsed.id, msg.id);
+    assert_eq!(parsed.id, message.id);
     assert_eq!(parsed.kind, MessageKind::app_broadcast("app_msg"));
-    assert_eq!(parsed.body, msg.body);
+    assert_eq!(parsed.body, message.body);
 }
 
 #[test]
@@ -51,8 +51,8 @@ fn correlation_id_constructor_rejects_an_invalid_value() {
 
 #[test]
 fn test_alive_round_trip() {
-    let msg = Message::new_alive(&sid(), &nick("word-word"));
-    let bytes = msg.serialize().unwrap();
+    let message = Message::new_alive(&sid(), &nick("word-word"));
+    let bytes = message.serialize().unwrap();
     let parsed = Message::parse(&bytes).unwrap();
     assert_eq!(
         parsed.kind,
@@ -65,8 +65,8 @@ fn test_alive_round_trip() {
 
 #[test]
 fn test_ping_round_trip() {
-    let msg = Message::new_ping(&sid(), &nick("word-word"));
-    let bytes = msg.serialize().unwrap();
+    let message = Message::new_ping(&sid(), &nick("word-word"));
+    let bytes = message.serialize().unwrap();
     assert!(String::from_utf8_lossy(&bytes).contains("\"type\":\"ping\""));
     let parsed = Message::parse(&bytes).unwrap();
     assert_eq!(parsed.kind, MessageKind::Ping);
@@ -78,10 +78,10 @@ fn test_ping_round_trip() {
 #[test]
 fn a_link_state_message_is_built_signed_and_round_tripped_on_every_target() {
     let identity = crate::identity::Identity::generate();
-    let msg = Message::new_link_state(&sid(), &nick("word-word"), MessageBody::from("{}"))
+    let message = Message::new_link_state(&sid(), &nick("word-word"), MessageBody::from("{}"))
         .sign(&identity);
-    assert!(msg.verify_signature());
-    let parsed = Message::parse(msg.serialize().unwrap().as_bytes()).unwrap();
+    assert!(message.verify_signature());
+    let parsed = Message::parse(message.serialize().unwrap().as_bytes()).unwrap();
     assert_eq!(parsed.kind, MessageKind::LinkState);
     assert_eq!(parsed.body.as_str(), "{}");
 }
@@ -90,8 +90,8 @@ fn a_link_state_message_is_built_signed_and_round_tripped_on_every_target() {
 fn test_pong_round_trip() {
     let target = nick("pinger-here");
     let probe = MessageId::random();
-    let msg = Message::new_pong(&sid(), &nick("word-word"), target.clone(), &probe);
-    let bytes = msg.serialize().unwrap();
+    let message = Message::new_pong(&sid(), &nick("word-word"), target.clone(), &probe);
+    let bytes = message.serialize().unwrap();
     let parsed = Message::parse(&bytes).unwrap();
     assert_eq!(parsed.kind, MessageKind::Pong { to: target, probe });
     assert_eq!(parsed.body.as_str(), "");
@@ -100,7 +100,7 @@ fn test_pong_round_trip() {
 #[test]
 fn test_task_status_round_trip() {
     let target = nick("calm-otter");
-    let msg = Message::new_app(
+    let message = Message::new_app(
         &sid(),
         &nick("word-word"),
         AppFrameParams {
@@ -110,25 +110,25 @@ fn test_task_status_round_trip() {
             body: MessageBody::from(r#"{"kind":"status-update"}"#),
         },
     );
-    let bytes = msg.serialize().unwrap();
+    let bytes = message.serialize().unwrap();
     let wire = String::from_utf8_lossy(&bytes);
     assert!(wire.contains("\"type\":\"app\""));
     assert!(wire.contains("\"tag\":\"app_status\""));
     let parsed = Message::parse(&bytes).unwrap();
     assert_eq!(parsed.kind, MessageKind::app_to("app_status", target, None));
-    assert_eq!(parsed.body, msg.body);
+    assert_eq!(parsed.body, message.body);
 }
 
 #[test]
 fn test_task_artifact_round_trip() {
     let target = nick("calm-otter");
-    let msg = Message::new_frame(
+    let message = Message::new_frame(
         &sid(),
         &nick("word-word"),
         MessageKind::app_to("app_artifact", target.clone(), None),
         MessageBody::from(r#"{"kind":"artifact-update"}"#),
     );
-    let bytes = msg.serialize().unwrap();
+    let bytes = message.serialize().unwrap();
     assert!(String::from_utf8_lossy(&bytes).contains("\"tag\":\"app_artifact\""));
     let parsed = Message::parse(&bytes).unwrap();
     assert_eq!(
@@ -139,7 +139,7 @@ fn test_task_artifact_round_trip() {
 
 #[test]
 fn test_ext_round_trip() {
-    let mut msg = Message::new_app(
+    let mut message = Message::new_app(
         &sid(),
         &nick("word-word"),
         AppFrameParams {
@@ -149,8 +149,8 @@ fn test_ext_round_trip() {
             body: MessageBody::from("With ext."),
         },
     );
-    msg.ext = serde_json::json!({"tags": ["rust", "p2p"], "priority": 1});
-    let bytes = msg.serialize().unwrap();
+    message.ext = serde_json::json!({"tags": ["rust", "p2p"], "priority": 1});
+    let bytes = message.serialize().unwrap();
     let parsed = Message::parse(&bytes).unwrap();
     assert_eq!(parsed.ext["tags"][0], "rust");
     assert_eq!(parsed.ext["priority"], 1);
@@ -283,9 +283,9 @@ fn build_msg_bytes_message() {
     .unwrap();
     assert!(!built.id.as_str().is_empty());
     assert!(!bytes.is_empty());
-    let msg = Message::parse(bytes.as_bytes()).unwrap();
-    assert_eq!(msg.body.as_str(), "hello");
-    assert_eq!(msg.author, alice);
+    let message = Message::parse(bytes.as_bytes()).unwrap();
+    assert_eq!(message.body.as_str(), "hello");
+    assert_eq!(message.author, alice);
 }
 
 mod signing {
@@ -299,52 +299,58 @@ mod signing {
 
     #[test]
     fn signed_message_verifies() {
-        let msg =
+        let message =
             Message::fixture(MessageKind::app_broadcast("app_msg"), "hello").sign(&identity());
-        assert!(msg.signer.is_some());
-        assert!(msg.verify_signature());
+        assert!(message.signer.is_some());
+        assert!(message.verify_signature());
     }
 
     #[test]
     fn unsigned_message_does_not_verify() {
-        let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "hello");
-        assert!(!msg.verify_signature(), "empty pubkey/sig must not verify");
+        let message = Message::fixture(MessageKind::app_broadcast("app_msg"), "hello");
+        assert!(
+            !message.verify_signature(),
+            "empty pubkey/sig must not verify"
+        );
     }
 
     #[test]
     fn tampered_body_breaks_signature() {
-        let mut msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "hello")
+        let mut message = Message::fixture(MessageKind::app_broadcast("app_msg"), "hello")
             .sign(&identity())
             .into_message();
-        msg.body = "tampered".into();
-        assert!(!msg.verify_signature());
+        message.body = "tampered".into();
+        assert!(!message.verify_signature());
     }
 
     #[test]
     fn tampered_author_breaks_signature() {
-        let mut msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "hello")
+        let mut message = Message::fixture(MessageKind::app_broadcast("app_msg"), "hello")
             .sign(&identity())
             .into_message();
-        msg.author = "impostor-bot".into();
-        assert!(!msg.verify_signature());
+        message.author = "impostor-bot".into();
+        assert!(!message.verify_signature());
     }
 
     #[test]
     fn tampered_task_target_breaks_signature() {
-        let mut msg = Message::fixture(
+        let mut message = Message::fixture(
             MessageKind::app_to("app_status", "calm-otter".into(), None),
             "{}",
         )
         .sign(&identity())
         .into_message();
-        assert!(msg.verify_signature());
-        msg.kind = MessageKind::app_to("app_status", "evil-otter".into(), None);
-        assert!(!msg.verify_signature(), "directed `to` is a signed field");
+        assert!(message.verify_signature());
+        message.kind = MessageKind::app_to("app_status", "evil-otter".into(), None);
+        assert!(
+            !message.verify_signature(),
+            "directed `to` is a signed field"
+        );
     }
 
     #[test]
     fn tampered_corr_breaks_signature() {
-        let mut msg = Message::fixture(
+        let mut message = Message::fixture(
             MessageKind::app_to(
                 "app_req",
                 "calm-otter".into(),
@@ -354,20 +360,21 @@ mod signing {
         )
         .sign(&identity())
         .into_message();
-        msg.kind = MessageKind::app_to(
+        message.kind = MessageKind::app_to(
             "app_req",
             "calm-otter".into(),
             Some(CorrId::try_new("bbbb").expect("a valid correlation id")),
         );
-        assert!(!msg.verify_signature(), "`corr` is a signed field");
+        assert!(!message.verify_signature(), "`corr` is a signed field");
     }
 
     #[test]
     fn signature_survives_wire_round_trip() {
-        let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "hi").sign(&identity());
-        let parsed = Message::parse(msg.serialize().unwrap().as_bytes()).unwrap();
+        let message =
+            Message::fixture(MessageKind::app_broadcast("app_msg"), "hi").sign(&identity());
+        let parsed = Message::parse(message.serialize().unwrap().as_bytes()).unwrap();
         assert!(parsed.verify_signature());
-        assert_eq!(parsed.signer, msg.signer);
+        assert_eq!(parsed.signer, message.signer);
     }
 
     #[test]
@@ -389,24 +396,24 @@ mod chain {
     use crate::identity::Identity;
     use habilis_network_test_tracing::test;
 
-    fn msg(body: &str) -> Message {
+    fn message(body: &str) -> Message {
         Message::fixture(MessageKind::app_broadcast("app_msg"), body)
     }
 
     #[test]
     fn chained_message_carries_seq_prev_and_verifies() {
-        let prev = ContentHash::from_bytes([0xaa; 32]);
-        let signed = msg("hi")
-            .with_chain(5, Some(prev))
+        let previous = ContentHash::from_bytes([0xaa; 32]);
+        let signed = message("hi")
+            .with_chain(5, Some(previous))
             .sign(&Identity::generate());
         assert_eq!(signed.seq, Some(5));
-        assert_eq!(signed.previous, Some(prev));
+        assert_eq!(signed.previous, Some(previous));
         assert!(signed.verify_signature());
     }
 
     #[test]
     fn content_hash_is_stable_and_64_hex() {
-        let stamped = msg("x").with_chain(0, None);
+        let stamped = message("x").with_chain(0, None);
         assert_eq!(stamped.content_hash(), stamped.content_hash());
         assert_eq!(stamped.content_hash().to_string().len(), 64);
     }
@@ -415,14 +422,14 @@ mod chain {
     fn fork_pair_hashes_differently() {
         // The equivocation primitive: two different messages at the same
         // seq hash differently, so a receiver can prove the fork.
-        let alpha = msg("alpha").with_chain(1, None);
-        let beta = msg("beta").with_chain(1, None);
+        let alpha = message("alpha").with_chain(1, None);
+        let beta = message("beta").with_chain(1, None);
         assert_ne!(alpha.content_hash(), beta.content_hash());
     }
 
     #[test]
     fn tampering_seq_breaks_signature() {
-        let mut signed = msg("x")
+        let mut signed = message("x")
             .with_chain(3, None)
             .sign(&Identity::generate())
             .into_message();
@@ -436,7 +443,7 @@ mod chain {
             ContentHash::from_bytes([0xaa; 32]),
             ContentHash::from_bytes([0xbb; 32]),
         ];
-        let signed = msg("hi")
+        let signed = message("hi")
             .with_chain(1, None)
             .with_parents(parents.clone())
             .sign(&Identity::generate());
@@ -448,7 +455,7 @@ mod chain {
 
     #[test]
     fn tampering_parents_breaks_signature() {
-        let mut signed = msg("hi")
+        let mut signed = message("hi")
             .with_parents(vec![ContentHash::from_bytes([0xaa; 32])])
             .sign(&Identity::generate())
             .into_message();
@@ -484,8 +491,8 @@ mod snapshots {
 
     #[test]
     fn snap_wire_message() {
-        let msg = chat_fixture("What is Rust?");
-        let bytes = msg.serialize().unwrap();
+        let message = chat_fixture("What is Rust?");
+        let bytes = message.serialize().unwrap();
         let wire = String::from_utf8(bytes).unwrap();
         insta::assert_snapshot!(wire);
     }
@@ -499,24 +506,24 @@ mod snapshots {
             "{\"ref\":\"00000000-0000-0000-0000-000000000001\",",
             "\"scope\":\"test\",\"progress\":{\"phase\":\"running\"}}"
         );
-        let msg = Message::fixture(
+        let message = Message::fixture(
             MessageKind::app_to("app_status", Nickname::from("addressed-nick"), None),
             body,
         );
-        let bytes = msg.serialize().unwrap();
+        let bytes = message.serialize().unwrap();
         let wire = String::from_utf8(bytes).unwrap();
         insta::assert_snapshot!(wire);
     }
 
     #[test]
     fn snap_wire_presence_joined() {
-        let msg = Message::fixture(
+        let message = Message::fixture(
             MessageKind::Presence {
                 subtype: PresenceSubtype::Joined,
             },
             "",
         );
-        let bytes = msg.serialize().unwrap();
+        let bytes = message.serialize().unwrap();
         let wire = String::from_utf8(bytes).unwrap();
         insta::assert_snapshot!(wire);
     }
@@ -526,8 +533,8 @@ mod snapshots {
         // A shared-state change rides `MessageKind::State`; its body is the
         // tagged merge envelope (`k:"merge"`) the reducer parses. Pinning the
         // wire bytes guards the discriminator + RFC 7386 merge shape.
-        let msg = Message::fixture(MessageKind::State, r#"{"k":"merge","merge":{"turn":"b"}}"#);
-        let bytes = msg.serialize().unwrap();
+        let message = Message::fixture(MessageKind::State, r#"{"k":"merge","merge":{"turn":"b"}}"#);
+        let bytes = message.serialize().unwrap();
         let wire = String::from_utf8(bytes).unwrap();
         insta::assert_snapshot!(wire);
     }
@@ -536,7 +543,7 @@ mod snapshots {
     /// body = a JSON-RPC `{method, params}` envelope.
     #[test]
     fn snap_wire_app_directed_corr_req() {
-        let msg = Message::fixture(
+        let message = Message::fixture(
             MessageKind::app_to(
                 "app_req",
                 Nickname::from("addressed-nick"),
@@ -547,14 +554,14 @@ mod snapshots {
             ),
             r#"{"op":"list","args":{}}"#,
         );
-        let wire = String::from_utf8(msg.serialize().unwrap()).unwrap();
+        let wire = String::from_utf8(message.serialize().unwrap()).unwrap();
         insta::assert_snapshot!(wire);
     }
 
     /// A directed **response** frame, echoing the request's `rpc_id`.
     #[test]
     fn snap_wire_app_directed_corr_resp() {
-        let msg = Message::fixture(
+        let message = Message::fixture(
             MessageKind::app_to(
                 "app_resp",
                 Nickname::from("addressed-nick"),
@@ -565,7 +572,7 @@ mod snapshots {
             ),
             r#"{"result":{"items":[]}}"#,
         );
-        let wire = String::from_utf8(msg.serialize().unwrap()).unwrap();
+        let wire = String::from_utf8(message.serialize().unwrap()).unwrap();
         insta::assert_snapshot!(wire);
     }
 }
@@ -598,11 +605,11 @@ mod prop {
             author in arb_nickname(),
         ) {
             let body = MessageBody::try_new(body).unwrap();
-            let msg = Message::new_app(&super::sid(), &author, AppFrameParams { tag: AppTag::try_new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
-            let bytes = msg.serialize().unwrap();
+            let message = Message::new_app(&super::sid(), &author, AppFrameParams { tag: AppTag::try_new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
+            let bytes = message.serialize().unwrap();
             let parsed = Message::parse(&bytes).unwrap();
-            prop_assert_eq!(&parsed.body, &msg.body);
-            prop_assert_eq!(&parsed.author, &msg.author);
+            prop_assert_eq!(&parsed.body, &message.body);
+            prop_assert_eq!(&parsed.author, &message.author);
             prop_assert_eq!(&parsed.version, VERSION);
             prop_assert_eq!(parsed.kind, MessageKind::app_broadcast("app_msg"));
         }
@@ -610,14 +617,14 @@ mod prop {
         #[test]
         fn prop_presence_round_trip(is_join in any::<bool>()) {
             let test_nick = Nickname::from("test-nick");
-            let msg = if is_join {
+            let message = if is_join {
                 Message::new_joined(&super::sid(), &test_nick)
             } else {
                 Message::new_left(&super::sid(), &test_nick)
             };
-            let bytes = msg.serialize().unwrap();
+            let bytes = message.serialize().unwrap();
             let parsed = Message::parse(&bytes).unwrap();
-            prop_assert_eq!(parsed.kind, msg.kind);
+            prop_assert_eq!(parsed.kind, message.kind);
         }
 
         #[test]
@@ -638,8 +645,8 @@ mod prop {
         ) {
             let body = MessageBody::try_new(body).unwrap();
             let expected = body.clone();
-            let msg = Message::new_app(&super::sid(), &author, AppFrameParams { tag: AppTag::try_new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
-            let bytes = msg.serialize().unwrap();
+            let message = Message::new_app(&super::sid(), &author, AppFrameParams { tag: AppTag::try_new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
+            let bytes = message.serialize().unwrap();
             let parsed = Message::parse(&bytes).unwrap();
             prop_assert_eq!(&parsed.body, &expected);
         }
@@ -648,7 +655,7 @@ mod prop {
         fn prop_serialized_size_within_limit(
             body in arb_ascii_body(),
         ) {
-            let msg = Message::new_app(
+            let message = Message::new_app(
                 &super::sid(),
                 &Nickname::from("nick-name"),
                 AppFrameParams {
@@ -658,7 +665,7 @@ mod prop {
                     body: MessageBody::try_new(body).unwrap(),
                 },
             );
-            if let Ok(bytes) = msg.serialize() {
+            if let Ok(bytes) = message.serialize() {
                 prop_assert!(bytes.len() <= MAX_MESSAGE_SIZE);
             }
         }
@@ -668,7 +675,7 @@ mod prop {
 #[test]
 fn a_resend_trailer_is_outside_the_frame_and_the_signature() {
     let identity = super::identity::Identity::generate();
-    let msg = Message::new_app(
+    let message = Message::new_app(
         &sid(),
         &nick("word-word"),
         AppFrameParams {
@@ -679,7 +686,7 @@ fn a_resend_trailer_is_outside_the_frame_and_the_signature() {
         },
     )
     .sign(&identity);
-    let frame = msg.serialize().unwrap().as_bytes().to_vec();
+    let frame = message.serialize().unwrap().as_bytes().to_vec();
 
     let first = super::wire_with_resend_nonce(&frame, 7);
     let second = super::wire_with_resend_nonce(&frame, 8);
@@ -689,20 +696,20 @@ fn a_resend_trailer_is_outside_the_frame_and_the_signature() {
     assert_eq!(first.len(), frame.len() + super::RESEND_TRAILER_LEN);
     let (parsed, nonce) = Message::parse_wire(&first).unwrap();
     assert_eq!(nonce, Some(7));
-    assert_eq!(parsed.id, msg.id);
+    assert_eq!(parsed.id, message.id);
     assert!(
         parsed.verify_signature_with(&parsed.canonical_bytes()),
         "the signature does not cover the trailer"
     );
     let (plain, no_nonce) = Message::parse_wire(&frame).unwrap();
     assert_eq!(no_nonce, None);
-    assert_eq!(plain.id, msg.id);
+    assert_eq!(plain.id, message.id);
 }
 
 #[test]
 fn a_reader_without_the_trailer_fails_closed_on_a_resend() {
-    let msg = Message::new_alive(&sid(), &nick("word-word"));
-    let frame = msg.serialize().unwrap();
+    let message = Message::new_alive(&sid(), &nick("word-word"));
+    let frame = message.serialize().unwrap();
     let wire = super::wire_with_resend_nonce(&frame, 1);
     assert!(
         Message::parse(&wire).is_err(),
@@ -712,8 +719,8 @@ fn a_reader_without_the_trailer_fails_closed_on_a_resend() {
 
 #[test]
 fn a_frame_of_the_largest_size_still_parses_with_the_trailer() {
-    let msg = Message::new_alive(&sid(), &nick("word-word"));
-    let mut frame = msg.serialize().unwrap();
+    let message = Message::new_alive(&sid(), &nick("word-word"));
+    let mut frame = message.serialize().unwrap();
     // JSON whitespace pads the frame up to the cap.
     frame.resize(habilis_network_util::consts::MAX_MESSAGE_SIZE, b' ');
     let wire = super::wire_with_resend_nonce(&frame, u64::MAX);
@@ -723,7 +730,7 @@ fn a_frame_of_the_largest_size_still_parses_with_the_trailer() {
     );
     let (parsed, nonce) = Message::parse_wire(&wire).unwrap();
     assert_eq!(nonce, Some(u64::MAX));
-    assert_eq!(parsed.id, msg.id);
+    assert_eq!(parsed.id, message.id);
 }
 
 /// The wire form of a signed message, captured from the code at the base commit with a fixed key
@@ -886,7 +893,7 @@ mod verified {
     use super::SIGNED_WIRE;
     use crate::identity::Identity;
 
-    fn msg(body: &str) -> Message {
+    fn message(body: &str) -> Message {
         Message::fixture(MessageKind::app_broadcast("app_msg"), body)
     }
 
@@ -894,7 +901,7 @@ mod verified {
     fn a_signed_message_verifies_and_keeps_its_key() {
         let identity = Identity::generate();
         let key = identity.author_key();
-        let verified = msg("hello").sign(&identity);
+        let verified = message("hello").sign(&identity);
         assert_eq!(verified.key(), key);
         let back = verified
             .into_message()
@@ -905,7 +912,7 @@ mod verified {
 
     #[test]
     fn an_unsigned_message_is_given_back_by_verify() {
-        let unsigned = msg("hello");
+        let unsigned = message("hello");
         let back = unsigned
             .clone()
             .verify()
@@ -916,7 +923,7 @@ mod verified {
 
     #[test]
     fn a_tampered_body_fails_verify_and_is_given_back() {
-        let mut tampered = msg("hello").sign(&Identity::generate()).into_message();
+        let mut tampered = message("hello").sign(&Identity::generate()).into_message();
         tampered.body = "tampered".into();
         let back = tampered
             .verify()
@@ -926,7 +933,7 @@ mod verified {
 
     #[test]
     fn a_fixture_keeps_the_signature_as_parsed() {
-        let signed = msg("hello").sign(&Identity::generate());
+        let signed = message("hello").sign(&Identity::generate());
         let wire = signed.serialize().expect("serialize");
         let parsed = Message::parse(wire.as_bytes()).expect("parses");
 
@@ -951,7 +958,7 @@ mod verified {
 
     #[test]
     fn verify_canonical_refuses_an_edited_clone() {
-        let original = msg("hello").sign(&Identity::generate()).into_message();
+        let original = message("hello").sign(&Identity::generate()).into_message();
         let (_, canonical) = original
             .clone()
             .verify_canonical()

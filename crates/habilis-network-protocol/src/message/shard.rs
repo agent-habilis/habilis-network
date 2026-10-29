@@ -26,8 +26,8 @@ use habilis_network_util::consts::MAX_SHARD_TOTAL;
 /// advertise those shards as missing, and the sender re-floods them every
 /// round while the resend budget starves real gaps.
 #[must_use]
-pub fn shard_fits_log(msg: &super::Message) -> bool {
-    msg.shard.as_ref().is_none_or(|shard| {
+pub fn shard_fits_log(message: &super::Message) -> bool {
+    message.shard.as_ref().is_none_or(|shard| {
         shard.total <= habilis_network_util::consts::LOGGED_SHARD_GROUP_MAX_TOTAL
     })
 }

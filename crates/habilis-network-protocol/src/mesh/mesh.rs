@@ -306,15 +306,16 @@ impl Mesh {
 /// part of it.
 pub(super) fn encode_id(seed: &Seed, name: &MeshName, config: &MeshConfig) -> Vec<u8> {
     let config = config.to_bytes();
-    let mut buf = Vec::with_capacity(1 + SEED_LEN + 1 + name.as_bytes().len() + 2 + config.len());
-    buf.push(VERSION);
-    buf.extend_from_slice(seed.as_bytes());
+    let mut buffer =
+        Vec::with_capacity(1 + SEED_LEN + 1 + name.as_bytes().len() + 2 + config.len());
+    buffer.push(VERSION);
+    buffer.extend_from_slice(seed.as_bytes());
     // MeshName guarantees 1..=128 UTF-8 bytes, so a 1-byte length is safe.
-    buf.push(name.len_u8());
-    buf.extend_from_slice(name.as_bytes());
+    buffer.push(name.len_u8());
+    buffer.extend_from_slice(name.as_bytes());
     let config_len =
         u16::try_from(config.len()).expect("MeshConfig encodes well within a u16 length");
-    buf.extend_from_slice(&config_len.to_le_bytes());
-    buf.extend_from_slice(&config);
-    buf
+    buffer.extend_from_slice(&config_len.to_le_bytes());
+    buffer.extend_from_slice(&config);
+    buffer
 }
