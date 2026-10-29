@@ -427,12 +427,13 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &Handle
     state.peerinfo_deferred = false;
     let our_addr = ctx.endpoint.addr();
     state.last_flooded_addr = Some(our_addr.clone());
+    let our_ips: Vec<_> = our_addr.ip_addrs().collect();
     tracing::debug!(
         target: "habilis_network::gossip",
         local = %ctx.endpoint.id().fmt_short(),
         relay = ?our_addr.relay_urls().next(),
         addrs = our_addr.ip_addrs().count(),
-        ip_addrs = ?our_addr.ip_addrs().collect::<Vec<_>>(),
+        ip_addrs = ?our_ips,
         "peerinfo flooded"
     );
     let proof = state

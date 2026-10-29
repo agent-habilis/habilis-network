@@ -1548,6 +1548,7 @@ async fn handle_peer_info(message: &Verified, state: &mut EventLoopState, ctx: &
     // and recovery (`heal::rebridge_known`, the starvation watchdog's
     // precondition) needs the memory precisely *after* that link dies.
     let first_sighting = state.known_endpoints.insert(peer_id);
+    let peer_ips: Vec<_> = peer_addr.ip_addrs().collect();
     tracing::debug!(
         target: "habilis_network::gossip",
         local = %ctx.endpoint.id().fmt_short(),
@@ -1555,7 +1556,7 @@ async fn handle_peer_info(message: &Verified, state: &mut EventLoopState, ctx: &
         peer = %peer_id.fmt_short(),
         first_sighting,
         relay = ?peer_addr.relay_urls().next(),
-        ip_addrs = ?peer_addr.ip_addrs().collect::<Vec<_>>(),
+        ip_addrs = ?peer_ips,
         "peerinfo received"
     );
     // Every address that is new or differs from the last one of this author is handed to

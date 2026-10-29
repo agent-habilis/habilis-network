@@ -145,10 +145,8 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
     if urls.is_empty() {
         return Ok(None);
     }
-    urls.join(",")
-        .parse::<RelayLadder>()
-        .map(Some)
-        .map_err(|error| anyhow::anyhow!("{error}"))
+    let ladder: Result<RelayLadder, _> = urls.join(",").parse();
+    ladder.map(Some).map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 /// One live membership's moving parts.

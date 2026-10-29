@@ -32,11 +32,9 @@ fn log_len() -> usize {
 }
 
 fn logs_since(since: usize) -> String {
-    habilis_network_test_tracing::captured_logs()
-        .lines()
-        .skip(since)
-        .collect::<Vec<_>>()
-        .join("\n")
+    let text = habilis_network_test_tracing::captured_logs();
+    let lines: Vec<_> = text.lines().skip(since).collect();
+    lines.join("\n")
 }
 
 /// Whether, since `since`, `local` logged the gossip neighbor `remote` going down.
@@ -160,11 +158,12 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
             "no underlay tick ran while a member had no gossip link"
         );
 
-        let detached = logs_since(since)
+        let since_logs = logs_since(since);
+        let detached_lines: Vec<_> = since_logs
             .lines()
             .filter(|line| line.contains("underlay session detached"))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect();
+        let detached = detached_lines.join("\n");
         assert!(
             detached.is_empty(),
             "a session was detached after the gossip link closed:\n{detached}"

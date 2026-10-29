@@ -151,10 +151,11 @@ async fn until_every_view_holds(
         if counts.iter().all(|(_, linked)| *linked == want) {
             return Ok(());
         }
+        let links_per_member: Vec<_> = counts.iter().map(|(_, linked)| *linked).collect();
         eprintln!(
             "{:>4} s: links per member {:?}",
             started.elapsed().as_secs(),
-            counts.iter().map(|(_, linked)| *linked).collect::<Vec<_>>()
+            links_per_member
         );
         if started.elapsed() >= deadline {
             return Err(counts);

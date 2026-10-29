@@ -452,6 +452,7 @@ mod tests {
 #[cfg(test)]
 mod real_gossip {
     use habilis_network_test_tracing::{at_end, expect_warn, test};
+    use std::net::SocketAddr;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
@@ -484,11 +485,7 @@ mod real_gossip {
         let endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(SecretKey::from_bytes(&[seed; 32]))
             .relay_mode(RelayMode::Disabled)
-            .bind_addr(
-                "127.0.0.1:0"
-                    .parse::<std::net::SocketAddr>()
-                    .expect("loopback"),
-            )
+            .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
             .expect("bind address")
             .address_lookup(lookup.clone())
             .bind()

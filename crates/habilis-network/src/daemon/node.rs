@@ -111,10 +111,8 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
             not(target_arch = "wasm32")
         ))]
         let underlay = config.multihop.as_ref().map(|handle| {
-            (
-                handle.underlay_id().get(),
-                handle.underlay_ports().collect::<Vec<_>>(),
-            )
+            let ports: Vec<_> = handle.underlay_ports().collect();
+            (handle.underlay_id().get(), ports)
         });
         #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
         let crash_handles = (config.webrtc_handle(), config.endpoint.clone());

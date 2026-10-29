@@ -25,7 +25,8 @@ const LIVE: Duration = Duration::from_secs(20);
 
 /// The lines that say how the swap and the repair went.
 fn trace() -> String {
-    habilis_network_test_tracing::captured_logs()
+    let text = habilis_network_test_tracing::captured_logs();
+    let lines: Vec<_> = text
         .lines()
         .filter(|line| {
             [
@@ -38,8 +39,8 @@ fn trace() -> String {
             .iter()
             .any(|needle| line.contains(needle))
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    lines.join("\n")
 }
 
 struct Member {

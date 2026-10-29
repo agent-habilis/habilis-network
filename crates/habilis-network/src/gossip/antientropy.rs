@@ -445,7 +445,7 @@ fn heads_digest(
     if !state.overlay_reachable() {
         return None;
     }
-    let heads = state.doc(channel).heads().collect::<Vec<_>>();
+    let heads: Vec<_> = state.doc(channel).heads().collect();
     let body = super::json_body(&HeadsBody { heads, closing })?;
     Some(
         Message::new_channel_digest(origin.mesh, origin.author, body, channel)
@@ -489,8 +489,9 @@ async fn ask_back(
 /// Our own heads key for `channel`, as a digest of ours would carry it (its
 /// body is the heads JSON), without building and signing one.
 fn heads_key_of(state: &EventLoopState, channel: Channel) -> u64 {
+    let heads_list: Vec<_> = state.doc(channel).heads().collect();
     let heads = HeadsBody {
-        heads: state.doc(channel).heads().collect::<Vec<_>>(),
+        heads: heads_list,
         closing: false,
     };
     let mut hasher = hash_map::DefaultHasher::new();
@@ -1277,11 +1278,9 @@ mod tests {
             &serde_json::json!({"peers": {"alice": {"status": "idle", "model": "m"}}}),
         );
         let mut bob = rendezvous_only();
-        assert_ne!(
-            bob.doc(Channel::Meta).heads().collect::<Vec<_>>(),
-            alice.doc(Channel::Meta).heads().collect::<Vec<_>>(),
-            "bob joins knowing nothing"
-        );
+        let bob_heads: Vec<_> = bob.doc(Channel::Meta).heads().collect();
+        let alice_heads: Vec<_> = alice.doc(Channel::Meta).heads().collect();
+        assert_ne!(bob_heads, alice_heads, "bob joins knowing nothing");
 
         // Round 1: bob's empty frontier pulls alice's change; alice's digest
         // finds nothing bob holds that she lacks.
@@ -1293,11 +1292,9 @@ mod tests {
             Some(0),
             "alice lacks nothing"
         );
-        assert_eq!(
-            bob.doc(Channel::Meta).heads().collect::<Vec<_>>(),
-            alice.doc(Channel::Meta).heads().collect::<Vec<_>>(),
-            "converged within one round"
-        );
+        let bob_after: Vec<_> = bob.doc(Channel::Meta).heads().collect();
+        let alice_after: Vec<_> = alice.doc(Channel::Meta).heads().collect();
+        assert_eq!(bob_after, alice_after, "converged within one round");
         assert_eq!(
             bob.doc(Channel::Meta).to_json(),
             alice.doc(Channel::Meta).to_json()
@@ -1416,7 +1413,8 @@ mod tests {
         };
         let wire = WireWindow::encode(&window);
         let decoded = wire.decode_ids().expect("valid window decodes");
-        assert_eq!(decoded, ids.into_iter().collect::<HashSet<_>>());
+        let expected: HashSet<_> = ids.into_iter().collect();
+        assert_eq!(decoded, expected);
     }
 
     /// The digest of the build before the window keys has no `lo_key` and

@@ -38,7 +38,9 @@ fn count(needle: &str) -> usize {
 /// the whole buffer holds lines from the start of the test, and from members the step did not touch.
 /// A line count, not a byte offset: a count cannot fall inside a character.
 fn logs_since(since: usize) -> String {
-    logs().lines().skip(since).collect::<Vec<_>>().join("\n")
+    let text = logs();
+    let lines: Vec<_> = text.lines().skip(since).collect();
+    lines.join("\n")
 }
 
 /// Whether, since `since`, the ladder of `local` considered a path of the member that bound
@@ -113,7 +115,8 @@ fn rendezvous_links_down() -> usize {
 /// The lines that say how the rendezvous was held, let go of and re-grafted: the
 /// last 120, because the lines that explain a failure come after the group forms.
 fn rendezvous_trace() -> String {
-    logs()
+    let text = logs();
+    let lines: Vec<_> = text
         .lines()
         .filter(|line| {
             [
@@ -128,13 +131,9 @@ fn rendezvous_trace() -> String {
             .iter()
             .any(|needle| line.contains(needle))
         })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .take(120)
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    let recent: Vec<_> = lines.into_iter().rev().take(120).rev().collect();
+    recent.join("\n")
 }
 
 /// The whole log, written to the file that `HABILIS_TEST_LOG_DUMP` names, if set.

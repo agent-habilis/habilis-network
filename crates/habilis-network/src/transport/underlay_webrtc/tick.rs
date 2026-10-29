@@ -57,7 +57,7 @@ pub(crate) fn tick(state: &state::EventLoopState, underlay: &UnderlayWebRtc) {
     });
     let wanted: Vec<EndpointId> = wanted_addrs.iter().map(|addr| addr.id).collect();
     let kept = plan::kept_underlays(&neighbors, |member| state.pair_path_kind(member));
-    let held = underlay.handle.live_peer_ids().collect::<Vec<_>>();
+    let held: Vec<_> = underlay.handle.live_peer_ids().collect();
     let Plan { dial, detach } = plan(
         underlay.endpoint.id(),
         &wanted,
@@ -65,15 +65,22 @@ pub(crate) fn tick(state: &state::EventLoopState, underlay: &UnderlayWebRtc) {
         &held,
         underlay.admission.room(),
     );
+    let describe = |member: &EndpointId| {
+        (
+            member.fmt_short().to_string(),
+            state.pair_path_kind(*member),
+        )
+    };
+    let kinds: Vec<_> = neighbors
+        .iter()
+        .map(|(member, _)| describe(member))
+        .collect();
     tracing::debug!(
         target: LOG_TARGET,
         local = %underlay.endpoint.id().fmt_short(),
         linked = state.linked_endpoints.len(),
         members = neighbors.len(),
-        kinds = ?neighbors
-            .iter()
-            .map(|(member, _)| (member.fmt_short().to_string(), state.pair_path_kind(*member)))
-            .collect::<Vec<_>>(),
+        kinds = ?kinds,
         wanted = wanted.len(),
         kept = kept.len(),
         held = held.len(),
@@ -171,8 +178,6 @@ pub(crate) fn held_members(
     let Some(multihop) = state.multihop() else {
         return Vec::new();
     };
-    members_with_session(
-        &neighbors_of(state, multihop),
-        &underlay.handle.live_peer_ids().collect::<Vec<_>>(),
-    )
+    let live: Vec<_> = underlay.handle.live_peer_ids().collect();
+    members_with_session(&neighbors_of(state, multihop), &live)
 }

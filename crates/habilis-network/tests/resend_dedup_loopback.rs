@@ -47,15 +47,16 @@ fn logs() -> String {
 
 /// The lines that say how a state change travelled, from `before` on.
 fn lines_since(before: usize) -> String {
-    logs()[before..]
+    let text = logs();
+    let lines: Vec<_> = text[before..]
         .lines()
         .filter(|line| {
             ["peerinfo received", "state anti-entropy", "state digest"]
                 .iter()
                 .any(|needle| line.contains(needle))
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    lines.join("\n")
 }
 
 enum Request {

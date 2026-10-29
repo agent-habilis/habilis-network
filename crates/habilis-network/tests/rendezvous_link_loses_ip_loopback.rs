@@ -114,7 +114,8 @@ impl Member {
 
 /// The rendezvous trace: the lines that say how the link went and what was offered.
 fn trace() -> String {
-    logs()
+    let text = logs();
+    let lines: Vec<_> = text
         .lines()
         .filter(|line| {
             [
@@ -126,8 +127,8 @@ fn trace() -> String {
             .iter()
             .any(|needle| line.contains(needle))
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    lines.join("\n")
 }
 
 #[test]

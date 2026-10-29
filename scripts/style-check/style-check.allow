@@ -318,7 +318,7 @@ long_chain|crates/habilis-network/tests/foreign_rung_loopback.rs|2|kept: stateme
 long_chain|crates/habilis-network/tests/gossip_link_loses_ip_loopback.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/tests/gossip_only.rs|4|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/tests/late_joiner_after_release_loopback.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-long_chain|crates/habilis-network/tests/loopback_room_split.rs|8|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
+long_chain|crates/habilis-network/tests/loopback_room_split.rs|7|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/tests/mesh_transport_lists.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/tests/multihop_after_deny_loopback.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network/tests/own_address_change_loopback.rs|5|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -369,36 +369,6 @@ turbofish_collect_parse|crates/habilis-network-netplay/src/sync.rs|1|kept: colle
 turbofish_collect_parse|crates/habilis-network-netplay/tests/mesh_loopback.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-stream/src/hash/mod.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 turbofish_collect_parse|crates/habilis-network-util/src/bounded_queue.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/examples/mesh_peer.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/examples/mesh_peer_load.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/daemon/node.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/daemon/setup.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/daemon/state.rs|3|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/gossip/antientropy.rs|7|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/gossip/merge_ctx.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/gossip/recv.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/gossip/split.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/lookup/relay.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/membership/membership_app.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/membership/join_options.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/transport/admission.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/transport/payload_path.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/transport/send.rs|4|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/transport/underlay_webrtc.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/transport/underlay_webrtc/tick.rs|3|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/src/transport/webrtc.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/tests/active_view_fill_loopback.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/tests/late_joiner_after_release_loopback.rs|3|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/tests/loopback_room_split.rs|3|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/tests/mesh_transport_lists.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/tests/own_address_change_loopback.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/tests/periodic_return_loopback.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/tests/rendezvous_link_loses_ip_loopback.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/tests/rendezvous_release_loopback.rs|3|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/tests/resend_after_loss_loopback.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/tests/resend_dedup_loopback.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/tests/underlay_survives_link_loss_loopback.rs|2|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
-turbofish_collect_parse|crates/habilis-network/tests/webrtc_full_roster_loopback.rs|3|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 
 # untyped_long_chain_let: a let of a chain of five or more calls with no type (P5). Each row is a count that may only go down.
 untyped_long_chain_let|crates/habilis-network-bench-wasm/src/browser.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
@@ -450,7 +420,6 @@ untyped_long_chain_let|crates/habilis-network/examples/mesh_peer_load.rs|2|kept:
 untyped_long_chain_let|crates/habilis-network/src/daemon/event_loop.rs|4|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/daemon/heal.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/daemon/message_log.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/src/daemon/node.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/daemon/shutdown.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/daemon/state.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/src/daemon/state_file.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
@@ -483,7 +452,6 @@ untyped_long_chain_let|crates/habilis-network/tests/send_ladder_matrix.rs|2|kept
 untyped_long_chain_let|crates/habilis-network/tests/underlay_above_cap_loopback.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/tests/underlay_survives_link_loss_loopback.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network/tests/unknown_peer_requests_loopback.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network/tests/webrtc_full_roster_loopback.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 # pub_vec_return: a public function returns a Vec. The guide prefers an iterator. These keep a Vec:
 # each one returns an owned byte buffer or an owned list that the caller keeps.
 pub_vec_return|crates/habilis-network-doc/src/mesh_doc.rs|1|build_change: the owned bytes of a change frame, the wire encoding
@@ -679,13 +647,11 @@ abbrev_name|crates/habilis-network/src/beacon/held.rs|2|existing letter-deleted 
 abbrev_name|crates/habilis-network/src/beacon/tests.rs|13|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 assert_no_message|crates/habilis-network/src/beacon/tests.rs|19|kept: assert without a message, to be given one (P13 rollout)
 long_chain|crates/habilis-network/src/beacon/tests.rs|5|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-turbofish_collect_parse|crates/habilis-network/src/beacon/claim.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 untyped_long_chain_let|crates/habilis-network/src/beacon/tests.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)abbrev_name|crates/habilis-network/src/beacon/rung_probe.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/beacon/rung_probe.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 
 assert_no_message|crates/habilis-network/src/lookup/tests.rs|20|kept: assert without a message, to be given one (P13 rollout)
 long_chain|crates/habilis-network/src/lookup/tests.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-turbofish_collect_parse|crates/habilis-network/src/lookup/tests.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 untyped_long_chain_let|crates/habilis-network/src/lookup/tests.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 
 abbrev_name|crates/habilis-network/src/lookup/test_relay.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count

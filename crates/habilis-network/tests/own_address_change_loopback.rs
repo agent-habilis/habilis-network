@@ -154,9 +154,10 @@ fn a_member_that_changes_its_own_address_floods_it_again() {
 
 /// The lines about `PeerInfo` floods and receipts, to read a failure by.
 fn trace() -> String {
-    logs()
+    let text = logs();
+    let lines: Vec<_> = text
         .lines()
         .filter(|line| line.contains("peerinfo flooded") || line.contains("peerinfo received"))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    lines.join("\n")
 }

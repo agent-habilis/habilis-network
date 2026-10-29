@@ -1398,8 +1398,9 @@ mod tests {
 
         let target = rendezvous::rendezvous_dial_target(&book, id);
         assert_eq!(target.id, id);
+        let ips: Vec<_> = target.ip_addrs().copied().collect();
         assert_eq!(
-            target.ip_addrs().copied().collect::<Vec<_>>(),
+            ips,
             vec![at(5000)],
             "the dial carries the ip address of the beacon that holds the id now, and only that one"
         );
@@ -1407,11 +1408,12 @@ mod tests {
         // An entry with a relay (a relay-homed rendezvous, as `register_rendezvous` writes it).
         let relay: iroh::RelayUrl = "https://relay.invalid".parse().expect("relay url");
         book.set_endpoint_info(EndpointAddr::new(id).with_relay_url(relay.clone()));
+        let relays: Vec<_> = rendezvous::rendezvous_dial_target(&book, id)
+            .relay_urls()
+            .cloned()
+            .collect();
         assert_eq!(
-            rendezvous::rendezvous_dial_target(&book, id)
-                .relay_urls()
-                .cloned()
-                .collect::<Vec<_>>(),
+            relays,
             vec![relay],
             "the dial carries the relay of the entry"
         );

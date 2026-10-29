@@ -1132,8 +1132,8 @@ mod tests {
         let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
         let ctx = net.ctx();
         let asker = Identity::generate();
-        let current = serde_json::to_value(state.doc(Channel::State).heads().collect::<Vec<_>>())
-            .expect("heads");
+        let heads: Vec<_> = state.doc(Channel::State).heads().collect();
+        let current = serde_json::to_value(heads).expect("heads");
         let up_to_date = digest(&net.mesh, Channel::State, &current, &asker);
         let behind = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
@@ -1266,11 +1266,12 @@ mod tests {
         assert_eq!(got[..3], expected[..], "the three frames first, in order");
         let last = Message::parse(&got[3]).expect("the last frame parses");
         assert_eq!(last.kind, MessageKind::StateDigest, "then a state digest");
+        let closing_heads: Vec<_> = state.doc(Channel::State).heads().collect();
         assert_eq!(
             last.body.as_str(),
             format!(
                 r#"{{"heads":{},"closing":true}}"#,
-                serde_json::json!(state.doc(Channel::State).heads().collect::<Vec<_>>())
+                serde_json::json!(closing_heads)
             ),
             "carrying the holder's heads"
         );
@@ -1287,14 +1288,16 @@ mod tests {
 
         let (other_endpoint, _other_sender) = loopback_node().await;
         let (other_net, ahead, _frames) = holder(other_endpoint.addr(), 3).await;
-        let ahead_heads = serde_json::json!(ahead.doc(Channel::State).heads().collect::<Vec<_>>());
+        let ahead_list: Vec<_> = ahead.doc(Channel::State).heads().collect();
+        let ahead_heads = serde_json::json!(ahead_list);
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _none) = holder(bob_endpoint.addr(), 0).await;
         let bob = Identity::generate();
         prove_identity(&mut state, &bob, bob_endpoint.id());
         let now = clock::Instant::now();
 
-        let own = serde_json::json!(state.doc(Channel::State).heads().collect::<Vec<_>>());
+        let own_list: Vec<_> = state.doc(Channel::State).heads().collect();
+        let own = serde_json::json!(own_list);
         let up_to_date = digest(&net.mesh, Channel::State, &own, &bob);
         antientropy::handle_state_digest(Channel::State, &up_to_date, &mut state, &net.ctx()).await;
         assert!(

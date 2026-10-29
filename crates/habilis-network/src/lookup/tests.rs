@@ -40,7 +40,7 @@ fn the_lan_tag_follows_the_topic() {
 fn only_our_tag_is_a_member_of_our_mesh() {
     let ours = super::lan::lan_member_tag(&iroh_gossip::proto::TopicId::from_bytes([1u8; 32]));
     let foreign = super::lan::lan_member_tag(&iroh_gossip::proto::TopicId::from_bytes([2u8; 32]));
-    let user = |text: &str| text.parse::<iroh::endpoint_info::UserData>().expect("fits");
+    let user = |text: &str| -> iroh::endpoint_info::UserData { text.parse().expect("fits") };
 
     assert!(super::mdns::is_member_tag(Some(&user(&ours)), &ours));
     assert!(!super::mdns::is_member_tag(Some(&user(&foreign)), &ours));

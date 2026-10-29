@@ -137,7 +137,8 @@ fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roster() {
         let rosters = rosters_until(&members, MEMBERS - 1, FORMATION_DEADLINE).await;
 
         leave_all(members).await;
-        let trace = logs()
+        let text = logs();
+        let lines: Vec<_> = text
             .lines()
             .filter(|line| {
                 ["direct-peer cap", "refused a signal offer", "evicted"]
@@ -145,8 +146,8 @@ fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roster() {
                     .any(|needle| line.contains(needle))
             })
             .take(60)
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect();
+        let trace = lines.join("\n");
         assert!(
             rosters.iter().all(|len| *len == MEMBERS - 1),
             "every roster must hold {} peers; roster sizes by member: {rosters:?}\n{trace}",
@@ -306,7 +307,8 @@ fn a_member_that_the_beacon_dropped_holds_no_link() {
 
 /// The lines that say how the rendezvous was released and visited again.
 fn come_back_trace() -> String {
-    logs()
+    let text = logs();
+    let lines: Vec<_> = text
         .lines()
         .filter(|line| {
             [
@@ -318,11 +320,7 @@ fn come_back_trace() -> String {
             .iter()
             .any(|needle| line.contains(needle))
         })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .take(60)
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    let recent: Vec<_> = lines.into_iter().rev().take(60).rev().collect();
+    recent.join("\n")
 }

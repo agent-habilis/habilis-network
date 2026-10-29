@@ -91,11 +91,12 @@ async fn main() -> anyhow::Result<()> {
         .filter(|urls| !urls.is_empty());
     if let Ok(topic) = std::env::var("MESH_TOPIC") {
         let ladder = match &relay_urls {
-            Some(urls) => habilis_network::protocol::RelayChoice::Custom(
-                urls.split(',')
-                    .map(|url| url.trim().parse())
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
+            Some(urls) => {
+                let fields = urls.split(',');
+                let parsed: Result<Vec<iroh::RelayUrl>, _> =
+                    fields.map(|url| url.trim().parse()).collect();
+                habilis_network::protocol::RelayChoice::Custom(parsed?)
+            }
             None => habilis_network::protocol::RelayChoice::Pinned,
         };
         let mesh = habilis_network::runtime::derive_topic_mesh_config(
@@ -128,7 +129,10 @@ async fn main() -> anyhow::Result<()> {
         advertise_directory: _advertise_directory,
         ..
     } = match arg {
-        Some(id) => JoinParams::new(id.parse::<JoinTarget>()?, None, None).resolve()?,
+        Some(id) => {
+            let target: JoinTarget = id.parse()?;
+            JoinParams::new(target, None, None).resolve()?
+        }
         None => CreateParams::new(
             MeshName::random(),
             None,

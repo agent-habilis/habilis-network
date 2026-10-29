@@ -633,7 +633,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     // event loop applies it (re-register + re-home) without ever running
     // a ladder walk on the sole loop. Initialized to the optimistic
     // rung 0 (empty ladder ⇒ `None`).
-    let ladder = relay_ladder(&lookups.relay_lookup).collect::<Vec<_>>();
+    let ladder: Vec<_> = relay_ladder(&lookups.relay_lookup).collect();
     let (rung_tx, rung_rx) = watch::channel(ladder.first().cloned());
 
     let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport);

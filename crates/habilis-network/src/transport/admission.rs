@@ -86,6 +86,7 @@ pub(crate) use victims::Victims;
 mod tests {
     use habilis_network_test_tracing::test;
     use std::collections::HashSet;
+    use std::net::SocketAddr;
 
     use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
 
@@ -1256,11 +1257,7 @@ mod tests {
             .hooks(admission.connection_hook());
         builder = if with_ip {
             builder
-                .bind_addr(
-                    "127.0.0.1:0"
-                        .parse::<std::net::SocketAddr>()
-                        .expect("loopback"),
-                )
+                .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
                 .expect("bind address")
         } else {
             builder.clear_ip_transports().clear_relay_transports()

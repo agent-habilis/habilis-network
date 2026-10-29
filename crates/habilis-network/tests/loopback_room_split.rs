@@ -187,17 +187,17 @@ impl Round {
 
     /// How many different members logged a release with `RELEASE_LINKS` links or more.
     fn members_released_with_enough_links(&self) -> usize {
-        self.log()
+        let text = self.log();
+        let members: BTreeSet<_> = text
             .lines()
             .filter(|line| line.contains("released the rendezvous"))
             .filter(|line| {
-                field(line, "links=")
-                    .parse::<usize>()
-                    .is_ok_and(|count| count >= RELEASE_LINKS)
+                let links: Result<usize, _> = field(line, "links=").parse();
+                links.is_ok_and(|count| count >= RELEASE_LINKS)
             })
             .map(|line| field(line, "local="))
-            .collect::<BTreeSet<_>>()
-            .len()
+            .collect();
+        members.len()
     }
 
     /// Print the line of the round and end it. A round that failed panics and keeps its log.
@@ -774,9 +774,10 @@ async fn ladder_held_by_other_processes(
     wait_for_beacons(round, 1).await?;
     let mesh_id = creator.mesh_id();
     creator.leave().await;
-    let mesh = mesh_id
-        .parse::<LockedMesh>()
-        .map_err(|error| format!("the id of the room does not parse: {error}"))?
+    let locked: LockedMesh = mesh_id
+        .parse()
+        .map_err(|error| format!("the id of the room does not parse: {error}"))?;
+    let mesh = locked
         .unlock(None)
         .map_err(|error| format!("the room does not unlock without a password: {error}"))?;
     let _held = hold_every_rung(&mesh.rendezvous_ports()).await?;

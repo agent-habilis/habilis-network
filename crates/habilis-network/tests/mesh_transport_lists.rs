@@ -32,7 +32,8 @@ fn logs() -> String {
 
 /// The engine lines that say how a link formed or why it did not.
 fn link_trace() -> String {
-    logs()
+    let text = logs();
+    let lines: Vec<_> = text
         .lines()
         .filter(|line| {
             [
@@ -57,8 +58,8 @@ fn link_trace() -> String {
             .iter()
             .any(|needle| line.contains(needle))
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    lines.join("\n")
 }
 
 async fn eventually(deadline: Duration, mut done: impl FnMut() -> bool) -> bool {

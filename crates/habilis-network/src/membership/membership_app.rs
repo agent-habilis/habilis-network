@@ -1184,18 +1184,17 @@ mod tests {
 
     /// The longest nickname there is: 32 four-byte scalars.
     fn widest_nick(seed: char) -> Nickname {
-        Nickname::try_new(std::iter::repeat_n(seed, 32).collect::<String>()).expect("32 scalars")
+        let text: String = std::iter::repeat_n(seed, 32).collect();
+        Nickname::try_new(text).expect("32 scalars")
     }
 
     /// A mesh id well past the common case: every lookup and a four-rung
     /// custom relay ladder.
     fn long_mesh() -> MeshId {
-        let ladder: RelayLadder = (0..4)
+        let urls: Vec<String> = (0..4)
             .map(|rung| format!("https://relay-{rung}.a-rather-long-relay-domain.example/"))
-            .collect::<Vec<_>>()
-            .join(",")
-            .parse()
-            .expect("ladder");
+            .collect();
+        let ladder: RelayLadder = urls.join(",").parse().expect("ladder");
         let config = MeshConfig::resolve(
             &[Lookup::Mdns, Lookup::Dht, Lookup::Relay],
             Some(ladder),

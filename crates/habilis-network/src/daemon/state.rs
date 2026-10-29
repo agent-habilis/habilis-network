@@ -1131,10 +1131,12 @@ mod tests {
         let mut state = fresh_state();
         // First message (no parents) becomes the sole tip.
         assert!(!state.note_dag(hash_of("h1"), &[], UnixSecs::from_secs(100)));
-        assert_eq!(state.dag_parents().collect::<Vec<_>>(), vec![hash_of("h1")]);
+        let tips_h1: Vec<_> = state.dag_parents().collect();
+        assert_eq!(tips_h1, vec![hash_of("h1")]);
         // A child referencing h1 makes h1 no longer a tip; h2 is the new one.
         assert!(!state.note_dag(hash_of("h2"), &[hash_of("h1")], UnixSecs::from_secs(101)));
-        assert_eq!(state.dag_parents().collect::<Vec<_>>(), vec![hash_of("h2")]);
+        let tips_h2: Vec<_> = state.dag_parents().collect();
+        assert_eq!(tips_h2, vec![hash_of("h2")]);
     }
 
     #[test]
@@ -1144,11 +1146,8 @@ mod tests {
         state.note_dag(hash_of("b"), &[], UnixSecs::from_secs(1)); // concurrent: no shared parent
         let mut both = vec![hash_of("a"), hash_of("b")];
         both.sort();
-        assert_eq!(
-            state.dag_parents().collect::<Vec<_>>(),
-            both,
-            "both tips, in hash order"
-        );
+        let tips: Vec<_> = state.dag_parents().collect();
+        assert_eq!(tips, both, "both tips, in hash order");
     }
 
     #[test]

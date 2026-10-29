@@ -68,7 +68,7 @@ fn flood_plan() -> (usize, &'static str) {
     let peers = usize::try_from(env_number("MESH_FLOOD_PEERS")).unwrap_or(0);
     let senders = std::env::var("MESH_FLOOD_SENDERS")
         .ok()
-        .and_then(|senders| senders.parse::<u64>().ok());
+        .and_then(|senders| -> Option<u64> { senders.parse().ok() });
     match senders {
         Some(limit) if env_number("MESH_NODE_INDEX") <= limit => (peers, " role sender"),
         Some(_) => (0, " role receiver"),

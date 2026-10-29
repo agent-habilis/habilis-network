@@ -34,7 +34,8 @@ fn count(needle: &str) -> usize {
 /// The lines that say how the rendezvous was held, let go of and re-grafted: the
 /// last 120, because the lines that explain a failure come after the group forms.
 fn rendezvous_trace() -> String {
-    logs()
+    let text = logs();
+    let lines: Vec<_> = text
         .lines()
         .filter(|line| {
             [
@@ -49,13 +50,9 @@ fn rendezvous_trace() -> String {
             .iter()
             .any(|needle| line.contains(needle))
         })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .take(120)
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    let recent: Vec<_> = lines.into_iter().rev().take(120).rev().collect();
+    recent.join("\n")
 }
 
 /// The whole log, written to the file that `HABILIS_TEST_LOG_DUMP` names, if set.

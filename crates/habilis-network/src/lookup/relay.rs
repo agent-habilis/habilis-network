@@ -478,18 +478,16 @@ mod tests {
 
     #[test]
     fn pinned_ladder_resolves_to_prod_set() {
+        let pinned: Vec<_> = relay_ladder(&RelayChoice::Pinned).collect();
         assert_eq!(
-            relay_ladder(&RelayChoice::Pinned).collect::<Vec<_>>(),
-            *RENDEZVOUS_RELAY_LADDER_URLS,
+            pinned, *RENDEZVOUS_RELAY_LADDER_URLS,
             "Pinned ⇒ the full n0 prod ladder"
         );
         assert!(relay_ladder(&RelayChoice::Disabled).next().is_none());
         let url: RelayUrl = "https://a.example./".parse().unwrap();
         let custom = vec![url];
-        assert_eq!(
-            relay_ladder(&RelayChoice::Custom(custom.clone())).collect::<Vec<_>>(),
-            custom
-        );
+        let ladder: Vec<_> = relay_ladder(&RelayChoice::Custom(custom.clone())).collect();
+        assert_eq!(ladder, custom);
     }
 
     #[test]
