@@ -58,7 +58,6 @@ pub(crate) fn rand_token() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::{call_page_within, shown};
@@ -79,6 +78,7 @@ mod tests {
 
     #[test]
     fn a_failed_call_names_the_method_not_its_arguments() {
+        let _guard = ::habilis_network_test_tracing::init();
         let sdp = "x".repeat(2000);
         let error = call_page_within(
             &Failing,
@@ -94,6 +94,7 @@ mod tests {
 
     #[test]
     fn a_short_call_or_one_without_arguments_stays_whole() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(shown("offer()"), "offer()");
         let bare = "x".repeat(100);
         assert_eq!(shown(&bare), bare);

@@ -326,7 +326,6 @@ pub(crate) fn select(kind: Kind, packages: &[String]) -> Vec<&'static Step> {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use xshell::Shell;
 
     use super::{Kind, STEPS, Scope};
@@ -368,6 +367,7 @@ mod tests {
 
     #[test]
     fn every_workspace_crate_that_builds_for_wasm32_has_a_wasm_clippy_row() {
+        let _guard = ::habilis_network_test_tracing::init();
         let rows = wasm_clippy_crates();
         let missing: Vec<String> = workspace_members()
             .into_iter()
@@ -384,6 +384,7 @@ mod tests {
 
     #[test]
     fn the_rows_and_the_exemptions_name_workspace_crates_and_do_not_overlap() {
+        let _guard = ::habilis_network_test_tracing::init();
         let members = workspace_members();
         let rows = wasm_clippy_crates();
         let unknown: Vec<&str> = rows

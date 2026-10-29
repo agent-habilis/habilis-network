@@ -189,7 +189,6 @@ async fn third(args: &Args, open: &mut Open) -> Result<Measured, String> {
 mod tests {
     use super::{Args, Outcome, ladder_multihop_direct, ladder_multihop_third, require_forwarded};
     use crate::bench::Direction;
-    use habilis_network_test_tracing::test;
 
     fn small_args() -> Args {
         Args {
@@ -203,29 +202,34 @@ mod tests {
     }
 
     #[test]
-    async fn the_direct_multihop_cell_is_on_the_multihop_path_with_round_trips() {
-        let Outcome::Ok(measured) = ladder_multihop_direct(&small_args()).await else {
-            panic!("the direct multihop cell did not measure");
-        };
+    fn the_direct_multihop_cell_is_on_the_multihop_path_with_round_trips() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let Outcome::Ok(measured) = ladder_multihop_direct(&small_args()).await else {
+                panic!("the direct multihop cell did not measure");
+            };
 
-        assert_eq!(measured.path, "multihop");
-        assert!(measured.rtt.is_some());
+            assert_eq!(measured.path, "multihop");
+            assert!(measured.rtt.is_some());
+        });
     }
 
     #[test]
-    async fn the_third_member_cell_is_on_the_multihop_path_through_the_third() {
-        let Outcome::Ok(measured) = ladder_multihop_third(&small_args()).await else {
-            panic!("the third-member multihop cell did not measure");
-        };
+    fn the_third_member_cell_is_on_the_multihop_path_through_the_third() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let Outcome::Ok(measured) = ladder_multihop_third(&small_args()).await else {
+                panic!("the third-member multihop cell did not measure");
+            };
 
-        assert_eq!(measured.path, "multihop");
-        assert!(measured.rtt.is_some());
+            assert_eq!(measured.path, "multihop");
+            assert!(measured.rtt.is_some());
+        });
     }
 
     /// A "via a third member" number from a run where the third forwarded
     /// nothing would be a direct number with the wrong name.
     #[test]
     fn a_third_member_that_forwarded_nothing_is_an_error() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(require_forwarded(0).is_err());
         assert!(require_forwarded(1).is_ok());
     }

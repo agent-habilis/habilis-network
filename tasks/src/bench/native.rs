@@ -403,64 +403,67 @@ mod tests {
     };
     use crate::bench::Direction;
     use habilis_network_iroh_webrtc_transport::bench::MAX_TRANSFER_BYTES;
-    use habilis_network_test_tracing::{expect_warn, test};
 
     /// An upload's throughput is the bulk it sent, not the token it got back.
     #[test]
-    async fn an_upload_sample_counts_the_bulk_it_sent() {
-        let args = Args {
-            only: None,
-            bytes: 64 * 1024,
-            rounds: 1,
-            direction: Direction::Up,
-            list: false,
-            json: None,
-        };
-        let client = vanilla().await.expect("bind the client");
-        let server = vanilla().await.expect("bind the server");
-        let args_ref = &args;
+    fn an_upload_sample_counts_the_bulk_it_sent() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let args = Args {
+                only: None,
+                bytes: 64 * 1024,
+                rounds: 1,
+                direction: Direction::Up,
+                list: false,
+                json: None,
+            };
+            let client = vanilla().await.expect("bind the client");
+            let server = vanilla().await.expect("bind the server");
+            let args_ref = &args;
 
-        let samples = bench_ip(client, server, |client, addr| async move {
-            rounds(&client, addr, args_ref).await
-        })
-        .await
-        .expect("the rounds run");
+            let samples = bench_ip(client, server, |client, addr| async move {
+                rounds(&client, addr, args_ref).await
+            })
+            .await
+            .expect("the rounds run");
 
-        let counted: Vec<usize> = samples.iter().map(|sample| sample.bytes).collect();
-        assert!(
-            counted.iter().all(|&bytes| bytes == args.bytes),
-            "samples counted {counted:?} bytes, the upload sent {}",
-            args.bytes
-        );
+            let counted: Vec<usize> = samples.iter().map(|sample| sample.bytes).collect();
+            assert!(
+                counted.iter().all(|&bytes| bytes == args.bytes),
+                "samples counted {counted:?} bytes, the upload sent {}",
+                args.bytes
+            );
+        });
     }
 
     /// Bulk both ways at once moves twice the bulk, and the rate counts both.
     #[test]
-    async fn a_both_ways_sample_counts_both_directions() {
-        let args = Args {
-            only: None,
-            bytes: 64 * 1024,
-            rounds: 1,
-            direction: Direction::Both,
-            list: false,
-            json: None,
-        };
-        let client = vanilla().await.expect("bind the client");
-        let server = vanilla().await.expect("bind the server");
-        let args_ref = &args;
+    fn a_both_ways_sample_counts_both_directions() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let args = Args {
+                only: None,
+                bytes: 64 * 1024,
+                rounds: 1,
+                direction: Direction::Both,
+                list: false,
+                json: None,
+            };
+            let client = vanilla().await.expect("bind the client");
+            let server = vanilla().await.expect("bind the server");
+            let args_ref = &args;
 
-        let samples = bench_ip(client, server, |client, addr| async move {
-            rounds(&client, addr, args_ref).await
-        })
-        .await
-        .expect("the rounds run");
+            let samples = bench_ip(client, server, |client, addr| async move {
+                rounds(&client, addr, args_ref).await
+            })
+            .await
+            .expect("the rounds run");
 
-        let counted: Vec<usize> = samples.iter().map(|sample| sample.bytes).collect();
-        assert!(
-            counted.iter().all(|&bytes| bytes == 2 * args.bytes),
-            "samples counted {counted:?} bytes, both directions moved {}",
-            2 * args.bytes
-        );
+            let counted: Vec<usize> = samples.iter().map(|sample| sample.bytes).collect();
+            assert!(
+                counted.iter().all(|&bytes| bytes == 2 * args.bytes),
+                "samples counted {counted:?} bytes, both directions moved {}",
+                2 * args.bytes
+            );
+        });
     }
 
     /// The reply bytes a `Bench` server sends for one raw request header.
@@ -495,17 +498,27 @@ mod tests {
     }
 
     #[test]
-    async fn a_bench_server_refuses_an_unknown_mode() {
-        // The server logs each refusal it sends, and this test asks for one.
-        expect_warn("iroh::protocol", "refused request: mode 7");
-        assert_eq!(reply_to(7, 1024).await, 0);
+    fn a_bench_server_refuses_an_unknown_mode() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // The server logs each refusal it sends, and this test asks for one.
+            ::habilis_network_test_tracing::expect_warn(
+                "iroh::protocol",
+                "refused request: mode 7",
+            );
+            assert_eq!(reply_to(7, 1024).await, 0);
+        });
     }
 
     #[test]
-    async fn a_bench_server_refuses_a_reply_past_the_transfer_ceiling() {
-        let past = u32::try_from(MAX_TRANSFER_BYTES + 1).expect("the ceiling fits in u32");
-        expect_warn("iroh::protocol", "refused request: mode 0");
-        assert_eq!(reply_to(0, past).await, 0);
+    fn a_bench_server_refuses_a_reply_past_the_transfer_ceiling() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let past = u32::try_from(MAX_TRANSFER_BYTES + 1).expect("the ceiling fits in u32");
+            ::habilis_network_test_tracing::expect_warn(
+                "iroh::protocol",
+                "refused request: mode 0",
+            );
+            assert_eq!(reply_to(0, past).await, 0);
+        });
     }
 
     fn small_args() -> Args {
@@ -522,36 +535,42 @@ mod tests {
     /// The ladder's UDP cell carries both measurements: the transfer rounds
     /// and the 1000 round trips after 50 warm-up probes, on the IP path.
     #[test]
-    async fn the_ladder_udp_cell_measures_throughput_and_round_trips_on_ip() {
-        let Outcome::Ok(measured) = ladder_udp(&small_args()).await else {
-            panic!("the ladder udp cell did not measure");
-        };
+    fn the_ladder_udp_cell_measures_throughput_and_round_trips_on_ip() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let Outcome::Ok(measured) = ladder_udp(&small_args()).await else {
+                panic!("the ladder udp cell did not measure");
+            };
 
-        assert_eq!(measured.path, "ip");
-        let rtt = measured.rtt.expect("round-trip percentiles");
-        assert!(rtt.p50_ms > 0.0 && rtt.p99_ms >= rtt.p50_ms);
+            assert_eq!(measured.path, "ip");
+            let rtt = measured.rtt.expect("round-trip percentiles");
+            assert!(rtt.p50_ms > 0.0 && rtt.p99_ms >= rtt.p50_ms);
+        });
     }
 
     /// The ladder's `WebRTC` cell is on the data channel, and measures both.
     #[test]
-    async fn the_ladder_webrtc_cell_measures_throughput_and_round_trips_on_webrtc() {
-        let Outcome::Ok(measured) = ladder_webrtc(&small_args()).await else {
-            panic!("the ladder webrtc cell did not measure");
-        };
+    fn the_ladder_webrtc_cell_measures_throughput_and_round_trips_on_webrtc() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let Outcome::Ok(measured) = ladder_webrtc(&small_args()).await else {
+                panic!("the ladder webrtc cell did not measure");
+            };
 
-        assert_eq!(measured.path, "webrtc");
-        assert!(measured.rtt.is_some());
+            assert_eq!(measured.path, "webrtc");
+            assert!(measured.rtt.is_some());
+        });
     }
 
     /// With no IP transport on either side and a local relay between them, the
     /// relay is the only path there is, and the cell says so.
     #[test]
-    async fn the_ladder_relay_cell_is_on_the_relay_path_with_round_trips() {
-        let Outcome::Ok(measured) = ladder_relay(&small_args()).await else {
-            panic!("the ladder relay cell did not measure");
-        };
+    fn the_ladder_relay_cell_is_on_the_relay_path_with_round_trips() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let Outcome::Ok(measured) = ladder_relay(&small_args()).await else {
+                panic!("the ladder relay cell did not measure");
+            };
 
-        assert_eq!(measured.path, "relay");
-        assert!(measured.rtt.is_some());
+            assert_eq!(measured.path, "relay");
+            assert!(measured.rtt.is_some());
+        });
     }
 }

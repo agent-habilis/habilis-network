@@ -521,7 +521,6 @@ async fn measure_group(
 mod tests {
     use super::{Args, Outcome, ladder_gossip, ladder_gossip_backup};
     use crate::bench::Direction;
-    use habilis_network_test_tracing::test;
 
     fn small_args() -> Args {
         Args {
@@ -536,61 +535,73 @@ mod tests {
 
     /// The cell keeps IP selected, reports the flood of both runs, and the run with
     /// no gossip address puts nothing on the topic.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_backup_path_cell_reports_the_flood_under_ip_and_a_control_with_none() {
-        let Outcome::Ok(measured) = ladder_gossip_backup(&small_args()).await else {
-            panic!("the backup-path cell did not measure");
-        };
+    #[test]
+    fn the_backup_path_cell_reports_the_flood_under_ip_and_a_control_with_none() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let Outcome::Ok(measured) = ladder_gossip_backup(&small_args()).await else {
+                    panic!("the backup-path cell did not measure");
+                };
 
-        assert_eq!(measured.path, "ip", "IP is the selected path");
-        let extra = measured.extra.expect("the flood numbers");
-        let group = &extra["groups"][0];
-        assert_eq!(group["members"], 4);
-        let with_path = &group["with_gossip_path"];
-        let control = &group["ip_only_control"];
-        assert_eq!(with_path["selected_path"], "ip");
-        assert_eq!(control["selected_path"], "ip");
-        assert_eq!(control["gossip_path_open"], false);
-        assert_eq!(control["flood_frames_idle"], 0);
-        assert!(with_path["flood_frames_idle"].is_u64(), "{with_path}");
-        assert!(with_path["idle"]["bystander_mean"]["frames_in_per_s"].is_f64());
-        // Both ends of the inner connection report their lost packets in the bulk.
-        assert!(with_path["bulk"]["lost_packets_a"].is_u64(), "{with_path}");
-        assert!(with_path["bulk"]["lost_packets_b"].is_u64(), "{with_path}");
+                assert_eq!(measured.path, "ip", "IP is the selected path");
+                let extra = measured.extra.expect("the flood numbers");
+                let group = &extra["groups"][0];
+                assert_eq!(group["members"], 4);
+                let with_path = &group["with_gossip_path"];
+                let control = &group["ip_only_control"];
+                assert_eq!(with_path["selected_path"], "ip");
+                assert_eq!(control["selected_path"], "ip");
+                assert_eq!(control["gossip_path_open"], false);
+                assert_eq!(control["flood_frames_idle"], 0);
+                assert!(with_path["flood_frames_idle"].is_u64(), "{with_path}");
+                assert!(with_path["idle"]["bystander_mean"]["frames_in_per_s"].is_f64());
+                // Both ends of the inner connection report their lost packets in the bulk.
+                assert!(with_path["bulk"]["lost_packets_a"].is_u64(), "{with_path}");
+                assert!(with_path["bulk"]["lost_packets_b"].is_u64(), "{with_path}");
+            },
+        );
     }
 
     /// The gossip cell: a transfer and the round trips over the real flood, on the
     /// gossip path, and the cost of the flood at the member between the two ends.
     /// Skipped, with a log line, where the `IPv6` loopback cannot bind.
-    #[test(flavor = "multi_thread", worker_threads = 4)]
-    async fn the_gossip_cell_measures_a_quic_transfer_over_the_real_flood() {
-        let measured = match ladder_gossip(&small_args()).await {
-            Outcome::Ok(measured) => measured,
-            Outcome::Skipped(reason) => {
-                eprintln!("SKIPPED: {reason}");
-                return;
-            }
-            Outcome::Failed(reason) => panic!("the gossip cell failed: {reason}"),
-        };
+    #[test]
+    fn the_gossip_cell_measures_a_quic_transfer_over_the_real_flood() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            4,
+            async {
+                let measured = match ladder_gossip(&small_args()).await {
+                    Outcome::Ok(measured) => measured,
+                    Outcome::Skipped(reason) => {
+                        eprintln!("SKIPPED: {reason}");
+                        return;
+                    }
+                    Outcome::Failed(reason) => panic!("the gossip cell failed: {reason}"),
+                };
 
-        assert_eq!(measured.path, "gossip", "the selected path");
-        assert!(measured.rtt.is_some(), "round trips over gossip");
-        let extra = measured.extra.expect("the flood numbers");
-        assert!(
-            extra["members"]["b"]["frames_in"].as_u64().unwrap_or(0) > 0,
-            "the member between the ends read the flood: {extra}"
+                assert_eq!(measured.path, "gossip", "the selected path");
+                assert!(measured.rtt.is_some(), "round trips over gossip");
+                let extra = measured.extra.expect("the flood numbers");
+                assert!(
+                    extra["members"]["b"]["frames_in"].as_u64().unwrap_or(0) > 0,
+                    "the member between the ends read the flood: {extra}"
+                );
+                assert!(extra["flood_amplification"].is_f64(), "{extra}");
+                // Where a frame can be lost: the sink queue, and the topic's own queue.
+                for member in ["a", "b", "c"] {
+                    let counts = &extra["members"][member];
+                    assert!(
+                        counts["dropped_sink_refused"].is_u64(),
+                        "{member}: {counts}"
+                    );
+                    assert!(counts["topic_lagged"].is_u64(), "{member}: {counts}");
+                    assert!(counts["forward_dropped"].is_u64(), "{member}: {counts}");
+                }
+                assert!(extra["lost_packets_a"].is_u64() && extra["lost_packets_c"].is_u64());
+            },
         );
-        assert!(extra["flood_amplification"].is_f64(), "{extra}");
-        // Where a frame can be lost: the sink queue, and the topic's own queue.
-        for member in ["a", "b", "c"] {
-            let counts = &extra["members"][member];
-            assert!(
-                counts["dropped_sink_refused"].is_u64(),
-                "{member}: {counts}"
-            );
-            assert!(counts["topic_lagged"].is_u64(), "{member}: {counts}");
-            assert!(counts["forward_dropped"].is_u64(), "{member}: {counts}");
-        }
-        assert!(extra["lost_packets_a"].is_u64() && extra["lost_packets_c"].is_u64());
     }
 }

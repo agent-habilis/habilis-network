@@ -267,7 +267,6 @@ fn time_of_day(params: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 
@@ -302,6 +301,7 @@ mod tests {
     /// tries again until its deadline instead of giving up on the first error.
     #[test]
     fn a_failed_target_list_is_read_again() {
+        let _guard = ::habilis_network_test_tracing::init();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
         let port = listener.local_addr().expect("local addr").port();
         std::thread::spawn(move || {
@@ -333,6 +333,7 @@ mod tests {
     /// must not hold the runner past its deadline.
     #[test]
     fn a_silent_target_list_does_not_hang() {
+        let _guard = ::habilis_network_test_tracing::init();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
         let port = listener.local_addr().expect("local addr").port();
         std::thread::spawn(move || {
@@ -358,6 +359,7 @@ mod tests {
     /// in that time its target list is empty.
     #[test]
     fn a_page_that_shows_after_the_port_file_is_found() {
+        let _guard = ::habilis_network_test_tracing::init();
         let port = fake_devtools(vec![
             "[]",
             r#"[{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1/devtools/page/1"}]"#,

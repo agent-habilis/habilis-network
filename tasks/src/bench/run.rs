@@ -430,7 +430,6 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::{Cell, Measured, Outcome, Row, Rtt, Sample, table};
@@ -455,17 +454,20 @@ mod tests {
 
     #[test]
     fn rtt_is_the_nearest_rank_p50_and_p99() {
+        let _guard = ::habilis_network_test_tracing::init();
         let rtt = Rtt::summarize(&millis(100)).map(|rtt| (rtt.p50_ms, rtt.p99_ms));
         assert_eq!(rtt, Some((50.0, 99.0)));
     }
 
     #[test]
     fn rtt_of_no_samples_is_none() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(Rtt::summarize(&[]).is_none());
     }
 
     #[test]
     fn the_table_has_the_two_rtt_columns_and_a_dash_where_a_cell_has_none() {
+        let _guard = ::habilis_network_test_tracing::init();
         let rows = [
             Row {
                 cell: Cell::IrohNativeNative,
