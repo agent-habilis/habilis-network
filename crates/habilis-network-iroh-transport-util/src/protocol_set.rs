@@ -4,6 +4,14 @@ use iroh::protocol::{DynProtocolHandler, ProtocolHandler};
 ///
 /// Each handler is any [`ProtocolHandler`]. The set boxes it once, so a caller passes
 /// handlers of different types one by one.
+///
+/// # Examples
+///
+/// A protocol set serves a handler on a live endpoint, so this is not compiled.
+///
+/// ```ignore
+/// let set = ProtocolSet::default().with_protocol(handler);
+/// ```
 #[derive(Debug, Default)]
 pub struct ProtocolSet(pub(crate) Vec<(Vec<u8>, Box<dyn DynProtocolHandler>)>);
 

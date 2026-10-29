@@ -15,6 +15,14 @@ use std::sync::atomic::Ordering;
 /// favour of the fallback it is meant to replace. That is the load-bearing
 /// half: without it a new direct path loses to the relay forever, because it
 /// never gets the traffic that would measure it.
+///
+/// # Examples
+///
+/// It reads the path selection of a live connection, so this is not compiled.
+///
+/// ```ignore
+/// let best = best_of(paths);
+/// ```
 #[must_use]
 pub fn best_of<'a>(
     iter: impl Iterator<Item = &'a PathSelectionData<'a>>,
@@ -41,6 +49,16 @@ pub fn best_of<'a>(
 ///
 /// The order is the declaration order, and both selectors take it from here, so
 /// that it does not depend on which transports an endpoint has installed.
+///
+/// # Examples
+///
+/// The ladder tries the direct IP rung first.
+///
+/// ```
+/// use habilis_network_iroh_transport_util::Rung;
+///
+/// assert!(matches!(Rung::LADDER[0], Rung::Ip));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum Rung {
@@ -75,6 +93,14 @@ impl Rung {
 /// The rung `path` stands on. `custom` names the rung of a custom transport by
 /// its id. Each selector knows its own transport's id and not the other's, so it
 /// names its own and gives the other one by elimination.
+///
+/// # Examples
+///
+/// It reads the path selection of a live connection, so this is not compiled.
+///
+/// ```ignore
+/// let rung = rung_of(&path, custom_rung);
+/// ```
 #[must_use]
 pub fn rung_of(path: &PathSelectionData<'_>, custom: impl Fn(u64) -> Rung) -> Rung {
     match path.network_path().remote() {
@@ -98,6 +124,16 @@ pub const GOSSIP_TRANSPORT_ID: u64 = 0x6773;
 /// The ids live here because this crate is below the transport crates, which
 /// cannot name each other. Each transport crate keeps its own constant, and a
 /// test in that crate checks that it equals the one here.
+///
+/// # Examples
+///
+/// A custom transport id maps to the rung of that transport.
+///
+/// ```
+/// use habilis_network_iroh_transport_util::{Rung, WEBRTC_TRANSPORT_ID, custom_rung};
+///
+/// assert!(matches!(custom_rung(WEBRTC_TRANSPORT_ID), Rung::WebRtc));
+/// ```
 #[must_use]
 pub fn custom_rung(id: u64) -> Rung {
     match id {
@@ -112,6 +148,17 @@ pub fn custom_rung(id: u64) -> Rung {
 /// `available` path, or `None`. Pure. The ladder lives here and nowhere else:
 /// both selectors choose through it, and a test that asks where a node should
 /// stand asks it too.
+///
+/// # Examples
+///
+/// The first rung on the ladder that is allowed and available is the expected one.
+///
+/// ```
+/// use habilis_network_iroh_transport_util::{Rung, expected_rung};
+///
+/// let rung = expected_rung(|_| true, |rung| matches!(rung, Rung::Multihop | Rung::Relay));
+/// assert!(rung.is_some_and(|rung| matches!(rung, Rung::Multihop)));
+/// ```
 #[must_use]
 pub fn expected_rung(
     allowed: impl Fn(Rung) -> bool,
@@ -126,6 +173,14 @@ pub fn expected_rung(
 /// have a usable path: the lowest RTT inside the rung (see [`best_of`]).
 /// `usable` lets a caller drop a path, as a test does to take one rung away
 /// from one node. It adds no ladder of its own.
+///
+/// # Examples
+///
+/// It walks the rungs of a live connection, so this is not compiled.
+///
+/// ```ignore
+/// let next = climb(&rungs, current);
+/// ```
 #[must_use]
 pub fn climb<'a>(
     paths: &'a [PathSelectionData<'a>],
@@ -143,6 +198,14 @@ pub fn climb<'a>(
 }
 
 /// The IP address a path leads to, or `None` for a relay or custom path.
+///
+/// # Examples
+///
+/// It reads the path selection of a live connection, so this is not compiled.
+///
+/// ```ignore
+/// let remote = ip_remote(&path);
+/// ```
 #[must_use]
 pub fn ip_remote(path: &PathSelectionData<'_>) -> Option<std::net::SocketAddr> {
     match path.network_path().remote() {
@@ -156,6 +219,14 @@ pub fn ip_remote(path: &PathSelectionData<'_>) -> Option<std::net::SocketAddr> {
 /// endpoint's id. An IP address does not, and a custom address of another
 /// transport carries no single remote (a multihop address is a route), so those
 /// give `None`.
+///
+/// # Examples
+///
+/// It reads an address of a live connection, so this is not compiled.
+///
+/// ```ignore
+/// let id = remote_id_of(&address);
+/// ```
 #[must_use]
 pub fn remote_id_of(address: &Addr) -> Option<iroh::EndpointId> {
     match address {
@@ -169,6 +240,14 @@ pub fn remote_id_of(address: &Addr) -> Option<iroh::EndpointId> {
 }
 
 /// [`remote_id_of`] for the address of a path.
+///
+/// # Examples
+///
+/// It reads the path selection of a live connection, so this is not compiled.
+///
+/// ```ignore
+/// let id = remote_id(&path);
+/// ```
 #[must_use]
 pub fn remote_id(path: &PathSelectionData<'_>) -> Option<iroh::EndpointId> {
     remote_id_of(&path.network_path().remote())
@@ -176,6 +255,14 @@ pub fn remote_id(path: &PathSelectionData<'_>) -> Option<iroh::EndpointId> {
 
 /// Whether a test took the path `path` away from the node `local`, on `rung`:
 /// [`is_blocked_to`] for a selector, which has a path and not an address.
+///
+/// # Examples
+///
+/// It reads the path selection of a live connection, so this is not compiled.
+///
+/// ```ignore
+/// let dropped = blocked(local, Rung::Ip, &path);
+/// ```
 #[must_use]
 pub fn blocked(local: iroh::EndpointId, rung: Rung, path: &PathSelectionData<'_>) -> bool {
     is_blocked_to(local, rung, ip_remote(path), remote_id(path))
@@ -183,6 +270,14 @@ pub fn blocked(local: iroh::EndpointId, rung: Rung, path: &PathSelectionData<'_>
 
 /// Without `test-hooks` nothing is ever blocked, so a selector reads the same
 /// function in every build and needs no feature of its own.
+///
+/// # Examples
+///
+/// It reads the path selection of a live connection, so this is not compiled.
+///
+/// ```ignore
+/// let dropped = is_blocked(local, Rung::Ip, &path);
+/// ```
 #[cfg(not(feature = "test-hooks"))]
 #[must_use]
 pub fn is_blocked(
@@ -194,6 +289,14 @@ pub fn is_blocked(
 }
 
 /// [`is_blocked`], and the remote endpoint id of the path when it has one.
+///
+/// # Examples
+///
+/// It reads the block list of a live connection, so this is not compiled.
+///
+/// ```ignore
+/// let dropped = is_blocked_to(local, remote, Rung::Ip);
+/// ```
 #[cfg(not(feature = "test-hooks"))]
 #[must_use]
 pub fn is_blocked_to(
@@ -231,6 +334,14 @@ static RUNGS_BLOCKED_TO: std::sync::Mutex<
 /// # Panics
 ///
 /// Panics if another thread panicked while it held a block table.
+///
+/// # Examples
+///
+/// It reads the path selection of a live connection, so this is not compiled.
+///
+/// ```ignore
+/// let dropped = is_blocked(local, Rung::Ip, &path);
+/// ```
 #[cfg(feature = "test-hooks")]
 #[must_use]
 pub fn is_blocked(
@@ -248,6 +359,14 @@ pub fn is_blocked(
 /// # Panics
 ///
 /// Panics if another thread panicked while it held a block table.
+///
+/// # Examples
+///
+/// It reads the block list of a live connection, so this is not compiled.
+///
+/// ```ignore
+/// let dropped = is_blocked_to(local, remote, Rung::Ip);
+/// ```
 #[cfg(feature = "test-hooks")]
 #[must_use]
 pub fn is_blocked_to(
@@ -286,6 +405,14 @@ pub fn is_blocked_to(
 /// Tests only: while set, no IP path is selected, in every endpoint of the
 /// process. iroh re-runs selection on its path-stat updates, so a live
 /// connection leaves UDP within a few seconds and returns once it is cleared.
+///
+/// # Examples
+///
+/// It changes the block list of the test hooks for the whole process, so this is not compiled.
+///
+/// ```ignore
+/// block_ip_paths(local, &path);
+/// ```
 #[cfg(feature = "test-hooks")]
 pub fn block_ip_paths(
     // true blocks every IP path, false clears the block
@@ -305,6 +432,14 @@ pub fn block_ip_paths(
 /// # Panics
 ///
 /// Panics if another thread panicked while it held the block table.
+///
+/// # Examples
+///
+/// It changes the block list of the test hooks for the whole process, so this is not compiled.
+///
+/// ```ignore
+/// block_ip_to(local, [7000]);
+/// ```
 #[cfg(feature = "test-hooks")]
 pub fn block_ip_to(local: iroh::EndpointId, remote_ports: impl IntoIterator<Item = u16>) {
     let ports: HashSet<u16> = remote_ports.into_iter().collect();
@@ -326,6 +461,14 @@ pub fn block_ip_to(local: iroh::EndpointId, remote_ports: impl IntoIterator<Item
 /// # Panics
 ///
 /// Panics if another thread panicked while it held the block table.
+///
+/// # Examples
+///
+/// It changes the block list of the test hooks for the whole process, so this is not compiled.
+///
+/// ```ignore
+/// block_rung(local, Rung::Ip);
+/// ```
 #[cfg(feature = "test-hooks")]
 pub fn block_rung(
     local: iroh::EndpointId,
@@ -352,6 +495,14 @@ pub fn block_rung(
 /// # Panics
 ///
 /// Panics if another thread panicked while it held the block table.
+///
+/// # Examples
+///
+/// It changes the block list of the test hooks for the whole process, so this is not compiled.
+///
+/// ```ignore
+/// block_rung_to(local, remote, Rung::Ip);
+/// ```
 #[cfg(feature = "test-hooks")]
 pub fn block_rung_to(
     local: iroh::EndpointId,
@@ -377,6 +528,14 @@ pub fn block_rung_to(
 /// which turns an empty transmit into zero datagrams, while the third special-
 /// cased it. A real QUIC packet is never empty, so the divergence was
 /// unreachable — but it is the kind that outlives the copy it came from.
+///
+/// # Examples
+///
+/// It reads the transmit of a live connection, so this is not compiled.
+///
+/// ```ignore
+/// let parts: Vec<&[u8]> = datagrams(&transmit).collect();
+/// ```
 pub fn datagrams<'a>(transmit: &'a Transmit<'a>) -> impl Iterator<Item = &'a [u8]> {
     split_segments(transmit.contents, transmit.segment_size)
 }
@@ -384,6 +543,17 @@ pub fn datagrams<'a>(transmit: &'a Transmit<'a>) -> impl Iterator<Item = &'a [u8
 /// [`datagrams`] over the two fields it reads. Separate because `Transmit` has
 /// a private field, so it cannot be built outside iroh and the rule above
 /// would otherwise have no test at all.
+///
+/// # Examples
+///
+/// A buffer splits into segments of the given size, and the last one may be shorter.
+///
+/// ```
+/// use habilis_network_iroh_transport_util::split_segments;
+///
+/// let parts: Vec<&[u8]> = split_segments(b"abcdef", Some(2)).collect();
+/// assert_eq!(parts, [b"ab".as_slice(), b"cd", b"ef"]);
+/// ```
 pub fn split_segments(contents: &[u8], segment_size: Option<usize>) -> impl Iterator<Item = &[u8]> {
     let segment = segment_size.unwrap_or(contents.len()).max(1);
     let mut keepalive = contents.is_empty();
