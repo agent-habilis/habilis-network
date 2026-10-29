@@ -317,10 +317,10 @@ pub async fn broadcast_state_merge(
     //    writes; the internal card publish stays lean (no delta on the wire).
     //    On a passworded mesh the wire body is sealed under the channel key;
     //    `plain_body` keeps the plaintext for our own surfacing below.
-    let (wire_body, plain_body) = state
-        .doc(channel)
-        .compose_wire_body(&change_bytes, surface.then_some(&merge))
-        .map_err(|error| crate::transport::SendError::Internal(error.into()))?;
+    let channel_doc = state.doc(channel);
+    let composed = channel_doc.compose_wire_body(&change_bytes, surface.then_some(&merge));
+    let (wire_body, plain_body) =
+        composed.map_err(|error| crate::transport::SendError::Internal(error.into()))?;
     let signed = Message::new_channel_event(mesh, author, wire_body, channel).sign(&state.identity);
     let bytes = signed
         .serialize()
@@ -434,11 +434,13 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &Ha
     let our_addr = context.endpoint.addr();
     state.last_flooded_addr = Some(our_addr.clone());
     let our_ips: Vec<_> = our_addr.ip_addrs().collect();
+    let local = context.endpoint.id().fmt_short();
+    let relay = our_addr.relay_urls().next();
     tracing::debug!(
         target: "habilis_network::gossip",
-        local = %context.endpoint.id().fmt_short(),
-        relay = ?our_addr.relay_urls().next(),
-        addrs = our_addr.ip_addrs().count(),
+        local = %local,
+        relay = ?relay,
+        addrs = our_ips.len(),
         ip_addrs = ?our_ips,
         "peerinfo flooded"
     );

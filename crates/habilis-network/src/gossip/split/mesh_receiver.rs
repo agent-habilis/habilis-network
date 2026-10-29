@@ -60,6 +60,7 @@ impl<S> MeshReceiver<S> {
         not(test),
         expect(dead_code, reason = "read by the tests and the load run of the split")
     )]
+    // the gauge is a shared handle to the receiver's high-water mark
     pub(crate) fn high_water_gauge(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.high_water)
     }

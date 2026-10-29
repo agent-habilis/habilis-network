@@ -108,6 +108,7 @@ pub(crate) fn spawn_split_capped<S>(
 where
     S: Stream<Item = TopicItem> + Unpin + Send + 'static,
 {
+    // the gauge and the splitter share the high-water mark
     let high_water = Arc::new(AtomicUsize::new(0));
     let gauge = Arc::clone(&high_water);
     let (data_tx, data) = mpsc::channel(capacity);
@@ -482,18 +483,17 @@ mod real_gossip {
     const PERIOD: Duration = Duration::from_millis(100);
 
     fn setting<T: std::str::FromStr>(name: &str, default: T) -> T {
-        std::env::var(name)
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(default)
+        let raw = std::env::var(name).ok();
+        raw.and_then(|value| value.parse().ok()).unwrap_or(default)
     }
 
     async fn member(seed: u8, lookup: &MemoryLookup) -> (Endpoint, Gossip, Router) {
-        let endpoint = Endpoint::builder(presets::Minimal)
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(SecretKey::from_bytes(&[seed; 32]))
             .relay_mode(RelayMode::Disabled)
             .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .expect("bind address")
+            .expect("bind address");
+        let endpoint = builder
             .address_lookup(lookup.clone())
             .bind()
             .await

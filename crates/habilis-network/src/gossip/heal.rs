@@ -124,10 +124,8 @@ pub(crate) async fn tick_heal_hard(
 ///
 /// [`EventLoopState::known_endpoints`]: crate::daemon::state::EventLoopState::known_endpoints
 pub(crate) async fn rebridge_known(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
-    let peers: Vec<EndpointId> = state
-        .known_endpoints
-        .iter()
-        .copied()
+    let known = state.known_endpoints.iter().copied();
+    let peers: Vec<EndpointId> = known
         .filter(|peer| !state.rides_gossip_rung(*peer))
         .collect();
     // `info`, not `debug`: this fires only on the isolation signal (rare,

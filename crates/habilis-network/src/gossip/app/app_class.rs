@@ -90,13 +90,12 @@ impl std::ops::BitOr for AppClass {
 
 impl std::fmt::Debug for AppClass {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("AppClass")
-            .field("loggable", &self.loggable())
-            .field("beat", &self.beat())
-            .field("valid", &self.valid())
-            .field("chained", &self.chained())
-            .field("sealed", &self.sealed())
-            .finish()
+        let mut debug = formatter.debug_struct("AppClass");
+        debug.field("loggable", &self.loggable());
+        debug.field("beat", &self.beat());
+        debug.field("valid", &self.valid());
+        debug.field("chained", &self.chained());
+        debug.field("sealed", &self.sealed());
+        debug.finish()
     }
 }

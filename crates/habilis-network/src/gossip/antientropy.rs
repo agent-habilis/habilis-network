@@ -507,16 +507,13 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, context: &Han
     for channel in [Channel::State, Channel::Meta] {
         let now = Instant::now();
         let ahead = state.fast_rounds.ahead(channel);
-        let held: Vec<&[String]> = ahead
+        let doc = state.doc(channel);
+        let held_peers = ahead.iter().filter(|peer| doc.holds_heads(&peer.heads));
+        let held: Vec<&[String]> = held_peers.map(|peer| peer.heads.as_slice()).collect();
+        let answerable = ahead
             .iter()
-            .filter(|peer| state.doc(channel).holds_heads(&peer.heads))
-            .map(|peer| peer.heads.as_slice())
-            .collect();
-        let reachable: Vec<AuthorKey> = ahead
-            .iter()
-            .filter(|peer| crate::transport::unicast_answer_target(&peer.key, state).is_some())
-            .map(|peer| peer.key)
-            .collect();
+            .filter(|peer| crate::transport::unicast_answer_target(&peer.key, state).is_some());
+        let reachable: Vec<AuthorKey> = answerable.map(|peer| peer.key).collect();
         let ours = heads_key_of(state, channel);
         let target = state.fast_rounds.retry_target(
             channel,
@@ -617,10 +614,9 @@ pub(crate) async fn handle_state_digest(
         tracing::debug!(me = %context.author, author = %message.author, ?channel, ?plane, heads, "state digest ignored: this asker was served within the window");
         return Answered::default();
     }
-    let frames: Vec<WireFrame> = missing_frames(channel, message, state)
-        .iter()
-        .filter_map(|frame| frame.serialize().ok())
-        .collect();
+    let missing = missing_frames(channel, message, state);
+    let serialize = |frame: &Verified| frame.serialize().ok();
+    let frames: Vec<WireFrame> = missing.iter().filter_map(serialize).collect();
     let mut answered = Answered::default();
     if frames.is_empty() {
         return answered;
@@ -634,12 +630,13 @@ pub(crate) async fn handle_state_digest(
     };
     let our_heads =
         heads_digest(state, origin, channel, true).and_then(|ours| ours.serialize().ok());
+    let batch: Vec<WireFrame> = frames.iter().cloned().chain(our_heads).collect();
     let fallback: Option<&str> = match target {
         None => Some("asker has no proven endpoint that is a linked neighbor with a direct path"),
         Some(eid)
             if state
                 .unicast_pool
-                .send_batch_in_background(eid, frames.iter().cloned().chain(our_heads).collect())
+                .send_batch_in_background(eid, batch)
                 .await =>
         {
             None
@@ -1106,9 +1103,8 @@ mod tests {
     fn one_digest_is_answered_by_k_members_not_by_all() {
         let members = members(48);
         let asker = &members[0];
-        let answering: usize = members
-            .iter()
-            .filter(|me| *me != asker)
+        let others = members.iter().filter(|me| *me != asker);
+        let answering: usize = others
             .filter(|me| super::answers_digest(me, asker, "digest-1", members.iter()))
             .count();
         assert_eq!(
@@ -1575,10 +1571,10 @@ mod tests {
     /// computes it.
     fn answer(node: &mut EventLoopState, holder: &MessageLog) -> HashSet<String> {
         let windows = digest_windows(node).expect("a non-empty log advertises");
-        let have: HashSet<DedupKey> = windows
+        let ids = windows
             .iter()
-            .flat_map(|window| window.decode_ids().expect("our own encoding"))
-            .collect();
+            .flat_map(|window| window.decode_ids().expect("our own encoding"));
+        let have: HashSet<DedupKey> = ids.collect();
         windows
             .iter()
             .flat_map(|window| {
@@ -1645,10 +1641,10 @@ mod tests {
         mut budget: usize,
     ) -> Vec<Verified> {
         let windows = digest_windows(node).expect("a non-empty log advertises");
-        let mut have: HashSet<DedupKey> = windows
+        let ids = windows
             .iter()
-            .flat_map(|window| window.decode_ids().expect("our own encoding"))
-            .collect();
+            .flat_map(|window| window.decode_ids().expect("our own encoding"));
+        let mut have: HashSet<DedupKey> = ids.collect();
         let mut sent = Vec::new();
         for window in &windows {
             if budget == 0 {

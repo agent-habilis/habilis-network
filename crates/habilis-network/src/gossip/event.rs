@@ -95,6 +95,7 @@ pub trait NodeSink: Send + Sync {
     fn emit(&self, event: NodeEvent);
 }
 
+// a shared sink is a sink: the loop and the setup hold the same Arc
 impl<T: NodeSink + ?Sized> NodeSink for std::sync::Arc<T> {
     fn emit(&self, event: NodeEvent) {
         (**self).emit(event);

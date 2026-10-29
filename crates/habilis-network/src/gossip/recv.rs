@@ -87,12 +87,14 @@ pub(crate) async fn handle_gossip_event(
         }
         Some(Ok(Event::NeighborUp(node_id))) => {
             let (connection, relay) = net::conn_path(context.endpoint, node_id).await;
+            let local = context.endpoint.id().fmt_short();
+            let relay_label = relay.as_ref().map_or("-", |url| url.as_str());
             tracing::info!(target: "habilis_network::gossip",
-                local = %context.endpoint.id().fmt_short(),
+                local = %local,
                 endpoint_id = %node_id,
                 is_rendezvous = node_id == context.rendezvous_id,
                 connection = connection.label(),
-                relay = relay.as_ref().map_or("-", |url| url.as_str()),
+                relay = relay_label,
                 "gossip neighbor up"
             );
             // Announce on the first link, not at startup: a joiner's
@@ -1576,13 +1578,16 @@ async fn handle_peer_info(
     // precondition) needs the memory precisely *after* that link dies.
     let first_sighting = state.known_endpoints.insert(peer_id);
     let peer_ips: Vec<_> = peer_addr.ip_addrs().collect();
+    let local = context.endpoint.id().fmt_short();
+    let peer = peer_id.fmt_short();
+    let relay = peer_addr.relay_urls().next();
     tracing::debug!(
         target: "habilis_network::gossip",
-        local = %context.endpoint.id().fmt_short(),
+        local = %local,
         author = %message.author,
-        peer = %peer_id.fmt_short(),
+        peer = %peer,
         first_sighting,
-        relay = ?peer_addr.relay_urls().next(),
+        relay = ?relay,
         ip_addrs = ?peer_ips,
         "peerinfo received"
     );
@@ -1656,9 +1661,10 @@ async fn handle_peer_info(
     webrtc::negotiate_session::negotiate_session(state, context, peer_id, peer_addr.clone());
     // No `rendezvous_wanted` gate on this graft: `peer_id` is never the
     // rendezvous here, which returned above.
+    let below = state.linked_endpoints.len()
+        < peer_info_graft_below(context.max_peers, state.peer_endpoints.len() + 1);
     if !defer_first_dial
-        && state.linked_endpoints.len()
-            < peer_info_graft_below(context.max_peers, state.peer_endpoints.len() + 1)
+        && below
         && !state.linked_endpoints.contains(&peer_id)
         && !state.relink_on_cooldown(peer_id, now)
         && !state.graft_blocked(peer_id, now)
@@ -2179,10 +2185,10 @@ mod evicted_orphan_tests {
             !missing.is_empty(),
             "nothing was evicted, so this test proves nothing"
         );
-        let already_seen: usize = missing
+        let fresh = missing
             .iter()
-            .filter(|frame| reader.seen.contains(&frame.dedup_key()))
-            .count();
+            .filter(|frame| reader.seen.contains(&frame.dedup_key()));
+        let already_seen: usize = fresh.count();
         assert_eq!(
             already_seen,
             0,
@@ -2409,6 +2415,7 @@ mod first_contact_tests {
     }
 
     /// An app frame counts the times that it reaches the app.
+    // the app and the test share the counter
     struct Counting(Arc<atomic::AtomicUsize>);
 
     #[async_trait::async_trait]
@@ -2435,6 +2442,7 @@ mod first_contact_tests {
         let node = Node::spawn().await;
         let context = node.context();
         let mut state = fresh_state();
+        // the app and the test share the counter
         let reads = Arc::new(atomic::AtomicUsize::new(0));
         let mut app = Counting(Arc::clone(&reads));
         let frame = Message::new_app(
