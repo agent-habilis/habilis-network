@@ -97,11 +97,15 @@ fn classify(event: NodeEvent) -> Option<MembershipEvent> {
             mesh,
             name,
             nickname,
-        } => Some(MembershipEvent::Ready {
-            mesh: mesh.as_str().to_owned(),
-            name: name.as_str().to_owned(),
-            nick: nickname.to_string(),
-        }),
+        } => {
+            let mesh = mesh.as_str().to_owned();
+            let name = name.as_str().to_owned();
+            Some(MembershipEvent::Ready {
+                mesh,
+                name,
+                nick: nickname.to_string(),
+            })
+        }
         NodeEvent::Presence { message, .. } => {
             // The engine emits this for a peer's own `joined` frame, for a
             // `Left`, and — the reliable case — for the *first frame of any
@@ -199,7 +203,9 @@ impl NodeSink for JsonSink {
 /// message, where dropping a `left` leaves a phantom peer in the consumer's
 /// mirror forever. Events are small and rare.
 #[must_use]
+// the caller passes this Arc to join, which takes a shared sink
 pub fn json_sink() -> (Arc<impl NodeSink>, mpsc::UnboundedReceiver<String>) {
     let (events, queue) = mpsc::unbounded_channel();
+    // the sink is shared with the caller, which passes it to join
     (Arc::new(JsonSink { events }), queue)
 }

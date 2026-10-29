@@ -191,6 +191,7 @@ pub fn blind_new_members(
 /// this target could reach, or a failure standing up the endpoint and overlay.
 pub async fn join<S: NodeSink + 'static>(
     options: &JoinOptions,
+    // join takes a shared sink, which the event loop keeps
     sink: Arc<S>,
 ) -> Result<Membership, SetupError> {
     let nickname = options

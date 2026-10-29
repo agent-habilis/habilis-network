@@ -993,14 +993,15 @@ impl NodeDriver for MembershipApp {
                     state.redials.session.observe(now, id, session);
                     state.redials.pool.observe(now, id, pooled);
                 }
-                let counts: [u64; 6] = [
-                    state.redials.quic.closes(),
-                    state.redials.quic.redials(),
+                let mut counts = [0_u64; 6];
+                (counts[0], counts[1]) =
+                    (state.redials.quic.closes(), state.redials.quic.redials());
+                (counts[2], counts[3]) = (
                     state.redials.session.closes(),
                     state.redials.session.redials(),
-                    state.redials.pool.closes(),
-                    state.redials.pool.redials(),
-                ];
+                );
+                (counts[4], counts[5]) =
+                    (state.redials.pool.closes(), state.redials.pool.redials());
                 let _ = reply.send(counts);
                 false
             }
@@ -1126,17 +1127,17 @@ fn route_diag(state: &EventLoopState) -> String {
         if id == view.self_id {
             return "self".to_owned();
         }
-        state
+        let peer = state
             .peer_endpoints
             .iter()
-            .find(|(_, address)| address.id.to_string() == id)
-            .map_or_else(
-                || id.chars().take(10).collect(),
-                |(nickname, _)| {
-                    let text: &str = nickname.borrow();
-                    text.to_owned()
-                },
-            )
+            .find(|(_, address)| address.id.to_string() == id);
+        match peer {
+            Some((nickname, _)) => {
+                let text: &str = nickname.borrow();
+                text.to_owned()
+            }
+            None => id.chars().take(10).collect(),
+        }
     };
     let edges: Vec<String> = view
         .edges
