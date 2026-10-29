@@ -320,11 +320,9 @@ impl LoggingMember {
     async fn start(topic: &str, name: &str) -> Self {
         let mesh =
             derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
+        let topic_string = topic.to_owned();
         let config = setup_mesh(
-            SetupKind::Topic {
-                mesh,
-                topic_string: topic.to_owned(),
-            },
+            SetupKind::Topic { mesh, topic_string },
             SetupParams::new(
                 Nickname::try_new(name).expect("valid nickname"),
                 // The membership keeps its sink as a trait object for its whole life.

@@ -126,7 +126,7 @@ impl Member {
             .expect("the loop answers");
         let names = answers
             .into_iter()
-            .map(|(nick, _)| nick.as_str().to_owned());
+            .map(|(nick, _)| String::from(nick.as_str()));
         names.collect()
     }
 

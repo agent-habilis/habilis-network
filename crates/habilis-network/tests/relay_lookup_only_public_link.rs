@@ -126,11 +126,9 @@ async fn spawn_with(
     )
     .expect("derive");
     let author = Nickname::try_new(nick).expect("valid nickname");
+    let topic_string = topic.to_owned();
     let config = setup_mesh(
-        SetupKind::Topic {
-            mesh,
-            topic_string: topic.to_owned(),
-        },
+        SetupKind::Topic { mesh, topic_string },
         SetupParams::new(author, sink)
             .with_max_peers(16)
             .with_transports(transports),
@@ -150,7 +148,7 @@ fn two_ip_peers_link_through_the_gated_rendezvous() {
         let alice_saw = Arc::new(Joined::default());
         // each member's sink is shared with the node that writes to it, and the test reads it
         let bob_saw = Arc::new(Joined::default());
-        let ip_only = TransportOpts::default()
+        let ip_only: TransportOpts = TransportOpts::default()
             .with_udp(true)
             .with_relay(true)
             .with_webrtc(false)
@@ -192,34 +190,29 @@ fn a_webrtc_only_peer_links_through_the_beacon_lane() {
         let alice_saw = Arc::new(Joined::default());
         // each member's sink is shared with the node that writes to it, and the test reads it
         let bob_saw = Arc::new(Joined::default());
+        let alice_transports: TransportOpts = TransportOpts::default()
+            .with_udp(true)
+            .with_relay(true)
+            .with_webrtc(true)
+            .with_gossip(false);
         let alice = spawn_with(
             &topic,
             "alice",
             &relay,
             Arc::clone(&alice_saw),
-            TransportOpts::default()
-                .with_udp(true)
-                .with_relay(true)
-                .with_webrtc(true)
-                .with_gossip(false),
+            alice_transports,
         )
         .await;
         // Stagger like a real join: the first node claims the beacon, the second
         // finds it held. Simultaneous starts race both into the claim and leave
         // two same-id rendezvous copies shedding each other for the whole test.
         tokio::time::sleep(Duration::from_secs(10)).await;
-        let bob = spawn_with(
-            &topic,
-            "bob",
-            &relay,
-            Arc::clone(&bob_saw),
-            TransportOpts::default()
-                .with_udp(false)
-                .with_relay(true)
-                .with_webrtc(true)
-                .with_gossip(false),
-        )
-        .await;
+        let bob_transports: TransportOpts = TransportOpts::default()
+            .with_udp(false)
+            .with_relay(true)
+            .with_webrtc(true)
+            .with_gossip(false);
+        let bob = spawn_with(&topic, "bob", &relay, Arc::clone(&bob_saw), bob_transports).await;
 
         let deadline = Duration::from_secs(75);
         let alice_nick = Nickname::try_new("alice").expect("valid");

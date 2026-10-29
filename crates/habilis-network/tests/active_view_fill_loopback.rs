@@ -64,6 +64,7 @@ impl Member {
         let options = membership::JoinOptions::default()
             .with_nick(Some(nick.to_owned()))
             .with_lookup(vec![Lookup::Relay]);
+        let relay_urls = vec![relay.to_string()];
         let options = options
             .with_transport(vec![
                 Transport::Udp,
@@ -71,7 +72,7 @@ impl Member {
                 Transport::Multihop,
                 Transport::Relay,
             ])
-            .with_relay_urls(vec![relay.to_string()])
+            .with_relay_urls(relay_urls)
             .with_max_peers(max_peers);
         Self::open(&options).await
     }
@@ -111,7 +112,7 @@ impl Member {
             .unwrap_or_default();
         let roster: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
         let peers = roster["peers"].as_array().cloned().unwrap_or_default();
-        let linked = peers
+        let linked: usize = peers
             .iter()
             .filter(|peer| peer["reach"].as_str() == Some("direct"))
             .count();

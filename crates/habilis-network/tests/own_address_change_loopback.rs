@@ -37,9 +37,10 @@ fn logs() -> String {
 /// How many log lines of `message` name `NEW_ADDR`.
 fn lines_naming_new_addr(message: &str) -> usize {
     let text = logs();
-    let lines = text
-        .lines()
-        .filter(|line| line.contains(message) && line.contains(NEW_ADDR));
+    let lines = text.lines().filter(|line| {
+        let mentions_message = line.contains(message);
+        mentions_message && line.contains(NEW_ADDR)
+    });
     lines.count()
 }
 
@@ -155,9 +156,10 @@ fn a_member_that_changes_its_own_address_floods_it_again() {
 /// The lines about `PeerInfo` floods and receipts, to read a failure by.
 fn trace() -> String {
     let text = logs();
-    let lines = text
-        .lines()
-        .filter(|line| line.contains("peerinfo flooded") || line.contains("peerinfo received"));
+    let lines = text.lines().filter(|line| {
+        let flooded = line.contains("peerinfo flooded");
+        flooded || line.contains("peerinfo received")
+    });
     let lines: Vec<_> = lines.collect();
     lines.join("\n")
 }

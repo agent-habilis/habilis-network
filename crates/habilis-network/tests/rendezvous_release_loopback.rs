@@ -109,7 +109,8 @@ fn pair_link_closed(since: usize, one: &EndpointId, two: &EndpointId) -> bool {
 fn rendezvous_links_down() -> usize {
     let text = logs();
     let lines = text.lines().filter(|line| {
-        line.contains("gossip neighbor down") && line.contains("is_rendezvous=true")
+        let down = line.contains("gossip neighbor down");
+        down && line.contains("is_rendezvous=true")
     });
     lines.count()
 }

@@ -71,13 +71,14 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
         let options = membership::JoinOptions::default()
             .with_nick(Some("m0".to_owned()))
             .with_lookup(vec![Lookup::Relay]);
+        let relay_urls = vec![relay.to_string()];
         let options = options
             .with_transport(vec![
                 Transport::WebRtc,
                 Transport::Multihop,
                 Transport::Relay,
             ])
-            .with_relay_urls(vec![relay.to_string()])
+            .with_relay_urls(relay_urls)
             .with_max_peers(CAP);
         let creator: Membership = membership::join(&options, first_sink)
             .await
@@ -88,7 +89,7 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
         for index in 1..MEMBERS {
             let (sink, events) = membership::json_sink();
             sinks.push(events);
-            let member_options = membership::JoinOptions::default()
+            let member_options: membership::JoinOptions = membership::JoinOptions::default()
                 .with_nick(Some(format!("m{index}")))
                 .with_mesh(Some(mesh.clone()))
                 .with_max_peers(CAP);

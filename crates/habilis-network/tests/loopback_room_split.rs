@@ -136,7 +136,7 @@ impl Round {
 
     fn begin(name: &'static str) -> Self {
         let log = init_process();
-        let prefix = std::env::var("HABILIS_TEST_LOG_DUMP").unwrap_or_else(|_| {
+        let prefix: String = std::env::var("HABILIS_TEST_LOG_DUMP").unwrap_or_else(|_| {
             std::env::temp_dir()
                 .join("loopback-room-split")
                 .display()
@@ -242,7 +242,7 @@ impl Member {
     /// A creator when `mesh` is `None`, a joiner by id otherwise. No lookup: a loopback room.
     async fn open(nick: &str, mesh: Option<&str>) -> Self {
         let (sink, events) = membership::json_sink();
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
             .with_nick(Some(nick.to_owned()))
             .with_mesh(mesh.map(str::to_owned));
         let membership: Membership = membership::join(&options, sink)
@@ -711,7 +711,7 @@ async fn holder_whose_beacon_stops_answering(
 /// A joiner by id whose sink is read by the caller. The one case that reads what the app is told.
 async fn open_watched(nick: &str, mesh: &str) -> (Member, UnboundedReceiver<String>) {
     let (sink, events) = membership::json_sink();
-    let options = membership::JoinOptions::default()
+    let options: membership::JoinOptions = membership::JoinOptions::default()
         .with_nick(Some(nick.to_owned()))
         .with_mesh(Some(mesh.to_owned()));
     let membership: Membership = membership::join(&options, sink)
@@ -813,9 +813,10 @@ async fn ladder_held_by_other_processes(
         }
     }
     let text = round.log();
-    let lines = text
-        .lines()
-        .filter(|line| line.contains("WARN") && line.contains("no rendezvous port is free"));
+    let lines = text.lines().filter(|line| {
+        let warn = line.contains("WARN");
+        warn && line.contains("no rendezvous port is free")
+    });
     let warns: usize = lines.count();
     let bound = round.beacons().len() - bound_before;
     if again != 0 || warns != 1 || bound != 0 {

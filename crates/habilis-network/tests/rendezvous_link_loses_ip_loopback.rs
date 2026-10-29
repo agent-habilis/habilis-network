@@ -42,9 +42,10 @@ fn logs() -> String {
 fn rendezvous_lines(state: &str) -> usize {
     let needle = format!("gossip neighbor {state}");
     let text = logs();
-    let lines = text
-        .lines()
-        .filter(|line| line.contains(&needle) && line.contains("is_rendezvous=true"));
+    let lines = text.lines().filter(|line| {
+        let matches_needle = line.contains(&needle);
+        matches_needle && line.contains("is_rendezvous=true")
+    });
     lines.count()
 }
 

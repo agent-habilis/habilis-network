@@ -116,7 +116,7 @@ async fn spawn(
     )
     .expect("derive a relay-only mesh");
     let author = Nickname::try_new(nick).expect("valid nickname");
-    let transports = TransportOpts::default()
+    let transports: TransportOpts = TransportOpts::default()
         .with_udp(false)
         .with_relay(true)
         .with_webrtc(false)

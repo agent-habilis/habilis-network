@@ -64,12 +64,13 @@ async fn roster_len(member: &Membership) -> usize {
 /// A creator that hosts the rendezvous and `MEMBERS - 1` joiners on one
 /// `WebRTC`-only mesh over a local relay, as live members.
 async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
+    let relay_urls = vec![relay.to_string()];
     let creator = open(
         "member-00",
         membership::JoinOptions::default()
             .with_lookup(vec![Lookup::Relay])
             .with_transport(vec![Transport::WebRtc])
-            .with_relay_urls(vec![relay.to_string()]),
+            .with_relay_urls(relay_urls),
     )
     .await;
     let beacon_wait = Instant::now();
@@ -247,9 +248,10 @@ fn dump_logs() {
 /// How many times a member has linked to the rendezvous, in this run.
 fn rendezvous_visits() -> usize {
     let text = logs();
-    let visits = text
-        .lines()
-        .filter(|line| line.contains("gossip neighbor up") && line.contains("is_rendezvous=true"));
+    let visits = text.lines().filter(|line| {
+        let up = line.contains("gossip neighbor up");
+        up && line.contains("is_rendezvous=true")
+    });
     visits.count()
 }
 
@@ -284,7 +286,7 @@ fn rendezvous_holders(log: &str) -> usize {
 #[test]
 fn a_member_that_the_beacon_dropped_holds_no_link() {
     let rendezvous = "endpoint_id=aa is_rendezvous=true";
-    let log = [
+    let log: String = [
         format!("gossip neighbor up local=stayed {rendezvous}"),
         format!("gossip neighbor up local=crashed {rendezvous}"),
         "member crashed".to_owned(),

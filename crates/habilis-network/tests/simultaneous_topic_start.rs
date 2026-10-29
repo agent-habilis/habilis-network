@@ -92,7 +92,7 @@ impl std::io::Write for RoundLogWriter {
 /// has no tag per member, so a line names its member only when it has a `local=` or
 /// `node=` field.
 fn round_log_path(topic: &str) -> std::path::PathBuf {
-    let prefix = std::env::var("HABILIS_TEST_LOG_DUMP").unwrap_or_else(|_| {
+    let prefix: String = std::env::var("HABILIS_TEST_LOG_DUMP").unwrap_or_else(|_| {
         std::env::temp_dir()
             .join("simultaneous-start")
             .display()
@@ -195,7 +195,7 @@ impl Joined {
             }
         };
         let left = until.saturating_duration_since(Instant::now());
-        let done = tokio::time::timeout(left, wait).await.is_ok() || {
+        let done: bool = tokio::time::timeout(left, wait).await.is_ok() || {
             others.iter().all(|nick| self.has_seen(nick))
         };
         done.then(Instant::now)
@@ -248,9 +248,10 @@ async fn round(members: usize, start: Start, index: usize) -> Result<Duration, S
     *ROUND_LOG.lock().expect("no poison") =
         Some(std::fs::File::create(&log_path).expect("create the log file of the round"));
     let names: Vec<String> = (0..members).map(|number| format!("peer{number}")).collect();
-    let parsed = names
-        .iter()
-        .map(|name| Nickname::try_new(name.as_str()).expect("valid nickname"));
+    let parsed = names.iter().map(|name| {
+        let text = name.as_str();
+        Nickname::try_new(text).expect("valid nickname")
+    });
     let nicks: Vec<Nickname> = parsed.collect();
     // One sink per member, each handed to that member's task while the caller keeps the others.
     let sinks: Vec<Arc<Joined>> = nicks.iter().map(|_| Arc::default()).collect();
@@ -320,7 +321,8 @@ fn distribution(times: &[Duration]) -> String {
             .filter(|time| **time > Duration::from_secs(limit))
             .count()
     };
-    let median = sorted.get(sorted.len() / 2).copied().unwrap_or_default();
+    let middle = sorted.len() / 2;
+    let median = sorted.get(middle).copied().unwrap_or_default();
     let max = sorted.last().copied().unwrap_or_default();
     format!(
         "median {:?}, over 20 s {}, over 30 s {}, max {:?}",

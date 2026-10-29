@@ -2107,10 +2107,8 @@ fn the_gossip_cells_use_valid_lists_and_the_ladder_orders_gossip_between_multiho
         );
     }
     let expected = |name: &str| {
-        CELLS
-            .iter()
-            .find(|(cell, _)| *cell == name)
-            .and_then(|(_, cell)| cell.expected())
+        let found = CELLS.iter().find(|(cell, _)| *cell == name);
+        found.and_then(|(_, cell)| cell.expected())
     };
     assert_eq!(
         expected("udp_gossip_ip_direct"),
