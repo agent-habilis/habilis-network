@@ -55,7 +55,7 @@ pub struct TransportOpts {
 impl TransportOpts {
     /// Set the UDP transport.
     #[must_use]
-    pub fn with_udp(
+    pub fn udp(
         mut self,
         // true enables the UDP transport
         udp: bool,
@@ -66,7 +66,7 @@ impl TransportOpts {
 
     /// The relay to dial for the lookup, instead of the one the mesh names.
     #[must_use]
-    pub fn with_relay(
+    pub fn relay(
         mut self,
         // true enables the relay
         relay: bool,
@@ -77,7 +77,7 @@ impl TransportOpts {
 
     /// Set the WebRTC transport.
     #[must_use]
-    pub fn with_webrtc(
+    pub fn webrtc(
         mut self,
         // true enables the WebRTC transport
         webrtc: bool,
@@ -88,7 +88,7 @@ impl TransportOpts {
 
     /// Set the gossip transport.
     #[must_use]
-    pub fn with_gossip(
+    pub fn gossip(
         mut self,
         // true enables the gossip transport
         gossip: bool,

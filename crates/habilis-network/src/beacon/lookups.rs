@@ -20,6 +20,6 @@ pub(crate) fn beacon_lookups(params: &RendezvousParams) -> LookupOpts {
                 RelayChoice::Custom(vec![rung])
             }),
     )
-    .with_mdns(params.lookups.mdns)
-    .with_dht(params.lookups.dht)
+    .mdns(params.lookups.mdns)
+    .dht(params.lookups.dht)
 }

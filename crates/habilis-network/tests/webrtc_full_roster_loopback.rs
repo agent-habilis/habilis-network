@@ -36,7 +36,7 @@ fn logs() -> String {
 
 async fn open(nick: &str, options: membership::JoinOptions) -> Membership {
     let (sink, _events) = membership::json_sink();
-    let options = options.with_nick(Some(nick.to_owned()));
+    let options = options.nick(Some(nick.to_owned()));
     membership::join(&options, sink)
         .await
         .expect("open a member")
@@ -68,9 +68,9 @@ async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
     let creator = open(
         "member-00",
         membership::JoinOptions::default()
-            .with_lookup(vec![Lookup::Relay])
-            .with_transport(vec![Transport::WebRtc])
-            .with_relay_urls(relay_urls),
+            .lookup(vec![Lookup::Relay])
+            .transport(vec![Transport::WebRtc])
+            .relay_urls(relay_urls),
     )
     .await;
     let beacon_wait = Instant::now();
@@ -88,7 +88,7 @@ async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
         members.push(
             open(
                 &format!("member-{index:02}"),
-                membership::JoinOptions::default().with_mesh(Some(mesh.clone())),
+                membership::JoinOptions::default().mesh(Some(mesh.clone())),
             )
             .await,
         );
@@ -222,7 +222,7 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
         members.push(
             open(
                 "late-joiner",
-                membership::JoinOptions::default().with_mesh(Some(mesh)),
+                membership::JoinOptions::default().mesh(Some(mesh)),
             )
             .await,
         );

@@ -135,8 +135,7 @@ impl NodeDriver for Chat {
             Request::Merge(merge, done) => {
                 broadcast_state_merge(
                     state,
-                    StateMergeParams::new(context.into(), Channel::State, merge)
-                        .with_surface(false),
+                    StateMergeParams::new(context.into(), Channel::State, merge).surface(false),
                 )
                 .await
                 .expect("a small merge is accepted");
@@ -171,7 +170,7 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Arc<Mutex<Vec<String>>>)
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams::new(nick(name), SilentSink::default()).with_max_peers(16),
+        SetupParams::new(nick(name), SilentSink::default()).max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");

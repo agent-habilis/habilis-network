@@ -37,7 +37,7 @@ impl Offer {
         Ok(())
     }
 
-    pub(crate) fn with_answer(mut self, answer: SignalEnvelope) -> Self {
+    pub(crate) fn answer(mut self, answer: SignalEnvelope) -> Self {
         self.answer = Some(answer);
         self
     }

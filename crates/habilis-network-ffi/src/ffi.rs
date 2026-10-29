@@ -260,17 +260,17 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
         let nick_name = nick.map(str::to_owned);
         let display_name = name.map(str::to_owned);
         let base: JoinOptions = JoinOptions::default()
-            .with_mesh(mesh_name)
-            .with_topic(topic_name)
-            .with_nick(nick_name)
-            .with_name(display_name);
+            .mesh(mesh_name)
+            .topic(topic_name)
+            .nick(nick_name)
+            .name(display_name);
         let limited = base
-            .with_lookup(lookup)
-            .with_transport(transport)
-            .with_relay_urls(relay_urls);
+            .lookup(lookup)
+            .transport(transport)
+            .relay_urls(relay_urls);
         let parsed: JoinOptions = limited
-            .with_max_peers(options.max_peers)
-            .with_max_direct(options.max_direct);
+            .max_peers(options.max_peers)
+            .max_direct(options.max_direct);
         match Mesh::open(&parsed) {
             Ok(opened) => {
                 // The nickname the engine settled on — not `nick` above, which is
@@ -593,9 +593,9 @@ pub unsafe extern "C" fn habilis_network_streams_bind(
         };
         let relay_urls: Vec<String> = relay_urls.map(url_list).unwrap_or_default();
         let parsed = habilis_network_stream::StreamOpts::default()
-            .with_lookup(lookup)
-            .with_transport(transport)
-            .with_relay_urls(relay_urls);
+            .lookup(lookup)
+            .transport(transport)
+            .relay_urls(relay_urls);
         boxed(Streams::bind(&parsed).map(|streams| HabilisNetworkStreams { streams }))
     })
 }

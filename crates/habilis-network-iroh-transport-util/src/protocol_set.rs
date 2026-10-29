@@ -15,7 +15,7 @@ use std::vec;
 /// use iroh::protocol::ProtocolHandler;
 ///
 /// # fn demo<Handler: ProtocolHandler>(set: ProtocolSet, handler: Handler) -> ProtocolSet {
-/// set.with_protocol(b"chat".to_vec(), handler)
+/// set.protocol(b"chat".to_vec(), handler)
 /// # }
 /// ```
 #[derive(Debug, Default)]
@@ -24,11 +24,7 @@ pub struct ProtocolSet(pub(crate) Vec<(Vec<u8>, Box<dyn DynProtocolHandler>)>);
 impl ProtocolSet {
     /// Serve `handler` on `alpn`, beside the multihop ALPNs.
     #[must_use]
-    pub fn with_protocol<Handler: ProtocolHandler>(
-        mut self,
-        alpn: Vec<u8>,
-        handler: Handler,
-    ) -> Self {
+    pub fn protocol<Handler: ProtocolHandler>(mut self, alpn: Vec<u8>, handler: Handler) -> Self {
         self.0.push((alpn, Box::new(handler)));
         self
     }

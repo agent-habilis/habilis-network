@@ -112,8 +112,8 @@ fn init_process() -> habilis_network_test_tracing::Guard {
     ONCE.call_once(|| {
         init(
             Tuning::DEFAULTS
-                .with_heal_interval(Duration::from_secs(3))
-                .with_cohost_grace(Duration::from_secs(2)),
+                .heal_interval(Duration::from_secs(3))
+                .cohost_grace(Duration::from_secs(2)),
         );
     });
     habilis_network_test_tracing::init_with_writer("habilis_network=info", || RoundLogWriter)
@@ -243,8 +243,8 @@ impl Member {
     async fn open(nick: &str, mesh: Option<&str>) -> Self {
         let (sink, events) = membership::json_sink();
         let options: membership::JoinOptions = membership::JoinOptions::default()
-            .with_nick(Some(nick.to_owned()))
-            .with_mesh(mesh.map(str::to_owned));
+            .nick(Some(nick.to_owned()))
+            .mesh(mesh.map(str::to_owned));
         let membership: Membership = membership::join(&options, sink)
             .await
             .expect("open a member");
@@ -712,8 +712,8 @@ async fn holder_whose_beacon_stops_answering(
 async fn open_watched(nick: &str, mesh: &str) -> (Member, UnboundedReceiver<String>) {
     let (sink, events) = membership::json_sink();
     let options: membership::JoinOptions = membership::JoinOptions::default()
-        .with_nick(Some(nick.to_owned()))
-        .with_mesh(Some(mesh.to_owned()));
+        .nick(Some(nick.to_owned()))
+        .mesh(Some(mesh.to_owned()));
     let membership: Membership = membership::join(&options, sink)
         .await
         .expect("open a member");

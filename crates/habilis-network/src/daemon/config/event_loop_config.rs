@@ -186,7 +186,7 @@ pub struct EventLoopConfig {
     /// channel free-form.
     pub(crate) per_peer_gate: Option<crate::doc::SelfWriteGate>,
     /// The process a CLI daemon lives for, set by
-    /// [`with_owner_pid`](Self::with_owner_pid). `None` keeps the parent watch.
+    /// [`set_owner_pid`](Self::set_owner_pid). `None` keeps the parent watch.
     #[cfg(feature = "host")]
     pub(crate) owner: Option<Owner>,
 }
@@ -201,12 +201,12 @@ impl EventLoopConfig {
     /// `pid` is 0 or 1, the daemon's own pid, or no live process has it. The
     /// message is one line.
     #[cfg(feature = "host")]
-    pub fn with_owner_pid(mut self, pid: u32) -> Result<Self, OwnerPidError> {
+    pub fn set_owner_pid(mut self, pid: u32) -> Result<Self, OwnerPidError> {
         self.owner = Some(Owner::try_new(pid)?);
         Ok(self)
     }
 
-    /// The pid set by [`with_owner_pid`](Self::with_owner_pid).
+    /// The pid set by [`owner_pid`](Self::owner_pid).
     #[cfg(feature = "host")]
     #[must_use]
     pub fn owner_pid(&self) -> Option<u32> {

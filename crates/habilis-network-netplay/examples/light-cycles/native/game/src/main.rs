@@ -174,7 +174,7 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
             lookups,
             None,
             None,
-            TransportPolicy::default().with_relay_transport(relay_transport),
+            TransportPolicy::default().relay_transport(relay_transport),
         ),
     )?;
     let author = Nickname::try_new(nick)?;
@@ -186,7 +186,7 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
 
     let config = setup_mesh(
         kind,
-        SetupParams::new(author, SilentSink::default()).with_max_peers(16),
+        SetupParams::new(author, SilentSink::default()).max_peers(16),
     )
     .await?;
 

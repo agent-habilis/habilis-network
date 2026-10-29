@@ -38,5 +38,5 @@ fn a_blob_ticket_is_built_from_outside_the_crate() {
     assert_eq!(ticket.address, address, "the address");
     assert_eq!(ticket.size, 42, "the size");
     assert!(!ticket.password, "no password until with_password");
-    assert!(ticket.with_password(true).password, "with_password sets it");
+    assert!(ticket.password(true).password, "with_password sets it");
 }

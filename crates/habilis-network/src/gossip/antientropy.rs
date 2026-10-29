@@ -312,7 +312,7 @@ fn resend_one(message: &Verified, state: &mut EventLoopState) -> bool {
             // not. A broadcast resend therefore carries a new nonce, and so a new name.
             let resend = match resend {
                 Resend::Broadcast(frame) => {
-                    Resend::Broadcast(frame.with_resend_nonce(rand::random()))
+                    Resend::Broadcast(frame.copy_with_resend_nonce(rand::random()))
                 }
                 unicast @ Resend::Unicast(..) => unicast,
             };
@@ -657,7 +657,7 @@ pub(crate) async fn handle_state_digest(
         }
         for bytes in frames {
             // A new name for each answer, as for the resend of a message (see `resend_one`).
-            let answer = bytes.with_resend_nonce(rand::random());
+            let answer = bytes.copy_with_resend_nonce(rand::random());
             let _ = context.sender.broadcast(answer).await;
         }
         answered.broadcast = count;

@@ -149,7 +149,7 @@ fn two_members_on_the_lan_link_with_no_beacon() {
             }
 
             async fn member(topic: iroh_gossip::proto::TopicId) -> Member {
-                let lan = LookupOpts::new(RelayChoice::Disabled).with_mdns(true);
+                let lan = LookupOpts::new(RelayChoice::Disabled).mdns(true);
                 let (endpoint, handle) = super::build_endpoint_keeping_mdns(
                     &lan,
                     None,
@@ -285,14 +285,14 @@ fn replacing_a_peer_address_leaves_exactly_the_new_one() {
 #[test]
 fn the_mesh_policy_turns_off_the_paths_it_leaves_out() {
     let _guard = ::habilis_network_test_tracing::init();
-    let webrtc_only = TransportPolicy::default().with_udp(false);
+    let webrtc_only = TransportPolicy::default().udp(false);
     let on_webrtc = TransportOpts::default().within(&webrtc_only);
     assert!(
         !on_webrtc.udp && on_webrtc.webrtc && on_webrtc.relay,
         "the webrtc policy turns off the paths it leaves out"
     );
 
-    let udp_only = TransportPolicy::default().with_webrtc(false);
+    let udp_only = TransportPolicy::default().webrtc(false);
     let on_udp = TransportOpts::default().within(&udp_only);
     assert!(
         on_udp.udp && !on_udp.webrtc && on_udp.relay,
@@ -565,9 +565,9 @@ fn the_mesh_policy_decides_gossip_for_the_opts() {
     let _guard = ::habilis_network_test_tracing::init();
     let policy = |gossip: bool, udp: bool, webrtc: bool| {
         TransportPolicy::default()
-            .with_gossip(gossip)
-            .with_udp(udp)
-            .with_webrtc(webrtc)
+            .gossip(gossip)
+            .udp(udp)
+            .webrtc(webrtc)
     };
     let within = |mesh: TransportPolicy| TransportOpts::default().within(&mesh).gossip;
     assert!(!TransportOpts::default().gossip, "off until the mesh asks");
@@ -735,7 +735,7 @@ fn the_handle_config_of_a_browser_differs_from_the_engine_s_in_the_link_cost_onl
         "the browser link cost differs from the engine's"
     );
     assert_eq!(
-        browser.with_link_cost(native.link_cost),
+        browser.link_cost(native.link_cost),
         native,
         "apart from the link cost the browser config matches the engine"
     );

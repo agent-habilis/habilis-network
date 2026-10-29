@@ -61,11 +61,11 @@ impl Member {
 
     async fn create_with(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
         let options = membership::JoinOptions::default()
-            .with_nick(Some(nick.to_owned()))
-            .with_lookup(vec![Lookup::Relay]);
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
         let options = options
-            .with_transport(transport)
-            .with_relay_urls(vec![relay.to_string()]);
+            .transport(transport)
+            .relay_urls(vec![relay.to_string()]);
         Self::open(&options).await
     }
 
@@ -73,8 +73,8 @@ impl Member {
         let mesh = creator.membership.node.mesh_id().to_string();
         Self::open(
             &membership::JoinOptions::default()
-                .with_nick(Some(nick.to_owned()))
-                .with_mesh(Some(mesh)),
+                .nick(Some(nick.to_owned()))
+                .mesh(Some(mesh)),
         )
         .await
     }

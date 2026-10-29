@@ -106,7 +106,7 @@ impl StateFile {
     /// fail-closed squat check against it. Left `None` by [`Self::new`] — a
     /// target outside any base (a `--state-file` override, a test temp dir) has
     /// no base to validate.
-    pub(crate) fn with_base(mut self, base: Option<PathBuf>) -> Self {
+    pub(crate) fn base(mut self, base: Option<PathBuf>) -> Self {
         self.base = base;
         self
     }
@@ -114,14 +114,14 @@ impl StateFile {
     /// Attach the raw topic string a topic gossip was derived from, so every
     /// write publishes it as `topic`. A no-op `None` keeps the one
     /// construction site unconditional.
-    pub(crate) fn with_topic(mut self, topic: Option<&str>) -> Self {
+    pub(crate) fn topic(mut self, topic: Option<&str>) -> Self {
         self.topic = topic.map(str::to_owned);
         self
     }
 
     /// Attach the pid of the process the daemon lives for, so every write
-    /// publishes it as `owner_pid`. A no-op `None`, as for [`Self::with_topic`].
-    pub(crate) fn with_owner_pid(mut self, owner_pid: Option<u32>) -> Self {
+    /// publishes it as `owner_pid`. A no-op `None`, as for [`Self::topic`].
+    pub(crate) fn owner_pid(mut self, owner_pid: Option<u32>) -> Self {
         self.owner_pid = owner_pid;
         self
     }
@@ -387,7 +387,7 @@ pub struct SessionEntry {
     /// The process id of the daemon.
     pub pid: Option<u32>,
     /// The process the daemon lives for; present only for a daemon started
-    /// with an owner (see `EventLoopConfig::with_owner_pid`).
+    /// with an owner (see `EventLoopConfig::owner_pid`).
     pub owner_pid: Option<u32>,
 }
 
@@ -590,7 +590,7 @@ mod tests {
         state_file.write(1, true);
         let unowned = super::read_session_entry(&path).expect("entry");
         assert_eq!(unowned.owner_pid, None, "an unowned entry has no owner pid");
-        let state_file = state_file.with_owner_pid(Some(4242));
+        let state_file = state_file.owner_pid(Some(4242));
         state_file.write(1, true);
         let owned = super::read_session_entry(&path).expect("entry");
         assert_eq!(
@@ -666,7 +666,7 @@ mod tests {
             &Nickname::from("treat-empire"),
             &name("www.youtube.com/watch"),
         )
-        .with_topic(Some(raw));
+        .topic(Some(raw));
         state_file.write(1, true);
         let parsed: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

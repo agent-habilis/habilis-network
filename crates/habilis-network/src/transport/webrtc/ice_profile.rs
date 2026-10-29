@@ -33,7 +33,7 @@ pub struct IceProfile {
 impl IceProfile {
     /// Set whether only host candidates are gathered.
     #[must_use]
-    pub fn with_host_only(
+    pub fn host_only(
         mut self,
         // true gathers host candidates only: no STUN, no TURN
         host_only: bool,

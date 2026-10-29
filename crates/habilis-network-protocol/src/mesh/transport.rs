@@ -99,7 +99,7 @@ impl fmt::Display for Transport {
 /// ```
 /// use habilis_network_protocol::mesh::TransportPolicy;
 ///
-/// let policy = TransportPolicy::default().with_udp(false);
+/// let policy = TransportPolicy::default().udp(false);
 /// assert!(!policy.udp);
 /// assert!(policy.webrtc);
 /// ```
@@ -151,7 +151,7 @@ impl Default for TransportPolicy {
 impl TransportPolicy {
     /// Set the UDP transport. Start from `default()` and chain the `with_` methods.
     #[must_use]
-    pub fn with_udp(
+    pub fn udp(
         mut self,
         // true enables the UDP transport
         udp: bool,
@@ -162,7 +162,7 @@ impl TransportPolicy {
 
     /// Set the WebRTC transport.
     #[must_use]
-    pub fn with_webrtc(
+    pub fn webrtc(
         mut self,
         // true enables the WebRTC transport
         webrtc: bool,
@@ -173,7 +173,7 @@ impl TransportPolicy {
 
     /// Set the multihop transport.
     #[must_use]
-    pub fn with_multihop(
+    pub fn multihop(
         mut self,
         // true enables the multihop transport
         multihop: bool,
@@ -184,7 +184,7 @@ impl TransportPolicy {
 
     /// Set the gossip transport.
     #[must_use]
-    pub fn with_gossip(
+    pub fn gossip(
         mut self,
         // true enables the gossip transport
         gossip: bool,
@@ -195,7 +195,7 @@ impl TransportPolicy {
 
     /// Set whether the relay carries payload.
     #[must_use]
-    pub fn with_relay_transport(
+    pub fn relay_transport(
         mut self,
         // true lets the relay carry payload
         relay_transport: bool,

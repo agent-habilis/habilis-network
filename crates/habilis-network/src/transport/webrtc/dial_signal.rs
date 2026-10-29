@@ -160,7 +160,7 @@ pub(crate) async fn dial_signal_round(
     })?;
 
     offer
-        .with_answer(answer)
+        .answer(answer)
         .complete(remote, handle)
         .await
         .map_err(EndpointError::internal)?;

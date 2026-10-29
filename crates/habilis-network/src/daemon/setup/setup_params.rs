@@ -97,19 +97,19 @@ impl SetupParams {
 
     /// Set the ceiling of peers in the mesh.
     #[must_use]
-    pub fn with_max_peers(self, max_peers: usize) -> Self {
+    pub fn max_peers(self, max_peers: usize) -> Self {
         Self { max_peers, ..self }
     }
 
     /// Set the ceiling of direct connections.
     #[must_use]
-    pub fn with_max_direct(self, max_direct: usize) -> Self {
+    pub fn max_direct(self, max_direct: usize) -> Self {
         Self { max_direct, ..self }
     }
 
     /// Set the per-user runtime base.
     #[must_use]
-    pub fn with_runtime_base(self, runtime_base: PathBuf) -> Self {
+    pub fn runtime_base(self, runtime_base: PathBuf) -> Self {
         Self {
             runtime_base: Some(runtime_base),
             ..self
@@ -118,7 +118,7 @@ impl SetupParams {
 
     /// Set the default state file.
     #[must_use]
-    pub fn with_state_file(self, state_file: PathBuf) -> Self {
+    pub fn state_file(self, state_file: PathBuf) -> Self {
         Self {
             state_file: Some(state_file),
             ..self
@@ -127,7 +127,7 @@ impl SetupParams {
 
     /// Share the caller's endpoint instead of minting one.
     #[must_use]
-    pub fn with_endpoint(self, endpoint: InjectedEndpoint) -> Self {
+    pub fn endpoint(self, endpoint: InjectedEndpoint) -> Self {
         Self {
             endpoint: Some(endpoint),
             ..self
@@ -145,13 +145,13 @@ impl SetupParams {
 
     /// Narrow this node's own paths.
     #[must_use]
-    pub fn with_transports(self, transports: crate::lookup::TransportOpts) -> Self {
+    pub fn transports(self, transports: crate::lookup::TransportOpts) -> Self {
         Self { transports, ..self }
     }
 
     /// Set the `meta` channel's per-peer write gate.
     #[must_use]
-    pub fn with_per_peer_gate(self, per_peer_gate: crate::doc::SelfWriteGate) -> Self {
+    pub fn per_peer_gate(self, per_peer_gate: crate::doc::SelfWriteGate) -> Self {
         Self {
             per_peer_gate: Some(per_peer_gate),
             ..self
@@ -160,7 +160,7 @@ impl SetupParams {
 
     /// Override the co-host policy the [`SetupKind`](super::SetupKind) would imply.
     #[must_use]
-    pub fn with_cohost(self, cohost: CoHostPolicy) -> Self {
+    pub fn cohost(self, cohost: CoHostPolicy) -> Self {
         Self {
             cohost: Some(cohost),
             ..self
@@ -169,7 +169,7 @@ impl SetupParams {
 
     /// Set the shared live-peer counter a directory advertiser re-broadcasts from.
     #[must_use]
-    pub fn with_live_count(self, live_count: LiveCount) -> Self {
+    pub fn live_count(self, live_count: LiveCount) -> Self {
         Self {
             live_count: Some(live_count),
             ..self

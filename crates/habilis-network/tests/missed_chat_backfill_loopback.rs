@@ -160,7 +160,7 @@ impl Joined {
 }
 
 fn pin_antientropy_tick() {
-    tuning::init(tuning::Tuning::DEFAULTS.with_antientropy_interval(Duration::from_hours(1)));
+    tuning::init(tuning::Tuning::DEFAULTS.antientropy_interval(Duration::from_hours(1)));
 }
 
 fn nick(name: &str) -> Nickname {
@@ -178,7 +178,7 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Chat, Arc<Joined>) {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams::new(nick(name), Arc::clone(&sink)).with_max_peers(16),
+        SetupParams::new(nick(name), Arc::clone(&sink)).max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");

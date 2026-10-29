@@ -66,14 +66,14 @@ impl CreateParams {
 
     /// The password that unlocks the mesh, when the mesh has one.
     #[must_use]
-    pub fn with_password(mut self, password: Option<Password>) -> Self {
+    pub fn password(mut self, password: Option<Password>) -> Self {
         self.password = password;
         self
     }
 
     /// Set whether the mesh is invite-only.
     #[must_use]
-    pub fn with_invite_only(
+    pub fn invite_only(
         mut self,
         // true makes the mesh invite-only
         invite_only: bool,

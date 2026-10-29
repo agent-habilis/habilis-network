@@ -430,7 +430,7 @@ mod tests {
             // Host candidates only: these tests must not touch STUN.
             IceProfile { host_only: true },
         );
-        let signal = signal.with_deadlines(quick());
+        let signal = signal.deadlines(quick());
         let router = Router::builder(endpoint.clone());
         let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
         let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);
@@ -817,7 +817,7 @@ mod tests {
                     admission.clone(),
                     IceProfile { host_only: true },
                 );
-                let signal = signal.with_deadlines(quick());
+                let signal = signal.deadlines(quick());
                 let router = Router::builder(server.clone());
                 let router = router.accept(NUDGE_ALPN, NudgeAcceptor);
                 let router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, signal);

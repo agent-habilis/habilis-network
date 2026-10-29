@@ -16,7 +16,7 @@ use serde::Deserialize;
 /// ```
 /// use habilis_network_stream::StreamOpts;
 ///
-/// let opts = StreamOpts::default().with_relay_urls(Vec::<String>::new());
+/// let opts = StreamOpts::default().relay_urls(Vec::<String>::new());
 /// assert!(!format!("{opts:?}").is_empty());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -37,21 +37,21 @@ pub struct StreamOpts {
 impl StreamOpts {
     /// Set the lookups.
     #[must_use]
-    pub fn with_lookup(mut self, lookup: impl IntoIterator<Item = Lookup>) -> Self {
+    pub fn lookup(mut self, lookup: impl IntoIterator<Item = Lookup>) -> Self {
         self.lookup = lookup.into_iter().collect();
         self
     }
 
     /// Set the transports.
     #[must_use]
-    pub fn with_transport(mut self, transport: impl IntoIterator<Item = Transport>) -> Self {
+    pub fn transport(mut self, transport: impl IntoIterator<Item = Transport>) -> Self {
         self.transport = transport.into_iter().collect();
         self
     }
 
     /// The relay URLs to dial, in the order given.
     #[must_use]
-    pub fn with_relay_urls(mut self, relay_urls: impl IntoIterator<Item = String>) -> Self {
+    pub fn relay_urls(mut self, relay_urls: impl IntoIterator<Item = String>) -> Self {
         self.relay_urls = relay_urls.into_iter().collect();
         self
     }

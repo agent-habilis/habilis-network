@@ -766,12 +766,12 @@ impl EventLoopState {
             reassembled_groups: BoundedFifoSet::new(MESSAGE_LOG_SIZE),
             reassembly: ReassemblyStore::default(),
             shard_cache: ShardCache::default(),
-            state_doc: MeshDoc::new_ungated().with_key(state_key),
+            state_doc: MeshDoc::new_ungated().key(state_key),
             meta_doc: match per_peer_gate {
                 Some(gate) => MeshDoc::new_gated(gate),
                 None => MeshDoc::new_ungated(),
             }
-            .with_key(meta_key),
+            .key(meta_key),
             digest_cursor: 0,
             identity,
             self_seq: 0,

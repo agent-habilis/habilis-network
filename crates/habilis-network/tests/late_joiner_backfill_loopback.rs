@@ -71,8 +71,7 @@ impl NodeDriver for Store {
             Request::Write(merge, done) => {
                 broadcast_state_merge(
                     state,
-                    StateMergeParams::new(context.into(), Channel::State, merge)
-                        .with_surface(false),
+                    StateMergeParams::new(context.into(), Channel::State, merge).surface(false),
                 )
                 .await
                 .expect("a small merge is accepted");
@@ -130,7 +129,7 @@ impl Joined {
 /// a slow join cannot let a tick pass it instead. Per process, and every test
 /// here wants the same value.
 fn pin_antientropy_tick() {
-    tuning::init(tuning::Tuning::DEFAULTS.with_antientropy_interval(Duration::from_hours(1)));
+    tuning::init(tuning::Tuning::DEFAULTS.antientropy_interval(Duration::from_hours(1)));
 }
 
 fn nick(name: &str) -> Nickname {
@@ -148,7 +147,7 @@ async fn spawn(topic: &str, name: &str) -> (Node<Store>, Arc<Joined>) {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams::new(nick(name), Arc::clone(&sink)).with_max_peers(16),
+        SetupParams::new(nick(name), Arc::clone(&sink)).max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");

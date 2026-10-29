@@ -22,7 +22,7 @@ use super::{BlobError, BlobServer, BlobTicket, ContentId};
 /// use habilis_network::ops::blob::{ContentId, OffloadRequest};
 ///
 /// # fn demo(path: PathBuf, id: ContentId, spool: PathBuf) -> OffloadRequest {
-/// OffloadRequest::new(path, id, spool).with_password(None)
+/// OffloadRequest::new(path, id, spool).password(None)
 /// # }
 /// ```
 #[derive(Debug, Clone)]
@@ -54,7 +54,7 @@ impl OffloadRequest {
 
     /// Set the mesh password that the ticket inherits.
     #[must_use]
-    pub fn with_password(mut self, password: Option<crypto::Password>) -> Self {
+    pub fn password(mut self, password: Option<crypto::Password>) -> Self {
         self.password = password;
         self
     }

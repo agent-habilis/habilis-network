@@ -814,10 +814,7 @@ fn build_overlay(
     let ice = crate::transport::IceProfile {
         host_only: mesh.is_loopback(),
     };
-    let unicast = build
-        .unicast_acceptor
-        .clone()
-        .with_admission(admission.clone());
+    let unicast = build.unicast_acceptor.clone().admission(admission.clone());
     let webrtc_lane = build
         .transports
         .webrtc
@@ -1129,7 +1126,7 @@ mod tests {
     #[test]
     fn a_browser_refuses_a_mesh_with_no_relay_lookup() {
         let _guard = ::habilis_network_test_tracing::init();
-        let dht_only = LookupOpts::new(RelayChoice::Disabled).with_dht(true);
+        let dht_only = LookupOpts::new(RelayChoice::Disabled).dht(true);
         let policy =
             TransportPolicy::try_from(&[Transport::Udp, Transport::WebRtc]).expect("valid");
         let transports = crate::lookup::TransportOpts::default().within(&policy);
@@ -1142,8 +1139,8 @@ mod tests {
         );
 
         let relay = LookupOpts::new(RelayChoice::Pinned)
-            .with_mdns(dht_only.mdns)
-            .with_dht(dht_only.dht);
+            .mdns(dht_only.mdns)
+            .dht(dht_only.dht);
         super::refuse_in_browser(&relay, policy, transports).expect("the relay signals");
     }
 
@@ -1153,14 +1150,14 @@ mod tests {
     #[test]
     fn a_node_without_udp_refuses_a_mesh_with_no_relay_lookup() {
         let _guard = ::habilis_network_test_tracing::init();
-        let dht_only = LookupOpts::new(RelayChoice::Disabled).with_dht(true);
+        let dht_only = LookupOpts::new(RelayChoice::Disabled).dht(true);
         let policy =
             TransportPolicy::try_from(&[Transport::Udp, Transport::WebRtc]).expect("valid");
         let webrtc_only = crate::lookup::TransportOpts::webrtc_only();
         super::member_transports(&dht_only, webrtc_only, policy).expect_err("no path to signal on");
         let relay = LookupOpts::new(RelayChoice::Pinned)
-            .with_mdns(dht_only.mdns)
-            .with_dht(dht_only.dht);
+            .mdns(dht_only.mdns)
+            .dht(dht_only.dht);
         super::member_transports(&relay, webrtc_only, policy).expect("the relay signals");
     }
 
@@ -1211,7 +1208,7 @@ mod tests {
                     crate::membership::resolve_kind(&options, None).expect("a kind");
                 let config = super::setup_mesh(
                     kind,
-                    super::SetupParams::new(author, crate::embed::SilentSink).with_max_peers(8),
+                    super::SetupParams::new(author, crate::embed::SilentSink).max_peers(8),
                 )
                 .await
                 .expect("a loopback mesh sets up");
@@ -1262,8 +1259,8 @@ mod tests {
                 let config = super::setup_mesh(
                     kind,
                     super::SetupParams::new(author, crate::embed::SilentSink)
-                        .with_max_peers(8)
-                        .with_transports(transports),
+                        .max_peers(8)
+                        .transports(transports),
                 )
                 .await
                 .expect("a mesh sets up");
@@ -1293,8 +1290,8 @@ mod tests {
             let config = super::setup_mesh(
                 kind,
                 super::SetupParams::new(author, crate::embed::SilentSink)
-                    .with_max_peers(8)
-                    .with_transports(crate::lookup::TransportOpts {
+                    .max_peers(8)
+                    .transports(crate::lookup::TransportOpts {
                         udp: false,
                         ..crate::lookup::TransportOpts::default()
                     }),
@@ -1334,8 +1331,8 @@ mod tests {
                 let config = super::setup_mesh(
                     kind,
                     super::SetupParams::new(author, crate::embed::SilentSink)
-                        .with_max_peers(max_peers)
-                        .with_max_direct(max_direct),
+                        .max_peers(max_peers)
+                        .max_direct(max_direct),
                 )
                 .await
                 .expect("a loopback mesh sets up");
@@ -1545,8 +1542,8 @@ mod tests {
         super::setup_mesh(
             kind,
             super::SetupParams::new(author, crate::embed::SilentSink)
-                .with_max_peers(8)
-                .with_endpoint(injected),
+                .max_peers(8)
+                .endpoint(injected),
         )
         .await
         .map_err(anyhow::Error::from)
@@ -1659,7 +1656,7 @@ mod tests {
             let (kind, author) = crate::membership::resolve_kind(&options, None).expect("a kind");
             let config = super::setup_mesh(
                 kind,
-                super::SetupParams::new(author, crate::embed::SilentSink).with_max_peers(8),
+                super::SetupParams::new(author, crate::embed::SilentSink).max_peers(8),
             )
             .await
             .expect("a loopback mesh sets up");
@@ -1712,8 +1709,8 @@ mod browser_tests {
             let mut config = super::setup_mesh(
                 kind,
                 super::SetupParams::new(author, crate::embed::SilentSink)
-                    .with_max_peers(8)
-                    .with_transports(crate::lookup::TransportOpts {
+                    .max_peers(8)
+                    .transports(crate::lookup::TransportOpts {
                         udp: false,
                         ..crate::lookup::TransportOpts::default()
                     }),

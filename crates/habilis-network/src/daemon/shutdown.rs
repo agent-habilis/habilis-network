@@ -146,7 +146,7 @@ pub(super) fn spawn_quit_signal_tasks(
     quit_rx
 }
 /// Whether `pid` can own a daemon, with the checks and messages of
-/// `EventLoopConfig::with_owner_pid`. For a launcher that must refuse a bad
+/// `EventLoopConfig::owner_pid`. For a launcher that must refuse a bad
 /// pid in the foreground, before it re-spawns the daemon detached.
 ///
 /// # Errors

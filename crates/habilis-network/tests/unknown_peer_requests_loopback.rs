@@ -18,11 +18,11 @@ fn a_cut_a_deny_an_offer_and_a_close_on_a_member_the_node_does_not_know_are_refu
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let (sink, _events) = membership::json_sink();
         let options = membership::JoinOptions::default()
-            .with_nick(Some("alice".to_owned()))
-            .with_lookup(vec![Lookup::Relay]);
+            .nick(Some("alice".to_owned()))
+            .lookup(vec![Lookup::Relay]);
         let options = options
-            .with_transport(vec![Transport::Udp])
-            .with_relay_urls(vec![relay.to_string()]);
+            .transport(vec![Transport::Udp])
+            .relay_urls(vec![relay.to_string()]);
         let member: membership::Membership = membership::join(&options, sink)
             .await
             .expect("open a member");

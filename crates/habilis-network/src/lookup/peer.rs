@@ -66,9 +66,9 @@ pub fn multihop_handle_config(
     relay_payload: PayloadPath,
 ) -> habilis_network_iroh_multihop_transport::HandleConfig {
     habilis_network_iroh_multihop_transport::HandleConfig::default()
-        .with_relay_payload(relay_payload.relay_allowed())
-        .with_vector_max_age(tuning::LINKSTATE_MAX_AGE)
-        .with_relay_stuck_after(tuning::MULTIHOP_RELAY_STUCK)
+        .relay_payload(relay_payload.relay_allowed())
+        .vector_max_age(tuning::LINKSTATE_MAX_AGE)
+        .relay_stuck_after(tuning::MULTIHOP_RELAY_STUCK)
 }
 
 /// [`multihop_handle_config`] for a browser: the same numbers, and the link cost of
@@ -87,9 +87,8 @@ pub fn multihop_handle_config(
 pub(crate) fn browser_handle_config(
     relay_payload: PayloadPath,
 ) -> habilis_network_iroh_multihop_transport::HandleConfig {
-    multihop_handle_config(relay_payload).with_link_cost(
-        habilis_network_iroh_multihop_transport::HandleConfig::for_browser().link_cost,
-    )
+    multihop_handle_config(relay_payload)
+        .link_cost(habilis_network_iroh_multihop_transport::HandleConfig::for_browser().link_cost)
 }
 
 /// Assert that an injected endpoint agrees with the mesh it joins.
@@ -403,13 +402,13 @@ pub(crate) async fn build_peer_multihop_with(
                 table.clone(),
                 ice,
             );
-        protocols = protocols.with_protocol(
+        protocols = protocols.protocol(
             crate::transport::MESH_WEBRTC_SIGNAL_ALPN.to_vec(),
             underlay_webrtc::UnderlaySignalGate::new(acceptor, allowed.clone()),
         );
         // A session that attached is used only after a connect that completes, and
         // the nudge is that connect: see `webrtc::nudge_acceptor::nudge_session`.
-        protocols = protocols.with_protocol(webrtc::NUDGE_ALPN.to_vec(), webrtc::NudgeAcceptor);
+        protocols = protocols.protocol(webrtc::NUDGE_ALPN.to_vec(), webrtc::NudgeAcceptor);
         underlay_webrtc = Some(underlay_webrtc::UnderlayWebRtc {
             handle,
             admission: table,

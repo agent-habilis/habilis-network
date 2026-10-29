@@ -161,7 +161,7 @@ impl LightCyclesPeer {
                 LookupOpts::public_preset(),
                 None,
                 None,
-                TransportPolicy::default().with_relay_transport(relay_transport),
+                TransportPolicy::default().relay_transport(relay_transport),
             ),
         )
         .map_err(to_js_error)?;
@@ -173,7 +173,7 @@ impl LightCyclesPeer {
 
         let config = setup_mesh(
             kind,
-            SetupParams::new(author.clone(), SilentSink::default()).with_max_peers(16),
+            SetupParams::new(author.clone(), SilentSink::default()).max_peers(16),
         )
         .await
         .map_err(to_js_error)?;

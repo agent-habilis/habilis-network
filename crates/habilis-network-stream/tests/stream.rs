@@ -402,9 +402,9 @@ async fn on_relay(url: &str, transport: Vec<Transport>) -> StreamNode {
     let base = StreamOpts::default();
     let relay_urls = vec![url.to_owned()];
     let opts = base
-        .with_lookup(vec![Lookup::Relay])
-        .with_transport(transport)
-        .with_relay_urls(relay_urls);
+        .lookup(vec![Lookup::Relay])
+        .transport(transport)
+        .relay_urls(relay_urls);
     StreamNode::bind(&opts).await.expect("bind a relay node")
 }
 
@@ -595,7 +595,7 @@ fn a_stream_node_refuses_the_gossip_and_multihop_transports() {
             (Transport::Gossip, "a stream has no gossip"),
             (Transport::Multihop, "a stream has no multihop"),
         ] {
-            let options = StreamOpts::default().with_transport(vec![Transport::Udp, transport]);
+            let options = StreamOpts::default().transport(vec![Transport::Udp, transport]);
             let error = StreamNode::bind(&options)
                 .await
                 .expect_err("the transport must be refused");

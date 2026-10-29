@@ -56,8 +56,8 @@ pub fn build_msg_bytes(
             body: params.body,
         },
     )
-    .with_chain(params.chain.seq, params.chain.previous)
-    .with_parents(params.chain.parents)
+    .chain(params.chain.seq, params.chain.previous)
+    .parents(params.chain.parents)
     .sign(identity);
     let raw = message.serialize()?;
     Ok((raw, message))

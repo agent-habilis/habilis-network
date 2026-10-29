@@ -43,7 +43,7 @@ use tokio::sync::oneshot;
 /// ```
 /// use habilis_network::membership::{JoinOptions, resolve_kind};
 ///
-/// let options = JoinOptions::default().with_mesh(Some("a".to_owned())).with_topic(Some("b".to_owned()));
+/// let options = JoinOptions::default().mesh(Some("a".to_owned())).topic(Some("b".to_owned()));
 /// assert!(resolve_kind(&options, None).is_err());
 /// ```
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -88,63 +88,63 @@ pub struct JoinOptions {
 impl JoinOptions {
     /// Set the topic that derives the mesh.
     #[must_use]
-    pub fn with_topic(mut self, topic: Option<String>) -> Self {
+    pub fn topic(mut self, topic: Option<String>) -> Self {
         self.topic = topic;
         self
     }
 
     /// Set the nickname.
     #[must_use]
-    pub fn with_nick(mut self, nick: Option<String>) -> Self {
+    pub fn nick(mut self, nick: Option<String>) -> Self {
         self.nick = nick;
         self
     }
 
     /// Set the mesh name.
     #[must_use]
-    pub fn with_mesh(mut self, mesh: Option<String>) -> Self {
+    pub fn mesh(mut self, mesh: Option<String>) -> Self {
         self.mesh = mesh;
         self
     }
 
     /// Set the name to create the mesh with.
     #[must_use]
-    pub fn with_name(mut self, name: Option<String>) -> Self {
+    pub fn name(mut self, name: Option<String>) -> Self {
         self.name = name;
         self
     }
 
     /// Set the lookups.
     #[must_use]
-    pub fn with_lookup(mut self, lookup: impl IntoIterator<Item = Lookup>) -> Self {
+    pub fn lookup(mut self, lookup: impl IntoIterator<Item = Lookup>) -> Self {
         self.lookup = lookup.into_iter().collect();
         self
     }
 
     /// Set the transports.
     #[must_use]
-    pub fn with_transport(mut self, transport: impl IntoIterator<Item = Transport>) -> Self {
+    pub fn transport(mut self, transport: impl IntoIterator<Item = Transport>) -> Self {
         self.transport = transport.into_iter().collect();
         self
     }
 
     /// The relay URLs to dial, in the order given.
     #[must_use]
-    pub fn with_relay_urls(mut self, relay_urls: impl IntoIterator<Item = String>) -> Self {
+    pub fn relay_urls(mut self, relay_urls: impl IntoIterator<Item = String>) -> Self {
         self.relay_urls = relay_urls.into_iter().collect();
         self
     }
 
     /// Set the peer cap.
     #[must_use]
-    pub fn with_max_peers(mut self, max_peers: usize) -> Self {
+    pub fn max_peers(mut self, max_peers: usize) -> Self {
         self.max_peers = max_peers;
         self
     }
 
     /// Set the direct-session cap.
     #[must_use]
-    pub fn with_max_direct(mut self, max_direct: usize) -> Self {
+    pub fn max_direct(mut self, max_direct: usize) -> Self {
         self.max_direct = max_direct;
         self
     }
@@ -235,7 +235,7 @@ pub fn blind_new_members(
 ///
 /// # async fn demo() {
 /// let (sink, _events) = json_sink();
-/// let options = JoinOptions::default().with_nick(Some("alice".to_owned()));
+/// let options = JoinOptions::default().nick(Some("alice".to_owned()));
 /// let member = join(&options, sink).await.expect("a member");
 /// # let _ = member;
 /// # }
@@ -280,8 +280,8 @@ pub async fn join<S: NodeSink + 'static>(
     let config = setup_mesh(
         kind,
         SetupParams::new(author, sink)
-            .with_max_peers(max_peers)
-            .with_max_direct(options.max_direct),
+            .max_peers(max_peers)
+            .max_direct(options.max_direct),
     )
     .await?;
 
@@ -376,7 +376,7 @@ pub async fn depart(node: Node<MembershipApp>) -> Result<(), SetupError> {
 /// ```
 /// use habilis_network::membership::{JoinOptions, resolve_kind};
 ///
-/// let options = JoinOptions::default().with_mesh(Some("a".to_owned())).with_topic(Some("b".to_owned()));
+/// let options = JoinOptions::default().mesh(Some("a".to_owned())).topic(Some("b".to_owned()));
 /// assert!(resolve_kind(&options, None).is_err());
 /// ```
 pub fn resolve_kind(
@@ -428,8 +428,8 @@ pub fn resolve_kind(
                 .map_err(|error| SetupError::internal(anyhow::anyhow!("{error}")))?;
             let Resolved { kind, author, .. } =
                 CreateParams::new(name, nickname, config, DirectorySelection::Unset)
-                    .with_password(None)
-                    .with_invite_only(false)
+                    .password(None)
+                    .invite_only(false)
                     .resolve()
                     .map_err(|error| SetupError::internal(anyhow::Error::from(error)))?;
             Ok((kind, author))

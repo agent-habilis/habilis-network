@@ -1159,7 +1159,7 @@ fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
     let changed = plain.filter(|text| text != frame.body.as_str());
     let body = changed.and_then(|text| MessageBody::try_new(&text).ok());
     match body {
-        Some(body) => frame.with_body(body),
+        Some(body) => frame.copy_with_body(body),
         None => frame.authored(),
     }
 }
@@ -1293,7 +1293,7 @@ fn gate_and_decrypt<F: Proof>(
         let Some(body) = decrypt_broadcast(frame, state) else {
             return Gated::Drop;
         };
-        let view = frame.with_body(body);
+        let view = frame.copy_with_body(body);
         let Some(class) = gate_app_payload(&view, app) else {
             return Gated::Drop;
         };
@@ -1339,7 +1339,7 @@ fn gate_directed_to_us<F: Proof>(frame: &F, state: &EventLoopState, app: &dyn No
     let Some(body) = decrypt_directed(frame, state) else {
         return Gated::Drop;
     };
-    let view = frame.with_body(body);
+    let view = frame.copy_with_body(body);
     let Some(class) = gate_app_payload(&view, app) else {
         return Gated::Drop;
     };
@@ -1976,7 +1976,7 @@ mod retain_own_broadcast_tests {
 
     fn class(loggable: bool) -> app::AppClass {
         app::AppClass::NONE
-            .with_if(app::AppClass::LOGGABLE, loggable)
+            .plus_if(app::AppClass::LOGGABLE, loggable)
             .union(app::AppClass::VALID)
     }
 
@@ -2477,7 +2477,7 @@ mod first_contact_tests {
             )
             .sign(&Identity::generate());
             let original = frame.serialize().expect("serialize");
-            let resend = original.with_resend_nonce(42);
+            let resend = original.copy_with_resend_nonce(42);
 
             ingest(original.into_bytes(), &mut state, &mut app, &context).await;
             ingest(resend.into_bytes(), &mut state, &mut app, &context).await;
@@ -3640,7 +3640,7 @@ mod left_tests {
                 .secret_key(underlay_secret(&secret))
                 .relay_mode(iroh::RelayMode::Disabled);
             let underlay = underlay_builder.bind().await.expect("bind an underlay");
-            let config = HandleConfig::default().with_vector_max_age(Duration::from_millis(400));
+            let config = HandleConfig::default().vector_max_age(Duration::from_millis(400));
             let handle = MultihopHandle::new(&secret, underlay, config).expect("a handle");
             let (leaver_endpoint, leaver_handle, _leaver_webrtc) = build_peer_multihop(
                 &lookups,

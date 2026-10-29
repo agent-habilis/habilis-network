@@ -526,9 +526,9 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // claims under the stagger, so its defaults stay untouched.
     tuning::init(
         tuning::Tuning::DEFAULTS
-            .with_rival_recheck_first(Duration::from_hours(1))
-            .with_rival_recheck(Duration::from_hours(1))
-            .with_rival_recheck_meshed(Duration::from_hours(1)),
+            .rival_recheck_first(Duration::from_hours(1))
+            .rival_recheck(Duration::from_hours(1))
+            .rival_recheck_meshed(Duration::from_hours(1)),
     );
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

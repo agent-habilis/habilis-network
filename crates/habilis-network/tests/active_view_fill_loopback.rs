@@ -62,27 +62,27 @@ impl Member {
 
     async fn create(nick: &str, relay: &RelayUrl, max_peers: usize) -> Self {
         let options = membership::JoinOptions::default()
-            .with_nick(Some(nick.to_owned()))
-            .with_lookup(vec![Lookup::Relay]);
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
         let relay_urls = vec![relay.to_string()];
         let options = options
-            .with_transport(vec![
+            .transport(vec![
                 Transport::Udp,
                 Transport::WebRtc,
                 Transport::Multihop,
                 Transport::Relay,
             ])
-            .with_relay_urls(relay_urls)
-            .with_max_peers(max_peers);
+            .relay_urls(relay_urls)
+            .max_peers(max_peers);
         Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self, max_peers: usize) -> Self {
         let mesh = creator.membership.node.mesh_id().to_string();
         let options = membership::JoinOptions::default()
-            .with_nick(Some(nick.to_owned()))
-            .with_mesh(Some(mesh));
-        let options = options.with_max_peers(max_peers);
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
+        let options = options.max_peers(max_peers);
         Self::open(&options).await
     }
 

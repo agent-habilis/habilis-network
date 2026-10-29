@@ -297,7 +297,7 @@ pub fn ppid_watch_interval() -> Duration {
 ///
 /// use habilis_network_util::tuning::Tuning;
 ///
-/// let tuning = Tuning::default().with_heal_interval(Duration::from_secs(3));
+/// let tuning = Tuning::default().heal_interval(Duration::from_secs(3));
 /// assert_eq!(tuning.heal_interval, Duration::from_secs(3));
 /// ```
 #[derive(Clone, Copy, Debug)]
@@ -346,56 +346,56 @@ pub struct Tuning {
 impl Tuning {
     /// Set how often anti-entropy runs.
     #[must_use]
-    pub fn with_antientropy_interval(mut self, antientropy_interval: Duration) -> Self {
+    pub fn antientropy_interval(mut self, antientropy_interval: Duration) -> Self {
         self.antientropy_interval = antientropy_interval;
         self
     }
 
     /// Set how long the first rival recheck waits.
     #[must_use]
-    pub fn with_rival_recheck_first(mut self, rival_recheck_first: Duration) -> Self {
+    pub fn rival_recheck_first(mut self, rival_recheck_first: Duration) -> Self {
         self.rival_recheck_first = rival_recheck_first;
         self
     }
 
     /// Set how long each rival recheck waits.
     #[must_use]
-    pub fn with_rival_recheck(mut self, rival_recheck: Duration) -> Self {
+    pub fn rival_recheck(mut self, rival_recheck: Duration) -> Self {
         self.rival_recheck = rival_recheck;
         self
     }
 
     /// Set how long each rival recheck waits once meshed.
     #[must_use]
-    pub fn with_rival_recheck_meshed(mut self, rival_recheck_meshed: Duration) -> Self {
+    pub fn rival_recheck_meshed(mut self, rival_recheck_meshed: Duration) -> Self {
         self.rival_recheck_meshed = rival_recheck_meshed;
         self
     }
 
     /// Set how often the heal tick runs.
     #[must_use]
-    pub fn with_heal_interval(mut self, heal_interval: Duration) -> Self {
+    pub fn heal_interval(mut self, heal_interval: Duration) -> Self {
         self.heal_interval = heal_interval;
         self
     }
 
     /// Set the co-host grace period.
     #[must_use]
-    pub fn with_cohost_grace(mut self, cohost_grace: Duration) -> Self {
+    pub fn cohost_grace(mut self, cohost_grace: Duration) -> Self {
         self.cohost_grace = cohost_grace;
         self
     }
 
     /// Set how long a member waits before it asks for the rendezvous again.
     #[must_use]
-    pub fn with_rendezvous_periodic_return(mut self, rendezvous_periodic_return: Duration) -> Self {
+    pub fn rendezvous_periodic_return(mut self, rendezvous_periodic_return: Duration) -> Self {
         self.rendezvous_periodic_return = rendezvous_periodic_return;
         self
     }
 
     /// Set the rival recheck interval for a lone member.
     #[must_use]
-    pub fn with_rival_recheck_alone(mut self, rival_recheck_alone: Duration) -> Self {
+    pub fn rival_recheck_alone(mut self, rival_recheck_alone: Duration) -> Self {
         self.rival_recheck_alone = rival_recheck_alone;
         self
     }

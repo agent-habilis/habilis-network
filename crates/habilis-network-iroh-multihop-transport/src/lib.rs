@@ -205,7 +205,7 @@ impl Default for HandleConfig {
 impl HandleConfig {
     /// Set whether the relay carries payload.
     #[must_use]
-    pub fn with_relay_payload(
+    pub fn relay_payload(
         mut self,
         // true lets the relay carry payload
         relay_payload: bool,
@@ -216,21 +216,21 @@ impl HandleConfig {
 
     /// Set the age after which a vector entry is dropped.
     #[must_use]
-    pub fn with_vector_max_age(mut self, vector_max_age: Duration) -> Self {
+    pub fn vector_max_age(mut self, vector_max_age: Duration) -> Self {
         self.vector_max_age = vector_max_age;
         self
     }
 
     /// Set how long a hop may stay stuck on the relay before it is reported.
     #[must_use]
-    pub fn with_relay_stuck_after(mut self, relay_stuck_after: Duration) -> Self {
+    pub fn relay_stuck_after(mut self, relay_stuck_after: Duration) -> Self {
         self.relay_stuck_after = relay_stuck_after;
         self
     }
 
     /// Replaces the cost advertised for each link, instead of `DEFAULT_LINK_COST`.
     #[must_use]
-    pub fn with_link_cost(mut self, link_cost: u32) -> Self {
+    pub fn link_cost(mut self, link_cost: u32) -> Self {
         self.link_cost = link_cost;
         self
     }
@@ -897,7 +897,7 @@ mod tests {
                 &secret,
                 loopback_underlay(&secret).await,
                 HandleConfig::default(),
-                ProtocolSet::default().with_protocol(
+                ProtocolSet::default().protocol(
                     EXTRA_ALPN.to_vec(),
                     Counting(std::sync::Arc::clone(&accepted)),
                 ),
@@ -931,7 +931,7 @@ mod tests {
                 &secret,
                 loopback_underlay(&secret).await,
                 HandleConfig::default(),
-                ProtocolSet::default().with_protocol(
+                ProtocolSet::default().protocol(
                     crate::underlay::FORWARD_ALPN.to_vec(),
                     Counting(std::sync::Arc::default()),
                 ),

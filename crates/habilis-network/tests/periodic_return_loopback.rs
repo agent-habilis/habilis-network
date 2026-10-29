@@ -94,19 +94,19 @@ impl Member {
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
         let options = membership::JoinOptions::default()
-            .with_nick(Some(nick.to_owned()))
-            .with_lookup(vec![Lookup::Relay]);
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
         let options = options
-            .with_transport(vec![Transport::Udp])
-            .with_relay_urls(vec![relay.to_string()]);
+            .transport(vec![Transport::Udp])
+            .relay_urls(vec![relay.to_string()]);
         Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
         let mesh = creator.membership.node.mesh_id().to_string();
         let options = membership::JoinOptions::default()
-            .with_nick(Some(nick.to_owned()))
-            .with_mesh(Some(mesh));
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
         Self::open(&options).await
     }
 }
@@ -123,7 +123,7 @@ fn a_member_that_let_go_of_the_rendezvous_comes_back_and_lets_go_again() {
     );
     habilis_network_test_tracing::clear_captured_logs();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        init(Tuning::DEFAULTS.with_rendezvous_periodic_return(PERIOD));
+        init(Tuning::DEFAULTS.rendezvous_periodic_return(PERIOD));
 
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
 

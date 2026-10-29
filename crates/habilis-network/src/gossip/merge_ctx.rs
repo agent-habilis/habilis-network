@@ -283,7 +283,7 @@ impl<'context> From<&HandlerCtx<'context>> for MergeCtx<'context> {
 }
 
 /// Parameters for [`broadcast_state_merge`]. Agent-driven writes surface to the operator, so
-/// `surface` is `true` unless [`StateMergeParams::with_surface`] says otherwise.
+/// `surface` is `true` unless [`StateMergeParams::surface`] says otherwise.
 ///
 /// # Examples
 ///
@@ -326,7 +326,7 @@ impl<'mesh> StateMergeParams<'mesh> {
 
     /// Whether the write is reported to the operator as a `state` or `meta` event.
     #[must_use]
-    pub fn with_surface(
+    pub fn surface(
         self,
         // true reports the write to the operator as a state or meta event
         surface: bool,
@@ -449,7 +449,7 @@ pub async fn broadcast_state_merge(
         // renders even when the wire body we signed is sealed.
         sink.emit(NodeEvent::StateChanged {
             channel,
-            event: Box::new(signed.with_body(plain_body)),
+            event: Box::new(signed.copy_with_body(plain_body)),
             document: after,
             is_self: true,
         });

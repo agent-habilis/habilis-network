@@ -538,7 +538,7 @@ mod chain {
         let _guard = ::habilis_network_test_tracing::init();
         let previous = ContentHash::from([0xaa; 32]);
         let signed = message("hi")
-            .with_chain(5, Some(previous))
+            .chain(5, Some(previous))
             .sign(&Identity::generate());
         assert_eq!(
             signed.seq,
@@ -559,7 +559,7 @@ mod chain {
     #[test]
     fn content_hash_is_stable_and_64_hex() {
         let _guard = ::habilis_network_test_tracing::init();
-        let stamped = message("x").with_chain(0, None);
+        let stamped = message("x").chain(0, None);
         assert_eq!(
             stamped.content_hash(),
             stamped.content_hash(),
@@ -577,8 +577,8 @@ mod chain {
         let _guard = ::habilis_network_test_tracing::init();
         // The equivocation primitive: two different messages at the same
         // seq hash differently, so a receiver can prove the fork.
-        let alpha = message("alpha").with_chain(1, None);
-        let beta = message("beta").with_chain(1, None);
+        let alpha = message("alpha").chain(1, None);
+        let beta = message("beta").chain(1, None);
         assert_ne!(
             alpha.content_hash(),
             beta.content_hash(),
@@ -590,7 +590,7 @@ mod chain {
     fn tampering_seq_breaks_signature() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut signed = message("x")
-            .with_chain(3, None)
+            .chain(3, None)
             .sign(&Identity::generate())
             .into_message();
         signed.seq = Some(4);
@@ -601,10 +601,8 @@ mod chain {
     fn parents_are_signed_and_round_trip() {
         let _guard = ::habilis_network_test_tracing::init();
         let parents = vec![ContentHash::from([0xaa; 32]), ContentHash::from([0xbb; 32])];
-        let draft = message("hi").with_chain(1, None);
-        let signed = draft
-            .with_parents(parents.clone())
-            .sign(&Identity::generate());
+        let draft = message("hi").chain(1, None);
+        let signed = draft.parents(parents.clone()).sign(&Identity::generate());
         assert_eq!(
             signed.parents, parents,
             "the signed message keeps its parents"
@@ -621,7 +619,7 @@ mod chain {
     fn tampering_parents_breaks_signature() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut signed = message("hi")
-            .with_parents(vec![ContentHash::from([0xaa; 32])])
+            .parents(vec![ContentHash::from([0xaa; 32])])
             .sign(&Identity::generate())
             .into_message();
         signed.parents.push(ContentHash::from([0xbb; 32]));

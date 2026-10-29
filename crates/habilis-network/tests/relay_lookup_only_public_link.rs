@@ -121,7 +121,7 @@ async fn spawn_with(
             LookupOpts::new(RelayChoice::Custom(vec![relay.clone()])),
             None,
             None,
-            TransportPolicy::default().with_relay_transport(false),
+            TransportPolicy::default().relay_transport(false),
         ),
     )
     .expect("derive");
@@ -130,8 +130,8 @@ async fn spawn_with(
     let config = setup_mesh(
         SetupKind::Topic { mesh, topic_string },
         SetupParams::new(author, sink)
-            .with_max_peers(16)
-            .with_transports(transports),
+            .max_peers(16)
+            .transports(transports),
     )
     .await
     .expect("setup_mesh");
@@ -149,10 +149,10 @@ fn two_ip_peers_link_through_the_gated_rendezvous() {
         // each member's sink is shared with the node that writes to it, and the test reads it
         let bob_saw = Arc::new(Joined::default());
         let ip_only: TransportOpts = TransportOpts::default()
-            .with_udp(true)
-            .with_relay(true)
-            .with_webrtc(false)
-            .with_gossip(false);
+            .udp(true)
+            .relay(true)
+            .webrtc(false)
+            .gossip(false);
         let alice = spawn_with(&topic, "alice", &relay, Arc::clone(&alice_saw), ip_only).await;
         assert!(
             wait_for_log("beacon role active", Duration::from_mins(1)).await,
@@ -191,10 +191,10 @@ fn a_webrtc_only_peer_links_through_the_beacon_lane() {
         // each member's sink is shared with the node that writes to it, and the test reads it
         let bob_saw = Arc::new(Joined::default());
         let alice_transports: TransportOpts = TransportOpts::default()
-            .with_udp(true)
-            .with_relay(true)
-            .with_webrtc(true)
-            .with_gossip(false);
+            .udp(true)
+            .relay(true)
+            .webrtc(true)
+            .gossip(false);
         let alice = spawn_with(
             &topic,
             "alice",
@@ -208,10 +208,10 @@ fn a_webrtc_only_peer_links_through_the_beacon_lane() {
         // two same-id rendezvous copies shedding each other for the whole test.
         tokio::time::sleep(Duration::from_secs(10)).await;
         let bob_transports: TransportOpts = TransportOpts::default()
-            .with_udp(false)
-            .with_relay(true)
-            .with_webrtc(true)
-            .with_gossip(false);
+            .udp(false)
+            .relay(true)
+            .webrtc(true)
+            .gossip(false);
         let bob = spawn_with(&topic, "bob", &relay, Arc::clone(&bob_saw), bob_transports).await;
 
         let deadline = Duration::from_secs(75);

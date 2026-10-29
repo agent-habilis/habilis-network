@@ -105,12 +105,12 @@ fn init_process() -> habilis_network_test_tracing::Guard {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let tuning = Tuning::DEFAULTS
-            .with_heal_interval(Duration::from_secs(5))
-            .with_rival_recheck_first(Duration::from_secs(3))
-            .with_rival_recheck(Duration::from_secs(8));
+            .heal_interval(Duration::from_secs(5))
+            .rival_recheck_first(Duration::from_secs(3))
+            .rival_recheck(Duration::from_secs(8));
         let tuning = tuning
-            .with_rival_recheck_meshed(Duration::from_secs(12))
-            .with_rival_recheck_alone(Duration::from_secs(12));
+            .rival_recheck_meshed(Duration::from_secs(12))
+            .rival_recheck_alone(Duration::from_secs(12));
         init(tuning);
     });
     habilis_network_test_tracing::init_with_writer(
@@ -209,7 +209,7 @@ impl Joined {
 
 /// The reach of a public topic room cut down to the LAN. See the doc of the file.
 fn mdns_only() -> LookupOpts {
-    LookupOpts::new(RelayChoice::Disabled).with_mdns(true)
+    LookupOpts::new(RelayChoice::Disabled).mdns(true)
 }
 
 // The sink is shared: the spawned task feeds it and the caller reads it after the join.
@@ -221,7 +221,7 @@ async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Member> {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams::new(author, sink).with_max_peers(16),
+        SetupParams::new(author, sink).max_peers(16),
     )
     .await
     .expect("setup_mesh on an mDNS-only mesh");

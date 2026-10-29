@@ -54,10 +54,10 @@ fn transports() -> String {
 
 fn native_opts(nick: &str, topic: &str, relay_url: &str) -> membership::JoinOptions {
     membership::JoinOptions::default()
-        .with_topic(Some(topic.to_owned()))
-        .with_nick(Some(nick.to_owned()))
-        .with_relay_urls(vec![relay_url.to_owned()])
-        .with_transport(TRANSPORTS.to_vec())
+        .topic(Some(topic.to_owned()))
+        .nick(Some(nick.to_owned()))
+        .relay_urls(vec![relay_url.to_owned()])
+        .transport(TRANSPORTS.to_vec())
 }
 
 fn page_url(base: &str, relay_url: &str, topic: &str) -> String {
@@ -264,9 +264,9 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // steady state.
     tuning::init(
         tuning::Tuning::DEFAULTS
-            .with_rival_recheck_first(Duration::from_hours(1))
-            .with_rival_recheck(Duration::from_hours(1))
-            .with_rival_recheck_meshed(Duration::from_hours(1)),
+            .rival_recheck_first(Duration::from_hours(1))
+            .rival_recheck(Duration::from_hours(1))
+            .rival_recheck_meshed(Duration::from_hours(1)),
     );
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

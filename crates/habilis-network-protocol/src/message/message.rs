@@ -281,7 +281,7 @@ impl Message {
     }
 
     /// Parse a gossip payload that may end in the trailer of a resend (see
-    /// [`WireFrame::with_resend_nonce`](super::WireFrame::with_resend_nonce)). Returns the message and the nonce, if any. The trailer is
+    /// [`WireFrame::copy_with_resend_nonce`](super::WireFrame::copy_with_resend_nonce)). Returns the message and the nonce, if any. The trailer is
     /// outside the signature: it changes the gossip message id and nothing else.
     ///
     /// # Errors
@@ -377,9 +377,9 @@ impl Message {
     /// Stamp the per-author log fields before signing (`Msg` only). `seq`
     /// is the author's monotonic counter, `prev` the hash of their previous
     /// `Msg` (`None` at `seq 0`). Consuming-builder so it composes with
-    /// [`sign`](Self::sign): `Message::new_app(..).with_chain(..).sign(..)`.
+    /// [`sign`](Self::sign): `Message::new_app(..).chain(..).sign(..)`.
     #[must_use]
-    pub fn with_chain(mut self, seq: u64, previous: Option<ContentHash>) -> Self {
+    pub fn chain(mut self, seq: u64, previous: Option<ContentHash>) -> Self {
         self.seq = Some(seq);
         self.previous = previous;
         self
@@ -387,9 +387,9 @@ impl Message {
 
     /// Stamp the cross-author DAG `parents` (content hashes of the tips
     /// seen when authoring) before signing. Consuming-builder, composes
-    /// with [`with_chain`](Self::with_chain) and [`sign`](Self::sign).
+    /// with [`chain`](Self::chain) and [`sign`](Self::sign).
     #[must_use]
-    pub fn with_parents(mut self, parents: impl IntoIterator<Item = ContentHash>) -> Self {
+    pub fn parents(mut self, parents: impl IntoIterator<Item = ContentHash>) -> Self {
         self.parents = parents.into_iter().collect();
         self
     }
@@ -397,7 +397,7 @@ impl Message {
     /// Stamp the [`Shard`] header (which slice of a split body this
     /// message carries) before signing. `None` leaves it an ordinary message.
     #[must_use]
-    pub fn with_shard(mut self, shard: Option<Shard>) -> Self {
+    pub fn shard(mut self, shard: Option<Shard>) -> Self {
         self.shard = shard;
         self
     }
@@ -407,7 +407,7 @@ impl Message {
     /// (dedup, poll cursor, echo) *is* the payload's own id; receive validates the two
     /// agree.
     #[must_use]
-    pub fn with_id(mut self, id: MessageId) -> Self {
+    pub fn id(mut self, id: MessageId) -> Self {
         self.id = id;
         self
     }
@@ -531,7 +531,7 @@ impl Message {
     /// This message claiming `key` as its author, with a signature that does not verify: for a
     /// test that needs a message with an author key and never checks the signature.
     #[must_use]
-    pub fn with_unverified_key(mut self, key: AuthorKey) -> Self {
+    pub fn unverified_key(mut self, key: AuthorKey) -> Self {
         self.signer = Some(Signer::new(key, Signature::from_bytes(&[0u8; 64])));
         self
     }

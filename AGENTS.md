@@ -259,7 +259,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 ### Rules of the guide that do not apply
 
 - A rule that the guide tags for Chromium, Android or Fuchsia does not apply. This repository is none of them.
-- The guide names a closure accessor `with_foo`. This repository also uses `with_foo` for a builder method that returns `Self`, for example `EndpointAddr::with_ip_addr` of iroh. Keep the builder meaning.
+- The guide names a closure accessor `with_foo`, and this repository keeps that form for closure accessors only (`with_step`, `with_live`, `with_state`). A builder takes its field name (`fn relay(mut self, url) -> Self`), so `with_` is never a builder prefix here (Z31). The `with_ip_addr` and `with_relay_url` calls are iroh's own builders and keep their names.
 
 ### Rules still under audit
 

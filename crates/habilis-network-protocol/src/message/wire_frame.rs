@@ -65,7 +65,7 @@ impl WireFrame {
     /// are unchanged. Call it on a frame from [`Verified::serialize`](super::Verified::serialize); a
     /// frame that already carries a trailer is not re-named.
     #[must_use]
-    pub fn with_resend_nonce(&self, nonce: u64) -> WireFrame {
+    pub fn copy_with_resend_nonce(&self, nonce: u64) -> WireFrame {
         debug_assert!(
             super::split_resend_trailer(&self.0).1.is_none(),
             "a frame from Verified::serialize has no resend trailer yet"

@@ -63,20 +63,20 @@ impl Member {
         max_direct: usize,
     ) -> Self {
         let options = membership::JoinOptions::default()
-            .with_nick(Some(nick.to_owned()))
-            .with_lookup(vec![Lookup::Relay]);
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
         let options = options
-            .with_transport(transport)
-            .with_relay_urls(vec![relay.to_string()]);
-        let options = options.with_max_direct(max_direct);
+            .transport(transport)
+            .relay_urls(vec![relay.to_string()]);
+        let options = options.max_direct(max_direct);
         Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
         let mesh = creator.membership.node.mesh_id().to_string();
         let options = membership::JoinOptions::default()
-            .with_nick(Some(nick.to_owned()))
-            .with_mesh(Some(mesh));
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
         Self::open(&options).await
     }
 

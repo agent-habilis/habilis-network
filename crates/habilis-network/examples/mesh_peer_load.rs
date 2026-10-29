@@ -244,14 +244,14 @@ async fn main() -> anyhow::Result<()> {
 
     let mut relay_server = None;
     let options = if let Some(id) = std::env::args().nth(1) {
-        JoinOptions::default().with_mesh(Some(id))
+        JoinOptions::default().mesh(Some(id))
     } else {
         let (url, server) = test_relay::spawn_plain().await?;
         relay_server = Some(server);
         JoinOptions::default()
-            .with_lookup(vec![Lookup::Relay])
-            .with_transport(transports()?)
-            .with_relay_urls(vec![url.to_string()])
+            .lookup(vec![Lookup::Relay])
+            .transport(transports()?)
+            .relay_urls(vec![url.to_string()])
     };
     let (kind, author) = resolve_kind(&options, None)?;
 
@@ -261,8 +261,8 @@ async fn main() -> anyhow::Result<()> {
     let config: habilis_network::runtime::EventLoopConfig = setup_mesh(
         kind,
         SetupParams::new(author.clone(), SilentSink::default())
-            .with_max_peers(max_peers)
-            .with_max_direct(max_direct),
+            .max_peers(max_peers)
+            .max_direct(max_direct),
     )
     .await?;
 

@@ -44,9 +44,9 @@ impl Args {
         let transport = self.transport.clone();
         let relay_urls = self.relay_urls.clone();
         StreamOpts::default()
-            .with_lookup(lookup)
-            .with_transport(transport)
-            .with_relay_urls(relay_urls)
+            .lookup(lookup)
+            .transport(transport)
+            .relay_urls(relay_urls)
     }
 
     /// The page URL for `hash`, when a web address is known. The hash rides in

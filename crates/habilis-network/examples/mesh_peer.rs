@@ -98,15 +98,15 @@ async fn main() -> anyhow::Result<()> {
             None => habilis_network::protocol::RelayChoice::Pinned,
         };
         let transport = TransportPolicy::default()
-            .with_relay_transport(
+            .relay_transport(
                 std::env::var_os("MESH_RELAY_TRANSPORT").is_some_and(|value| value == "on"),
             )
-            .with_udp(udp);
+            .udp(udp);
         let mesh: habilis_network::protocol::Mesh =
             habilis_network::runtime::derive_topic_mesh_config(
                 &topic,
                 MeshConfig::new(
-                    LookupOpts::new(ladder).with_mdns(true).with_dht(true),
+                    LookupOpts::new(ladder).mdns(true).dht(true),
                     None,
                     None,
                     transport,
@@ -125,10 +125,10 @@ async fn main() -> anyhow::Result<()> {
     let arg = std::env::args().nth(1);
     // Baked into the id, so a joiner inherits it: only the creator reads the env var.
     let create_transport = TransportPolicy::default()
-        .with_relay_transport(
+        .relay_transport(
             std::env::var_os("MESH_RELAY_TRANSPORT").is_some_and(|value| value == "on"),
         )
-        .with_udp(udp);
+        .udp(udp);
     let Resolved {
         kind,
         author,
@@ -148,8 +148,8 @@ async fn main() -> anyhow::Result<()> {
             MeshConfig::new(LookupOpts::public_preset(), None, None, create_transport),
             DirectorySelection::Unset,
         )
-        .with_password(None)
-        .with_invite_only(false)
+        .password(None)
+        .invite_only(false)
         .resolve()?,
     };
 
@@ -169,8 +169,8 @@ async fn run_peer(
     let config = setup_mesh(
         kind,
         SetupParams::new(author.clone(), SilentSink::default())
-            .with_max_peers(16)
-            .with_live_count(live_count),
+            .max_peers(16)
+            .live_count(live_count),
     )
     .await?;
 

@@ -151,13 +151,13 @@ impl StreamHash {
         let (_id, address) = endpoint_addr_from_json(&value)
             .map_err(HashError::field("invalid stream hash address"))?;
         let policy = TransportPolicy::default()
-            .with_udp(flags & NO_UDP_BIT == 0)
-            .with_webrtc(flags & NO_WEBRTC_BIT == 0);
+            .udp(flags & NO_UDP_BIT == 0)
+            .webrtc(flags & NO_WEBRTC_BIT == 0);
         // A stream is one direct lane: its node has no multi-hop.
         let transport = policy
-            .with_multihop(false)
-            .with_gossip(false)
-            .with_relay_transport(flags & RELAY_TRANSPORT_BIT != 0);
+            .multihop(false)
+            .gossip(false)
+            .relay_transport(flags & RELAY_TRANSPORT_BIT != 0);
         Ok(Self {
             address,
             lookups,

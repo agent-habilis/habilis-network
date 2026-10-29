@@ -73,15 +73,15 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
         let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let (sink_a, _events_a) = membership::json_sink();
         let options = membership::JoinOptions::default()
-            .with_nick(Some("alice".to_owned()))
-            .with_lookup(vec![Lookup::Relay]);
+            .nick(Some("alice".to_owned()))
+            .lookup(vec![Lookup::Relay]);
         let options = options
-            .with_transport(vec![
+            .transport(vec![
                 Transport::WebRtc,
                 Transport::Multihop,
                 Transport::Relay,
             ])
-            .with_relay_urls(vec![relay.to_string()]);
+            .relay_urls(vec![relay.to_string()]);
         let alice: Membership = membership::join(&options, sink_a)
             .await
             .expect("open alice");
@@ -89,8 +89,8 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
         let mesh = alice.node.mesh_id().to_string();
         let bob: Membership = membership::join(
             &membership::JoinOptions::default()
-                .with_nick(Some("bob".to_owned()))
-                .with_mesh(Some(mesh)),
+                .nick(Some("bob".to_owned()))
+                .mesh(Some(mesh)),
             sink_b,
         )
         .await

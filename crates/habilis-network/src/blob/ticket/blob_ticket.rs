@@ -48,7 +48,7 @@ pub struct BlobTicket {
 
 impl BlobTicket {
     /// A ticket for the blob with `sha256` and `size` bytes, served by the producer at `address`
-    /// and redeemed with `secret`. It has no password until [`Self::with_password`]. The six types
+    /// and redeemed with `secret`. It has no password until [`Self::password`]. The six types
     /// differ, so no two arguments can be swapped.
     #[must_use]
     pub fn new(
@@ -72,7 +72,7 @@ impl BlobTicket {
 
     /// Set whether the ticket needs the mesh password.
     #[must_use]
-    pub fn with_password(
+    pub fn password(
         mut self,
         // true makes the consumer present the stretch of the password
         password: bool,

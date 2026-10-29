@@ -114,7 +114,7 @@ impl StreamNode {
         let producers = address_book(&endpoint);
         // the producers and the acceptor share this registry with the node
         let registry = Arc::new(Registry::default());
-        let ice = IceProfile::default().with_host_only(lookups.is_loopback());
+        let ice = IceProfile::default().host_only(lookups.is_loopback());
         let mut router = Router::builder(endpoint.clone()).accept(
             crate::STREAM_ALPN,
             StreamAcceptor {

@@ -56,7 +56,7 @@ pub fn derive_topic_mesh(string: &str) -> Result<Mesh, SetupError> {
     // Deliberately applied here and not in `derive_topic_mesh_with`: a caller
     // that states its own reach must not have it silently rewritten.
     let lookups = if tuning::topic_mdns_only_for_test() {
-        LookupOpts::new(RelayChoice::Disabled).with_mdns(true)
+        LookupOpts::new(RelayChoice::Disabled).mdns(true)
     } else {
         LookupOpts::public_preset()
     };
@@ -225,7 +225,7 @@ mod topic_derivation_tests {
                 LookupOpts::public_preset(),
                 None,
                 None,
-                TransportPolicy::default().with_relay_transport(true),
+                TransportPolicy::default().relay_transport(true),
             ),
         )
         .expect("derive");
@@ -253,7 +253,7 @@ mod topic_derivation_tests {
             LookupOpts::loopback(),
             None,
             None,
-            TransportPolicy::default().with_relay_transport(true),
+            TransportPolicy::default().relay_transport(true),
         );
         assert!(
             derive_topic_mesh_config("standup", config).is_err(),

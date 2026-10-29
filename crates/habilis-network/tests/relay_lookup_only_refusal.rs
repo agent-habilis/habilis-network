@@ -111,19 +111,19 @@ async fn spawn(
             LookupOpts::new(RelayChoice::Custom(vec![relay.clone()])),
             None,
             None,
-            TransportPolicy::default().with_relay_transport(relay_transport),
+            TransportPolicy::default().relay_transport(relay_transport),
         ),
     )
     .expect("derive a relay-only mesh");
     let author = Nickname::try_new(nick).expect("valid nickname");
     let transports: TransportOpts = TransportOpts::default()
-        .with_udp(false)
-        .with_relay(true)
-        .with_webrtc(false)
-        .with_gossip(false);
+        .udp(false)
+        .relay(true)
+        .webrtc(false)
+        .gossip(false);
     let params = SetupParams::new(author, sink)
-        .with_max_peers(16)
-        .with_transports(transports);
+        .max_peers(16)
+        .transports(transports);
     let config: habilis_network::runtime::EventLoopConfig = setup_mesh(
         SetupKind::Topic {
             mesh,

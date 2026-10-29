@@ -189,10 +189,9 @@ async fn run_checked<Driver: NodeDriver>(
         })
         .map(|path| {
             let owner_pid = owner.map(shutdown::Owner::pid);
-            let file = StateFile::new(path, &mesh_str, &author, &mesh_name)
-                .with_base(runtime_base.clone());
-            file.with_topic(topic_string.as_deref())
-                .with_owner_pid(owner_pid)
+            let file =
+                StateFile::new(path, &mesh_str, &author, &mesh_name).base(runtime_base.clone());
+            file.topic(topic_string.as_deref()).owner_pid(owner_pid)
         });
     #[cfg(not(feature = "host"))]
     drop(state_file);

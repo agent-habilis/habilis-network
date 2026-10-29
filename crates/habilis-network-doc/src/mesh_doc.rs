@@ -281,7 +281,7 @@ impl MeshDoc {
     /// Set this channel's encryption key (the daemon's per-channel
     /// mesh-password-derived key). `None` leaves the channel in plaintext.
     #[must_use]
-    pub fn with_key(mut self, key: Option<SymmetricKey>) -> Self {
+    pub fn key(mut self, key: Option<SymmetricKey>) -> Self {
         self.key = key;
         self
     }
@@ -915,7 +915,7 @@ mod tests {
                 super::wire::change_body(bytes, None).expect("body"),
                 Channel::State,
             )
-            .with_unverified_key(key),
+            .unverified_key(key),
             key,
         )
     }
@@ -1679,7 +1679,7 @@ mod tests {
         let key = [42u8; 32];
         // Author builds the change and seals the wire body, as the daemon does.
         let merge = json!({"secret": "value"});
-        let author_doc = MeshDoc::new_ungated().with_key(Some(SymmetricKey::from(key)));
+        let author_doc = MeshDoc::new_ungated().key(Some(SymmetricKey::from(key)));
         let seed = pad_seed(alice.as_str().as_bytes());
         let bytes: Vec<u8> = author_doc
             .build_change(&merge, &seed)
@@ -1691,7 +1691,7 @@ mod tests {
         let signer = AuthorKey::from(pad_seed(alice.as_str().as_bytes()));
         let carrier = Verified::fixture_unchecked(
             Message::new_channel_event(&MeshId::from("test"), &alice, wire, Channel::State)
-                .with_unverified_key(signer),
+                .unverified_key(signer),
             signer,
         );
         assert!(
@@ -1701,7 +1701,7 @@ mod tests {
 
         // A peer holding the key applies it and converges; surface_body recovers
         // the plaintext for the delta.
-        let mut with_key = MeshDoc::new_ungated().with_key(Some(SymmetricKey::from(key)));
+        let mut with_key = MeshDoc::new_ungated().key(Some(SymmetricKey::from(key)));
         assert!(
             matches!(with_key.ingest(&carrier), Ingested::Applied { .. }),
             "an encrypted change converges with the key"
@@ -1728,7 +1728,7 @@ mod tests {
             json!({}),
             "the no-key sink holds no change json"
         );
-        let mut wrong_key = MeshDoc::new_ungated().with_key(Some(SymmetricKey::from([7u8; 32])));
+        let mut wrong_key = MeshDoc::new_ungated().key(Some(SymmetricKey::from([7u8; 32])));
         assert!(
             matches!(wrong_key.ingest(&carrier), Ingested::Ignored),
             "an encrypted change is buffered with the wrong key"

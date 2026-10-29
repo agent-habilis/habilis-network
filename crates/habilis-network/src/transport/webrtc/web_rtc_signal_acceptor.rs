@@ -181,7 +181,7 @@ impl WebRtcSignalAcceptor {
 
     /// Shorten the deadlines, for tests that must not wait 45 real seconds.
     #[cfg(test)]
-    pub(crate) fn with_deadlines(mut self, deadlines: SignalDeadlines) -> Self {
+    pub(crate) fn deadlines(mut self, deadlines: SignalDeadlines) -> Self {
         self.deadlines = deadlines;
         self
     }

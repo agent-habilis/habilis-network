@@ -100,7 +100,7 @@ async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Probe> {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams::new(author, sink).with_max_peers(16),
+        SetupParams::new(author, sink).max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");

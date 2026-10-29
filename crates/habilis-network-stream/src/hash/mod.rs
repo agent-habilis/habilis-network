@@ -65,11 +65,11 @@ mod tests {
     }
 
     fn policy(udp: bool, webrtc: bool, relay_transport: bool) -> TransportPolicy {
-        let policy = TransportPolicy::default().with_udp(udp).with_webrtc(webrtc);
+        let policy = TransportPolicy::default().udp(udp).webrtc(webrtc);
         policy
-            .with_multihop(false)
-            .with_gossip(false)
-            .with_relay_transport(relay_transport)
+            .multihop(false)
+            .gossip(false)
+            .relay_transport(relay_transport)
     }
 
     #[test]

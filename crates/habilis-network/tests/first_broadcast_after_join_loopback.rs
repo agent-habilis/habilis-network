@@ -83,19 +83,19 @@ impl Member {
 
     async fn create(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
         let options = membership::JoinOptions::default()
-            .with_nick(Some(nick.to_owned()))
-            .with_lookup(vec![Lookup::Relay]);
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
         let options = options
-            .with_transport(transport)
-            .with_relay_urls(vec![relay.to_string()]);
+            .transport(transport)
+            .relay_urls(vec![relay.to_string()]);
         Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
         let mesh = creator.membership.node.mesh_id().to_string();
         let options = membership::JoinOptions::default()
-            .with_nick(Some(nick.to_owned()))
-            .with_mesh(Some(mesh));
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
         Self::open(&options).await
     }
 
@@ -328,7 +328,7 @@ impl LoggingMember {
                 // The membership keeps its sink as a trait object for its whole life.
                 Arc::new(Quiet),
             )
-            .with_max_peers(16),
+            .max_peers(16),
         )
         .await
         .expect("setup_mesh on a loopback mesh");

@@ -38,7 +38,7 @@ pub(crate) struct UnicastAcceptor {
 
 impl UnicastAcceptor {
     /// Report the streams of this acceptor to `admission`.
-    pub(crate) fn with_admission(mut self, admission: super::admission::SignalAdmission) -> Self {
+    pub(crate) fn admission(mut self, admission: super::admission::SignalAdmission) -> Self {
         self.admission = Some(admission);
         self
     }
