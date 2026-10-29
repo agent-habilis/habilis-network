@@ -61,7 +61,7 @@ async fn roster(member: &Membership) -> Vec<String> {
 /// more. A member that releases twice counts once.
 fn members_released_with_enough_links() -> usize {
     let logs = logs();
-    let released = logs
+    let members: BTreeSet<_> = logs
         .lines()
         .filter(|line| line.contains("released the rendezvous"))
         .filter(|line| {
@@ -70,6 +70,7 @@ fn members_released_with_enough_links() -> usize {
             word.and_then(|count| -> Option<usize> { count.parse().ok() })
                 .is_some_and(|count| count >= RELEASE_LINKS)
         })
+        .filter_map(|line| line.split("local=").nth(1)?.split_whitespace().next())
         .collect();
     members.len()
 }
