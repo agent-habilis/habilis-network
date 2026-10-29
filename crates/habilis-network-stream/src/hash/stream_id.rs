@@ -13,13 +13,13 @@ pub struct StreamId([u8; ID_LEN]);
 impl StreamId {
     /// Wrap the 16 bytes of an id.
     #[must_use]
-    pub const fn from_bytes(bytes: [u8; ID_LEN]) -> Self {
+    pub fn from_bytes(bytes: [u8; ID_LEN]) -> Self {
         Self(bytes)
     }
 
     /// The raw bytes, borrowed.
     #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; ID_LEN] {
+    pub fn as_bytes(&self) -> &[u8; ID_LEN] {
         &self.0
     }
 }

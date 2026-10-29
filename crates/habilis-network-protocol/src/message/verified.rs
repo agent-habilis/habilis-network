@@ -99,7 +99,7 @@ impl Verified {
 
     /// The key that signed the message. Never absent: a `Verified` has a signature.
     #[must_use]
-    pub const fn key(&self) -> AuthorKey {
+    pub fn key(&self) -> AuthorKey {
         self.key
     }
 
@@ -376,7 +376,7 @@ impl Authored {
 
     /// The key that signed the message this body came from.
     #[must_use]
-    pub const fn key(&self) -> AuthorKey {
+    pub fn key(&self) -> AuthorKey {
         self.key
     }
 

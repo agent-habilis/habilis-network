@@ -33,13 +33,13 @@ impl Coverage {
 
     /// How many chunks the map has.
     #[must_use]
-    pub const fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.len
     }
 
     /// Whether the map has no chunks at all.
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 

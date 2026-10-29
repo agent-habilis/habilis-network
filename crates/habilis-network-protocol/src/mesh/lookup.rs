@@ -58,7 +58,7 @@ pub(super) const MAX_RELAY_URL_BYTES: usize = 512;
 impl LookupOpts {
     /// Every lookup off, with the relay choice given. Turn one on with its `with_` method.
     #[must_use]
-    pub const fn new(relay_lookup: RelayChoice) -> Self {
+    pub fn new(relay_lookup: RelayChoice) -> Self {
         Self {
             mdns: false,
             dht: false,
@@ -348,7 +348,7 @@ pub struct MeshConfig {
 impl MeshConfig {
     /// The mesh config from its four parts.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         lookups: LookupOpts,
         password: Option<[u8; PASSWORD_VERIFIER_LEN]>,
         issuer_pubkey: Option<[u8; ISSUER_PUBKEY_LEN]>,

@@ -28,13 +28,13 @@ impl UnixSecs {
 
     /// A point `secs` seconds after the epoch.
     #[must_use]
-    pub const fn from_secs(secs: i64) -> Self {
+    pub fn from_secs(secs: i64) -> Self {
         Self(secs)
     }
 
     /// The seconds since the epoch, for a wire field or a log line.
     #[must_use]
-    pub const fn as_secs(self) -> i64 {
+    pub fn as_secs(self) -> i64 {
         self.0
     }
 
@@ -68,13 +68,13 @@ impl UnixSecs {
 
     /// The 8 little-endian bytes of the count: what a signature and an invite carry.
     #[must_use]
-    pub const fn to_le_bytes(self) -> [u8; 8] {
+    pub fn to_le_bytes(self) -> [u8; 8] {
         self.0.to_le_bytes()
     }
 
     /// The point whose count is the 8 little-endian bytes `bytes`.
     #[must_use]
-    pub const fn from_le_bytes(bytes: [u8; 8]) -> Self {
+    pub fn from_le_bytes(bytes: [u8; 8]) -> Self {
         Self(i64::from_le_bytes(bytes))
     }
 }

@@ -21,12 +21,7 @@ pub struct AppFrameParams {
 impl AppFrameParams {
     /// The parts of an app frame: its tag, the addressee and the request id, if any, and the body.
     #[must_use]
-    pub const fn new(
-        tag: AppTag,
-        to: Option<Nickname>,
-        corr: Option<CorrId>,
-        body: MessageBody,
-    ) -> Self {
+    pub fn new(tag: AppTag, to: Option<Nickname>, corr: Option<CorrId>, body: MessageBody) -> Self {
         Self {
             tag,
             to,

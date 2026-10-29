@@ -10,13 +10,13 @@ pub struct BlobDigest([u8; HASH_LEN]);
 impl BlobDigest {
     /// Wrap the 32 bytes of a SHA-256.
     #[must_use]
-    pub const fn from_bytes(bytes: [u8; HASH_LEN]) -> Self {
+    pub fn from_bytes(bytes: [u8; HASH_LEN]) -> Self {
         Self(bytes)
     }
 
     /// The raw bytes, borrowed.
     #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; HASH_LEN] {
+    pub fn as_bytes(&self) -> &[u8; HASH_LEN] {
         &self.0
     }
 }

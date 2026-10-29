@@ -28,13 +28,13 @@ pub struct AppId(EndpointId);
 impl AppId {
     /// The id of the application endpoint that has the id `id`.
     #[must_use]
-    pub const fn new(id: EndpointId) -> Self {
+    pub fn new(id: EndpointId) -> Self {
         Self(id)
     }
 
     /// The endpoint id.
     #[must_use]
-    pub const fn get(self) -> EndpointId {
+    pub fn get(self) -> EndpointId {
         self.0
     }
 
@@ -59,13 +59,13 @@ pub struct UnderlayId(EndpointId);
 impl UnderlayId {
     /// The id of the underlay endpoint that has the id `id`.
     #[must_use]
-    pub const fn new(id: EndpointId) -> Self {
+    pub fn new(id: EndpointId) -> Self {
         Self(id)
     }
 
     /// The endpoint id.
     #[must_use]
-    pub const fn get(self) -> EndpointId {
+    pub fn get(self) -> EndpointId {
         self.0
     }
 

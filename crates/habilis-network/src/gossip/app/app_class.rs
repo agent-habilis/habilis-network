@@ -34,13 +34,13 @@ impl AppClass {
 
     /// Both policies at once.
     #[must_use]
-    pub const fn union(self, other: Self) -> Self {
+    pub fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
     /// This policy, plus `flag` when `on`.
     #[must_use]
-    pub const fn with_if(
+    pub fn with_if(
         self,
         flag: Self,
         // true adds flag to the policy, false leaves the policy as it is
@@ -51,31 +51,31 @@ impl AppClass {
 
     /// Whether the frame goes in the message log ([`AppClass::LOGGABLE`](super::AppClass::LOGGABLE)).
     #[must_use]
-    pub const fn loggable(self) -> bool {
+    pub fn loggable(self) -> bool {
         self.0 & Self::LOGGABLE.0 != 0
     }
 
     /// Whether the frame is a liveness beat ([`AppClass::BEAT`](super::AppClass::BEAT)).
     #[must_use]
-    pub const fn beat(self) -> bool {
+    pub fn beat(self) -> bool {
         self.0 & Self::BEAT.0 != 0
     }
 
     /// Whether the frame's payload is valid ([`AppClass::VALID`](super::AppClass::VALID)).
     #[must_use]
-    pub const fn valid(self) -> bool {
+    pub fn valid(self) -> bool {
         self.0 & Self::VALID.0 != 0
     }
 
     /// Whether the frame is chained ([`AppClass::CHAINED`](super::AppClass::CHAINED)).
     #[must_use]
-    pub const fn chained(self) -> bool {
+    pub fn chained(self) -> bool {
         self.0 & Self::CHAINED.0 != 0
     }
 
     /// Whether the directed body is sealed ([`AppClass::SEALED`](super::AppClass::SEALED)).
     #[must_use]
-    pub const fn sealed(self) -> bool {
+    pub fn sealed(self) -> bool {
         self.0 & Self::SEALED.0 != 0
     }
 }

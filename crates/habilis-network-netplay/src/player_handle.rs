@@ -13,13 +13,13 @@ pub struct PlayerHandle(usize);
 impl PlayerHandle {
     /// The handle of roster slot `index`.
     #[must_use]
-    pub const fn new(index: usize) -> Self {
+    pub fn new(index: usize) -> Self {
         Self(index)
     }
 
     /// The roster slot this handle names.
     #[must_use]
-    pub const fn index(self) -> usize {
+    pub fn index(self) -> usize {
         self.0
     }
 }

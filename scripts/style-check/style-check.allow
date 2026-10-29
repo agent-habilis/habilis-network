@@ -30,24 +30,7 @@ operator|crates/habilis-network-util/src/unix_secs.rs|2|UnixSecs plus or minus a
 operator|crates/habilis-network/src/gossip/app/app_class.rs|1|AppClass bit flags: BitOr joins two sets of flags.
 
 # pub_const_fn: a public const fn (U21). Each row is a count that may only go down.
-pub_const_fn|crates/habilis-network-chunks/src/chunk_hash.rs|4|kept: ChunkHash and Root newtype accessors and constructors (from_bytes, as_bytes), plus trivial accessors (root, size, len, is_empty)
-pub_const_fn|crates/habilis-network-chunks/src/chunk_map.rs|2|kept: ChunkHash and Root newtype accessors and constructors (from_bytes, as_bytes), plus trivial accessors (root, size, len, is_empty)
-pub_const_fn|crates/habilis-network-chunks/src/coverage.rs|2|kept: ChunkHash and Root newtype accessors and constructors (from_bytes, as_bytes), plus trivial accessors (root, size, len, is_empty)
-pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/link_metric.rs|2|kept: newtype rule (LinkMetric new and get)
-pub_const_fn|crates/habilis-network-iroh-multihop-transport/src/app_id.rs|4|kept: newtype rule (AppId and UnderlayId new and get)
-pub_const_fn|crates/habilis-network-netplay/src/frame.rs|2|kept: newtype rule (Frame new and get)
-pub_const_fn|crates/habilis-network-netplay/src/player_handle.rs|2|kept: newtype rule (PlayerHandle new and index)
-pub_const_fn|crates/habilis-network-netplay/src/mesh/lobby.rs|8|kept: newtype rule (Epoch, SessionId, Tick, TickSpan new, get, next, since)
-pub_const_fn|crates/habilis-network-protocol/src/author_key.rs|3|kept: newtype rule (from_bytes, as_bytes, to_bytes of a 32- or 16-byte key or hash)
-pub_const_fn|crates/habilis-network-protocol/src/content_hash.rs|2|kept: newtype rule (from_bytes, as_bytes, to_bytes of a 32- or 16-byte key or hash)
-pub_const_fn|crates/habilis-network-protocol/src/crypto/seed.rs|2|kept: newtype rule (from_bytes, as_bytes, to_bytes of a 32- or 16-byte key or hash)
-pub_const_fn|crates/habilis-network-protocol/src/dedup_key.rs|3|kept: newtype rule (from_bytes, as_bytes, to_bytes of a 32- or 16-byte key or hash)
-pub_const_fn|crates/habilis-network-protocol/src/mesh/lookup.rs|2|kept: const constructor of the lookup options (new), reviewer to confirm a const context
-pub_const_fn|crates/habilis-network-protocol/src/message/verified.rs|2|kept: trivial accessor key of a verified message (reviewer to confirm)
-pub_const_fn|crates/habilis-network-protocol/src/topic_id.rs|3|kept: newtype rule (from_bytes, as_bytes, to_bytes of a 32- or 16-byte key or hash)
-pub_const_fn|crates/habilis-network-stream/src/hash/stream_id.rs|2|kept: newtype rule (StreamId from_bytes and as_bytes)
-pub_const_fn|crates/habilis-network-util/src/unix_secs.rs|4|kept: 4 UnixSecs newtype accessors and constructors (newtype rule)
-pub_const_fn|crates/habilis-network/src/gossip/app/app_class.rs|7|kept: flag set of a gossip message (union, with_if, loggable, beat, valid, chained, sealed): bit-flag logic
+pub_const_fn|crates/habilis-network-protocol/src/crypto/seed.rs|1|kept: Seed::from_bytes is used in a const item of the protocol crate (a const context)
 
 # A hand-written Eq, Ord or PartialOrd: the compiler checks a derive, not a manual impl.
 
@@ -686,7 +669,6 @@ long_chain|crates/habilis-network-stream/src/hash/mod.rs|1|kept: statements with
 abbrev_name|crates/habilis-network/src/lifecycle/observed.rs|5|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/lifecycle/presence_event.rs|9|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network/src/net.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-pub_const_fn|crates/habilis-network/src/blob/blob_digest.rs|2|kept: newtype rule (BlobDigest from_bytes and as_bytes)
 abbrev_name|crates/habilis-network-stream/src/node/stream_node.rs|19|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream/src/node/tests.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 assert_no_message|crates/habilis-network-stream/src/node/tests.rs|2|kept: assert without a message, to be given one (P13 rollout)
@@ -719,11 +701,9 @@ trait_import_scope|crates/habilis-network/src/transport/probe/watchers.rs|1|kept
 abbrev_name|crates/habilis-network-protocol/src/mesh/mesh.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network-protocol/src/mesh/locked_mesh.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/mesh/mesh.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-pub_const_fn|crates/habilis-network-protocol/src/message/signer.rs|3|kept: trivial accessors of a signer and a constructor (moved from message/mod.rs)
 long_chain|crates/habilis-network/src/beacon/dependents.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/message/wire_in.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/message/wire_out.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-pub_const_fn|crates/habilis-network-protocol/src/message/app_frame_params.rs|1|kept: the const constructor of an app frame parameter set (moved from message/mod.rs)
 abbrev_name|crates/habilis-network/src/beacon/rival_probe.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 trait_import_scope|crates/habilis-network/src/beacon/rival_probe.rs|1|kept: a trait imported at the top of the file for its methods (O22 rollout)
 long_chain|crates/habilis-network/src/beacon/rung_watch.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)

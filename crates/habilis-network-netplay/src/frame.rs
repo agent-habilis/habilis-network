@@ -64,13 +64,13 @@ impl Frame {
 
     /// The frame with number `number`.
     #[must_use]
-    pub const fn new(number: i32) -> Self {
+    pub fn new(number: i32) -> Self {
         Self(number)
     }
 
     /// The frame number.
     #[must_use]
-    pub const fn get(self) -> i32 {
+    pub fn get(self) -> i32 {
         self.0
     }
 }

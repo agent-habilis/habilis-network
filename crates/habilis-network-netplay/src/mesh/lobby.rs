@@ -49,19 +49,19 @@ impl Epoch {
 
     /// The match with number `number`.
     #[must_use]
-    pub const fn new(number: u64) -> Self {
+    pub fn new(number: u64) -> Self {
         Self(number)
     }
 
     /// The match number.
     #[must_use]
-    pub const fn get(self) -> u64 {
+    pub fn get(self) -> u64 {
         self.0
     }
 
     /// The match after this one.
     #[must_use]
-    pub const fn next(self) -> Self {
+    pub fn next(self) -> Self {
         Self(self.0 + 1)
     }
 }
@@ -82,13 +82,13 @@ pub struct SessionId(u64);
 impl SessionId {
     /// The id with value `value`.
     #[must_use]
-    pub const fn new(value: u64) -> Self {
+    pub fn new(value: u64) -> Self {
         Self(value)
     }
 
     /// The id as a number.
     #[must_use]
-    pub const fn get(self) -> u64 {
+    pub fn get(self) -> u64 {
         self.0
     }
 }
@@ -107,13 +107,13 @@ pub struct Tick(u64);
 impl Tick {
     /// The tick with number `number`.
     #[must_use]
-    pub const fn new(number: u64) -> Self {
+    pub fn new(number: u64) -> Self {
         Self(number)
     }
 
     /// How long ago `earlier` was, `0` when it is not earlier.
     #[must_use]
-    pub const fn since(self, earlier: Self) -> TickSpan {
+    pub fn since(self, earlier: Self) -> TickSpan {
         TickSpan(self.0.saturating_sub(earlier.0))
     }
 }
@@ -125,7 +125,7 @@ pub struct TickSpan(u64);
 impl TickSpan {
     /// A span of `ticks` ticks.
     #[must_use]
-    pub const fn new(ticks: u64) -> Self {
+    pub fn new(ticks: u64) -> Self {
         Self(ticks)
     }
 }

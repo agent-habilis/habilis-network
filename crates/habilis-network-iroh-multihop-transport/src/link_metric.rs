@@ -17,13 +17,13 @@ pub struct LinkMetric(u32);
 impl LinkMetric {
     /// A link cost of `cost`.
     #[must_use]
-    pub const fn new(cost: u32) -> Self {
+    pub fn new(cost: u32) -> Self {
         Self(cost)
     }
 
     /// The cost as a number.
     #[must_use]
-    pub const fn get(self) -> u32 {
+    pub fn get(self) -> u32 {
         self.0
     }
 

@@ -66,7 +66,7 @@ impl ChunkMap {
 
     /// The name of this file.
     #[must_use]
-    pub const fn root(&self) -> Root {
+    pub fn root(&self) -> Root {
         self.root
     }
 
@@ -78,7 +78,7 @@ impl ChunkMap {
 
     /// Total bytes described.
     #[must_use]
-    pub const fn size(&self) -> u64 {
+    pub fn size(&self) -> u64 {
         self.size
     }
 

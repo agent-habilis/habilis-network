@@ -16,19 +16,19 @@ impl Signer {
     /// Pair a key with the signature it made. Nothing checks it here: [`Message::verify_signature_with`]
     /// does.
     #[must_use]
-    pub(crate) const fn new(key: AuthorKey, signature: Signature) -> Self {
+    pub(crate) fn new(key: AuthorKey, signature: Signature) -> Self {
         Self { key, signature }
     }
 
     /// The key that signed.
     #[must_use]
-    pub const fn key(&self) -> AuthorKey {
+    pub fn key(&self) -> AuthorKey {
         self.key
     }
 
     /// The detached signature.
     #[must_use]
-    pub const fn signature(&self) -> &Signature {
+    pub fn signature(&self) -> &Signature {
         &self.signature
     }
 }
