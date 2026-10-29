@@ -175,7 +175,8 @@ impl FastRounds {
         holds: impl Fn(&[String]) -> bool,
         reachable: impl Fn(&AuthorKey) -> bool,
     ) -> Option<(AuthorKey, Nickname)> {
-        let waiting = self.rounds.get(&channel).is_some_and(|round| {
+        let round_entry = self.rounds.get(&channel);
+        let waiting = round_entry.is_some_and(|round| {
             now.duration_since(self.quiet_since(channel, round)) < FAST_ROUND_RETRY
         });
         let ahead = self.ahead.get_mut(&channel)?;
@@ -188,9 +189,10 @@ impl FastRounds {
         let round_index =
             round.and_then(|round| candidates.iter().position(|peer| peer.key == round.peer));
         let progress = round.is_none_or(|round| round.heads != ours);
+        let candidate_count = candidates.len();
         let pick = match round_index {
             Some(index) if progress => candidates.get(index),
-            Some(index) => candidates.get((index + 1) % candidates.len()),
+            Some(index) => candidates.get((index + 1) % candidate_count),
             None => candidates.first(),
         };
         pick.map(|peer| (peer.key, peer.author.clone()))

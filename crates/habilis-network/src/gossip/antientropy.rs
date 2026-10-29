@@ -341,7 +341,8 @@ fn answer_rank(digest_id: &str, member: &Nickname) -> (u64, String) {
     let hasher: Sha256 = Sha256::new()
         .chain_update(digest_id.as_bytes())
         .chain_update([0]);
-    let hash = hasher.chain_update(member.as_str().as_bytes()).finalize();
+    let member_bytes = member.as_str().as_bytes();
+    let hash = hasher.chain_update(member_bytes).finalize();
     let mut head = [0u8; 8];
     head.copy_from_slice(&hash[..8]);
     // The name breaks a tie, so the order is total.
@@ -919,8 +920,8 @@ mod budget_tests {
         state.meshed = true;
         let (mesh, author) = (MeshId::from("test"), nick("alice"));
         let seed = *state.identity.public().as_bytes();
-        let change = state
-            .doc(Channel::State)
+        let state_doc = state.doc(Channel::State);
+        let change = state_doc
             .build_change(&serde_json::json!({ "k": 1 }), &seed)
             .expect("a JSON object merges")
             .expect("a non-empty merge yields a change");
@@ -1257,8 +1258,8 @@ mod tests {
         merge: &serde_json::Value,
     ) {
         let seed = *state.identity.public().as_bytes();
-        let change = state
-            .doc(Channel::Meta)
+        let meta_doc = state.doc(Channel::Meta);
+        let change = meta_doc
             .build_change(merge, &seed)
             .expect("a JSON object merges")
             .expect("a non-empty merge yields a change");
@@ -1571,9 +1572,8 @@ mod tests {
     /// computes it.
     fn answer(node: &mut EventLoopState, holder: &MessageLog) -> HashSet<String> {
         let windows = digest_windows(node).expect("a non-empty log advertises");
-        let ids = windows
-            .iter()
-            .flat_map(|window| window.decode_ids().expect("our own encoding"));
+        let window_refs = windows.iter();
+        let ids = window_refs.flat_map(|window| window.decode_ids().expect("our own encoding"));
         let have: HashSet<DedupKey> = ids.collect();
         windows
             .iter()
@@ -1641,9 +1641,8 @@ mod tests {
         mut budget: usize,
     ) -> Vec<Verified> {
         let windows = digest_windows(node).expect("a non-empty log advertises");
-        let ids = windows
-            .iter()
-            .flat_map(|window| window.decode_ids().expect("our own encoding"));
+        let window_refs = windows.iter();
+        let ids = window_refs.flat_map(|window| window.decode_ids().expect("our own encoding"));
         let mut have: HashSet<DedupKey> = ids.collect();
         let mut sent = Vec::new();
         for window in &windows {
@@ -1726,9 +1725,8 @@ mod tests {
         let lost = all[ANTIENTROPY_DIGEST_WINDOW_IDS].dedup_key();
         let budget = tuning::antientropy_max_resend();
         let asked = (0..12).any(|_| {
-            answer_within_budget(&mut node, &holder, budget)
-                .iter()
-                .any(|message| message.dedup_key() == lost)
+            let replies = answer_within_budget(&mut node, &holder, budget);
+            replies.iter().any(|message| message.dedup_key() == lost)
         });
         assert!(
             asked,

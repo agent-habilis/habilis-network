@@ -493,16 +493,12 @@ mod real_gossip {
             .relay_mode(RelayMode::Disabled)
             .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
             .expect("bind address");
-        let endpoint = builder
-            .address_lookup(lookup.clone())
-            .bind()
-            .await
-            .expect("bind");
+        let endpoint_builder = builder.address_lookup(lookup.clone());
+        let endpoint = endpoint_builder.bind().await.expect("bind");
         lookup.add_endpoint_info(endpoint.addr());
         let gossip = Gossip::builder().spawn(endpoint.clone());
-        let router = Router::builder(endpoint.clone())
-            .accept(GOSSIP_ALPN, gossip.clone())
-            .spawn();
+        let router_builder = Router::builder(endpoint.clone()).accept(GOSSIP_ALPN, gossip.clone());
+        let router = router_builder.spawn();
         (endpoint, gossip, router)
     }
 
@@ -540,13 +536,11 @@ mod real_gossip {
             .await
             .expect("b joins");
         let (_b_sender, b_receiver) = b_topic.split();
-        let a_topic = tokio::time::timeout(
-            Duration::from_secs(20),
-            a_gossip.subscribe_and_join(topic_id, vec![b_endpoint.id()]),
-        )
-        .await
-        .expect("a joins in time")
-        .expect("a joins");
+        let joining = a_gossip.subscribe_and_join(topic_id, vec![b_endpoint.id()]);
+        let a_topic = tokio::time::timeout(Duration::from_secs(20), joining)
+            .await
+            .expect("a joins in time")
+            .expect("a joins");
         let (a_sender, _a_receiver) = a_topic.split();
 
         // B: the reader, and the busy loop.
@@ -602,7 +596,9 @@ mod real_gossip {
             }
             let mut datagram = vec![7u8; MAX_DATAGRAM_LEN];
             datagram[..8].copy_from_slice(&sent.to_le_bytes());
-            let frame = Frame::fixture(b_endpoint.id(), a_endpoint.id(), &datagram)
+            let dst_id = b_endpoint.id();
+            let src_id = a_endpoint.id();
+            let frame = Frame::fixture(dst_id, src_id, &datagram)
                 .encode()
                 .expect("frame");
             a_sender.broadcast(frame).await.expect("send");

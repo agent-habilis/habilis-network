@@ -892,9 +892,8 @@ async fn auto_pong(message: &Message, state: &EventLoopState, context: &HandlerC
     )
     .sign(context.identity);
     messages::log_out(&pong);
-    let warm_endpoint = state
-        .peer_endpoints
-        .get(message.author.as_str())
+    let author_endpoint = state.peer_endpoints.get(message.author.as_str());
+    let warm_endpoint = author_endpoint
         .map(|address| address.id)
         .filter(|eid| Some(*eid) != state.rendezvous_id);
     match (warm_endpoint, pong.serialize()) {
@@ -939,10 +938,8 @@ async fn handle_shard(
     }
     // The raw shard's own per-tag policy (loggability/chain) — computed from its
     // fragment body, matching the pre-thread behavior of the internal classify.
-    let shard_class = message
-        .kind
-        .app_tag()
-        .map(|_| app.classify(&message.authored()));
+    let kind_tag = message.kind.app_tag();
+    let shard_class = kind_tag.map(|_| app.classify(&message.authored()));
     // Only a small group's shards enter the message log (anti-entropy heals
     // them like any message — point-to-point when the shard is directed, so
     // the addressee still recovers); a big group would evict the mesh's whole
@@ -1159,9 +1156,8 @@ fn dispatch_channel(
 /// the original borrowed unchanged. The output helpers read `event.body` for the
 /// `m` delta, so they must see plaintext.
 fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
-    let body = plain
-        .filter(|text| text != frame.body.as_str())
-        .and_then(|text| MessageBody::try_new(&text).ok());
+    let changed = plain.filter(|text| text != frame.body.as_str());
+    let body = changed.and_then(|text| MessageBody::try_new(&text).ok());
     match body {
         Some(body) => frame.with_body(body),
         None => frame.authored(),
@@ -1461,7 +1457,8 @@ fn maybe_push_inbound(
     // plumbing) and not a liveness beat — the app's per-tag policy, threaded in
     // from the caller's single classification. An infra frame (`class == None`,
     // `app_tag` also `None`) is always pushable past the structural guards above.
-    let app_pushable = match message.kind.app_tag() {
+    let kind_tag = message.kind.app_tag();
+    let app_pushable = match kind_tag {
         Some(_) => class.is_some_and(|cls| cls.loggable() && !cls.beat()),
         None => true,
     };
@@ -2095,8 +2092,8 @@ mod evicted_orphan_tests {
         let seed = *writer.identity.public().as_bytes();
         (0..count)
             .map(|step| {
-                let change = writer
-                    .doc(Channel::State)
+                let state_doc = writer.doc(Channel::State);
+                let change = state_doc
                     .build_change(&json!({ format!("k{step}"): step }), &seed)
                     .expect("a JSON object merges")
                     .expect("a non-empty merge yields a change");
@@ -2185,9 +2182,8 @@ mod evicted_orphan_tests {
             !missing.is_empty(),
             "nothing was evicted, so this test proves nothing"
         );
-        let fresh = missing
-            .iter()
-            .filter(|frame| reader.seen.contains(&frame.dedup_key()));
+        let missing_refs = missing.iter();
+        let fresh = missing_refs.filter(|frame| reader.seen.contains(&frame.dedup_key()));
         let already_seen: usize = fresh.count();
         assert_eq!(
             already_seen,
@@ -2892,12 +2888,10 @@ mod first_contact_tests {
         use crate::protocol::peer_addr_error;
 
         async fn handle_for(secret: &SecretKey) -> MultihopHandle {
-            let underlay = Endpoint::builder(presets::Minimal)
+            let underlay_builder = Endpoint::builder(presets::Minimal)
                 .secret_key(underlay_secret(secret))
-                .relay_mode(RelayMode::Disabled)
-                .bind()
-                .await
-                .expect("bind an underlay");
+                .relay_mode(RelayMode::Disabled);
+            let underlay = underlay_builder.bind().await.expect("bind an underlay");
             MultihopHandle::new(
                 secret,
                 underlay,
@@ -3051,11 +3045,8 @@ mod first_contact_tests {
         .expect("serialize");
         let (parsed, nonce) = Message::parse_wire(inbound.as_bytes()).expect("parses");
         assert!(nonce.is_none(), "a relayed peer info carries no nonce");
-        let relayed = parsed
-            .verify()
-            .expect("verifies")
-            .serialize()
-            .expect("serialize");
+        let verified_frame = parsed.verify().expect("verifies");
+        let relayed = verified_frame.serialize().expect("serialize");
         assert_eq!(
             relayed.as_bytes(),
             inbound.as_bytes(),
@@ -3322,12 +3313,10 @@ mod link_state_tests {
 
     /// A handle over a loopback underlay on the key derived from `secret`.
     async fn handle_for(secret: &SecretKey) -> MultihopHandle {
-        let underlay = Endpoint::builder(presets::Minimal)
+        let underlay_builder = Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(secret))
-            .relay_mode(RelayMode::Disabled)
-            .bind()
-            .await
-            .expect("bind an underlay");
+            .relay_mode(RelayMode::Disabled);
+        let underlay = underlay_builder.bind().await.expect("bind an underlay");
         MultihopHandle::new(
             secret,
             underlay,
@@ -3565,12 +3554,10 @@ mod left_tests {
         .expect("a multihop peer binds");
         // Our own handle, with a short max age so that a test can wait it out.
         let secret = iroh::SecretKey::generate();
-        let underlay = iroh::Endpoint::builder(presets::Minimal)
+        let underlay_builder = iroh::Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(&secret))
-            .relay_mode(iroh::RelayMode::Disabled)
-            .bind()
-            .await
-            .expect("bind an underlay");
+            .relay_mode(iroh::RelayMode::Disabled);
+        let underlay = underlay_builder.bind().await.expect("bind an underlay");
         let config = HandleConfig::default().with_vector_max_age(Duration::from_millis(400));
         let handle = MultihopHandle::new(&secret, underlay, config).expect("a handle");
         let (leaver_endpoint, leaver_handle, _leaver_webrtc) = build_peer_multihop(
@@ -3711,12 +3698,10 @@ mod parked_link_state_tests {
     use crate::testing::{fresh_state, nick};
 
     async fn handle_for(secret: &SecretKey) -> MultihopHandle {
-        let underlay = Endpoint::builder(presets::Minimal)
+        let underlay_builder = Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(secret))
-            .relay_mode(RelayMode::Disabled)
-            .bind()
-            .await
-            .expect("bind an underlay");
+            .relay_mode(RelayMode::Disabled);
+        let underlay = underlay_builder.bind().await.expect("bind an underlay");
         MultihopHandle::new(
             secret,
             underlay,

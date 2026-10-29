@@ -304,8 +304,8 @@ pub async fn broadcast_state_merge(
     // rejoined session under a nickname-derived actor would collide seq
     // numbers with its predecessor's history (see `doc::actor_for`).
     let actor_seed = *state.identity.public().as_bytes();
-    let built = state
-        .doc(channel)
+    let fork_doc = state.doc(channel);
+    let built = fork_doc
         .build_change(&merge, &actor_seed)
         .map_err(|error| crate::transport::SendError::Internal(error.into()))?;
     let Some(change_bytes) = built else {
@@ -447,11 +447,8 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &Ha
     let proof = state
         .peer_info_proof
         .get_or_insert_with(|| {
-            proven_endpoints::sign(
-                context.endpoint.secret_key(),
-                context.mesh,
-                &state.identity.author_key(),
-            )
+            let author_key = state.identity.author_key();
+            proven_endpoints::sign(context.endpoint.secret_key(), context.mesh, &author_key)
         })
         .clone();
     let addr_json = peer_info_json(&our_addr, proof, state.hosts_rendezvous);
