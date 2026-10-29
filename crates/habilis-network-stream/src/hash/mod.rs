@@ -43,7 +43,6 @@ pub const SECRET_LEN: usize = 32;
 #[cfg(test)]
 mod tests {
     use habilis_network::iroh::{EndpointAddr, SecretKey, TransportAddr};
-    use habilis_network_test_tracing::test;
 
     use habilis_network::protocol::{LookupOpts, TransportPolicy, base58check};
     use zeroize::Zeroizing;
@@ -75,6 +74,7 @@ mod tests {
 
     #[test]
     fn a_hash_round_trips_every_transport_list() {
+        let _guard = ::habilis_network_test_tracing::init();
         for transport in [
             policy(true, true, false),
             policy(true, true, true),
@@ -99,6 +99,7 @@ mod tests {
 
     #[test]
     fn encode_matches_the_golden_string() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             sample(policy(true, true, true)).encode(),
             GOLDEN,
@@ -108,6 +109,7 @@ mod tests {
 
     #[test]
     fn decode_of_the_golden_string_gives_the_same_fields() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             StreamHash::decode(GOLDEN).expect("decodes"),
             sample(policy(true, true, true)),
@@ -119,12 +121,14 @@ mod tests {
     // type of the field instead. A `Zeroizing` buffer wipes on drop.
     #[test]
     fn the_secret_is_held_in_a_wiped_buffer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let secret = StreamSecret::from([9; SECRET_LEN]);
         let _: &Zeroizing<[u8; SECRET_LEN]> = &secret.0;
     }
 
     #[test]
     fn zeroizing_keeps_the_bytes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let secret = StreamSecret::from(Zeroizing::new([4; SECRET_LEN]));
         assert_eq!(
             secret.as_bytes(),
@@ -135,6 +139,7 @@ mod tests {
 
     #[test]
     fn header_bytes_are_the_id_then_the_secret() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut expected = vec![1; ID_LEN];
         expected.extend_from_slice(&[2; SECRET_LEN]);
         assert_eq!(
@@ -146,6 +151,7 @@ mod tests {
 
     #[test]
     fn an_unknown_flag_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut framed =
             base58check::decode(&sample(TransportPolicy::default()).encode(), "stream hash")
                 .expect("decodes");
@@ -156,6 +162,7 @@ mod tests {
 
     #[test]
     fn a_flipped_character_fails_the_checksum() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut encoded = sample(TransportPolicy::default()).encode().into_bytes();
         let last = encoded.len() - 1;
         encoded[last] = if encoded[last] == b'2' { b'3' } else { b'2' };
@@ -168,6 +175,7 @@ mod tests {
 
     #[test]
     fn another_kind_or_version_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         let reframe = |version: u8, kind: u8| {
             let mut framed =
                 base58check::decode(&sample(TransportPolicy::default()).encode(), "stream hash")
@@ -186,6 +194,7 @@ mod tests {
 
     #[test]
     fn a_mesh_id_is_not_a_stream_hash() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh =
             habilis_network::runtime::derive_topic_mesh_with("standup", LookupOpts::loopback())
                 .expect("mesh");
@@ -197,6 +206,7 @@ mod tests {
 
     #[test]
     fn a_secret_prints_no_byte_and_one_byte_makes_two_hashes_differ() {
+        let _guard = ::habilis_network_test_tracing::init();
         let hash = sample(TransportPolicy::default());
         assert_eq!(
             format!("{:?}", hash.secret),
@@ -216,6 +226,7 @@ mod tests {
 
     #[test]
     fn debug_never_prints_the_secret() {
+        let _guard = ::habilis_network_test_tracing::init();
         let shown = format!("{:?}", sample(TransportPolicy::default()));
         assert!(!shown.contains("secret"), "{shown}");
     }
