@@ -27,7 +27,7 @@ pub async fn read_bounded_line<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     max: usize,
 ) -> io::Result<LineRead> {
-    let mut buf: Vec<u8> = Vec::new();
+    let mut buffer: Vec<u8> = Vec::new();
     let mut overflow = false;
     loop {
         let chunk = reader.fill_buf().await?;
@@ -36,25 +36,25 @@ pub async fn read_bounded_line<R: AsyncBufRead + Unpin>(
             if overflow {
                 return Ok(LineRead::TooLong);
             }
-            if buf.is_empty() {
+            if buffer.is_empty() {
                 return Ok(LineRead::Eof);
             }
-            return Ok(finish(&buf));
+            return Ok(finish(&buffer));
         }
         if let Some(position) = chunk.iter().position(|&byte| byte == b'\n') {
-            if !overflow && would_overflow(&mut buf, &chunk[..position], max) {
+            if !overflow && would_overflow(&mut buffer, &chunk[..position], max) {
                 overflow = true;
             }
             reader.consume(position + 1);
             return Ok(if overflow {
                 LineRead::TooLong
             } else {
-                finish(&buf)
+                finish(&buffer)
             });
         }
         // No newline in this chunk: accumulate up to the cap, consume all.
         let len = chunk.len();
-        if !overflow && would_overflow(&mut buf, chunk, max) {
+        if !overflow && would_overflow(&mut buffer, chunk, max) {
             overflow = true;
         }
         reader.consume(len);
@@ -64,18 +64,18 @@ pub async fn read_bounded_line<R: AsyncBufRead + Unpin>(
 /// Append `piece` to `buf` if it fits within `max`; otherwise leave `buf`
 /// untouched and report the overflow. Split out of [`read_bounded_line`] so
 /// the overflow-check/extend branch isn't nested inside its `if let`/`if`.
-fn would_overflow(buf: &mut Vec<u8>, piece: &[u8], max: usize) -> bool {
-    let remaining = max.saturating_sub(buf.len());
+fn would_overflow(buffer: &mut Vec<u8>, piece: &[u8], max: usize) -> bool {
+    let remaining = max.saturating_sub(buffer.len());
     if piece.len() > remaining {
         return true;
     }
-    buf.extend_from_slice(piece);
+    buffer.extend_from_slice(piece);
     false
 }
 
-fn finish(buf: &[u8]) -> LineRead {
+fn finish(buffer: &[u8]) -> LineRead {
     // Callers `.trim()`; lossy keeps us robust to non-UTF-8 input.
-    LineRead::Line(String::from_utf8_lossy(buf).into_owned())
+    LineRead::Line(String::from_utf8_lossy(buffer).into_owned())
 }
 
 #[cfg(test)]
