@@ -465,13 +465,9 @@ mod tests {
         let port = 0x1388u16 ^ u16::try_from(MAGIC_COOKIE >> 16).expect("fits"); // 5000
         let mut value = vec![0, FAMILY_IPV6];
         value.extend_from_slice(&port.to_be_bytes());
-        value.extend(
-            address
-                .octets()
-                .iter()
-                .zip(mask)
-                .map(|(byte, mask)| byte ^ mask),
-        );
+        let octets = address.octets();
+        let masked = octets.iter().zip(mask).map(|(byte, mask)| byte ^ mask);
+        value.extend(masked);
         let message = response(ATTR_XOR_MAPPED_ADDRESS, &value, TXID);
         let parsed = parse_binding_response(&message, &TXID).expect("parse");
         assert_eq!(

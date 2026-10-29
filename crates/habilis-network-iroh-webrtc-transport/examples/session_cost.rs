@@ -204,10 +204,8 @@ fn load1() -> Option<f64> {
         .args(["-n", "vm.loadavg"])
         .output()
         .ok()?;
-    String::from_utf8(output.stdout)
-        .ok()?
-        .split_whitespace()
-        .find_map(|word| word.parse().ok())
+    let text = String::from_utf8(output.stdout).ok()?;
+    text.split_whitespace().find_map(|word| word.parse().ok())
 }
 
 async fn measure(role: Role, sessions: usize, settle: u64, hold: u64) -> anyhow::Result<()> {
@@ -215,12 +213,12 @@ async fn measure(role: Role, sessions: usize, settle: u64, hold: u64) -> anyhow:
         resident_memory::current_resident_memory_bytes().is_some(),
         "the resident memory of this process cannot be read on this platform"
     );
-    let mut child = Command::new(std::env::current_exe()?)
+    let mut command = Command::new(std::env::current_exe()?);
+    command
         .arg("peer")
         .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+        .stdout(std::process::Stdio::piped());
+    let mut child = command.kill_on_drop(true).spawn()?;
     let mut to_peer = child.stdin.take().context("no stdin")?;
     let mut from_peer = BufReader::new(child.stdout.take().context("no stdout")?).lines();
     let local = SecretKey::generate().public();
@@ -421,10 +419,8 @@ fn verdict(floor: Option<f64>, effect: Option<(f64, Option<f64>)>) -> &'static s
 }
 
 fn argument(args: &[String], name: &str) -> Option<String> {
-    args.iter()
-        .position(|arg| arg == name)
-        .and_then(|index| args.get(index + 1))
-        .cloned()
+    let index = args.iter().position(|arg| arg == name)?;
+    args.get(index + 1).cloned()
 }
 
 #[tokio::main(flavor = "multi_thread")]

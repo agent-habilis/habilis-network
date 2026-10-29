@@ -98,19 +98,15 @@ impl<T> Registry<T> {
 
     /// How many usable sessions this registry holds.
     pub(crate) fn live_len(&self) -> usize {
-        self.lock()
-            .values()
-            .filter(|slot| slot.value.is_some())
-            .count()
+        let slots = self.lock();
+        slots.values().filter(|slot| slot.value.is_some()).count()
     }
 
     /// Endpoint ids of every *usable* session (reservations excluded).
     pub(crate) fn live_ids(&self) -> Vec<EndpointId> {
-        self.lock()
-            .iter()
-            .filter(|(_, slot)| slot.value.is_some())
-            .map(|(id, _)| *id)
-            .collect()
+        let slots = self.lock();
+        let usable = slots.iter().filter(|(_, slot)| slot.value.is_some());
+        usable.map(|(id, _)| *id).collect()
     }
 
     /// Run `f` against `remote`'s payload, if it is live.
@@ -122,10 +118,9 @@ impl<T> Registry<T> {
         remote: &EndpointId,
         read: impl FnOnce(&T) -> R,
     ) -> Option<R> {
-        self.lock()
-            .get(remote)
-            .and_then(|slot| slot.value.as_ref())
-            .map(read)
+        let slots = self.lock();
+        let slot = slots.get(remote).and_then(|slot| slot.value.as_ref());
+        slot.map(read)
     }
 
     /// Drop `remote`'s slot whatever its generation. Returns whether the slot
@@ -355,12 +350,9 @@ mod tests {
     fn a_committed_guard_leaves_the_session_live() {
         let registry = Registry::new();
         let (payload, dropped) = probe();
-        registry
-            .reserve(peer(1))
-            .expect("first reserve")
-            .fulfil(payload)
-            .expect("slot is ours")
-            .commit();
+        let reserved = registry.reserve(peer(1)).expect("first reserve");
+        let guard = reserved.fulfil(payload).expect("slot is ours");
+        guard.commit();
 
         assert!(
             registry.is_live(&peer(1)),
@@ -393,12 +385,9 @@ mod tests {
         );
 
         let (second, second_dropped) = probe();
-        registry
-            .reserve(peer(1))
-            .expect("second reserve")
-            .fulfil(second)
-            .expect("slot is ours")
-            .commit();
+        let reserved = registry.reserve(peer(1)).expect("second reserve");
+        let guard = reserved.fulfil(second).expect("slot is ours");
+        guard.commit();
 
         drop(stale);
 
@@ -425,12 +414,9 @@ mod tests {
             generation
         };
         registry.remove(&peer(1));
-        registry
-            .reserve(peer(1))
-            .expect("second reserve")
-            .fulfil(probe().0)
-            .expect("slot is ours")
-            .commit();
+        let reserved = registry.reserve(peer(1)).expect("second reserve");
+        let guard = reserved.fulfil(probe().0).expect("slot is ours");
+        guard.commit();
 
         assert!(
             !registry.remove_if_generation(&peer(1), stale_generation),
@@ -460,12 +446,9 @@ mod tests {
     fn clear_takes_reservations_too_and_counts_only_live_ones() {
         let registry = Registry::<Probe>::new();
         let reservation = registry.reserve(peer(1)).expect("reserve one");
-        registry
-            .reserve(peer(2))
-            .expect("reserve two")
-            .fulfil(probe().0)
-            .expect("slot is ours")
-            .commit();
+        let reserved = registry.reserve(peer(2)).expect("reserve two");
+        let guard = reserved.fulfil(probe().0).expect("slot is ours");
+        guard.commit();
 
         assert_eq!(registry.clear(), 1, "only the live one counts");
         assert!(registry.reserve(peer(1)).is_some(), "no slot left stranded");

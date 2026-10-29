@@ -125,9 +125,10 @@ impl BrowserHubTransport {
                     }
                 });
             });
+            let handle: &JsValue = hook.as_ref();
             match event {
-                "close" => data_channel.set_onclose(Some(hook.as_ref().unchecked_ref())),
-                _ => data_channel.set_onerror(Some(hook.as_ref().unchecked_ref())),
+                "close" => data_channel.set_onclose(Some(handle.unchecked_ref())),
+                _ => data_channel.set_onerror(Some(handle.unchecked_ref())),
             }
             callbacks.push(hook.into_js_value());
         }
@@ -455,10 +456,11 @@ impl BrowserHubTransport {
 
 impl std::fmt::Debug for BrowserHubTransport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sessions = self.sessions.live_len();
         formatter
             .debug_struct("BrowserHubTransport")
             .field("local_id", &self.local_id)
-            .field("sessions", &self.sessions.live_len())
+            .field("sessions", &sessions)
             .finish_non_exhaustive()
     }
 }

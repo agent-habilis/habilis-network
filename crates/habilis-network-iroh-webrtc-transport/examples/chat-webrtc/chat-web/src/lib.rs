@@ -132,9 +132,10 @@ impl ChatPeer {
             Some(url) => RelayMode::custom([url]),
             None => RelayMode::Default,
         };
-        let signalling = Endpoint::builder(presets::Minimal)
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(key.clone())
-            .relay_mode(relay_mode)
+            .relay_mode(relay_mode);
+        let signalling = builder
             .bind()
             .await
             .map_err(|error| err("bind the signalling endpoint", &error))?;
@@ -151,16 +152,19 @@ impl ChatPeer {
         let remote = negotiate(&signalling, &ticket, local, &hub).await?;
         emit.status("data channel up");
 
-        let chat = Endpoint::builder(presets::Minimal)
+        let transport = handle.transport();
+        let selector = handle.path_selector();
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             // Deliberate: no relay on this one. Its whole purpose is to have no
             // other path the chat dial could settle on.
             .relay_mode(RelayMode::Disabled)
-            .add_custom_transport(handle.transport())
-            // Registering the transport is not enough. iroh's default selector
-            // skips paths it has no RTT sample for, which a freshly attached
-            // WebRTC path always is.
-            .path_selector(handle.path_selector())
+            .add_custom_transport(transport);
+        // Registering the transport is not enough. iroh's default selector
+        // skips paths it has no RTT sample for, which a freshly attached
+        // WebRTC path always is.
+        let builder = builder.path_selector(selector);
+        let chat = builder
             .bind()
             .await
             .map_err(|error| err("bind the chat endpoint", &error))?;
@@ -419,10 +423,12 @@ fn candidate(address: &str, kind: &str) -> String {
 
 fn label_of(address: &TransportAddr) -> String {
     match address {
-        TransportAddr::Custom(custom) if custom.id() == WEBRTC_TRANSPORT_ID => "webrtc".to_owned(),
+        TransportAddr::Custom(custom) if custom.id() == WEBRTC_TRANSPORT_ID => {
+            String::from("webrtc")
+        }
         TransportAddr::Custom(custom) => format!("custom({})", custom.id()),
-        TransportAddr::Ip(_) => "ip".to_owned(),
-        TransportAddr::Relay(_) => "relay".to_owned(),
+        TransportAddr::Ip(_) => String::from("ip"),
+        TransportAddr::Relay(_) => String::from("relay"),
         other => format!("{other:?}"),
     }
 }

@@ -127,11 +127,11 @@ impl Pair {
         // Concurrently, and this is load-bearing: the answerer is waiting for
         // `ondatachannel`, which only fires once the offerer applies the
         // answer. Awaiting them in sequence deadlocks.
-        let (client_session, server_session) = n0_future::future::zip(
-            pending_offer.complete(client_hub.transport().as_ref(), &answer_env),
-            pending_answer.complete(server_hub.transport().as_ref(), id_client),
-        )
-        .await;
+        let client_transport = client_hub.transport();
+        let server_transport = server_hub.transport();
+        let offer = pending_offer.complete(client_transport.as_ref(), &answer_env);
+        let answer = pending_answer.complete(server_transport.as_ref(), id_client);
+        let (client_session, server_session) = n0_future::future::zip(offer, answer).await;
         client_session.map_err(|error| js_error(&error))?;
         server_session.map_err(|error| js_error(&error))?;
 

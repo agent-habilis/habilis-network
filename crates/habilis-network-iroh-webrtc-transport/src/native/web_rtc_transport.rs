@@ -140,10 +140,11 @@ impl WebRtcTransport {
 
 impl std::fmt::Debug for WebRtcTransport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sessions = self.registry.live_len();
         formatter
             .debug_struct("WebRtcTransport")
             .field("local_id", &self.local_id)
-            .field("sessions", &self.registry.live_len())
+            .field("sessions", &sessions)
             .finish_non_exhaustive()
     }
 }
@@ -172,11 +173,11 @@ struct ExclusivePreset {
 impl Preset for ExclusivePreset {
     fn apply(self, builder: Builder) -> Builder {
         // `Minimal` supplies the mandatory TLS crypto provider.
-        Minimal
+        let base = Minimal
             .apply(builder)
             .clear_ip_transports()
-            .clear_relay_transports()
-            .clear_address_lookup()
+            .clear_relay_transports();
+        base.clear_address_lookup()
             .add_custom_transport(self.factory)
     }
 }

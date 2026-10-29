@@ -78,12 +78,14 @@ impl PathSelector for WebRtcPreferred {
                     )
                 })
                 .collect();
+            let current = context.current().map(transports::FourTuple::remote);
+            let chosen_remote = chosen.map(|path| path.network_path().remote());
             tracing::trace!(
                 target: "habilis_ladder",
                 local = %self.local.fmt_short(),
-                current = ?context.current().map(transports::FourTuple::remote),
+                current = ?current,
                 ?seen,
-                chosen = ?chosen.map(|path| path.network_path().remote()),
+                chosen = ?chosen_remote,
                 "path selection"
             );
         }

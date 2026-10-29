@@ -307,17 +307,16 @@ async fn selected_candidate_from_stats(
                 .and_then(|value| value.as_string())
         })
         .unwrap_or_default();
-    let kind: String = Reflect::get(remote, &JsValue::from_str("candidateType"))
-        .ok()
+    let candidate = Reflect::get(remote, &JsValue::from_str("candidateType")).ok();
+    let kind: String = candidate
         .and_then(|value| value.as_string())
         .unwrap_or_else(|| "unknown".to_owned());
     // Suffix-compared case-insensitively: DNS labels are case-insensitive by
     // spec, and going through `str::ends_with` with a dotted literal reads to
     // clippy as a file-extension test, which this is not.
-    let is_mdns: bool = address
-        .len()
-        .checked_sub(MDNS_SUFFIX.len())
-        .is_some_and(|start| address[start..].eq_ignore_ascii_case(MDNS_SUFFIX));
+    let suffix_start = address.len().checked_sub(MDNS_SUFFIX.len());
+    let is_mdns: bool =
+        suffix_start.is_some_and(|start| address[start..].eq_ignore_ascii_case(MDNS_SUFFIX));
     let kind = if is_mdns { "mdns".to_owned() } else { kind };
     Some((address, kind))
 }

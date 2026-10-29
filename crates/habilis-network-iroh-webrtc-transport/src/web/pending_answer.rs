@@ -70,9 +70,9 @@ impl PendingAnswer {
         // the same reason; see `PendingOffer::complete`. `attach` installs the
         // hub's own `onmessage`, replacing the buffering one.
         let pc = peer_connection.release();
-        let guard: super::transport::BrowserSessionGuard = hub
-            .attach(remote, pc.clone(), data_channel.clone(), callbacks)
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let attached = hub.attach(remote, pc.clone(), data_channel.clone(), callbacks);
+        let guard: super::transport::BrowserSessionGuard =
+            attached.map_err(|error| JsValue::from_str(&error.to_string()))?;
         // Hand over what arrived before that handler existed, in arrival order
         // and before anything the hub receives itself — the channel is
         // unordered, so this is not a sequencing promise, only a refusal to

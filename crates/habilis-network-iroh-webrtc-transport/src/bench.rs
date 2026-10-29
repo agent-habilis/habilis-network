@@ -228,13 +228,13 @@ pub async fn browser_endpoint(
     key: iroh::SecretKey,
     hub: &crate::WebRtcHandle,
 ) -> Result<iroh::Endpoint, BenchError> {
-    Ok(iroh::Endpoint::builder(presets::Minimal)
+    let transport = hub.transport();
+    let selector = hub.path_selector();
+    let configured = iroh::Endpoint::builder(presets::Minimal)
         .secret_key(key)
         .relay_mode(iroh::RelayMode::Disabled)
-        .add_custom_transport(hub.transport())
-        .path_selector(hub.path_selector())
-        .bind()
-        .await?)
+        .add_custom_transport(transport);
+    Ok(configured.path_selector(selector).bind().await?)
 }
 
 /// One exchange in `direction`, sized `bulk`, over an already-open
@@ -339,13 +339,11 @@ mod tests {
 
     async fn loopback_endpoint() -> Endpoint {
         let loopback: SocketAddr = "127.0.0.1:0".parse().expect("a literal loopback address");
-        Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Disabled)
+        let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
+        let bound = builder
             .bind_addr(loopback)
-            .expect("a loopback bind address")
-            .bind()
-            .await
-            .expect("bind a loopback endpoint")
+            .expect("a loopback bind address");
+        bound.bind().await.expect("bind a loopback endpoint")
     }
 
     #[test]

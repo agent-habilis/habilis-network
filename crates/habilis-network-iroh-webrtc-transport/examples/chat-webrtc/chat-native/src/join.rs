@@ -56,9 +56,10 @@ pub async fn run(ticket: &str, nick: &str, webrtc: bool, host_ice: bool) -> Resu
 
         // The signalling endpoint: relay on, WebRTC absent. Its only job is to
         // reach the room and swap one envelope each way.
-        let signalling = Endpoint::builder(presets::Minimal)
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(key.clone())
-            .relay_mode(relay_mode)
+            .relay_mode(relay_mode);
+        let signalling = builder
             .bind()
             .await
             .context("bind the signalling endpoint")?;

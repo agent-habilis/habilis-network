@@ -38,21 +38,24 @@ pub async fn run(nick: &str, relay: Option<RelayUrl>, host_ice: bool) -> Result<
         None => RelayMode::Default,
     };
 
-    let endpoint = Endpoint::builder(presets::Minimal)
+    let transport = handle.transport();
+    let builder = Endpoint::builder(presets::Minimal)
         .secret_key(key)
         .relay_mode(relay_mode)
         // Additive — deliberately *not* `transport.preset()`, which would make
         // WebRTC this endpoint's only transport. That is right for a browser
         // and wrong for the room: a native peer joining without `--webrtc`
         // reaches it over iroh's own transports, and should.
-        .add_custom_transport(handle.transport())
-        // Registering the transport is not enough on its own. iroh's default
-        // selector skips paths it has no RTT sample for yet, which is every
-        // freshly attached WebRTC path — so a connection would settle on the
-        // relay and stay there for its whole life. This selector ranks
-        // ip > webrtc > relay, which is to say: the relay is a rendezvous, not
-        // a data path.
-        .path_selector(handle.path_selector())
+        .add_custom_transport(transport);
+    // Registering the transport is not enough on its own. iroh's default
+    // selector skips paths it has no RTT sample for yet, which is every
+    // freshly attached WebRTC path — so a connection would settle on the
+    // relay and stay there for its whole life. This selector ranks
+    // ip > webrtc > relay, which is to say: the relay is a rendezvous, not
+    // a data path.
+    let selector = handle.path_selector();
+    let endpoint = builder
+        .path_selector(selector)
         .bind()
         .await
         .context("bind the room's endpoint")?;
@@ -68,9 +71,11 @@ pub async fn run(nick: &str, relay: Option<RelayUrl>, host_ice: bool) -> Result<
 
     let room = Room::new();
     let ice = crate::ice_config(host_ice);
+    let signal = SignalAcceptor::new(handle.clone(), id, ice);
+    let chat = ChatAcceptor::new(room.clone(), handle.clone());
     let router = Router::builder(endpoint.clone())
-        .accept(SIGNAL_ALPN, SignalAcceptor::new(handle.clone(), id, ice))
-        .accept(CHAT_ALPN, ChatAcceptor::new(room.clone(), handle.clone()))
+        .accept(SIGNAL_ALPN, signal)
+        .accept(CHAT_ALPN, chat)
         .spawn();
 
     let ticket = Ticket {

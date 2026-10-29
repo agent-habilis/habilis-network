@@ -52,13 +52,13 @@ pub fn selected_label(connection: &Connection) -> String {
 
 fn label_of(address: &TransportAddr) -> String {
     match address {
-        TransportAddr::Custom(custom) if custom.id() == WEBRTC_TRANSPORT_ID => WEBRTC.to_owned(),
+        TransportAddr::Custom(custom) if custom.id() == WEBRTC_TRANSPORT_ID => String::from(WEBRTC),
         // A different custom transport is not a case this example produces, but
         // saying which one beats reporting "custom" and leaving the reader to
         // guess whether it was ours.
         TransportAddr::Custom(custom) => format!("custom({})", custom.id()),
-        TransportAddr::Ip(_) => "ip".to_owned(),
-        TransportAddr::Relay(_) => "relay".to_owned(),
+        TransportAddr::Ip(_) => String::from("ip"),
+        TransportAddr::Relay(_) => String::from("relay"),
         other => format!("{other:?}"),
     }
 }
