@@ -14,7 +14,7 @@ impl Drop for LogsOnDrop {
     }
 }
 
-fn panic_text(body: impl FnOnce()) -> String {
+fn panic_text(body: impl FnOnce() + Send) -> String {
     let err = catch_panic(AssertUnwindSafe(body)).expect_err("the guard must panic");
     err.downcast_ref::<String>().cloned().expect("panic text")
 }

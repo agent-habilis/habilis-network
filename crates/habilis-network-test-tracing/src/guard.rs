@@ -588,8 +588,19 @@ impl Visit for Fields {
 /// # Errors
 ///
 /// Returns the panic payload when `body` panics.
-pub fn catch_panic<F: FnOnce() -> R, R>(
+///
+/// # Panics
+/// Panics if the thread that runs `body` cannot be spawned.
+pub fn catch_panic<F: FnOnce() -> R + Send, R: Send>(
     body: std::panic::AssertUnwindSafe<F>,
 ) -> thread::Result<R> {
-    std::panic::catch_unwind(body)
+    // The guard files events by thread name, so the body runs on a thread of the same name.
+    let name = thread::current().name().unwrap_or_default().to_owned();
+    thread::scope(|scope| {
+        thread::Builder::new()
+            .name(name)
+            .spawn_scoped(scope, body.0)
+            .expect("spawn the thread that runs the body")
+            .join()
+    })
 }

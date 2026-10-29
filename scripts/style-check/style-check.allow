@@ -10,7 +10,6 @@
 # A panic must not cross the C boundary: this is the defence in depth that the guide allows.
 
 # The one catch_unwind outside the FFI boundary: the helper that the tests use to check a panic.
-catch_unwind|crates/habilis-network-test-tracing/src/guard.rs|1|catch_panic, the helper that the tests use to check a panic
 
 # anyhow_pub: a public signature returns anyhow. Exceptions: test and benchmark helpers behind a
 # feature, not library API.

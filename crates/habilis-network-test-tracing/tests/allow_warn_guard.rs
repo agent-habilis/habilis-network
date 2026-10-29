@@ -3,7 +3,7 @@
 
 use std::panic::AssertUnwindSafe;
 
-fn panic_text(body: impl FnOnce()) -> Option<String> {
+fn panic_text(body: impl FnOnce() + Send) -> Option<String> {
     let err = habilis_network_test_tracing::catch_panic(AssertUnwindSafe(body)).err()?;
     err.downcast_ref::<String>().cloned()
 }
