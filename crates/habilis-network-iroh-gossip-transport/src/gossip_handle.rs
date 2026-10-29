@@ -259,7 +259,7 @@ impl CustomEndpoint for GossipEndpoint {
         metas: &mut [noq_udp::RecvMeta],
         recv_infos: &mut [RecvInfo],
     ) -> Poll<io::Result<usize>> {
-        let cap = bufs.len().min(metas.len()).min(recv_infos.len());
+        let cap: usize = bufs.len().min(metas.len()).min(recv_infos.len());
         if cap == 0 {
             return Poll::Ready(Ok(0));
         }
@@ -454,7 +454,7 @@ mod tests {
         .expect("connect over gossip");
 
         echo_once(&connection, b"hello over gossip").await;
-        let selected_is_gossip = connection.paths().iter().any(|path| {
+        let selected_is_gossip: bool = connection.paths().iter().any(|path| {
             path.is_selected()
                 && matches!(path.remote_addr(), TransportAddr::Custom(address) if address.id() == GOSSIP_TRANSPORT_ID)
         });
@@ -769,16 +769,13 @@ mod tests {
         hub.join(&alice_handle);
         hub.join(&bob_handle);
         let build = |key: SecretKey, handle: GossipHandle| async move {
-            Endpoint::builder(presets::Minimal)
-                .secret_key(key)
-                .relay_mode(RelayMode::Disabled)
-                .add_custom_transport(handle.custom_transport())
-                .address_lookup(handle.address_lookup())
-                .clear_ip_transports()
-                .clear_relay_transports()
-                .bind()
-                .await
-                .expect("bind")
+            let builder = Endpoint::builder(presets::Minimal);
+            let builder = builder.secret_key(key);
+            let builder = builder.relay_mode(RelayMode::Disabled);
+            let builder = builder.add_custom_transport(handle.custom_transport());
+            let builder = builder.address_lookup(handle.address_lookup());
+            let builder = builder.clear_ip_transports();
+            builder.clear_relay_transports().bind().await.expect("bind")
         };
         let alice = build(secret(1), alice_handle).await;
         let bob = build(secret(2), bob_handle).await;

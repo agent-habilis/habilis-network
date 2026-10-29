@@ -55,7 +55,7 @@ mod tests {
     }
 
     async fn member(seed: u8, lookup: &MemoryLookup) -> (Endpoint, Gossip, Router) {
-        let endpoint = Endpoint::builder(presets::Minimal)
+        let endpoint: Endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(secret(seed))
             .relay_mode(RelayMode::Disabled)
             .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -193,13 +193,13 @@ mod tests {
                 1 => &["127.0.0.1:0", "[::1]:0"],
                 _ => &["127.0.0.1:0"],
             };
-            let mut builder = Endpoint::builder(presets::Minimal)
-                .secret_key(key.clone())
-                .relay_mode(RelayMode::Disabled)
-                .clear_ip_transports()
-                .add_custom_transport(handle.custom_transport())
-                .path_selector(std::sync::Arc::new(Ladder))
-                .address_lookup(lookup.clone());
+            let mut builder: iroh::endpoint::Builder = Endpoint::builder(presets::Minimal);
+            builder = builder.secret_key(key.clone());
+            builder = builder.relay_mode(RelayMode::Disabled);
+            builder = builder.clear_ip_transports();
+            builder = builder.add_custom_transport(handle.custom_transport());
+            builder = builder.path_selector(std::sync::Arc::new(Ladder));
+            builder = builder.address_lookup(lookup.clone());
             for bind in binds {
                 let bind: SocketAddr = bind.parse().expect("loopback");
                 builder = builder.bind_addr(bind).expect("bind address");
@@ -229,7 +229,7 @@ mod tests {
         // B joins first: A and C bootstrap on it, and wait for it to be there.
         for index in [1usize, 0, 2] {
             let (handle, gossip) = (&nodes[index].1, &gossips[index]);
-            let topic_handle = if index == 1 {
+            let topic_handle: iroh_gossip::api::GossipTopic = if index == 1 {
                 gossip.subscribe(topic, vec![]).await.expect("bob joins")
             } else {
                 tokio::time::timeout(
@@ -267,7 +267,7 @@ mod tests {
             .expect("read");
 
         assert_eq!(echoed, b"through the flood");
-        let selected_is_gossip = connection.paths().iter().any(|path| {
+        let selected_is_gossip: bool = connection.paths().iter().any(|path| {
             path.is_selected()
                 && matches!(path.remote_addr(), iroh::TransportAddr::Custom(address) if address.id() == crate::GOSSIP_TRANSPORT_ID)
         });

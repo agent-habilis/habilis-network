@@ -82,12 +82,12 @@ mod tests {
         let key = SecretKey::from_bytes(&[seed; 32]);
         let handle = GossipHandle::new(key.public());
         hub.join(&handle);
-        let builder = Endpoint::builder(presets::Minimal)
-            .secret_key(key)
-            .relay_mode(RelayMode::Disabled)
-            .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .expect("bind address")
-            .add_custom_transport(handle.custom_transport());
+        let builder = Endpoint::builder(presets::Minimal);
+        let builder = builder.secret_key(key);
+        let builder = builder.relay_mode(RelayMode::Disabled);
+        let builder = builder.bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)));
+        let builder = builder.expect("bind address");
+        let builder = builder.add_custom_transport(handle.custom_transport());
         let builder = if ladder {
             builder.path_selector(handle.path_selector())
         } else {
@@ -115,7 +115,7 @@ mod tests {
         }
         assert!(connection.paths().len() >= 2, "both paths opened");
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let selected_ip = connection
+        let selected_ip: bool = connection
             .paths()
             .iter()
             .find(iroh::endpoint::Path::is_selected)

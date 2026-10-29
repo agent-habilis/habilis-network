@@ -161,14 +161,13 @@ mod tests {
     #[test]
     async fn the_watch_ends_when_the_last_handle_of_the_connection_is_dropped() {
         let loopback = |key: SecretKey| async move {
-            Endpoint::builder(presets::Minimal)
-                .secret_key(key)
-                .relay_mode(RelayMode::Disabled)
+            let builder = Endpoint::builder(presets::Minimal);
+            let builder = builder.secret_key(key);
+            let builder = builder.relay_mode(RelayMode::Disabled);
+            let builder = builder
                 .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
-                .expect("bind address")
-                .bind()
-                .await
-                .expect("bind")
+                .expect("bind address");
+            builder.bind().await.expect("bind")
         };
         let (alice, bob) = (loopback(secret(5)).await, loopback(secret(6)).await);
         let (tx, _rx) = oneshot::channel();
@@ -197,14 +196,13 @@ mod tests {
     #[test]
     async fn a_connection_on_ip_is_left_open() {
         let loopback = |key: SecretKey| async move {
-            Endpoint::builder(presets::Minimal)
-                .secret_key(key)
-                .relay_mode(RelayMode::Disabled)
+            let builder = Endpoint::builder(presets::Minimal);
+            let builder = builder.secret_key(key);
+            let builder = builder.relay_mode(RelayMode::Disabled);
+            let builder = builder
                 .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
-                .expect("bind address")
-                .bind()
-                .await
-                .expect("bind")
+                .expect("bind address");
+            builder.bind().await.expect("bind")
         };
         let (alice, bob) = (loopback(secret(3)).await, loopback(secret(4)).await);
         let (tx, _rx) = oneshot::channel();
