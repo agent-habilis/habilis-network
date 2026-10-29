@@ -197,18 +197,7 @@ impl std::fmt::Debug for SetupParams {
 /// let _ = count;
 /// # }
 /// ```
-///
-/// # Examples
-///
-/// A live count is how many members a setup sees as live. The doc test compiles it but does not run it.
-///
-/// ```no_run
-/// use habilis_network::runtime::LiveCount;
-///
-/// # fn demo(count: LiveCount) {
-/// let _ = count;
-/// # }
-/// ```
+
 #[derive(Debug, Default)]
 // the counter is shared by the setup and the caller, which reads it
 pub struct LiveCount(std::sync::Arc<atomic::AtomicUsize>);
