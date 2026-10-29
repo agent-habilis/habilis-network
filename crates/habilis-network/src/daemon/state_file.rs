@@ -53,6 +53,18 @@ use std::sync::atomic;
 /// Drop removes the file (best effort), but because the daemon exits
 /// via `std::process::exit`, callers must also call `remove()`
 /// explicitly before exiting on SIGINT/SIGTERM.
+///
+/// # Examples
+///
+/// A state file holds the discovery fields that a daemon publishes for its peers. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::runtime::state_file::StateFile;
+///
+/// # fn demo(file: &StateFile) {
+/// file.set_discovery(serde_json::Map::new());
+/// # }
+/// ```
 #[derive(Debug)]
 pub struct StateFile {
     path: PathBuf,
@@ -247,6 +259,18 @@ impl Drop for StateFile {
 /// `ready: true` left by a prior daemon killed with SIGKILL is rejected). The
 /// session identity is read separately ([`read_identity`]) only on the success
 /// path, so the poll loop allocates nothing beyond these two fields.
+///
+/// # Examples
+///
+/// A snapshot is read from a state file, and a missing file has none.
+///
+/// ```
+/// use std::path::Path;
+///
+/// use habilis_network::runtime::state_file::read_snapshot;
+///
+/// assert!(read_snapshot(Path::new("/nonexistent/ready.json")).expect("a missing file is not an error").is_none());
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ReadySnapshot {
@@ -259,6 +283,19 @@ pub struct ReadySnapshot {
 /// Best-effort session identity for a consumer's readiness report. Each field is
 /// `None` when the state file is unreadable, not JSON, or predates that field
 /// — so the JSON the gate prints carries only the keys actually present.
+///
+/// # Examples
+///
+/// An identity read from a missing session file names no mesh.
+///
+/// ```
+/// use std::path::Path;
+///
+/// use habilis_network::runtime::state_file::read_identity;
+///
+/// let identity = read_identity(Path::new("/nonexistent/session.json"));
+/// assert!(identity.mesh.is_none());
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SessionIdentity {
@@ -276,6 +313,19 @@ pub struct SessionIdentity {
 /// failure yields all-`None` rather than an error, since identity is a
 /// convenience on top of the gate, not part of what it blocks on. Called once,
 /// on success — never in the poll loop (see [`ReadySnapshot`]).
+///
+/// # Examples
+///
+/// It reads the mesh identity of a session, and a missing file names no mesh.
+///
+/// ```
+/// use std::path::Path;
+///
+/// use habilis_network::runtime::state_file::read_identity;
+///
+/// let identity = read_identity(Path::new("/nonexistent/session.json"));
+/// assert!(identity.mesh.is_none());
+/// ```
 #[must_use]
 pub fn read_identity(path: &Path) -> SessionIdentity {
     let parsed: Option<serde_json::Value> = std::fs::read_to_string(path)
@@ -311,6 +361,18 @@ fn mesh_field(doc: &serde_json::Value) -> Option<String> {
 /// whether the calling session owns it. Every field is `Option`: a file
 /// written by an older binary predates `pid`, and discovery must still be
 /// able to *report* such an entry rather than error on it.
+///
+/// # Examples
+///
+/// A session entry is read from a session file, and a missing file has none.
+///
+/// ```
+/// use std::path::Path;
+///
+/// use habilis_network::runtime::state_file::read_session_entry;
+///
+/// assert!(read_session_entry(Path::new("/nonexistent/session.json")).is_none());
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SessionEntry {
@@ -332,6 +394,18 @@ pub struct SessionEntry {
 /// Read a state file as a [`SessionEntry`]. Best-effort: `None` only when
 /// the file is unreadable or not a JSON object — a *degenerate* object still
 /// yields an entry (all-`None` fields) so callers can decide per-field.
+///
+/// # Examples
+///
+/// It reads a session entry, and a missing file has none.
+///
+/// ```
+/// use std::path::Path;
+///
+/// use habilis_network::runtime::state_file::read_session_entry;
+///
+/// assert!(read_session_entry(Path::new("/nonexistent/session.json")).is_none());
+/// ```
 #[must_use]
 pub fn read_session_entry(path: &Path) -> Option<SessionEntry> {
     let parsed: serde_json::Value = std::fs::read_to_string(path)
@@ -366,6 +440,18 @@ pub fn read_session_entry(path: &Path) -> Option<SessionEntry> {
 /// # Errors
 /// The file exists but is not valid JSON, or is missing the `ready` /
 /// `last_updated` fields.
+///
+/// # Examples
+///
+/// It reads the ready snapshot of a daemon, and a missing file is not an error.
+///
+/// ```
+/// use std::path::Path;
+///
+/// use habilis_network::runtime::state_file::read_snapshot;
+///
+/// assert!(read_snapshot(Path::new("/nonexistent/ready.json")).expect("a missing file is not an error").is_none());
+/// ```
 pub fn read_snapshot(path: &Path) -> Result<Option<ReadySnapshot>, StateFileError> {
     let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,
@@ -946,6 +1032,18 @@ mod tests {
 }
 
 /// Why a state file cannot be read as a snapshot.
+///
+/// # Examples
+///
+/// A state file that exists but cannot be read is an error, not a missing file.
+///
+/// ```
+/// use std::path::Path;
+///
+/// use habilis_network::runtime::state_file::read_snapshot;
+///
+/// assert!(read_snapshot(Path::new("/")).is_err());
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]
