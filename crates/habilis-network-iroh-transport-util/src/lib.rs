@@ -44,6 +44,7 @@ mod tests {
     use super::{block_ip_to, block_rung, block_rung_to, is_blocked, is_blocked_to};
     use iroh::endpoint::transports::Addr;
 
+    use std::net;
     #[test]
     fn the_ladder_runs_from_ip_to_the_relay() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -174,7 +175,7 @@ mod tests {
             None,
             "a custom multihop path names its remote"
         );
-        let ip = std::net::SocketAddr::from(([127, 0, 0, 1], 4000));
+        let ip = net::SocketAddr::from(([127, 0, 0, 1], 4000));
         assert_eq!(
             remote_id_of(&Addr::Ip(ip)),
             None,
@@ -223,7 +224,7 @@ mod tests {
     fn an_ip_port_block_takes_one_port_of_the_ip_rung_from_one_node() {
         let _guard = ::habilis_network_test_tracing::init();
         let (blocked, other) = (node(11), node(12));
-        let at = |port: u16| Some(std::net::SocketAddr::from(([127, 0, 0, 1], port)));
+        let at = |port: u16| Some(net::SocketAddr::from(([127, 0, 0, 1], port)));
         block_ip_to(blocked, [4000, 4001]);
         assert!(
             is_blocked(blocked, Rung::Ip, at(4000)),
