@@ -170,6 +170,13 @@ async fn until_every_view_holds(
 fn a_mesh_of_ten_links_every_member_to_every_other() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        // Two members can claim the rendezvous a few milliseconds apart: a holder that is bound and
+        // not serving yet answers the probe with a refusal, which the probe reads as silence. The
+        // rival check resolves that overlap by design, and the relay logs the connection that it replaced.
+        habilis_network_test_tracing::allow_warn(
+            "iroh::socket::transports::relay::actor",
+            "Another endpoint connected with the same endpoint id",
+        );
         let (members, keep) = mesh(10, 32).await;
 
         let result = until_every_view_holds(&members, 9, FILL_DEADLINE).await;
