@@ -55,8 +55,16 @@ pub enum Yield {
 impl std::fmt::Debug for Yield {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Yield::View(view) => f.debug_tuple("View").field(view).finish(),
-            Yield::Thunk(_) => f.debug_tuple("Thunk").field(&"<closure>").finish(),
+            Yield::View(view) => {
+                let mut tuple = f.debug_tuple("View");
+                tuple.field(view);
+                tuple.finish()
+            }
+            Yield::Thunk(_) => {
+                let mut tuple = f.debug_tuple("Thunk");
+                tuple.field(&"<closure>");
+                tuple.finish()
+            }
         }
     }
 }
