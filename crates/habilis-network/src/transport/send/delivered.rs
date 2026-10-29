@@ -3,6 +3,16 @@
 use crate::transport::PendingSend;
 
 /// What `deliver` did with a frame.
+///
+/// # Examples
+///
+/// A delivery is either done, or it is pending until its answer arrives.
+///
+/// ```
+/// use habilis_network::ops::Delivered;
+///
+/// assert!(matches!(Delivered::Done, Delivered::Done));
+/// ```
 #[derive(Debug)]
 #[must_use = "a dropped Pending handle loses the verdict of the send"]
 #[non_exhaustive]

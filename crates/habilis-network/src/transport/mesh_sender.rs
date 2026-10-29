@@ -12,6 +12,19 @@ use crate::protocol::message::WireFrame;
 ///
 /// A clone shares the handle, so the task that sends the digest answers (see
 /// `ResendOutbox`) follows a resubscribe too.
+///
+/// # Examples
+///
+/// A mesh sender broadcasts wire frames to the mesh. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::ops::MeshSender;
+/// use habilis_network::protocol::message::WireFrame;
+///
+/// # async fn demo(sender: &MeshSender, frame: WireFrame) {
+/// let _ = sender.broadcast(frame).await;
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct MeshSender {
     // the sender is shared by the mesh handles, which swap the gossip under it

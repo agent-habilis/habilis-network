@@ -21,6 +21,22 @@ use crate::util::line_read::{self, LineRead};
 /// # Errors
 /// [`NoDaemon`] when no server is listening; otherwise an invalid socket name
 /// or a failed request/response round trip.
+///
+/// # Examples
+///
+/// It sends a command to the daemon at the base path, and it returns the reply text. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use std::path::Path;
+///
+/// use habilis_network::protocol::Nickname;
+/// use habilis_network::runtime::ipc::{Addressed, send};
+/// use serde::Serialize;
+///
+/// # async fn demo<Cmd: Serialize + Addressed>(base: &Path, command: &Cmd, nickname: &Nickname) {
+/// let _ = send(base, command, nickname).await;
+/// # }
+/// ```
 pub async fn send<Cmd>(
     base: &std::path::Path,
     command: &Cmd,
@@ -53,6 +69,21 @@ where
 /// # Errors
 /// The path is not valid UTF-8, the socket can't be connected (no live
 /// daemon), or the request/response round trip fails.
+///
+/// # Examples
+///
+/// It sends a command to the daemon socket at the given path. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use std::path::Path;
+///
+/// use habilis_network::runtime::ipc::send_to_path;
+/// use serde::Serialize;
+///
+/// # async fn demo<Cmd: Serialize>(path: &Path, command: &Cmd) {
+/// let _ = send_to_path(path, command).await;
+/// # }
+/// ```
 pub async fn send_to_path<Cmd: Serialize>(
     path: &std::path::Path,
     command: &Cmd,
@@ -95,6 +126,18 @@ async fn round_trip<Cmd: Serialize>(stream: Stream, command: &Cmd) -> Result<Str
 /// inside each mesh's folder (`<base>/<mesh-prefix>/`). Best-effort: a missing
 /// base yields an empty list. Drives the consumer's active-mesh discovery, so it
 /// walks the per-mesh subfolders.
+///
+/// # Examples
+///
+/// A base path with no daemon sockets lists none.
+///
+/// ```
+/// use std::path::Path;
+///
+/// use habilis_network::runtime::ipc::active_socket_paths;
+///
+/// assert_eq!(active_socket_paths(Path::new("/nonexistent")).count(), 0);
+/// ```
 pub fn active_socket_paths(base: &std::path::Path) -> impl Iterator<Item = std::path::PathBuf> {
     let entries = std::fs::read_dir(base).into_iter().flatten().flatten();
     let dir_paths = entries.map(|entry| entry.path());

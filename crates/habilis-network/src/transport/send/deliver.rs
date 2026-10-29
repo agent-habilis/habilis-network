@@ -31,6 +31,21 @@ use crate::transport::{Delivered, Lane, SendError};
 /// hasn't arrived, or its advertised endpoint is the rendezvous pseudo-node)
 /// is undeliverable — the error names which; callers retry once a real
 /// endpoint is learned. A dial or a write that fails comes through the handle.
+///
+/// # Examples
+///
+/// It delivers a signed message to the peers that its addressing names, and it reports whether the send is done or still pending. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::EventLoopState;
+/// use habilis_network::ops::{Delivered, MeshSender, deliver};
+/// use habilis_network::protocol::{Verified, message::WireFrame};
+/// use habilis_network::runtime::SendError;
+///
+/// # async fn demo(message: &Verified, bytes: WireFrame, state: &EventLoopState, sender: &MeshSender) -> Result<Delivered, SendError> {
+/// deliver(message, bytes, state, sender).await
+/// # }
+/// ```
 pub async fn deliver(
     message: &Verified,
     bytes: WireFrame,
@@ -114,6 +129,20 @@ pub(crate) fn resolve(
 /// new address while a stale dial is still running, that dial's failure puts
 /// the peer on the cooldown, and directed sends to it return `false` for up
 /// to the dial budget plus the cooldown.
+///
+/// # Examples
+///
+/// It delivers a signed message in the background, and it says whether the message was accepted. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::EventLoopState;
+/// use habilis_network::ops::{MeshSender, deliver_in_background};
+/// use habilis_network::protocol::{Verified, message::WireFrame};
+///
+/// # async fn demo(message: &Verified, bytes: WireFrame, state: &EventLoopState, sender: &MeshSender) -> bool {
+/// deliver_in_background(message, bytes, state, sender).await
+/// # }
+/// ```
 pub async fn deliver_in_background(
     message: &Verified,
     bytes: WireFrame,

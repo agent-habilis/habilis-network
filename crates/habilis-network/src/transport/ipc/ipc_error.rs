@@ -7,6 +7,18 @@ use super::no_daemon::NoDaemon;
 /// [`IpcError::NoDaemon`] is the one a caller acts on (no live daemon to ask).
 /// [`IpcError::Internal`] holds the causes no caller acts on: a bad socket name, a
 /// round trip that fails, or a response that is too large.
+///
+/// # Examples
+///
+/// A control call that finds no daemon returns this error. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::runtime::ipc::{IpcError, NoDaemon};
+///
+/// # fn demo(error: &IpcError) -> bool {
+/// matches!(error, IpcError::NoDaemon(_))
+/// # }
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]

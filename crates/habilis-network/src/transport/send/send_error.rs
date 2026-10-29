@@ -7,6 +7,17 @@ use iroh::EndpointId;
 ///
 /// [`SendError::Held`] is the one a caller parks rather than fails on (`send_app`), so it
 /// is a variant and not a downcast. [`SendError::Internal`] holds the causes no caller acts on.
+///
+/// # Examples
+///
+/// A send that finds the node stopped returns this error.
+///
+/// ```
+/// use habilis_network::runtime::SendError;
+///
+/// let error = SendError::Stopped;
+/// assert!(matches!(error, SendError::Stopped));
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]
