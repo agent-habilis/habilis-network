@@ -1,3 +1,5 @@
+#[cfg(not(all(feature = "host", feature = "mdns")))]
+use std::convert::Infallible;
 // Only the `host` loopback bind names a socket address; a browser has no IP
 // stack to bind one on.
 
@@ -31,4 +33,4 @@ pub type MdnsHandle = iroh_mdns_address_lookup::MdnsAddressLookup;
 /// # }
 /// ```
 #[cfg(not(all(feature = "host", feature = "mdns")))]
-pub type MdnsHandle = std::convert::Infallible;
+pub type MdnsHandle = Infallible;

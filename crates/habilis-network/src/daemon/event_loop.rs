@@ -84,6 +84,8 @@ use crate::transport::ipc;
 use crate::transport::underlay_webrtc;
 use crate::transport::{outbox, probe, webrtc};
 use crate::util::version;
+#[cfg(not(feature = "multihop"))]
+use tokio::sync::Notify;
 /// Never returns normally — exits the process on ctrl-c / SIGTERM.
 ///
 /// The engine loop is generic over the application: `app` implements
@@ -1299,9 +1301,9 @@ fn route_wake_of(state: &EventLoopState) -> Arc<sync::Notify> {
 /// Without the `multihop` feature there is no multihop transport: the wake never rings.
 #[cfg(not(feature = "multihop"))]
 // without the feature, a fresh wake that nothing rings
-fn route_wake_of(_state: &EventLoopState) -> Arc<tokio::sync::Notify> {
+fn route_wake_of(_state: &EventLoopState) -> Arc<Notify> {
     // without the feature, a fresh wake that nothing rings
-    Arc::new(tokio::sync::Notify::new())
+    Arc::new(Notify::new())
 }
 
 /// The wake of the admission table of the multihop underlay, which rings when a round of the
@@ -1319,9 +1321,9 @@ fn underlay_slot_freed_of(state: &EventLoopState) -> Arc<sync::Notify> {
 /// Without the `multihop` feature there is no underlay: the wake never rings.
 #[cfg(not(feature = "multihop"))]
 // without the feature, a fresh wake that nothing rings
-fn underlay_slot_freed_of(_state: &EventLoopState) -> Arc<tokio::sync::Notify> {
+fn underlay_slot_freed_of(_state: &EventLoopState) -> Arc<Notify> {
     // without the feature, a fresh wake that nothing rings
-    Arc::new(tokio::sync::Notify::new())
+    Arc::new(Notify::new())
 }
 
 /// Build and emit the `ping_report` for the elapsed round, then clear

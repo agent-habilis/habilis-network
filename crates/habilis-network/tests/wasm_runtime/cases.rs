@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use habilis_network::protocol::{MeshId, Message, Nickname};
 use habilis_network::util::{clock, unix_secs};
+use n0_future::{task, time, time as n0future_time};
 use wasm_bindgen_test::wasm_bindgen_test;
 
 // Deliberately *not* `wasm_bindgen_test_configure!(run_in_browser)`: that needs
@@ -39,7 +40,7 @@ fn wall_clock_stamps_a_plausible_time() {
 #[wasm_bindgen_test]
 async fn timers_fire() {
     let before = clock::Instant::now();
-    n0_future::time::sleep(Duration::from_millis(20)).await;
+    n0future_time::sleep(Duration::from_millis(20)).await;
     assert!(
         clock::Instant::now() >= before,
         "clock did not advance across a sleep"
@@ -56,13 +57,13 @@ async fn tasks_spawn() {
     // the spawned task and the test share the counter
     let counter = Arc::new(AtomicUsize::new(0));
     let inner = Arc::clone(&counter);
-    n0_future::task::spawn(async move {
-        n0_future::time::sleep(Duration::from_millis(5)).await;
+    task::spawn(async move {
+        n0future_time::sleep(Duration::from_millis(5)).await;
         inner.store(7, Ordering::Relaxed);
     });
     // Yield long enough for the spawned task to be driven. No channel, so the
     // test depends on nothing beyond the two primitives under test.
-    n0_future::time::sleep(Duration::from_millis(60)).await;
+    time::sleep(Duration::from_millis(60)).await;
     assert_eq!(counter.load(Ordering::Relaxed), 7, "spawned task never ran");
 }
 
