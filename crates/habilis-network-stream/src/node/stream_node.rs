@@ -24,6 +24,8 @@ use crate::produce::{Producer, Registry, StreamAcceptor};
 use crate::read::{Reader, Refused};
 
 use habilis_network::net::EndpointError;
+#[cfg(target_arch = "wasm32")]
+use habilis_network::runtime;
 use n0_future::time;
 /// One endpoint serving and opening streams. It never joins a gossip mesh.
 ///
@@ -108,7 +110,7 @@ impl StreamNode {
         transports: TransportOpts,
     ) -> Result<Self, StreamError> {
         #[cfg(target_arch = "wasm32")]
-        habilis_network::runtime::refuse_in_browser(&lookups, transport, transports)
+        runtime::refuse_in_browser(&lookups, transport, transports)
             .map_err(StreamError::bind("start the stream node"))?;
         let (endpoint, webrtc) = build_peer_webrtc(&lookups, transports)
             .await
