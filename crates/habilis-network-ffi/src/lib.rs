@@ -13,6 +13,16 @@
 //! `mesh` is the blocking handle over `habilis_network::membership`, `stream` the
 //! blocking handles over `habilis-network-stream`; [`ffi`] is the thin unsafe shim over
 //! both.
+//!
+//! # Example
+//!
+//! ```c
+//! habilis_network_opts opts = {0};
+//! habilis_network_mesh *mesh = habilis_network_mesh_open(&opts);
+//! if (mesh != NULL) {
+//!     habilis_network_mesh_close(mesh);
+//! }
+//! ```
 
 pub mod ffi;
 pub(crate) mod mesh;

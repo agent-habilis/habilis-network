@@ -1,6 +1,19 @@
 //! The `test` attribute of `habilis-network-test-tracing`. Import it by name,
 //! `use habilis_network_test_tracing::test;`, and every `#[test]` of the module
 //! gets a guard that fails the test on a WARN or ERROR event.
+//!
+//! # Example
+//!
+//! ```
+//! use habilis_network_test_tracing::test as guarded_test;
+//!
+//! #[guarded_test]
+//! fn adds() {
+//!     assert_eq!(1 + 1, 2, "one and one make two");
+//! }
+//!
+//! # fn main() {}
+//! ```
 
 use proc_macro::TokenStream;
 use syn::{ItemFn, parse_macro_input};

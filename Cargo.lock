@@ -2011,6 +2011,7 @@ dependencies = [
 name = "habilis-network-test-tracing-macros"
 version = "0.6.0"
 dependencies = [
+ "habilis-network-test-tracing",
  "proc-macro2",
  "quote",
  "syn",

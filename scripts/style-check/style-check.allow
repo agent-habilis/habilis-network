@@ -480,13 +480,6 @@ pub_impl_into|crates/habilis-network-protocol/src/nickname_error.rs|1|Nickname::
 pub_impl_into|crates/habilis-network/src/lookup/probe.rs|1|a function that takes an address or anything that converts into one
 
 # crate_example: a library crate with no doc example (D2). Each row is a count that may only go down.
-crate_example|crates/habilis-network-bench-wasm/src/lib.rs|1|kept: no doc example yet in this crate; its entry point is to get one (D2 rollout)
-crate_example|crates/habilis-network-ffi/src/lib.rs|1|kept: no doc example yet in this crate; its entry point is to get one (D2 rollout)
-crate_example|crates/habilis-network-iroh-transport-util/src/lib.rs|1|kept: no doc example yet in this crate; its entry point is to get one (D2 rollout)
-crate_example|crates/habilis-network-logging/src/lib.rs|1|kept: no doc example yet in this crate; its entry point is to get one (D2 rollout)
-crate_example|crates/habilis-network-test-tracing-macros/src/lib.rs|1|kept: no doc example yet in this crate; its entry point is to get one (D2 rollout)
-crate_example|crates/habilis-network-test-tracing/src/lib.rs|1|kept: no doc example yet in this crate; its entry point is to get one (D2 rollout)
-crate_example|crates/habilis-network-wasm/src/lib.rs|1|kept: no doc example yet in this crate; its entry point is to get one (D2 rollout)
 
 # self_convention: a by-value as_ or to_ method. Each type is Copy, so self by value is the right form.
 # fn_import: a top-level function imported by its bare name (O23). Each row is a count that may only go down.

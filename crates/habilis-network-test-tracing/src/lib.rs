@@ -21,6 +21,13 @@
 //! A panic inside the subscriber does not fail a test when a spawned task logs
 //! the event, so the subscriber records the event and [`Guard`] panics on the
 //! test thread when it drops.
+//!
+//! # Example
+//!
+//! ```
+//! let _log = habilis_network_test_tracing::init();
+//! tracing::info!("an INFO event does not fail the test");
+//! ```
 
 mod guard;
 

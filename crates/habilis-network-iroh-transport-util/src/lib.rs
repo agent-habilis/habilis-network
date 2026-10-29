@@ -9,6 +9,15 @@
 //! isolating a dependency it could have inherited; it exists because there is
 //! no other sharing point between two otherwise-independent crates. It adds no
 //! external dependency — `iroh` is already in both manifests.
+//!
+//! # Example
+//!
+//! ```
+//! use habilis_network_iroh_transport_util::split_segments;
+//!
+//! let segments: Vec<&[u8]> = split_segments(b"abcdef", Some(4)).collect();
+//! assert_eq!(segments, [&b"abcd"[..], &b"ef"[..]], "the last segment holds the rest");
+//! ```
 
 mod rung;
 

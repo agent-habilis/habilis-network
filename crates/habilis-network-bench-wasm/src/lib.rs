@@ -9,6 +9,13 @@
 //! One endpoint per page, held in a thread-local: the browser is
 //! single-threaded and the JSEP handles are `JsValue`s, which are neither
 //! `Send` nor `Sync`.
+//!
+//! # Example
+//!
+//! ```js
+//! const endpointId = await window.bench.init();
+//! await window.bench.serve();
+//! ```
 
 /// The browser endpoint of the benchmark.
 #[cfg(target_arch = "wasm32")]

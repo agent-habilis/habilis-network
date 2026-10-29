@@ -8,6 +8,14 @@
 //! (the same shape `packages/habilis-network-api` was designed around). One in-flight
 //! call per queue: the receivers are behind async mutexes, so a second
 //! concurrent `nextMsg()` waits rather than panics.
+//!
+//! # Example
+//!
+//! ```js
+//! const peer = await MeshPeer.open(JSON.stringify({ name: "demo" }));
+//! await peer.stateMerge(JSON.stringify({ hello: "world" }));
+//! console.log(peer.id(), await peer.peerCount());
+//! ```
 
 mod stream_node;
 
