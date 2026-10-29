@@ -119,11 +119,9 @@ mod tests {
         }
         assert!(connection.paths().len() >= 2, "both paths opened");
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let selected_ip: bool = connection
-            .paths()
-            .iter()
-            .find(iroh::endpoint::Path::is_selected)
-            .is_some_and(|path| path.is_ip());
+        let open = connection.paths();
+        let found = open.iter().find(iroh::endpoint::Path::is_selected);
+        let selected_ip: bool = found.is_some_and(|path| path.is_ip());
         router.shutdown().await.expect("shutdown");
         selected_ip
     }
@@ -162,11 +160,12 @@ mod tests {
             let handle = GossipHandle::new(key(seed).public());
             hub.join(&handle);
             async move {
-                Endpoint::builder(presets::Minimal)
+                let builder = Endpoint::builder(presets::Minimal)
                     .secret_key(key(seed))
                     .relay_mode(RelayMode::Disabled)
-                    .add_custom_transport(handle.custom_transport())
-                    .path_selector(handle.path_selector())
+                    .add_custom_transport(handle.custom_transport());
+                let configured = builder.path_selector(handle.path_selector());
+                configured
                     .clear_ip_transports()
                     .clear_relay_transports()
                     .bind()

@@ -259,7 +259,8 @@ impl CustomEndpoint for GossipEndpoint {
         metas: &mut [noq_udp::RecvMeta],
         recv_infos: &mut [RecvInfo],
     ) -> Poll<io::Result<usize>> {
-        let cap: usize = bufs.len().min(metas.len()).min(recv_infos.len());
+        let cap: usize = bufs.len().min(metas.len());
+        let cap = cap.min(recv_infos.len());
         if cap == 0 {
             return Poll::Ready(Ok(0));
         }
@@ -397,10 +398,11 @@ mod tests {
 
     /// An endpoint whose only transport is gossip.
     async fn endpoint(secret: SecretKey, handle: &GossipHandle) -> Endpoint {
-        Endpoint::builder(presets::Minimal)
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(secret)
             .relay_mode(RelayMode::Disabled)
-            .add_custom_transport(handle.custom_transport())
+            .add_custom_transport(handle.custom_transport());
+        builder
             .clear_ip_transports()
             .clear_relay_transports()
             .bind()
@@ -617,12 +619,9 @@ mod tests {
 
         echo_once(&connection, b"after").await;
         assert!(connection.close_reason().is_none(), "the connection closed");
-        let selected: Vec<_> = connection
-            .paths()
-            .iter()
-            .filter(iroh::endpoint::Path::is_selected)
-            .map(|path| path.remote_addr().clone())
-            .collect();
+        let open = connection.paths();
+        let chosen = open.iter().filter(iroh::endpoint::Path::is_selected);
+        let selected: Vec<_> = chosen.map(|path| path.remote_addr().clone()).collect();
         assert_eq!(
             selected,
             [TransportAddr::Custom(gossip_addr(bob.id()))],

@@ -95,10 +95,11 @@ mod tests {
     }
 
     async fn gossip_only_endpoint(key: SecretKey, handle: &GossipHandle) -> Endpoint {
-        Endpoint::builder(presets::Minimal)
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
-            .add_custom_transport(handle.custom_transport())
+            .add_custom_transport(handle.custom_transport());
+        builder
             .clear_ip_transports()
             .clear_relay_transports()
             .bind()

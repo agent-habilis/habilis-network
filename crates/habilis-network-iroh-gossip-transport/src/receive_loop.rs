@@ -55,11 +55,13 @@ mod tests {
     }
 
     async fn member(seed: u8, lookup: &MemoryLookup) -> (Endpoint, Gossip, Router) {
-        let endpoint: Endpoint = Endpoint::builder(presets::Minimal)
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(secret(seed))
-            .relay_mode(RelayMode::Disabled)
+            .relay_mode(RelayMode::Disabled);
+        let bound = builder
             .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .expect("bind address")
+            .expect("bind address");
+        let endpoint: Endpoint = bound
             .address_lookup(lookup.clone())
             .bind()
             .await
@@ -221,12 +223,8 @@ mod tests {
         let mut gossips = Vec::new();
         for (endpoint, _) in &nodes {
             let gossip = Gossip::builder().spawn(endpoint.clone());
-            routers.push(
-                Router::builder(endpoint.clone())
-                    .accept(GOSSIP_ALPN, gossip.clone())
-                    .accept(ECHO_ALPN, Echo)
-                    .spawn(),
-            );
+            let router = Router::builder(endpoint.clone()).accept(GOSSIP_ALPN, gossip.clone());
+            routers.push(router.accept(ECHO_ALPN, Echo).spawn());
             gossips.push(gossip);
         }
         let mut readers = Vec::new();
@@ -278,11 +276,14 @@ mod tests {
             path.is_selected()
                 && matches!(path.remote_addr(), iroh::TransportAddr::Custom(address) if address.id() == crate::GOSSIP_TRANSPORT_ID)
         });
-        let paths: Vec<String> = connection
-            .paths()
-            .iter()
-            .map(|path| format!("{:?} selected={}", path.remote_addr(), path.is_selected()))
-            .collect();
+        let mut paths: Vec<String> = Vec::new();
+        for path in connection.paths().iter() {
+            paths.push(format!(
+                "{:?} selected={}",
+                path.remote_addr(),
+                path.is_selected()
+            ));
+        }
         assert!(
             selected_is_gossip,
             "the selected path is not gossip: {paths:?}"
