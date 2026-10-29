@@ -190,3 +190,27 @@ fn commented() {
 `);
   expect(text).toContain("    // why the items come first\n    use std::collections::HashSet;\n    let _guard = ::habilis_network_test_tracing::init();\n    let set");
 });
+
+test("an async test that returns a Result keeps the value: run is the tail expression", () => {
+  const { text, flagged } = rewrite(`use habilis_network_test_tracing::test;
+
+#[test]
+async fn returns_a_result() -> Result<(), String> {
+    Ok(())
+}
+`);
+  expect(flagged).toEqual([]);
+  expect(text).toContain("fn returns_a_result() -> Result<(), String> {\n    ::habilis_network_test_tracing::run(");
+  expect(text).toContain("    })\n}");
+});
+
+test("a doc comment that names the attribute is not a test", () => {
+  const { text, flagged } = rewrite(`//! \`#[test]\` of this crate, imported by name.
+use habilis_network_test_tracing::test;
+
+#[test]
+fn one() {}
+`);
+  expect(flagged).toEqual([]);
+  expect(text).toContain("fn one() {\n    let _guard");
+});

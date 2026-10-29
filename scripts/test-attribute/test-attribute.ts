@@ -113,7 +113,7 @@ export function rewrite(source: string): { text: string; flagged: string[] } {
   for (const name of kept) {
     text = text.replace(new RegExp(`(?<![\\w.:])${name}\\(`, "g"), `::habilis_network_test_tracing::${name}(`);
   }
-  const testAttrs = (text.match(/#\[test\b/g) ?? []).length;
+  const testAttrs = (text.match(/^[ \t]*#\[test\b/gm) ?? []).length;
   const pieces: string[] = [];
   let last = 0;
   let matched = 0;
@@ -151,7 +151,8 @@ export function rewrite(source: string): { text: string; flagged: string[] } {
         ? `${bodyIndent}::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {`
         : `${bodyIndent}::habilis_network_test_tracing::run_multi_thread(::habilis_network_test_tracing::init(), ${run.workers}, async {`;
       const inner = indentBy(body.replace(/^\n/, "").replace(/\n[ \t]*$/, ""), "    ");
-      newBody = `\n${head}\n${inner}\n${bodyIndent}});\n${indent}`;
+      // A test that returns a value keeps it: run is the tail expression, with no semicolon.
+      newBody = `\n${head}\n${inner}\n${bodyIndent}})${ret.trim() === "" ? ";" : ""}\n${indent}`;
     } else {
       if (args !== undefined) {
         flagged.push(`${name}: sync test arguments not handled: ${args}`);
