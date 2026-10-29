@@ -1454,9 +1454,7 @@ mod tests {
     /// would silently break cross-node reconciliation.
     #[test]
     fn wire_window_round_trips_ids() {
-        let ids: Vec<DedupKey> = (0..5u8)
-            .map(|seed| DedupKey::from([seed; 16]))
-            .collect();
+        let ids: Vec<DedupKey> = (0..5u8).map(|seed| DedupKey::from([seed; 16])).collect();
         let window = DigestWindow {
             lo: (UnixSecs::from_secs(1), DedupKey::MIN),
             hi: (UnixSecs::MAX, DedupKey::MAX),
@@ -2009,10 +2007,7 @@ mod tests {
                 DedupKey::from([0x03; 16]),
             ),
             hi: (UnixSecs::MAX, DedupKey::MAX),
-            ids: vec![
-                DedupKey::from([0x11; 16]),
-                DedupKey::from([0x22; 16]),
-            ],
+            ids: vec![DedupKey::from([0x11; 16]), DedupKey::from([0x22; 16])],
             from_start: false,
         };
         let older = DigestWindow {
@@ -2056,10 +2051,7 @@ mod tests {
         let ids = back.windows[0].decode_ids().expect("the ids decode");
         assert_eq!(
             ids,
-            HashSet::from([
-                DedupKey::from([0x11; 16]),
-                DedupKey::from([0x22; 16])
-            ]),
+            HashSet::from([DedupKey::from([0x11; 16]), DedupKey::from([0x22; 16])]),
             "the digest body keeps its ids on the wire"
         );
         let closed = back.windows[1].range().expect("the keys decode");
