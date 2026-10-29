@@ -58,7 +58,7 @@ pub(crate) fn expand(
         }
     }
     let block = &function.block;
-    let body = if function.sig.asyncness.take().is_some() {
+    let body: proc_macro2::TokenStream = if function.sig.asyncness.take().is_some() {
         if multi_thread {
             let workers = workers.map_or_else(
                 || quote!(::std::thread::available_parallelism().map_or(1, usize::from)),
