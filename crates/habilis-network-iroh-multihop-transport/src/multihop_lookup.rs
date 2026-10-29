@@ -87,10 +87,8 @@ impl RouteChooser {
             dst,
         };
         let shortest = topology.route_to(leg, 1).next();
-        let first_is_refused: bool = shortest
-            .as_ref()
-            .and_then(|route| route.hops().first())
-            .is_some_and(|hop| refused.contains(&hop.app_id));
+        let first_hop = shortest.as_ref().and_then(|route| route.hops().first());
+        let first_is_refused: bool = first_hop.is_some_and(|hop| refused.contains(&hop.app_id));
         if first_is_refused
             && let Some(route) = topology.route_to_avoiding_first_hops(leg, &refused)
         {
@@ -113,7 +111,11 @@ impl AddressLookup for MultihopLookup {
         // One route, chosen as `route_addr` chooses it: the shortest, unless the gate
         // refuses its first hop.
         let chosen = self.chooser.choose(AppId::new(endpoint_id));
-        tracing::debug!(target: "habilis_lookup", me = %self.chooser.self_id.fmt_short(), remote = %endpoint_id.fmt_short(), found = chosen.is_some(), first_hop_skipped = chosen.as_ref().is_some_and(|chosen| chosen.skipped), hops = %chosen.as_ref().map_or_else(String::new, |chosen| chosen.route.describe()), "multihop lookup");
+        let first_hop_skipped = chosen.as_ref().is_some_and(|chosen| chosen.skipped);
+        let hops = chosen
+            .as_ref()
+            .map_or_else(String::new, |chosen| chosen.route.describe());
+        tracing::debug!(target: "habilis_lookup", me = %self.chooser.self_id.fmt_short(), remote = %endpoint_id.fmt_short(), found = chosen.is_some(), first_hop_skipped = first_hop_skipped, hops = %hops, "multihop lookup");
         let route = chosen?.route;
         let info = EndpointInfo::from_parts(
             endpoint_id,

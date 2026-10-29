@@ -776,14 +776,11 @@ mod tests {
     /// An underlay on loopback only, bound to the derived key of `secret`.
     async fn loopback_underlay(secret: &SecretKey) -> Endpoint {
         let loopback_addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("loopback");
-        let underlay: Endpoint = Endpoint::builder(presets::Minimal)
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(secret))
-            .relay_mode(RelayMode::Disabled)
-            .bind_addr(loopback_addr)
-            .expect("valid bind addr")
-            .bind()
-            .await
-            .expect("bind a loopback underlay");
+            .relay_mode(RelayMode::Disabled);
+        let bound = builder.bind_addr(loopback_addr).expect("valid bind addr");
+        let underlay: Endpoint = bound.bind().await.expect("bind a loopback underlay");
         close_at_end(&underlay);
         underlay
     }
@@ -821,13 +818,9 @@ mod tests {
         .expect("an extra ALPN is allowed");
 
         let loopback_addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("loopback");
-        let client: Endpoint = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Disabled)
-            .bind_addr(loopback_addr)
-            .expect("valid bind addr")
-            .bind()
-            .await
-            .expect("bind a client");
+        let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
+        let bound = builder.bind_addr(loopback_addr).expect("valid bind addr");
+        let client: Endpoint = bound.bind().await.expect("bind a client");
         close_at_end(&client);
         let connection = client
             .connect(handle.underlay_addr(), EXTRA_ALPN)
@@ -897,9 +890,10 @@ mod tests {
 
     /// A handle whose underlay can only reach other underlays through the relay.
     async fn relay_only_handle(secret: &SecretKey, url: &iroh::RelayUrl) -> MultihopHandle {
-        let underlay: Endpoint = Endpoint::builder(presets::Minimal)
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(secret))
-            .relay_mode(RelayMode::custom([url.clone()]))
+            .relay_mode(RelayMode::custom([url.clone()]));
+        let underlay: Endpoint = builder
             .clear_ip_transports()
             .bind()
             .await
@@ -1023,12 +1017,8 @@ mod tests {
             AppId::new(dst.public()),
         );
         let address = handle.route_addr(dst_id).expect("a route to dst");
-        let hops: Vec<AppId> = Route::decode(&address)
-            .expect("a route")
-            .hops()
-            .iter()
-            .map(|hop| hop.app_id)
-            .collect();
+        let route = Route::decode(&address).expect("a route");
+        let hops: Vec<AppId> = route.hops().iter().map(|hop| hop.app_id).collect();
         assert_eq!(
             hops,
             vec![AppId::new(via.public()), dst_id],
@@ -1137,10 +1127,9 @@ mod tests {
                 .resolve(dst.get())
                 .expect("the lookup answers");
             let item = answers.next().await.expect("an item").expect("no error");
-            let custom: iroh_base::CustomAddr = item
-                .endpoint_info()
-                .addrs()
-                .find(|address| address.is_custom())
+            let mut addrs = item.endpoint_info().addrs();
+            let custom_addr = addrs.find(|address| address.is_custom());
+            let custom: iroh_base::CustomAddr = custom_addr
                 .map(|address| {
                     let iroh::TransportAddr::Custom(custom) = address else {
                         unreachable!("is_custom was true");

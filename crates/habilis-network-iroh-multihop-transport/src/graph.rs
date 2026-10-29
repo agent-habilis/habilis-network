@@ -79,7 +79,8 @@ impl Graph {
                 break;
             };
             // Interior hops = every hop except the final destination.
-            let interior: Vec<AppId> = path.hops.iter().rev().skip(1).copied().collect();
+            let trimmed = path.hops.iter().rev().skip(1);
+            let interior: Vec<AppId> = trimmed.copied().collect();
             let exhausted = interior.is_empty();
             blocked.extend(interior);
             paths.push(path);

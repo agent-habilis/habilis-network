@@ -257,12 +257,11 @@ impl Topology {
     /// Returns how many vectors were dropped.
     pub fn expire_older_than(&mut self, now: Instant) -> usize {
         let max_age = self.max_age;
-        let expired: Vec<AppId> = self
+        let stale = self
             .vectors
             .iter()
-            .filter(|(_, held)| now.saturating_duration_since(held.received) > max_age)
-            .map(|(origin, _)| *origin)
-            .collect();
+            .filter(|(_, held)| now.saturating_duration_since(held.received) > max_age);
+        let expired: Vec<AppId> = stale.map(|(origin, _)| *origin).collect();
         for origin in &expired {
             self.remove_at(*origin, now);
         }
@@ -280,9 +279,8 @@ impl Topology {
 
     /// The application ids that `origin` linked to in the vector that we hold of it.
     pub(crate) fn links_of(&self, origin: AppId) -> Option<Vec<AppId>> {
-        self.vectors
-            .get(&origin)
-            .map(|held| held.vector.links.iter().map(|(id, _)| *id).collect())
+        let held = self.vectors.get(&origin)?;
+        Some(held.vector.links.iter().map(|(id, _)| *id).collect())
     }
 
     /// The underlay address an origin advertised, for dialing a hop through it.
@@ -308,10 +306,8 @@ impl Topology {
     /// we can't reach), so the returned list may be shorter than `max_paths` or
     /// empty.
     pub fn route_to(&self, leg: Leg, max_paths: usize) -> impl Iterator<Item = Route> + use<'_> {
-        self.graph()
-            .disjoint_paths(leg, max_paths)
-            .into_iter()
-            .filter_map(|path| self.route_of(&path))
+        let paths = self.graph().disjoint_paths(leg, max_paths);
+        paths.into_iter().filter_map(|path| self.route_of(&path))
     }
 
     /// The shortest [`Route`] from `src` to `dst` that does not start with a hop in
@@ -720,9 +716,10 @@ mod tests {
         let before = before_routes[0].encode();
 
         let relay: iroh::RelayUrl = "http://127.0.0.1:1/".parse().expect("a relay url");
+        let ip_addr: std::net::SocketAddr = "10.0.0.7:4000".parse().expect("an address");
         let moved: EndpointAddr = EndpointAddr::new(nc.get())
             .with_relay_url(relay)
-            .with_ip_addr("10.0.0.7:4000".parse().expect("an address"));
+            .with_ip_addr(ip_addr);
         assert!(
             ingest(
                 &mut store,
@@ -849,9 +846,10 @@ mod tests {
     /// The application ids of the hops of the best route from `src` to `dst`.
     fn best_route(store: &Topology, src: AppId, dst: AppId) -> Option<Vec<AppId>> {
         let routes: Vec<_> = store.route_to(Leg { src, dst }, 1).collect();
-        routes
-            .first()
-            .map(|route| route.hops().iter().map(|hop| hop.app_id).collect())
+        let hops_of = |route: &crate::Route| -> Vec<AppId> {
+            route.hops().iter().map(|hop| hop.app_id).collect()
+        };
+        routes.first().map(hops_of)
     }
 
     /// The cost of the cheapest path from `src` to `dst`.

@@ -82,11 +82,11 @@ const PATH_RECHECK: Duration = Duration::from_millis(250);
 
 /// The open paths of a connection, each with whether it is the selected one.
 fn paths_of(connection: &Connection) -> Vec<(TransportAddr, bool)> {
-    connection
-        .paths()
-        .iter()
-        .map(|path| (path.remote_addr().clone(), path.is_selected()))
-        .collect()
+    let mut out = Vec::new();
+    for path in connection.paths().iter() {
+        out.push((path.remote_addr().clone(), path.is_selected()));
+    }
+    out
 }
 
 /// Whether a writer sends on a selected path that is not the relay.
@@ -368,23 +368,15 @@ impl WriterPool {
 
     /// The hops that the gate refuses now, stuck or not.
     fn refusing_app_ids(&self) -> Vec<AppId> {
-        self.health
-            .lock()
-            .expect("health mutex poisoned")
-            .values()
-            .filter(|hop| hop.refused_since.is_some())
-            .map(|hop| hop.app_id)
-            .collect()
+        let health = self.health.lock().expect("health mutex poisoned");
+        let refusing = health.values().filter(|hop| hop.refused_since.is_some());
+        refusing.map(|hop| hop.app_id).collect()
     }
 
     fn stuck_app_ids(&self) -> Vec<AppId> {
-        self.health
-            .lock()
-            .expect("health mutex poisoned")
-            .values()
-            .filter(|hop| hop.stuck)
-            .map(|hop| hop.app_id)
-            .collect()
+        let health = self.health.lock().expect("health mutex poisoned");
+        let stuck = health.values().filter(|hop| hop.stuck);
+        stuck.map(|hop| hop.app_id).collect()
     }
 }
 
@@ -530,13 +522,9 @@ mod tests {
     /// as it is in production.
     async fn forwarder() -> (Forwarder, AppId, mpsc::Receiver<Delivered>) {
         let loopback: SocketAddr = "127.0.0.1:0".parse().expect("loopback addr");
-        let underlay: Endpoint = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Disabled)
-            .bind_addr(loopback)
-            .expect("valid bind addr")
-            .bind()
-            .await
-            .expect("bind underlay endpoint");
+        let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
+        let bound = builder.bind_addr(loopback).expect("valid bind addr");
+        let underlay: Endpoint = bound.bind().await.expect("bind underlay endpoint");
         close_at_end(&underlay);
         let app_id = AppId::new(SecretKey::from_bytes(&[99; 32]).public());
         let (inbound, received) = mpsc::channel(4);
@@ -787,9 +775,10 @@ mod tests {
     }
 
     async fn relay_node(seed: u8, url: &iroh::RelayUrl, allow_relay: bool) -> RelayNode {
-        let underlay = Endpoint::builder(presets::Minimal)
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(SecretKey::from_bytes(&[seed; 32]))
-            .relay_mode(RelayMode::custom([url.clone()]))
+            .relay_mode(RelayMode::custom([url.clone()]));
+        let underlay = builder
             .clear_ip_transports()
             .bind()
             .await

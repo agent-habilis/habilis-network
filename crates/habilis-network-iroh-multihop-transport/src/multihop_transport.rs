@@ -102,7 +102,8 @@ impl CustomEndpoint for MultihopEndpoint {
         metas: &mut [noq_udp::RecvMeta],
         recv_infos: &mut [RecvInfo],
     ) -> Poll<io::Result<usize>> {
-        let cap: usize = bufs.len().min(metas.len()).min(recv_infos.len());
+        let cap: usize = bufs.len().min(metas.len());
+        let cap = cap.min(recv_infos.len());
         if cap == 0 {
             return Poll::Ready(Ok(0));
         }

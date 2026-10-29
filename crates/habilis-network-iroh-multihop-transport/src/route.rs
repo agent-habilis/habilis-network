@@ -54,11 +54,9 @@ impl Route {
     /// The hops as short ids for a log line: the application id of each, then the id
     /// of its underlay, which differ because the underlay has a key of its own.
     pub(crate) fn describe(&self) -> String {
-        let hops: Vec<String> = self
-            .0
-            .iter()
-            .map(|hop| format!("{}/{}", hop.app_id.fmt_short(), hop.underlay_id.fmt_short()))
-            .collect();
+        let describe_hop =
+            |hop: &RouteHop| format!("{}/{}", hop.app_id.fmt_short(), hop.underlay_id.fmt_short());
+        let hops: Vec<String> = self.0.iter().map(describe_hop).collect();
         hops.join(">")
     }
 
@@ -119,12 +117,8 @@ impl Route {
     /// `None` when the result is not a legal route: `source` already appears in
     /// `forward`, so reversing would mint a cyclic return path.
     pub(crate) fn reverse_from(forward: &[RouteHop], source: RouteHop) -> Option<Self> {
-        let mut hops: Vec<RouteHop> = forward
-            .iter()
-            .rev()
-            .skip(1) // drop the destination (ourselves)
-            .copied()
-            .collect();
+        let trimmed = forward.iter().rev().skip(1); // drop the destination (ourselves)
+        let mut hops: Vec<RouteHop> = trimmed.copied().collect();
         hops.push(source);
         Self::try_new(hops)
     }

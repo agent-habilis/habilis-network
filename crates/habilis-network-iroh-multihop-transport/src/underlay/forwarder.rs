@@ -153,9 +153,8 @@ impl Forwarder {
 
     /// Whether `app_id` is a link in the vector that this node published of itself.
     fn is_link_of_ours(&self, app_id: AppId) -> bool {
-        self.topology
-            .read()
-            .expect("topology lock poisoned")
+        let topology = self.topology.read().expect("topology lock poisoned");
+        topology
             .links_of(self.self_app_id)
             .is_some_and(|links| links.contains(&app_id))
     }

@@ -63,14 +63,11 @@ fn multihop_paths(connection: &Connection) -> usize {
 /// on the key derived from the peer's own.
 async fn underlay_endpoint(peer: &SecretKey) -> Endpoint {
     let loopback: SocketAddr = "127.0.0.1:0".parse().expect("loopback addr");
-    Endpoint::builder(presets::Minimal)
+    let builder = Endpoint::builder(presets::Minimal)
         .secret_key(underlay_secret(peer))
-        .relay_mode(RelayMode::Disabled)
-        .bind_addr(loopback)
-        .expect("valid bind addr")
-        .bind()
-        .await
-        .expect("bind underlay endpoint")
+        .relay_mode(RelayMode::Disabled);
+    let bound = builder.bind_addr(loopback).expect("valid bind addr");
+    bound.bind().await.expect("bind underlay endpoint")
 }
 
 /// A node that participates in the end-to-end connection: an application endpoint
@@ -85,15 +82,14 @@ async fn make_node(secret: SecretKey) -> Node {
     let underlay = underlay_endpoint(&secret).await;
     let handle = MultihopHandle::new(&secret, underlay, HandleConfig::default())
         .expect("underlay on the derived key");
-    let app: Endpoint = Endpoint::builder(presets::Minimal)
+    let builder = Endpoint::builder(presets::Minimal)
         .secret_key(secret.clone())
-        .relay_mode(RelayMode::Disabled)
+        .relay_mode(RelayMode::Disabled);
+    let configured = builder
         .preset(handle.clone())
         .clear_ip_transports()
-        .clear_relay_transports()
-        .bind()
-        .await
-        .expect("bind app endpoint");
+        .clear_relay_transports();
+    let app: Endpoint = configured.bind().await.expect("bind app endpoint");
     Node {
         app,
         handle,
@@ -112,14 +108,17 @@ async fn make_dual_node(
     let webrtc = habilis_network_iroh_webrtc_transport::WebRtcHandle::new(
         habilis_network_iroh_webrtc_transport::WebRtcTransport::new(secret.public()),
     );
-    let app: Endpoint = Endpoint::builder(presets::Minimal)
+    let builder = Endpoint::builder(presets::Minimal)
         .secret_key(secret.clone())
-        .relay_mode(RelayMode::Disabled)
+        .relay_mode(RelayMode::Disabled);
+    let transport = webrtc.transport();
+    let selector = webrtc.path_selector();
+    let configured = builder
         .preset(handle.clone())
-        .add_custom_transport(webrtc.transport())
-        .path_selector(webrtc.path_selector())
-        .clear_ip_transports()
-        .clear_relay_transports()
+        .add_custom_transport(transport)
+        .path_selector(selector);
+    let configured = configured.clear_ip_transports().clear_relay_transports();
+    let app: Endpoint = configured
         .bind()
         .await
         .expect("bind app endpoint with both custom transports");
