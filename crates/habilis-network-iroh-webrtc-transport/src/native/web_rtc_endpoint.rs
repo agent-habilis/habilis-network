@@ -113,7 +113,6 @@ impl CustomEndpoint for WebRtcEndpoint {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use iroh::SecretKey;
     use iroh::endpoint::transports::CustomTransport as _;
 
@@ -124,6 +123,7 @@ mod tests {
 
     #[test]
     fn the_webrtc_endpoint_does_not_cap_udp_gso() {
+        let _guard = ::habilis_network_test_tracing::init();
         let endpoint = WebRtcTransport::new(SecretKey::generate().public())
             .bind()
             .expect("a fresh transport binds");

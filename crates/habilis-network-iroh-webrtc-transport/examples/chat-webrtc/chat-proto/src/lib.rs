@@ -258,7 +258,6 @@ mod tests {
         ClientMsg, EndpointId, FRAME_HEADER_LEN, MAX_NICK_CHARS, ServerMsg, Ticket, decode_body,
         decode_frame_len, encode_frame,
     };
-    use habilis_network_test_tracing::test;
 
     /// Generated rather than a hardcoded array: an endpoint id is a point on a
     /// curve, and most 32-byte patterns are not one.
@@ -268,6 +267,7 @@ mod tests {
 
     #[test]
     fn a_ticket_round_trips_with_a_relay() {
+        let _guard = ::habilis_network_test_tracing::init();
         let ticket = Ticket {
             id: sample_id(),
             relay: Some("https://relay.example/".parse().expect("a valid relay URL")),
@@ -285,6 +285,7 @@ mod tests {
 
     #[test]
     fn a_ticket_round_trips_without_a_relay() {
+        let _guard = ::habilis_network_test_tracing::init();
         let ticket = Ticket {
             id: sample_id(),
             relay: None,
@@ -306,6 +307,7 @@ mod tests {
     /// endpoint" after a 20-second dial.
     #[test]
     fn a_mistyped_ticket_is_rejected_rather_than_dialled() {
+        let _guard = ::habilis_network_test_tracing::init();
         let encoded = Ticket {
             id: sample_id(),
             relay: None,
@@ -330,6 +332,7 @@ mod tests {
 
     #[test]
     fn a_frame_round_trips() {
+        let _guard = ::habilis_network_test_tracing::init();
         let message = ServerMsg::Said {
             nick: "bob".into(),
             text: "hi".into(),
@@ -353,6 +356,7 @@ mod tests {
     /// us reserve `4 GiB` by sending four bytes.
     #[test]
     fn an_oversized_length_prefix_is_refused_before_allocating() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             decode_frame_len(u32::MAX.to_le_bytes()).is_err(),
             "an oversized length prefix is refused before allocating"
@@ -361,6 +365,7 @@ mod tests {
 
     #[test]
     fn a_nick_is_measured_in_chars_not_bytes() {
+        let _guard = ::habilis_network_test_tracing::init();
         // 24 multi-byte chars is 72 bytes; a byte cap would reject it.
         let nick = "ぁ".repeat(MAX_NICK_CHARS);
         assert!(
@@ -376,6 +381,7 @@ mod tests {
 
     #[test]
     fn an_empty_message_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             ClientMsg::Say { text: "   ".into() }.validate().is_err(),
             "an empty message is refused"

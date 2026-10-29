@@ -481,12 +481,12 @@ pub(super) async fn sleep_ms(millis: i32) {
 #[cfg(test)]
 mod tests {
     use super::{ICE_QUIET_MS, PreAttachBacklog, count_candidates, gathering_settled};
-    use habilis_network_test_tracing::test;
 
     const QUIET: f64 = ICE_QUIET_MS;
 
     #[test]
     fn the_pre_attach_backlog_is_bounded_at_the_inbound_queue() {
+        let _guard = ::habilis_network_test_tracing::init();
         // `inject_inbound` try_sends into a queue of exactly IN_QUEUE slots,
         // so anything held past that could never be delivered: an unbounded
         // buffer only grew browser memory until attach, where the excess was
@@ -523,6 +523,7 @@ mod tests {
 
     #[test]
     fn a_srflx_with_an_mdns_raddr_counts_as_srflx() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Some browsers obfuscate the related address too: `raddr abc.local`
         // on a srflx line. Reading any `.local` as mdns kept srflx at zero,
         // which held `gathering_settled` open for the browser's full
@@ -538,6 +539,7 @@ mod tests {
 
     #[test]
     fn an_mdns_obfuscated_host_still_counts_as_mdns() {
+        let _guard = ::habilis_network_test_tracing::init();
         let sdp = "a=candidate:1 1 udp 2113937151 abcd1234.local 54321 typ host generation 0\r\n";
         assert_eq!(
             count_candidates(sdp),
@@ -548,6 +550,7 @@ mod tests {
 
     #[test]
     fn no_candidates_never_settles() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             !gathering_settled(0, 0, QUIET * 100.0, true),
             "no candidates never settles at a long quiet period"
@@ -560,6 +563,7 @@ mod tests {
 
     #[test]
     fn srflx_is_required_when_stun_servers_are_configured() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Host-only in hand: keep waiting — srflx is the only NAT rung.
         assert!(
             !gathering_settled(2, 0, QUIET, true),
@@ -573,6 +577,7 @@ mod tests {
 
     #[test]
     fn srflx_is_waived_without_stun_servers() {
+        let _guard = ::habilis_network_test_tracing::init();
         // host_only() / degraded config: srflx can never arrive.
         assert!(
             gathering_settled(1, 0, QUIET, false),
@@ -582,6 +587,7 @@ mod tests {
 
     #[test]
     fn a_fresh_candidate_resets_the_quiet_period() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             !gathering_settled(1, 1, QUIET - 1.0, true),
             "a fresh candidate resets the quiet period"
@@ -594,6 +600,7 @@ mod tests {
 
     #[test]
     fn srflx_alone_is_not_enough() {
+        let _guard = ::habilis_network_test_tracing::init();
         // No host/mdns line yet means gathering only just started; the local
         // candidates are instant, so their absence says "keep waiting".
         assert!(

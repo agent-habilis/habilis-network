@@ -100,6 +100,9 @@ function runCall(args: string | undefined): { call: string; workers?: string } |
 }
 
 export function rewrite(source: string): { text: string; flagged: string[] } {
+  // Only a file that imports the attribute has macro tests. A file without the import keeps its std #[test].
+  const importsAttribute = /^[ \t]*use habilis_network_test_tracing::test;/m.test(source) || /^[ \t]*use habilis_network_test_tracing::\{[^}]*\btest\b[^}]*\};/m.test(source);
+  if (!importsAttribute) return { text: source, flagged: [] };
   const flagged: string[] = [];
   const kept: string[] = [];
   let text = source.replace(IMPORT, "").replace(BRACE_IMPORT, (_line, _indent: string, items: string) => {

@@ -328,7 +328,6 @@ pub async fn rtt_samples(
 
 #[cfg(all(test, feature = "native"))]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::net::SocketAddr;
 
     use iroh::endpoint::presets;
@@ -347,39 +346,41 @@ mod tests {
     }
 
     #[test]
-    async fn rtt_samples_returns_one_timed_probe_per_round() {
-        let server = loopback_endpoint().await;
-        let router = Router::builder(server.clone())
-            .accept(BENCH_ALPN, Bench::new())
-            .spawn();
-        let socket = server
-            .bound_sockets()
-            .into_iter()
-            .find(SocketAddr::is_ipv4)
-            .expect("an IPv4 socket");
-        let client = loopback_endpoint().await;
-        let connection = client
-            .connect(
-                EndpointAddr::from_parts(server.id(), [TransportAddr::Ip(socket)]),
-                BENCH_ALPN,
-            )
-            .await
-            .expect("connect over loopback");
+    fn rtt_samples_returns_one_timed_probe_per_round() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let server = loopback_endpoint().await;
+            let router = Router::builder(server.clone())
+                .accept(BENCH_ALPN, Bench::new())
+                .spawn();
+            let socket = server
+                .bound_sockets()
+                .into_iter()
+                .find(SocketAddr::is_ipv4)
+                .expect("an IPv4 socket");
+            let client = loopback_endpoint().await;
+            let connection = client
+                .connect(
+                    EndpointAddr::from_parts(server.id(), [TransportAddr::Ip(socket)]),
+                    BENCH_ALPN,
+                )
+                .await
+                .expect("connect over loopback");
 
-        let samples: Vec<_> = rtt_samples(&connection, 3, 20)
-            .await
-            .expect("rtt samples")
-            .collect();
+            let samples: Vec<_> = rtt_samples(&connection, 3, 20)
+                .await
+                .expect("rtt samples")
+                .collect();
 
-        assert_eq!(samples.len(), 20, "one timed probe is returned per round");
-        assert!(
-            samples.iter().all(|sample| !sample.is_zero()),
-            "every probe sample is nonzero"
-        );
-        connection.close(0u32.into(), b"done");
-        // Both endpoints are closed in order: an endpoint that is dropped open makes iroh log an
-        // ERROR, which the guard of the test turns into a failure.
-        client.close().await;
-        router.shutdown().await.expect("the router shuts down");
+            assert_eq!(samples.len(), 20, "one timed probe is returned per round");
+            assert!(
+                samples.iter().all(|sample| !sample.is_zero()),
+                "every probe sample is nonzero"
+            );
+            connection.close(0u32.into(), b"done");
+            // Both endpoints are closed in order: an endpoint that is dropped open makes iroh log an
+            // ERROR, which the guard of the test turns into a failure.
+            client.close().await;
+            router.shutdown().await.expect("the router shuts down");
+        });
     }
 }

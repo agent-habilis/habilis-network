@@ -364,7 +364,6 @@ mod tests {
         HEADER_LEN, IceConfig, MAGIC_COOKIE, TRANSACTION_ID_LEN, binding_request, gather_reflexive,
         parse_binding_response,
     };
-    use habilis_network_test_tracing::test;
     use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::net::UdpSocket;
@@ -402,6 +401,7 @@ mod tests {
 
     #[test]
     fn request_is_a_well_formed_binding_request() {
+        let _guard = ::habilis_network_test_tracing::init();
         let request = binding_request(TXID);
         assert_eq!(
             request.len(),
@@ -432,6 +432,7 @@ mod tests {
 
     #[test]
     fn xor_mapped_ipv4_is_unmasked() {
+        let _guard = ::habilis_network_test_tracing::init();
         let message = response(ATTR_XOR_MAPPED_ADDRESS, &xor_ipv4_value(), TXID);
         let address = parse_binding_response(&message, &TXID).expect("parse");
         assert_eq!(
@@ -443,6 +444,7 @@ mod tests {
 
     #[test]
     fn plain_mapped_address_is_accepted_as_a_fallback() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Older servers answer with the unXORed attribute; still usable.
         let mut value = vec![0, FAMILY_IPV4];
         value.extend_from_slice(&41234u16.to_be_bytes());
@@ -458,6 +460,7 @@ mod tests {
 
     #[test]
     fn xor_mapped_ipv6_masks_with_the_transaction_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut mask = [0u8; 16];
         mask[..4].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
         mask[4..].copy_from_slice(&TXID);
@@ -479,6 +482,7 @@ mod tests {
 
     #[test]
     fn plain_stun_responses_are_recognized_and_peer_traffic_is_not() {
+        let _guard = ::habilis_network_test_tracing::init();
         // A gather straggler: a well-formed Binding Success.
         let success = response(ATTR_XOR_MAPPED_ADDRESS, &xor_ipv4_value(), TXID);
         assert!(
@@ -527,6 +531,7 @@ mod tests {
 
     #[test]
     fn a_reply_for_another_transaction_is_rejected() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Two handshakes can share a socket; matching on the transaction id is
         // what keeps one from stealing the other's answer.
         let message = response(
@@ -542,6 +547,7 @@ mod tests {
 
     #[test]
     fn malformed_responses_are_rejected() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(parse_binding_response(&[], &TXID).is_err(), "empty");
         assert!(
             parse_binding_response(&[0u8; HEADER_LEN], &TXID).is_err(),
@@ -563,6 +569,7 @@ mod tests {
 
     #[test]
     fn a_truncated_body_is_rejected_not_panicked_on() {
+        let _guard = ::habilis_network_test_tracing::init();
         let full = response(ATTR_XOR_MAPPED_ADDRESS, &xor_ipv4_value(), TXID);
         for len in 0..full.len() {
             // A hostile or damaged server must produce an error, never a panic.
@@ -591,94 +598,102 @@ mod tests {
     }
 
     #[test]
-    async fn gather_probes_servers_concurrently() {
-        // The silent server comes first: the old sequential gather burned its
-        // whole per-server timeout on it before even asking the live one.
-        let silent = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
-        let silent_addr = silent.local_addr().expect("local addr");
-        let (live_addr, server) = mock_server().await;
+    fn gather_probes_servers_concurrently() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // The silent server comes first: the old sequential gather burned its
+            // whole per-server timeout on it before even asking the live one.
+            let silent = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+            let silent_addr = silent.local_addr().expect("local addr");
+            let (live_addr, server) = mock_server().await;
 
-        let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
-        let config = IceConfig {
-            stun_servers: vec![silent_addr.to_string(), live_addr.to_string()],
-            stun_timeout: Duration::from_secs(2),
-        };
-        let start = std::time::Instant::now();
-        let reflexive = gather_reflexive(&client, &config).await;
-        let elapsed = start.elapsed();
-        server.abort();
-        drop(silent);
+            let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+            let config = IceConfig {
+                stun_servers: vec![silent_addr.to_string(), live_addr.to_string()],
+                stun_timeout: Duration::from_secs(2),
+            };
+            let start = std::time::Instant::now();
+            let reflexive = gather_reflexive(&client, &config).await;
+            let elapsed = start.elapsed();
+            server.abort();
+            drop(silent);
 
-        assert_eq!(
-            reflexive,
-            Some("203.0.113.7:41234".parse().expect("addr")),
-            "the live server's answer wins"
-        );
-        assert!(
-            elapsed < Duration::from_secs(1),
-            "gather took {elapsed:?}, so the dead server was waited out sequentially"
-        );
+            assert_eq!(
+                reflexive,
+                Some("203.0.113.7:41234".parse().expect("addr")),
+                "the live server's answer wins"
+            );
+            assert!(
+                elapsed < Duration::from_secs(1),
+                "gather took {elapsed:?}, so the dead server was waited out sequentially"
+            );
+        });
     }
 
     #[test]
-    async fn a_hung_resolver_does_not_delay_a_live_answer() {
-        // One name hangs in resolution forever, the other resolves at once
-        // and its server answers within a millisecond. The answer must be
-        // read as it arrives: parking the receive loop behind the resolver
-        // re-taxes the connect path this gather sits on.
-        let (live_addr, server) = mock_server().await;
-        let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
-        let config = IceConfig {
-            stun_servers: vec!["hung.invalid:3478".to_owned(), live_addr.to_string()],
-            stun_timeout: Duration::from_secs(2),
-        };
-        let start = std::time::Instant::now();
-        let reflexive = super::gather_with_resolver(&client, &config, |name: String| async move {
-            if name.starts_with("hung") {
-                return std::future::pending().await;
-            }
-            let parsed: Option<SocketAddr> = name.parse().ok();
-            Ok(parsed)
-        })
-        .await;
-        let elapsed = start.elapsed();
-        server.abort();
+    fn a_hung_resolver_does_not_delay_a_live_answer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // One name hangs in resolution forever, the other resolves at once
+            // and its server answers within a millisecond. The answer must be
+            // read as it arrives: parking the receive loop behind the resolver
+            // re-taxes the connect path this gather sits on.
+            let (live_addr, server) = mock_server().await;
+            let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+            let config = IceConfig {
+                stun_servers: vec!["hung.invalid:3478".to_owned(), live_addr.to_string()],
+                stun_timeout: Duration::from_secs(2),
+            };
+            let start = std::time::Instant::now();
+            let reflexive =
+                super::gather_with_resolver(&client, &config, |name: String| async move {
+                    if name.starts_with("hung") {
+                        return std::future::pending().await;
+                    }
+                    let parsed: Option<SocketAddr> = name.parse().ok();
+                    Ok(parsed)
+                })
+                .await;
+            let elapsed = start.elapsed();
+            server.abort();
 
-        assert_eq!(
-            reflexive,
-            Some("203.0.113.7:41234".parse().expect("addr")),
-            "a hung resolver does not delay a live answer"
-        );
-        assert!(
-            elapsed < Duration::from_millis(500),
-            "gather took {elapsed:?}: the hung resolver parked the receive loop"
-        );
+            assert_eq!(
+                reflexive,
+                Some("203.0.113.7:41234".parse().expect("addr")),
+                "a hung resolver does not delay a live answer"
+            );
+            assert!(
+                elapsed < Duration::from_millis(500),
+                "gather took {elapsed:?}: the hung resolver parked the receive loop"
+            );
+        });
     }
 
     #[test]
-    async fn a_late_resolution_still_gets_probed_within_the_budget() {
-        // The name resolves after half the budget — past the old drain
-        // deadline. The probe must still go out: forfeiting with unused
-        // budget left loses the reflexive candidate for nothing.
-        let (live_addr, server) = mock_server().await;
-        let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
-        let config = IceConfig {
-            stun_servers: vec![live_addr.to_string()],
-            stun_timeout: Duration::from_secs(2),
-        };
-        let reflexive = super::gather_with_resolver(&client, &config, |name: String| async move {
-            tokio::time::sleep(Duration::from_millis(1200)).await;
-            let parsed: Option<SocketAddr> = name.parse().ok();
-            Ok(parsed)
-        })
-        .await;
-        server.abort();
+    fn a_late_resolution_still_gets_probed_within_the_budget() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // The name resolves after half the budget — past the old drain
+            // deadline. The probe must still go out: forfeiting with unused
+            // budget left loses the reflexive candidate for nothing.
+            let (live_addr, server) = mock_server().await;
+            let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+            let config = IceConfig {
+                stun_servers: vec![live_addr.to_string()],
+                stun_timeout: Duration::from_secs(2),
+            };
+            let reflexive =
+                super::gather_with_resolver(&client, &config, |name: String| async move {
+                    tokio::time::sleep(Duration::from_millis(1200)).await;
+                    let parsed: Option<SocketAddr> = name.parse().ok();
+                    Ok(parsed)
+                })
+                .await;
+            server.abort();
 
-        assert_eq!(
-            reflexive,
-            Some("203.0.113.7:41234".parse().expect("addr")),
-            "a resolution landing after half the budget must still be probed"
-        );
+            assert_eq!(
+                reflexive,
+                Some("203.0.113.7:41234".parse().expect("addr")),
+                "a resolution landing after half the budget must still be probed"
+            );
+        });
     }
 
     /// A fake socket whose `recv_from` fails `errors_left` times before it
@@ -716,28 +731,31 @@ mod tests {
     }
 
     #[test]
-    async fn an_error_burst_does_not_abort_a_gather_with_a_live_probe() {
-        // A burst of receive errors must not discard a live server's pending
-        // answer: the deadline already bounds the loop, so giving up early
-        // buys nothing and costs the only NAT-crossing candidate.
-        let socket = StormySocket {
-            errors_left: std::cell::Cell::new(10),
-            sent: std::cell::RefCell::new(Vec::new()),
-        };
-        let config = IceConfig {
-            stun_servers: vec!["203.0.113.9:3478".to_owned()],
-            stun_timeout: Duration::from_secs(2),
-        };
-        let reflexive = super::gather_with_resolver(&socket, &config, |name: String| async move {
-            let parsed: Option<SocketAddr> = name.parse().ok();
-            Ok(parsed)
-        })
-        .await;
-        assert_eq!(
-            reflexive,
-            Some("203.0.113.7:41234".parse().expect("addr")),
-            "receive errors ended the gather while the answer was still coming"
-        );
+    fn an_error_burst_does_not_abort_a_gather_with_a_live_probe() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // A burst of receive errors must not discard a live server's pending
+            // answer: the deadline already bounds the loop, so giving up early
+            // buys nothing and costs the only NAT-crossing candidate.
+            let socket = StormySocket {
+                errors_left: std::cell::Cell::new(10),
+                sent: std::cell::RefCell::new(Vec::new()),
+            };
+            let config = IceConfig {
+                stun_servers: vec!["203.0.113.9:3478".to_owned()],
+                stun_timeout: Duration::from_secs(2),
+            };
+            let reflexive =
+                super::gather_with_resolver(&socket, &config, |name: String| async move {
+                    let parsed: Option<SocketAddr> = name.parse().ok();
+                    Ok(parsed)
+                })
+                .await;
+            assert_eq!(
+                reflexive,
+                Some("203.0.113.7:41234".parse().expect("addr")),
+                "receive errors ended the gather while the answer was still coming"
+            );
+        });
     }
 
     /// A mock server that listens on one socket but answers from another —
@@ -764,36 +782,40 @@ mod tests {
     }
 
     #[test]
-    async fn a_reply_from_a_rewritten_source_address_still_counts() {
-        let (address, server) = sideways_server().await;
-        let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
-        let config = IceConfig {
-            stun_servers: vec![address.to_string()],
-            stun_timeout: Duration::from_millis(500),
-        };
-        let reflexive = gather_reflexive(&client, &config).await;
-        server.abort();
-        assert_eq!(
-            reflexive,
-            Some("203.0.113.7:41234".parse().expect("addr")),
-            "the echoed transaction id identifies the reply; the source address does not"
-        );
+    fn a_reply_from_a_rewritten_source_address_still_counts() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (address, server) = sideways_server().await;
+            let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+            let config = IceConfig {
+                stun_servers: vec![address.to_string()],
+                stun_timeout: Duration::from_millis(500),
+            };
+            let reflexive = gather_reflexive(&client, &config).await;
+            server.abort();
+            assert_eq!(
+                reflexive,
+                Some("203.0.113.7:41234".parse().expect("addr")),
+                "the echoed transaction id identifies the reply; the source address does not"
+            );
+        });
     }
 
     #[test]
-    async fn gather_returns_none_when_no_server_answers() {
-        let silent = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
-        let silent_addr = silent.local_addr().expect("local addr");
-        let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
-        let config = IceConfig {
-            stun_servers: vec![silent_addr.to_string()],
-            stun_timeout: Duration::from_millis(300),
-        };
-        let reflexive = gather_reflexive(&client, &config).await;
-        drop(silent);
-        assert_eq!(
-            reflexive, None,
-            "gathering gives no reflexive address when no server answers"
-        );
+    fn gather_returns_none_when_no_server_answers() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let silent = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+            let silent_addr = silent.local_addr().expect("local addr");
+            let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+            let config = IceConfig {
+                stun_servers: vec![silent_addr.to_string()],
+                stun_timeout: Duration::from_millis(300),
+            };
+            let reflexive = gather_reflexive(&client, &config).await;
+            drop(silent);
+            assert_eq!(
+                reflexive, None,
+                "gathering gives no reflexive address when no server answers"
+            );
+        });
     }
 }

@@ -36,10 +36,10 @@ pub(crate) fn judge_state(phase: ConnectionPhase, disconnected_for_ms: Option<f6
 mod tests {
     use super::{DISCONNECT_GRACE_MS, Verdict, judge_state};
     use crate::connection_phase::ConnectionPhase;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn a_dead_connection_is_removed_at_once() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             judge_state(ConnectionPhase::Dead, None),
             Verdict::Remove,
@@ -54,6 +54,7 @@ mod tests {
 
     #[test]
     fn a_healthy_connection_is_kept_whatever_its_history() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             judge_state(ConnectionPhase::Healthy, None),
             Verdict::Keep,
@@ -70,6 +71,7 @@ mod tests {
 
     #[test]
     fn a_fresh_disconnect_waits_for_the_grace_window() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             judge_state(ConnectionPhase::Disconnected, None),
             Verdict::Wait,
@@ -87,6 +89,7 @@ mod tests {
 
     #[test]
     fn a_disconnect_that_outlives_the_grace_window_is_removed() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             judge_state(ConnectionPhase::Disconnected, Some(DISCONNECT_GRACE_MS)),
             Verdict::Remove,

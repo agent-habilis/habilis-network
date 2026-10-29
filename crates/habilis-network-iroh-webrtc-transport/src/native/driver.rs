@@ -474,13 +474,13 @@ mod tests {
         ChannelReadyTarget, HandshakeNoise, bind_ephemeral_udp, build_rtc,
         drive_until_channel_ready,
     };
-    use habilis_network_test_tracing::test;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::time::{Duration, Instant};
     use tokio::net::UdpSocket;
 
     #[test]
     fn a_quiet_timeout_says_only_that_it_timed_out() {
+        let _guard = ::habilis_network_test_tracing::init();
         let text = HandshakeNoise::default().into_timeout_error().to_string();
         assert!(text.contains("timed out"), "{text}");
         assert!(
@@ -491,6 +491,7 @@ mod tests {
 
     #[test]
     fn a_noisy_timeout_reports_what_it_ignored() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Tolerating stray datagrams must not cost the diagnosis the old
         // fail-fast gave: a timeout has to say something was arriving.
         let noise = HandshakeNoise {
@@ -505,54 +506,56 @@ mod tests {
     }
 
     #[test]
-    async fn a_stray_datagram_does_not_abort_the_handshake() {
-        // The socket is reachable by anything that can route to the host
-        // candidate we put in the SDP, so one garbage packet from a scanner
-        // used to kill a negotiation that was otherwise fine.
-        let (socket, advertised) = bind_ephemeral_udp().await.expect("bind media socket");
-        // The socket binds to the wildcard address, so reach it on loopback
-        // rather than the 0.0.0.0 that `local_addr` reports.
-        let local = SocketAddr::from((
-            Ipv4Addr::LOCALHOST,
-            socket.local_addr().expect("local addr").port(),
-        ));
-        let mut rtc = build_rtc(Instant::now());
+    fn a_stray_datagram_does_not_abort_the_handshake() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // The socket is reachable by anything that can route to the host
+            // candidate we put in the SDP, so one garbage packet from a scanner
+            // used to kill a negotiation that was otherwise fine.
+            let (socket, advertised) = bind_ephemeral_udp().await.expect("bind media socket");
+            // The socket binds to the wildcard address, so reach it on loopback
+            // rather than the 0.0.0.0 that `local_addr` reports.
+            let local = SocketAddr::from((
+                Ipv4Addr::LOCALHOST,
+                socket.local_addr().expect("local addr").port(),
+            ));
+            let mut rtc = build_rtc(Instant::now());
 
-        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("bind sender");
-        let noise = tokio::spawn(async move {
-            for _ in 0..5u8 {
-                let _ = sender.send_to(&[0xFF; 32], local).await;
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
+            let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("bind sender");
+            let noise = tokio::spawn(async move {
+                for _ in 0..5u8 {
+                    let _ = sender.send_to(&[0xFF; 32], local).await;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            });
+
+            let started = Instant::now();
+            let outcome = drive_until_channel_ready(
+                &mut rtc,
+                &socket,
+                advertised,
+                &ChannelReadyTarget::Answerer,
+                Duration::from_millis(400),
+            )
+            .await;
+            let elapsed = started.elapsed();
+            noise.abort();
+
+            let error = outcome.expect_err("no channel can open without a peer");
+            let text = error.to_string();
+            assert!(
+                text.contains("timed out"),
+                "a stray datagram must not end the handshake early: {text}"
+            );
+            assert!(
+                elapsed >= Duration::from_millis(300),
+                "the loop returned after {elapsed:?}, so it bailed rather than waiting"
+            );
+            assert!(
+                text.contains("unparseable"),
+                "the timeout must name what it ignored: {text}"
+            );
         });
-
-        let started = Instant::now();
-        let outcome = drive_until_channel_ready(
-            &mut rtc,
-            &socket,
-            advertised,
-            &ChannelReadyTarget::Answerer,
-            Duration::from_millis(400),
-        )
-        .await;
-        let elapsed = started.elapsed();
-        noise.abort();
-
-        let error = outcome.expect_err("no channel can open without a peer");
-        let text = error.to_string();
-        assert!(
-            text.contains("timed out"),
-            "a stray datagram must not end the handshake early: {text}"
-        );
-        assert!(
-            elapsed >= Duration::from_millis(300),
-            "the loop returned after {elapsed:?}, so it bailed rather than waiting"
-        );
-        assert!(
-            text.contains("unparseable"),
-            "the timeout must name what it ignored: {text}"
-        );
     }
 }

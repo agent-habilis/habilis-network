@@ -105,13 +105,13 @@ pub use habilis_network_iroh_transport_util::{
 #[cfg(test)]
 mod tests {
     use habilis_network_iroh_transport_util::{Rung, custom_rung};
-    use habilis_network_test_tracing::test;
 
     /// The ladder names this crate's transport by the id that the transport uses.
     /// The ids are written twice, here and in the util crate, which is below this
     /// one; this is the guard that they stay equal. It was green on its first run.
     #[test]
     fn the_ladder_knows_the_webrtc_transport_id_of_this_crate() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             custom_rung(crate::WEBRTC_TRANSPORT_ID),
             Rung::WebRtc,

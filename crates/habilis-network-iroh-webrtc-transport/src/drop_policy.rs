@@ -19,7 +19,6 @@ pub(crate) fn drops_are_sustained(total: u64) -> bool {
 
 #[cfg(all(test, any(feature = "native", feature = "web")))]
 mod drop_policy_tests {
-    use habilis_network_test_tracing::test;
 
     use super::{drops_are_sustained, should_log_drop};
 
@@ -27,6 +26,7 @@ mod drop_policy_tests {
     /// as it does on any lossy path. A lane that keeps dropping warns, from the 256th drop on.
     #[test]
     fn a_first_drop_is_no_warning_and_a_sustained_one_is() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(should_log_drop(1), "the first drop is logged");
         assert!(!drops_are_sustained(1), "the first drop is not sustained");
         assert!(!drops_are_sustained(255), "255 drops are not sustained");

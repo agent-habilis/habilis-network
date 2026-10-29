@@ -164,3 +164,15 @@ fn spans_lines() {
   expect(flagged).toEqual([]);
   expect(text).toContain("#[test]\n#[expect(\n    unsafe_code,\n    reason = \"libc mmap and munmap\"\n)]\nfn spans_lines() {\n    let _guard");
 });
+
+test("a file that does not import the attribute is left alone", () => {
+  const source = `#[test]
+fn std_test() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run(guard, async {});
+}
+`;
+  const { text, flagged } = rewrite(source);
+  expect(flagged).toEqual([]);
+  expect(text).toBe(source);
+});

@@ -60,10 +60,10 @@ pub fn accept_ice_uri(uri: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn accepts_stun() {
+        let _guard = ::habilis_network_test_tracing::init();
         for uri in [
             "stun:stun1.l.google.com:19302",
             "stun:stun.cloudflare.com:3478",
@@ -76,6 +76,7 @@ mod tests {
 
     #[test]
     fn refuses_turn_by_policy() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Not "we happen to configure none" — the scheme cannot get through.
         for uri in [
             "turn:example.com:3478",
@@ -89,6 +90,7 @@ mod tests {
 
     #[test]
     fn strips_a_query_safari_would_throw_on() {
+        let _guard = ::habilis_network_test_tracing::init();
         // RFC 7064 gives `stun:` no query at all, so this is meaningless rather
         // than merely redundant — stripping recovers the intended server.
         assert_eq!(
@@ -100,6 +102,7 @@ mod tests {
 
     #[test]
     fn refuses_junk() {
+        let _guard = ::habilis_network_test_tracing::init();
         for uri in [
             "",
             "example.com:3478",

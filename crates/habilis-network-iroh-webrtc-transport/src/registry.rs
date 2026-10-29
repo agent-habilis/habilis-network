@@ -271,7 +271,6 @@ impl<T> Drop for SessionGuard<T> {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -297,6 +296,7 @@ mod tests {
 
     #[test]
     fn a_reservation_is_not_live() {
+        let _guard = ::habilis_network_test_tracing::init();
         let registry = Registry::<Probe>::new();
         let reservation = registry.reserve(peer(1)).expect("first reserve");
         assert!(!registry.is_live(&peer(1)), "a reservation is not live");
@@ -310,6 +310,7 @@ mod tests {
 
     #[test]
     fn dropping_a_reservation_frees_the_slot() {
+        let _guard = ::habilis_network_test_tracing::init();
         let registry = Registry::<Probe>::new();
         drop(registry.reserve(peer(1)).expect("first reserve"));
         assert!(
@@ -320,6 +321,7 @@ mod tests {
 
     #[test]
     fn reserve_refuses_while_reserved_and_while_live() {
+        let _guard = ::habilis_network_test_tracing::init();
         let registry = Registry::<Probe>::new();
         let reservation = registry.reserve(peer(1)).expect("first reserve");
         assert!(registry.reserve(peer(1)).is_none(), "reserved");
@@ -332,6 +334,7 @@ mod tests {
 
     #[test]
     fn dropping_an_uncommitted_guard_removes_the_slot_and_drops_the_payload() {
+        let _guard = ::habilis_network_test_tracing::init();
         let registry = Registry::new();
         let (payload, dropped) = probe();
         let guard = registry
@@ -352,6 +355,7 @@ mod tests {
 
     #[test]
     fn a_committed_guard_leaves_the_session_live() {
+        let _guard = ::habilis_network_test_tracing::init();
         let registry = Registry::new();
         let (payload, dropped) = probe();
         let reserved = registry.reserve(peer(1)).expect("first reserve");
@@ -374,6 +378,7 @@ mod tests {
     /// died late, must not take out the session that replaced it.
     #[test]
     fn a_stale_guard_does_not_evict_a_newer_session() {
+        let _guard = ::habilis_network_test_tracing::init();
         let registry = Registry::new();
 
         let (first, first_dropped) = probe();
@@ -406,6 +411,7 @@ mod tests {
     /// own data channel, which is what actually fires in production.
     #[test]
     fn a_stale_close_hook_is_a_no_op() {
+        let _guard = ::habilis_network_test_tracing::init();
         let registry = Registry::new();
         let stale_generation = {
             let guard = registry
@@ -431,6 +437,7 @@ mod tests {
 
     #[test]
     fn with_live_skips_a_reservation() {
+        let _guard = ::habilis_network_test_tracing::init();
         let registry = Registry::<Probe>::new();
         let reservation = registry.reserve(peer(1)).expect("first reserve");
         assert!(
@@ -448,6 +455,7 @@ mod tests {
 
     #[test]
     fn clear_takes_reservations_too_and_counts_only_live_ones() {
+        let _guard = ::habilis_network_test_tracing::init();
         let registry = Registry::<Probe>::new();
         let reservation = registry.reserve(peer(1)).expect("reserve one");
         let reserved = registry.reserve(peer(2)).expect("reserve two");
