@@ -136,7 +136,7 @@ impl Coverage {
     /// # Errors
     /// # Errors
     /// [`ChunkError::Malformed`] when the bitmap is too short for the count it claims to cover.
-    pub fn from_bits(bits: &[u8], len: usize) -> Result<Self, ChunkError> {
+    pub fn decode_bits(bits: &[u8], len: usize) -> Result<Self, ChunkError> {
         let needed = len.div_ceil(8);
         if bits.len() < needed {
             return Err(ChunkError::Malformed(format!(

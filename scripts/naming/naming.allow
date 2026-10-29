@@ -1,8 +1,6 @@
 # rule|file|count|reason
 # Used by scripts/naming/naming.ts. Each file breaks one naming rule. Keep each count exact.
 
-from_name|crates/habilis-network-chunks/src/chunk_map.rs|1|no impl From in this file beside from_bits,from_bytes,from_hex,from_leaves (N12), to add the From impl or rename
-from_name|crates/habilis-network-chunks/src/coverage.rs|1|no impl From in this file beside from_bits,from_bytes,from_hex,from_leaves (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/crypto/seed.rs|1|no impl From in this file beside from_bytes (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/identity.rs|1|no impl From in this file beside from_hex (N12), to add the From impl or rename
 from_name|crates/habilis-network-protocol/src/mesh/name_error.rs|1|no impl From in this file beside from_topic_string,from_topic_string_passthrough_and_case_preserving (N12), to add the From impl or rename

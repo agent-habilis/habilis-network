@@ -495,7 +495,7 @@ async fn coverage_survives_being_described_and_rebuilt() {
             .expect("put");
     }
     let coverage = store.coverage(map.root()).await.expect("cov");
-    let rebuilt = Coverage::from_bits(coverage.as_bits(), coverage.len()).expect("rebuild");
+    let rebuilt = Coverage::decode_bits(coverage.as_bits(), coverage.len()).expect("rebuild");
     let held: Vec<_> = rebuilt.held().collect();
     assert_eq!(
         held,

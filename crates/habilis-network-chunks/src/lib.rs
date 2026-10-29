@@ -157,9 +157,9 @@ mod tests {
     #[test]
     fn a_root_commits_to_order_and_to_size() {
         let leaves = vec![chunk_hash(b"a"), chunk_hash(b"b")];
-        let forward = ChunkMap::from_leaves(leaves.clone(), CHUNK_BYTES + 1).expect("two chunks");
+        let forward = ChunkMap::build_tree(leaves.clone(), CHUNK_BYTES + 1).expect("two chunks");
         let reversed: Vec<ChunkHash> = leaves.into_iter().rev().collect();
-        let backward = ChunkMap::from_leaves(reversed, CHUNK_BYTES + 1).expect("two chunks");
+        let backward = ChunkMap::build_tree(reversed, CHUNK_BYTES + 1).expect("two chunks");
         assert_ne!(
             forward.root(),
             backward.root(),
@@ -173,7 +173,7 @@ mod tests {
     fn a_row_that_disagrees_with_its_size_is_refused() {
         let leaves = vec![chunk_hash(b"only one")];
         assert!(
-            ChunkMap::from_leaves(leaves, CHUNK_BYTES * 4).is_err(),
+            ChunkMap::build_tree(leaves, CHUNK_BYTES * 4).is_err(),
             "a row that disagrees with its size is refused"
         );
     }
@@ -183,7 +183,7 @@ mod tests {
         let bytes = body(CHUNK_BYTES_USIZE * 3 + 11, 3);
         let built = ChunkMap::build(&bytes);
         let rebuilt =
-            ChunkMap::from_leaves(built.leaves().to_vec(), built.size()).expect("same row");
+            ChunkMap::build_tree(built.leaves().to_vec(), built.size()).expect("same row");
         assert_eq!(
             built, rebuilt,
             "a rebuilt map equals the one that was built"
@@ -409,13 +409,13 @@ mod tests {
         for index in [0, 3, 7, 19] {
             coverage.insert(index);
         }
-        let restored = Coverage::from_bits(coverage.as_bits(), 20).expect("round trip");
+        let restored = Coverage::decode_bits(coverage.as_bits(), 20).expect("round trip");
         assert_eq!(
             restored, coverage,
             "coverage survives a round trip through bits"
         );
         assert!(
-            Coverage::from_bits(&[0u8; 1], 20).is_err(),
+            Coverage::decode_bits(&[0u8; 1], 20).is_err(),
             "coverage bits of the wrong length are refused"
         );
     }

@@ -506,9 +506,9 @@ fn decode_map(bytes: &[u8]) -> Result<ChunkMap, ChunkError> {
         digest.copy_from_slice(&bytes[start..start + 32]);
         leaves.push(ChunkHash::from(digest));
     }
-    // `from_leaves` recomputes the root, so a row corrupted in storage simply
+    // `build_tree` recomputes the root, so a row corrupted in storage simply
     // names a different file rather than impersonating this one.
-    ChunkMap::from_leaves(leaves, size)
+    ChunkMap::build_tree(leaves, size)
 }
 
 impl ChunkSource for IdbStore {

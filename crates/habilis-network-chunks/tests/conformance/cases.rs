@@ -688,7 +688,7 @@ async fn coverage_survives_being_described_and_rebuilt(harness: &impl Harness) {
     }
 
     let coverage = store.coverage(map.root()).await.expect("cov");
-    let rebuilt = Coverage::from_bits(coverage.as_bits(), coverage.len()).expect("rebuild");
+    let rebuilt = Coverage::decode_bits(coverage.as_bits(), coverage.len()).expect("rebuild");
     assert_eq!(
         rebuilt, coverage,
         "the rebuilt coverage equals the original"

@@ -49,7 +49,7 @@ impl ChunkMap {
     /// # Errors
     /// # Errors
     /// [`ChunkError::Malformed`] when the row length does not match the size it claims to describe.
-    pub fn from_leaves(leaves: Vec<ChunkHash>, size: u64) -> Result<Self, ChunkError> {
+    pub fn build_tree(leaves: Vec<ChunkHash>, size: u64) -> Result<Self, ChunkError> {
         let expected = chunk_count(size);
         if leaves.len() != expected {
             return Err(ChunkError::Malformed(format!(
