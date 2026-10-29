@@ -67,9 +67,8 @@ mod tests {
             .expect("bind");
         lookup.add_endpoint_info(endpoint.addr());
         let gossip = Gossip::builder().spawn(endpoint.clone());
-        let router = Router::builder(endpoint.clone())
-            .accept(GOSSIP_ALPN, gossip.clone())
-            .spawn();
+        let accepting = Router::builder(endpoint.clone()).accept(GOSSIP_ALPN, gossip.clone());
+        let router = accepting.spawn();
         (endpoint, gossip, router)
     }
 
