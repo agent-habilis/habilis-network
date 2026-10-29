@@ -406,7 +406,6 @@ pub struct TopologyEdge {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::{expect_warn, test};
     use n0_future::time::{Duration, Instant};
 
     use super::{Leg, LinkVector, Topology};
@@ -446,6 +445,7 @@ mod tests {
 
     #[test]
     fn a_vector_that_claims_another_origin_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Mallory broadcasts a vector as the victim and points the victim's
         // underlay at her own address: every route through the victim would
         // then go to her.
@@ -466,6 +466,7 @@ mod tests {
 
     #[test]
     fn a_vector_changed_after_signing_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc) = (eid(1), eid(2), eid(3));
         let mut store = Topology::default();
         let mut tampered = vector(na, 1, &[(nb, 10)]);
@@ -490,6 +491,7 @@ mod tests {
 
     #[test]
     fn a_vector_refused_for_its_age_is_reported_once_per_max_age() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut store = Topology::default();
         let start = Instant::now();
         assert!(store.should_report_skew(start), "the first is reported");
@@ -511,6 +513,7 @@ mod tests {
 
     #[test]
     fn a_stale_vector_ages_out() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb) = (eid(1), eid(2));
         let start = Instant::now();
         let mut store = Topology::default();
@@ -543,6 +546,7 @@ mod tests {
 
     #[test]
     fn a_copy_of_an_old_vector_does_not_keep_a_gone_peer_alive() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb) = (eid(1), eid(2));
         let start = Instant::now();
         let mut store = Topology::default();
@@ -563,6 +567,7 @@ mod tests {
 
     #[test]
     fn a_vector_that_was_expired_does_not_come_back() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The peer's last vector arrives again after the age-out, through
         // anti-entropy: it must not read as new.
         let (na, nb) = (eid(1), eid(2));
@@ -591,6 +596,7 @@ mod tests {
 
     #[test]
     fn a_vector_of_a_peer_that_left_does_not_come_back() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb) = (eid(1), eid(2));
         let mut store = Topology::default();
         assert!(
@@ -610,6 +616,7 @@ mod tests {
 
     #[test]
     fn a_node_whose_vector_expired_returns_with_its_next_one() {
+        let _guard = ::habilis_network_test_tracing::init();
         // A node that missed ticks under load is expired by every peer. Its
         // next vector must bring it back, not be held off by the tombstone.
         let (na, nb) = (eid(1), eid(2));
@@ -637,7 +644,8 @@ mod tests {
 
     #[test]
     fn a_vector_older_than_the_max_age_is_refused() {
-        expect_warn(
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
             "habilis_network_iroh_multihop_transport::topology",
             "link-state refused: the sender's clock is behind ours",
         );
@@ -665,6 +673,7 @@ mod tests {
 
     #[test]
     fn after_a_restart_the_first_new_vector_wins() {
+        let _guard = ::habilis_network_test_tracing::init();
         // seq is wall-clock milliseconds, so a node that restarts with the same
         // key does not start again at 1 and lose to what it sent before.
         let (na, nb) = (eid(1), eid(2));
@@ -686,6 +695,7 @@ mod tests {
 
     #[test]
     fn newer_vector_supersedes_older() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb) = (eid(1), eid(2));
         let mut store = Topology::default();
         assert!(
@@ -707,6 +717,7 @@ mod tests {
     /// IP), so the bytes of a route must depend on the ids of its hops and on nothing else.
     #[test]
     fn the_locator_of_a_route_does_not_depend_on_the_addresses_a_vector_carries() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc) = (eid(1), eid(2), eid(3));
         let mut store = Topology::default();
         ingest(&mut store, vector(na, 1, &[(nb, 1)]));
@@ -734,6 +745,7 @@ mod tests {
 
     #[test]
     fn route_traces_the_chain_and_carries_underlay_addrs() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc, nd) = (eid(1), eid(2), eid(3), eid(4));
         let mut store = Topology::default();
         ingest(&mut store, vector(na, 1, &[(nb, 1)]));
@@ -754,6 +766,7 @@ mod tests {
 
     #[test]
     fn a_known_underlay_maps_to_its_app_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (alice, bob) = (eid(1), eid(2));
         let (alice_underlay, bob_underlay) = (eid(101), eid(102));
         let mut store = Topology::default();
@@ -791,6 +804,7 @@ mod tests {
 
     #[test]
     fn a_hop_without_an_underlay_addr_drops_the_route() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc) = (eid(1), eid(2), eid(3));
         let mut store = Topology::default();
         ingest(&mut store, vector(na, 1, &[(nb, 1)]));
@@ -802,6 +816,7 @@ mod tests {
 
     #[test]
     fn prefers_the_cheaper_direct_over_the_chain() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc, nd) = (eid(1), eid(2), eid(3), eid(4));
         let mut store = Topology::default();
         ingest(&mut store, vector(na, 1, &[(nb, 1), (nd, 1)]));
@@ -820,6 +835,7 @@ mod tests {
 
     #[test]
     fn returns_disjoint_alternates() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc, nd) = (eid(1), eid(2), eid(3), eid(4));
         let mut store = Topology::default();
         ingest(&mut store, vector(na, 1, &[(nb, 1), (nc, 1)]));
@@ -882,6 +898,7 @@ mod tests {
 
     #[test]
     fn a_three_hop_native_path_beats_a_one_hop_browser_path() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (store, [src, n1, n2, dst, tab]) = native_and_browser_routes(BROWSER_COST);
         assert_eq!(
             best_route(&store, src, dst),
@@ -912,6 +929,7 @@ mod tests {
 
     #[test]
     fn without_the_native_route_the_route_goes_through_the_browser() {
+        let _guard = ::habilis_network_test_tracing::init();
         let [alice, bob, carol, tab] = [1, 2, 3, 4].map(eid);
         let mut store = Topology::default();
         for (origin, links) in [
@@ -946,6 +964,7 @@ mod tests {
 
     #[test]
     fn a_browser_pays_nothing_as_a_destination() {
+        let _guard = ::habilis_network_test_tracing::init();
         let [src, dst] = [1, 2].map(eid);
         // The last edge into it is advertised by its predecessor.
         for (name, last_cost) in [("native", NATIVE_COST), ("browser", BROWSER_COST)] {
@@ -969,6 +988,7 @@ mod tests {
 
     #[test]
     fn the_cost_of_a_source_changes_no_choice() {
+        let _guard = ::habilis_network_test_tracing::init();
         let [src, hop, dst, other] = [1, 2, 3, 4].map(eid);
         // Every route starts with one of the edges of the source, so the choice is the same
         // whatever those edges cost.
@@ -997,6 +1017,7 @@ mod tests {
     /// look native, nor a native look like a browser.
     #[test]
     fn a_changed_cost_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         let [tab, dst] = [1, 2].map(eid);
         let mut store = Topology::default();
         let mut cheaper = vector(tab, 1, &[(dst, BROWSER_COST)]);

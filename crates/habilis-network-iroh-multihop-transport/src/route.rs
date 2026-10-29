@@ -153,7 +153,6 @@ impl<'de> Deserialize<'de> for Route {
 mod tests {
     use super::{MAX_ROUTE_HOPS, Route, RouteHop};
     use crate::app_id::{AppId, UnderlayId};
-    use habilis_network_test_tracing::test;
     use iroh::{EndpointId, SecretKey};
     use std::fmt::Write as _;
 
@@ -167,6 +166,7 @@ mod tests {
 
     #[test]
     fn encode_decode_roundtrips() {
+        let _guard = ::habilis_network_test_tracing::init();
         let route = Route::try_new(vec![hop(1), hop(2), hop(3)]).unwrap();
         let address = route.encode();
         assert_eq!(
@@ -180,6 +180,7 @@ mod tests {
     /// build must read what this one writes.
     #[test]
     fn a_route_encodes_to_fixed_bytes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id = |seed: u8| -> EndpointId { SecretKey::from_bytes(&[seed; 32]).public() };
         let route = Route::try_new(vec![
             RouteHop {
@@ -210,6 +211,7 @@ mod tests {
 
     #[test]
     fn wrong_transport_id_does_not_decode() {
+        let _guard = ::habilis_network_test_tracing::init();
         let route = Route::try_new(vec![hop(1)]).unwrap();
         let address = route.encode();
         let foreign = iroh_base::CustomAddr::from_parts(0x99, address.data());
@@ -221,6 +223,7 @@ mod tests {
 
     #[test]
     fn empty_route_does_not_decode() {
+        let _guard = ::habilis_network_test_tracing::init();
         let bytes = postcard::to_allocvec(&Vec::<RouteHop>::new()).unwrap();
         let address = iroh_base::CustomAddr::from_parts(crate::MULTIHOP_TRANSPORT_ID, &bytes);
         assert!(
@@ -231,6 +234,7 @@ mod tests {
 
     #[test]
     fn reverse_is_an_involution_across_the_two_ends() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Source S=hop(9); forward route to B: [R1, R2, B].
         let (source, r1, r2, dest) = (hop(9), hop(1), hop(2), hop(3));
         let forward = vec![r1, r2, dest];
@@ -250,6 +254,7 @@ mod tests {
 
     #[test]
     fn a_route_past_the_hop_ceiling_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         // ~4000 hops fit in one cell, which is what turns a relay into a
         // 1000x amplifier; the ceiling is the cap on that.
         let hops: Vec<RouteHop> = (0..=MAX_ROUTE_HOPS)
@@ -263,6 +268,7 @@ mod tests {
 
     #[test]
     fn a_route_at_the_hop_ceiling_is_accepted() {
+        let _guard = ::habilis_network_test_tracing::init();
         let hops: Vec<RouteHop> = (0..MAX_ROUTE_HOPS)
             .map(|seed| hop(u8::try_from(seed).expect("seed fits")))
             .collect();
@@ -274,6 +280,7 @@ mod tests {
 
     #[test]
     fn a_route_that_revisits_a_hop_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The [X, Y, X, Y, …] ping-pong: every entry is a real node, so an
         // "am I named here?" check passes at every bounce. Acyclicity is what
         // actually stops it.
@@ -285,6 +292,7 @@ mod tests {
 
     #[test]
     fn a_route_past_the_hop_ceiling_does_not_decode() {
+        let _guard = ::habilis_network_test_tracing::init();
         let hops: Vec<RouteHop> = (0..=MAX_ROUTE_HOPS)
             .map(|seed| hop(u8::try_from(seed).expect("seed fits")))
             .collect();
@@ -298,6 +306,7 @@ mod tests {
 
     #[test]
     fn a_cyclic_route_does_not_decode() {
+        let _guard = ::habilis_network_test_tracing::init();
         let hops = vec![hop(1), hop(2), hop(1)];
         let bytes = postcard::to_allocvec(&hops).unwrap();
         let address = iroh_base::CustomAddr::from_parts(crate::MULTIHOP_TRANSPORT_ID, &bytes);
@@ -309,6 +318,7 @@ mod tests {
 
     #[test]
     fn reverse_refuses_a_source_already_in_the_path() {
+        let _guard = ::habilis_network_test_tracing::init();
         // A cell claiming a source that is also one of its hops would reverse
         // into a cyclic return route — including a source claiming to be us.
         let forward = vec![hop(1), hop(2), hop(3)];

@@ -57,7 +57,6 @@ impl PathSelector for MultihopLadder {
 #[cfg(test)]
 mod tests {
     use habilis_network_iroh_transport_util::{block_ip_to, block_rung, block_rung_to};
-    use habilis_network_test_tracing::test;
 
     use super::{MultihopLadder, Rung, custom_rung};
     /// The ladder names this crate's transport by the id that the transport uses.
@@ -65,6 +64,7 @@ mod tests {
     /// one; this is the guard that they stay equal.
     #[test]
     fn the_ladder_knows_the_multihop_transport_id_of_this_crate() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             custom_rung(crate::MULTIHOP_TRANSPORT_ID),
             Rung::Multihop,
@@ -84,6 +84,7 @@ mod tests {
     /// paths away: the ladder reads the same tables as the `WebRTC` selector.
     #[test]
     fn the_ladder_of_a_node_gives_up_an_ip_port_that_a_test_blocked() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (local, other) = (node(21), node(22));
         let ladder = MultihopLadder::new(local);
         block_ip_to(local, [5000]);
@@ -110,6 +111,7 @@ mod tests {
 
     #[test]
     fn the_ladder_of_a_node_gives_up_a_rung_that_a_test_blocked() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (local, other) = (node(23), node(24));
         let ladder = MultihopLadder::new(local);
         block_rung(local, Rung::Multihop, true);
@@ -133,6 +135,7 @@ mod tests {
     /// lets a test cut one pair of three members and keep the others.
     #[test]
     fn the_ladder_of_a_node_gives_up_webrtc_to_one_remote_only() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (local, cut, kept) = (node(25), node(26), node(27));
         let ladder = MultihopLadder::new(local);
         block_rung_to(local, Rung::WebRtc, cut, true);

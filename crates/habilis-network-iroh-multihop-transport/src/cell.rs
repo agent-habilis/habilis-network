@@ -104,7 +104,6 @@ mod tests {
     use super::Cell;
     use crate::app_id::{AppId, UnderlayId};
     use crate::route::{MAX_ROUTE_HOPS, Route, RouteHop};
-    use habilis_network_test_tracing::test;
     use iroh::{EndpointId, SecretKey};
 
     fn hop(seed: u8) -> RouteHop {
@@ -132,6 +131,7 @@ mod tests {
 
     #[test]
     fn a_cyclic_route_does_not_deserialize_into_a_cell() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The linchpin of the design: `Cell.path` is a `Route`, so a hostile
         // route is refused by the codec and never reaches the forwarder.
         let bytes = forged_bytes(vec![hop(1), hop(2), hop(1)], 0);
@@ -143,6 +143,7 @@ mod tests {
 
     #[test]
     fn an_oversized_route_does_not_deserialize_into_a_cell() {
+        let _guard = ::habilis_network_test_tracing::init();
         let hops: Vec<RouteHop> = (0..=MAX_ROUTE_HOPS)
             .map(|seed| hop(u8::try_from(seed).expect("seed fits")))
             .collect();
@@ -154,6 +155,7 @@ mod tests {
 
     #[test]
     fn a_legal_route_still_deserializes_into_a_cell() {
+        let _guard = ::habilis_network_test_tracing::init();
         let bytes = forged_bytes(vec![hop(1), hop(2)], 0);
         assert!(
             postcard::from_bytes::<Cell>(&bytes).is_ok(),
@@ -163,6 +165,7 @@ mod tests {
 
     #[test]
     fn current_hop_is_none_when_pos_is_past_the_end() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Today this falls through `next_hop()`'s `None` arm and delivers an
         // attacker's packet locally as though we were the destination.
         assert!(
@@ -173,6 +176,7 @@ mod tests {
 
     #[test]
     fn current_hop_is_the_addressed_hop() {
+        let _guard = ::habilis_network_test_tracing::init();
         let subject = cell(vec![hop(1), hop(2)], 1);
         assert_eq!(
             subject.current_hop(),

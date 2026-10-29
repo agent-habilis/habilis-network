@@ -223,7 +223,6 @@ fn reconstruct(previous: &HashMap<AppId, AppId>, leg: Leg) -> Vec<AppId> {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use iroh::SecretKey;
 
     use crate::app_id::AppId;
@@ -251,6 +250,7 @@ mod tests {
 
     #[test]
     fn a_link_from_the_source_to_a_refused_node_is_skipped_also_when_it_is_the_destination() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (src, via, dst) = (eid(1), eid(2), eid(3));
         let mut graph = Graph::default();
         link(&mut graph, src, dst, 1);
@@ -283,6 +283,7 @@ mod tests {
 
     #[test]
     fn a_refused_first_hop_is_still_a_hop_in_the_middle_of_a_route() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Only the links from the source are refused: `via` can carry the route
         // on from a later node, since the rule reads the first hop alone.
         let (src, near, via, dst) = (eid(1), eid(2), eid(3), eid(4));
@@ -304,6 +305,7 @@ mod tests {
 
     #[test]
     fn shortest_path_traces_a_line() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc) = (eid(1), eid(2), eid(3));
         let mut graph = Graph::default();
         link(&mut graph, na, nb, 5);
@@ -321,6 +323,7 @@ mod tests {
 
     #[test]
     fn shortest_path_prefers_a_cheaper_direct_over_the_chain() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc, nd) = (eid(1), eid(2), eid(3), eid(4));
         let mut graph = Graph::default();
         link(&mut graph, na, nb, 1);
@@ -344,6 +347,7 @@ mod tests {
 
     #[test]
     fn shortest_path_prefers_the_chain_when_the_direct_link_is_costlier() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc, nd) = (eid(1), eid(2), eid(3), eid(4));
         let mut graph = Graph::default();
         link(&mut graph, na, nb, 1);
@@ -367,6 +371,7 @@ mod tests {
 
     #[test]
     fn unreachable_destination_is_none() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, lonely) = (eid(1), eid(2), eid(9));
         let mut graph = Graph::default();
         link(&mut graph, na, nb, 1);
@@ -383,6 +388,7 @@ mod tests {
 
     #[test]
     fn infinite_links_are_dropped() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb) = (eid(1), eid(2));
         let mut graph = Graph::default();
         graph.insert_link(Link {
@@ -398,6 +404,7 @@ mod tests {
 
     #[test]
     fn disjoint_paths_are_node_disjoint() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Diamond: na -> {nb, nc} -> nd. Two interior-disjoint paths exist.
         let (na, nb, nc, nd) = (eid(1), eid(2), eid(3), eid(4));
         let mut graph = Graph::default();
@@ -422,6 +429,7 @@ mod tests {
 
     #[test]
     fn disjoint_paths_stops_when_no_alternative_exists() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nr, nd) = (eid(1), eid(5), eid(4));
         let mut graph = Graph::default();
         link(&mut graph, na, nr, 1);

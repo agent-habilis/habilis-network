@@ -643,7 +643,6 @@ pub fn underlay_path_selector(underlay_id: UnderlayId) -> Arc<dyn PathSelector> 
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::{expect_warn, test};
     use std::time::Duration;
 
     use iroh::endpoint::presets;
@@ -658,6 +657,7 @@ mod tests {
     use std::sync::atomic::Ordering;
     #[test]
     fn the_underlay_key_is_derived_from_the_peer_key() {
+        let _guard = ::habilis_network_test_tracing::init();
         let peer = SecretKey::from_bytes(&[7; 32]);
         let other = SecretKey::from_bytes(&[8; 32]);
         assert_eq!(
@@ -727,6 +727,7 @@ mod tests {
     /// wrong one would make that test pass for nothing.
     #[test]
     fn the_test_encoders_match_known_vectors() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(base32(b"foobar"), "MZXW6YTBOI", "RFC 4648 vector");
         assert_eq!(
             base58(b"hello world"),
@@ -736,43 +737,45 @@ mod tests {
     }
 
     #[test]
-    async fn the_debug_output_of_a_handle_shows_no_key_material() {
-        // Distinct bytes, so no pattern of one repeated byte stands for the key.
-        let mut bytes = [0_u8; 32];
-        for (index, byte) in bytes.iter_mut().enumerate() {
-            *byte = u8::try_from(index)
-                .expect("below 32")
-                .wrapping_mul(7)
-                .wrapping_add(3);
-        }
-        let secret = SecretKey::from_bytes(&bytes);
-        let underlay: Endpoint = Endpoint::builder(presets::Minimal)
-            .secret_key(underlay_secret(&secret))
-            .relay_mode(RelayMode::Disabled)
-            .bind()
-            .await
-            .expect("bind an underlay");
-        close_at_end(&underlay);
-        let handle = MultihopHandle::new(&secret, underlay, HandleConfig::default())
-            .expect("underlay on the derived key");
-        let shown = format!("{handle:?}");
+    fn the_debug_output_of_a_handle_shows_no_key_material() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // Distinct bytes, so no pattern of one repeated byte stands for the key.
+            let mut bytes = [0_u8; 32];
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                *byte = u8::try_from(index)
+                    .expect("below 32")
+                    .wrapping_mul(7)
+                    .wrapping_add(3);
+            }
+            let secret = SecretKey::from_bytes(&bytes);
+            let underlay: Endpoint = Endpoint::builder(presets::Minimal)
+                .secret_key(underlay_secret(&secret))
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind an underlay");
+            close_at_end(&underlay);
+            let handle = MultihopHandle::new(&secret, underlay, HandleConfig::default())
+                .expect("underlay on the derived key");
+            let shown = format!("{handle:?}");
 
-        let lower_hex = hex(&bytes);
-        let forms = [
-            ("hex", lower_hex.clone()),
-            ("hex upper", lower_hex.to_uppercase()),
-            ("base32", base32(&bytes)),
-            ("base32 lower", base32(&bytes).to_lowercase()),
-            ("base58", base58(&bytes)),
-            ("byte list", format!("{bytes:?}")),
-        ];
-        for (name, form) in forms {
-            assert!(!shown.contains(&form), "the key as {name}: {shown}");
-        }
-        assert!(
-            !shown.as_bytes().windows(32).any(|run| run == bytes),
-            "the 32 raw bytes of the key: {shown}"
-        );
+            let lower_hex = hex(&bytes);
+            let forms = [
+                ("hex", lower_hex.clone()),
+                ("hex upper", lower_hex.to_uppercase()),
+                ("base32", base32(&bytes)),
+                ("base32 lower", base32(&bytes).to_lowercase()),
+                ("base58", base58(&bytes)),
+                ("byte list", format!("{bytes:?}")),
+            ];
+            for (name, form) in forms {
+                assert!(!shown.contains(&form), "the key as {name}: {shown}");
+            }
+            assert!(
+                !shown.as_bytes().windows(32).any(|run| run == bytes),
+                "the 32 raw bytes of the key: {shown}"
+            );
+        });
     }
 
     fn hex(bytes: &[u8]) -> String {
@@ -820,90 +823,96 @@ mod tests {
     const EXTRA_ALPN: &[u8] = b"test/extra/1";
 
     #[test]
-    async fn an_extra_protocol_is_accepted_on_the_underlay() {
-        // the test reads the count after the accept loop runs
-        let accepted = std::sync::Arc::new(atomic::AtomicUsize::new(0));
-        let secret = SecretKey::from_bytes(&[51; 32]);
-        let handle = MultihopHandle::with_protocols(
-            &secret,
-            loopback_underlay(&secret).await,
-            HandleConfig::default(),
-            ProtocolSet::default().with_protocol(
-                EXTRA_ALPN.to_vec(),
-                Counting(std::sync::Arc::clone(&accepted)),
-            ),
-        )
-        .expect("an extra ALPN is allowed");
+    fn an_extra_protocol_is_accepted_on_the_underlay() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // the test reads the count after the accept loop runs
+            let accepted = std::sync::Arc::new(atomic::AtomicUsize::new(0));
+            let secret = SecretKey::from_bytes(&[51; 32]);
+            let handle = MultihopHandle::with_protocols(
+                &secret,
+                loopback_underlay(&secret).await,
+                HandleConfig::default(),
+                ProtocolSet::default().with_protocol(
+                    EXTRA_ALPN.to_vec(),
+                    Counting(std::sync::Arc::clone(&accepted)),
+                ),
+            )
+            .expect("an extra ALPN is allowed");
 
-        let loopback_addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("loopback");
-        let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
-        let bound = builder.bind_addr(loopback_addr).expect("valid bind addr");
-        let client: Endpoint = bound.bind().await.expect("bind a client");
-        close_at_end(&client);
-        let connection = client
-            .connect(handle.underlay_addr(), EXTRA_ALPN)
-            .await
-            .expect("the underlay answers the extra ALPN");
-        connection.close(0u32.into(), b"done");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(
-            accepted.load(Ordering::SeqCst),
-            1,
-            "one extra protocol is accepted on the underlay"
-        );
+            let loopback_addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("loopback");
+            let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
+            let bound = builder.bind_addr(loopback_addr).expect("valid bind addr");
+            let client: Endpoint = bound.bind().await.expect("bind a client");
+            close_at_end(&client);
+            let connection = client
+                .connect(handle.underlay_addr(), EXTRA_ALPN)
+                .await
+                .expect("the underlay answers the extra ALPN");
+            connection.close(0u32.into(), b"done");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(
+                accepted.load(Ordering::SeqCst),
+                1,
+                "one extra protocol is accepted on the underlay"
+            );
+        });
     }
 
     #[test]
-    async fn the_forward_alpn_cannot_be_given_to_another_handler() {
-        let secret = SecretKey::from_bytes(&[52; 32]);
-        let result = MultihopHandle::with_protocols(
-            &secret,
-            loopback_underlay(&secret).await,
-            HandleConfig::default(),
-            ProtocolSet::default().with_protocol(
-                crate::underlay::FORWARD_ALPN.to_vec(),
-                Counting(std::sync::Arc::default()),
-            ),
-        );
-        assert!(result.is_err(), "the forwarder keeps its own ALPN");
+    fn the_forward_alpn_cannot_be_given_to_another_handler() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let secret = SecretKey::from_bytes(&[52; 32]);
+            let result = MultihopHandle::with_protocols(
+                &secret,
+                loopback_underlay(&secret).await,
+                HandleConfig::default(),
+                ProtocolSet::default().with_protocol(
+                    crate::underlay::FORWARD_ALPN.to_vec(),
+                    Counting(std::sync::Arc::default()),
+                ),
+            );
+            assert!(result.is_err(), "the forwarder keeps its own ALPN");
+        });
     }
 
     #[test]
-    async fn the_underlay_address_of_an_origin_comes_from_its_link_vector() {
-        let (me, other) = (
-            SecretKey::from_bytes(&[53; 32]),
-            SecretKey::from_bytes(&[54; 32]),
-        );
-        let handle =
-            MultihopHandle::new(&me, loopback_underlay(&me).await, HandleConfig::default())
-                .expect("underlay on the derived key");
-        assert_eq!(
-            handle.underlay_addr_of(AppId::new(other.public())),
-            None,
-            "no vector yet"
-        );
+    fn the_underlay_address_of_an_origin_comes_from_its_link_vector() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (me, other) = (
+                SecretKey::from_bytes(&[53; 32]),
+                SecretKey::from_bytes(&[54; 32]),
+            );
+            let handle =
+                MultihopHandle::new(&me, loopback_underlay(&me).await, HandleConfig::default())
+                    .expect("underlay on the derived key");
+            assert_eq!(
+                handle.underlay_addr_of(AppId::new(other.public())),
+                None,
+                "no vector yet"
+            );
 
-        let their_underlay = iroh::EndpointAddr::new(underlay_secret(&other).public());
-        let vector = crate::LinkVector::signed(
-            &other,
-            crate::topology::wall_clock_ms(),
-            their_underlay.clone(),
-            Vec::new(),
-        );
-        assert!(
-            handle.feed_topology(vector),
-            "the vector feeds the topology"
-        );
-        assert_eq!(
-            handle.underlay_addr_of(AppId::new(other.public())),
-            Some(their_underlay),
-            "the underlay address of an origin comes from its link vector"
-        );
-        assert_eq!(
-            handle.underlay_addr_of(AppId::new(me.public())),
-            None,
-            "not our own"
-        );
+            let their_underlay = iroh::EndpointAddr::new(underlay_secret(&other).public());
+            let vector = crate::LinkVector::signed(
+                &other,
+                crate::topology::wall_clock_ms(),
+                their_underlay.clone(),
+                Vec::new(),
+            );
+            assert!(
+                handle.feed_topology(vector),
+                "the vector feeds the topology"
+            );
+            assert_eq!(
+                handle.underlay_addr_of(AppId::new(other.public())),
+                Some(their_underlay),
+                "the underlay address of an origin comes from its link vector"
+            );
+            assert_eq!(
+                handle.underlay_addr_of(AppId::new(me.public())),
+                None,
+                "not our own"
+            );
+        });
     }
 
     /// A handle whose underlay can only reach other underlays through the relay.
@@ -969,79 +978,85 @@ mod tests {
     }
 
     #[test]
-    async fn the_shorter_route_is_chosen_while_its_first_hop_is_not_refused() {
-        let (handle, [(short, _), _, _, (dst, _)]) = handle_with_two_routes().await;
-        assert_eq!(
-            first_hop_of(&handle, dst),
-            short,
-            "the shorter route is chosen while its first hop is not refused"
-        );
+    fn the_shorter_route_is_chosen_while_its_first_hop_is_not_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (handle, [(short, _), _, _, (dst, _)]) = handle_with_two_routes().await;
+            assert_eq!(
+                first_hop_of(&handle, dst),
+                short,
+                "the shorter route is chosen while its first hop is not refused"
+            );
+        });
     }
 
     #[test]
-    async fn a_route_whose_first_hop_is_refused_now_gives_way_to_the_longer_one() {
-        let (handle, [(short, short_underlay), (long_a, _), _, (dst, _)]) =
-            handle_with_two_routes().await;
-        handle
-            .inner
-            .forwarder
-            .refuse_hop_for_test(short_underlay, short);
-        assert!(
-            handle.stuck_hops().next().is_none(),
-            "refused now, not past the deadline: the link vector still names the hop"
-        );
-        assert_eq!(
-            first_hop_of(&handle, dst),
-            long_a,
-            "a route whose first hop is refused gives way to the longer one"
-        );
+    fn a_route_whose_first_hop_is_refused_now_gives_way_to_the_longer_one() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (handle, [(short, short_underlay), (long_a, _), _, (dst, _)]) =
+                handle_with_two_routes().await;
+            handle
+                .inner
+                .forwarder
+                .refuse_hop_for_test(short_underlay, short);
+            assert!(
+                handle.stuck_hops().next().is_none(),
+                "refused now, not past the deadline: the link vector still names the hop"
+            );
+            assert_eq!(
+                first_hop_of(&handle, dst),
+                long_a,
+                "a route whose first hop is refused gives way to the longer one"
+            );
+        });
     }
 
     #[test]
-    async fn a_direct_route_whose_destination_is_refused_gives_way_to_a_route_through_a_third() {
-        // The shape of a cell through a third member: the shortest route is the
-        // direct edge, and its first hop is the destination itself. It has no
-        // interior hop, so a search for disjoint routes stops after it.
-        let me = SecretKey::from_bytes(&[71; 32]);
-        let handle =
-            MultihopHandle::new(&me, loopback_underlay(&me).await, HandleConfig::default())
-                .expect("underlay on the derived key");
-        let (via, dst) = (
-            SecretKey::from_bytes(&[72; 32]),
-            SecretKey::from_bytes(&[73; 32]),
-        );
-        let advertise = |node: &SecretKey, links: Vec<(AppId, u32)>| {
-            handle.feed_topology(crate::LinkVector::signed(
-                node,
-                crate::topology::wall_clock_ms(),
-                iroh::EndpointAddr::new(underlay_secret(node).public()),
-                links,
-            ));
-        };
-        advertise(&via, vec![(AppId::new(dst.public()), 1)]);
-        advertise(&dst, vec![]);
-        assert!(
-            handle.feed_topology(handle.link_vector(vec![
-                (AppId::new(dst.public()), 1),
-                (AppId::new(via.public()), 1),
-            ])),
-            "the direct route's vector feeds the topology"
-        );
-        let dst_id = AppId::new(dst.public());
-        assert_eq!(first_hop_of(&handle, dst_id), dst_id, "direct");
+    fn a_direct_route_whose_destination_is_refused_gives_way_to_a_route_through_a_third() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // The shape of a cell through a third member: the shortest route is the
+            // direct edge, and its first hop is the destination itself. It has no
+            // interior hop, so a search for disjoint routes stops after it.
+            let me = SecretKey::from_bytes(&[71; 32]);
+            let handle =
+                MultihopHandle::new(&me, loopback_underlay(&me).await, HandleConfig::default())
+                    .expect("underlay on the derived key");
+            let (via, dst) = (
+                SecretKey::from_bytes(&[72; 32]),
+                SecretKey::from_bytes(&[73; 32]),
+            );
+            let advertise = |node: &SecretKey, links: Vec<(AppId, u32)>| {
+                handle.feed_topology(crate::LinkVector::signed(
+                    node,
+                    crate::topology::wall_clock_ms(),
+                    iroh::EndpointAddr::new(underlay_secret(node).public()),
+                    links,
+                ));
+            };
+            advertise(&via, vec![(AppId::new(dst.public()), 1)]);
+            advertise(&dst, vec![]);
+            assert!(
+                handle.feed_topology(handle.link_vector(vec![
+                    (AppId::new(dst.public()), 1),
+                    (AppId::new(via.public()), 1),
+                ])),
+                "the direct route's vector feeds the topology"
+            );
+            let dst_id = AppId::new(dst.public());
+            assert_eq!(first_hop_of(&handle, dst_id), dst_id, "direct");
 
-        handle.inner.forwarder.refuse_hop_for_test(
-            UnderlayId::new(underlay_secret(&dst).public()),
-            AppId::new(dst.public()),
-        );
-        let address = handle.route_addr(dst_id).expect("a route to dst");
-        let route = Route::decode(&address).expect("a route");
-        let hops: Vec<AppId> = route.hops().iter().map(|hop| hop.app_id).collect();
-        assert_eq!(
-            hops,
-            vec![AppId::new(via.public()), dst_id],
-            "the route through a third peer carries the expected hops"
-        );
+            handle.inner.forwarder.refuse_hop_for_test(
+                UnderlayId::new(underlay_secret(&dst).public()),
+                AppId::new(dst.public()),
+            );
+            let address = handle.route_addr(dst_id).expect("a route to dst");
+            let route = Route::decode(&address).expect("a route");
+            let hops: Vec<AppId> = route.hops().iter().map(|hop| hop.app_id).collect();
+            assert_eq!(
+                hops,
+                vec![AppId::new(via.public()), dst_id],
+                "the route through a third peer carries the expected hops"
+            );
+        });
     }
 
     /// A handle that knows a native route to `dst` of three hops (`a1`, `a2`, `dst`) and a route
@@ -1087,6 +1102,7 @@ mod tests {
     /// here sees this fail, and with measured costs the relation must be shown again.
     #[test]
     fn a_route_through_a_browser_costs_more_than_any_native_route() {
+        let _guard = ::habilis_network_test_tracing::init();
         let native = u64::from(HandleConfig::default().link_cost);
         let browser = u64::from(HandleConfig::for_browser().link_cost);
         let longest_native = native * u64::try_from(crate::route::MAX_ROUTE_HOPS).expect("small");
@@ -1097,80 +1113,89 @@ mod tests {
     }
 
     #[test]
-    async fn a_native_route_is_chosen_over_a_shorter_route_through_a_browser() {
-        let (handle, [(a1, _), _, _, (dst, _)]) = handle_with_a_native_and_a_browser_route().await;
-        assert_eq!(
-            first_hop_of(&handle, dst),
-            a1,
-            "a native route beats a shorter route through a browser"
-        );
+    fn a_native_route_is_chosen_over_a_shorter_route_through_a_browser() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (handle, [(a1, _), _, _, (dst, _)]) =
+                handle_with_a_native_and_a_browser_route().await;
+            assert_eq!(
+                first_hop_of(&handle, dst),
+                a1,
+                "a native route beats a shorter route through a browser"
+            );
+        });
     }
 
     #[test]
-    async fn the_browser_route_is_chosen_when_the_only_native_first_hop_is_refused() {
-        let (handle, [(a1, a1_underlay), _, (tab, _), (dst, _)]) =
-            handle_with_a_native_and_a_browser_route().await;
-        handle.inner.forwarder.refuse_hop_for_test(a1_underlay, a1);
-        assert_eq!(
-            first_hop_of(&handle, dst),
-            tab,
-            "the browser is the way out"
-        );
+    fn the_browser_route_is_chosen_when_the_only_native_first_hop_is_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (handle, [(a1, a1_underlay), _, (tab, _), (dst, _)]) =
+                handle_with_a_native_and_a_browser_route().await;
+            handle.inner.forwarder.refuse_hop_for_test(a1_underlay, a1);
+            assert_eq!(
+                first_hop_of(&handle, dst),
+                tab,
+                "the browser is the way out"
+            );
+        });
     }
 
     #[test]
-    async fn a_refused_browser_first_hop_does_not_change_the_native_route() {
-        let (handle, [(a1, _), _, (tab, tab_underlay), (dst, _)]) =
-            handle_with_a_native_and_a_browser_route().await;
-        handle
-            .inner
-            .forwarder
-            .refuse_hop_for_test(tab_underlay, tab);
-        assert_eq!(
-            first_hop_of(&handle, dst),
-            a1,
-            "a refused browser first hop leaves the native route in place"
-        );
+    fn a_refused_browser_first_hop_does_not_change_the_native_route() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (handle, [(a1, _), _, (tab, tab_underlay), (dst, _)]) =
+                handle_with_a_native_and_a_browser_route().await;
+            handle
+                .inner
+                .forwarder
+                .refuse_hop_for_test(tab_underlay, tab);
+            assert_eq!(
+                first_hop_of(&handle, dst),
+                a1,
+                "a refused browser first hop leaves the native route in place"
+            );
+        });
     }
 
     #[test]
-    async fn the_address_lookup_chooses_the_route_like_route_addr() {
-        use iroh::address_lookup::AddressLookup as _;
-        use n0_future::StreamExt as _;
-        let (handle, [(short, short_underlay), (long_a, _), _, (dst, _)]) =
-            handle_with_two_routes().await;
-        let first_hop_resolved = || async {
-            let mut answers = handle
-                .address_lookup()
-                .resolve(dst.get())
-                .expect("the lookup answers");
-            let item = answers.next().await.expect("an item").expect("no error");
-            let mut addrs = item.endpoint_info().addrs();
-            let custom_addr = addrs.find(|address| address.is_custom());
-            let custom: iroh_base::CustomAddr = custom_addr
-                .map(|address| {
-                    let iroh::TransportAddr::Custom(custom) = address else {
-                        unreachable!("is_custom was true");
-                    };
-                    custom.clone()
-                })
-                .expect("a custom address");
-            Route::decode(&custom).expect("a route").hops()[0].app_id
-        };
-        assert_eq!(
-            first_hop_resolved().await,
-            short,
-            "the address lookup chooses the route like route_addr"
-        );
-        handle
-            .inner
-            .forwarder
-            .refuse_hop_for_test(short_underlay, short);
-        assert_eq!(
-            first_hop_resolved().await,
-            long_a,
-            "iroh is not handed the refused first hop"
-        );
+    fn the_address_lookup_chooses_the_route_like_route_addr() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use iroh::address_lookup::AddressLookup as _;
+            use n0_future::StreamExt as _;
+            let (handle, [(short, short_underlay), (long_a, _), _, (dst, _)]) =
+                handle_with_two_routes().await;
+            let first_hop_resolved = || async {
+                let mut answers = handle
+                    .address_lookup()
+                    .resolve(dst.get())
+                    .expect("the lookup answers");
+                let item = answers.next().await.expect("an item").expect("no error");
+                let mut addrs = item.endpoint_info().addrs();
+                let custom_addr = addrs.find(|address| address.is_custom());
+                let custom: iroh_base::CustomAddr = custom_addr
+                    .map(|address| {
+                        let iroh::TransportAddr::Custom(custom) = address else {
+                            unreachable!("is_custom was true");
+                        };
+                        custom.clone()
+                    })
+                    .expect("a custom address");
+                Route::decode(&custom).expect("a route").hops()[0].app_id
+            };
+            assert_eq!(
+                first_hop_resolved().await,
+                short,
+                "the address lookup chooses the route like route_addr"
+            );
+            handle
+                .inner
+                .forwarder
+                .refuse_hop_for_test(short_underlay, short);
+            assert_eq!(
+                first_hop_resolved().await,
+                long_a,
+                "iroh is not handed the refused first hop"
+            );
+        });
     }
 
     /// The return route that the far end builds from a cell is the route that it would dial
@@ -1181,64 +1206,68 @@ mod tests {
     /// underlay is online. The stamp that a node puts on its cells (`self_hop`) was taken when
     /// the handle was made, before that.
     #[test]
-    async fn the_return_route_of_a_cell_is_the_route_that_the_far_end_dials() {
-        let relay: iroh::RelayUrl = "http://127.0.0.1:1/".parse().expect("a relay url");
-        let secrets = [81_u8, 82, 83].map(|seed| SecretKey::from_bytes(&[seed; 32]));
-        let [alice, carol, bob] = &secrets;
-        let with_relay = |secret: &SecretKey| {
-            iroh::EndpointAddr::new(underlay_secret(secret).public()).with_relay_url(relay.clone())
-        };
-        let alice_handle = MultihopHandle::new(
-            alice,
-            loopback_underlay(alice).await,
-            HandleConfig::default(),
-        )
-        .expect("a handle");
-        let bob_handle =
-            MultihopHandle::new(bob, loopback_underlay(bob).await, HandleConfig::default())
-                .expect("a handle");
-        for handle in [&alice_handle, &bob_handle] {
-            let app = |key: &SecretKey| AppId::new(key.public());
-            for (node, links) in [
-                (alice, vec![(app(carol), 1)]),
-                (carol, vec![(app(alice), 1), (app(bob), 1)]),
-                (bob, vec![(app(carol), 1)]),
-            ] {
-                handle.feed_topology(crate::LinkVector::signed(
-                    node,
-                    crate::topology::wall_clock_ms(),
-                    with_relay(node),
-                    links,
-                ));
+    fn the_return_route_of_a_cell_is_the_route_that_the_far_end_dials() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let relay: iroh::RelayUrl = "http://127.0.0.1:1/".parse().expect("a relay url");
+            let secrets = [81_u8, 82, 83].map(|seed| SecretKey::from_bytes(&[seed; 32]));
+            let [alice, carol, bob] = &secrets;
+            let with_relay = |secret: &SecretKey| {
+                iroh::EndpointAddr::new(underlay_secret(secret).public())
+                    .with_relay_url(relay.clone())
+            };
+            let alice_handle = MultihopHandle::new(
+                alice,
+                loopback_underlay(alice).await,
+                HandleConfig::default(),
+            )
+            .expect("a handle");
+            let bob_handle =
+                MultihopHandle::new(bob, loopback_underlay(bob).await, HandleConfig::default())
+                    .expect("a handle");
+            for handle in [&alice_handle, &bob_handle] {
+                let app = |key: &SecretKey| AppId::new(key.public());
+                for (node, links) in [
+                    (alice, vec![(app(carol), 1)]),
+                    (carol, vec![(app(alice), 1), (app(bob), 1)]),
+                    (bob, vec![(app(carol), 1)]),
+                ] {
+                    handle.feed_topology(crate::LinkVector::signed(
+                        node,
+                        crate::topology::wall_clock_ms(),
+                        with_relay(node),
+                        links,
+                    ));
+                }
             }
-        }
 
-        // Alice dials Bob; Bob gets the cell and builds the way back from it.
-        let forward = Route::decode(
-            &alice_handle
-                .route_addr(AppId::new(bob.public()))
-                .expect("a route"),
-        )
-        .expect("a route");
-        let stamp = alice_handle.inner.transport.self_hop();
-        let way_back = Route::reverse_from(forward.hops(), stamp).expect("a legal route");
+            // Alice dials Bob; Bob gets the cell and builds the way back from it.
+            let forward = Route::decode(
+                &alice_handle
+                    .route_addr(AppId::new(bob.public()))
+                    .expect("a route"),
+            )
+            .expect("a route");
+            let stamp = alice_handle.inner.transport.self_hop();
+            let way_back = Route::reverse_from(forward.hops(), stamp).expect("a legal route");
 
-        // Bob's own route to Alice, as his address lookup would hand it to iroh.
-        let dialed = Route::decode(
-            &bob_handle
-                .route_addr(AppId::new(alice.public()))
-                .expect("a route"),
-        )
-        .expect("a route");
-        assert_eq!(
-            way_back.encode(),
-            dialed.encode(),
-            "the way back from a cell is not the route that Bob dials: two iroh paths for one route"
-        );
+            // Bob's own route to Alice, as his address lookup would hand it to iroh.
+            let dialed = Route::decode(
+                &bob_handle
+                    .route_addr(AppId::new(alice.public()))
+                    .expect("a route"),
+            )
+            .expect("a route");
+            assert_eq!(
+                way_back.encode(),
+                dialed.encode(),
+                "the way back from a cell is not the route that Bob dials: two iroh paths for one route"
+            );
+        });
     }
 
     #[test]
     fn a_browser_advertises_its_links_at_ten_times_the_cost_of_a_native_node() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             HandleConfig::default().link_cost,
             10,
@@ -1266,123 +1295,129 @@ mod tests {
     }
 
     #[test]
-    async fn a_handle_reports_the_link_cost_of_its_config() {
-        let secret = SecretKey::from_bytes(&[91; 32]);
-        let native = MultihopHandle::new(
-            &secret,
-            loopback_underlay(&secret).await,
-            HandleConfig::default(),
-        )
-        .expect("a handle");
-        assert_eq!(
-            native.link_cost(),
-            10,
-            "a native handle reports link cost ten"
-        );
-        let other = SecretKey::from_bytes(&[92; 32]);
-        let browser = MultihopHandle::new(
-            &other,
-            loopback_underlay(&other).await,
-            HandleConfig::for_browser(),
-        )
-        .expect("a handle");
-        assert_eq!(
-            browser.link_cost(),
-            100,
-            "a browser handle reports link cost one hundred"
-        );
+    fn a_handle_reports_the_link_cost_of_its_config() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let secret = SecretKey::from_bytes(&[91; 32]);
+            let native = MultihopHandle::new(
+                &secret,
+                loopback_underlay(&secret).await,
+                HandleConfig::default(),
+            )
+            .expect("a handle");
+            assert_eq!(
+                native.link_cost(),
+                10,
+                "a native handle reports link cost ten"
+            );
+            let other = SecretKey::from_bytes(&[92; 32]);
+            let browser = MultihopHandle::new(
+                &other,
+                loopback_underlay(&other).await,
+                HandleConfig::for_browser(),
+            )
+            .expect("a handle");
+            assert_eq!(
+                browser.link_cost(),
+                100,
+                "a browser handle reports link cost one hundred"
+            );
+        });
     }
 
     #[test]
-    async fn the_shorter_route_is_kept_when_every_first_hop_is_refused() {
-        let (
-            handle,
-            [
-                (short, short_underlay),
-                (long_a, long_underlay),
-                _,
-                (dst, _),
-            ],
-        ) = handle_with_two_routes().await;
-        handle
-            .inner
-            .forwarder
-            .refuse_hop_for_test(short_underlay, short);
-        handle
-            .inner
-            .forwarder
-            .refuse_hop_for_test(long_underlay, long_a);
-        assert_eq!(
-            first_hop_of(&handle, dst),
-            short,
-            "the shorter route is kept when every first hop is refused"
-        );
+    fn the_shorter_route_is_kept_when_every_first_hop_is_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (
+                handle,
+                [
+                    (short, short_underlay),
+                    (long_a, long_underlay),
+                    _,
+                    (dst, _),
+                ],
+            ) = handle_with_two_routes().await;
+            handle
+                .inner
+                .forwarder
+                .refuse_hop_for_test(short_underlay, short);
+            handle
+                .inner
+                .forwarder
+                .refuse_hop_for_test(long_underlay, long_a);
+            assert_eq!(
+                first_hop_of(&handle, dst),
+                short,
+                "the shorter route is kept when every first hop is refused"
+            );
+        });
     }
 
     #[test]
-    async fn two_nodes_whose_underlays_only_meet_on_the_relay_advertise_no_usable_route() {
-        expect_warn(
-            "habilis_network_iroh_multihop_transport::underlay",
-            "multihop underlay stays on the relay: this hop is not advertised as a link",
-        );
-        let (url, _server) = test_support::relay_server().await;
-        let (alice, bob) = (
-            SecretKey::from_bytes(&[41; 32]),
-            SecretKey::from_bytes(&[42; 32]),
-        );
-        let (first, second) = (
-            relay_only_handle(&alice, &url).await,
-            relay_only_handle(&bob, &url).await,
-        );
-        let (first_id, second_id) = (AppId::new(alice.public()), AppId::new(bob.public()));
-        assert_eq!(
-            first.link_vector(vec![(second_id, 10)]).links.len(),
-            1,
-            "a link before any cell"
-        );
+    fn two_nodes_whose_underlays_only_meet_on_the_relay_advertise_no_usable_route() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "multihop underlay stays on the relay: this hop is not advertised as a link",
+            );
+            let (url, _server) = test_support::relay_server().await;
+            let (alice, bob) = (
+                SecretKey::from_bytes(&[41; 32]),
+                SecretKey::from_bytes(&[42; 32]),
+            );
+            let (first, second) = (
+                relay_only_handle(&alice, &url).await,
+                relay_only_handle(&bob, &url).await,
+            );
+            let (first_id, second_id) = (AppId::new(alice.public()), AppId::new(bob.public()));
+            assert_eq!(
+                first.link_vector(vec![(second_id, 10)]).links.len(),
+                1,
+                "a link before any cell"
+            );
 
-        // Each end holds the vector of the other: a route names a hop by ids, and the
-        // forwarder dials the address that the hop signed.
-        first.feed_topology(second.link_vector(Vec::new()));
-        second.feed_topology(first.link_vector(Vec::new()));
+            // Each end holds the vector of the other: a route names a hop by ids, and the
+            // forwarder dials the address that the hop signed.
+            first.feed_topology(second.link_vector(Vec::new()));
+            second.feed_topology(first.link_vector(Vec::new()));
 
-        // Traffic each way: the gate refuses it, since only the relay is open.
-        let hop = |handle: &MultihopHandle, id| RouteHop {
-            app_id: id,
-            underlay_id: handle.underlay_id(),
-        };
-        for (from, from_id, to, to_id) in [
-            (&first, first_id, &second, second_id),
-            (&second, second_id, &first, first_id),
-        ] {
-            let cell = Cell {
-                path: Route::try_new(vec![hop(to, to_id)]).expect("legal route"),
-                position: 0,
-                source: hop(from, from_id),
-                packet: vec![1, 2, 3],
+            // Traffic each way: the gate refuses it, since only the relay is open.
+            let hop = |handle: &MultihopHandle, id| RouteHop {
+                app_id: id,
+                underlay_id: handle.underlay_id(),
             };
-            let deadline = std::time::Instant::now() + Duration::from_secs(8);
-            while from.stuck_hops().next().is_none() && std::time::Instant::now() < deadline {
-                from.inner.forwarder.enqueue(&hop(to, to_id), cell.clone());
-                tokio::time::sleep(Duration::from_millis(150)).await;
+            for (from, from_id, to, to_id) in [
+                (&first, first_id, &second, second_id),
+                (&second, second_id, &first, first_id),
+            ] {
+                let cell = Cell {
+                    path: Route::try_new(vec![hop(to, to_id)]).expect("legal route"),
+                    position: 0,
+                    source: hop(from, from_id),
+                    packet: vec![1, 2, 3],
+                };
+                let deadline = std::time::Instant::now() + Duration::from_secs(8);
+                while from.stuck_hops().next().is_none() && std::time::Instant::now() < deadline {
+                    from.inner.forwarder.enqueue(&hop(to, to_id), cell.clone());
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
             }
-        }
 
-        let (from_a, from_b) = (
-            first.link_vector(vec![(second_id, 10)]),
-            second.link_vector(vec![(first_id, 10)]),
-        );
-        assert!(
-            from_a.links.is_empty() && from_b.links.is_empty(),
-            "no stuck hop is advertised"
-        );
-        assert!(
-            first.feed_topology(from_a) && first.feed_topology(from_b),
-            "nodes whose underlays only meet on the relay advertise no usable route"
-        );
-        assert!(
-            first.topology_view().edges.is_empty(),
-            "so no route is computed"
-        );
+            let (from_a, from_b) = (
+                first.link_vector(vec![(second_id, 10)]),
+                second.link_vector(vec![(first_id, 10)]),
+            );
+            assert!(
+                from_a.links.is_empty() && from_b.links.is_empty(),
+                "no stuck hop is advertised"
+            );
+            assert!(
+                first.feed_topology(from_a) && first.feed_topology(from_b),
+                "nodes whose underlays only meet on the relay advertise no usable route"
+            );
+            assert!(
+                first.topology_view().edges.is_empty(),
+                "so no route is computed"
+            );
+        });
     }
 }

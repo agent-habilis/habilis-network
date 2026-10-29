@@ -85,11 +85,11 @@ impl fmt::Display for UnderlayId {
 #[cfg(test)]
 mod tests {
     use super::{AppId, UnderlayId};
-    use habilis_network_test_tracing::test;
     use iroh::SecretKey;
 
     #[test]
     fn a_role_id_has_the_bytes_of_the_endpoint_id_it_wraps() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id = SecretKey::from_bytes(&[7; 32]).public();
         let raw = postcard::to_allocvec(&id).expect("an endpoint id serializes");
 
