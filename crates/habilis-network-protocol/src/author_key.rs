@@ -2,6 +2,8 @@
 
 use iroh_base::PublicKey;
 
+use crate::identity;
+use std::fmt;
 /// The 32 bytes of the Ed25519 key that signed a message, from `Message::author_key`.
 ///
 /// On the wire the key is its 64-character lowercase hex text. The signed bytes of a message
@@ -47,14 +49,14 @@ impl AuthorKey {
     /// other length, for an uppercase digit, and for a non-hex character.
     #[must_use]
     pub fn decode_hex(hex: &str) -> Option<Self> {
-        crate::identity::decode_lower_hex_32(hex).map(Self)
+        identity::decode_lower_hex_32(hex).map(Self)
     }
 
     /// The 64 ASCII bytes of the lowercase hex form, on the stack: what the signed bytes carry
     /// and what the dedup key hashes, written for every inbound message without an allocation.
     #[must_use]
     pub fn hex(&self) -> [u8; 64] {
-        crate::identity::encode_lower_hex_32(&self.0)
+        identity::encode_lower_hex_32(&self.0)
     }
 
     /// Whether `hex` is this key in the form of [`Display`](std::fmt::Display). It does not
@@ -72,15 +74,15 @@ impl AuthorKey {
 }
 
 // Hex, so a log line and an assertion failure stay readable.
-impl std::fmt::Debug for AuthorKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for AuthorKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "AuthorKey({self})")
     }
 }
 
-impl std::fmt::Display for AuthorKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        crate::identity::write_hex(f, &self.0)
+impl fmt::Display for AuthorKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        identity::write_hex(f, &self.0)
     }
 }
 
@@ -88,6 +90,7 @@ impl std::fmt::Display for AuthorKey {
 mod tests {
     use super::AuthorKey;
 
+    use crate::identity;
     const HEX: &str = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
 
     #[test]
@@ -185,7 +188,7 @@ mod tests {
             AuthorKey::from(bytes).public_key().is_none(),
             "a non-curve string is an author key but not a public key"
         );
-        let identity = crate::identity::Identity::generate();
+        let identity = identity::Identity::generate();
         let author = identity.author_key();
         assert_eq!(
             author.public_key(),

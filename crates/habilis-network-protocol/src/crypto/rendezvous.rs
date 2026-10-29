@@ -5,6 +5,7 @@ use iroh_base::{EndpointId, SecretKey};
 
 use super::derive;
 
+use std::array;
 /// The shared rendezvous endpoint secret key. Every member that
 /// co-hosts the rendezvous binds an iroh endpoint to this key, so the
 /// node id is stable and joiner-computable. `SecretKey::from_bytes` is
@@ -44,7 +45,7 @@ pub(crate) fn rendezvous_ports(source: Keying<'_>) -> [u16; RENDEZVOUS_LADDER] {
     const LOW: u32 = 1024;
     const SPAN: u32 = 32767 - LOW + 1; // 31744
     let digest = derive::derive_secret(source.bytes(), b"port");
-    std::array::from_fn(|index| {
+    array::from_fn(|index| {
         let raw = u32::from(u16::from_le_bytes([
             digest[2 * index],
             digest[2 * index + 1],

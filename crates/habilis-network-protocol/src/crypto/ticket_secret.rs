@@ -2,6 +2,7 @@
 
 use zeroize::Zeroizing;
 
+use std::fmt;
 /// The 32-byte bearer secret of a ticket. Whoever holds it can redeem the
 /// ticket, so `Debug` prints no byte, and the type has no `PartialEq`: compare
 /// two with [`super::ct_eq`] on [`Self::as_bytes`], which does not stop at the first
@@ -49,8 +50,8 @@ impl TicketSecret {
 // The only field is a `Zeroizing`.
 impl zeroize::ZeroizeOnDrop for TicketSecret {}
 
-impl std::fmt::Debug for TicketSecret {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for TicketSecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("TicketSecret(***)")
     }
 }

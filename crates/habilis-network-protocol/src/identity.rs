@@ -294,6 +294,8 @@ mod tests {
     use super::{Identity, decode_sig, dedup_key16, encode_hex, encode_pubkey, verify};
     use crate::AuthorKey;
 
+    use crate::crypto;
+    use std::fmt;
     #[test]
     fn sign_verify_round_trip() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -383,7 +385,7 @@ mod tests {
     fn the_seal_secret_is_the_derivation_of_the_identity_seed() {
         let _guard = ::habilis_network_test_tracing::init();
         let identity = Identity::generate();
-        let by_hand = x25519_dalek::StaticSecret::from(*crate::crypto::derive_secret(
+        let by_hand = x25519_dalek::StaticSecret::from(*crypto::derive_secret(
             &identity.secret.to_bytes(),
             super::SEAL_ENC_LABEL,
         ));
@@ -402,8 +404,8 @@ mod tests {
     #[test]
     fn write_hex_writes_the_same_text_as_encode_hex() {
         struct Hex<'bytes>(&'bytes [u8]);
-        impl std::fmt::Display for Hex<'_> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        impl fmt::Display for Hex<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 super::write_hex(f, self.0)
             }
         }

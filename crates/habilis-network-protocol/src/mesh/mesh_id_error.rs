@@ -2,10 +2,14 @@
 //! outside the type until their checksum and complete payload have been
 //! validated.
 
+use serde::de;
+use std::borrow::Borrow;
 use std::fmt;
+use std::str::FromStr;
 
 use super::LockedMesh;
 
+use std::error;
 const MIN_LEN: usize = 3;
 const MAX_LEN: usize = 512;
 
@@ -43,36 +47,36 @@ impl MeshId {
     }
 }
 
-impl ::std::fmt::Display for MeshId {
-    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+impl fmt::Display for MeshId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
 }
 
 impl<'de> ::serde::Deserialize<'de> for MeshId {
-    fn deserialize<Decoder>(deserializer: Decoder) -> ::std::result::Result<Self, Decoder::Error>
+    fn deserialize<Decoder>(deserializer: Decoder) -> Result<Self, Decoder::Error>
     where
         Decoder: ::serde::Deserializer<'de>,
     {
         let raw = <String as ::serde::Deserialize>::deserialize(deserializer)?;
-        Self::try_new(&raw).map_err(::serde::de::Error::custom)
+        Self::try_new(&raw).map_err(de::Error::custom)
     }
 }
 
-impl ::std::str::FromStr for MeshId {
+impl FromStr for MeshId {
     type Err = MeshIdError;
-    fn from_str(text: &str) -> ::std::result::Result<Self, Self::Err> {
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
         Self::try_new(text)
     }
 }
 
-impl ::std::convert::AsRef<str> for MeshId {
+impl AsRef<str> for MeshId {
     fn as_ref(&self) -> &str {
         &self.0
     }
 }
 
-impl ::std::borrow::Borrow<str> for MeshId {
+impl Borrow<str> for MeshId {
     fn borrow(&self) -> &str {
         &self.0
     }
@@ -119,7 +123,7 @@ impl fmt::Display for MeshIdError {
     }
 }
 
-impl std::error::Error for MeshIdError {}
+impl error::Error for MeshIdError {}
 
 fn is_base58_char(ch: char) -> bool {
     matches!(ch,
@@ -170,10 +174,11 @@ impl From<&str> for MeshId {
 mod mesh_id_tests {
     use super::{LockedMesh, MeshId, MeshIdError};
 
+    use crate::crypto;
     fn valid_id() -> String {
         use super::super::{Mesh, MeshConfig, MeshName};
         Mesh::try_new(
-            crate::crypto::Seed::new([1u8; 32]),
+            crypto::Seed::new([1u8; 32]),
             MeshName::try_new("test").unwrap(),
             MeshConfig::loopback(),
         )

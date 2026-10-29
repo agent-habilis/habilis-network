@@ -3,6 +3,8 @@ use super::{
     MessageBody, MessageId, MessageKind, Nickname, PresenceSubtype, build_msg_bytes,
 };
 
+use crate::identity;
+use habilis_network_util::consts;
 fn nick(name: &str) -> Nickname {
     Nickname::from(name)
 }
@@ -100,7 +102,7 @@ fn test_ping_round_trip() {
 #[test]
 fn a_link_state_message_is_built_signed_and_round_tripped_on_every_target() {
     let _guard = ::habilis_network_test_tracing::init();
-    let identity = crate::identity::Identity::generate();
+    let identity = identity::Identity::generate();
     let message = Message::new_link_state(&sid(), &nick("word-word"), MessageBody::from("{}"))
         .sign(&identity);
     assert!(
@@ -371,7 +373,7 @@ fn parse_rejects_malformed_integrity_fields() {
 fn build_msg_bytes_message() {
     let _guard = ::habilis_network_test_tracing::init();
     let alice = nick("alice");
-    let identity = crate::identity::Identity::generate();
+    let identity = identity::Identity::generate();
     let (bytes, built) = build_msg_bytes(
         BuildMsgParams {
             tag: AppTag::try_new("app_msg").expect("a valid app tag"),
@@ -756,6 +758,7 @@ mod prop {
         VERSION,
     };
 
+    use crate::proptest_support;
     fn arb_ascii_body() -> impl Strategy<Value = String> {
         arb_vec(0x20u8..0x7Eu8, 0..200).prop_map(|bytes| String::from_utf8(bytes).unwrap())
     }
@@ -765,7 +768,7 @@ mod prop {
     }
 
     proptest! {
-        #![proptest_config(crate::proptest_support::config())]
+        #![proptest_config(proptest_support::config())]
         #[test]
         fn prop_message_round_trip(
             body in arb_ascii_body(),
@@ -847,7 +850,7 @@ mod prop {
 #[test]
 fn a_resend_trailer_is_outside_the_frame_and_the_signature() {
     let _guard = ::habilis_network_test_tracing::init();
-    let identity = super::identity::Identity::generate();
+    let identity = identity::Identity::generate();
     let message = Message::new_app(
         &sid(),
         &nick("word-word"),
@@ -901,11 +904,11 @@ fn a_frame_of_the_largest_size_still_parses_with_the_trailer() {
     let message = Message::new_alive(&sid(), &nick("word-word"));
     let mut frame = message.serialize().unwrap();
     // JSON whitespace pads the frame up to the cap.
-    frame.resize(habilis_network_util::consts::MAX_MESSAGE_SIZE, b' ');
+    frame.resize(consts::MAX_MESSAGE_SIZE, b' ');
     let wire = super::wire_with_resend_nonce(&frame, u64::MAX);
     assert_eq!(
         wire.len(),
-        habilis_network_util::consts::MAX_MESSAGE_SIZE + super::RESEND_TRAILER_LEN,
+        consts::MAX_MESSAGE_SIZE + super::RESEND_TRAILER_LEN,
         "the largest frame has the size limit"
     );
     let (parsed, nonce) = Message::parse_wire(&wire).unwrap();
@@ -996,7 +999,7 @@ const UNSIGNED_CANONICAL_HEX: &str = concat!(
 );
 
 fn hex(bytes: &[u8]) -> String {
-    crate::identity::encode_hex(bytes)
+    identity::encode_hex(bytes)
 }
 
 /// Golden: the bytes of a signed message are fixed. The JSON text, the signed bytes, the content

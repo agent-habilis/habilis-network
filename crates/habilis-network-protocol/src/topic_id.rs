@@ -9,6 +9,7 @@
 //! `habilis-network` converts at the gossip boundary (`daemon::setup`),
 //! which is the only place that needs the iroh-gossip type.
 
+use std::fmt;
 /// A gossip topic: the 32 bytes derived from a mesh's seed, name and config by
 /// `crypto::derive_topic_id`.
 ///
@@ -50,14 +51,14 @@ impl TopicId {
 // Hex, matching how iroh-gossip's `TopicId` renders. A derived `Debug` would
 // print a 32-element byte array instead, which is unreadable in a log line and
 // would silently churn the pinned golden in `mesh::mesh_tests`.
-impl std::fmt::Debug for TopicId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for TopicId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "TopicId({self})")
     }
 }
 
-impl std::fmt::Display for TopicId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for TopicId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for byte in &self.0 {
             write!(f, "{byte:02x}")?;
         }

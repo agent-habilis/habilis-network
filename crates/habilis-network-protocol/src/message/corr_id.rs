@@ -1,9 +1,11 @@
 //! The request and response correlation id of an app frame.
 
 use serde::Deserialize;
+use std::fmt;
 
 use super::CorrIdError;
 
+use serde::de::Error;
 /// An opaque request/response correlation id carried on a directed
 /// [`super::MessageKind::App`] frame (the `corr` field). Matched by the engine's
 /// pending-call registry to pair a reply with its outstanding call; the app
@@ -32,8 +34,8 @@ impl CorrId {
     }
 }
 
-impl ::std::fmt::Display for CorrId {
-    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+impl fmt::Display for CorrId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
 }
@@ -78,6 +80,6 @@ impl<'de> Deserialize<'de> for CorrId {
         // mints a 36-char UUID, so anything empty or wildly larger is a crafted
         // frame, not a correlation id. Mirrors [`AppTag`]'s bounded deserialize.
         let raw = String::deserialize(deserializer)?;
-        Self::try_new(&raw).map_err(serde::de::Error::custom)
+        Self::try_new(&raw).map_err(Error::custom)
     }
 }

@@ -15,6 +15,8 @@ use super::transport::{Transport, TransportPolicy};
 use super::{ChoiceError, ConfigError, MeshName};
 use crate::crypto::PASSWORD_VERIFIER_LEN;
 
+use habilis_network_util::tuning;
+use std::{error, str};
 /// The connectivity relay. `Disabled` ⇒ no relay at all
 /// (`RelayMode::Disabled`); `Pinned` ⇒ the lookup-layer pinned default
 /// *ladder* (the n0 prod set); `Custom` ⇒ an operator-supplied **ordered
@@ -291,8 +293,7 @@ fn decode_relay_ladder(
             .get(*position..end)
             .ok_or(ConfigError::Truncated("truncated relay URL"))?;
         *position = end;
-        let text =
-            std::str::from_utf8(raw).map_err(ConfigError::with_step("relay URL is not UTF-8"))?;
+        let text = str::from_utf8(raw).map_err(ConfigError::with_step("relay URL is not UTF-8"))?;
         let url: RelayUrl = text
             .parse()
             .map_err(ConfigError::with_step("invalid relay URL"))?;
@@ -773,7 +774,7 @@ impl fmt::Display for AdvertiseRequiresReachable {
     }
 }
 
-impl std::error::Error for AdvertiseRequiresReachable {}
+impl error::Error for AdvertiseRequiresReachable {}
 
 /// `--advertise` lists the mesh in a public directory, so it requires a
 /// mesh that is actually reachable across machines.
@@ -794,10 +795,7 @@ pub fn validate_advertise(
     advertise: &DirectorySelection,
     lookups: &LookupOpts,
 ) -> Result<(), AdvertiseRequiresReachable> {
-    if advertise.is_set()
-        && lookups.is_loopback()
-        && !habilis_network_util::tuning::directory_private_for_test()
-    {
+    if advertise.is_set() && lookups.is_loopback() && !tuning::directory_private_for_test() {
         return Err(AdvertiseRequiresReachable);
     }
     Ok(())
@@ -1025,7 +1023,7 @@ impl fmt::Display for RelayLadderError {
     }
 }
 
-impl std::error::Error for RelayLadderError {}
+impl error::Error for RelayLadderError {}
 
 impl FromStr for RelayLadder {
     type Err = RelayLadderError;

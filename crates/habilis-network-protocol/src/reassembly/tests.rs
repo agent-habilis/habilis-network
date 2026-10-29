@@ -11,6 +11,7 @@ use habilis_network_util::consts::{
     REASSEMBLY_TOTAL_BUDGET_BYTES,
 };
 
+use crate::message;
 fn group(uuid: &str) -> ShardGroup {
     ShardGroup::parse_uuid(uuid).expect("valid group")
 }
@@ -799,8 +800,7 @@ fn shard_cache_serves_requested_frames_and_evicts_whole_groups() {
     let _guard = ::habilis_network_test_tracing::init();
     let mut cache = super::ShardCache::default();
     let first = group("00000000-0000-4000-8000-0000000000c1");
-    let frame =
-        |tag: u8, len: usize| crate::message::WireFrame::new(bytes::Bytes::from(vec![tag; len]));
+    let frame = |tag: u8, len: usize| message::WireFrame::new(bytes::Bytes::from(vec![tag; len]));
     cache.insert(first.clone(), vec![frame(1, 10), frame(2, 10)]);
     let served: Vec<_> = cache.frames(&first, &[1, 7]).collect();
     assert_eq!(served.len(), 1, "out-of-range idx skipped");

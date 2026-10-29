@@ -8,6 +8,7 @@ use crate::mesh::MeshId;
 use crate::nickname_error::Nickname;
 use crate::{AuthorKey, ContentHash, identity};
 
+use serde::de::Error;
 /// A [`Message`] as the wire has it, read: every field a string or a plain value, so that one
 /// place ([`Message::try_from`]) decides what a well-formed message is.
 #[derive(Deserialize)]
@@ -44,7 +45,7 @@ impl<'de> Deserialize<'de> for Message {
         deserializer: Decoder,
     ) -> Result<Self, Decoder::Error> {
         let wire = WireIn::deserialize(deserializer)?;
-        Message::try_from(wire).map_err(serde::de::Error::custom)
+        Message::try_from(wire).map_err(Error::custom)
     }
 }
 

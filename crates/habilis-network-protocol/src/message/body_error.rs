@@ -2,8 +2,11 @@
 //! tabs are allowed (multi-line snippets); other control characters are
 //! rejected. Empty is legal: presence and `PeerInfo` messages use it.
 
+use serde::de;
 use std::fmt;
+use std::str::FromStr;
 
+use std::error;
 /// A protocol message body — UTF-8 text. Newlines and tabs are allowed
 /// (multi-line snippets); other control characters are rejected. Empty
 /// is legal: presence and `PeerInfo` messages use it.
@@ -36,37 +39,37 @@ impl MessageBody {
     }
 }
 
-impl ::std::fmt::Display for MessageBody {
-    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+impl fmt::Display for MessageBody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
 }
 
 impl<'de> ::serde::Deserialize<'de> for MessageBody {
-    fn deserialize<Decoder>(deserializer: Decoder) -> ::std::result::Result<Self, Decoder::Error>
+    fn deserialize<Decoder>(deserializer: Decoder) -> Result<Self, Decoder::Error>
     where
         Decoder: ::serde::Deserializer<'de>,
     {
         let raw = <String as ::serde::Deserialize>::deserialize(deserializer)?;
-        Self::try_new(&raw).map_err(::serde::de::Error::custom)
+        Self::try_new(&raw).map_err(de::Error::custom)
     }
 }
 
-impl ::std::str::FromStr for MessageBody {
+impl FromStr for MessageBody {
     type Err = BodyError;
-    fn from_str(text: &str) -> ::std::result::Result<Self, Self::Err> {
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
         Self::try_new(text)
     }
 }
 
-impl ::std::convert::AsRef<str> for MessageBody {
+impl AsRef<str> for MessageBody {
     fn as_ref(&self) -> &str {
         &self.0
     }
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
-impl ::std::convert::From<&str> for MessageBody {
+impl From<&str> for MessageBody {
     fn from(text: &str) -> Self {
         Self::try_new(text).expect(concat!(
             "invalid ",
@@ -102,7 +105,7 @@ impl fmt::Display for BodyError {
     }
 }
 
-impl std::error::Error for BodyError {}
+impl error::Error for BodyError {}
 
 impl MessageBody {
     /// Construct a body. Accepts any UTF-8 text; the only restriction is

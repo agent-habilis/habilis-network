@@ -5,9 +5,11 @@
 //! newtype is the single validation point.
 
 use std::fmt;
+use std::str::FromStr;
 
 use crate::{identifier, wordlist};
 
+use std::error;
 /// A human-readable mesh label, bound cryptographically into the topic id.
 ///
 /// 1..=32 "safe UTF-8" scalar values from any script; see
@@ -43,15 +45,15 @@ impl MeshName {
     }
 }
 
-impl ::std::fmt::Display for MeshName {
-    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+impl fmt::Display for MeshName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
 }
 
-impl ::std::str::FromStr for MeshName {
+impl FromStr for MeshName {
     type Err = NameError;
-    fn from_str(text: &str) -> ::std::result::Result<Self, Self::Err> {
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
         Self::try_new(text)
     }
 }
@@ -99,7 +101,7 @@ impl fmt::Display for NameError {
     }
 }
 
-impl std::error::Error for NameError {}
+impl error::Error for NameError {}
 
 /// Whether `input` starts with the `http://` or `https://` scheme
 /// (case-insensitive, per RFC 3986 — schemes are case-insensitive).

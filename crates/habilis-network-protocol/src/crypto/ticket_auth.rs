@@ -2,6 +2,7 @@
 
 use super::{Password, TicketSecret};
 
+use std::fmt;
 /// The 32 bytes a bridge consumer presents on connect and a producer
 /// expects: the raw ticket secret (no password), or its Argon2id stretch
 /// salted by the secret (passworded) — same wire size either way, so a
@@ -67,9 +68,9 @@ impl TicketAuth {
     }
 }
 
-impl std::fmt::Debug for TicketAuth {
+impl fmt::Debug for TicketAuth {
     // The token is the live credential — redact it, keep the flag.
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("TicketAuth")
             .field("token", &"***")

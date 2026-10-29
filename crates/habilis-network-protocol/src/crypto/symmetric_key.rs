@@ -4,6 +4,7 @@ use zeroize::Zeroizing;
 
 use super::derive;
 
+use std::fmt;
 /// A 32-byte key that encrypts, wraps or derives: the stretched password key,
 /// the invite root, and each key derived from them. Its bytes are wiped on
 /// drop, `Debug` prints no byte, and the type has no `PartialEq`: compare two
@@ -62,8 +63,8 @@ impl SymmetricKey {
 // The only field is a `Zeroizing`.
 impl zeroize::ZeroizeOnDrop for SymmetricKey {}
 
-impl std::fmt::Debug for SymmetricKey {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for SymmetricKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("SymmetricKey(***)")
     }
 }

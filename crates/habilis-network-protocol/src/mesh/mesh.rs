@@ -11,6 +11,8 @@ use zeroize::Zeroizing;
 
 use crate::crypto::{self, Keying, Seed, SymmetricKey};
 
+use crate::topic::TopicId;
+
 /// A mesh identifier — bare `Base58Check` payload.
 ///
 /// The token carries the random `seed` plus the mesh's [`MeshConfig`]
@@ -240,7 +242,7 @@ impl Mesh {
     /// The gossip `TopicId` — the one derivation entry point, so no caller
     /// can forget the password mix.
     #[must_use]
-    pub fn topic_id(&self) -> crate::topic::TopicId {
+    pub fn topic_id(&self) -> TopicId {
         crypto::derive_topic_id(self.effective_seed(), &self.name, &self.config_bytes())
     }
 

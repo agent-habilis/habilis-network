@@ -7,9 +7,6 @@
 //!   (de)serialization.
 
 #[cfg(any(test, feature = "test-fixtures"))]
-#[cfg(test)]
-use super::identity;
-#[cfg(any(test, feature = "test-fixtures"))]
 #[cfg(any(test, feature = "test-fixtures"))]
 mod chain_ctx;
 #[cfg(any(test, feature = "test-fixtures"))]

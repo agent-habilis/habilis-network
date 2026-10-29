@@ -1,5 +1,9 @@
+use serde::de;
+use std::borrow::Borrow;
 use std::fmt;
+use std::str::FromStr;
 
+use std::error;
 /// An agent nickname — a "safe UTF-8" identifier.
 ///
 /// 1..=32 Unicode scalar values from any script (letters, marks,
@@ -40,43 +44,43 @@ impl Nickname {
     }
 }
 
-impl ::std::fmt::Display for Nickname {
-    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+impl fmt::Display for Nickname {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
 }
 
 impl<'de> ::serde::Deserialize<'de> for Nickname {
-    fn deserialize<Decoder>(deserializer: Decoder) -> ::std::result::Result<Self, Decoder::Error>
+    fn deserialize<Decoder>(deserializer: Decoder) -> Result<Self, Decoder::Error>
     where
         Decoder: ::serde::Deserializer<'de>,
     {
         let raw = <String as ::serde::Deserialize>::deserialize(deserializer)?;
-        Self::try_new(&raw).map_err(::serde::de::Error::custom)
+        Self::try_new(&raw).map_err(de::Error::custom)
     }
 }
 
-impl ::std::str::FromStr for Nickname {
+impl FromStr for Nickname {
     type Err = NicknameError;
-    fn from_str(text: &str) -> ::std::result::Result<Self, Self::Err> {
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
         Self::try_new(text)
     }
 }
 
-impl ::std::convert::AsRef<str> for Nickname {
+impl AsRef<str> for Nickname {
     fn as_ref(&self) -> &str {
         &self.0
     }
 }
 
-impl ::std::borrow::Borrow<str> for Nickname {
+impl Borrow<str> for Nickname {
     fn borrow(&self) -> &str {
         &self.0
     }
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
-impl ::std::convert::From<&str> for Nickname {
+impl From<&str> for Nickname {
     fn from(text: &str) -> Self {
         Self::try_new(text).expect(concat!(
             "invalid ",
@@ -129,7 +133,7 @@ impl fmt::Display for NicknameError {
     }
 }
 
-impl std::error::Error for NicknameError {}
+impl error::Error for NicknameError {}
 
 impl Nickname {
     /// Validate and construct a nickname.

@@ -9,6 +9,7 @@ use super::{ConfigError, MeshConfig, MeshName, NAME_MAX_BYTES, SEED_LEN, VERSION
 use crate::base58check;
 use crate::crypto::{self, Seed, SymmetricKey};
 
+use std::{error, str};
 /// A decoded mesh id that has no secret yet.
 ///
 /// Decoding an id (`FromStr`) yields this, not a [`Mesh`]: the id declares
@@ -86,7 +87,7 @@ impl fmt::Display for UnlockError {
     }
 }
 
-impl std::error::Error for UnlockError {}
+impl error::Error for UnlockError {}
 
 impl fmt::Debug for LockedMesh {
     // The seed is the join capability, so it is redacted as it is on `Mesh`.
@@ -255,8 +256,8 @@ impl LockedMesh {
             .get(position..position + name_len)
             .ok_or(ConfigError::Truncated("truncated mesh name"))?;
         position += name_len;
-        let name_str = std::str::from_utf8(name_raw)
-            .map_err(ConfigError::with_step("invalid mesh name UTF-8"))?;
+        let name_str =
+            str::from_utf8(name_raw).map_err(ConfigError::with_step("invalid mesh name UTF-8"))?;
         let name =
             MeshName::try_new(name_str).map_err(ConfigError::with_step("invalid mesh name"))?;
 

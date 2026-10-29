@@ -16,6 +16,8 @@ mod tests {
 
     // The consumer builds its own "use the topic command instead" hint off this
     // variant, so the trimmed input has to survive classification verbatim.
+    use crate::{crypto, invite, mesh};
+    use std::time;
     #[test]
     fn a_non_token_string_is_unrecognized_and_echoes_its_input() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -35,7 +37,7 @@ mod tests {
     fn known_mesh_id() -> String {
         use crate::mesh::{Mesh, MeshConfig, MeshName};
         Mesh::try_new(
-            crate::crypto::Seed::new([1u8; 32]),
+            crypto::Seed::new([1u8; 32]),
             MeshName::try_new("test").unwrap(),
             MeshConfig::loopback(),
         )
@@ -78,10 +80,10 @@ mod tests {
         );
     }
 
-    fn invite_only_mesh() -> crate::mesh::Mesh {
+    fn invite_only_mesh() -> mesh::Mesh {
         use crate::mesh::{Mesh, MeshConfig, MeshName};
         let mut mesh = Mesh::try_new(
-            crate::crypto::Seed::new([5u8; 32]),
+            crypto::Seed::new([5u8; 32]),
             MeshName::try_new("t").unwrap(),
             MeshConfig::loopback(),
         )
@@ -108,9 +110,9 @@ mod tests {
     #[test]
     fn a_minted_invite_classifies_as_invite() {
         let _guard = ::habilis_network_test_tracing::init();
-        let token = crate::invite::mint(
+        let token = invite::mint(
             &invite_only_mesh(),
-            Some(std::time::Duration::from_hours(1)),
+            Some(time::Duration::from_hours(1)),
             None,
         )
         .unwrap();

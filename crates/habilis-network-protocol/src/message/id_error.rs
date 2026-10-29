@@ -2,10 +2,14 @@
 //! The newtype prevents argument-order confusion between `id` and
 //! `after`-cursor parameters that carry the same kind of value.
 
+use serde::de;
+use std::borrow::Borrow;
 use std::fmt;
+use std::str::FromStr;
 
 use uuid::Uuid;
 
+use std::error;
 /// A protocol message identifier — UUID v4 string form.
 ///
 /// Construction goes through `new` (validates UUID format) or `random`
@@ -38,43 +42,43 @@ impl MessageId {
     }
 }
 
-impl ::std::fmt::Display for MessageId {
-    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+impl fmt::Display for MessageId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
 }
 
 impl<'de> ::serde::Deserialize<'de> for MessageId {
-    fn deserialize<Decoder>(deserializer: Decoder) -> ::std::result::Result<Self, Decoder::Error>
+    fn deserialize<Decoder>(deserializer: Decoder) -> Result<Self, Decoder::Error>
     where
         Decoder: ::serde::Deserializer<'de>,
     {
         let raw = <String as ::serde::Deserialize>::deserialize(deserializer)?;
-        Self::try_new(&raw).map_err(::serde::de::Error::custom)
+        Self::try_new(&raw).map_err(de::Error::custom)
     }
 }
 
-impl ::std::str::FromStr for MessageId {
+impl FromStr for MessageId {
     type Err = IdError;
-    fn from_str(text: &str) -> ::std::result::Result<Self, Self::Err> {
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
         Self::try_new(text)
     }
 }
 
-impl ::std::convert::AsRef<str> for MessageId {
+impl AsRef<str> for MessageId {
     fn as_ref(&self) -> &str {
         &self.0
     }
 }
 
-impl ::std::borrow::Borrow<str> for MessageId {
+impl Borrow<str> for MessageId {
     fn borrow(&self) -> &str {
         &self.0
     }
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
-impl ::std::convert::From<&str> for MessageId {
+impl From<&str> for MessageId {
     fn from(text: &str) -> Self {
         Self::try_new(text).expect(concat!(
             "invalid ",
@@ -106,7 +110,7 @@ impl fmt::Display for IdError {
     }
 }
 
-impl std::error::Error for IdError {}
+impl error::Error for IdError {}
 
 impl MessageId {
     /// # Errors

@@ -22,6 +22,7 @@ use crate::{identity, seal_error};
 use habilis_network_util::unix_secs::UnixSecs;
 use zeroize::Zeroizing;
 
+use std::str;
 /// Framing version. Bumped only on a breaking framing change.
 const VERSION: u8 = 2;
 
@@ -232,7 +233,7 @@ impl InviteTicket {
             .get(position..hash_end)
             .ok_or(InviteError::Truncated("truncated mesh hash"))?;
         position = hash_end;
-        let mesh_hash = std::str::from_utf8(hash_bytes)
+        let mesh_hash = str::from_utf8(hash_bytes)
             .map_err(InviteError::with_step("invalid mesh hash utf-8"))?
             .to_owned();
         let root_field = payload
@@ -329,6 +330,7 @@ mod tests {
     use habilis_network_util::unix_secs::UnixSecs;
     use iroh_base::SecretKey;
 
+    use crate::base58check;
     fn pw(text: &str) -> Password {
         Password::new(text.to_owned())
     }
@@ -339,11 +341,10 @@ mod tests {
     fn a_ticket_of_version_1_fails_with_the_upgrade_text() {
         let _guard = ::habilis_network_test_tracing::init();
         let mesh = creator();
-        let mut framed =
-            crate::base58check::decode(&minted(&mesh, None, None).encode(), "invite ticket")
-                .expect("a minted ticket decodes");
+        let mut framed = base58check::decode(&minted(&mesh, None, None).encode(), "invite ticket")
+            .expect("a minted ticket decodes");
         framed[0] = 1;
-        let old = crate::base58check::encode(&framed);
+        let old = base58check::encode(&framed);
         let error = InviteTicket::decode(&old).expect_err("a version 1 ticket is refused");
         assert!(error.to_string().contains("upgrade"), "{error}");
     }

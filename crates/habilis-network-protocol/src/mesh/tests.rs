@@ -6,6 +6,8 @@ use crate::crypto::{Password, Seed};
 use crate::mesh::lookup::MAX_RELAY_URL_BYTES;
 use iroh_base::RelayUrl;
 
+use crate::crypto;
+use crate::crypto::Keying;
 fn dummy_seed() -> Seed {
     Seed::new([7u8; SEED_LEN])
 }
@@ -412,11 +414,8 @@ fn golden_passwordless_id_and_topic_are_pinned() {
         "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqazmpTSgH",
         "the passwordless id is pinned to its golden text"
     );
-    let topic = crate::crypto::derive_topic_id(
-        crate::crypto::Keying::Wire(mesh.seed()),
-        mesh.name(),
-        &mesh.config_bytes(),
-    );
+    let topic =
+        crypto::derive_topic_id(Keying::Wire(mesh.seed()), mesh.name(), &mesh.config_bytes());
     assert_eq!(
         format!("{topic:?}"),
         "TopicId(1898d0078596295e6f69e42e9284e139d69921f2db46026b16611a924e65bd1d)",
@@ -469,11 +468,8 @@ fn an_id_of_an_older_default_mesh_keeps_its_id_and_its_topic() {
     let mesh: LockedMesh = older.parse().expect("an older id decodes");
     assert!(!mesh.config().transport.gossip, "it has no gossip");
     assert_eq!(mesh.to_string(), older, "and it keeps its id");
-    let topic = crate::crypto::derive_topic_id(
-        crate::crypto::Keying::Wire(mesh.seed()),
-        mesh.name(),
-        &mesh.config_bytes(),
-    );
+    let topic =
+        crypto::derive_topic_id(Keying::Wire(mesh.seed()), mesh.name(), &mesh.config_bytes());
     assert_eq!(
         format!("{topic:?}"),
         "TopicId(0efae5467ad7c26c9b6a3f0a64a97d1799412ac891282711077401b8ecd8c0e7)",
@@ -697,6 +693,8 @@ mod prop {
     use super::{Mesh, MeshConfig, MeshName, SEED_LEN};
     use crate::crypto::Seed;
 
+    use crate::proptest_support;
+    use proptest::option;
     fn arb_seed() -> impl Strategy<Value = [u8; SEED_LEN]> {
         uniform32(0u8..)
     }
@@ -706,7 +704,7 @@ mod prop {
     }
 
     fn arb_config() -> impl Strategy<Value = MeshConfig> {
-        (any::<bool>(), proptest::option::of(uniform16(0u8..))).prop_map(build_config)
+        (any::<bool>(), option::of(uniform16(0u8..))).prop_map(build_config)
     }
 
     fn build_config((public, verifier): (bool, Option<[u8; 16]>)) -> MeshConfig {
@@ -720,7 +718,7 @@ mod prop {
     }
 
     proptest! {
-        #![proptest_config(crate::proptest_support::config())]
+        #![proptest_config(proptest_support::config())]
         #[test]
         fn prop_round_trip(
             seed in arb_seed(),

@@ -1,6 +1,8 @@
 //! The application-payload tag of an app frame.
 
 use super::AppTagError;
+use serde::de;
+use std::fmt;
 
 /// An opaque application-payload tag — the wire discriminant for a
 /// [`super::MessageKind::App`] frame (serialized in the `tag` field). The engine never
@@ -31,19 +33,19 @@ impl AppTag {
     }
 }
 
-impl ::std::fmt::Display for AppTag {
-    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+impl fmt::Display for AppTag {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
 }
 
 impl<'de> ::serde::Deserialize<'de> for AppTag {
-    fn deserialize<Decoder>(deserializer: Decoder) -> ::std::result::Result<Self, Decoder::Error>
+    fn deserialize<Decoder>(deserializer: Decoder) -> Result<Self, Decoder::Error>
     where
         Decoder: ::serde::Deserializer<'de>,
     {
         let raw = <String as ::serde::Deserialize>::deserialize(deserializer)?;
-        Self::try_new(&raw).map_err(::serde::de::Error::custom)
+        Self::try_new(&raw).map_err(de::Error::custom)
     }
 }
 

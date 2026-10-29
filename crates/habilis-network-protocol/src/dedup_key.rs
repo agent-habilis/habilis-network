@@ -1,6 +1,8 @@
 //! The key that names a message in the dedup set, the message log, and the
 //! anti-entropy digest.
 
+use crate::identity;
+use std::fmt;
 /// `SHA-256(pubkey ‖ id)[..16]` of a message, from [`Message::dedup_key`].
 ///
 /// It is not the message id and not the UUID bytes of the id: the key binds the
@@ -49,15 +51,15 @@ impl DedupKey {
 
 // Hex, so a log line and an assertion failure stay readable. A derived `Debug`
 // prints a 16-element byte array.
-impl std::fmt::Debug for DedupKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for DedupKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "DedupKey({self})")
     }
 }
 
-impl std::fmt::Display for DedupKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        crate::identity::write_hex(f, &self.0)
+impl fmt::Display for DedupKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        identity::write_hex(f, &self.0)
     }
 }
 

@@ -13,10 +13,13 @@
 //! missing indexes over the `shard/repair` gossip RPC.
 
 use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt;
 use uuid::Uuid;
 
 use habilis_network_util::consts::MAX_SHARD_TOTAL;
 
+use habilis_network_util::consts;
+use serde::de::Error;
 /// Whether a frame belongs in the message log as far as sharding is
 /// concerned: unsharded frames and shards of a small group do; a big group's
 /// shards stay out on **both** ends. The gate must be two-sided — a sender
@@ -52,9 +55,10 @@ use habilis_network_util::consts::MAX_SHARD_TOTAL;
 /// ```
 #[must_use]
 pub fn shard_fits_log(message: &super::Message) -> bool {
-    message.shard.as_ref().is_none_or(|shard| {
-        shard.total <= habilis_network_util::consts::LOGGED_SHARD_GROUP_MAX_TOTAL
-    })
+    message
+        .shard
+        .as_ref()
+        .is_none_or(|shard| shard.total <= consts::LOGGED_SHARD_GROUP_MAX_TOTAL)
 }
 
 /// The correlation id shared by every shard of one logical body — a UUID v4
@@ -83,8 +87,8 @@ impl ShardGroup {
     }
 }
 
-impl ::std::fmt::Display for ShardGroup {
-    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+impl fmt::Display for ShardGroup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
 }
@@ -95,7 +99,7 @@ impl<'de> Deserialize<'de> for ShardGroup {
         Decoder: Deserializer<'de>,
     {
         let raw = String::deserialize(deserializer)?;
-        Uuid::parse_str(&raw).map_err(|_| serde::de::Error::custom("invalid shard group"))?;
+        Uuid::parse_str(&raw).map_err(|_| Error::custom("invalid shard group"))?;
         Ok(Self(raw))
     }
 }
@@ -178,10 +182,10 @@ impl<'de> Deserialize<'de> for Shard {
         // body won't fit), so the smallest real `total` is 2; the upper bound
         // rejects a header no budget-respecting sender can produce.
         if raw.total < 2 || raw.total > MAX_SHARD_TOTAL {
-            return Err(serde::de::Error::custom("shard total out of range"));
+            return Err(Error::custom("shard total out of range"));
         }
         if raw.index >= raw.total {
-            return Err(serde::de::Error::custom("shard idx out of range"));
+            return Err(Error::custom("shard idx out of range"));
         }
         Ok(Shard {
             group: raw.group,
@@ -195,6 +199,7 @@ impl<'de> Deserialize<'de> for Shard {
 mod shard_tests {
     use super::{Shard, ShardGroup};
 
+    use habilis_network_util::consts;
     const GROUP: &str = "550e8400-e29b-41d4-a716-446655440000";
 
     #[test]
@@ -252,8 +257,7 @@ mod shard_tests {
         // The tripwire must never reject a body the byte budgets allow: even
         // at a pessimistic ~2 KiB of body per shard, a group at the byte
         // ceiling needs fewer shards than the header bound admits.
-        let worst_case_shards =
-            habilis_network_util::consts::REASSEMBLY_GROUP_MAX_BYTES.div_ceil(2048);
+        let worst_case_shards = consts::REASSEMBLY_GROUP_MAX_BYTES.div_ceil(2048);
         assert!(
             worst_case_shards <= super::MAX_SHARD_TOTAL as usize,
             "MAX_SHARD_TOTAL ({}) must clear REASSEMBLY_GROUP_MAX_BYTES / 2KiB ({worst_case_shards})",

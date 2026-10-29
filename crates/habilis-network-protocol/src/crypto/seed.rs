@@ -4,6 +4,7 @@ use super::SymmetricKey;
 
 use super::derive;
 
+use std::fmt;
 /// The random 32 bytes that a mesh id carries, and the salts of the key
 /// derivations. Whoever holds it can join an open mesh, so `Debug` prints no
 /// byte; unlike [`SymmetricKey`] it is `Copy` and comparable, because it is
@@ -50,8 +51,8 @@ impl Seed {
     }
 }
 
-impl std::fmt::Debug for Seed {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Seed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("Seed(***)")
     }
 }

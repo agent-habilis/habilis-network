@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use std::error;
 /// A name that is not one of a list's choices — a `lookup` or `transport`
 /// entry with a typo. Names the list and the choices, so the message stands
 /// on its own wherever it surfaces (a CLI, a JSON error, a C error slot).
@@ -46,4 +47,4 @@ impl fmt::Display for ChoiceError {
     }
 }
 
-impl std::error::Error for ChoiceError {}
+impl error::Error for ChoiceError {}

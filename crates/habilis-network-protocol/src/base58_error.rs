@@ -15,6 +15,7 @@ use std::fmt;
 
 use sha2::Sha256;
 
+use std::error;
 /// The double-SHA-256 checksum, truncated to its first 4 bytes.
 /// Why a Base58Check text does not decode. `what` names the text, for example
 /// `mesh identifier`.
@@ -50,7 +51,7 @@ impl fmt::Display for Base58Error {
     }
 }
 
-impl std::error::Error for Base58Error {}
+impl error::Error for Base58Error {}
 
 fn checksum(bytes: &[u8]) -> [u8; 4] {
     use sha2::Digest;

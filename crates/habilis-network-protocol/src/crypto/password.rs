@@ -8,6 +8,7 @@ use zeroize::Zeroizing;
 
 use super::derive;
 
+use std::fmt;
 /// An operator-supplied password. A newtype so a stray `{:?}` in a
 /// `tracing` call can never leak the value into a log file that is
 /// otherwise safe to share. Its bytes are wiped on drop (best-effort: any
@@ -47,14 +48,14 @@ impl Drop for Password {
     }
 }
 
-impl std::fmt::Debug for Password {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Password {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("***")
     }
 }
 
-impl std::fmt::Display for Password {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Password {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("***")
     }
 }
@@ -134,6 +135,7 @@ mod password_tests {
 
     use crate::crypto::{Password, Seed, password_verifier, stretch_mesh_password};
 
+    use crate::crypto;
     const SEED_A: [u8; 32] = [7u8; 32];
     const SEED_B: [u8; 32] = [9u8; 32];
 
@@ -300,8 +302,8 @@ mod password_tests {
         use zeroize::Zeroizing;
 
         let _guard = ::habilis_network_test_tracing::init();
-        let _: &Zeroizing<[u8; 32]> = &crate::crypto::TicketSecret::from([0; 32]).0;
-        let _: &Zeroizing<[u8; 32]> = &crate::crypto::SymmetricKey::from([0; 32]).0;
+        let _: &Zeroizing<[u8; 32]> = &crypto::TicketSecret::from([0; 32]).0;
+        let _: &Zeroizing<[u8; 32]> = &crypto::SymmetricKey::from([0; 32]).0;
     }
 
     #[test]

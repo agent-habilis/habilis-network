@@ -2,6 +2,8 @@
 
 use sha2::Sha256;
 
+use crate::identity;
+use std::fmt;
 /// The SHA-256 of the canonical bytes of a message: its id for another author's `prev`
 /// backlink, for the DAG `parents`, and for fork detection. It is recomputed on receive and
 /// never trusted off the wire.
@@ -43,27 +45,27 @@ impl ContentHash {
     /// other length, for an uppercase digit, and for a non-hex character.
     #[must_use]
     pub fn decode_hex(hex: &str) -> Option<Self> {
-        crate::identity::decode_lower_hex_32(hex).map(Self)
+        identity::decode_lower_hex_32(hex).map(Self)
     }
 
     /// The 64 ASCII bytes of the lowercase hex form, on the stack: what the signed bytes of a
     /// message carry for its `prev` and, inside a JSON array, for each of its `parents`.
     #[must_use]
     pub fn hex(&self) -> [u8; 64] {
-        crate::identity::encode_lower_hex_32(&self.0)
+        identity::encode_lower_hex_32(&self.0)
     }
 }
 
 // Hex, so a log line and an assertion failure stay readable.
-impl std::fmt::Debug for ContentHash {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for ContentHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ContentHash({self})")
     }
 }
 
-impl std::fmt::Display for ContentHash {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        crate::identity::write_hex(f, &self.0)
+impl fmt::Display for ContentHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        identity::write_hex(f, &self.0)
     }
 }
 
