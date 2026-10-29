@@ -62,11 +62,10 @@ impl NodeDriver for Probe {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "habilis_network=info".into());
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "habilis_network=info".into()),
-        )
+        .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
 
@@ -98,6 +97,11 @@ async fn main() -> anyhow::Result<()> {
             }
             None => habilis_network::protocol::RelayChoice::Pinned,
         };
+        let transport = TransportPolicy::default()
+            .with_relay_transport(
+                std::env::var_os("MESH_RELAY_TRANSPORT").is_some_and(|value| value == "on"),
+            )
+            .with_udp(udp);
         let mesh: habilis_network::protocol::Mesh =
             habilis_network::runtime::derive_topic_mesh_config(
                 &topic,
@@ -105,12 +109,7 @@ async fn main() -> anyhow::Result<()> {
                     LookupOpts::new(ladder).with_mdns(true).with_dht(true),
                     None,
                     None,
-                    TransportPolicy::default()
-                        .with_relay_transport(
-                            std::env::var_os("MESH_RELAY_TRANSPORT")
-                                .is_some_and(|value| value == "on"),
-                        )
-                        .with_udp(udp),
+                    transport,
                 ),
             )?;
         return run_peer(
@@ -124,6 +123,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let arg = std::env::args().nth(1);
+    // Baked into the id, so a joiner inherits it: only the creator reads the env var.
+    let create_transport = TransportPolicy::default()
+        .with_relay_transport(
+            std::env::var_os("MESH_RELAY_TRANSPORT").is_some_and(|value| value == "on"),
+        )
+        .with_udp(udp);
     let Resolved {
         kind,
         author,
@@ -140,18 +145,7 @@ async fn main() -> anyhow::Result<()> {
             // Public preset: mDNS + DHT + the pinned relay ladder. The relay
             // rung is the part that matters here — it is the only leg a browser
             // peer has, and the rendezvous homes on it.
-            MeshConfig::new(
-                LookupOpts::public_preset(),
-                None,
-                None,
-                // Baked into the id, so a joiner inherits it: only the
-                // creator reads the env var.
-                TransportPolicy::default()
-                    .with_relay_transport(
-                        std::env::var_os("MESH_RELAY_TRANSPORT").is_some_and(|value| value == "on"),
-                    )
-                    .with_udp(udp),
-            ),
+            MeshConfig::new(LookupOpts::public_preset(), None, None, create_transport),
             DirectorySelection::Unset,
         )
         .with_password(None)

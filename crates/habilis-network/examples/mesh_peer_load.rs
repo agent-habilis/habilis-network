@@ -54,10 +54,8 @@ use tokio::sync::{mpsc, oneshot};
 use habilis_network::net::test_relay;
 /// A number from the environment, `0` when it is unset or not a number.
 fn env_number(name: &str) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0)
+    let raw = std::env::var(name).ok();
+    raw.and_then(|value| value.parse().ok()).unwrap_or(0)
 }
 
 /// How many peers this node floods, and the suffix that tells its role on the output line. A node
@@ -119,10 +117,10 @@ async fn roster(sender: &mpsc::Sender<Request>) -> Option<(Vec<String>, usize)> 
         .iter()
         .filter(|peer| peer["reach"].as_str() == Some("direct"))
         .count();
-    let nicks: Vec<String> = peers
+    let named = peers
         .iter()
-        .filter_map(|peer| peer["nickname"].as_str().map(str::to_owned))
-        .collect();
+        .filter_map(|peer| peer["nickname"].as_str().map(str::to_owned));
+    let nicks: Vec<String> = named.collect();
     Some((nicks, links))
 }
 
@@ -200,11 +198,10 @@ async fn talk(
 }
 
 fn init_logging() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "habilis_network=info".into());
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "habilis_network=info".into()),
-        )
+        .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
 }
@@ -258,11 +255,13 @@ async fn main() -> anyhow::Result<()> {
     let (kind, author) = resolve_kind(&options, None)?;
 
     let (inbound_tx, mut inbound) = mpsc::channel(INBOUND_CAP);
+    let max_peers = usize::try_from(env_number("MESH_MAX_PEERS")).unwrap_or(0);
+    let max_direct = usize::try_from(env_number("MESH_MAX_DIRECT")).unwrap_or(0);
     let config: habilis_network::runtime::EventLoopConfig = setup_mesh(
         kind,
         SetupParams::new(author.clone(), SilentSink::default())
-            .with_max_peers(usize::try_from(env_number("MESH_MAX_PEERS")).unwrap_or(0))
-            .with_max_direct(usize::try_from(env_number("MESH_MAX_DIRECT")).unwrap_or(0)),
+            .with_max_peers(max_peers)
+            .with_max_direct(max_direct),
     )
     .await?;
 
