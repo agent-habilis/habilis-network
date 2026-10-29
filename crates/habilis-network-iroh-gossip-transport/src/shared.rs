@@ -13,12 +13,13 @@ use crate::counters::Counters;
 use crate::frame::{EncodeError, Frame};
 use crate::frame_sink::FrameSink;
 
+use std::sync;
 /// Packets waiting for iroh to read them.
 pub(crate) const INBOUND_CAP: usize = 256;
 
 /// The guard of `mutex`. A poisoned lock means a panic happened while it was held,
 /// so this function panics too.
-pub(crate) fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn locked<T>(mutex: &Mutex<T>) -> sync::MutexGuard<'_, T> {
     mutex.lock().expect("the lock is poisoned")
 }
 

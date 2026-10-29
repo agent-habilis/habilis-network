@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 
 use crate::FrameSink;
 
+use n0_future::task;
 /// Frames waiting for the topic's sender. A full queue refuses the frame: QUIC
 /// treats that as loss.
 const QUEUE: usize = 256;
@@ -46,7 +47,7 @@ impl GossipSink {
         // the sink's task and the handle both read the liveness flag
         let alive = Arc::new(AtomicBool::new(true));
         let task_alive = Arc::clone(&alive);
-        n0_future::task::spawn(async move {
+        task::spawn(async move {
             while let Some(frame) = frames.recv().await {
                 if sender.broadcast(frame).await.is_err() {
                     break;

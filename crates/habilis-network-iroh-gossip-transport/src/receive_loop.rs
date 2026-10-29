@@ -4,6 +4,7 @@ use iroh_gossip::api::{Event, GossipReceiver};
 
 use crate::GossipHandle;
 
+use n0_future::task;
 /// The task of [`spawn_receive_loop`]. `abort()` stops it.
 ///
 /// # Examples
@@ -17,7 +18,7 @@ use crate::GossipHandle;
 /// spawn_receive_loop(receiver, handle)
 /// # }
 /// ```
-pub type ReceiveLoop = n0_future::task::JoinHandle<()>;
+pub type ReceiveLoop = task::JoinHandle<()>;
 
 /// Read a topic and hand every message to `handle`, until the topic ends.
 ///
@@ -40,7 +41,7 @@ pub type ReceiveLoop = n0_future::task::JoinHandle<()>;
 #[must_use]
 pub fn spawn_receive_loop(mut receiver: GossipReceiver, handle: GossipHandle) -> ReceiveLoop {
     use n0_future::StreamExt as _;
-    n0_future::task::spawn(async move {
+    task::spawn(async move {
         while let Some(Ok(event)) = receiver.next().await {
             handle_event(&handle, event);
         }
@@ -74,6 +75,10 @@ mod tests {
     use crate::{GossipHandle, frame};
 
     use iroh::endpoint::transports;
+    use iroh::{endpoint, protocol};
+    use iroh_gossip::api;
+    use std::{net, sync};
+    use tokio::{io, time};
     fn secret(seed: u8) -> SecretKey {
         SecretKey::from_bytes(&[seed; 32])
     }
@@ -102,7 +107,7 @@ mod tests {
             if done() {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            time::sleep(Duration::from_millis(50)).await;
         }
         panic!("timed out waiting for {what}");
     }
@@ -179,13 +184,13 @@ mod tests {
     #[derive(Debug, Clone)]
     struct Echo;
 
-    impl iroh::protocol::ProtocolHandler for Echo {
+    impl protocol::ProtocolHandler for Echo {
         async fn accept(
             &self,
-            connection: iroh::endpoint::Connection,
-        ) -> Result<(), iroh::protocol::AcceptError> {
+            connection: endpoint::Connection,
+        ) -> Result<(), protocol::AcceptError> {
             while let Ok((mut send, mut recv)) = connection.accept_bi().await {
-                tokio::io::copy(&mut recv, &mut send).await?;
+                io::copy(&mut recv, &mut send).await?;
                 send.finish()?;
             }
             Ok(())
@@ -194,7 +199,7 @@ mod tests {
 
     /// Whether the `IPv6` loopback (`::1`) can be bound on this machine.
     fn ipv6_loopback_available() -> bool {
-        std::net::UdpSocket::bind("[::1]:0").is_ok()
+        net::UdpSocket::bind("[::1]:0").is_ok()
     }
 
     /// Three members, A and C with no IP path to each other and B between them. The
@@ -232,13 +237,13 @@ mod tests {
                         1 => &["127.0.0.1:0", "[::1]:0"],
                         _ => &["127.0.0.1:0"],
                     };
-                    let mut builder: iroh::endpoint::Builder = Endpoint::builder(presets::Minimal);
+                    let mut builder: endpoint::Builder = Endpoint::builder(presets::Minimal);
                     builder = builder.secret_key(key.clone());
                     builder = builder.relay_mode(RelayMode::Disabled);
                     builder = builder.clear_ip_transports();
                     builder = builder.add_custom_transport(handle.custom_transport());
                     // trait object: the endpoint builder takes the selector by Arc
-                    builder = builder.path_selector(std::sync::Arc::new(Ladder));
+                    builder = builder.path_selector(sync::Arc::new(Ladder));
                     builder = builder.address_lookup(lookup.clone());
                     for bind in binds {
                         let bind: SocketAddr = bind.parse().expect("loopback");
@@ -266,10 +271,10 @@ mod tests {
                 // B joins first: A and C bootstrap on it, and wait for it to be there.
                 for index in [1usize, 0, 2] {
                     let (handle, gossip) = (&nodes[index].1, &gossips[index]);
-                    let topic_handle: iroh_gossip::api::GossipTopic = if index == 1 {
+                    let topic_handle: api::GossipTopic = if index == 1 {
                         gossip.subscribe(topic, vec![]).await.expect("bob joins")
                     } else {
-                        tokio::time::timeout(
+                        time::timeout(
                             Duration::from_secs(20),
                             gossip.subscribe_and_join(topic, vec![bob.0.id()]),
                         )
@@ -288,7 +293,7 @@ mod tests {
                         carol.0.id(),
                     ))],
                 );
-                let connection = tokio::time::timeout(
+                let connection = time::timeout(
                     Duration::from_secs(30),
                     alice.0.connect(to_carol, ECHO_ALPN),
                 )
@@ -298,7 +303,7 @@ mod tests {
                 let (mut send, mut recv) = connection.open_bi().await.expect("stream");
                 send.write_all(b"through the flood").await.expect("write");
                 send.finish().expect("finish");
-                let echoed = tokio::time::timeout(Duration::from_secs(30), recv.read_to_end(1024))
+                let echoed = time::timeout(Duration::from_secs(30), recv.read_to_end(1024))
                     .await
                     .expect("the echo timed out")
                     .expect("read");
@@ -365,7 +370,7 @@ mod tests {
                     if !handle.shared.path_is_valid() {
                         break;
                     }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    time::sleep(Duration::from_millis(50)).await;
                 }
 
                 assert!(!handle.shared.path_is_valid(), "the topic is closed");

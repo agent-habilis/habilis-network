@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 
+use std::fmt;
 /// Where a frame goes: the mesh gossip topic, once the engine has joined it.
 /// It never blocks. `false` means the frame was not accepted.
 ///
@@ -25,7 +26,7 @@ use bytes::Bytes;
 /// assert!(Sink.try_send(Bytes::from_static(b"frame")));
 /// assert!(!Sink.try_send(Bytes::new()));
 /// ```
-pub trait FrameSink: std::fmt::Debug + Send + Sync + 'static {
+pub trait FrameSink: fmt::Debug + Send + Sync + 'static {
     /// Hand over one frame. It never blocks. Returns `false` if the frame was not accepted.
     fn try_send(&self, frame: Bytes) -> bool;
 

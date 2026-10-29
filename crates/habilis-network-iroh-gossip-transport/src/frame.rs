@@ -193,6 +193,7 @@ mod tests {
         DecodeError, EncodeError, EndpointId, FRAME_KIND, FRAME_VERSION, Frame, HEADER_LEN,
         MAX_DATAGRAM_LEN, MAX_FRAME_LEN, decode,
     };
+    use habilis_network_util::consts;
     fn id(seed: u8) -> EndpointId {
         SecretKey::from_bytes(&[seed; 32]).public()
     }
@@ -383,7 +384,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             MAX_FRAME_LEN,
-            habilis_network_util::consts::MAX_MESSAGE_SIZE,
+            consts::MAX_MESSAGE_SIZE,
             "the largest frame equals the engine message cap"
         );
     }

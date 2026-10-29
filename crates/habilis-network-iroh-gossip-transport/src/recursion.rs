@@ -11,6 +11,7 @@ use iroh::endpoint::Connection;
 
 use crate::GOSSIP_TRANSPORT_ID;
 
+use n0_future::task;
 /// Whether the selected path of `connection` is the gossip rung.
 ///
 /// # Examples
@@ -60,7 +61,7 @@ pub fn watch_recursion(
     use n0_future::StreamExt as _;
     let weak = connection.weak_handle();
     let mut events = connection.path_events();
-    n0_future::task::spawn(async move {
+    task::spawn(async move {
         loop {
             let Some(live) = weak.upgrade() else {
                 return;
@@ -98,6 +99,8 @@ mod tests {
     use crate::hub::Hub;
     use crate::{GossipHandle, gossip_addr};
 
+    use iroh::endpoint;
+    use tokio::time;
     const ALPN: &[u8] = b"habilis-network-gossip/test-recursion/0";
     const CODE: u32 = 77;
 
@@ -111,7 +114,7 @@ mod tests {
     struct CloseProbe(Arc<Mutex<Option<oneshot::Sender<ConnectionError>>>>);
 
     impl ProtocolHandler for CloseProbe {
-        async fn accept(&self, connection: iroh::endpoint::Connection) -> Result<(), AcceptError> {
+        async fn accept(&self, connection: endpoint::Connection) -> Result<(), AcceptError> {
             let reason = connection.closed().await;
             if let Some(tx) = self.0.lock().expect("probe lock").take() {
                 let _ = tx.send(reason);
@@ -169,7 +172,7 @@ mod tests {
                 let _ = called.send(());
             });
 
-            let at_bob = tokio::time::timeout(Duration::from_secs(5), rx)
+            let at_bob = time::timeout(Duration::from_secs(5), rx)
                 .await
                 .expect("the connection was not closed")
                 .expect("the probe reported");
@@ -177,7 +180,7 @@ mod tests {
                 matches!(&at_bob, ConnectionError::ApplicationClosed(close) if u64::from(close.error_code) == u64::from(CODE)),
                 "{at_bob:?}"
             );
-            tokio::time::timeout(Duration::from_secs(5), called_rx)
+            time::timeout(Duration::from_secs(5), called_rx)
                 .await
                 .expect("the callback did not run")
                 .expect("the callback ran");
@@ -216,7 +219,7 @@ mod tests {
 
             drop(connection);
 
-            let ended = tokio::time::timeout(Duration::from_secs(5), watch_ended)
+            let ended = time::timeout(Duration::from_secs(5), watch_ended)
                 .await
                 .expect("the watch task did not end");
             assert!(ended.is_err(), "the callback ran: {ended:?}");
@@ -251,7 +254,7 @@ mod tests {
             );
 
             watch_recursion(&connection, CODE, || panic!("closed a connection on IP"));
-            tokio::time::sleep(Duration::from_millis(800)).await;
+            time::sleep(Duration::from_millis(800)).await;
 
             assert!(
                 connection.close_reason().is_none(),

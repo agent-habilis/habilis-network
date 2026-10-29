@@ -46,6 +46,7 @@ mod tests {
     use habilis_network_iroh_transport_util::Rung;
     use std::net::SocketAddr;
 
+    use tokio::time;
     /// The ladder names this crate's transport by the id that the transport uses. The id is
     /// written twice, here and in the util crate, which is below this one; this is the guard
     /// that they stay equal.
@@ -67,6 +68,7 @@ mod tests {
 
     use crate::hub::Hub;
     use crate::{GossipHandle, gossip_addr};
+    use tokio::time::{Instant, Instant as tokio_Instant};
 
     const ALPN: &[u8] = b"habilis-network-gossip/test-selector/0";
 
@@ -112,12 +114,12 @@ mod tests {
             .connect(EndpointAddr::from_parts(bob.id(), both), ALPN)
             .await
             .expect("connect");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while connection.paths().len() < 2 && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        let deadline = tokio_Instant::now() + Duration::from_secs(5);
+        while connection.paths().len() < 2 && Instant::now() < deadline {
+            time::sleep(Duration::from_millis(50)).await;
         }
         assert!(connection.paths().len() >= 2, "both paths opened");
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
         let open = connection.paths();
         let found = open.iter().find(iroh::endpoint::Path::is_selected);
         let selected_ip: bool = found.is_some_and(|path| path.is_ip());

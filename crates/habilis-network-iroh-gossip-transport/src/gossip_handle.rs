@@ -29,6 +29,8 @@ use crate::{frame, gossip_addr, parse_gossip_addr};
 
 use iroh::endpoint::transports;
 
+use crate::{gossip_ladder, gossip_lookup, gossip_sink};
+use iroh_gossip::api;
 /// A handle to a gossip transport. Clone-cheap. Register `custom_transport()` on
 /// the endpoint builder, and `attach` a sink once the topic is joined.
 ///
@@ -91,16 +93,16 @@ impl GossipHandle {
     ///
     /// The engine calls this when it joins the topic, and again where it replaces
     /// the topic's sender after a resubscribe.
-    pub fn attach_gossip(&self, sender: iroh_gossip::api::GossipSender) {
+    pub fn attach_gossip(&self, sender: api::GossipSender) {
         // the sink is a trait object: the handle stores it and the receive task calls it
-        self.attach(Arc::new(crate::gossip_sink::GossipSink::spawn(sender)));
+        self.attach(Arc::new(gossip_sink::GossipSink::spawn(sender)));
     }
 
     /// The address lookup, for `Builder::address_lookup`: it answers the first dial
     /// of a peer with the gossip address.
     #[must_use]
     pub fn address_lookup(&self) -> impl AddressLookup + use<> {
-        crate::gossip_lookup::GossipLookup {
+        gossip_lookup::GossipLookup {
             shared: Arc::clone(&self.shared),
         }
     }
@@ -113,7 +115,7 @@ impl GossipHandle {
     // trait object: the endpoint builder takes the selector by Arc
     pub fn path_selector(&self) -> Arc<dyn transports::PathSelector> {
         // trait object: the endpoint builder takes the selector by Arc
-        Arc::new(crate::gossip_ladder::GossipLadder::new(self.app_id()))
+        Arc::new(gossip_ladder::GossipLadder::new(self.app_id()))
     }
 
     /// Allow frames to `dst`, or stop them. The engine calls this when the selected
@@ -377,6 +379,9 @@ mod tests {
     use crate::shared::{INBOUND_CAP, locked};
     use crate::{GOSSIP_TRANSPORT_ID, frame};
 
+    use iroh::endpoint::{Connection, Connection as iroh_Connection};
+    use std::{panic, task};
+    use tokio::{io as tokio_io, time};
     const ECHO_ALPN: &[u8] = b"habilis-network-gossip/test-echo/0";
 
     fn secret(seed: u8) -> SecretKey {
@@ -412,10 +417,10 @@ mod tests {
     struct Echo;
 
     impl ProtocolHandler for Echo {
-        async fn accept(&self, connection: iroh::endpoint::Connection) -> Result<(), AcceptError> {
+        async fn accept(&self, connection: iroh_Connection) -> Result<(), AcceptError> {
             // One echo per stream, until the client closes the connection.
             while let Ok((mut send, mut recv)) = connection.accept_bi().await {
-                tokio::io::copy(&mut recv, &mut send).await?;
+                tokio_io::copy(&mut recv, &mut send).await?;
                 send.finish()?;
             }
             Ok(())
@@ -441,11 +446,11 @@ mod tests {
         EndpointAddr::from_parts(id, [TransportAddr::Custom(gossip_addr(id))])
     }
 
-    async fn echo_once(connection: &iroh::endpoint::Connection, message: &[u8]) {
+    async fn echo_once(connection: &Connection, message: &[u8]) {
         let (mut send, mut recv) = connection.open_bi().await.expect("open a stream");
         send.write_all(message).await.expect("write");
         send.finish().expect("finish");
-        let echoed = tokio::time::timeout(Duration::from_secs(10), recv.read_to_end(1024))
+        let echoed = time::timeout(Duration::from_secs(10), recv.read_to_end(1024))
             .await
             .expect("the echo timed out")
             .expect("read the echo");
@@ -477,7 +482,7 @@ mod tests {
 
             let target = dial(bob.id());
             let connection =
-                tokio::time::timeout(Duration::from_secs(10), alice.connect(target, ECHO_ALPN))
+                time::timeout(Duration::from_secs(10), alice.connect(target, ECHO_ALPN))
                     .await
                     .expect("connect timed out")
                     .expect("connect over gossip");
@@ -517,10 +522,9 @@ mod tests {
         // a sink that panics, to see the handle survive it
         handle.attach(Arc::new(Panicking));
 
-        let outcome =
-            habilis_network_test_tracing::catch_panic(std::panic::AssertUnwindSafe(|| {
-                handle.shared.path_is_valid()
-            }));
+        let outcome = habilis_network_test_tracing::catch_panic(panic::AssertUnwindSafe(|| {
+            handle.shared.path_is_valid()
+        }));
 
         assert!(outcome.is_err(), "the liveness check should panic");
         assert!(
@@ -569,7 +573,7 @@ mod tests {
         let mut endpoint = handle.transport.bind().expect("bind");
         // the Wake contract hands the waker out as an Arc
         let waker = Arc::new(CountingWaker::default());
-        let std_waker = std::task::Waker::from(Arc::clone(&waker));
+        let std_waker = task::Waker::from(Arc::clone(&waker));
         let mut cx = Context::from_waker(&std_waker);
         let mut storage = [0u8; 2048];
         let mut bufs = [io::IoSliceMut::new(&mut storage)];
@@ -892,7 +896,7 @@ mod tests {
 
             let target = bob.id();
             let connection =
-                tokio::time::timeout(Duration::from_secs(10), alice.connect(target, ECHO_ALPN))
+                time::timeout(Duration::from_secs(10), alice.connect(target, ECHO_ALPN))
                     .await
                     .expect("connect timed out")
                     .expect("connect by id");
@@ -985,7 +989,7 @@ mod tests {
         let mut endpoint = handle.transport.bind().expect("bind");
         // the Wake contract hands the waker out as an Arc
         let waker = Arc::new(CountingWaker::default());
-        let std_waker = std::task::Waker::from(Arc::clone(&waker));
+        let std_waker = task::Waker::from(Arc::clone(&waker));
         let mut cx = Context::from_waker(&std_waker);
         let mut storage = [0u8; 50];
         let mut bufs = [io::IoSliceMut::new(&mut storage)];
