@@ -11,7 +11,7 @@ use crate::mesh::{LookupOpts, Mesh, MeshConfig, MeshName, TransportPolicy};
 /// orphans every existing directory (a wire-incompatible directory change).
 /// The literal must be exactly 32 bytes to fit `[u8; 32]` (the `derive_secret`
 /// seed width) — keep any future rename to that length.
-const DIRECTORY_BASE_SEED: Seed = Seed::from_bytes(*b"habilis-mesh/directory/domain/v1");
+const DIRECTORY_BASE_SEED: Seed = Seed::new(*b"habilis-mesh/directory/domain/v1");
 
 /// The well-known [`Mesh`] for a directory, reached over `lookups`. Both
 /// The advertise and discover paths both call this; the
@@ -30,7 +30,7 @@ const DIRECTORY_BASE_SEED: Seed = Seed::from_bytes(*b"habilis-mesh/directory/dom
 #[must_use]
 pub fn directory_mesh(directory: &MeshName, lookups: LookupOpts) -> Mesh {
     Mesh::try_new(
-        Seed::from_bytes(*derive_secret(
+        Seed::new(*derive_secret(
             DIRECTORY_BASE_SEED.as_bytes(),
             directory.as_bytes(),
         )),

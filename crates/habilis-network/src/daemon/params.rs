@@ -233,7 +233,7 @@ mod join_password_tests {
     /// A passworded id, as a joiner is handed it.
     fn passworded_id() -> String {
         let mut mesh = Mesh::try_new(
-            Seed::from_bytes([9u8; 32]),
+            Seed::new([9u8; 32]),
             MeshName::try_new("pw").unwrap(),
             MeshConfig::loopback(),
         )

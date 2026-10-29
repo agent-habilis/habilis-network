@@ -134,7 +134,7 @@ pub fn encode_pubkey(pubkey: &PublicKey) -> String {
 
 /// Parse a hex Ed25519 signature (64 bytes) from the wire.
 pub(crate) fn decode_sig(hex: &str) -> Result<Signature> {
-    let bytes: [u8; 64] = from_hex(hex)?
+    let bytes: [u8; 64] = parse_hex(hex)?
         .try_into()
         .map_err(|_| anyhow::anyhow!("signature must be 64 bytes"))?;
     Ok(Signature::from_bytes(&bytes))
@@ -191,7 +191,7 @@ pub(crate) fn encode_lower_hex_32(bytes: &[u8; 32]) -> [u8; 64] {
 /// digit.
 #[must_use]
 pub fn decode_hex(hex: &str) -> Option<Vec<u8>> {
-    from_hex(hex).ok()
+    parse_hex(hex).ok()
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -203,7 +203,7 @@ fn to_hex(bytes: &[u8]) -> String {
     out
 }
 
-fn from_hex(hex: &str) -> Result<Vec<u8>> {
+fn parse_hex(hex: &str) -> Result<Vec<u8>> {
     // Operate on raw bytes, not `&str` slices: an attacker-controlled
     // `pubkey`/`sig` is arbitrary UTF-8, and byte-indexing a `&str`
     // (`&hex[i..i+2]`) panics if `i` lands inside a multibyte char. Decoding

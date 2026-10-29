@@ -323,7 +323,7 @@ mod tests {
     /// A fresh invite-only mesh on the creator (holds the issuer key + root).
     fn creator() -> Mesh {
         let mut mesh = Mesh::try_new(
-            Seed::from_bytes([1u8; 32]),
+            Seed::new([1u8; 32]),
             MeshName::try_new("t").unwrap(),
             MeshConfig::loopback(),
         )
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn mint_refuses_a_non_invite_only_mesh() {
         let plain = Mesh::try_new(
-            Seed::from_bytes([2u8; 32]),
+            Seed::new([2u8; 32]),
             MeshName::try_new("t").unwrap(),
             MeshConfig::loopback(),
         )
@@ -616,7 +616,7 @@ mod tests {
     fn a_mesh_id_is_not_an_invite() {
         // A bare mesh id is not an invite ticket (different framing).
         let plain = Mesh::try_new(
-            Seed::from_bytes([3u8; 32]),
+            Seed::new([3u8; 32]),
             MeshName::try_new("t").unwrap(),
             MeshConfig::loopback(),
         )

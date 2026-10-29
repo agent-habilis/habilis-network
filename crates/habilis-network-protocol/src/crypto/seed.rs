@@ -15,7 +15,7 @@ pub struct Seed([u8; 32]);
 impl Seed {
     /// Wrap 32 raw bytes.
     #[must_use]
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub const fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
@@ -68,7 +68,7 @@ mod golden_tests {
 
     #[test]
     fn golden_rendezvous_of_a_wire_seed() {
-        let seed = Seed::from_bytes(SEED);
+        let seed = Seed::new(SEED);
         assert_eq!(
             rendezvous_id(Keying::Wire(&seed)).to_string(),
             "f7172ec3cf80783eb9972177ba2ac384d4b30612c0892ec0fa8d4ee552190469",
@@ -83,7 +83,7 @@ mod golden_tests {
 
     #[test]
     fn golden_password_stretch_and_verifier() {
-        let seed = Seed::from_bytes(SEED);
+        let seed = Seed::new(SEED);
         let password = Password::new("hunter2".to_owned());
         let key = stretch_mesh_password(&password, &seed);
         assert_eq!(
@@ -131,7 +131,7 @@ mod golden_tests {
     fn the_ladders_of_the_old_range_are_no_longer_derived() {
         let old_wire = [5931, 48242, 42909, 64096, 38056, 45299, 54555, 32776];
         let old_secret = [64619, 51235, 41400, 1621, 17345, 37799, 35331, 60865];
-        let wire = rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED)));
+        let wire = rendezvous_ports(Keying::Wire(&Seed::new(SEED)));
         let secret = rendezvous_ports(Keying::Secret(&SymmetricKey::from(ROOT)));
         assert_ne!(wire, old_wire, "the old wire ladder is no longer derived");
         assert_ne!(

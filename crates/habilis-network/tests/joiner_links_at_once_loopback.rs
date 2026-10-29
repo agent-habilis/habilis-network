@@ -39,7 +39,7 @@ fn fresh_seed() -> Seed {
             ^ u128::from(std::process::id());
         chunk.copy_from_slice(&value.to_le_bytes());
     }
-    Seed::from_bytes(bytes)
+    Seed::new(bytes)
 }
 
 /// Presence alone forms the mesh.

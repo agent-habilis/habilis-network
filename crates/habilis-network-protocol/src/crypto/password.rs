@@ -144,8 +144,8 @@ mod password_tests {
 
     #[test]
     fn stretch_is_deterministic_and_separates_by_password_and_seed() {
-        let seed_a = Seed::from_bytes(SEED_A);
-        let seed_b = Seed::from_bytes(SEED_B);
+        let seed_a = Seed::new(SEED_A);
+        let seed_b = Seed::new(SEED_B);
         let key = stretch_mesh_password(&pw("hunter2"), &seed_a);
         let same = stretch_mesh_password(&pw("hunter2"), &seed_a);
         assert_eq!(
@@ -169,7 +169,7 @@ mod password_tests {
 
     #[test]
     fn verifier_is_not_the_key_and_not_a_topic_or_rendezvous_input() {
-        let key = stretch_mesh_password(&pw("hunter2"), &Seed::from_bytes(SEED_A));
+        let key = stretch_mesh_password(&pw("hunter2"), &Seed::new(SEED_A));
         let verifier = password_verifier(&key);
         assert_ne!(
             &key.as_bytes()[..16],
@@ -202,7 +202,7 @@ mod password_tests {
     fn channel_keys_are_domain_separated() {
         // The state/meta/broadcast content keys are all derived from the same
         // stretched mesh key but must never collide.
-        let mesh_key = stretch_mesh_password(&pw("hunter2"), &Seed::from_bytes(SEED_A));
+        let mesh_key = stretch_mesh_password(&pw("hunter2"), &Seed::new(SEED_A));
         let state = derive::derive_secret(mesh_key.as_bytes(), b"state-doc");
         let meta = derive::derive_secret(mesh_key.as_bytes(), b"meta-doc");
         let broadcast = derive::derive_secret(mesh_key.as_bytes(), b"broadcast");

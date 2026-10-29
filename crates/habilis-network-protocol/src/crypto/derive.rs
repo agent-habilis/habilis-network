@@ -33,7 +33,7 @@ pub(crate) fn topic_seed(topic: &str) -> Seed {
     let digest = hasher.finalize();
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
-    Seed::from_bytes(out)
+    Seed::new(out)
 }
 
 /// Derive an independent 32-byte secret for `label` from the mesh
@@ -117,7 +117,7 @@ mod derive_secret_tests {
     #[test]
     fn derive_hashes_the_same_bytes_as_derive_secret() {
         use crate::crypto::{Seed, SymmetricKey};
-        let seed = Seed::from_bytes(SEED_A);
+        let seed = Seed::new(SEED_A);
         assert_eq!(
             seed.derive(b"state-doc").as_bytes(),
             &*derive_secret(&SEED_A, b"state-doc"),
@@ -136,7 +136,7 @@ mod derive_secret_tests {
     fn a_seed_and_a_symmetric_key_print_no_byte() {
         use crate::crypto::{Seed, SymmetricKey};
         assert_eq!(
-            format!("{:?}", Seed::from_bytes(SEED_A)),
+            format!("{:?}", Seed::new(SEED_A)),
             "Seed(***)",
             "a seed prints no byte"
         );
@@ -179,13 +179,13 @@ mod derive_secret_tests {
     #[test]
     fn rendezvous_id_is_stable_for_a_seed() {
         assert_eq!(
-            rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_A))),
-            rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_A))),
+            rendezvous_id(Keying::Wire(&Seed::new(SEED_A))),
+            rendezvous_id(Keying::Wire(&Seed::new(SEED_A))),
             "the rendezvous id is stable for a seed"
         );
         assert_ne!(
-            rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_A))),
-            rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_B))),
+            rendezvous_id(Keying::Wire(&Seed::new(SEED_A))),
+            rendezvous_id(Keying::Wire(&Seed::new(SEED_B))),
             "a different seed gives a different rendezvous id"
         );
     }
@@ -193,15 +193,15 @@ mod derive_secret_tests {
     #[test]
     fn rendezvous_id_matches_secret_public() {
         assert_eq!(
-            rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_A))),
-            rendezvous_secret(Keying::Wire(&Seed::from_bytes(SEED_A))).public(),
+            rendezvous_id(Keying::Wire(&Seed::new(SEED_A))),
+            rendezvous_secret(Keying::Wire(&Seed::new(SEED_A))).public(),
             "the rendezvous id matches the secret public key"
         );
     }
 
     #[test]
     fn rendezvous_ports_are_in_range_stable_and_seed_specific() {
-        let ladder = rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED_A)));
+        let ladder = rendezvous_ports(Keying::Wire(&Seed::new(SEED_A)));
         assert_eq!(
             ladder.len(),
             RENDEZVOUS_LADDER,
@@ -213,12 +213,12 @@ mod derive_secret_tests {
         );
         assert_eq!(
             ladder,
-            rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED_A))),
+            rendezvous_ports(Keying::Wire(&Seed::new(SEED_A))),
             "stable for a seed"
         );
         assert_ne!(
-            rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED_A))),
-            rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED_B))),
+            rendezvous_ports(Keying::Wire(&Seed::new(SEED_A))),
+            rendezvous_ports(Keying::Wire(&Seed::new(SEED_B))),
             "different seeds get different ladders"
         );
     }
@@ -228,7 +228,7 @@ mod derive_secret_tests {
         for seed in 0..2000_u32 {
             let mut bytes = [0_u8; 32];
             bytes[..4].copy_from_slice(&seed.to_le_bytes());
-            let ladder = rendezvous_ports(Keying::Wire(&Seed::from_bytes(bytes)));
+            let ladder = rendezvous_ports(Keying::Wire(&Seed::new(bytes)));
             assert!(
                 ladder.iter().all(|port| (1024..32768).contains(port)),
                 "seed {seed} gave {ladder:?}"
@@ -285,7 +285,7 @@ mod derive_secret_tests {
 
     #[test]
     fn rendezvous_ports_rungs_are_near_certainly_distinct() {
-        let ladder = rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED_A)));
+        let ladder = rendezvous_ports(Keying::Wire(&Seed::new(SEED_A)));
         let unique: HashSet<_> = ladder.iter().collect();
         // A rare in-ladder dup is harmless, but the fixed test seed
         // must not regress into a degenerate all-same ladder.
@@ -312,8 +312,8 @@ mod topic_tests {
     #[test]
     fn deterministic_for_same_input() {
         let seed = [42u8; 32];
-        let first = derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("team"), CFG_A);
-        let second = derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("team"), CFG_A);
+        let first = derive_topic_id(Keying::Wire(&Seed::new(seed)), &name("team"), CFG_A);
+        let second = derive_topic_id(Keying::Wire(&Seed::new(seed)), &name("team"), CFG_A);
         assert_eq!(first, second, "the same input derives the same topic id");
     }
 
@@ -322,16 +322,8 @@ mod topic_tests {
         let seed_a = [1u8; 32];
         let seed_b = [42u8; 32];
         assert_ne!(
-            derive_topic_id(
-                Keying::Wire(&Seed::from_bytes(seed_a)),
-                &name("team"),
-                CFG_A
-            ),
-            derive_topic_id(
-                Keying::Wire(&Seed::from_bytes(seed_b)),
-                &name("team"),
-                CFG_A
-            ),
+            derive_topic_id(Keying::Wire(&Seed::new(seed_a)), &name("team"), CFG_A),
+            derive_topic_id(Keying::Wire(&Seed::new(seed_b)), &name("team"), CFG_A),
             "different seeds derive different topic ids"
         );
     }
@@ -340,8 +332,8 @@ mod topic_tests {
     fn different_names_produce_different_topics() {
         let seed = [1u8; 32];
         assert_ne!(
-            derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("alpha"), CFG_A),
-            derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("beta"), CFG_A),
+            derive_topic_id(Keying::Wire(&Seed::new(seed)), &name("alpha"), CFG_A),
+            derive_topic_id(Keying::Wire(&Seed::new(seed)), &name("beta"), CFG_A),
             "different names derive different topic ids"
         );
     }
@@ -350,8 +342,8 @@ mod topic_tests {
     fn different_config_produces_different_topics() {
         let seed = [1u8; 32];
         assert_ne!(
-            derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("team"), CFG_A),
-            derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("team"), CFG_B),
+            derive_topic_id(Keying::Wire(&Seed::new(seed)), &name("team"), CFG_A),
+            derive_topic_id(Keying::Wire(&Seed::new(seed)), &name("team"), CFG_B),
             "config is mixed into the topic, so it cannot diverge across members"
         );
     }

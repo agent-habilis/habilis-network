@@ -31,7 +31,7 @@ fn fresh_seed() -> Seed {
             ^ u128::from(std::process::id());
         chunk.copy_from_slice(&value.to_le_bytes());
     }
-    Seed::from_bytes(bytes)
+    Seed::new(bytes)
 }
 
 /// A listener on `port` that serves one ALPN, so it answers a gossip dial with a TLS alert. It is a

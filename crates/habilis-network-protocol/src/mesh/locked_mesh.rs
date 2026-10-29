@@ -219,7 +219,7 @@ impl LockedMesh {
             .ok_or(ConfigError::Truncated("mesh identifier too short"))?;
         let mut seed_bytes = [0u8; SEED_LEN];
         seed_bytes.copy_from_slice(seed_slice);
-        let seed = Seed::from_bytes(seed_bytes);
+        let seed = Seed::new(seed_bytes);
         position += SEED_LEN;
 
         let name_len = *bytes

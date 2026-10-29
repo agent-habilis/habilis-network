@@ -7,7 +7,7 @@ use crate::mesh::lookup::MAX_RELAY_URL_BYTES;
 use habilis_network_test_tracing::test;
 
 fn dummy_seed() -> Seed {
-    Seed::from_bytes([7u8; SEED_LEN])
+    Seed::new([7u8; SEED_LEN])
 }
 
 fn dummy_name() -> MeshName {
@@ -63,7 +63,7 @@ fn round_trip_loopback() {
 #[test]
 fn round_trip_public_preset() {
     let mesh = Mesh::try_new(
-        Seed::from_bytes([0xABu8; SEED_LEN]),
+        Seed::new([0xABu8; SEED_LEN]),
         dummy_name(),
         MeshConfig::public_preset(),
     )
@@ -174,14 +174,14 @@ fn seed_drives_rendezvous_identity() {
 #[test]
 fn different_seeds_yield_different_ids() {
     let one = Mesh::try_new(
-        Seed::from_bytes([1u8; SEED_LEN]),
+        Seed::new([1u8; SEED_LEN]),
         dummy_name(),
         MeshConfig::loopback(),
     )
     .unwrap()
     .to_string();
     let two = Mesh::try_new(
-        Seed::from_bytes([2u8; SEED_LEN]),
+        Seed::new([2u8; SEED_LEN]),
         dummy_name(),
         MeshConfig::loopback(),
     )
@@ -698,7 +698,7 @@ mod prop {
             config in arb_config(),
         ) {
             // Built as the id on the wire, since `Mesh::try_new` refuses a secret config.
-            let wire = Seed::from_bytes(seed);
+            let wire = Seed::new(seed);
             let locked = LockedMesh { name: name.clone(), seed: wire, config: config.clone() };
             let decoded: LockedMesh = locked.to_string().parse().expect("decode failed");
             prop_assert_eq!(decoded.seed(), &wire);
@@ -708,7 +708,7 @@ mod prop {
 
         #[test]
         fn prop_bare_base58(seed in arb_seed(), name in arb_name()) {
-            let id = Mesh::try_new(Seed::from_bytes(seed), name, MeshConfig::loopback()).unwrap().to_string();
+            let id = Mesh::try_new(Seed::new(seed), name, MeshConfig::loopback()).unwrap().to_string();
             prop_assert!(!id.contains("://"));
             prop_assert!(id.is_ascii());
             prop_assert!(!id.is_empty());
@@ -720,7 +720,7 @@ mod prop {
             name in arb_name(),
             config in arb_config(),
         ) {
-            let locked = LockedMesh { name, seed: Seed::from_bytes(seed), config };
+            let locked = LockedMesh { name, seed: Seed::new(seed), config };
             prop_assert_eq!(locked.to_string(), locked.to_string());
         }
 
@@ -731,8 +731,8 @@ mod prop {
             name in arb_name(),
         ) {
             prop_assume!(seed_a != seed_b);
-            let one = Mesh::try_new(Seed::from_bytes(seed_a), name.clone(), MeshConfig::loopback()).unwrap().to_string();
-            let two = Mesh::try_new(Seed::from_bytes(seed_b), name, MeshConfig::loopback()).unwrap().to_string();
+            let one = Mesh::try_new(Seed::new(seed_a), name.clone(), MeshConfig::loopback()).unwrap().to_string();
+            let two = Mesh::try_new(Seed::new(seed_b), name, MeshConfig::loopback()).unwrap().to_string();
             prop_assert_ne!(one, two);
         }
     }
