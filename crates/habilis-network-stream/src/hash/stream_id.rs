@@ -3,7 +3,7 @@
 use std::fmt;
 
 use super::ID_LEN;
-use habilis_network::protocol::identity::write_hex;
+use habilis_network::protocol::identity;
 
 /// The public id a producer files a stream under. It names the stream and
 /// opens nothing: [`super::StreamSecret`] does that.
@@ -26,7 +26,7 @@ impl StreamId {
 
 impl fmt::Display for StreamId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_hex(formatter, &self.0)
+        identity::write_hex(formatter, &self.0)
     }
 }
 

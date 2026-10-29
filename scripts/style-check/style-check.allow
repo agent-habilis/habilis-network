@@ -561,11 +561,6 @@ self_convention|crates/habilis-network-protocol/src/mesh/transport.rs|1|Transpor
 self_convention|crates/habilis-network-protocol/src/topic_id.rs|1|TopicId::to_bytes: a Copy type, so self by value
 self_convention|crates/habilis-network-util/src/unix_secs.rs|2|UnixSecs::as_secs and to_le_bytes: a Copy type, so self by value
 # fn_import: a top-level function imported by its bare name (O23). Each row is a count that may only go down.
-fn_import|crates/habilis-network-netplay/examples/light-cycles/native/game/src/ui.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/runtime.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/tui/diff.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/tui/paint.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
-fn_import|crates/habilis-network-stream/src/hash/stream_id.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/examples/mesh_peer_load.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/blob/produce.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 fn_import|crates/habilis-network/src/daemon/cohost_arm.rs|4|kept: a top-level function imported by its bare name (O23 rollout)
@@ -726,13 +721,11 @@ pub_const_fn|crates/habilis-network/src/blob/blob_digest.rs|2|kept: newtype rule
 abbrev_name|crates/habilis-network-stream/src/node/stream_node.rs|19|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream/src/node/tests.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 assert_no_message|crates/habilis-network-stream/src/node/tests.rs|2|kept: assert without a message, to be given one (P13 rollout)
-fn_import|crates/habilis-network-stream/src/node/tests.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 long_chain|crates/habilis-network-stream/src/node/stream_node.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 turbofish_collect_parse|crates/habilis-network-stream/src/node/stream_node.rs|1|kept: collect or parse with a turbofish; the type is to move to the variable (P2 rollout)
 abbrev_name|crates/habilis-network-stream/src/produce/producer.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream/src/produce/registry.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 abbrev_name|crates/habilis-network-stream/src/produce/stream_acceptor.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-fn_import|crates/habilis-network-stream/src/produce/registry.rs|1|kept: a top-level function imported by its bare name (O23 rollout)
 long_chain|crates/habilis-network-stream/src/produce/registry.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 
 

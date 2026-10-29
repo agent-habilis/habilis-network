@@ -399,7 +399,7 @@ fn index(buffer: &ScreenBuffer, row: i32, col: i32) -> usize {
 mod tests {
     use super::{ScreenBuffer, paint};
     use crate::tui::node::{Arena, Tag};
-    use crate::tui::width::string_width;
+    use crate::tui::width;
     use habilis_network_test_tracing::test;
 
     #[test]
@@ -456,7 +456,7 @@ mod tests {
         }
         let mut buffer = ScreenBuffer::new(5, 1);
         paint(&mut buffer, &arena, root);
-        assert_eq!(string_width(&buffer.chars[0]), 2);
+        assert_eq!(width::string_width(&buffer.chars[0]), 2);
         assert_eq!(buffer.chars[1], ""); // continuation
         assert_eq!(buffer.chars[2], "a");
     }

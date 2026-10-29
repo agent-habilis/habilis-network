@@ -188,7 +188,7 @@ fn style(out: &mut String, pen: &mut Pen, fg: i32, bg: i32, attrs: u8) {
 #[cfg(test)]
 mod tests {
     use super::{CLEAR_LINE, RESET, diff};
-    use crate::tui::color::palette;
+    use crate::tui::color;
     use crate::tui::paint::ScreenBuffer;
     use habilis_network_test_tracing::test;
 
@@ -265,7 +265,7 @@ mod tests {
         let mut b = ScreenBuffer::new(3, 1);
         for i in 0..3 {
             b.chars[i] = "x".to_string();
-            b.fg[i] = palette(1);
+            b.fg[i] = color::palette(1);
         }
         let out = diff(Some(&a), &b);
         // Exactly one `38...m`-shaped SGR sequence, i.e. one occurrence of

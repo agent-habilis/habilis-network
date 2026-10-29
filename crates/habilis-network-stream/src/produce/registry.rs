@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use habilis_network::iroh::endpoint::{Connection, SendStream};
-use habilis_network::protocol::ct_eq;
+use habilis_network::protocol;
 use tokio::sync::oneshot;
 
 use crate::code;
@@ -75,7 +75,7 @@ impl Registry {
     ) -> Result<oneshot::Sender<Link>, u32> {
         let mut entries = self.entries();
         match entries.get_mut(id) {
-            Some(entry) if ct_eq(secret.as_bytes(), entry.secret.as_bytes()) => {
+            Some(entry) if protocol::ct_eq(secret.as_bytes(), entry.secret.as_bytes()) => {
                 entry.waiting.take().ok_or(code::TAKEN)
             }
             Some(_) | None => Err(code::UNKNOWN),

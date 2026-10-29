@@ -349,7 +349,6 @@ fn flush_run(owner: Option<u8>, run: &mut String, spans: &mut Vec<View>) {
 
 #[cfg(test)]
 mod tests {
-    use super::room_label;
     use habilis_network_test_tracing::test;
 
     /// Regression: the room code used to be uppercased for display, but
@@ -358,7 +357,7 @@ mod tests {
     /// forever. The label may shout; the code may not.
     #[test]
     fn the_room_code_is_shown_exactly_as_given() {
-        assert_eq!(room_label("Gadget-Plover"), "ROOM Gadget-Plover");
-        assert_eq!(room_label("volt-paddle"), "ROOM volt-paddle");
+        assert_eq!(super::room_label("Gadget-Plover"), "ROOM Gadget-Plover");
+        assert_eq!(super::room_label("volt-paddle"), "ROOM volt-paddle");
     }
 }

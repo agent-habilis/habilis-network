@@ -1,6 +1,6 @@
 //! The stream node's tests: a loopback producer and consumer.
 
-use habilis_network::runtime::refuse_in_browser;
+use habilis_network::runtime;
 use habilis_network_test_tracing::test;
 
 use habilis_network::net::TransportOpts;
@@ -59,7 +59,7 @@ fn a_browser_refuses_a_list_with_no_path_it_can_run() {
     let refused = |transport: &[Transport]| {
         let config = MeshConfig::resolve(&[Lookup::Relay], None, transport).expect("valid");
         let transports = TransportOpts::default().within(&config.transport);
-        refuse_in_browser(&config.lookups, config.transport, transports).is_err()
+        runtime::refuse_in_browser(&config.lookups, config.transport, transports).is_err()
     };
     assert!(refused(&[Transport::Udp]), "udp only");
     assert!(
@@ -76,12 +76,9 @@ fn a_browser_refuses_a_stream_with_no_relay_lookup() {
     let config = MeshConfig::resolve(&[Lookup::Dht], None, &[Transport::Udp, Transport::WebRtc])
         .expect("valid");
     let transports = TransportOpts::default().within(&config.transport);
-    let error = refuse_in_browser(&config.lookups, config.transport, transports)
+    let error = runtime::refuse_in_browser(&config.lookups, config.transport, transports)
         .expect_err("no path to signal on");
-    assert_eq!(
-        error.to_string(),
-        habilis_network::runtime::BROWSER_NEEDS_RELAY_LOOKUP
-    );
+    assert_eq!(error.to_string(), runtime::BROWSER_NEEDS_RELAY_LOOKUP);
 }
 
 // A reader runs only the paths the producer runs: an offer to a producer

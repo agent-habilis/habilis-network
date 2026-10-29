@@ -106,7 +106,6 @@ pub fn render_frame(
 
 #[cfg(test)]
 mod tests {
-    use super::render_frame;
     use crate::component::Yield;
     use crate::reactive::Signal;
     use crate::runtime::Runtime;
@@ -132,7 +131,7 @@ mod tests {
         );
 
         let mut layout_state = LayoutState::new();
-        let (first_bytes, first_buffer) = render_frame(&mut app, &mut layout_state, None, 20, 1);
+        let (first_bytes, first_buffer) = super::render_frame(&mut app, &mut layout_state, None, 20, 1);
         assert!(first_bytes.contains("count is 0"));
         assert_eq!(row_text(&first_buffer).trim_end(), "count is 0");
 
@@ -146,7 +145,7 @@ mod tests {
         // real assertion is against the freshly painted buffer, not the
         // diff bytes.
         let (second_bytes, second_buffer) =
-            render_frame(&mut app, &mut layout_state, Some(&first_buffer), 20, 1);
+            super::render_frame(&mut app, &mut layout_state, Some(&first_buffer), 20, 1);
         assert!(second_bytes.contains('9'));
         assert!(!second_bytes.contains("count is 9")); // the unchanged prefix is not re-emitted
         assert_eq!(row_text(&second_buffer).trim_end(), "count is 9");
@@ -177,7 +176,7 @@ mod tests {
         );
 
         let mut layout_state = LayoutState::new();
-        let (_bytes, buffer) = render_frame(&mut app, &mut layout_state, None, 20, 1);
+        let (_bytes, buffer) = super::render_frame(&mut app, &mut layout_state, None, 20, 1);
         assert_eq!(*parent_renders.borrow(), 1);
         assert_eq!(row_text(&buffer).trim_end(), "child sees 0");
 
@@ -191,7 +190,7 @@ mod tests {
             "parent re-rendered when only the child's signal changed"
         );
 
-        let (_bytes, new_buffer) = render_frame(&mut app, &mut layout_state, Some(&buffer), 20, 1);
+        let (_bytes, new_buffer) = super::render_frame(&mut app, &mut layout_state, Some(&buffer), 20, 1);
         assert_eq!(row_text(&new_buffer).trim_end(), "child sees 7");
     }
 
