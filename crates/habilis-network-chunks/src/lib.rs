@@ -93,7 +93,6 @@ mod tests {
         CHUNK_BYTES, CHUNK_BYTES_USIZE, ChunkHash, ChunkMap, ChunkMapBuilder, Coverage, FileId,
         Root, chunk_count, chunk_hash,
     };
-    use habilis_network_test_tracing::test;
 
     /// Bytes that differ per position and per seed, so a chunk taken from one
     /// place cannot accidentally equal a chunk taken from another.
@@ -112,6 +111,7 @@ mod tests {
     /// crate is off by whatever the difference is.
     #[test]
     fn chunk_bytes_agree() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             u64::try_from(CHUNK_BYTES_USIZE).expect("fits"),
             CHUNK_BYTES,
@@ -124,6 +124,7 @@ mod tests {
     /// the reason dedup and serve-by-hash are possible at all.
     #[test]
     fn the_same_bytes_address_the_same_wherever_they_sit() {
+        let _guard = ::habilis_network_test_tracing::init();
         let chunk = body(CHUNK_BYTES_USIZE, 7);
         let mut early = Vec::new();
         early.extend_from_slice(&chunk);
@@ -156,6 +157,7 @@ mod tests {
 
     #[test]
     fn a_root_commits_to_order_and_to_size() {
+        let _guard = ::habilis_network_test_tracing::init();
         let leaves = vec![chunk_hash(b"a"), chunk_hash(b"b")];
         let forward = ChunkMap::build_tree(leaves.clone(), CHUNK_BYTES + 1).expect("two chunks");
         let reversed: Vec<ChunkHash> = leaves.into_iter().rev().collect();
@@ -171,6 +173,7 @@ mod tests {
     /// producing a map that would verify against nothing.
     #[test]
     fn a_row_that_disagrees_with_its_size_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         let leaves = vec![chunk_hash(b"only one")];
         assert!(
             ChunkMap::build_tree(leaves, CHUNK_BYTES * 4).is_err(),
@@ -180,6 +183,7 @@ mod tests {
 
     #[test]
     fn a_rebuilt_map_matches_the_one_that_was_built() {
+        let _guard = ::habilis_network_test_tracing::init();
         let bytes = body(CHUNK_BYTES_USIZE * 3 + 11, 3);
         let built = ChunkMap::build(&bytes);
         let rebuilt =
@@ -199,6 +203,7 @@ mod tests {
     /// in memory, so it must agree with the all-at-once path exactly.
     #[test]
     fn the_streaming_builder_agrees_with_the_whole_file_path() {
+        let _guard = ::habilis_network_test_tracing::init();
         let bytes = body(CHUNK_BYTES_USIZE * 2 + 5, 21);
         let mut builder = ChunkMapBuilder::new();
         for chunk in bytes.chunks(CHUNK_BYTES_USIZE) {
@@ -213,6 +218,7 @@ mod tests {
 
     #[test]
     fn an_empty_file_has_a_root_and_no_chunks() {
+        let _guard = ::habilis_network_test_tracing::init();
         let map = ChunkMap::build(b"");
         assert_eq!(map.len(), 0, "an empty file has no chunks");
         assert!(map.is_empty(), "an empty file's map is empty");
@@ -230,6 +236,7 @@ mod tests {
 
     #[test]
     fn a_file_shorter_than_one_chunk_is_one_chunk() {
+        let _guard = ::habilis_network_test_tracing::init();
         let map = ChunkMap::build(b"short");
         assert_eq!(map.len(), 1, "a file shorter than one chunk is one chunk");
         assert_eq!(
@@ -251,6 +258,7 @@ mod tests {
     /// version must not verify.
     #[test]
     fn a_padded_last_chunk_does_not_verify() {
+        let _guard = ::habilis_network_test_tracing::init();
         let bytes = body(CHUNK_BYTES_USIZE + 10, 5);
         let map = ChunkMap::build(&bytes);
         let mut padded = bytes[CHUNK_BYTES_USIZE..].to_vec();
@@ -267,6 +275,7 @@ mod tests {
 
     #[test]
     fn exact_multiples_do_not_gain_an_empty_trailing_chunk() {
+        let _guard = ::habilis_network_test_tracing::init();
         let map = ChunkMap::build(&body(CHUNK_BYTES_USIZE * 2, 1));
         assert_eq!(
             map.len(),
@@ -282,6 +291,7 @@ mod tests {
 
     #[test]
     fn byte_ranges_map_onto_chunk_indices() {
+        let _guard = ::habilis_network_test_tracing::init();
         let map = ChunkMap::build(&body(CHUNK_BYTES_USIZE * 4, 2));
         assert_eq!(
             map.indices_for(0, CHUNK_BYTES),
@@ -328,6 +338,7 @@ mod tests {
     /// seedable — silent, and only visible as coverage that stops short.
     #[test]
     fn byte_ranges_cover_every_chunk_a_read_could_hold_whole() {
+        let _guard = ::habilis_network_test_tracing::init();
         let map = ChunkMap::build(&body(CHUNK_BYTES_USIZE * 8 + 17, 3));
         for offset in [0, 1, 17, CHUNK_BYTES - 1, CHUNK_BYTES, CHUNK_BYTES * 3 + 5] {
             for len in [1, 17, CHUNK_BYTES, CHUNK_BYTES * 4, CHUNK_BYTES * 99] {
@@ -349,6 +360,7 @@ mod tests {
 
     #[test]
     fn verifying_past_the_end_is_false_not_a_panic() {
+        let _guard = ::habilis_network_test_tracing::init();
         let map = ChunkMap::build(b"tiny");
         assert!(
             !map.verify(9, b"tiny"),
@@ -359,6 +371,7 @@ mod tests {
 
     #[test]
     fn coverage_tracks_what_is_held() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut coverage = Coverage::empty(10);
         assert!(!coverage.is_complete(), "coverage starts incomplete");
         assert_eq!(coverage.count(), 0, "coverage starts with no chunks held");
@@ -395,6 +408,7 @@ mod tests {
     /// map: a peer describing a different file must not be able to resize ours.
     #[test]
     fn out_of_range_coverage_is_ignored() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut coverage = Coverage::empty(4);
         coverage.insert(99);
         coverage.remove(99);
@@ -405,6 +419,7 @@ mod tests {
 
     #[test]
     fn coverage_survives_a_round_trip_through_bits() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut coverage = Coverage::empty(20);
         for index in [0, 3, 7, 19] {
             coverage.insert(index);
@@ -422,6 +437,7 @@ mod tests {
 
     #[test]
     fn coverage_unions_across_peers() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut ours = Coverage::empty(8);
         ours.insert(1);
         let mut theirs = Coverage::empty(8);
@@ -436,6 +452,7 @@ mod tests {
 
     #[test]
     fn a_version_change_unbinds_a_file() {
+        let _guard = ::habilis_network_test_tracing::init();
         let file = FileId {
             key: "a.txt".to_owned(),
             size: 10,
@@ -465,6 +482,7 @@ mod tests {
 
     #[test]
     fn digests_round_trip_through_hex() {
+        let _guard = ::habilis_network_test_tracing::init();
         let hash = chunk_hash(b"payload");
         assert_eq!(
             ChunkHash::try_from(hash.to_hex().as_str()).expect("hex"),
@@ -494,6 +512,7 @@ mod tests {
     /// degrade a row at a time rather than abort.
     #[test]
     fn non_ascii_hex_of_the_right_byte_length_errors_rather_than_panics() {
+        let _guard = ::habilis_network_test_tracing::init();
         let text = format!("{}a", "€".repeat(21));
         assert_eq!(
             text.len(),
@@ -514,6 +533,7 @@ mod tests {
     /// for a one-chunk file whose row holds exactly one address.
     #[test]
     fn a_root_is_not_its_own_leaf() {
+        let _guard = ::habilis_network_test_tracing::init();
         let map = ChunkMap::build(b"single chunk");
         let root = map.root();
         let leaf = map.leaf(0).expect("one");
@@ -527,6 +547,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "only the last chunk")]
     fn a_short_chunk_mid_stream_is_a_caller_bug() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut builder = ChunkMapBuilder::new();
         builder.push(b"short");
         builder.push(b"another");
