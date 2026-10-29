@@ -13,6 +13,17 @@ use std::fmt;
 /// control characters (e.g. ANSI/terminal escapes) is rejected at
 /// `Message::parse` instead of being embedded byte-for-byte in the surfaced
 /// display string.
+///
+/// # Examples
+///
+/// A message body is text that holds no control characters.
+///
+/// ```
+/// use habilis_network_protocol::message::MessageBody;
+///
+/// let body = MessageBody::try_new("hello").expect("a valid body");
+/// assert_eq!(body.as_str(), "hello");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
 #[serde(transparent)]
 pub struct MessageBody(String);
@@ -66,6 +77,17 @@ impl ::std::convert::From<&str> for MessageBody {
 }
 
 /// A message body with a control character other than tab or newline.
+///
+/// # Examples
+///
+/// A body with a control character returns this error.
+///
+/// ```
+/// use habilis_network_protocol::message::MessageBody;
+///
+/// let error = MessageBody::try_new("bell\u{7}").unwrap_err();
+/// assert!(!error.to_string().is_empty());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
 pub struct BodyError(String);

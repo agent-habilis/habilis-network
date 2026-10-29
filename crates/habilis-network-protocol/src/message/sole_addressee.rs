@@ -13,6 +13,16 @@ use super::MessageKind;
 /// Deliberately **separate** from `addressed_to_us`: that answers a *surfacing*
 /// question and treats `Pong` as broadcast-visible, whereas routing wants the
 /// `Pong`'s addressee too. Merging them would change the surface/relay filter.
+///
+/// # Examples
+///
+/// A frame that is not directed names no recipient.
+///
+/// ```
+/// use habilis_network_protocol::message::{MessageKind, sole_addressee};
+///
+/// assert!(sole_addressee(&MessageKind::Meta).is_none());
+/// ```
 #[must_use]
 pub fn sole_addressee(kind: &MessageKind) -> Option<&Nickname> {
     match kind {

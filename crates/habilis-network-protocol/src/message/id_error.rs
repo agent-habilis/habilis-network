@@ -15,6 +15,17 @@ use uuid::Uuid;
 /// transparent one): an inbound id off the wire is run through `new`, so a
 /// non-UUID `id` is rejected at `Message::parse` rather than panicking later
 /// in `as_uuid_bytes` (the dedup key path).
+///
+/// # Examples
+///
+/// A random message id is a UUID, and its text reads back as a valid id.
+///
+/// ```
+/// use habilis_network_protocol::message::MessageId;
+///
+/// let id = MessageId::random();
+/// assert!(MessageId::try_new(id.as_str()).is_ok());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
 #[serde(transparent)]
 pub struct MessageId(String);
@@ -74,6 +85,17 @@ impl ::std::convert::From<&str> for MessageId {
 }
 
 /// A message id text that is not a valid UUID.
+///
+/// # Examples
+///
+/// Text that is not a UUID returns this error.
+///
+/// ```
+/// use habilis_network_protocol::message::MessageId;
+///
+/// let error = MessageId::try_new("not a uuid").unwrap_err();
+/// assert!(!error.to_string().is_empty());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
 pub struct IdError(String);

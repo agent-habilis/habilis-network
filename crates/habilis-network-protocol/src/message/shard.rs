@@ -23,6 +23,33 @@ use habilis_network_util::consts::MAX_SHARD_TOTAL;
 /// that logs what receivers refuse to retain makes every anti-entropy digest
 /// advertise those shards as missing, and the sender re-floods them every
 /// round while the resend budget starves real gaps.
+///
+/// # Examples
+///
+/// A small message fits in the log. The shard module is private, so this is not compiled.
+///
+/// ```ignore
+/// use habilis_network_protocol::identity::Identity;
+/// use habilis_network_protocol::message::{AppTag, BuildMsgParams, ChainCtx, MessageBody, build_msg_bytes};
+/// use habilis_network_protocol::mesh::MeshId;
+/// use habilis_network_protocol::Nickname;
+///
+/// use habilis_network_protocol::{Mesh, MeshConfig, MeshName, Seed};
+///
+/// let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
+/// let mesh = Mesh::try_new(Seed::new([4u8; 32]), MeshName::try_new("chat").expect("a name"), config)
+///     .expect("a mesh");
+///
+/// let id = MeshId::try_new(&mesh.to_string()).expect("a valid id");
+/// let identity = Identity::generate();
+/// let author = Nickname::try_new("alice").expect("a nickname");
+/// let tag = AppTag::try_new("chat").expect("a tag");
+/// let body = MessageBody::try_new("hello").expect("a body");
+/// let params = BuildMsgParams::new(tag, &id, &author, body, ChainCtx::genesis());
+/// let (_frame, verified) = build_msg_bytes(params, &identity).expect("a message builds");
+///
+/// assert!(shard_fits_log(&verified));
+/// ```
 #[must_use]
 pub fn shard_fits_log(message: &super::Message) -> bool {
     message.shard.as_ref().is_none_or(|shard| {
@@ -34,6 +61,16 @@ pub fn shard_fits_log(message: &super::Message) -> bool {
 /// string form, minted once by the sender when it splits a body. Like
 /// task id, deserialization is **validating**, so a
 /// non-UUID group is rejected at `Message::parse`.
+///
+/// # Examples
+///
+/// A shard group is named by a UUID that reads back as the same text. The shard module is private, so this is not compiled.
+///
+/// ```ignore
+/// let text = "6c0d4f2e-2b1a-4c3d-9e8f-7a6b5c4d3e2f";
+/// let group = ShardGroup::parse_uuid(text).expect("a valid group");
+/// assert_eq!(group.as_str(), text);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
 #[serde(transparent)]
 pub struct ShardGroup(String);
@@ -80,6 +117,17 @@ impl ShardGroup {
 /// [`MAX_SHARD_TOTAL`] and `idx < total` — an absurd-header tripwire, not a
 /// memory guard: the reassembly store is byte-budgeted and never allocates by
 /// `total`.
+///
+/// # Examples
+///
+/// A shard holds its position and the total count of its group. The shard module is private, so this is not compiled.
+///
+/// ```ignore
+/// let group = ShardGroup::parse_uuid("6c0d4f2e-2b1a-4c3d-9e8f-7a6b5c4d3e2f").expect("a valid group");
+/// let shard = Shard::new(group, 3).with_index(1);
+/// assert_eq!(shard.index, 1);
+/// assert_eq!(shard.total, 3);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct Shard {

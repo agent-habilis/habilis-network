@@ -8,6 +8,17 @@ use super::AppTagError;
 /// layer's `app_msg` / `app_status` / `app_req` tags) and dispatches on it.
 /// Validated as a short non-empty ASCII slug so a crafted value can't smuggle
 /// structure into the routing layer.
+///
+/// # Examples
+///
+/// An application tag is a short slug that routes a frame to its handler.
+///
+/// ```
+/// use habilis_network_protocol::message::AppTag;
+///
+/// let tag = AppTag::try_new("chat").expect("a valid tag");
+/// assert_eq!(tag.as_str(), "chat");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
 #[serde(transparent)]
 pub struct AppTag(String);

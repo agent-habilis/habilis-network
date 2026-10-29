@@ -4,6 +4,16 @@ use super::MessageKind;
 
 /// Which shared-state channel an event/digest belongs to. The two channels share
 /// all machinery; this selects the wire kind, the log, and the surfaced name.
+///
+/// # Examples
+///
+/// The state and the meta channel have different labels.
+///
+/// ```
+/// use habilis_network_protocol::message::Channel;
+///
+/// assert_ne!(Channel::State.label(), Channel::Meta.label());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Channel {

@@ -4,6 +4,17 @@ use std::error::Error;
 use std::fmt;
 
 /// Why a correlation id is refused: empty or longer than 64 bytes.
+///
+/// # Examples
+///
+/// An empty correlation id returns this error.
+///
+/// ```
+/// use habilis_network_protocol::message::CorrId;
+///
+/// let error = CorrId::try_new("").unwrap_err();
+/// assert!(!error.to_string().is_empty());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[must_use]

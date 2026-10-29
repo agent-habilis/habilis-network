@@ -9,6 +9,17 @@ use super::MAX_MESSAGE_SIZE;
 type BoxedError = Box<dyn Error + Send + Sync>;
 
 /// Why a message does not parse or encode.
+///
+/// # Examples
+///
+/// A message that is too large for the wire returns this error.
+///
+/// ```
+/// use habilis_network_protocol::message::MessageError;
+///
+/// let error = MessageError::TooLarge;
+/// assert!(!error.to_string().is_empty());
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 #[must_use]

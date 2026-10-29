@@ -4,6 +4,17 @@ use std::error::Error;
 use std::fmt;
 
 /// Why an app tag is refused: empty, longer than 32 bytes, or not an ASCII slug.
+///
+/// # Examples
+///
+/// An empty tag returns this error.
+///
+/// ```
+/// use habilis_network_protocol::message::AppTag;
+///
+/// let error = AppTag::try_new("").unwrap_err();
+/// assert!(!error.to_string().is_empty());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[must_use]

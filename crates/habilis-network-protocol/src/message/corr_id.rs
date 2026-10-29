@@ -9,6 +9,17 @@ use super::CorrIdError;
 /// pending-call registry to pair a reply with its outstanding call; the app
 /// mints and interprets its value (the application layer uses a UUID). Kept generic so
 /// the engine correlates without knowing the payload model.
+///
+/// # Examples
+///
+/// A correlation id ties a reply to the request that it answers.
+///
+/// ```
+/// use habilis_network_protocol::message::CorrId;
+///
+/// let corr = CorrId::try_new("req-1").expect("a valid correlation id");
+/// assert_eq!(corr.as_str(), "req-1");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize)]
 #[serde(transparent)]
 pub struct CorrId(String);

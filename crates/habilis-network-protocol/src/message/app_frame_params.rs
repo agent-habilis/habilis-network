@@ -5,6 +5,19 @@ use crate::nickname_error::Nickname;
 
 /// Parameters for [`super::Message::new_app`] (and `habilis_network::ops::send_app`, which
 /// shares the same `App` frame shape).
+///
+/// # Examples
+///
+/// A broadcast frame has no recipient and no correlation id.
+///
+/// ```
+/// use habilis_network_protocol::message::{AppFrameParams, AppTag, MessageBody};
+///
+/// let tag = AppTag::try_new("chat").expect("a valid tag");
+/// let body = MessageBody::try_new("hello").expect("a body");
+/// let params = AppFrameParams::new(tag, None, None, body);
+/// assert!(params.to.is_none());
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct AppFrameParams {

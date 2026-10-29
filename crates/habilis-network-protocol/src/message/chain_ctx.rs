@@ -7,6 +7,18 @@ use crate::ContentHash;
 /// [`super::build_msg_bytes`] stays within the argument budget. Test-only now that the
 /// send path (`gossip::broadcast`) stamps the chain inline to interleave it with
 /// the multipart split.
+///
+/// # Examples
+///
+/// The first message of an author has sequence 0 and no earlier message.
+///
+/// ```
+/// use habilis_network_protocol::message::ChainCtx;
+///
+/// let chain = ChainCtx::genesis();
+/// assert_eq!(chain.seq, 0);
+/// assert!(chain.previous.is_none());
+/// ```
 #[cfg(any(test, feature = "test-fixtures"))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]

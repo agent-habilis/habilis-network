@@ -16,6 +16,17 @@ use crate::nickname_error::Nickname;
 ///   opaque to this layer and dispatched on `tag`.
 /// - `Presence`: agent lifecycle (joined/left), empty body.
 /// - `PeerInfo`: infrastructure — carries endpoint address for mesh formation. Not user-visible.
+///
+/// # Examples
+///
+/// A frame that is not an application frame has no app tag.
+///
+/// ```
+/// use habilis_network_protocol::message::MessageKind;
+///
+/// assert!(MessageKind::State.app_tag().is_none());
+/// assert!(!MessageKind::Meta.is_app("chat"));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 #[non_exhaustive]
