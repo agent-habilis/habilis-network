@@ -138,10 +138,8 @@ mod js_copy {
     /// rather than scanned for quotes — the prose above it contains
     /// apostrophes, which a quote scanner would read as entries.
     fn transcribed() -> Vec<&'static str> {
-        let body = SOURCE
-            .lines()
-            .skip_while(|line| !line.ends_with("= ["))
-            .skip(1);
+        let lines = SOURCE.lines();
+        let body = lines.skip_while(|line| !line.ends_with("= [")).skip(1);
         let entries = body
             .take_while(|line| *line != "]")
             .flat_map(|line| line.split(','));

@@ -97,7 +97,7 @@ mod tests {
         // refuse, so no mesh is ever derived without its root.
         let id = invite_only_mesh().to_string();
         let target: JoinTarget = id.parse().unwrap();
-        let error = resolve(&target)
+        let error: String = resolve(&target)
             .unwrap()
             .unlock(None)
             .unwrap_err()

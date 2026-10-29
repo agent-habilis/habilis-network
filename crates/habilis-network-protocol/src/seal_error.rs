@@ -174,7 +174,7 @@ fn unseal(our_secret: &StaticSecret, sealed: &Sealed) -> Result<Vec<u8>, SealErr
 /// tag, so serialization cannot fail short of an allocator failure.
 pub fn seal_to_body(recipient_pub: &PublicKey, plaintext: &str) -> Result<MessageBody, SealError> {
     let sealed = seal(recipient_pub, plaintext.as_bytes());
-    let envelope = Envelope {
+    let envelope: Envelope = Envelope {
         version: ENVELOPE_VERSION.to_string(),
         epk: bs58::encode(sealed.epk).into_string(),
         nonce: bs58::encode(sealed.nonce).into_string(),

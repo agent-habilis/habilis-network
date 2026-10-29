@@ -60,13 +60,13 @@ impl TryFrom<WireIn> for Message {
     /// SHA-256 hash 32B). A key with no signature, and a signature with no key, are errors:
     /// no sender emits either, and a message cannot hold one.
     fn try_from(wire: WireIn) -> Result<Self, Self::Error> {
-        let key = (!wire.pubkey.is_empty())
+        let key: Option<AuthorKey> = (!wire.pubkey.is_empty())
             .then(|| AuthorKey::decode_hex(&wire.pubkey).ok_or("malformed pubkey"))
             .transpose()?;
         if !wire.signature.is_empty() && !is_lower_hex(&wire.signature, 64) {
             return Err("malformed signature");
         }
-        let previous = wire
+        let previous: Option<ContentHash> = wire
             .previous
             .as_deref()
             .map(|hash| ContentHash::decode_hex(hash).ok_or("malformed prev hash"))
@@ -108,7 +108,7 @@ impl TryFrom<WireIn> for Message {
 /// Is `value` exactly `bytes * 2` lowercase-hex characters — the canonical
 /// wire form of a fixed-width binary field (pubkey / signature / hash)?
 fn is_lower_hex(value: &str, bytes: usize) -> bool {
-    let lower = value
+    let lower: bool = value
         .bytes()
         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
     value.len() == bytes * 2 && lower

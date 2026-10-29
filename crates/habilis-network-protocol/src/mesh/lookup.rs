@@ -1060,7 +1060,7 @@ mod lookup_tests {
     #[test]
     fn config_round_trips_custom_relay_ladder() {
         let _guard = ::habilis_network_test_tracing::init();
-        let config = MeshConfig {
+        let config: MeshConfig = MeshConfig {
             lookups: LookupOpts {
                 mdns: true,
                 dht: false,

@@ -4,6 +4,7 @@ use super::{
 };
 use crate::crypto::{Password, Seed};
 use crate::mesh::lookup::MAX_RELAY_URL_BYTES;
+use iroh_base::RelayUrl;
 
 fn dummy_seed() -> Seed {
     Seed::new([7u8; SEED_LEN])
@@ -105,7 +106,7 @@ fn round_trip_custom_relay_ladder() {
 
 /// A config whose custom ladder holds `count` distinct relay URLs.
 fn ladder_config(count: usize) -> MeshConfig {
-    let ladder = (0..count)
+    let ladder: Vec<RelayUrl> = (0..count)
         .map(|index| format!("https://r{index}.example").parse().unwrap())
         .collect();
     MeshConfig {

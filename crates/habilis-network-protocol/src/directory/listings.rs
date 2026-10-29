@@ -61,11 +61,11 @@ impl Listings {
         }
 
         // New mesh. Bound the map by evicting the stalest entry.
-        let stalest = self
+        let oldest = self
             .entries
             .iter()
-            .min_by_key(|(_, listing)| listing.last_seen)
-            .map(|(id, _)| id.clone());
+            .min_by_key(|(_, listing)| listing.last_seen);
+        let stalest = oldest.map(|(id, _)| id.clone());
         if self.entries.len() >= MAX_LISTINGS
             && let Some(stalest) = stalest
         {

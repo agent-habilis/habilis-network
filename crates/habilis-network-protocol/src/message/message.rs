@@ -311,11 +311,8 @@ impl Message {
         const DOMAIN: &[u8] = b"habilis-mesh/msg";
         let mut buffer = Vec::new();
         let mut field = |bytes: &[u8]| {
-            buffer.extend_from_slice(
-                &u32::try_from(bytes.len())
-                    .expect("a message field fits in u32")
-                    .to_le_bytes(),
-            );
+            let len: u32 = u32::try_from(bytes.len()).expect("a message field fits in u32");
+            buffer.extend_from_slice(&len.to_le_bytes());
             buffer.extend_from_slice(bytes);
         };
         field(DOMAIN);

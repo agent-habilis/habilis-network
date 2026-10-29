@@ -98,7 +98,7 @@ pub fn mint(
         .invite_key()
         .ok_or(InviteError::Refused("not an invite-only mesh"))?;
     let mesh_hash = mesh.to_string();
-    let expiry = match ttl {
+    let expiry: UnixSecs = match ttl {
         None => UnixSecs::ZERO,
         Some(ttl) if ttl.is_zero() => UnixSecs::ZERO,
         Some(ttl) => {

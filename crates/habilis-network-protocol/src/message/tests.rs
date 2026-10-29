@@ -107,7 +107,7 @@ fn a_link_state_message_is_built_signed_and_round_tripped_on_every_target() {
         message.verify_signature(),
         "a link state message verifies its signature"
     );
-    let parsed = Message::parse(message.serialize().unwrap().as_bytes()).unwrap();
+    let parsed: Message = Message::parse(message.serialize().unwrap().as_bytes()).unwrap();
     assert_eq!(
         parsed.kind,
         MessageKind::LinkState,
@@ -476,7 +476,7 @@ mod signing {
     #[test]
     fn tampered_corr_breaks_signature() {
         let _guard = ::habilis_network_test_tracing::init();
-        let mut message = Message::fixture(
+        let mut message: Message = Message::fixture(
             MessageKind::app_to(
                 "app_req",
                 "calm-otter".into(),
@@ -499,7 +499,7 @@ mod signing {
         let _guard = ::habilis_network_test_tracing::init();
         let message =
             Message::fixture(MessageKind::app_broadcast("app_msg"), "hi").sign(&identity());
-        let parsed = Message::parse(message.serialize().unwrap().as_bytes()).unwrap();
+        let parsed: Message = Message::parse(message.serialize().unwrap().as_bytes()).unwrap();
         assert!(
             parsed.verify_signature(),
             "the signature survives a wire round trip"
@@ -601,15 +601,15 @@ mod chain {
     fn parents_are_signed_and_round_trip() {
         let _guard = ::habilis_network_test_tracing::init();
         let parents = vec![ContentHash::from([0xaa; 32]), ContentHash::from([0xbb; 32])];
-        let signed = message("hi")
-            .with_chain(1, None)
+        let draft = message("hi").with_chain(1, None);
+        let signed = draft
             .with_parents(parents.clone())
             .sign(&Identity::generate());
         assert_eq!(
             signed.parents, parents,
             "the signed message keeps its parents"
         );
-        let parsed = Message::parse(signed.serialize().unwrap().as_bytes()).unwrap();
+        let parsed: Message = Message::parse(signed.serialize().unwrap().as_bytes()).unwrap();
         assert_eq!(parsed.parents, parents, "the parents survive a round trip");
         assert!(
             parsed.verify_signature(),
@@ -861,7 +861,7 @@ fn a_resend_trailer_is_outside_the_frame_and_the_signature() {
         },
     )
     .sign(&identity);
-    let frame = message.serialize().unwrap().as_bytes().to_vec();
+    let frame: Vec<u8> = message.serialize().unwrap().as_bytes().to_vec();
 
     let first = super::wire_with_resend_nonce(&frame, 7);
     let second = super::wire_with_resend_nonce(&frame, 8);
@@ -1204,7 +1204,7 @@ mod verified {
         let mut tampered = parsed;
         tampered.body = "tampered".into();
         let forged = Verified::fixture_with_signature(tampered);
-        let replayed =
+        let replayed: Message =
             Message::parse(forged.serialize().expect("serialize").as_bytes()).expect("parses");
         assert!(
             replayed.verify().is_err(),
