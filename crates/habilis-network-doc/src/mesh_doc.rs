@@ -1217,6 +1217,7 @@ mod tests {
         let chain: Vec<Verified> = (0..DOC_PENDING_AUTHOR_MAX + 200)
             .map(|step| author(&mut source, &alice, &json!({ "k": step })))
             .collect();
+        // the subscriber holds a clone of the counts, and the test reads them after the scope
         let mut sink = MeshDoc::new_ungated();
         let counts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         // The root is withheld, so every change is an orphan: the first
