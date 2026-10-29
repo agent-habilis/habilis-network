@@ -9,6 +9,9 @@
 //! binary is Chrome for Testing, downloaded into `target/` on first use
 //! ([`chrome_for_testing`]), or the one `CHROME_FOR_TESTING` names.
 
+#[cfg(feature = "mesh")]
+use std::iter;
+use std::{env, fs, process, thread};
 mod browser;
 
 use std::path::{Path, PathBuf};
@@ -33,7 +36,7 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// A [`Skip`] naming the step that failed: the version lookup, the download
 /// or the unpack.
 pub(crate) fn chrome_for_testing() -> Result<PathBuf, Skip> {
-    if let Some(binary) = std::env::var_os("CHROME_FOR_TESTING") {
+    if let Some(binary) = env::var_os("CHROME_FOR_TESTING") {
         return Ok(PathBuf::from(binary));
     }
     let platform = match (consts::OS, consts::ARCH) {
@@ -77,13 +80,13 @@ pub(crate) fn chrome_for_testing() -> Result<PathBuf, Skip> {
         })
         .and_then(|build| build.get("url").and_then(serde_json::Value::as_str))
         .ok_or_else(|| Skip(format!("no Chrome for Testing download for {platform}")))?;
-    std::fs::create_dir_all(&root)
+    fs::create_dir_all(&root)
         .map_err(|error| Skip(format!("could not create {}: {error}", root.display())))?;
     // Per-process names, then one rename into place: two runners on one
     // checkout can download at once, and the loser of the rename finds the
     // winner's copy.
-    let zip = root.join(format!("chrome.{}.zip", std::process::id()));
-    let unpack = root.join(format!(".unpack-{}", std::process::id()));
+    let zip = root.join(format!("chrome.{}.zip", process::id()));
+    let unpack = root.join(format!(".unpack-{}", process::id()));
     let fetched = Command::new("curl")
         .args([
             "--fail",
@@ -110,12 +113,12 @@ pub(crate) fn chrome_for_testing() -> Result<PathBuf, Skip> {
         // that prunes `target/` restores the folder with the binary gone, and
         // the rename below cannot replace a folder that is not empty.
         if !binary.exists() {
-            let _ = std::fs::remove_dir_all(root.join(&folder));
+            let _ = fs::remove_dir_all(root.join(&folder));
         }
-        let _ = std::fs::rename(unpack.join(&folder), root.join(&folder));
+        let _ = fs::rename(unpack.join(&folder), root.join(&folder));
     }
-    let _ = std::fs::remove_file(&zip);
-    let _ = std::fs::remove_dir_all(&unpack);
+    let _ = fs::remove_file(&zip);
+    let _ = fs::remove_dir_all(&unpack);
     if !binary.exists() {
         return Err(Skip(format!(
             "could not download Chrome for Testing from {url}"
@@ -125,7 +128,7 @@ pub(crate) fn chrome_for_testing() -> Result<PathBuf, Skip> {
         .pointer("/channels/Stable/version")
         .and_then(serde_json::Value::as_str)
     {
-        let _ = std::fs::write(root.join("VERSION"), version);
+        let _ = fs::write(root.join("VERSION"), version);
     }
     Ok(binary)
 }
@@ -138,13 +141,13 @@ fn devtools_port(profile: &Path, chrome: &mut Child) -> Result<u16, Skip> {
         if let Ok(Some(status)) = chrome.try_wait() {
             return Err(Skip(format!("Chrome exited at launch: {status}")));
         }
-        if let Some(port) = std::fs::read_to_string(profile.join("DevToolsActivePort"))
+        if let Some(port) = fs::read_to_string(profile.join("DevToolsActivePort"))
             .ok()
             .and_then(|file| file.lines().next()?.trim().parse().ok())
         {
             return Ok(port);
         }
-        std::thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
     }
     Err(Skip("Chrome never opened its debugging port".to_owned()))
 }
@@ -181,7 +184,7 @@ fn page_socket_within(port: u16, within: Duration) -> Result<String, Skip> {
                 return Err(Skip(format!("could not list Chrome's targets: {error}")));
             }
             Err(_) => {
-                std::thread::sleep(Duration::from_millis(50));
+                thread::sleep(Duration::from_millis(50));
                 continue;
             }
         };
@@ -201,7 +204,7 @@ fn page_socket_within(port: u16, within: Duration) -> Result<String, Skip> {
         if Instant::now() >= deadline {
             return Err(Skip("Chrome has no page to drive".to_owned()));
         }
-        std::thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -229,7 +232,7 @@ fn console_lines(events: &serde_json::Value) -> String {
             });
             let first = texts.next().unwrap_or_default();
             let styles = first.matches("%c").count();
-            let line = std::iter::once(first.replace("%c", ""))
+            let line = iter::once(first.replace("%c", ""))
                 .chain(texts.skip(styles))
                 .collect::<Vec<_>>()
                 .join(" ");
@@ -273,11 +276,12 @@ mod tests {
     use super::{page_socket, page_socket_within};
 
     use std::sync::mpsc;
+    use std::{thread, time};
     /// Answer each `/json/list` request with the next body, then stop.
     fn fake_devtools(bodies: Vec<&'static str>) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
         let port = listener.local_addr().expect("local addr").port();
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             for body in bodies {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
@@ -304,7 +308,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
         let port = listener.local_addr().expect("local addr").port();
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             // The first connection is dropped at once: the call fails.
             drop(listener.accept());
             let Ok((mut stream, _)) = listener.accept() else {
@@ -336,19 +340,19 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
         let port = listener.local_addr().expect("local addr").port();
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             let mut held = Vec::new();
             while let Ok((stream, _)) = listener.accept() {
                 held.push(stream);
             }
         });
         let (done_tx, done_rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let within = std::time::Duration::from_secs(2);
+        thread::spawn(move || {
+            let within = time::Duration::from_secs(2);
             let _ = done_tx.send(page_socket_within(port, within).map_err(|skip| skip.0));
         });
 
-        let result = done_rx.recv_timeout(std::time::Duration::from_secs(40));
+        let result = done_rx.recv_timeout(time::Duration::from_secs(40));
         assert!(
             matches!(result, Ok(Err(_))),
             "page_socket returned {result:?}"

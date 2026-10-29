@@ -19,6 +19,7 @@ use std::process::Command;
 use crate::TaskOutcome;
 use crate::util::{output, repo_root, target_dir};
 
+use std::{env, fs};
 /// Capabilities for the browser the runner will drive.
 ///
 /// The `binary` pins Chrome for Testing so the chromedriver in `$CHROMEDRIVER`
@@ -37,7 +38,7 @@ fn webdriver_json(binary: &str) -> String {
 }
 
 pub(super) fn run(binary: &str, env: &BTreeMap<String, String>) -> TaskOutcome {
-    let chromedriver = std::env::var("CHROMEDRIVER").map_err(|_| {
+    let chromedriver = env::var("CHROMEDRIVER").map_err(|_| {
         "the fast suite needs a chromedriver matching its Chrome — set $CHROMEDRIVER\n             \
          (the matrix suite drives Chrome over CDP and needs none; this one hands\n             \
           the driving to wasm-bindgen-test-runner, which speaks WebDriver)"
@@ -45,10 +46,10 @@ pub(super) fn run(binary: &str, env: &BTreeMap<String, String>) -> TaskOutcome {
 
     let caps = target_dir()?.join("webdriver.json");
     if let Some(parent) = caps.parent() {
-        std::fs::create_dir_all(parent)
+        fs::create_dir_all(parent)
             .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
     }
-    let mut file = std::fs::File::create(&caps)
+    let mut file = fs::File::create(&caps)
         .map_err(|error| format!("could not write {}: {error}", caps.display()))?;
     file.write_all(webdriver_json(binary).as_bytes())
         .map_err(|error| format!("could not write {}: {error}", caps.display()))?;

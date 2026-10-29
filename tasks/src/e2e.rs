@@ -18,6 +18,7 @@ use crate::util::webdriver::{Driver, SAFARI_TP};
 use crate::util::{Skip, json_to_string, output};
 
 use crate::util::{cdp as util_cdp, wasm};
+use std::env;
 pub(crate) mod build;
 mod cdp;
 #[cfg(feature = "mesh")]
@@ -229,7 +230,7 @@ fn browsers() -> Vec<Browser> {
         Browser {
             name: "chrome-ci",
             backend: Backend::WebDriver,
-            binary: std::env::var("CHROME_BIN").unwrap_or_default(),
+            binary: env::var("CHROME_BIN").unwrap_or_default(),
             pressures: &[0],
         },
         Browser {

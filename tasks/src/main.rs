@@ -19,6 +19,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use xshell::Shell;
 
+use std::error;
 mod bench;
 mod dev;
 mod e2e;
@@ -32,7 +33,7 @@ mod wasm;
 use scope::Scope;
 
 /// Task result; any `Err` is printed and turns into a non-zero exit.
-pub(crate) type TaskOutcome = Result<(), Box<dyn std::error::Error>>;
+pub(crate) type TaskOutcome = Result<(), Box<dyn error::Error>>;
 
 /// The workspace's quality gate and its browser test suite.
 #[derive(Parser)]

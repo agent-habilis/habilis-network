@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use std::thread;
 /// Poll `probe` until it yields a value, or give up.
 ///
 /// Used for everything that comes up asynchronously — the harness server's
@@ -18,6 +19,6 @@ pub(crate) fn wait_for<T>(
         if Instant::now() >= deadline {
             return None;
         }
-        std::thread::sleep(interval);
+        thread::sleep(interval);
     }
 }

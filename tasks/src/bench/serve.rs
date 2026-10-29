@@ -5,6 +5,7 @@
 //! process for three files. The accept loop runs on a detached thread and
 //! dies with the runner; the listener is never reused across runs.
 
+use std::{fs, io};
 mod static_server;
 
 use std::io::{Read as _, Write as _};
@@ -13,7 +14,7 @@ use std::path::Path;
 
 pub(crate) use static_server::StaticServer;
 
-fn respond(mut stream: TcpStream, www: &Path, wasm: &Path) -> std::io::Result<()> {
+fn respond(mut stream: TcpStream, www: &Path, wasm: &Path) -> io::Result<()> {
     let mut request = [0u8; 4096];
     let read = stream.read(&mut request)?;
     let request = String::from_utf8_lossy(&request[..read]);
@@ -31,7 +32,7 @@ fn respond(mut stream: TcpStream, www: &Path, wasm: &Path) -> std::io::Result<()
             .filter(|name| !name.contains("..") && !name.contains('/'))
             .map(|name| wasm.join(name)),
     };
-    let found = wanted.and_then(|file| std::fs::read(&file).ok().map(|body| (file, body)));
+    let found = wanted.and_then(|file| fs::read(&file).ok().map(|body| (file, body)));
 
     let Some((file, body)) = found else {
         return stream.write_all(

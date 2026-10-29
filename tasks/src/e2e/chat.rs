@@ -23,6 +23,8 @@ use super::page::{Page, call_page, urlencode};
 use super::{Args, Skip, build};
 
 use habilis_network::net::test_relay;
+use std::{env, fs, thread};
+use tokio::runtime;
 /// Beacon claim + JSEP + graft on a cold pair; generous like the mesh
 /// suite's link budget, for the same reason.
 const LINK_TIMEOUT: Duration = Duration::from_secs(150);
@@ -68,7 +70,7 @@ impl Robot {
             ])
             .env(
                 "RUST_LOG",
-                std::env::var("RUST_LOG").unwrap_or_else(|_| "habilis_network=info".to_owned()),
+                env::var("RUST_LOG").unwrap_or_else(|_| "habilis_network=info".to_owned()),
             )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -88,7 +90,7 @@ impl Robot {
             .take()
             .ok_or_else(|| Skip("the chat example has no stderr pipe".to_owned()))?;
         let (lines_tx, lines) = mpsc::channel();
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if lines_tx.send(line).is_err() {
                     break;
@@ -96,7 +98,7 @@ impl Robot {
             }
         });
         let (stderr_tx, stderr_lines) = mpsc::channel();
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 if stderr_tx.send(line).is_err() {
                     break;
@@ -195,7 +197,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     output::status("Building", "the native chat example");
     let chat_binary = build::build_binary("chat", "chat")?;
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("no tokio runtime: {error}"))?;
@@ -339,7 +341,7 @@ fn fail(robot: &mut Robot, page: Option<&Page>, reason: &str) -> TaskOutcome {
     }
     let dump = format!("{}{browser}", robot.transcript());
     let path = repo_root().join("target/chat-e2e.log");
-    let _ = std::fs::write(&path, dump);
+    let _ = fs::write(&path, dump);
     output::detail(&format!("full log: {}", path.display()));
     Err(format!("chat e2e failed: {reason}").into())
 }

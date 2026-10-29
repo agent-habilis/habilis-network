@@ -8,6 +8,7 @@ use super::evaluate::Evaluate;
 use super::started::{await_call, start_call};
 use super::wait_for;
 
+use std::time;
 /// A page object's promise-returning control (`window.harness`,
 /// `window.chat`, `window.bench`), awaited for at most `timeout`. Resolves to
 /// the call's value, rendered as a string.
@@ -50,8 +51,8 @@ pub(crate) fn wait_ready(
 }
 
 pub(crate) fn rand_token() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    time::SystemTime::now()
+        .duration_since(time::UNIX_EPOCH)
         .map(|since| since.subsec_nanos().into())
         .unwrap_or_default()
 }

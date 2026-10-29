@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::util::{reachable, wait_for};
 
+use std::thread;
 pub(crate) struct StaticServer {
     pub(crate) url: String,
 }
@@ -18,7 +19,7 @@ impl StaticServer {
             .local_addr()
             .map_err(|error| format!("the page server has no address: {error}"))?
             .port();
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let _ = super::respond(stream, &www, &wasm);
             }

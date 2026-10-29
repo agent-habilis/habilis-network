@@ -1,5 +1,6 @@
 use super::Measured;
 
+use crate::util;
 pub(crate) enum Outcome {
     Ok(Measured),
     Skipped(String),
@@ -15,8 +16,8 @@ impl From<Result<Measured, String>> for Outcome {
     }
 }
 
-impl From<crate::util::Skip> for Outcome {
-    fn from(crate::util::Skip(reason): crate::util::Skip) -> Self {
+impl From<util::Skip> for Outcome {
+    fn from(util::Skip(reason): util::Skip) -> Self {
         Self::Skipped(reason)
     }
 }

@@ -7,6 +7,7 @@
 //! number. The webrtc-only pair is str0m at both ends and the only native cell
 //! that goes through the data channel at all.
 
+use tokio::time;
 mod web_rtc_peer;
 
 use std::net::SocketAddr;
@@ -75,7 +76,7 @@ pub(super) async fn rounds_on(
     for _ in 0..=args.rounds {
         let path = path(connection);
         let started = Instant::now();
-        let bytes = tokio::time::timeout(
+        let bytes = time::timeout(
             TRANSFER_TIMEOUT,
             exchange(connection, args.direction.protocol(), args.bytes),
         )
@@ -133,7 +134,7 @@ pub(super) async fn ladder_measure(
         .await
         .map_err(|error| format!("connect failed: {error:#}"))?;
     let samples = rounds_on(&connection, args, selected_path).await?;
-    let round_trips = tokio::time::timeout(
+    let round_trips = time::timeout(
         TRANSFER_TIMEOUT,
         rtt_samples(&connection, RTT_WARMUP, RTT_ROUNDS),
     )

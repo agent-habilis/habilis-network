@@ -2,6 +2,8 @@
 //! Behind the `bench` feature with the cells, so a default build of the
 //! runner carries only the CLI surface.
 
+use std::{error, fs, iter};
+use tokio::runtime;
 mod measured;
 mod outcome;
 mod rtt;
@@ -119,7 +121,7 @@ fn table(rows: &[Row]) -> Vec<String> {
             cells
                 .iter()
                 .map(|row| row.0[column].chars().count())
-                .chain(std::iter::once(name.chars().count()))
+                .chain(iter::once(name.chars().count()))
                 .max()
                 .unwrap_or_default()
         })
@@ -283,7 +285,7 @@ impl Row {
     }
 }
 
-fn serve_page() -> Result<serve::StaticServer, Box<dyn std::error::Error>> {
+fn serve_page() -> Result<serve::StaticServer, Box<dyn error::Error>> {
     wasm::check_wasm_bindgen()?;
     let env = wasm::wasm_env()?;
     output::status("Building", "the browser side (habilis-network-bench-wasm)");
@@ -322,7 +324,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
         );
     }
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("no tokio runtime: {error}"))?;
@@ -416,7 +418,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
             "direction": args.direction.protocol().label(),
             "rows": rows.iter().map(Row::json).collect::<Vec<_>>(),
         });
-        std::fs::write(path, serde_json::to_string_pretty(&dump).expect("json"))
+        fs::write(path, serde_json::to_string_pretty(&dump).expect("json"))
             .map_err(|error| format!("could not write {}: {error}", path.display()))?;
         output::detail(&format!("json: {}", path.display()));
     }

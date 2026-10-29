@@ -30,6 +30,8 @@ use super::Args;
 use super::native::{RTT_ROUNDS, RTT_WARMUP, rounds_on, selected_path};
 use super::run::{Measured, Outcome, Rtt, Sample, TRANSFER_TIMEOUT};
 
+use std::net;
+use tokio::time;
 /// Group sizes of a real run, and the time one group idles. A test uses one small
 /// group and a short idle: the idle is the wait, not the work.
 fn group_sizes() -> &'static [usize] {
@@ -107,7 +109,7 @@ impl Tap {
 /// to each other, carried by the real gossip flood through B. Throughput and round
 /// trips on the selected path, and what the flood costs each member.
 pub(crate) async fn ladder_gossip(args: &Args) -> Outcome {
-    if std::net::UdpSocket::bind("[::1]:0").is_err() {
+    if net::UdpSocket::bind("[::1]:0").is_err() {
         return Outcome::Skipped(
             "the IPv6 loopback cannot be bound: A and C need it to have no IP path to each other"
                 .to_owned(),
@@ -232,7 +234,7 @@ async fn fill_flood(flood: &mut Flood, keys: &[SecretKey]) -> Result<(), String>
         let joined = if index == 1 {
             gossips[1].subscribe(topic, vec![]).await
         } else {
-            tokio::time::timeout(
+            time::timeout(
                 Duration::from_secs(20),
                 gossips[index].subscribe_and_join(topic, vec![endpoints[1].id()]),
             )
@@ -263,7 +265,7 @@ async fn measure_flood(flood: &Flood, args: &Args) -> Result<Measured, String> {
         endpoints[2].id(),
         [TransportAddr::Custom(gossip_addr(endpoints[2].id()))],
     );
-    let connection = tokio::time::timeout(
+    let connection = time::timeout(
         Duration::from_secs(30),
         endpoints[0].connect(to_carol, BENCH_ALPN),
     )
@@ -277,7 +279,7 @@ async fn measure_flood(flood: &Flood, args: &Args) -> Result<Measured, String> {
     let client_lost_before = connection.stats().lost_packets;
     let server_lost_before = tap.lost_packets();
     let samples = rounds_on(&connection, args, selected_path).await?;
-    let round_trips = tokio::time::timeout(
+    let round_trips = time::timeout(
         TRANSFER_TIMEOUT,
         rtt_samples(&connection, RTT_WARMUP, RTT_ROUNDS),
     )
@@ -469,12 +471,12 @@ async fn measure_group(
         .connect(EndpointAddr::from_parts(bob.id(), addrs), BENCH_ALPN)
         .await
         .map_err(|error| format!("connect failed: {error:#}"))?;
-    tokio::time::sleep(settle()).await;
+    time::sleep(settle()).await;
 
     let all =
         |list: &[GossipHandle]| -> Vec<Stats> { list.iter().map(GossipHandle::stats).collect() };
     let (idle_before, path_before) = (all(handles), gossip_path(&connection));
-    tokio::time::sleep(idle()).await;
+    time::sleep(idle()).await;
     let (idle_after, path_after) = (all(handles), gossip_path(&connection));
     let secs = idle().as_secs_f64();
     let selected_idle = selected_path(&connection);

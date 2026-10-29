@@ -12,6 +12,8 @@ use crate::util::{Skip, json_to_string};
 use std::sync::atomic;
 use std::sync::atomic::Ordering;
 
+use std::io::ErrorKind;
+use std::{env, fs, process, thread, time};
 /// A launched headless Chrome, killed when it goes out of scope.
 #[derive(Debug)]
 pub(crate) struct Browser {
@@ -36,7 +38,7 @@ impl Drop for Browser {
         let _ = self.page.get_mut().close(None);
         let _ = self.chrome.kill();
         let _ = self.chrome.wait();
-        let _ = std::fs::remove_dir_all(&self.profile);
+        let _ = fs::remove_dir_all(&self.profile);
     }
 }
 
@@ -47,15 +49,15 @@ impl Browser {
         static LAUNCHES: atomic::AtomicU32 = atomic::AtomicU32::new(0);
         let binary = super::chrome_for_testing()?;
         let launch = LAUNCHES.fetch_add(1, Ordering::Relaxed);
-        let profile = std::env::temp_dir().join(format!(
+        let profile = env::temp_dir().join(format!(
             "habilis-network-cdp-{}-{}-{launch}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            process::id(),
+            time::SystemTime::now()
+                .duration_since(time::UNIX_EPOCH)
                 .map(|since| since.as_millis())
                 .unwrap_or_default()
         ));
-        std::fs::create_dir_all(&profile)
+        fs::create_dir_all(&profile)
             .map_err(|error| Skip(format!("could not create the Chrome profile: {error}")))?;
         let mut chrome = Command::new(&binary);
         // A Linux CI runner cannot grant the user-namespace sandbox Chrome
@@ -99,7 +101,7 @@ impl Browser {
             Err(skip) => {
                 let _ = chrome.kill();
                 let _ = chrome.wait();
-                let _ = std::fs::remove_dir_all(&profile);
+                let _ = fs::remove_dir_all(&profile);
                 return Err(skip);
             }
         };
@@ -208,7 +210,7 @@ impl Browser {
         let timed_out = matches!(
             error,
             tungstenite::Error::Io(io)
-                if matches!(io.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+                if matches!(io.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
         );
         if !timed_out && self.dead.borrow().is_none() {
             *self.dead.borrow_mut() = Some(error.to_string());
@@ -259,7 +261,7 @@ impl Browser {
             if self.evaluate(&expression) == "true" {
                 return true;
             }
-            std::thread::sleep(Duration::from_millis(250));
+            thread::sleep(Duration::from_millis(250));
         }
         false
     }

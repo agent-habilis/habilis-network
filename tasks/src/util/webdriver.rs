@@ -2,6 +2,7 @@
 //! driver, open a session, navigate, run a script. The e2e matrix and the
 //! benchmark both drive Safari through it.
 
+use std::{env, net};
 mod driver;
 #[cfg(any(feature = "mesh", feature = "bench"))]
 mod session;
@@ -33,7 +34,7 @@ pub(crate) const SAFARI_TP: &str =
 /// else could take it. That window is microseconds and the alternative is a
 /// collision that lasts as long as the stale process does.
 pub(crate) fn free_port() -> Result<u16, Skip> {
-    std::net::TcpListener::bind("127.0.0.1:0")
+    net::TcpListener::bind("127.0.0.1:0")
         .and_then(|listener| listener.local_addr())
         .map(|addr| addr.port())
         .map_err(|error| {
@@ -47,7 +48,7 @@ pub(crate) fn free_port() -> Result<u16, Skip> {
 /// without installing anything system-wide — the same courtesy the wasm-bindgen
 /// runner extends via the same variable.
 pub(super) fn locate(env_var: &str, binary: &str) -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os(env_var).map(PathBuf::from)
+    if let Some(path) = env::var_os(env_var).map(PathBuf::from)
         && path.is_file()
     {
         return Some(path);

@@ -10,6 +10,8 @@ use crate::util::{output, repo_root};
 
 use super::Profile;
 
+#[cfg(feature = "mesh")]
+use std::process;
 /// The tools the sweep shells out to.
 pub(super) fn check_tooling() -> TaskOutcome {
     if Command::new("wasm-bindgen-test-runner")
@@ -122,7 +124,7 @@ pub(crate) fn build_wasm_peer(env: &BTreeMap<String, String>) -> Result<PathBuf,
 pub(crate) fn ensure_bun(why: &str) -> TaskOutcome {
     if Command::new("bun")
         .arg("--version")
-        .stdout(std::process::Stdio::null())
+        .stdout(process::Stdio::null())
         .spawn()
         .and_then(|mut child| child.wait())
         .is_err()

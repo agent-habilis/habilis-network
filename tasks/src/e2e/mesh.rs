@@ -15,6 +15,8 @@
 //! non-linking cell (policy off × native relay-only) must *never* link, and
 //! must say why in the engine's own words (`relay-only path refused`).
 
+use std::{env, fs, io, mem};
+use tokio::time;
 mod bun_server;
 mod native;
 
@@ -34,7 +36,10 @@ use super::page::{Page, call_page, urlencode};
 use super::{Args, Skip, build};
 
 use habilis_network::net::test_relay;
+use habilis_network::runtime::BROWSER_HAS_NO_PATH;
 use habilis_network::util::tuning;
+use tokio::runtime::Builder;
+use tokio::time::{Instant, Instant as tokio_Instant};
 
 pub(super) use bun_server::BunServer;
 pub(super) use native::Native;
@@ -155,15 +160,15 @@ fn log_buffer() -> &'static Arc<Mutex<String>> {
 
 struct BufferWriter;
 
-impl std::io::Write for BufferWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+impl io::Write for BufferWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if let Ok(mut buffer) = log_buffer().lock() {
             buffer.push_str(&String::from_utf8_lossy(buf));
         }
         Ok(buf.len())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
@@ -197,7 +202,7 @@ pub(super) fn logs_contain(needle: &str) -> bool {
 pub(super) fn drain_logs() -> String {
     log_buffer()
         .lock()
-        .map(|mut buffer| std::mem::take(&mut *buffer))
+        .map(|mut buffer| mem::take(&mut *buffer))
         .unwrap_or_default()
 }
 
@@ -215,15 +220,15 @@ pub(super) async fn native_send_with_retry(
     to: Option<&str>,
     text: &str,
 ) -> Result<(), String> {
-    let deadline = tokio::time::Instant::now() + PAYLOAD_TIMEOUT;
+    let deadline = tokio_Instant::now() + PAYLOAD_TIMEOUT;
     loop {
         let Err(error) = native.send(to, text).await else {
             return Ok(());
         };
-        if tokio::time::Instant::now() >= deadline {
+        if tokio_Instant::now() >= deadline {
             return Err(error);
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -278,18 +283,18 @@ async fn check_payload_lanes(page: &Page, native: &mut Native) -> Result<(), Cel
     if converged.is_none() {
         return Err(fail("the state documents never converged".to_owned()));
     }
-    let deadline = tokio::time::Instant::now() + PAYLOAD_TIMEOUT;
+    let deadline = tokio_Instant::now() + PAYLOAD_TIMEOUT;
     loop {
         let state = native.state_json().await;
         if state.contains("fromNative") && state.contains("fromBrowser") {
             return Ok(());
         }
-        if tokio::time::Instant::now() >= deadline {
+        if tokio_Instant::now() >= deadline {
             return Err(fail(format!(
                 "the native state never converged with the browser's: {state}"
             )));
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -363,7 +368,7 @@ fn refused_by_the_tab(
         (!failed.is_empty()).then_some(failed)
     })
     .ok_or_else(|| CellFailure("the tab opened a mesh it has no path in".to_owned()))?;
-    if !failed.contains(habilis_network::runtime::BROWSER_HAS_NO_PATH) {
+    if !failed.contains(BROWSER_HAS_NO_PATH) {
         return Err(CellFailure(format!(
             "the tab failed for another reason: {failed}"
         )));
@@ -461,7 +466,7 @@ async fn run_cell(
     // first (`reach: "gossip"`), and their own JSEP round and graft follow
     // on the retry ticks. On a lookup-only mesh a directed frame is *held*
     // until then, so the payload checks below need the `unicast` lane.
-    let deadline = tokio::time::Instant::now() + LINK_TIMEOUT;
+    let deadline = tokio_Instant::now() + LINK_TIMEOUT;
     loop {
         let native_roster = native.roster_json().await;
         if !native_roster.contains("\"browser\"") {
@@ -472,12 +477,12 @@ async fn run_cell(
         if native_roster.contains("\"transport\":\"unicast\"") {
             break;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             return Err(fail(format!(
                 "the pair rostered but never went direct: {native_roster}"
             )));
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
 
     check_payload_lanes(page, &mut native).await?;
@@ -530,7 +535,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
             .rival_recheck(Duration::from_hours(1))
             .rival_recheck_meshed(Duration::from_hours(1)),
     );
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("no tokio runtime: {error}"))?;
@@ -554,7 +559,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     let only = args.page_browser().to_owned();
     // `MESH_CELL=<substring>` narrows the sweep to matching cell labels —
     // for iterating on one failing cell without paying for the rest.
-    let cell_filter = std::env::var("MESH_CELL").ok();
+    let cell_filter = env::var("MESH_CELL").ok();
     let mut failures = 0usize;
     for cell in &cells {
         if let Some(filter) = &cell_filter
@@ -610,7 +615,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
                     "mesh-cell-{}.log",
                     cell.label().replace([' ', '/'], "_")
                 ));
-                let _ = std::fs::write(&dump, format!("{}\n{logs}", browser.join("\n")));
+                let _ = fs::write(&dump, format!("{}\n{logs}", browser.join("\n")));
                 output::detail(&format!("full log: {}", dump.display()));
             }
         }

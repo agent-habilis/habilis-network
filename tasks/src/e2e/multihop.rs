@@ -32,6 +32,9 @@ use super::{Args, Skip, build};
 
 use habilis_network::net::test_relay;
 use habilis_network::util::tuning;
+use std::fs;
+use tokio::time::{Instant, Instant as tokio_Instant};
+use tokio::{runtime, time};
 /// The route is learned from link vectors (15 s apart) and the underlay session of the tab comes
 /// on the next tick after that, so a message may wait a few ticks for its route.
 const ROUTE_TIMEOUT: Duration = Duration::from_mins(3);
@@ -89,7 +92,7 @@ async fn underlay_sessions(alpha: &Native) -> String {
 
 /// Whether B learns a route to the tab, through A, before the window ends.
 async fn route_to_tab(bravo: &Native) -> bool {
-    let deadline = tokio::time::Instant::now() + ROUTE_TIMEOUT;
+    let deadline = tokio_Instant::now() + ROUTE_TIMEOUT;
     loop {
         let has_route = bravo
             .request(|reply| membership::Request::HasRoute {
@@ -101,10 +104,10 @@ async fn route_to_tab(bravo: &Native) -> bool {
         if has_route {
             return true;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if tokio_Instant::now() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -144,21 +147,21 @@ async fn tab_to_b(
     bravo: &mut Native,
     after_down: u64,
 ) -> Result<u64, CellFailure> {
-    let deadline = tokio::time::Instant::now() + ROUTE_TIMEOUT;
+    let deadline = tokio_Instant::now() + ROUTE_TIMEOUT;
     loop {
         // A send before the tab has its route is refused or held; try again until the window ends.
         let _ = call_page(page, "harness", "send('bravo', 'tab-to-b')");
         if bravo.saw_msg("tab-to-b", true) {
             break;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             let now = forwarded_cells(alpha).await?;
             return Err(fail(format!(
                 "the tab's message never reached B (A's forwarded cells: {after_down} then {now}; A's underlay sessions: {})",
                 underlay_sessions(alpha).await
             )));
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
     let after_up = forwarded_cells(alpha).await?;
     if after_up <= after_down {
@@ -268,7 +271,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
             .rival_recheck(Duration::from_hours(1))
             .rival_recheck_meshed(Duration::from_hours(1)),
     );
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("no tokio runtime: {error}"))?;
@@ -299,7 +302,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
             let logs = drain_logs();
             let dump = target.join("multihop-cell.log");
             let browser = page.evaluate("(window.harnessLog||[]).join('\\n')");
-            let _ = std::fs::write(&dump, format!("── browser console ──\n{browser}\n{logs}"));
+            let _ = fs::write(&dump, format!("── browser console ──\n{browser}\n{logs}"));
             output::detail(&format!("full log: {}", dump.display()));
             Err(reason.into())
         }
