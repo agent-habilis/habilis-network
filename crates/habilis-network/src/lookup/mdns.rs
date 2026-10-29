@@ -14,6 +14,9 @@ use tokio::sync::mpsc;
 
 use super::LanEvent;
 
+use iroh::endpoint_info;
+use n0_future::task;
+use std::future;
 /// Wire the LAN mDNS address-lookup onto a bound endpoint. In iroh 1.0 the
 /// provider is a companion crate built from the endpoint id and added to the
 /// endpoint's address-lookup services.
@@ -31,7 +34,7 @@ pub(super) fn wire(endpoint: &Endpoint) -> Result<MdnsAddressLookup> {
 }
 
 /// Whether a record's user data is our mesh's member tag.
-pub(crate) fn is_member_tag(user_data: Option<&iroh::endpoint_info::UserData>, tag: &str) -> bool {
+pub(crate) fn is_member_tag(user_data: Option<&endpoint_info::UserData>, tag: &str) -> bool {
     user_data.is_some_and(|data| data.to_string() == tag)
 }
 
@@ -43,7 +46,7 @@ pub(crate) async fn lan_events(
     own: EndpointId,
 ) -> impl Stream<Item = LanEvent> + Unpin + use<> {
     lookup.subscribe().await.filter_map(move |event| {
-        std::future::ready(match event {
+        future::ready(match event {
             DiscoveryEvent::Discovered { endpoint_info, .. }
                 if endpoint_info.endpoint_id != own
                     && is_member_tag(endpoint_info.data.user_data(), &tag) =>
@@ -89,7 +92,7 @@ pub(crate) async fn spawn_lan_contacts(
 ) -> mpsc::Receiver<LanEvent> {
     let mut events = lan_events(lookup, tag, own).await;
     let (sender, receiver) = mpsc::channel(32);
-    n0_future::task::spawn(async move {
+    task::spawn(async move {
         let mut known = HashMap::new();
         while let Some(event) = events.next().await {
             let Some(event) = news_only(event, &mut known) else {

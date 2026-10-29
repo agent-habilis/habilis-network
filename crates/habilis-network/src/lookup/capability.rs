@@ -1,3 +1,4 @@
+use tokio::time;
 mod network_capability;
 
 use std::time::Duration;
@@ -32,9 +33,7 @@ async fn probe_checked(timeout: Duration) -> Result<NetworkCapability> {
     // the first completed report. Offline, it never resolves → we time out and
     // report only the local bind.
     let mut watcher = endpoint.net_report();
-    let report = tokio::time::timeout(timeout, watcher.initialized())
-        .await
-        .ok();
+    let report = time::timeout(timeout, watcher.initialized()).await.ok();
 
     let capability = match report {
         Some(report) => {

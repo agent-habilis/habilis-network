@@ -1,5 +1,7 @@
 use std::fmt;
 
+use iroh_relay::server;
+use std::error;
 /// Why the local relay did not start.
 #[cfg_attr(
     not(feature = "iroh-test-utils"),
@@ -13,7 +15,7 @@ use std::fmt;
 #[must_use]
 pub enum TestRelayError {
     /// The relay server did not spawn.
-    Spawn(iroh_relay::server::SpawnError),
+    Spawn(server::SpawnError),
     /// The relay server bound no HTTP address.
     NoHttpAddr,
     /// The local address is not a relay URL.
@@ -33,8 +35,8 @@ impl fmt::Display for TestRelayError {
     }
 }
 
-impl std::error::Error for TestRelayError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl error::Error for TestRelayError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Spawn(error) => Some(error),
             Self::BadUrl(error) => Some(error),

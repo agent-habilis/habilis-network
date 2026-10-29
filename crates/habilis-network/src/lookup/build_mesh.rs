@@ -11,6 +11,7 @@ use iroh_gossip::proto::HyparviewConfig;
 
 use crate::transport::PayloadPath;
 
+use crate::transport;
 /// How many events of a topic the gossip keeps for a task that is not scheduled yet: sixteen full
 /// answers to an anti-entropy digest. A late joiner meets the answers of its peers in one burst,
 /// and every change is a message of the topic. The default of 256 overflowed on a loaded host
@@ -25,14 +26,14 @@ const TOPIC_EVENT_CAPACITY: usize = 16 * tuning::ANTIENTROPY_MAX_RESEND;
 pub(crate) fn build_mesh(
     endpoint: Endpoint,
     active_view_capacity: usize,
-    unicast: Option<crate::transport::UnicastAcceptor>,
+    unicast: Option<transport::UnicastAcceptor>,
     // The admission travels with the handle because the acceptor built below
     // has to share it with the dialing side — one ceiling per node, not one
     // per role. The beacon passes `None` and needs neither.
     webrtc: Option<(
         habilis_network_iroh_webrtc_transport::WebRtcHandle,
-        crate::transport::SignalAdmission,
-        crate::transport::IceProfile,
+        transport::SignalAdmission,
+        transport::IceProfile,
     )>,
     protocols: habilis_network_iroh_transport_util::ProtocolSet,
     // The mesh's `transport.relay_transport`: with it off, every inbound gossip
@@ -68,7 +69,7 @@ pub(crate) fn build_mesh(
     let gated = webrtc.as_ref().filter(|_| needs_session);
     let session_gate: Option<(
         habilis_network_iroh_webrtc_transport::WebRtcHandle,
-        crate::transport::SignalAdmission,
+        transport::SignalAdmission,
         iroh::PublicKey,
     )> = gated.map(|(handle, admission, _)| (handle.clone(), admission.clone(), local));
     // Every router serves the nudge, the beacon's too: a session that attaches to the rendezvous
@@ -76,7 +77,7 @@ pub(crate) fn build_mesh(
     let mut builder = Router::builder(endpoint)
         .accept(
             GOSSIP_ALPN,
-            crate::transport::DirectOnlyGossip::new(
+            transport::DirectOnlyGossip::new(
                 gossip.clone(),
                 PayloadPath::from(relay_transport),
                 session_gate,
@@ -86,7 +87,7 @@ pub(crate) fn build_mesh(
     // A peer also accepts inbound unicast; the rendezvous/beacon endpoint
     // passes `None` (it is not a peer and carries no unicast traffic).
     if let Some(acceptor) = unicast {
-        builder = builder.accept(crate::transport::UNICAST_ALPN, acceptor);
+        builder = builder.accept(transport::UNICAST_ALPN, acceptor);
     }
     // …and answers JSEP offers, so a peer that cannot reach us over IP can
     // still open a direct data channel. Answering is unconditional: the role
@@ -94,8 +95,8 @@ pub(crate) fn build_mesh(
     // never answers can never be dialled by anyone.
     if let Some((handle, admission, ice)) = webrtc {
         builder = builder.accept(
-            crate::transport::MESH_WEBRTC_SIGNAL_ALPN,
-            crate::transport::WebRtcSignalAcceptor::new(
+            transport::MESH_WEBRTC_SIGNAL_ALPN,
+            transport::WebRtcSignalAcceptor::new(
                 handle,
                 endpoint_for_acceptor,
                 book.clone(),

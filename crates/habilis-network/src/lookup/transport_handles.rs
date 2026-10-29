@@ -1,5 +1,6 @@
 use super::transport_opts::TransportOpts;
 
+use crate::transport;
 /// Build an iroh endpoint for a mesh's lookups.
 ///
 /// - `lookups`: which address-lookups (mDNS / DHT) and relay to wire.
@@ -53,7 +54,7 @@ pub struct TransportHandles {
     /// The table that decides who holds a direct-peer slot. When set, the
     /// endpoint reports every connection to it, so that it can drop the ones
     /// that are gone.
-    pub admission: Option<crate::transport::SignalAdmission>,
+    pub admission: Option<transport::SignalAdmission>,
     /// The endpoint is a multi-hop underlay, an internal forwarding endpoint
     /// and not a peer or a beacon. Changes only the role a log line names.
     pub underlay: bool,

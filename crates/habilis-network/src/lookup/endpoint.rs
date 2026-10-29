@@ -6,6 +6,7 @@ use iroh::{Endpoint, SecretKey};
 
 use crate::protocol::mesh::LookupOpts;
 
+use iroh::endpoint;
 /// Install on `builder` every custom transport and hook a mesh node needs: the
 /// multi-hop transport (with its address lookup and backup path selector), the
 /// `WebRTC` transport with its selector, and the connection hook that records
@@ -22,9 +23,9 @@ use crate::protocol::mesh::LookupOpts;
 /// `hooks` call after it: both are single slots, and the last call wins.
 #[must_use]
 pub(crate) fn install_transports(
-    mut builder: iroh::endpoint::Builder,
+    mut builder: endpoint::Builder,
     transports: &super::TransportHandles,
-) -> iroh::endpoint::Builder {
+) -> endpoint::Builder {
     // Register the multi-hop custom transport (plus its address lookup + backup
     // path selector) so a `connect` to a peer with no direct path rides the
     // multihop path. The handle's app id must match this endpoint's key — the
@@ -82,7 +83,7 @@ pub(crate) fn install_transports(
 /// and the blob endpoint included (decision D11). They are generous on purpose: the count of direct
 /// connections is the real limit, and these only keep one connection from growing without bound.
 /// Keep-alive, idle timeout, multipath, stream counts and datagrams stay at the iroh defaults.
-pub(crate) fn quic_limits() -> iroh::endpoint::QuicTransportConfig {
+pub(crate) fn quic_limits() -> endpoint::QuicTransportConfig {
     use crate::util::tuning::{
         QUIC_CONNECTION_RECEIVE_WINDOW, QUIC_SEND_WINDOW, QUIC_STREAM_RECEIVE_WINDOW,
     };

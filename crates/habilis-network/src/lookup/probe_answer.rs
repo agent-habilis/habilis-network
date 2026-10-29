@@ -6,6 +6,8 @@ use std::time::Duration;
 use iroh::{Endpoint, EndpointAddr};
 use iroh_gossip::net::GOSSIP_ALPN;
 
+use iroh::endpoint;
+use n0_future::time;
 /// What a connect-probe found at an address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProbeAnswer {
@@ -41,7 +43,7 @@ pub(crate) async fn probe_answer(
     let started = clock::Instant::now();
     let mut failure = None;
     let connecting = endpoint.connect(address.clone(), GOSSIP_ALPN);
-    let answer = match n0_future::time::timeout(timeout, connecting).await {
+    let answer = match time::timeout(timeout, connecting).await {
         Ok(Ok(connection)) => {
             // Close explicitly, not via drop: the resolution side effect is
             // done, and an orderly CONNECTION_CLOSE lets the accept side
@@ -90,7 +92,7 @@ const CERTIFICATE_ALERTS: [u8; 7] = [48, 42, 43, 44, 45, 46, 51];
 /// A dial that ended in an error: a handshake that failed on the identity is
 /// [`ProbeAnswer::Foreign`], a listener that closed or refused is [`ProbeAnswer::Refused`], and
 /// every other failure said nothing.
-fn answer_of_connect_error(error: &iroh::endpoint::ConnectError) -> ProbeAnswer {
+fn answer_of_connect_error(error: &endpoint::ConnectError) -> ProbeAnswer {
     use iroh::endpoint::{AuthenticationError, ConnectError, ConnectingError};
 
     match error {
@@ -138,7 +140,7 @@ fn answer_of_connect_error(error: &iroh::endpoint::ConnectError) -> ProbeAnswer 
 /// verifier raises about the key is [`ProbeAnswer::Foreign`]. A close, a reset, a refusal and
 /// any other alert are [`ProbeAnswer::Refused`]. A timeout, a close of ours and exhausted
 /// connection ids say nothing.
-pub(crate) fn answer_of_connection_error(error: &iroh::endpoint::ConnectionError) -> ProbeAnswer {
+pub(crate) fn answer_of_connection_error(error: &endpoint::ConnectionError) -> ProbeAnswer {
     use iroh::endpoint::{ConnectionError, TransportErrorCode};
 
     match error {

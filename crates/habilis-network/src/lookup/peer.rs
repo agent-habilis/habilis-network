@@ -14,6 +14,7 @@ use crate::protocol::mesh::{LookupOpts, RelayChoice};
 #[cfg(feature = "multihop")]
 use crate::transport::PayloadPath;
 
+use crate::transport;
 /// The normal peer endpoint: a fresh random identity, no
 /// pinned port. Thin intent-named wrapper over `build_endpoint`
 /// so call sites don't carry the rendezvous-only `None, None`.
@@ -200,7 +201,7 @@ pub async fn build_peer_webrtc(
 pub(crate) async fn build_peer_webrtc_with(
     lookups: &LookupOpts,
     options: super::TransportOpts,
-    admission: Option<&crate::transport::SignalAdmission>,
+    admission: Option<&transport::SignalAdmission>,
 ) -> Result<(
     Endpoint,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
@@ -241,7 +242,7 @@ pub(crate) async fn build_peer_webrtc_with(
 fn build_gossip_handle(
     options: super::TransportOpts,
     local: iroh::EndpointId,
-    admission: Option<&crate::transport::SignalAdmission>,
+    admission: Option<&transport::SignalAdmission>,
 ) -> Option<habilis_network_iroh_gossip_transport::GossipHandle> {
     options.gossip.then(|| {
         let handle = habilis_network_iroh_gossip_transport::GossipHandle::new(local);
@@ -308,7 +309,7 @@ fn mint_secret() -> SecretKey {
 pub(crate) async fn build_peer_multihop(
     lookups: &LookupOpts,
     options: super::TransportOpts,
-    admission: Option<&crate::transport::SignalAdmission>,
+    admission: Option<&transport::SignalAdmission>,
     relay_payload: PayloadPath,
 ) -> Result<(
     Endpoint,
@@ -338,7 +339,7 @@ pub(crate) async fn build_peer_multihop(
 pub(crate) async fn build_peer_multihop_with(
     lookups: &LookupOpts,
     options: super::TransportOpts,
-    admission: Option<&crate::transport::SignalAdmission>,
+    admission: Option<&transport::SignalAdmission>,
     handle_config: habilis_network_iroh_multihop_transport::HandleConfig,
     underlay_cap: Option<usize>,
 ) -> Result<(
@@ -358,7 +359,7 @@ pub(crate) async fn build_peer_multihop_with(
     let underlay_leg = underlay_cap.filter(|_| options.webrtc).map(|cap| {
         (
             build_webrtc_handle(underlay_secret.public()),
-            crate::transport::SignalAdmission::new_route_table(cap),
+            transport::SignalAdmission::new_route_table(cap),
         )
     });
     let webrtc_leg = underlay_leg.as_ref().map(|(handle, _)| handle.clone());
@@ -386,24 +387,23 @@ pub(crate) async fn build_peer_multihop_with(
     let mut underlay_webrtc = None;
     if let Some((handle, table)) = underlay_leg {
         let allowed = underlay_webrtc::Allowed::default();
-        let ice = crate::transport::IceProfile {
+        let ice = transport::IceProfile {
             host_only: lookups.is_loopback(),
         };
         // The underlay is an endpoint of its own, with lookup services of its own, so it has
         // an address book of its own.
         let book = super::address_book(&underlay);
         let underlay_id = underlay.id();
-        let acceptor: crate::transport::WebRtcSignalAcceptor =
-            crate::transport::WebRtcSignalAcceptor::new(
-                handle.clone(),
-                underlay.clone(),
-                book.clone(),
-                underlay_id,
-                table.clone(),
-                ice,
-            );
+        let acceptor: transport::WebRtcSignalAcceptor = transport::WebRtcSignalAcceptor::new(
+            handle.clone(),
+            underlay.clone(),
+            book.clone(),
+            underlay_id,
+            table.clone(),
+            ice,
+        );
         protocols = protocols.protocol(
-            crate::transport::MESH_WEBRTC_SIGNAL_ALPN.to_vec(),
+            transport::MESH_WEBRTC_SIGNAL_ALPN.to_vec(),
             underlay_webrtc::UnderlaySignalGate::new(acceptor, allowed.clone()),
         );
         // A session that attached is used only after a connect that completes, and

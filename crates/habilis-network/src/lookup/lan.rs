@@ -13,6 +13,7 @@ use iroh::{Endpoint, RelayMode, SecretKey};
 
 use crate::protocol::mesh::{LookupOpts, RelayChoice};
 
+use iroh_gossip::proto;
 /// The LAN members of our mesh, as the event loop reads them. `None` where the endpoint has no
 /// mDNS handle: that is the off switch of the LAN arm.
 ///
@@ -21,7 +22,7 @@ use crate::protocol::mesh::{LookupOpts, RelayChoice};
 pub(crate) async fn lan_contacts(
     endpoint: &Endpoint,
     mdns: Option<super::MdnsHandle>,
-    topic: &iroh_gossip::proto::TopicId,
+    topic: &proto::TopicId,
 ) -> Result<Option<mpsc::Receiver<super::LanEvent>>> {
     #[cfg(all(feature = "host", feature = "mdns"))]
     if let Some(handle) = mdns {
@@ -42,7 +43,7 @@ pub(crate) async fn lan_contacts(
 /// rooms with the same name and different passwords do not share a tag.
 #[cfg(all(feature = "host", feature = "mdns"))]
 #[must_use]
-pub(crate) fn lan_member_tag(topic: &iroh_gossip::proto::TopicId) -> String {
+pub(crate) fn lan_member_tag(topic: &proto::TopicId) -> String {
     use std::fmt::Write as _;
 
     use sha2::{Digest as _, Sha256};
@@ -66,10 +67,7 @@ pub(crate) fn lan_member_tag(topic: &iroh_gossip::proto::TopicId) -> String {
 /// # Errors
 /// Returns an error if the tag does not fit the user data of an endpoint.
 #[cfg(all(feature = "host", feature = "mdns"))]
-pub(crate) fn tag_as_member(
-    endpoint: &Endpoint,
-    topic: &iroh_gossip::proto::TopicId,
-) -> Result<()> {
+pub(crate) fn tag_as_member(endpoint: &Endpoint, topic: &proto::TopicId) -> Result<()> {
     let tag = lan_member_tag(topic)
         .parse()
         .context("the member tag does not fit the endpoint user data")?;

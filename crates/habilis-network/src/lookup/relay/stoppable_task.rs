@@ -5,6 +5,7 @@ use tokio::sync::watch;
 
 use crate::util::tuning::RENDEZVOUS_CLOSE;
 
+use n0_future::{task, time};
 /// A task that walks the relay ladder, held so its owner can stop it and wait
 /// for it on the way out. It is never aborted: the walk probes each rung on an
 /// endpoint of its own, and an abort mid-walk drops that endpoint open.
@@ -25,7 +26,7 @@ impl StoppableTask {
     {
         let (stop, stopped) = watch::channel(());
         Self {
-            task: n0_future::task::spawn(run(stopped)),
+            task: task::spawn(run(stopped)),
             stop,
         }
     }
@@ -35,10 +36,7 @@ impl StoppableTask {
     pub(crate) async fn stop_and_wait(self) {
         let Self { task, stop } = self;
         drop(stop);
-        if n0_future::time::timeout(RENDEZVOUS_CLOSE, task)
-            .await
-            .is_err()
-        {
+        if time::timeout(RENDEZVOUS_CLOSE, task).await.is_err() {
             tracing::debug!(target: "habilis_network::lookup", "relay ladder walk did not stop in time; abandoning it");
         }
     }

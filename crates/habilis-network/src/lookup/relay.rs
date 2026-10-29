@@ -12,6 +12,7 @@
 //! over together. The public analog of the private loopback-port ladder
 //! (`beacon::RendezvousParams::bind_ports`).
 
+use std::future;
 mod rung_refresh;
 mod stoppable_task;
 
@@ -31,6 +32,7 @@ use crate::util::tuning::{
     RELAY_LIVENESS_FAILS_TO_EVICT, RELAY_LIVENESS_INTERVAL, RELAY_REPROBE_BACKOFF_MAX,
     RELAY_REPROBE_BACKOFF_MIN, RELAY_RUNG_PROBE,
 };
+use n0_future::time as n0future_time;
 
 /// The default relay **ladder** — n0's prod relay set, in fixed
 /// preference order. The beacon homes on the first reachable rung
@@ -267,7 +269,7 @@ async fn relay_rung_reachable(
         return false;
     };
     let reachable = tokio::select! {
-        online = n0_future::time::timeout(timeout, endpoint.online()) => online.is_ok(),
+        online = n0future_time::timeout(timeout, endpoint.online()) => online.is_ok(),
         () = stopped(stop) => false,
     };
     endpoint.close().await;
@@ -278,7 +280,7 @@ async fn relay_rung_reachable(
 async fn stopped(stop: Option<watch::Receiver<()>>) {
     match stop {
         Some(mut stop) => while stop.changed().await.is_ok() {},
-        None => std::future::pending().await,
+        None => future::pending().await,
     }
 }
 
@@ -376,8 +378,8 @@ async fn monitor_homed_rung(
     let mut fails: u32 = 0;
     loop {
         let poll = async {
-            n0_future::time::sleep(RELAY_LIVENESS_INTERVAL).await;
-            n0_future::time::timeout(probe, endpoint.online())
+            n0future_time::sleep(RELAY_LIVENESS_INTERVAL).await;
+            n0future_time::timeout(probe, endpoint.online())
                 .await
                 .is_ok()
         };
@@ -432,7 +434,7 @@ async fn monitor_relay_less(
             return;
         }
         tokio::select! {
-            () = n0_future::time::sleep(backoff) => {}
+            () = n0future_time::sleep(backoff) => {}
             () = stopped(Some(stop.clone())) => return,
         }
         backoff = next_relay_backoff(backoff);
@@ -451,6 +453,9 @@ mod tests {
     use crate::lookup::test_relay;
     use crate::util::tuning;
     use iroh::endpoint::presets;
+    use std::cell;
+    use std::time::Duration as std_Duration;
+    use tokio::time;
     /// Tripwire: the iroh fallback rungs of our pinned rendezvous ladder
     /// must stay equal to iroh's `defaults::prod` relay hosts, **in
     /// order** (rung 1 = NA-east). Rung 0 is our own operated relay and
@@ -531,7 +536,7 @@ mod tests {
             // logic is unit-tested via `select_first_reachable` below; the
             // down-detection primitive by `unreachable_rung_*` below.
             assert!(
-                select_bootstrap_rung(&[], std::time::Duration::from_secs(1), None)
+                select_bootstrap_rung(&[], std_Duration::from_secs(1), None)
                     .await
                     .is_none(),
                 "an empty ladder selects no bootstrap rung"
@@ -555,8 +560,7 @@ mod tests {
             // RFC-5737 TEST-NET-1, never routable ⇒ the relay handshake can
             // never connect ⇒ `select_bootstrap_rung` finds no reachable rung.
             let bogus: RelayUrl = "https://192.0.2.1./".parse().unwrap();
-            let selected =
-                select_bootstrap_rung(&[bogus], std::time::Duration::from_secs(2), None).await;
+            let selected = select_bootstrap_rung(&[bogus], std_Duration::from_secs(2), None).await;
             assert!(
                 selected.is_none(),
                 "an unreachable relay must not be selected as a live rung"
@@ -631,7 +635,7 @@ mod tests {
     /// returns `(selected, probed_in_order)`.
     async fn walk(ladder: &[RelayUrl], down: &[&str]) -> (Option<RelayUrl>, Vec<String>) {
         let down: HashSet<String> = down.iter().map(|host| (*host).to_string()).collect();
-        let probed = std::cell::RefCell::new(Vec::new());
+        let probed = cell::RefCell::new(Vec::new());
         let selected = select_first_reachable(ladder, |rung| {
             let host = short_host(&rung);
             probed.borrow_mut().push(host.clone());
@@ -764,7 +768,7 @@ mod tests {
             .await
             .expect("bind an endpoint on the rung");
 
-        let online = tokio::time::timeout(std::time::Duration::from_secs(2), endpoint.online())
+        let online = time::timeout(std_Duration::from_secs(2), endpoint.online())
             .await
             .is_ok();
         endpoint.close().await;

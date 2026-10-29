@@ -4,13 +4,34 @@ use crate::transport::PayloadPath;
 use std::collections::HashSet;
 
 #[cfg(feature = "host")]
+use crate::transport;
+#[cfg(feature = "host")]
 use crate::transport::payload_path;
 use crate::transport::webrtc;
+#[cfg(feature = "host")]
+use habilis_network_iroh_gossip_transport::hub;
 use iroh::address_lookup::memory;
+#[cfg(feature = "host")]
+use iroh::endpoint;
 #[cfg(feature = "host")]
 use iroh::endpoint::presets;
 #[cfg(all(feature = "host", feature = "mdns"))]
+use iroh::endpoint_info;
+#[cfg(feature = "host")]
+use iroh::protocol;
+#[cfg(all(feature = "host", feature = "mdns"))]
+use iroh_gossip::api;
+#[cfg(all(feature = "host", feature = "mdns"))]
+use iroh_gossip::proto;
+use n0_future::{task, time};
+#[cfg(all(feature = "host", feature = "mdns"))]
+use std::io;
+use std::net;
+use std::time::Duration as std_Duration;
+#[cfg(all(feature = "host", feature = "mdns"))]
 use tokio::sync::mpsc;
+use tokio::time as tokio_time;
+use tokio::time::Instant as tokio_Instant;
 /// R1: the tag of a mesh is the same for one topic, differs between topics (the topic id
 /// folds in the password: two rooms of one name with two passwords are two topics) and fits the
 /// user data of an endpoint.
@@ -18,8 +39,8 @@ use tokio::sync::mpsc;
 #[test]
 fn the_lan_tag_follows_the_topic() {
     let _guard = ::habilis_network_test_tracing::init();
-    let one = iroh_gossip::proto::TopicId::from_bytes([1u8; 32]);
-    let other = iroh_gossip::proto::TopicId::from_bytes([2u8; 32]);
+    let one = proto::TopicId::from_bytes([1u8; 32]);
+    let other = proto::TopicId::from_bytes([2u8; 32]);
 
     assert_eq!(
         super::lan::lan_member_tag(&one),
@@ -31,8 +52,7 @@ fn the_lan_tag_follows_the_topic() {
         super::lan::lan_member_tag(&other),
         "the lan tag differs between topics"
     );
-    let user_data: Result<iroh::endpoint_info::UserData, _> =
-        super::lan::lan_member_tag(&one).parse();
+    let user_data: Result<endpoint_info::UserData, _> = super::lan::lan_member_tag(&one).parse();
     assert!(user_data.is_ok(), "the tag must fit the user data");
 }
 
@@ -41,9 +61,9 @@ fn the_lan_tag_follows_the_topic() {
 #[test]
 fn only_our_tag_is_a_member_of_our_mesh() {
     let _guard = ::habilis_network_test_tracing::init();
-    let ours = super::lan::lan_member_tag(&iroh_gossip::proto::TopicId::from_bytes([1u8; 32]));
-    let foreign = super::lan::lan_member_tag(&iroh_gossip::proto::TopicId::from_bytes([2u8; 32]));
-    let user = |text: &str| -> iroh::endpoint_info::UserData { text.parse().expect("fits") };
+    let ours = super::lan::lan_member_tag(&proto::TopicId::from_bytes([1u8; 32]));
+    let foreign = super::lan::lan_member_tag(&proto::TopicId::from_bytes([2u8; 32]));
+    let user = |text: &str| -> endpoint_info::UserData { text.parse().expect("fits") };
 
     assert!(
         super::mdns::is_member_tag(Some(&user(&ours)), &ours),
@@ -76,10 +96,8 @@ fn the_forwarder_passes_news_only() {
     let id = iroh::SecretKey::generate().public();
     let stranger = iroh::SecretKey::generate().public();
     let at = |port: u16| {
-        iroh::EndpointAddr::new(id).with_ip_addr(std::net::SocketAddr::from((
-            std::net::Ipv4Addr::LOCALHOST,
-            port,
-        )))
+        iroh::EndpointAddr::new(id)
+            .with_ip_addr(net::SocketAddr::from((net::Ipv4Addr::LOCALHOST, port)))
     };
     let mut known = HashMap::new();
 
@@ -142,13 +160,13 @@ fn two_members_on_the_lan_link_with_no_beacon() {
             struct Member {
                 endpoint: Endpoint,
                 book: MemoryLookup,
-                sender: iroh_gossip::api::GossipSender,
-                receiver: iroh_gossip::api::GossipReceiver,
+                sender: api::GossipSender,
+                receiver: api::GossipReceiver,
                 events: mpsc::Receiver<LanEvent>,
                 _router: Router,
             }
 
-            async fn member(topic: iroh_gossip::proto::TopicId) -> Member {
+            async fn member(topic: proto::TopicId) -> Member {
                 let lan = LookupOpts::new(RelayChoice::Disabled).mdns(true);
                 let (endpoint, handle) = super::build_endpoint_keeping_mdns(
                     &lan,
@@ -185,19 +203,19 @@ fn two_members_on_the_lan_link_with_no_beacon() {
                 }
             }
 
-            let topic = iroh_gossip::proto::TopicId::from_bytes([3u8; 32]);
-            let other_topic = iroh_gossip::proto::TopicId::from_bytes([4u8; 32]);
+            let topic = proto::TopicId::from_bytes([3u8; 32]);
+            let other_topic = proto::TopicId::from_bytes([4u8; 32]);
             let started = Instant::now();
             let mut first = member(topic).await;
             let mut second = member(topic).await;
             let stranger = member(other_topic).await;
             let ids = (first.endpoint.id(), second.endpoint.id());
-            let mut stderr = std::io::stderr();
+            let mut stderr = io::stderr();
             let mut seen_first = HashSet::new();
             let mut seen_second = HashSet::new();
             let mut neighbors = (false, false);
 
-            let deadline = tokio::time::sleep(Duration::from_secs(30));
+            let deadline = tokio_time::sleep(Duration::from_secs(30));
             tokio::pin!(deadline);
             while !(neighbors.0 && neighbors.1) {
                 tokio::select! {
@@ -258,10 +276,8 @@ fn replacing_a_peer_address_leaves_exactly_the_new_one() {
     let book = memory::MemoryLookup::new();
     let id = iroh::SecretKey::generate().public();
     let at = |port: u16| {
-        iroh::EndpointAddr::new(id).with_ip_addr(std::net::SocketAddr::from((
-            std::net::Ipv4Addr::LOCALHOST,
-            port,
-        )))
+        iroh::EndpointAddr::new(id)
+            .with_ip_addr(net::SocketAddr::from((net::Ipv4Addr::LOCALHOST, port)))
     };
     add_peer_addr(&book, at(4000));
 
@@ -274,10 +290,7 @@ fn replacing_a_peer_address_leaves_exactly_the_new_one() {
     let ip_addrs: Vec<_> = entry.ip_addrs().copied().collect();
     assert_eq!(
         ip_addrs,
-        vec![std::net::SocketAddr::from((
-            std::net::Ipv4Addr::LOCALHOST,
-            5000
-        ))],
+        vec![net::SocketAddr::from((net::Ipv4Addr::LOCALHOST, 5000))],
         "the book keeps the address of a beacon that is gone"
     );
 }
@@ -345,7 +358,7 @@ fn a_receiver_that_never_reads_grants_the_whole_window_to_one_stream() {
             )
             .await
             .expect("bind the receiver");
-            let transport = iroh::endpoint::QuicTransportConfig::builder()
+            let transport = endpoint::QuicTransportConfig::builder()
                 .send_window(SENDER_BUFFER as u64)
                 .build();
             let sender: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
@@ -362,7 +375,7 @@ fn a_receiver_that_never_reads_grants_the_whole_window_to_one_stream() {
                     let connection = incoming.await.expect("the handshake");
                     let stream = connection.accept_uni().await.expect("a stream");
                     // Nothing is read: the connection and the stream stay open and unread.
-                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    tokio_time::sleep(Duration::from_secs(10)).await;
                     drop((connection, stream));
                 }
             });
@@ -383,7 +396,7 @@ fn a_receiver_that_never_reads_grants_the_whole_window_to_one_stream() {
                 }
             });
 
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio_time::sleep(Duration::from_secs(2)).await;
             let taken_in = accepted
                 .load(Ordering::Relaxed)
                 .saturating_sub(SENDER_BUFFER);
@@ -430,7 +443,7 @@ fn streams_that_nobody_reads_fit_in_the_connection_window() {
             )
             .await
             .expect("bind the receiver");
-            let transport = iroh::endpoint::QuicTransportConfig::builder()
+            let transport = endpoint::QuicTransportConfig::builder()
                 .send_window(SENDER_BUFFER as u64)
                 .build();
             let sender: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
@@ -469,7 +482,7 @@ fn streams_that_nobody_reads_fit_in_the_connection_window() {
                 }));
             }
 
-            tokio::time::sleep(Duration::from_secs(6)).await;
+            tokio_time::sleep(Duration::from_secs(6)).await;
             let taken_in = accepted
                 .load(Ordering::Relaxed)
                 .saturating_sub(SENDER_BUFFER);
@@ -601,7 +614,7 @@ fn only_the_member_endpoint_has_the_gossip_handle() {
                 gossip,
                 ..TransportOpts::default()
             };
-            let table = crate::transport::SignalAdmission::new(8);
+            let table = transport::SignalAdmission::new(8);
             let (endpoint, handle, _webrtc, leg, _mdns) = super::build_peer_multihop_with(
                 &LookupOpts::loopback(),
                 options,
@@ -653,10 +666,7 @@ fn the_member_of_a_udp_and_gossip_list_keeps_ip_above_gossip() {
         #[derive(Debug, Clone)]
         struct Hold;
         impl ProtocolHandler for Hold {
-            async fn accept(
-                &self,
-                connection: iroh::endpoint::Connection,
-            ) -> Result<(), AcceptError> {
+            async fn accept(&self, connection: endpoint::Connection) -> Result<(), AcceptError> {
                 connection.closed().await;
                 Ok(())
             }
@@ -666,10 +676,10 @@ fn the_member_of_a_udp_and_gossip_list_keeps_ip_above_gossip() {
             gossip: true,
             ..TransportOpts::default()
         };
-        let hub = habilis_network_iroh_gossip_transport::hub::Hub::new();
+        let hub = hub::Hub::new();
         let mut members = Vec::new();
         for _ in 0..2 {
-            let table = crate::transport::SignalAdmission::new(8);
+            let table = transport::SignalAdmission::new(8);
             let (endpoint, _webrtc, _mdns) =
                 super::build_peer_webrtc_with(&LookupOpts::loopback(), options, Some(&table))
                     .await
@@ -681,7 +691,7 @@ fn the_member_of_a_udp_and_gossip_list_keeps_ip_above_gossip() {
             members.push(endpoint);
         }
         let (alice, bob) = (members.remove(0), members.remove(0));
-        let router = iroh::protocol::Router::builder(bob.clone())
+        let router = protocol::Router::builder(bob.clone())
             .accept(ALPN, Hold)
             .spawn();
         let bob_addr = bob.addr();
@@ -696,20 +706,20 @@ fn the_member_of_a_udp_and_gossip_list_keeps_ip_above_gossip() {
             .await
             .expect("connect");
 
-        let paths_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while connection.paths().len() < 2 && tokio::time::Instant::now() < paths_deadline {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        let paths_deadline = tokio_Instant::now() + Duration::from_secs(5);
+        while connection.paths().len() < 2 && tokio_Instant::now() < paths_deadline {
+            tokio_time::sleep(Duration::from_millis(50)).await;
         }
         assert!(connection.paths().len() >= 2, "IP and gossip are both open");
-        let selected_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let selected_deadline = tokio_Instant::now() + Duration::from_secs(5);
         while connection
             .paths()
             .iter()
-            .find(iroh::endpoint::Path::is_selected)
+            .find(endpoint::Path::is_selected)
             .is_none()
-            && tokio::time::Instant::now() < selected_deadline
+            && tokio_Instant::now() < selected_deadline
         {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio_time::sleep(Duration::from_millis(50)).await;
         }
         assert!(
             payload_path::selected_is_ip(&connection),
@@ -870,7 +880,7 @@ fn a_holder_of_our_identity_that_serves_no_alpn_yet_is_not_a_foreign_mesh() {
 
         let secret = SecretKey::generate();
         let id = secret.public();
-        let bound = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        let bound = net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0))
             .and_then(|socket| socket.local_addr());
         let port = bound.expect("a free loopback port").port();
         let holder = build_endpoint(
@@ -883,7 +893,7 @@ fn a_holder_of_our_identity_that_serves_no_alpn_yet_is_not_a_foreign_mesh() {
         .await
         .expect("a bound rung without a router");
         let driving = holder.clone();
-        let task = n0_future::task::spawn(async move {
+        let task = task::spawn(async move {
             while let Some(incoming) = driving.accept().await {
                 if let Ok(accepting) = incoming.accept() {
                     let _ = accepting.await;
@@ -899,10 +909,10 @@ fn a_holder_of_our_identity_that_serves_no_alpn_yet_is_not_a_foreign_mesh() {
         )
         .await
         .expect("a prober");
-        let address = EndpointAddr::new(id)
-            .with_ip_addr(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)));
+        let address =
+            EndpointAddr::new(id).with_ip_addr(SocketAddr::from((net::Ipv4Addr::LOCALHOST, port)));
 
-        let answer = probe_answer(&prober, address, std::time::Duration::from_secs(2)).await;
+        let answer = probe_answer(&prober, address, std_Duration::from_secs(2)).await;
 
         prober.close().await;
         holder.close().await;
@@ -935,7 +945,7 @@ fn a_refusal_from_a_listener_of_our_identity_is_not_a_foreign_mesh() {
 
         let secret = SecretKey::generate();
         let id = secret.public();
-        let bound = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        let bound = net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0))
             .and_then(|socket| socket.local_addr());
         let port = bound.expect("a free loopback port").port();
         let listener = build_endpoint(
@@ -948,7 +958,7 @@ fn a_refusal_from_a_listener_of_our_identity_is_not_a_foreign_mesh() {
         .await
         .expect("a listener of our identity");
         let refusing = listener.clone();
-        let task = n0_future::task::spawn(async move {
+        let task = task::spawn(async move {
             while let Some(incoming) = refusing.accept().await {
                 incoming.refuse();
             }
@@ -962,10 +972,10 @@ fn a_refusal_from_a_listener_of_our_identity_is_not_a_foreign_mesh() {
         )
         .await
         .expect("a prober");
-        let address = EndpointAddr::new(id)
-            .with_ip_addr(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)));
+        let address =
+            EndpointAddr::new(id).with_ip_addr(SocketAddr::from((net::Ipv4Addr::LOCALHOST, port)));
 
-        let answer = probe_answer(&prober, address, std::time::Duration::from_secs(2)).await;
+        let answer = probe_answer(&prober, address, std_Duration::from_secs(2)).await;
 
         prober.close().await;
         listener.close().await;
@@ -995,7 +1005,7 @@ fn a_router_that_carries_no_unicast_completes_a_nudge() {
 
         let secret = SecretKey::generate();
         let id = secret.public();
-        let bound = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        let bound = net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0))
             .and_then(|socket| socket.local_addr());
         let port = bound.expect("a free loopback port").port();
         let beacon = build_endpoint(
@@ -1025,11 +1035,11 @@ fn a_router_that_carries_no_unicast_completes_a_nudge() {
         )
         .await
         .expect("a dialer");
-        let address = EndpointAddr::new(id)
-            .with_ip_addr(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)));
+        let address =
+            EndpointAddr::new(id).with_ip_addr(SocketAddr::from((net::Ipv4Addr::LOCALHOST, port)));
 
-        let nudge = n0_future::time::timeout(
-            std::time::Duration::from_secs(5),
+        let nudge = time::timeout(
+            std_Duration::from_secs(5),
             dialer.connect(address, webrtc::NUDGE_ALPN),
         )
         .await

@@ -1,5 +1,7 @@
 use super::TestRelayError;
 
+use iroh_relay::server;
+use std::net;
 /// Spawn the relay; the URL is `http://127.0.0.1:<port>/`. Dropping the
 /// server stops it.
 ///
@@ -12,14 +14,11 @@ use super::TestRelayError;
         reason = "`net` re-exports it only with `iroh-test-utils`"
     )
 )]
-pub async fn spawn_plain() -> Result<(iroh::RelayUrl, iroh_relay::server::Server), TestRelayError> {
-    let mut config = iroh_relay::server::ServerConfig::default();
-    config.relay = Some(iroh_relay::server::RelayConfig::new((
-        std::net::Ipv4Addr::LOCALHOST,
-        0,
-    )));
+pub async fn spawn_plain() -> Result<(iroh::RelayUrl, server::Server), TestRelayError> {
+    let mut config = server::ServerConfig::default();
+    config.relay = Some(server::RelayConfig::new((net::Ipv4Addr::LOCALHOST, 0)));
     config.quic = None;
-    let server = iroh_relay::server::Server::spawn(config)
+    let server = server::Server::spawn(config)
         .await
         .map_err(TestRelayError::Spawn)?;
     let address = server.http_addr().ok_or(TestRelayError::NoHttpAddr)?;

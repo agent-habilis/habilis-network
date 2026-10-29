@@ -2,6 +2,7 @@ use std::fmt;
 
 use iroh::EndpointId;
 
+use std::error;
 /// Why an endpoint cannot be built, or a WebRTC signal cannot be exchanged.
 ///
 /// [`EndpointError::CapRefused`] and [`EndpointError::NotANeighbor`] are the refusals a
@@ -30,7 +31,7 @@ pub enum EndpointError {
         /// The peer that refused.
         remote: EndpointId,
         /// The exchange error.
-        source: Box<dyn std::error::Error + Send + Sync>,
+        source: Box<dyn error::Error + Send + Sync>,
     },
     /// The underlay of the peer turned us away: we are not a neighbor of it yet. `source` is
     /// the exchange error the refusal came from.
@@ -38,10 +39,10 @@ pub enum EndpointError {
         /// The peer that refused.
         remote: EndpointId,
         /// The exchange error.
-        source: Box<dyn std::error::Error + Send + Sync>,
+        source: Box<dyn error::Error + Send + Sync>,
     },
     /// A cause no caller acts on. It keeps its text and its chain.
-    Internal(Box<dyn std::error::Error + Send + Sync>),
+    Internal(Box<dyn error::Error + Send + Sync>),
 }
 
 impl EndpointError {
@@ -66,8 +67,8 @@ impl fmt::Display for EndpointError {
     }
 }
 
-impl std::error::Error for EndpointError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl error::Error for EndpointError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::CapRefused { source, .. } | Self::NotANeighbor { source, .. } => {
                 Some(source.as_ref())
