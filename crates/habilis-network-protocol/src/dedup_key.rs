@@ -21,17 +21,18 @@
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DedupKey([u8; 16]);
 
+impl From<[u8; 16]> for DedupKey {
+    /// Wrap 16 raw bytes.
+    fn from(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+}
+
 impl DedupKey {
     /// The lowest key. With [`DedupKey::MAX`] it makes a bound that takes in every key.
     pub const MIN: Self = Self([0; 16]);
     /// The highest key.
     pub const MAX: Self = Self([u8::MAX; 16]);
-
-    /// Wrap 16 raw bytes.
-    #[must_use]
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(bytes)
-    }
 
     /// The raw bytes, borrowed.
     #[must_use]
@@ -67,7 +68,7 @@ mod tests {
 
     #[test]
     fn the_bounds_take_in_every_key() {
-        let key = DedupKey::from_bytes([7; 16]);
+        let key = DedupKey::from([7; 16]);
         assert!(DedupKey::MIN < key && key < DedupKey::MAX);
         assert_eq!(DedupKey::MIN.to_bytes(), [0; 16]);
         assert_eq!(DedupKey::MAX.to_bytes(), [u8::MAX; 16]);
@@ -79,12 +80,12 @@ mod tests {
         low[15] = 1;
         let mut high = [0u8; 16];
         high[0] = 1;
-        assert!(DedupKey::from_bytes(low) < DedupKey::from_bytes(high));
+        assert!(DedupKey::from(low) < DedupKey::from(high));
     }
 
     #[test]
     fn it_prints_as_hex() {
-        let key = DedupKey::from_bytes([0xab; 16]);
+        let key = DedupKey::from([0xab; 16]);
         assert_eq!(key.to_string(), "ab".repeat(16));
         assert_eq!(format!("{key:?}"), format!("DedupKey({})", "ab".repeat(16)));
     }

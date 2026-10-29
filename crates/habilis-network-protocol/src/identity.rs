@@ -118,7 +118,7 @@ pub(crate) fn dedup_key16(author: Option<&AuthorKey>, id_bytes: &[u8; 16]) -> De
     let digest = hasher.finalize();
     let mut key = [0u8; 16];
     key.copy_from_slice(&digest[..16]);
-    DedupKey::from_bytes(key)
+    DedupKey::from(key)
 }
 
 // ── wire encoding ──────────────────────────────────────────────────────

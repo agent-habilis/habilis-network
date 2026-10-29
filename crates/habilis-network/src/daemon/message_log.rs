@@ -16,7 +16,7 @@ pub(crate) use window_range::WindowRange;
 /// The smallest bound that sorts after `bound`.
 fn bound_after((timestamp, key): Bound) -> Bound {
     match u128::from_be_bytes(key.to_bytes()).checked_add(1) {
-        Some(next) => (timestamp, DedupKey::from_bytes(next.to_be_bytes())),
+        Some(next) => (timestamp, DedupKey::from(next.to_be_bytes())),
         None => (timestamp + std::time::Duration::from_secs(1), DedupKey::MIN),
     }
 }

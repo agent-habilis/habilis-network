@@ -67,7 +67,7 @@ fn encode_key(key: &DedupKey) -> String {
 
 fn decode_key(text: &str) -> Option<DedupKey> {
     let bytes: [u8; 16] = bs58::decode(text).into_vec().ok()?.try_into().ok()?;
-    Some(DedupKey::from_bytes(bytes))
+    Some(DedupKey::from(bytes))
 }
 
 impl WireWindow {
@@ -105,7 +105,7 @@ impl WireWindow {
                 .map(|chunk| {
                     let mut id = [0u8; 16];
                     id.copy_from_slice(chunk);
-                    DedupKey::from_bytes(id)
+                    DedupKey::from(id)
                 })
                 .collect(),
         )
@@ -1455,7 +1455,7 @@ mod tests {
     #[test]
     fn wire_window_round_trips_ids() {
         let ids: Vec<DedupKey> = (0..5u8)
-            .map(|seed| DedupKey::from_bytes([seed; 16]))
+            .map(|seed| DedupKey::from([seed; 16]))
             .collect();
         let window = DigestWindow {
             lo: (UnixSecs::from_secs(1), DedupKey::MIN),
@@ -1958,16 +1958,16 @@ mod tests {
             windows: vec![
                 WireWindow {
                     lo: 100,
-                    lo_key: encode_key(&DedupKey::from_bytes([3; 16])),
+                    lo_key: encode_key(&DedupKey::from([3; 16])),
                     hi: i64::MAX,
                     hi_key: encode_key(&DedupKey::MAX),
                     ids: bs58::encode([7u8; 16]).into_string(),
                 },
                 WireWindow {
                     lo: 10,
-                    lo_key: encode_key(&DedupKey::from_bytes([1; 16])),
+                    lo_key: encode_key(&DedupKey::from([1; 16])),
                     hi: 50,
-                    hi_key: encode_key(&DedupKey::from_bytes([2; 16])),
+                    hi_key: encode_key(&DedupKey::from([2; 16])),
                     // Two *distinct* 16-byte ids (identical halves would
                     // dedup to one in the decoded set).
                     ids: {
@@ -2006,12 +2006,12 @@ mod tests {
         let newest = DigestWindow {
             lo: (
                 UnixSecs::from_secs(1_700_000_100),
-                DedupKey::from_bytes([0x03; 16]),
+                DedupKey::from([0x03; 16]),
             ),
             hi: (UnixSecs::MAX, DedupKey::MAX),
             ids: vec![
-                DedupKey::from_bytes([0x11; 16]),
-                DedupKey::from_bytes([0x22; 16]),
+                DedupKey::from([0x11; 16]),
+                DedupKey::from([0x22; 16]),
             ],
             from_start: false,
         };
@@ -2019,9 +2019,9 @@ mod tests {
             lo: (UnixSecs::from_secs(1_700_000_000), DedupKey::MIN),
             hi: (
                 UnixSecs::from_secs(1_700_000_099),
-                DedupKey::from_bytes([0x04; 16]),
+                DedupKey::from([0x04; 16]),
             ),
-            ids: vec![DedupKey::from_bytes([0x33; 16])],
+            ids: vec![DedupKey::from([0x33; 16])],
             from_start: true,
         };
         let body = crate::gossip::json_body(&DigestBody {
@@ -2044,7 +2044,7 @@ mod tests {
             open_end.lo,
             (
                 UnixSecs::from_secs(1_700_000_100),
-                DedupKey::from_bytes([0x03; 16])
+                DedupKey::from([0x03; 16])
             ),
             "the open window's low bound keeps its wire form"
         );
@@ -2057,8 +2057,8 @@ mod tests {
         assert_eq!(
             ids,
             HashSet::from([
-                DedupKey::from_bytes([0x11; 16]),
-                DedupKey::from_bytes([0x22; 16])
+                DedupKey::from([0x11; 16]),
+                DedupKey::from([0x22; 16])
             ]),
             "the digest body keeps its ids on the wire"
         );
@@ -2072,7 +2072,7 @@ mod tests {
             closed.hi,
             (
                 UnixSecs::from_secs(1_700_000_099),
-                DedupKey::from_bytes([0x04; 16])
+                DedupKey::from([0x04; 16])
             ),
             "the closed window's high bound keeps its wire form"
         );
