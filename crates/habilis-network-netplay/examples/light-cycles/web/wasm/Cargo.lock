@@ -1413,6 +1413,7 @@ dependencies = [
  "iroh",
  "iroh-gossip",
  "n0-future",
+ "parking_lot",
  "rand 0.9.5",
  "serde",
  "serde_json",
@@ -1542,6 +1543,7 @@ version = "0.6.0"
 dependencies = [
  "habilis-network-test-tracing-macros",
  "libc",
+ "parking_lot",
  "tokio",
  "tracing",
  "tracing-subscriber",

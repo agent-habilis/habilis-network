@@ -3,8 +3,10 @@ use std::cell::RefCell;
 use std::fmt::{self, Write as _};
 #[cfg(not(target_arch = "wasm32"))]
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, OnceLock};
 use std::{io, thread};
+
+use parking_lot::Mutex;
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
@@ -107,13 +109,13 @@ where
 /// after the other entry points.
 #[must_use]
 pub fn captured_logs() -> String {
-    lock(&CAPTURED).clone()
+    CAPTURED.lock().clone()
 }
 
 /// Empties the text that [`captured_logs`] returns, for a test that reads the
 /// log of its own run when the tests of the binary run one after the other.
 pub fn clear_captured_logs() {
-    lock(&CAPTURED).clear();
+    CAPTURED.lock().clear();
 }
 
 /// Like [`Guard::expect_warn`], for the test of the calling thread, which the
@@ -125,12 +127,12 @@ pub fn clear_captured_logs() {
 pub fn expect_warn(target: &str, text: &str) {
     let current = thread::current();
     let name = current.name().unwrap_or_default();
-    let live = lock(&LIVE);
+    let live = LIVE.lock();
     let slot = live
         .iter()
         .find(|slot| slot.thread == name)
         .unwrap_or_else(|| panic!("expect_warn outside a guarded test (thread {name})"));
-    lock(&slot.expected).push(Expectation {
+    slot.expected.lock().push(Expectation {
         target: target.to_owned(),
         text: text.to_owned(),
         seen: false,
@@ -148,12 +150,12 @@ pub fn expect_warn(target: &str, text: &str) {
 pub fn allow_warn(target: &str, text: &str) {
     let current = thread::current();
     let name = current.name().unwrap_or_default();
-    let live = lock(&LIVE);
+    let live = LIVE.lock();
     let slot = live
         .iter()
         .find(|slot| slot.thread == name)
         .unwrap_or_else(|| panic!("allow_warn outside a guarded test (thread {name})"));
-    lock(&slot.expected).push(Expectation {
+    slot.expected.lock().push(Expectation {
         target: target.to_owned(),
         text: text.to_owned(),
         seen: false,
@@ -168,11 +170,11 @@ pub fn allow_warn(target: &str, text: &str) {
 pub fn saw_warn(target: &str, text: &str) -> bool {
     let current = thread::current();
     let name = current.name().unwrap_or_default();
-    lock(&LIVE)
+    LIVE.lock()
         .iter()
         .filter(|slot| slot.thread == name)
         .any(|slot| {
-            lock(&slot.events).iter().any(|logged| {
+            slot.events.lock().iter().any(|logged| {
                 logged.level == Level::WARN
                     && target_is_within(&logged.target, target)
                     && logged.text.contains(text)
@@ -255,7 +257,7 @@ fn worker_name() -> String {
 fn fail_the_binary_on_a_late_event_at_exit() {
     static REGISTERED: std::sync::Once = std::sync::Once::new();
     extern "C" fn at_exit() {
-        let Ok(late) = LATE.try_lock() else { return };
+        let Some(late) = LATE.try_lock() else { return };
         if late.events.is_empty() {
             return;
         }
@@ -303,7 +305,7 @@ where
 fn new_guard() -> Guard {
     let thread = thread::current().name().unwrap_or_default().to_owned();
     assert!(
-        thread.is_empty() || !lock(&LIVE).iter().any(|slot| slot.thread == thread),
+        thread.is_empty() || !LIVE.lock().iter().any(|slot| slot.thread == thread),
         "init() twice in one test (thread {thread}): a test has one guard"
     );
     let slot = Arc::new(Slot {
@@ -311,8 +313,8 @@ fn new_guard() -> Guard {
         events: Mutex::new(Vec::new()),
         expected: Mutex::new(Vec::new()),
     });
-    let mut live = lock(&LIVE);
-    lock(&slot.events).append(&mut lock(&LATE).events);
+    let mut live = LIVE.lock();
+    slot.events.lock().append(&mut LATE.lock().events);
     live.push(Arc::clone(&slot));
     Guard { slot }
 }
@@ -331,7 +333,7 @@ struct CaptureWriter;
 
 impl io::Write for CaptureWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        lock(&CAPTURED).push_str(&String::from_utf8_lossy(bytes));
+        CAPTURED.lock().push_str(&String::from_utf8_lossy(bytes));
         Ok(bytes.len())
     }
 
@@ -353,7 +355,7 @@ impl Guard {
     /// module below it) whose message contains `text`. Use it only where the warning is the subject
     /// of the test; fix the code for every other warning.
     pub fn expect_warn(&self, target: &str, text: &str) {
-        lock(&self.slot.expected).push(Expectation {
+        self.slot.expected.lock().push(Expectation {
             target: target.to_owned(),
             text: text.to_owned(),
             seen: false,
@@ -363,7 +365,7 @@ impl Guard {
 
     /// Like [`Self::expect_warn`], but the WARN may also not come, see [`allow_warn`].
     pub fn allow_warn(&self, target: &str, text: &str) {
-        lock(&self.slot.expected).push(Expectation {
+        self.slot.expected.lock().push(Expectation {
             target: target.to_owned(),
             text: text.to_owned(),
             seen: false,
@@ -375,9 +377,9 @@ impl Guard {
 impl Drop for Guard {
     fn drop(&mut self) {
         {
-            let mut live = lock(&LIVE);
+            let mut live = LIVE.lock();
             live.retain(|slot| !Arc::ptr_eq(slot, &self.slot));
-            lock(&LATE).ended = Some(self.slot.thread.clone());
+            LATE.lock().ended = Some(self.slot.thread.clone());
         }
         if thread::panicking() {
             return;
@@ -400,9 +402,9 @@ struct Slot {
 
 impl Slot {
     fn problems(&self) -> Vec<String> {
-        let mut expected = lock(&self.expected);
+        let mut expected = self.expected.lock();
         let mut problems = Vec::new();
-        for logged in lock(&self.events).iter() {
+        for logged in self.events.lock().iter() {
             let hit = expected
                 .iter_mut()
                 .find(|want| logged.level == Level::WARN && want.matches(logged));
@@ -507,7 +509,7 @@ impl<S: Subscriber> Layer<S> for Catch {
         let current = thread::current();
         let thread = current.name().unwrap_or("unnamed");
         let test = thread.strip_suffix(WORKER).unwrap_or(thread);
-        let live = lock(&LIVE);
+        let live = LIVE.lock();
         let own: Vec<_> = live.iter().filter(|slot| slot.thread == test).collect();
         let shared = own.is_empty();
         let logged = || Logged {
@@ -521,7 +523,7 @@ impl<S: Subscriber> Layer<S> for Catch {
         };
         let ended_worker = shared && test != thread;
         if live.is_empty() || ended_worker {
-            let mut late = lock(&LATE);
+            let mut late = LATE.lock();
             let ended = if ended_worker {
                 Some(test.to_owned())
             } else {
@@ -537,7 +539,7 @@ impl<S: Subscriber> Layer<S> for Catch {
         }
         if !shared {
             for slot in own {
-                lock(&slot.events).push(logged());
+                slot.events.lock().push(logged());
             }
             return;
         }
@@ -548,7 +550,7 @@ impl<S: Subscriber> Layer<S> for Catch {
         };
         shared_with.sort();
         for slot in live.iter() {
-            lock(&slot.events).push(Logged {
+            slot.events.lock().push(Logged {
                 shared_with: shared_with.clone(),
                 ..logged()
             });
@@ -583,8 +585,4 @@ pub fn catch_panic<F: FnOnce() -> R, R>(
     body: std::panic::AssertUnwindSafe<F>,
 ) -> thread::Result<R> {
     std::panic::catch_unwind(body)
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

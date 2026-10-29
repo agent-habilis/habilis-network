@@ -91,7 +91,7 @@ pub(in crate::transport::pool) struct PoolInner {
     /// [`UnicastPool::send_registered`] and [`UnicastPool::send_batch_in_background`]: an inline
     /// dial through [`UnicastPool::warm_or_dial`] does not.
     pub(in crate::transport::pool) dialing:
-        std::sync::Mutex<HashMap<EndpointId, watch::Receiver<DialOutcome>>>,
+        parking_lot::Mutex<HashMap<EndpointId, watch::Receiver<DialOutcome>>>,
     /// Tests only: the next dial waits on this before it connects, so a test can queue a send
     /// behind it.
     #[cfg(test)]
@@ -143,7 +143,7 @@ impl UnicastPool {
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
-                dialing: std::sync::Mutex::new(HashMap::new()),
+                dialing: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std::sync::Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 dial_gate: std::sync::Mutex::new(None),
@@ -179,7 +179,7 @@ impl UnicastPool {
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
-                dialing: std::sync::Mutex::new(HashMap::new()),
+                dialing: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std::sync::Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 dial_gate: std::sync::Mutex::new(None),
@@ -563,11 +563,7 @@ impl UnicastPool {
     /// Make this caller the dialer of `eid`, or the waiter of the dial that is in flight. Taken by
     /// the caller itself, synchronously, before the task that sends is spawned.
     pub(crate) fn register_dial(&self, eid: EndpointId) -> Registration {
-        let mut dialing = self
-            .inner
-            .dialing
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut dialing = self.inner.dialing.lock();
         if let Some(outcome) = dialing.get(&eid) {
             return Registration::Waiter(outcome.clone());
         }

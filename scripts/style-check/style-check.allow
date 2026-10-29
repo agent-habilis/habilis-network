@@ -2,11 +2,8 @@
 # Used by scripts/style-check/style-check.ts. Keep the count exact: the check fails when it is too low as well.
 
 # A Drop that runs while a panic unwinds must not panic: a second panic aborts the process.
-poison|crates/habilis-network/src/transport/pool/in_flight_dial.rs|1|InFlightDial::drop clears the in-flight entry during unwinding. register_dial must read the same map.
-poison|crates/habilis-network/src/transport/pool/unicast_pool.rs|1|register_dial reads the map that the in-flight drop clears: a poisoned lock is reached only from the pool
 
 # The guard of a test must survive a test that panicked, or it hides the failure that matters.
-poison|crates/habilis-network-test-tracing/src/guard.rs|2|lock helper of the test guard: the import and the call.
 
 # The light-cycles example uses native generators, a nightly-only feature.
 feature|crates/habilis-network-netplay/examples/light-cycles/native/game/src/lib.rs|1|coroutines, yield_expr (nightly example)

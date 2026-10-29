@@ -339,7 +339,7 @@ mod tests {
 
         drop(runtime);
 
-        let still_in_flight = pool.inner.dialing.lock().expect("lock").contains_key(&bob);
+        let still_in_flight = pool.inner.dialing.lock().contains_key(&bob);
         // The dropped runtime also held the driver of the connection that the dial had started. In
         // 1 run of 10 under load no close can drain that connection, and `Endpoint::close` waits
         // for it for good. A drop without a close logs an ERROR, and the drop of the runtime of
@@ -524,7 +524,7 @@ mod tests {
             async move { pool.dial_or_warm_send(bob, bytes::Bytes::new()).await }
         });
         let started = Instant::now();
-        while !pool.inner.dialing.lock().expect("lock").contains_key(&bob) {
+        while !pool.inner.dialing.lock().contains_key(&bob) {
             assert!(
                 started.elapsed() < Duration::from_secs(2),
                 "the dialer never registered"
@@ -549,7 +549,7 @@ mod tests {
             "the error says that the dial was cancelled: {error}"
         );
         assert!(
-            !pool.inner.dialing.lock().expect("lock").contains_key(&bob),
+            !pool.inner.dialing.lock().contains_key(&bob),
             "the cancelled dialer left its entry"
         );
 

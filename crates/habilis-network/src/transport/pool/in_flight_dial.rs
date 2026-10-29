@@ -24,12 +24,7 @@ impl InFlightDial {
 
 impl Drop for InFlightDial {
     fn drop(&mut self) {
-        self.pool
-            .inner
-            .dialing
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.eid);
+        self.pool.inner.dialing.lock().remove(&self.eid);
         self.outcome_tx.send_if_modified(|outcome| {
             if outcome.is_some() {
                 return false;
