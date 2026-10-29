@@ -135,27 +135,48 @@ mod body_tests {
 
     #[test]
     fn rejects_control_chars() {
-        assert!(MessageBody::try_new("nul\0byte").is_err());
-        assert!(MessageBody::try_new("bell\u{7}char").is_err());
+        assert!(
+            MessageBody::try_new("nul\0byte").is_err(),
+            "a body with a nul byte is refused"
+        );
+        assert!(
+            MessageBody::try_new("bell\u{7}char").is_err(),
+            "a body with a bell character is refused"
+        );
     }
 
     #[test]
     fn serde_transparent_round_trip() {
         let body = MessageBody::from("hello");
         let json = serde_json::to_string(&body).unwrap();
-        assert_eq!(json, "\"hello\"");
+        assert_eq!(
+            json, "\"hello\"",
+            "a message body serializes as a plain json string"
+        );
         let parsed: MessageBody = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, body);
+        assert_eq!(parsed, body, "a message body survives a json round trip");
     }
 
     #[test]
     fn deserialize_rejects_control_chars() {
         // The validating Deserialize rejects a body a crafted wire message
         // could otherwise smuggle past `new` (e.g. a NUL or an ANSI escape).
-        assert!(serde_json::from_str::<MessageBody>("\"evil\\u0000body\"").is_err());
-        assert!(serde_json::from_str::<MessageBody>("\"esc\\u001b[31m\"").is_err());
+        assert!(
+            serde_json::from_str::<MessageBody>("\"evil\\u0000body\"").is_err(),
+            "a json body with a nul escape is refused"
+        );
+        assert!(
+            serde_json::from_str::<MessageBody>("\"esc\\u001b[31m\"").is_err(),
+            "a json body with an escape sequence is refused"
+        );
         // Newline/tab and ordinary text still round-trip.
-        assert!(serde_json::from_str::<MessageBody>("\"line\\nfeed\"").is_ok());
-        assert!(serde_json::from_str::<MessageBody>("\"\"").is_ok());
+        assert!(
+            serde_json::from_str::<MessageBody>("\"line\\nfeed\"").is_ok(),
+            "a json body with a line feed is accepted"
+        );
+        assert!(
+            serde_json::from_str::<MessageBody>("\"\"").is_ok(),
+            "an empty json body is accepted"
+        );
     }
 }

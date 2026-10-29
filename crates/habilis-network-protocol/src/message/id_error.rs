@@ -120,45 +120,72 @@ mod id_tests {
     #[test]
     fn accepts_uuid_v4() {
         let id = MessageId::try_new("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        assert_eq!(id.as_str(), "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(
+            id.as_str(),
+            "550e8400-e29b-41d4-a716-446655440000",
+            "a v4 uuid is accepted and kept as written"
+        );
     }
 
     #[test]
     fn rejects_garbage() {
-        assert!(MessageId::try_new("not-a-uuid").is_err());
-        assert!(MessageId::try_new("").is_err());
-        assert!(MessageId::try_new("550e8400").is_err());
+        assert!(
+            MessageId::try_new("not-a-uuid").is_err(),
+            "a non-uuid is refused"
+        );
+        assert!(MessageId::try_new("").is_err(), "an empty id is refused");
+        assert!(
+            MessageId::try_new("550e8400").is_err(),
+            "a short id is refused"
+        );
     }
 
     #[test]
     fn random_produces_valid_id() {
         let first = MessageId::random();
         let second = MessageId::random();
-        assert_ne!(first, second);
+        assert_ne!(first, second, "two random ids differ");
         MessageId::try_new(first.as_str()).expect("random must round-trip through new");
     }
 
     #[test]
     fn from_str_works_for_clap() {
         let id: MessageId = "550e8400-e29b-41d4-a716-446655440000".parse().unwrap();
-        assert_eq!(id.as_str(), "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(
+            id.as_str(),
+            "550e8400-e29b-41d4-a716-446655440000",
+            "an id parsed from text keeps its text"
+        );
     }
 
     #[test]
     fn serde_transparent_round_trip() {
         let id = MessageId::random();
         let json = serde_json::to_string(&id).unwrap();
-        assert_eq!(json, format!("\"{}\"", id.as_str()));
+        assert_eq!(
+            json,
+            format!("\"{}\"", id.as_str()),
+            "a message id serializes as a plain json string"
+        );
         let parsed: MessageId = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, id);
+        assert_eq!(parsed, id, "a message id survives a json round trip");
     }
 
     #[test]
     fn deserialize_rejects_non_uuid() {
         // The derived transparent Deserialize would accept any string and let
         // `as_uuid_bytes` panic later; the validating impl rejects it here.
-        assert!(serde_json::from_str::<MessageId>("\"not-a-uuid\"").is_err());
-        assert!(serde_json::from_str::<MessageId>("\"550e8400\"").is_err());
-        assert!(serde_json::from_str::<MessageId>("\"\"").is_err());
+        assert!(
+            serde_json::from_str::<MessageId>("\"not-a-uuid\"").is_err(),
+            "a non-uuid json id is refused"
+        );
+        assert!(
+            serde_json::from_str::<MessageId>("\"550e8400\"").is_err(),
+            "a short json id is refused"
+        );
+        assert!(
+            serde_json::from_str::<MessageId>("\"\"").is_err(),
+            "an empty json id is refused"
+        );
     }
 }

@@ -166,32 +166,80 @@ mod tests {
 
     #[test]
     fn rejects_empty_and_overlong() {
-        assert!(Nickname::try_new("").is_err());
+        assert!(
+            Nickname::try_new("").is_err(),
+            "an empty nickname is refused"
+        );
         let too_long = "a".repeat(super::super::ident::MAX_CHARS + 1);
-        assert!(Nickname::try_new(&too_long).is_err());
+        assert!(
+            Nickname::try_new(&too_long).is_err(),
+            "an overlong nickname is refused"
+        );
     }
 
     #[test]
     fn length_cap_counts_characters_not_bytes() {
         // 32 multibyte chars (96 bytes) is fine; 33 is not.
-        assert!(Nickname::try_new(&"あ".repeat(32)).is_ok());
-        assert!(Nickname::try_new(&"あ".repeat(33)).is_err());
+        assert!(
+            Nickname::try_new(&"あ".repeat(32)).is_ok(),
+            "a 32-character nickname of wide characters is accepted"
+        );
+        assert!(
+            Nickname::try_new(&"あ".repeat(33)).is_err(),
+            "a 33-character nickname of wide characters is refused"
+        );
     }
 
     #[test]
     fn rejects_unsafe_chars() {
-        assert!(Nickname::try_new("alice bot").is_err()); // space
-        assert!(Nickname::try_new("alice/bob").is_err()); // path sep
-        assert!(Nickname::try_new("alice\\bob").is_err()); // path sep
-        assert!(Nickname::try_new("alice\nbob").is_err()); // newline
-        assert!(Nickname::try_new("alice\0bob").is_err()); // NUL
-        assert!(Nickname::try_new("alice\u{7}bob").is_err()); // bell control
-        assert!(Nickname::try_new("alice\u{202E}bob").is_err()); // RLO (bidi override)
-        assert!(Nickname::try_new("alice\u{200F}bob").is_err()); // RLM (bidi mark)
-        assert!(Nickname::try_new("alice\u{61C}bob").is_err()); // ALM (Arabic letter mark)
-        assert!(Nickname::try_new("a<b").is_err()); // reserved for <nick>
-        assert!(Nickname::try_new("a>b").is_err()); // reserved for <nick>
-        assert!(Nickname::try_new("a#b").is_err()); // reserved for #mesh
+        assert!(
+            Nickname::try_new("alice bot").is_err(),
+            "a space in a nickname is refused"
+        ); // space
+        assert!(
+            Nickname::try_new("alice/bob").is_err(),
+            "a slash in a nickname is refused"
+        ); // path sep
+        assert!(
+            Nickname::try_new("alice\\bob").is_err(),
+            "a backslash in a nickname is refused"
+        ); // path sep
+        assert!(
+            Nickname::try_new("alice\nbob").is_err(),
+            "a newline in a nickname is refused"
+        ); // newline
+        assert!(
+            Nickname::try_new("alice\0bob").is_err(),
+            "a nul byte in a nickname is refused"
+        ); // NUL
+        assert!(
+            Nickname::try_new("alice\u{7}bob").is_err(),
+            "a bell character in a nickname is refused"
+        ); // bell control
+        assert!(
+            Nickname::try_new("alice\u{202E}bob").is_err(),
+            "a right-to-left override in a nickname is refused"
+        ); // RLO (bidi override)
+        assert!(
+            Nickname::try_new("alice\u{200F}bob").is_err(),
+            "a right-to-left mark in a nickname is refused"
+        ); // RLM (bidi mark)
+        assert!(
+            Nickname::try_new("alice\u{61C}bob").is_err(),
+            "an arabic letter mark in a nickname is refused"
+        ); // ALM (Arabic letter mark)
+        assert!(
+            Nickname::try_new("a<b").is_err(),
+            "a less-than sign in a nickname is refused"
+        ); // reserved for <nick>
+        assert!(
+            Nickname::try_new("a>b").is_err(),
+            "a greater-than sign in a nickname is refused"
+        ); // reserved for <nick>
+        assert!(
+            Nickname::try_new("a#b").is_err(),
+            "a hash sign in a nickname is refused"
+        ); // reserved for #mesh
     }
 
     #[test]
@@ -206,23 +254,47 @@ mod tests {
     fn serde_transparent_round_trip() {
         let nickname = Nickname::from("swift-cedar");
         let json = serde_json::to_string(&nickname).unwrap();
-        assert_eq!(json, "\"swift-cedar\"");
+        assert_eq!(
+            json, "\"swift-cedar\"",
+            "a nickname serializes as a plain json string"
+        );
         let parsed: Nickname = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, nickname);
+        assert_eq!(parsed, nickname, "a nickname survives a json round trip");
     }
 
     #[test]
     fn deserialize_rejects_unsafe_nicknames() {
         // The validating Deserialize rejects what `new` rejects, so a crafted
         // wire nickname can't bypass the charset/length rules.
-        assert!(serde_json::from_str::<Nickname>("\"a#b\"").is_err()); // reserved
-        assert!(serde_json::from_str::<Nickname>("\"a<b\"").is_err()); // reserved
-        assert!(serde_json::from_str::<Nickname>("\"a\\u0007b\"").is_err()); // bell
-        assert!(serde_json::from_str::<Nickname>("\"a\\u202Eb\"").is_err()); // RLO bidi
-        assert!(serde_json::from_str::<Nickname>("\"\"").is_err()); // empty
+        assert!(
+            serde_json::from_str::<Nickname>("\"a#b\"").is_err(),
+            "a hash in a json nickname is refused"
+        ); // reserved
+        assert!(
+            serde_json::from_str::<Nickname>("\"a<b\"").is_err(),
+            "a less-than sign in a json nickname is refused"
+        ); // reserved
+        assert!(
+            serde_json::from_str::<Nickname>("\"a\\u0007b\"").is_err(),
+            "a bell in a json nickname is refused"
+        ); // bell
+        assert!(
+            serde_json::from_str::<Nickname>("\"a\\u202Eb\"").is_err(),
+            "a right-to-left override in a json nickname is refused"
+        ); // RLO bidi
+        assert!(
+            serde_json::from_str::<Nickname>("\"\"").is_err(),
+            "an empty json nickname is refused"
+        ); // empty
         let overlong = format!("\"{}\"", "a".repeat(33));
-        assert!(serde_json::from_str::<Nickname>(&overlong).is_err());
+        assert!(
+            serde_json::from_str::<Nickname>(&overlong).is_err(),
+            "an overlong json nickname is refused"
+        );
         // A valid nickname still round-trips.
-        assert!(serde_json::from_str::<Nickname>("\"swift-cedar\"").is_ok());
+        assert!(
+            serde_json::from_str::<Nickname>("\"swift-cedar\"").is_ok(),
+            "a plain json nickname is accepted"
+        );
     }
 }

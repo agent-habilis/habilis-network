@@ -4,21 +4,35 @@ use habilis_network_test_tracing::test;
 #[test]
 fn unset_is_not_advertising() {
     let sel = DirectorySelection::Unset;
-    assert!(!sel.is_set());
-    assert!(sel.directory().is_none());
+    assert!(!sel.is_set(), "an unset selection is not advertising");
+    assert!(
+        sel.directory().is_none(),
+        "an unset selection has no directory"
+    );
 }
 
 #[test]
 fn bare_resolves_to_default_directory() {
     let sel = DirectorySelection::Default;
-    assert!(sel.is_set());
-    assert_eq!(sel.directory().unwrap().as_str(), DEFAULT_DIRECTORY);
+    assert!(
+        sel.is_set(),
+        "a bare selection resolves to the default directory"
+    );
+    assert_eq!(
+        sel.directory().unwrap().as_str(),
+        DEFAULT_DIRECTORY,
+        "the default directory is named as the default"
+    );
 }
 
 #[test]
 fn named_resolves_to_that_directory() {
     let sel = DirectorySelection::Named(MeshName::try_new("gamedev").unwrap());
-    assert_eq!(sel.directory().unwrap().as_str(), "gamedev");
+    assert_eq!(
+        sel.directory().unwrap().as_str(),
+        "gamedev",
+        "a named selection resolves to that directory"
+    );
 }
 
 #[test]
@@ -28,6 +42,12 @@ fn advertise_requires_reachable_mesh() {
         validate_advertise(&DirectorySelection::Default, &LookupOpts::loopback()).unwrap_err();
     assert!(error.to_string().contains("reachable"), "got: {error}");
     // Reachable + advertising, and loopback + not advertising, are fine.
-    assert!(validate_advertise(&DirectorySelection::Default, &LookupOpts::public_preset()).is_ok());
-    assert!(validate_advertise(&DirectorySelection::Unset, &LookupOpts::loopback()).is_ok());
+    assert!(
+        validate_advertise(&DirectorySelection::Default, &LookupOpts::public_preset()).is_ok(),
+        "advertising a default directory requires a reachable mesh"
+    );
+    assert!(
+        validate_advertise(&DirectorySelection::Unset, &LookupOpts::loopback()).is_ok(),
+        "advertising an unset selection requires a reachable mesh"
+    );
 }

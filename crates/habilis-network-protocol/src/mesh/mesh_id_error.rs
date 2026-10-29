@@ -160,21 +160,27 @@ mod mesh_id_tests {
 
     #[test]
     fn rejects_too_short() {
-        assert!(matches!(MeshId::try_new("a"), Err(MeshIdError::Length(_))));
+        assert!(
+            matches!(MeshId::try_new("a"), Err(MeshIdError::Length(_))),
+            "a one-character mesh id is a length error"
+        );
     }
 
     #[test]
     fn rejects_invalid_base58_chars() {
         // `0`, `O`, `I`, `l` are not in the Base58 alphabet — and neither is
         // the glyph prefix ids used to carry, so a stale paste lands here too.
-        assert!(matches!(
-            MeshId::try_new("AbCdEf0xyz"),
-            Err(MeshIdError::Charset(_))
-        ));
-        assert!(matches!(
-            MeshId::try_new("AbCdEf0xyzZZ"),
-            Err(MeshIdError::Charset(_))
-        ));
+        assert!(
+            matches!(MeshId::try_new("AbCdEf0xyz"), Err(MeshIdError::Charset(_))),
+            "a mesh id with non-base58 characters is a charset error"
+        );
+        assert!(
+            matches!(
+                MeshId::try_new("AbCdEf0xyzZZ"),
+                Err(MeshIdError::Charset(_))
+            ),
+            "a longer mesh id with non-base58 characters is a charset error"
+        );
     }
 
     #[test]
@@ -182,9 +188,13 @@ mod mesh_id_tests {
         let id_str = valid_id();
         let id = MeshId::try_new(&id_str).unwrap();
         let json = serde_json::to_string(&id).unwrap();
-        assert_eq!(json, format!("\"{id_str}\""));
+        assert_eq!(
+            json,
+            format!("\"{id_str}\""),
+            "a mesh id serializes as a plain json string"
+        );
         let parsed: MeshId = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, id);
+        assert_eq!(parsed, id, "a mesh id survives a json round trip");
     }
 
     #[test]
@@ -192,14 +202,21 @@ mod mesh_id_tests {
         let mut mistyped = valid_id();
         let replacement = if mistyped.ends_with('1') { "2" } else { "1" };
         mistyped.replace_range(mistyped.len() - 1.., replacement);
-        assert_eq!(MeshId::try_new(&mistyped), Err(MeshIdError::InvalidHash));
+        assert_eq!(
+            MeshId::try_new(&mistyped),
+            Err(MeshIdError::InvalidHash),
+            "a mistyped hash is refused as an invalid hash"
+        );
     }
 
     #[test]
     fn serde_rejects_an_invalid_hash() {
         let invalid = serde_json::to_string("AbCdEf1234567").unwrap();
         let error = serde_json::from_str::<MeshId>(&invalid).unwrap_err();
-        assert!(error.to_string().contains("invalid gossip hash"));
+        assert!(
+            error.to_string().contains("invalid gossip hash"),
+            "a json mesh id with an invalid hash names the hash"
+        );
     }
 
     #[test]

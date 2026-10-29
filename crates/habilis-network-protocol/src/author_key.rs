@@ -94,15 +94,30 @@ mod tests {
     #[test]
     fn it_round_trips_through_its_hex_text() {
         let key = AuthorKey::from_hex(HEX).expect("a lowercase 64-char string");
-        assert_eq!(key.to_string(), HEX);
-        assert_eq!(key.as_bytes()[0], 0xea);
-        assert_eq!(key.to_bytes()[31], 0x2c);
-        assert_eq!(format!("{key:?}"), format!("AuthorKey({HEX})"));
+        assert_eq!(key.to_string(), HEX, "the author key displays its hex text");
+        assert_eq!(
+            key.as_bytes()[0],
+            0xea,
+            "the first byte of the author key is 0xea"
+        );
+        assert_eq!(
+            key.to_bytes()[31],
+            0x2c,
+            "the last byte of the wire key is 0x2c"
+        );
+        assert_eq!(
+            format!("{key:?}"),
+            format!("AuthorKey({HEX})"),
+            "the author key debug prints its hex text"
+        );
     }
 
     #[test]
     fn it_rejects_what_the_wire_rejects() {
-        assert!(AuthorKey::from_hex("").is_none());
+        assert!(
+            AuthorKey::from_hex("").is_none(),
+            "an empty hex string is refused as an author key"
+        );
         assert!(AuthorKey::from_hex(&HEX[..62]).is_none(), "short");
         assert!(AuthorKey::from_hex(&format!("{HEX}00")).is_none(), "long");
         assert!(
@@ -116,34 +131,58 @@ mod tests {
     #[test]
     fn hex_is_the_display_text_as_bytes() {
         let key = AuthorKey::from_hex(HEX).unwrap();
-        assert_eq!(key.hex().as_slice(), HEX.as_bytes());
-        assert_eq!(key.hex().as_slice(), key.to_string().as_bytes());
+        assert_eq!(
+            key.hex().as_slice(),
+            HEX.as_bytes(),
+            "the hex bytes are the display text"
+        );
+        assert_eq!(
+            key.hex().as_slice(),
+            key.to_string().as_bytes(),
+            "the hex bytes match the display text"
+        );
     }
 
     #[test]
     fn matches_hex_agrees_with_display() {
         let key = AuthorKey::from_hex(HEX).unwrap();
-        assert!(key.matches_hex(HEX));
-        assert!(!key.matches_hex(&HEX.to_uppercase()));
-        assert!(!key.matches_hex(&HEX[..62]));
-        assert!(!key.matches_hex(&format!("{}00", &HEX[..62])));
-        assert!(!key.matches_hex(""));
+        assert!(key.matches_hex(HEX), "matches_hex accepts the display text");
+        assert!(
+            !key.matches_hex(&HEX.to_uppercase()),
+            "matches_hex refuses upper-case text"
+        );
+        assert!(
+            !key.matches_hex(&HEX[..62]),
+            "matches_hex refuses a short text"
+        );
+        assert!(
+            !key.matches_hex(&format!("{}00", &HEX[..62])),
+            "matches_hex refuses a text with a changed last byte"
+        );
+        assert!(!key.matches_hex(""), "matches_hex refuses an empty text");
     }
 
     #[test]
     fn it_orders_by_its_bytes() {
         let low = AuthorKey::from_bytes([1; 32]);
         let high = AuthorKey::from_bytes([2; 32]);
-        assert!(low < high);
+        assert!(low < high, "author keys order by their bytes");
     }
 
     #[test]
     fn a_string_that_is_not_a_curve_point_is_a_key_but_not_a_public_key() {
         let mut bytes = [0u8; 32];
         bytes[0] = 2;
-        assert!(AuthorKey::from_bytes(bytes).public_key().is_none());
+        assert!(
+            AuthorKey::from_bytes(bytes).public_key().is_none(),
+            "a non-curve string is an author key but not a public key"
+        );
         let identity = crate::identity::Identity::generate();
         let author = identity.author_key();
-        assert_eq!(author.public_key(), Some(identity.public()));
+        assert_eq!(
+            author.public_key(),
+            Some(identity.public()),
+            "the public key of the identity is its author key"
+        );
     }
 }

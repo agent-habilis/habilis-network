@@ -932,22 +932,25 @@ mod lookup_tests {
     #[test]
     fn relay_ladder_parses_ordered_rungs() {
         let one: RelayLadder = "https://a.example".parse().unwrap();
-        assert_eq!(one.len(), 1);
-        assert!(!one.is_empty());
+        assert_eq!(one.len(), 1, "a single rung parses to one rung");
+        assert!(!one.is_empty(), "a single rung is not an empty ladder");
 
         let two: RelayLadder = "https://a.example,https://b.example".parse().unwrap();
-        assert_eq!(two.len(), 2);
+        assert_eq!(two.len(), 2, "two rungs parse to two rungs");
         // Display round-trips through FromStr (canonical `a,b` text form).
         let rendered = two.to_string();
         let reparsed: RelayLadder = rendered.parse().unwrap();
-        assert_eq!(reparsed, two);
-        assert_eq!(two.as_urls().len(), 2);
+        assert_eq!(reparsed, two, "the ladder re-parses to the same rungs");
+        assert_eq!(two.as_urls().len(), 2, "the ladder lists its two urls");
     }
 
     #[test]
     fn relay_ladder_rejects_empty_and_empty_entries() {
         let empty: Result<RelayLadder, _> = "".parse();
-        assert!(empty.is_err());
+        assert!(
+            empty.is_err(),
+            "an empty ladder and an empty entry are refused"
+        );
         let doubled: Result<RelayLadder, _> = "https://a.example,,https://b.example".parse();
         assert!(
             doubled.is_err(),
@@ -961,18 +964,27 @@ mod lookup_tests {
         // (non-loopback) mesh.
         let ladder: RelayLadder = "https://a.example".parse().unwrap();
         let options = resolve_lookups(lookups(false, false, RelaySelection::Named(ladder)));
-        assert!(!options.mdns && !options.dht);
+        assert!(
+            !options.mdns && !options.dht,
+            "naming relay alone leaves mdns and dht off"
+        );
         assert!(
             !options.is_loopback(),
             "a named relay makes the mesh reachable"
         );
-        assert!(matches!(options.relay_lookup, RelayChoice::Custom(_)));
+        assert!(
+            matches!(options.relay_lookup, RelayChoice::Custom(_)),
+            "naming relay alone selects a custom relay lookup"
+        );
     }
 
     #[test]
     fn mdns_alone_disables_dht_and_relay() {
         let options = resolve_lookups(lookups(true, false, RelaySelection::Unset));
-        assert!(options.mdns && !options.dht);
+        assert!(
+            options.mdns && !options.dht,
+            "naming mdns alone turns dht off"
+        );
         assert_eq!(
             options.relay_lookup,
             RelayChoice::Disabled,
@@ -984,8 +996,15 @@ mod lookup_tests {
     #[test]
     fn bare_relay_is_pinned_and_suppresses_lookups() {
         let options = resolve_lookups(lookups(false, false, RelaySelection::Default));
-        assert!(!options.mdns && !options.dht);
-        assert_eq!(options.relay_lookup, RelayChoice::Pinned);
+        assert!(
+            !options.mdns && !options.dht,
+            "a bare relay is off for mdns and dht"
+        );
+        assert_eq!(
+            options.relay_lookup,
+            RelayChoice::Pinned,
+            "a bare relay pins the relay lookup"
+        );
     }
 
     #[test]
@@ -996,7 +1015,8 @@ mod lookup_tests {
         let options = resolve_lookups(lookups(false, false, RelaySelection::Named(ladder)));
         assert_eq!(
             options.relay_lookup,
-            RelayChoice::Custom(vec![rung0, rung1])
+            RelayChoice::Custom(vec![rung0, rung1]),
+            "a valued relay keeps the order of its ladder"
         );
     }
 
@@ -1004,14 +1024,17 @@ mod lookup_tests {
     fn config_round_trips_loopback() {
         let config = MeshConfig::loopback();
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
-        assert_eq!(decoded, config);
+        assert_eq!(decoded, config, "a loopback config survives a round trip");
     }
 
     #[test]
     fn config_round_trips_public_preset() {
         let config = MeshConfig::public_preset();
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
-        assert_eq!(decoded, config);
+        assert_eq!(
+            decoded, config,
+            "a public preset config survives a round trip"
+        );
     }
 
     #[test]
@@ -1030,7 +1053,10 @@ mod lookup_tests {
             transport: TransportPolicy::default(),
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
-        assert_eq!(decoded, config);
+        assert_eq!(
+            decoded, config,
+            "a custom relay ladder survives a round trip"
+        );
     }
 
     #[test]
@@ -1039,14 +1065,20 @@ mod lookup_tests {
         // either way it must be rejected, never silently absorbed.
         let mut bytes = MeshConfig::loopback().to_bytes();
         bytes.push(0);
-        assert!(MeshConfig::from_bytes(&bytes).is_err());
+        assert!(
+            MeshConfig::from_bytes(&bytes).is_err(),
+            "trailing bytes after a config are refused"
+        );
     }
 
     #[test]
     fn config_rejects_custom_flag_without_enabled() {
         // flags with custom(0b1000) but not enabled(0b0100).
         let bytes = [0b1000];
-        assert!(MeshConfig::from_bytes(&bytes).is_err());
+        assert!(
+            MeshConfig::from_bytes(&bytes).is_err(),
+            "a custom flag without its enabled flag is refused"
+        );
     }
 
     #[test]
@@ -1058,17 +1090,22 @@ mod lookup_tests {
             transport: TransportPolicy::default(),
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
-        assert_eq!(decoded, config);
+        assert_eq!(decoded, config, "a password verifier survives a round trip");
     }
 
     #[test]
     fn a_passwordless_config_has_no_feature_byte() {
         // The lookups byte, the policy byte, and nothing else: the feature
         // byte only exists for a password or an invite.
-        assert_eq!(MeshConfig::loopback().to_bytes(), vec![0b0000, 0b1_0111]);
+        assert_eq!(
+            MeshConfig::loopback().to_bytes(),
+            vec![0b0000, 0b1_0111],
+            "a loopback config without a password encodes no feature byte"
+        );
         assert_eq!(
             MeshConfig::public_preset().to_bytes(),
-            vec![0b0111, 0b1_0111]
+            vec![0b0111, 0b1_0111],
+            "a public preset without a password encodes no feature byte"
         );
     }
 
@@ -1096,8 +1133,16 @@ mod lookup_tests {
         let bytes = config.to_bytes();
         // Lookups byte, then the policy byte with every path on, the relay and gossip
         // included. No feature byte: no password and no invite.
-        assert_eq!(bytes, vec![0b0111, 0b1_1111]);
-        assert_eq!(MeshConfig::from_bytes(&bytes).unwrap(), config);
+        assert_eq!(
+            bytes,
+            vec![0b0111, 0b1_1111],
+            "a relay transport encodes as the expected bytes"
+        );
+        assert_eq!(
+            MeshConfig::from_bytes(&bytes).unwrap(),
+            config,
+            "a relay transport decodes back to the same config"
+        );
         assert_ne!(
             bytes,
             MeshConfig::public_preset().to_bytes(),
@@ -1107,34 +1152,46 @@ mod lookup_tests {
 
     #[test]
     fn relay_is_lookup_only_by_default() {
-        assert!(!MeshConfig::public_preset().transport.relay_transport);
+        assert!(
+            !MeshConfig::public_preset().transport.relay_transport,
+            "the public preset keeps the relay lookup only"
+        );
         assert!(
             !MeshConfig::from_bytes(&[0b0111, 0b0111])
                 .unwrap()
                 .transport
-                .relay_transport
+                .relay_transport,
+            "the relay stays lookup-only when the flag is not set"
         );
     }
 
     #[test]
     fn udp_webrtc_multihop_and_gossip_are_on_by_default() {
         let default = TransportPolicy::default();
-        assert!(default.udp && default.webrtc && default.multihop && !default.relay_transport);
+        assert!(
+            default.udp && default.webrtc && default.multihop && !default.relay_transport,
+            "udp, webrtc, multihop and gossip are on by default"
+        );
         assert!(default.gossip, "gossip is on by default");
         assert_eq!(
             MeshConfig::public_preset().to_bytes(),
-            vec![0b0111, 0b1_0111]
+            vec![0b0111, 0b1_0111],
+            "the public preset encodes the default transport policy"
         );
         let decoded = MeshConfig::from_bytes(&[0b0111, 0b1_0111])
             .unwrap()
             .transport;
-        assert_eq!(decoded, default);
+        assert_eq!(
+            decoded, default,
+            "the default transport policy survives a round trip"
+        );
         let with_relay = MeshConfig::from_bytes(&[0b0111, 0b1111]).unwrap().transport;
         assert!(
             with_relay.udp
                 && with_relay.webrtc
                 && with_relay.multihop
-                && with_relay.relay_transport
+                && with_relay.relay_transport,
+            "the relayed policy keeps the default paths on"
         );
     }
 
@@ -1142,27 +1199,50 @@ mod lookup_tests {
     fn the_transport_policy_is_always_one_explicit_byte() {
         // Lookups byte, then the policy byte. Nothing is left implicit: a
         // config without the policy byte is not a version 2 config.
-        assert_eq!(MeshConfig::public_preset().to_bytes().len(), 2);
-        assert!(MeshConfig::from_bytes(&[0b0111]).is_err());
+        assert_eq!(
+            MeshConfig::public_preset().to_bytes().len(),
+            2,
+            "the transport policy is one explicit byte"
+        );
+        assert!(
+            MeshConfig::from_bytes(&[0b0111]).is_err(),
+            "a transport policy of one byte with no lookup is refused"
+        );
     }
 
     #[test]
     fn a_transport_list_turns_on_exactly_the_paths_it_names() {
         let policy = |list: &[Transport]| TransportPolicy::from_transports(list).unwrap();
-        assert_eq!(policy(&[]), TransportPolicy::default());
+        assert_eq!(
+            policy(&[]),
+            TransportPolicy::default(),
+            "an empty transport list gives the default policy"
+        );
         let udp = policy(&[Transport::Udp]);
-        assert!(udp.udp && !udp.webrtc && !udp.multihop && !udp.relay_transport);
+        assert!(
+            udp.udp && !udp.webrtc && !udp.multihop && !udp.relay_transport,
+            "a udp list turns on udp alone"
+        );
         let webrtc = policy(&[Transport::WebRtc]);
-        assert!(!webrtc.udp && webrtc.webrtc && !webrtc.multihop && !webrtc.relay_transport);
+        assert!(
+            !webrtc.udp && webrtc.webrtc && !webrtc.multihop && !webrtc.relay_transport,
+            "a webrtc list turns on webrtc alone"
+        );
         let multihop = policy(&[Transport::Udp, Transport::Multihop]);
-        assert!(multihop.udp && !multihop.webrtc && multihop.multihop && !multihop.relay_transport);
+        assert!(
+            multihop.udp && !multihop.webrtc && multihop.multihop && !multihop.relay_transport,
+            "a multihop list turns on multihop alone"
+        );
         let all = policy(&[
             Transport::Udp,
             Transport::WebRtc,
             Transport::Multihop,
             Transport::Relay,
         ]);
-        assert!(all.udp && all.webrtc && all.multihop && all.relay_transport);
+        assert!(
+            all.udp && all.webrtc && all.multihop && all.relay_transport,
+            "the full list turns on every path"
+        );
     }
 
     #[test]
@@ -1193,8 +1273,14 @@ mod lookup_tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("relay"), "{error}");
-        assert!(MeshConfig::resolve(&[Lookup::Relay], None, &[Transport::WebRtc]).is_ok());
-        assert!(MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::Udp]).is_ok());
+        assert!(
+            MeshConfig::resolve(&[Lookup::Relay], None, &[Transport::WebRtc]).is_ok(),
+            "a mesh without udp needs the relay lookup for webrtc"
+        );
+        assert!(
+            MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::Udp]).is_ok(),
+            "a mesh with mdns and udp needs no relay lookup"
+        );
     }
 
     /// `webrtc` is a direct path, so `webrtc,multihop` is a list that multihop can forward
@@ -1207,10 +1293,14 @@ mod lookup_tests {
                 None,
                 &[Transport::WebRtc, Transport::Multihop],
             )
-            .is_ok()
+            .is_ok(),
+            "multihop with webrtc and no udp resolves"
         );
         let bytes = vec![0b0111, super::TRANSPORT_WEBRTC | super::TRANSPORT_MULTIHOP];
-        assert!(MeshConfig::from_bytes(&bytes).is_ok());
+        assert!(
+            MeshConfig::from_bytes(&bytes).is_ok(),
+            "the multihop config decodes"
+        );
     }
 
     const NEEDS_A_DIRECT_PATH: &str =
@@ -1224,8 +1314,16 @@ mod lookup_tests {
     fn the_gossip_bit_is_the_fifth_and_an_older_id_reads_as_gossip_off() {
         let default = MeshConfig::public_preset();
         let bytes = default.to_bytes();
-        assert_eq!(bytes, vec![0b0111, 0b1_0111]);
-        assert_eq!(MeshConfig::from_bytes(&bytes).unwrap(), default);
+        assert_eq!(
+            bytes,
+            vec![0b0111, 0b1_0111],
+            "the gossip bit encodes as the expected bytes"
+        );
+        assert_eq!(
+            MeshConfig::from_bytes(&bytes).unwrap(),
+            default,
+            "an older id decodes with gossip off"
+        );
         let without_gossip = MeshConfig {
             transport: TransportPolicy {
                 gossip: false,
@@ -1233,7 +1331,11 @@ mod lookup_tests {
             },
             ..MeshConfig::public_preset()
         };
-        assert_eq!(without_gossip.to_bytes(), vec![0b0111, 0b0111]);
+        assert_eq!(
+            without_gossip.to_bytes(),
+            vec![0b0111, 0b0111],
+            "a config without gossip encodes the expected bytes"
+        );
         assert_ne!(
             bytes,
             without_gossip.to_bytes(),
@@ -1241,8 +1343,14 @@ mod lookup_tests {
         );
         let older = [0b0111, 0b0111];
         let decoded = MeshConfig::from_bytes(&older).unwrap();
-        assert!(!decoded.transport.gossip);
-        assert_eq!(decoded, without_gossip);
+        assert!(
+            !decoded.transport.gossip,
+            "an older id has gossip off after decoding"
+        );
+        assert_eq!(
+            decoded, without_gossip,
+            "the decoded config without gossip equals the original"
+        );
         assert_eq!(decoded.to_bytes(), older, "an older id keeps its bytes");
     }
 
@@ -1258,7 +1366,10 @@ mod lookup_tests {
             MeshConfig::from_bytes(&[0b0111, super::TRANSPORT_GOSSIP | super::TRANSPORT_MULTIHOP])
                 .unwrap_err()
                 .to_string();
-        assert_eq!(with_multihop, MULTIHOP_ALONE);
+        assert_eq!(
+            with_multihop, MULTIHOP_ALONE,
+            "an id with gossip and no direct path is refused as multihop alone"
+        );
     }
 
     /// Every subset of the five transports, each with its result: `Ok`, or the
@@ -1329,12 +1440,18 @@ mod lookup_tests {
         let alone = MeshConfig::from_bytes(&[0b0111, super::TRANSPORT_MULTIHOP])
             .unwrap_err()
             .to_string();
-        assert_eq!(alone, MULTIHOP_ALONE);
+        assert_eq!(
+            alone, MULTIHOP_ALONE,
+            "an id with multihop alone names the multihop mistake"
+        );
         let with_relay = super::TRANSPORT_MULTIHOP | super::TRANSPORT_RELAY;
         let with_relay_error = MeshConfig::from_bytes(&[0b0111, with_relay])
             .unwrap_err()
             .to_string();
-        assert_eq!(with_relay_error, MULTIHOP_ALONE);
+        assert_eq!(
+            with_relay_error, MULTIHOP_ALONE,
+            "an id with multihop and a relay error names the multihop mistake"
+        );
     }
 
     /// One rule, not one per caller: a list that names `multihop` twice is
@@ -1383,7 +1500,10 @@ mod lookup_tests {
             },
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
-        assert_eq!(decoded, config);
+        assert_eq!(
+            decoded, config,
+            "a relay transport with a password survives a round trip"
+        );
     }
 
     #[test]
@@ -1398,7 +1518,10 @@ mod lookup_tests {
         assert!(config.validate().is_err(), "no relay to carry payload");
         // The same shape on the wire is refused on decode too.
         let bytes = vec![0b0000, super::TRANSPORT_UDP | super::TRANSPORT_RELAY];
-        assert!(MeshConfig::from_bytes(&bytes).is_err());
+        assert!(
+            MeshConfig::from_bytes(&bytes).is_err(),
+            "relay transport on without a relay lookup is refused"
+        );
     }
 
     #[test]
@@ -1410,7 +1533,10 @@ mod lookup_tests {
             transport: TransportPolicy::default(),
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
-        assert_eq!(decoded, config);
+        assert_eq!(
+            decoded, config,
+            "an issuer public key survives a round trip"
+        );
     }
 
     #[test]
@@ -1424,7 +1550,10 @@ mod lookup_tests {
             transport: TransportPolicy::default(),
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
-        assert_eq!(decoded, config);
+        assert_eq!(
+            decoded, config,
+            "a password and an invite survive a round trip together"
+        );
     }
 
     #[test]
@@ -1432,7 +1561,10 @@ mod lookup_tests {
         let mut bytes = MeshConfig::public_preset().to_bytes();
         bytes.push(0b0010); // invite-only bit
         bytes.extend_from_slice(&[0u8; 16]); // half a pubkey
-        assert!(MeshConfig::from_bytes(&bytes).is_err());
+        assert!(
+            MeshConfig::from_bytes(&bytes).is_err(),
+            "a truncated issuer public key is refused"
+        );
     }
 
     #[test]
@@ -1440,7 +1572,10 @@ mod lookup_tests {
         let mut bytes = MeshConfig::public_preset().to_bytes();
         bytes.push(0b0001);
         bytes.extend_from_slice(&[0u8; 8]); // half a verifier
-        assert!(MeshConfig::from_bytes(&bytes).is_err());
+        assert!(
+            MeshConfig::from_bytes(&bytes).is_err(),
+            "a truncated verifier is refused"
+        );
     }
 
     #[test]
@@ -1448,7 +1583,10 @@ mod lookup_tests {
         let mut bytes = MeshConfig::public_preset().to_bytes();
         bytes.push(0b0001);
         bytes.extend_from_slice(&[0u8; 17]); // verifier + one extra byte
-        assert!(MeshConfig::from_bytes(&bytes).is_err());
+        assert!(
+            MeshConfig::from_bytes(&bytes).is_err(),
+            "a verifier with trailing slack is refused"
+        );
     }
 }
 
@@ -1467,38 +1605,74 @@ mod choice_tests {
     #[test]
     fn a_lookup_and_a_transport_parse_from_their_names() {
         let mdns: Lookup = "mdns".parse().unwrap();
-        assert_eq!(mdns, Lookup::Mdns);
+        assert_eq!(
+            mdns,
+            Lookup::Mdns,
+            "the mdns name parses to the mdns lookup"
+        );
         let dht: Lookup = "dht".parse().unwrap();
-        assert_eq!(dht, Lookup::Dht);
+        assert_eq!(dht, Lookup::Dht, "the dht name parses to the dht lookup");
         let relay: Lookup = "relay".parse().unwrap();
-        assert_eq!(relay, Lookup::Relay);
+        assert_eq!(
+            relay,
+            Lookup::Relay,
+            "the relay name parses to the relay lookup"
+        );
         let udp: Transport = "udp".parse().unwrap();
-        assert_eq!(udp, Transport::Udp);
+        assert_eq!(
+            udp,
+            Transport::Udp,
+            "the udp name parses to the udp transport"
+        );
         let webrtc: Transport = "webrtc".parse().unwrap();
-        assert_eq!(webrtc, Transport::WebRtc);
+        assert_eq!(
+            webrtc,
+            Transport::WebRtc,
+            "the webrtc name parses to the webrtc transport"
+        );
         let relay_transport: Transport = "relay".parse().unwrap();
-        assert_eq!(relay_transport, Transport::Relay);
+        assert_eq!(
+            relay_transport,
+            Transport::Relay,
+            "the relay name parses to the relay transport"
+        );
         let multihop: Transport = "multihop".parse().unwrap();
-        assert_eq!(multihop, Transport::Multihop);
+        assert_eq!(
+            multihop,
+            Transport::Multihop,
+            "the multihop name parses to the multihop transport"
+        );
         let gossip: Transport = "gossip".parse().unwrap();
-        assert_eq!(gossip, Transport::Gossip);
-        assert_eq!(Transport::Gossip.to_string(), "gossip");
+        assert_eq!(
+            gossip,
+            Transport::Gossip,
+            "the gossip name parses to the gossip transport"
+        );
+        assert_eq!(
+            Transport::Gossip.to_string(),
+            "gossip",
+            "the gossip transport displays as gossip"
+        );
         for (name, lookup) in [
             ("mdns", Lookup::Mdns),
             ("dht", Lookup::Dht),
             ("relay", Lookup::Relay),
         ] {
-            assert_eq!(lookup.to_string(), name);
+            assert_eq!(lookup.to_string(), name, "the lookup displays as its name");
         }
-        assert_eq!(Transport::Udp.to_string(), "udp");
+        assert_eq!(
+            Transport::Udp.to_string(),
+            "udp",
+            "the udp transport displays as udp"
+        );
     }
 
     #[test]
     fn the_direct_transport_is_named_udp_not_p2p() {
         let udp: Transport = "udp".parse().unwrap();
-        assert_eq!(udp.to_string(), "udp");
+        assert_eq!(udp.to_string(), "udp", "the direct transport is named udp");
         let p2p: Result<Transport, _> = "p2p".parse();
-        assert!(p2p.is_err());
+        assert!(p2p.is_err(), "the name p2p is not a transport");
     }
 
     #[test]
@@ -1521,25 +1695,53 @@ mod choice_tests {
     #[test]
     fn the_lists_deserialize_from_json_names() {
         let lookups: Vec<Lookup> = serde_json::from_str(r#"["mdns","relay"]"#).unwrap();
-        assert_eq!(lookups, vec![Lookup::Mdns, Lookup::Relay]);
+        assert_eq!(
+            lookups,
+            vec![Lookup::Mdns, Lookup::Relay],
+            "the lookup list deserializes from its json names"
+        );
         let transports: Vec<Transport> = serde_json::from_str(r#"["udp","relay"]"#).unwrap();
-        assert_eq!(transports, vec![Transport::Udp, Transport::Relay]);
-        assert!(serde_json::from_str::<Vec<Lookup>>(r#"["public"]"#).is_err());
+        assert_eq!(
+            transports,
+            vec![Transport::Udp, Transport::Relay],
+            "the transport list deserializes from its json names"
+        );
+        assert!(
+            serde_json::from_str::<Vec<Lookup>>(r#"["public"]"#).is_err(),
+            "an unknown json lookup name is refused"
+        );
     }
 
     #[test]
     fn a_lookup_list_becomes_the_set_of_exactly_those() {
         let set = LookupSet::from_lookups(&[Lookup::Mdns], None).unwrap();
-        assert!(set.mdns && !set.dht);
-        assert_eq!(set.relay_lookup, RelaySelection::Unset);
+        assert!(
+            set.mdns && !set.dht,
+            "a lookup list sets mdns and leaves dht off"
+        );
+        assert_eq!(
+            set.relay_lookup,
+            RelaySelection::Unset,
+            "a lookup list leaves the relay lookup unset"
+        );
         let options = resolve_lookups(set);
-        assert!(options.mdns && !options.dht);
-        assert_eq!(options.relay_lookup, RelayChoice::Disabled);
+        assert!(
+            options.mdns && !options.dht,
+            "a lookup list gives the options mdns and no dht"
+        );
+        assert_eq!(
+            options.relay_lookup,
+            RelayChoice::Disabled,
+            "a lookup list leaves the relay lookup disabled"
+        );
     }
 
     #[test]
     fn a_set_names_a_lookup_when_any_field_is_set() {
-        assert!(!LookupSet::default().any());
+        assert!(
+            !LookupSet::default().any(),
+            "an empty lookup set names no lookup"
+        );
         for lookup in [Lookup::Mdns, Lookup::Dht, Lookup::Relay] {
             let set = LookupSet::from_lookups(&[lookup], None).unwrap();
             assert!(set.any(), "{lookup:?} alone is a lookup");
@@ -1549,10 +1751,18 @@ mod choice_tests {
     #[test]
     fn naming_relay_takes_the_default_ladder_unless_one_is_given() {
         let bare = LookupSet::from_lookups(&[Lookup::Relay], None).unwrap();
-        assert_eq!(bare.relay_lookup, RelaySelection::Default);
+        assert_eq!(
+            bare.relay_lookup,
+            RelaySelection::Default,
+            "naming relay takes the default ladder when none is given"
+        );
         let ladder: RelayLadder = "https://a.example,https://b.example".parse().unwrap();
         let custom = LookupSet::from_lookups(&[Lookup::Relay], Some(ladder.clone())).unwrap();
-        assert_eq!(custom.relay_lookup, RelaySelection::Named(ladder));
+        assert_eq!(
+            custom.relay_lookup,
+            RelaySelection::Named(ladder),
+            "naming relay with a ladder keeps the named ladder"
+        );
     }
 
     #[test]
@@ -1568,17 +1778,20 @@ mod choice_tests {
     fn an_empty_transport_list_and_udp_alone_keep_the_relay_off_payload() {
         assert_eq!(
             TransportPolicy::from_transports(&[]).unwrap(),
-            TransportPolicy::default()
+            TransportPolicy::default(),
+            "an empty transport list keeps the relay off the payload path"
         );
         assert!(
             !TransportPolicy::from_transports(&[Transport::Udp])
                 .unwrap()
-                .relay_transport
+                .relay_transport,
+            "udp alone keeps the relay off the payload path"
         );
         assert!(
             TransportPolicy::from_transports(&[Transport::Udp, Transport::Relay])
                 .unwrap()
-                .relay_transport
+                .relay_transport,
+            "a transport list with relay turns the relay on"
         );
     }
 
@@ -1595,13 +1808,26 @@ mod choice_tests {
         let config =
             MeshConfig::resolve(&[Lookup::Relay], None, &[Transport::Udp, Transport::Relay])
                 .unwrap();
-        assert!(config.transport.relay_transport);
-        assert_eq!(config.lookups.relay_lookup, RelayChoice::Pinned);
-        assert!(config.password.is_none() && config.issuer_pubkey.is_none());
+        assert!(
+            config.transport.relay_transport,
+            "the three choices resolve to a relay transport"
+        );
+        assert_eq!(
+            config.lookups.relay_lookup,
+            RelayChoice::Pinned,
+            "the three choices resolve to a pinned relay lookup"
+        );
+        assert!(
+            config.password.is_none() && config.issuer_pubkey.is_none(),
+            "the three choices leave the password and issuer unset"
+        );
 
         let bare = MeshConfig::resolve(&[], None, &[]).unwrap();
-        assert!(bare.lookups.is_loopback());
-        assert!(!bare.transport.relay_transport);
+        assert!(bare.lookups.is_loopback(), "the bare config is loopback");
+        assert!(
+            !bare.transport.relay_transport,
+            "the bare config has the relay transport off"
+        );
     }
 
     /// The relay's two roles are two lists, so the relay can serve lookup
@@ -1611,9 +1837,17 @@ mod choice_tests {
     fn relay_can_be_a_lookup_and_nothing_more() {
         for transports in [&[][..], &[Transport::Udp][..]] {
             let config = MeshConfig::resolve(&[Lookup::Relay], None, transports).unwrap();
-            assert_eq!(config.lookups.relay_lookup, RelayChoice::Pinned);
+            assert_eq!(
+                config.lookups.relay_lookup,
+                RelayChoice::Pinned,
+                "a relay can be a lookup and nothing more"
+            );
             assert!(!config.transport.relay_transport, "{transports:?}");
-            assert_eq!(config, MeshConfig::from_bytes(&config.to_bytes()).unwrap());
+            assert_eq!(
+                config,
+                MeshConfig::from_bytes(&config.to_bytes()).unwrap(),
+                "the relay-only config survives a round trip"
+            );
         }
     }
 
@@ -1628,7 +1862,14 @@ mod choice_tests {
     #[test]
     fn no_lookups_is_loopback_without_a_preset_switch() {
         let options = resolve_lookups(LookupSet::default());
-        assert!(options.is_loopback());
-        assert_eq!(options.network_label(), "private");
+        assert!(
+            options.is_loopback(),
+            "no lookups is loopback without a preset switch"
+        );
+        assert_eq!(
+            options.network_label(),
+            "private",
+            "no lookups labels the network as private"
+        );
     }
 }

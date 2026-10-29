@@ -109,7 +109,8 @@ mod derive_secret_tests {
     fn derive_secret_is_deterministic() {
         assert_eq!(
             derive_secret(&SEED_A, b"rendezvous"),
-            derive_secret(&SEED_A, b"rendezvous")
+            derive_secret(&SEED_A, b"rendezvous"),
+            "derive_secret is deterministic for the same label"
         );
     }
 
@@ -119,23 +120,30 @@ mod derive_secret_tests {
         let seed = Seed::from_bytes(SEED_A);
         assert_eq!(
             seed.derive(b"state-doc").as_bytes(),
-            &*derive_secret(&SEED_A, b"state-doc")
+            &*derive_secret(&SEED_A, b"state-doc"),
+            "derive hashes the same bytes as derive_secret for a seed"
         );
         // A key derives from the same bytes the way a seed does.
         let key = SymmetricKey::from_bytes(SEED_A);
         assert_eq!(
             key.derive(b"broadcast").as_bytes(),
-            seed.derive(b"broadcast").as_bytes()
+            seed.derive(b"broadcast").as_bytes(),
+            "the key and the seed derive the same broadcast bytes"
         );
     }
 
     #[test]
     fn a_seed_and_a_symmetric_key_print_no_byte() {
         use crate::crypto::{Seed, SymmetricKey};
-        assert_eq!(format!("{:?}", Seed::from_bytes(SEED_A)), "Seed(***)");
+        assert_eq!(
+            format!("{:?}", Seed::from_bytes(SEED_A)),
+            "Seed(***)",
+            "a seed prints no byte"
+        );
         assert_eq!(
             format!("{:?}", SymmetricKey::from_bytes(SEED_A)),
-            "SymmetricKey(***)"
+            "SymmetricKey(***)",
+            "a symmetric key prints no byte"
         );
     }
 
@@ -143,7 +151,8 @@ mod derive_secret_tests {
     fn derive_secret_domain_separates_by_label() {
         assert_ne!(
             derive_secret(&SEED_A, b"rendezvous"),
-            derive_secret(&SEED_A, b"port")
+            derive_secret(&SEED_A, b"port"),
+            "different labels derive different secrets"
         );
     }
 
@@ -151,7 +160,8 @@ mod derive_secret_tests {
     fn derive_secret_domain_separates_by_seed() {
         assert_ne!(
             derive_secret(&SEED_A, b"rendezvous"),
-            derive_secret(&SEED_B, b"rendezvous")
+            derive_secret(&SEED_B, b"rendezvous"),
+            "different seeds derive different secrets"
         );
     }
 
@@ -161,7 +171,8 @@ mod derive_secret_tests {
         // hash the same stream. The prefix must keep them distinct.
         assert_ne!(
             derive_secret(&SEED_A, b"rdvx"),
-            derive_secret(&SEED_A, b"rdv")
+            derive_secret(&SEED_A, b"rdv"),
+            "the label length prefix prevents a collision"
         );
     }
 
@@ -169,11 +180,13 @@ mod derive_secret_tests {
     fn rendezvous_id_is_stable_for_a_seed() {
         assert_eq!(
             rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_A))),
-            rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_A)))
+            rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_A))),
+            "the rendezvous id is stable for a seed"
         );
         assert_ne!(
             rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_A))),
-            rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_B)))
+            rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_B))),
+            "a different seed gives a different rendezvous id"
         );
     }
 
@@ -181,15 +194,23 @@ mod derive_secret_tests {
     fn rendezvous_id_matches_secret_public() {
         assert_eq!(
             rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_A))),
-            rendezvous_secret(Keying::Wire(&Seed::from_bytes(SEED_A))).public()
+            rendezvous_secret(Keying::Wire(&Seed::from_bytes(SEED_A))).public(),
+            "the rendezvous id matches the secret public key"
         );
     }
 
     #[test]
     fn rendezvous_ports_are_in_range_stable_and_seed_specific() {
         let ladder = rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED_A)));
-        assert_eq!(ladder.len(), RENDEZVOUS_LADDER);
-        assert!(ladder.iter().all(|&port| port >= 1024));
+        assert_eq!(
+            ladder.len(),
+            RENDEZVOUS_LADDER,
+            "the rendezvous ladder has the expected length"
+        );
+        assert!(
+            ladder.iter().all(|&port| port >= 1024),
+            "every rendezvous port is at least 1024"
+        );
         assert_eq!(
             ladder,
             rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED_A))),
@@ -217,22 +238,38 @@ mod derive_secret_tests {
 
     #[test]
     fn topic_seed_is_deterministic() {
-        assert_eq!(topic_seed("agent-habilis"), topic_seed("agent-habilis"));
+        assert_eq!(
+            topic_seed("agent-habilis"),
+            topic_seed("agent-habilis"),
+            "the topic seed is deterministic"
+        );
     }
 
     #[test]
     fn topic_seed_differs_by_string() {
-        assert_ne!(topic_seed("alpha"), topic_seed("beta"));
+        assert_ne!(
+            topic_seed("alpha"),
+            topic_seed("beta"),
+            "different strings give different topic seeds"
+        );
     }
 
     #[test]
     fn topic_seed_trims_surrounding_whitespace() {
-        assert_eq!(topic_seed("  x\n"), topic_seed("x"));
+        assert_eq!(
+            topic_seed("  x\n"),
+            topic_seed("x"),
+            "the topic seed trims surrounding whitespace"
+        );
     }
 
     #[test]
     fn topic_seed_is_case_sensitive() {
-        assert_ne!(topic_seed("Repo"), topic_seed("repo"));
+        assert_ne!(
+            topic_seed("Repo"),
+            topic_seed("repo"),
+            "the topic seed is case sensitive"
+        );
     }
 
     #[test]
@@ -241,7 +278,8 @@ mod derive_secret_tests {
         // labelled derivation off some other seed for any plausible collision.
         assert_ne!(
             topic_seed("rendezvous").as_bytes(),
-            &*derive_secret(&SEED_A, b"rendezvous")
+            &*derive_secret(&SEED_A, b"rendezvous"),
+            "the topic seed is domain separated from derive_secret"
         );
     }
 
@@ -251,7 +289,10 @@ mod derive_secret_tests {
         let unique: HashSet<_> = ladder.iter().collect();
         // A rare in-ladder dup is harmless, but the fixed test seed
         // must not regress into a degenerate all-same ladder.
-        assert!(unique.len() >= RENDEZVOUS_LADDER - 1);
+        assert!(
+            unique.len() >= RENDEZVOUS_LADDER - 1,
+            "the rendezvous rungs are almost surely distinct"
+        );
     }
 }
 
@@ -273,7 +314,7 @@ mod topic_tests {
         let seed = [42u8; 32];
         let first = derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("team"), CFG_A);
         let second = derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("team"), CFG_A);
-        assert_eq!(first, second);
+        assert_eq!(first, second, "the same input derives the same topic id");
     }
 
     #[test]
@@ -290,7 +331,8 @@ mod topic_tests {
                 Keying::Wire(&Seed::from_bytes(seed_b)),
                 &name("team"),
                 CFG_A
-            )
+            ),
+            "different seeds derive different topic ids"
         );
     }
 
@@ -299,7 +341,8 @@ mod topic_tests {
         let seed = [1u8; 32];
         assert_ne!(
             derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("alpha"), CFG_A),
-            derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("beta"), CFG_A)
+            derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("beta"), CFG_A),
+            "different names derive different topic ids"
         );
     }
 

@@ -152,8 +152,14 @@ mod shard_tests {
 
     #[test]
     fn group_deserialize_rejects_non_uuid() {
-        assert!(serde_json::from_str::<ShardGroup>("\"not-a-uuid\"").is_err());
-        assert!(ShardGroup::from_uuid_str("not-a-uuid").is_none());
+        assert!(
+            serde_json::from_str::<ShardGroup>("\"not-a-uuid\"").is_err(),
+            "a non-uuid shard group is refused on deserialize"
+        );
+        assert!(
+            ShardGroup::from_uuid_str("not-a-uuid").is_none(),
+            "a non-uuid shard group is refused by from_uuid_str"
+        );
     }
 
     #[test]
@@ -163,14 +169,16 @@ mod shard_tests {
         // total < 2 (a single shard is never multipart).
         assert!(
             serde_json::from_str::<Shard>(&format!(r#"{{"group":"{group}","idx":0,"total":1}}"#))
-                .is_err()
+                .is_err(),
+            "a shard with an out-of-range total is refused"
         );
         // A large-but-sane total is fine (the store is byte-budgeted)...
         assert!(
             serde_json::from_str::<Shard>(&format!(
                 r#"{{"group":"{group}","idx":0,"total":9999}}"#
             ))
-            .is_ok()
+            .is_ok(),
+            "a shard with an out-of-range index is refused"
         );
         // ...but an absurd header past the tripwire is rejected.
         assert!(
@@ -178,12 +186,14 @@ mod shard_tests {
                 r#"{{"group":"{group}","idx":0,"total":{}}}"#,
                 u64::from(super::MAX_SHARD_TOTAL) + 1
             ))
-            .is_err()
+            .is_err(),
+            "a shard with a zero total is refused"
         );
         // idx must be inside total.
         assert!(
             serde_json::from_str::<Shard>(&format!(r#"{{"group":"{group}","idx":3,"total":3}}"#))
-                .is_err()
+                .is_err(),
+            "a shard whose index is not below its total is refused"
         );
     }
 
@@ -207,7 +217,7 @@ mod shard_tests {
         let group = group.as_str();
         let shard: Shard =
             serde_json::from_str(&format!(r#"{{"group":"{group}","idx":1,"total":3}}"#)).unwrap();
-        assert_eq!(shard.index, 1);
-        assert_eq!(shard.total, 3);
+        assert_eq!(shard.index, 1, "a valid shard keeps its index");
+        assert_eq!(shard.total, 3, "a valid shard keeps its total");
     }
 }

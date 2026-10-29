@@ -54,22 +54,25 @@ fn isolates_by_author() {
     // shard can't inject a slice into the victim's reassembled body.
     let now = Instant::now();
     let mut store = ReassemblyStore::default();
-    assert!(matches!(
-        ingest(
-            &mut store,
-            &shard_msg(
-                "alice-0",
-                "alice",
-                Shard {
-                    group: group_a(),
-                    index: 0,
-                    total: 2
-                }
+    assert!(
+        matches!(
+            ingest(
+                &mut store,
+                &shard_msg(
+                    "alice-0",
+                    "alice",
+                    Shard {
+                        group: group_a(),
+                        index: 0,
+                        total: 2
+                    }
+                ),
+                now
             ),
-            now
+            ShardIngest::Buffered
         ),
-        ShardIngest::Buffered
-    ));
+        "a shard from one author is kept apart from another author's"
+    );
     assert!(
         matches!(
             ingest(
@@ -105,7 +108,11 @@ fn isolates_by_author() {
     ) else {
         panic!("alice's set completes");
     };
-    assert_eq!(logical.body.as_str(), "alice-0alice-1");
+    assert_eq!(
+        logical.body.as_str(),
+        "alice-0alice-1",
+        "the two alice shards reassemble in order"
+    );
 }
 
 #[test]
@@ -176,22 +183,25 @@ fn header_mismatch_is_dropped() {
         now,
     );
     // Same signer contradicting its own advertised total: crafted stream.
-    assert!(matches!(
-        ingest(
-            &mut store,
-            &shard_msg(
-                "y",
-                "a",
-                Shard {
-                    group: group_a(),
-                    index: 1,
-                    total: 4
-                }
+    assert!(
+        matches!(
+            ingest(
+                &mut store,
+                &shard_msg(
+                    "y",
+                    "a",
+                    Shard {
+                        group: group_a(),
+                        index: 1,
+                        total: 4
+                    }
+                ),
+                now
             ),
-            now
+            ShardIngest::Dropped
         ),
-        ShardIngest::Dropped
-    ));
+        "a shard whose header mismatches is dropped"
+    );
     // A different kind under the same group is equally crafted.
     let mut wrong_kind = shard_msg(
         "z",
@@ -207,10 +217,10 @@ fn header_mismatch_is_dropped() {
         subtype: crate::PresenceSubtype::Joined,
     };
     let wrong_kind = Verified::fixture_unchecked(wrong_kind, author_of("a"));
-    assert!(matches!(
-        ingest(&mut store, &wrong_kind, now),
-        ShardIngest::Dropped
-    ));
+    assert!(
+        matches!(ingest(&mut store, &wrong_kind, now), ShardIngest::Dropped),
+        "a shard of the wrong kind is dropped"
+    );
 }
 
 #[test]
@@ -230,22 +240,25 @@ fn duplicate_idx_is_dropped_first_seen_wins() {
         ),
         now,
     );
-    assert!(matches!(
-        ingest(
-            &mut store,
-            &shard_msg(
-                "second",
-                "a",
-                Shard {
-                    group: group_a(),
-                    index: 0,
-                    total: 2
-                }
+    assert!(
+        matches!(
+            ingest(
+                &mut store,
+                &shard_msg(
+                    "second",
+                    "a",
+                    Shard {
+                        group: group_a(),
+                        index: 0,
+                        total: 2
+                    }
+                ),
+                now
             ),
-            now
+            ShardIngest::Dropped
         ),
-        ShardIngest::Dropped
-    ));
+        "the first copy of a duplicate index wins"
+    );
     let ShardIngest::Complete(logical) = ingest(
         &mut store,
         &shard_msg(
@@ -288,24 +301,30 @@ fn group_budget_breach_drops_the_group() {
     );
     // The second shard pushes the group past its byte ceiling: the whole
     // group is dropped, and its budget released.
-    assert!(matches!(
-        ingest(
-            &mut store,
-            &shard_msg(
-                &big,
-                "a",
-                Shard {
-                    group: group_a(),
-                    index: 1,
-                    total: 3
-                }
+    assert!(
+        matches!(
+            ingest(
+                &mut store,
+                &shard_msg(
+                    &big,
+                    "a",
+                    Shard {
+                        group: group_a(),
+                        index: 1,
+                        total: 3
+                    }
+                ),
+                now
             ),
-            now
+            ShardIngest::Dropped
         ),
-        ShardIngest::Dropped
-    ));
+        "a group over the budget is dropped"
+    );
     assert_eq!(store.total_bytes, 0, "dropped group released its budget");
-    assert!(store.groups.is_empty());
+    assert!(
+        store.groups.is_empty(),
+        "a dropped group leaves no groups behind"
+    );
 }
 
 #[test]
@@ -349,28 +368,37 @@ fn author_budget_evicts_the_stalest_group() {
     );
     // ...so a third group evicts the stalest (the first), not the freshest.
     let newcomer = group("00000000-0000-4000-8000-000000000003");
-    assert!(matches!(
-        ingest(
-            &mut store,
-            &shard_msg(
-                &chunk,
-                "a",
-                Shard {
-                    group: newcomer.clone(),
-                    index: 0,
-                    total: 2
-                }
+    assert!(
+        matches!(
+            ingest(
+                &mut store,
+                &shard_msg(
+                    &chunk,
+                    "a",
+                    Shard {
+                        group: newcomer.clone(),
+                        index: 0,
+                        total: 2
+                    }
+                ),
+                start + Duration::from_secs(2)
             ),
-            start + Duration::from_secs(2)
+            ShardIngest::Buffered
         ),
-        ShardIngest::Buffered
-    ));
+        "the author budget evicts the stalest group"
+    );
     assert!(
         !store.groups.contains_key(&(author_of("a"), stale)),
         "stalest group evicted"
     );
-    assert!(store.groups.contains_key(&(author_of("a"), fresh)));
-    assert!(store.groups.contains_key(&(author_of("a"), newcomer)));
+    assert!(
+        store.groups.contains_key(&(author_of("a"), fresh)),
+        "the fresh group stays after the author budget eviction"
+    );
+    assert!(
+        store.groups.contains_key(&(author_of("a"), newcomer)),
+        "the newcomer group is kept after the author budget eviction"
+    );
 }
 
 #[test]
@@ -410,7 +438,10 @@ fn global_budget_refuses_the_newcomer() {
         fitted <= REASSEMBLY_TOTAL_BUDGET_BYTES / (REASSEMBLY_GROUP_MAX_BYTES / 2),
         "global backstop caps buffered bytes across Sybil authors"
     );
-    assert!(store.total_bytes <= REASSEMBLY_TOTAL_BUDGET_BYTES);
+    assert!(
+        store.total_bytes <= REASSEMBLY_TOTAL_BUDGET_BYTES,
+        "the global budget refuses the newcomer"
+    );
 }
 
 /// The Sybil property, and the reason the budget is per author at all: a
@@ -432,22 +463,25 @@ fn a_floods_groups_do_not_evict_another_authors() {
 
     // One honest partial transfer, parked.
     let honest = group("00000000-0000-4000-8000-0000000000aa");
-    assert!(matches!(
-        ingest(
-            &mut store,
-            &shard_msg(
-                &chunk,
-                "honest",
-                Shard {
-                    group: honest.clone(),
-                    index: 0,
-                    total: 2,
-                },
+    assert!(
+        matches!(
+            ingest(
+                &mut store,
+                &shard_msg(
+                    &chunk,
+                    "honest",
+                    Shard {
+                        group: honest.clone(),
+                        index: 0,
+                        total: 2,
+                    },
+                ),
+                now,
             ),
-            now,
+            ShardIngest::Buffered
         ),
-        ShardIngest::Buffered
-    ));
+        "one author's flood does not evict another author's groups"
+    );
 
     // A flooder then burns through its own allowance several times over.
     for round in 0..8u32 {
@@ -501,40 +535,46 @@ fn stale_groups_are_swept_and_release_budget() {
     );
     // Progress (a NEW slot) refreshes the group's clock...
     let touched = start + REASSEMBLY_STALE.saturating_sub(Duration::from_secs(1));
-    assert!(matches!(
-        ingest(
-            &mut store,
-            &shard_msg(
-                "y",
-                "a",
-                Shard {
-                    group: group_a(),
-                    index: 1,
-                    total: 3
-                }
+    assert!(
+        matches!(
+            ingest(
+                &mut store,
+                &shard_msg(
+                    "y",
+                    "a",
+                    Shard {
+                        group: group_a(),
+                        index: 1,
+                        total: 3
+                    }
+                ),
+                touched
             ),
-            touched
+            ShardIngest::Buffered
         ),
-        ShardIngest::Buffered
-    ));
+        "a stale group is swept on the next shard"
+    );
     // ...but a duplicate slot does NOT — no attacker keepalive via resends.
     let dup_at = touched + REASSEMBLY_STALE.saturating_sub(Duration::from_secs(1));
-    assert!(matches!(
-        ingest(
-            &mut store,
-            &shard_msg(
-                "x",
-                "a",
-                Shard {
-                    group: group_a(),
-                    index: 0,
-                    total: 3
-                }
+    assert!(
+        matches!(
+            ingest(
+                &mut store,
+                &shard_msg(
+                    "x",
+                    "a",
+                    Shard {
+                        group: group_a(),
+                        index: 0,
+                        total: 3
+                    }
+                ),
+                dup_at
             ),
-            dup_at
+            ShardIngest::Dropped
         ),
-        ShardIngest::Dropped
-    ));
+        "a fresh shard after the sweep is accepted"
+    );
     assert_eq!(
         store.sweep_stale(touched + REASSEMBLY_STALE.saturating_sub(Duration::from_secs(1))),
         0,
@@ -545,8 +585,14 @@ fn stale_groups_are_swept_and_release_budget() {
         1,
         "a group with no new slots is reaped at the idle TTL (the dup did not refresh)"
     );
-    assert_eq!(store.total_bytes, 0);
-    assert!(store.author_bytes.is_empty());
+    assert_eq!(
+        store.total_bytes, 0,
+        "a sweep returns the total budget to zero"
+    );
+    assert!(
+        store.author_bytes.is_empty(),
+        "a sweep leaves no author bytes"
+    );
 }
 
 #[test]
@@ -582,7 +628,10 @@ fn a_trickling_group_is_reaped_at_the_lifetime_ceiling() {
         1,
         "the lifetime ceiling reaps it regardless of progress"
     );
-    assert_eq!(store.total_bytes, 0);
+    assert_eq!(
+        store.total_bytes, 0,
+        "a reaped trickling group releases its bytes"
+    );
 }
 
 #[test]
@@ -602,26 +651,38 @@ fn completion_releases_the_budget() {
         ),
         now,
     );
-    assert!(store.total_bytes > 0);
-    assert!(matches!(
-        ingest(
-            &mut store,
-            &shard_msg(
-                "b",
-                "a",
-                Shard {
-                    group: group_a(),
-                    index: 1,
-                    total: 2
-                }
+    assert!(
+        store.total_bytes > 0,
+        "a partial group holds budget before completion"
+    );
+    assert!(
+        matches!(
+            ingest(
+                &mut store,
+                &shard_msg(
+                    "b",
+                    "a",
+                    Shard {
+                        group: group_a(),
+                        index: 1,
+                        total: 2
+                    }
+                ),
+                now
             ),
-            now
+            ShardIngest::Complete(_)
         ),
-        ShardIngest::Complete(_)
-    ));
-    assert_eq!(store.total_bytes, 0);
-    assert!(store.author_bytes.is_empty());
-    assert!(store.groups.is_empty());
+        "the completing shard is accepted"
+    );
+    assert_eq!(store.total_bytes, 0, "completion releases the total budget");
+    assert!(
+        store.author_bytes.is_empty(),
+        "completion releases the author budget"
+    );
+    assert!(
+        store.groups.is_empty(),
+        "completion leaves no groups behind"
+    );
 }
 
 #[test]
@@ -674,25 +735,51 @@ fn repair_tickets_target_stalled_big_groups_once_per_window() {
 
     // Not stalled yet — no tickets.
     let early: Vec<_> = store.repair_tickets(start).collect();
-    assert!(early.is_empty());
+    assert!(
+        early.is_empty(),
+        "no repair ticket is due before the window"
+    );
 
     // Stalled: only the big group is ticketed, with exactly its gaps.
     let stalled = start + REASSEMBLY_REPAIR_IDLE;
     let tickets: Vec<_> = store.repair_tickets(stalled).collect();
     assert_eq!(tickets.len(), 1, "small groups heal via anti-entropy");
-    assert_eq!(tickets[0].group, big);
-    assert_eq!(tickets[0].author.as_str(), "author");
-    assert!(!tickets[0].missing.contains(&0));
-    assert!(!tickets[0].missing.contains(&2));
-    assert!(tickets[0].missing.contains(&1));
+    assert_eq!(
+        tickets[0].group, big,
+        "the repair ticket targets the stalled big group"
+    );
+    assert_eq!(
+        tickets[0].author.as_str(),
+        "author",
+        "the repair ticket names the author"
+    );
+    assert!(
+        !tickets[0].missing.contains(&0),
+        "the repair ticket does not ask for shard 0, which is held"
+    );
+    assert!(
+        !tickets[0].missing.contains(&2),
+        "the repair ticket does not ask for shard 2, which is held"
+    );
+    assert!(
+        tickets[0].missing.contains(&1),
+        "the repair ticket asks for the missing shard 1"
+    );
 
     // Asked once per window — the immediate re-check yields nothing.
     let asked_again: Vec<_> = store.repair_tickets(stalled).collect();
-    assert!(asked_again.is_empty());
+    assert!(
+        asked_again.is_empty(),
+        "the repair ticket is not asked again inside the window"
+    );
     // The next window asks again.
     let next = stalled + REASSEMBLY_REPAIR_IDLE;
     let next_tickets: Vec<_> = store.repair_tickets(next).collect();
-    assert_eq!(next_tickets.len(), 1);
+    assert_eq!(
+        next_tickets.len(),
+        1,
+        "the next window issues one repair ticket"
+    );
 }
 
 #[test]
@@ -705,7 +792,11 @@ fn shard_cache_serves_requested_frames_and_evicts_whole_groups() {
     cache.insert(first.clone(), vec![frame(1, 10), frame(2, 10)]);
     let served: Vec<_> = cache.frames(&first, &[1, 7]).collect();
     assert_eq!(served.len(), 1, "out-of-range idx skipped");
-    assert_eq!(served[0].as_bytes()[0], 2);
+    assert_eq!(
+        served[0].as_bytes()[0],
+        2,
+        "the shard cache serves the requested frame"
+    );
 
     // A budget-filling newcomer evicts the oldest group whole.
     let second = group("00000000-0000-4000-8000-0000000000c2");
@@ -743,12 +834,16 @@ fn author_budget_never_exceeded_under_random_streams() {
             ),
             now,
         );
-        assert!(store.total_bytes <= REASSEMBLY_TOTAL_BUDGET_BYTES);
+        assert!(
+            store.total_bytes <= REASSEMBLY_TOTAL_BUDGET_BYTES,
+            "the total budget is never exceeded under random streams"
+        );
         assert!(
             store
                 .author_bytes
                 .values()
-                .all(|bytes| *bytes <= REASSEMBLY_AUTHOR_BUDGET_BYTES)
+                .all(|bytes| *bytes <= REASSEMBLY_AUTHOR_BUDGET_BYTES),
+            "the author budget is never exceeded under random streams"
         );
     }
 }

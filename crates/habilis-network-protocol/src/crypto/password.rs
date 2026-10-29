@@ -148,11 +148,23 @@ mod password_tests {
         let seed_b = Seed::from_bytes(SEED_B);
         let key = stretch_mesh_password(&pw("hunter2"), &seed_a);
         let same = stretch_mesh_password(&pw("hunter2"), &seed_a);
-        assert_eq!(key.as_bytes(), same.as_bytes());
+        assert_eq!(
+            key.as_bytes(),
+            same.as_bytes(),
+            "the stretch of the same password and seed is the same key"
+        );
         let other_password = stretch_mesh_password(&pw("hunter3"), &seed_a);
-        assert_ne!(key.as_bytes(), other_password.as_bytes());
+        assert_ne!(
+            key.as_bytes(),
+            other_password.as_bytes(),
+            "a different password gives a different key"
+        );
         let other_seed = stretch_mesh_password(&pw("hunter2"), &seed_b);
-        assert_ne!(key.as_bytes(), other_seed.as_bytes());
+        assert_ne!(
+            key.as_bytes(),
+            other_seed.as_bytes(),
+            "a different seed gives a different key"
+        );
     }
 
     #[test]
@@ -174,8 +186,16 @@ mod password_tests {
     #[test]
     fn password_never_leaks_through_debug_or_display() {
         let secret = pw("hunter2");
-        assert_eq!(format!("{secret:?}"), "***");
-        assert_eq!(format!("{secret}"), "***");
+        assert_eq!(
+            format!("{secret:?}"),
+            "***",
+            "a password debug prints no byte"
+        );
+        assert_eq!(
+            format!("{secret}"),
+            "***",
+            "a password display prints no byte"
+        );
     }
 
     #[test]
@@ -186,9 +206,12 @@ mod password_tests {
         let state = derive::derive_secret(mesh_key.as_bytes(), b"state-doc");
         let meta = derive::derive_secret(mesh_key.as_bytes(), b"meta-doc");
         let broadcast = derive::derive_secret(mesh_key.as_bytes(), b"broadcast");
-        assert_ne!(state, meta);
-        assert_ne!(state, broadcast);
-        assert_ne!(meta, broadcast);
+        assert_ne!(state, meta, "the state and meta channel keys are separate");
+        assert_ne!(
+            state, broadcast,
+            "the state and broadcast keys are separate"
+        );
+        assert_ne!(meta, broadcast, "the meta and broadcast keys are separate");
     }
 
     /// The stretched token for a fixed secret, password and label. A change
@@ -198,10 +221,14 @@ mod password_tests {
         use crate::crypto::{TicketAuth, TicketSecret};
         let secret = TicketSecret::from_bytes([3u8; 32]);
         let auth = TicketAuth::derive(&secret, Some(&pw("hunter2")), b"blob-ticket");
-        assert!(auth.password_protected);
+        assert!(
+            auth.password_protected,
+            "a password-protected ticket is marked protected"
+        );
         assert_eq!(
             hex(auth.token.as_bytes()),
-            "824798ec30b0b968447a543d55adf59dd4a8a8a2218a9833409ce313edd258cf"
+            "824798ec30b0b968447a543d55adf59dd4a8a8a2218a9833409ce313edd258cf",
+            "the derived token matches the golden bytes"
         );
     }
 
@@ -221,8 +248,16 @@ mod password_tests {
         assert_ne!(*stretched, [0u8; 32], "the stretch fills the buffer");
         let key = SymmetricKey::from_zeroizing(stretched.clone());
         let secret = TicketSecret::from_zeroizing(stretched.clone());
-        assert_eq!(key.as_bytes(), &*stretched);
-        assert_eq!(secret.as_bytes(), &*stretched);
+        assert_eq!(
+            key.as_bytes(),
+            &*stretched,
+            "the stretched key keeps its bytes when moved into its type"
+        );
+        assert_eq!(
+            secret.as_bytes(),
+            &*stretched,
+            "the moved secret keeps the stretched bytes"
+        );
     }
 
     fn hex(bytes: &[u8]) -> String {
@@ -237,8 +272,16 @@ mod password_tests {
     fn ticket_secret_debug_never_prints_a_byte() {
         use crate::crypto::TicketSecret;
         let secret = TicketSecret::from_bytes([9u8; 32]);
-        assert_eq!(format!("{secret:?}"), "TicketSecret(***)");
-        assert_eq!(secret.as_bytes(), &[9u8; 32]);
+        assert_eq!(
+            format!("{secret:?}"),
+            "TicketSecret(***)",
+            "a ticket secret debug prints no byte"
+        );
+        assert_eq!(
+            secret.as_bytes(),
+            &[9u8; 32],
+            "the ticket secret keeps its bytes"
+        );
     }
 
     // `unsafe_code` is denied, so a test cannot read the freed bytes: the types
@@ -269,12 +312,17 @@ mod password_tests {
             "the same password+secret must yield different tokens per ticket kind"
         );
         // Without a password both are the raw secret (no stretch, no label).
-        assert_eq!(TicketAuth::blob(&secret, None).token.as_bytes(), &[3u8; 32]);
+        assert_eq!(
+            TicketAuth::blob(&secret, None).token.as_bytes(),
+            &[3u8; 32],
+            "the blob token is the derived bytes for its label"
+        );
         assert_eq!(
             TicketAuth::derive(&secret, None, b"other-ticket")
                 .token
                 .as_bytes(),
-            &[3u8; 32]
+            &[3u8; 32],
+            "a different label gives a different token"
         );
     }
 }

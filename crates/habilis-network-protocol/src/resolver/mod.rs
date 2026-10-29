@@ -23,7 +23,8 @@ mod tests {
         let error = parsed.unwrap_err();
         assert_eq!(
             error,
-            JoinTargetError::Unrecognized("github.com/alice/proj".to_owned())
+            JoinTargetError::Unrecognized("github.com/alice/proj".to_owned()),
+            "a non-token string is unrecognized and echoes its input"
         );
         assert!(
             error.to_string().contains("github.com/alice/proj"),
@@ -47,7 +48,7 @@ mod tests {
         let id = known_mesh_id();
         let target: JoinTarget = id.parse().unwrap();
         let mesh = resolve(&target).unwrap();
-        assert_eq!(mesh.to_string(), id);
+        assert_eq!(mesh.to_string(), id, "a valid mesh id resolves to itself");
     }
 
     #[test]
@@ -57,14 +58,21 @@ mod tests {
         mistyped.replace_range(mistyped.len() - 1.., replacement);
         let parsed: Result<JoinTarget, _> = mistyped.parse();
         let error = parsed.unwrap_err();
-        assert_eq!(error.to_string(), "invalid gossip hash");
+        assert_eq!(
+            error.to_string(),
+            "invalid gossip hash",
+            "a mistyped mesh id reports an invalid gossip hash"
+        );
     }
 
     #[test]
     fn join_target_classifies_valid_id() {
         let id = known_mesh_id();
         let parsed: Result<JoinTarget, _> = id.parse();
-        assert!(matches!(parsed, Ok(JoinTarget::Mesh(_))));
+        assert!(
+            matches!(parsed, Ok(JoinTarget::Mesh(_))),
+            "a valid id classifies as a mesh target"
+        );
     }
 
     fn invite_only_mesh() -> crate::mesh::Mesh {
@@ -102,6 +110,9 @@ mod tests {
         )
         .unwrap();
         let parsed: Result<JoinTarget, _> = token.parse();
-        assert!(matches!(parsed, Ok(JoinTarget::Invite(_))));
+        assert!(
+            matches!(parsed, Ok(JoinTarget::Invite(_))),
+            "a minted invite classifies as an invite target"
+        );
     }
 }

@@ -86,22 +86,53 @@ mod tests {
     #[test]
     fn it_hashes_with_sha256_and_prints_its_hex() {
         let hash = ContentHash::of(b"");
-        assert_eq!(hash.to_string(), EMPTY);
-        assert_eq!(format!("{hash:?}"), format!("ContentHash({EMPTY})"));
-        assert_eq!(hash.hex().as_slice(), EMPTY.as_bytes());
+        assert_eq!(
+            hash.to_string(),
+            EMPTY,
+            "the empty hash prints its sha256 hex"
+        );
+        assert_eq!(
+            format!("{hash:?}"),
+            format!("ContentHash({EMPTY})"),
+            "the content hash debug prints its hex"
+        );
+        assert_eq!(
+            hash.hex().as_slice(),
+            EMPTY.as_bytes(),
+            "the hex bytes are the display text"
+        );
     }
 
     #[test]
     fn it_reads_only_lowercase_64_char_hex() {
-        assert_eq!(ContentHash::from_hex(EMPTY), Some(ContentHash::of(b"")));
-        assert!(ContentHash::from_hex(&EMPTY.to_uppercase()).is_none());
-        assert!(ContentHash::from_hex(&EMPTY[..62]).is_none());
-        assert!(ContentHash::from_hex(&format!("{EMPTY}00")).is_none());
-        assert!(ContentHash::from_hex(&"é".repeat(32)).is_none());
+        assert_eq!(
+            ContentHash::from_hex(EMPTY),
+            Some(ContentHash::of(b"")),
+            "the lowercase 64-character hex reads back to the hash"
+        );
+        assert!(
+            ContentHash::from_hex(&EMPTY.to_uppercase()).is_none(),
+            "upper-case hex is refused"
+        );
+        assert!(
+            ContentHash::from_hex(&EMPTY[..62]).is_none(),
+            "a short hex is refused"
+        );
+        assert!(
+            ContentHash::from_hex(&format!("{EMPTY}00")).is_none(),
+            "a hex with extra characters is refused"
+        );
+        assert!(
+            ContentHash::from_hex(&"é".repeat(32)).is_none(),
+            "non-ascii hex is refused"
+        );
     }
 
     #[test]
     fn it_orders_by_its_bytes() {
-        assert!(ContentHash::from_bytes([1; 32]) < ContentHash::from_bytes([2; 32]));
+        assert!(
+            ContentHash::from_bytes([1; 32]) < ContentHash::from_bytes([2; 32]),
+            "content hashes order by their bytes"
+        );
     }
 }

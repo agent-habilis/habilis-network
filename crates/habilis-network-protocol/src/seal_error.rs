@@ -294,7 +294,11 @@ mod tests {
                 plaintext,
                 "ciphertext is not the plaintext"
             );
-            assert_eq!(open_symmetric(&key, &blob).unwrap(), plaintext);
+            assert_eq!(
+                open_symmetric(&key, &blob).unwrap(),
+                plaintext,
+                "a symmetric seal opens to the plaintext"
+            );
         }
     }
 
@@ -328,7 +332,11 @@ mod tests {
         let (secret, public) = keypair(1);
         let plaintext = r#"{"kind":"status-update","taskId":"7f3e"}"#;
         let body = seal_to_body(&public, plaintext).unwrap();
-        assert_eq!(unseal_from_body(&secret, &body).unwrap(), plaintext);
+        assert_eq!(
+            unseal_from_body(&secret, &body).unwrap(),
+            plaintext,
+            "a sealed body opens to the recipient's plaintext"
+        );
     }
 
     /// Golden: an envelope captured at the base commit opens to its plaintext. The nonce and the
@@ -348,7 +356,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             unseal_from_body(&secret, &body).unwrap(),
-            r#"{"kind":"status-update","taskId":"7f3e"}"#
+            r#"{"kind":"status-update","taskId":"7f3e"}"#,
+            "a fixed envelope opens to its plaintext"
         );
     }
 
@@ -386,7 +395,11 @@ mod tests {
         let (secret, public) = keypair(4);
         for plaintext in ["", &"x".repeat(40_000)] {
             let body = seal_to_body(&public, plaintext).unwrap();
-            assert_eq!(unseal_from_body(&secret, &body).unwrap(), plaintext);
+            assert_eq!(
+                unseal_from_body(&secret, &body).unwrap(),
+                plaintext,
+                "empty and large payloads seal and open"
+            );
         }
     }
 

@@ -96,6 +96,10 @@ mod tests {
     fn a_fixture_frame_carries_exactly_the_bytes_it_was_given() {
         let raw: &[u8] = b"\xff not a signed message \x00";
         let frame = WireFrame::fixture_raw(Bytes::copy_from_slice(raw));
-        assert_eq!(frame.as_bytes(), raw);
+        assert_eq!(
+            frame.as_bytes(),
+            raw,
+            "a fixture frame keeps exactly the bytes it was given"
+        );
     }
 }

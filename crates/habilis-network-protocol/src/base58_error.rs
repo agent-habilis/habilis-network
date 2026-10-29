@@ -104,13 +104,21 @@ mod tests {
     fn round_trips_a_payload() {
         let payload = b"the quick brown fox";
         let encoded = encode(payload);
-        assert_eq!(decode(&encoded, "test value").unwrap(), payload);
+        assert_eq!(
+            decode(&encoded, "test value").unwrap(),
+            payload,
+            "a payload round trips through base58"
+        );
     }
 
     #[test]
     fn round_trips_an_empty_payload() {
         let encoded = encode(b"");
-        assert_eq!(decode(&encoded, "test value").unwrap(), Vec::<u8>::new());
+        assert_eq!(
+            decode(&encoded, "test value").unwrap(),
+            Vec::<u8>::new(),
+            "an empty payload round trips through base58"
+        );
     }
 
     #[test]
@@ -156,17 +164,33 @@ mod tests {
     fn take_array_walks_a_cursor() {
         let bytes = [1u8, 2, 3, 4, 5];
         let mut position = 0;
-        assert_eq!(take_array::<2>(&bytes, &mut position), Some([1, 2]));
-        assert_eq!(position, 2);
-        assert_eq!(take_array::<3>(&bytes, &mut position), Some([3, 4, 5]));
-        assert_eq!(position, 5);
-        assert_eq!(take_array::<1>(&bytes, &mut position), None);
+        assert_eq!(
+            take_array::<2>(&bytes, &mut position),
+            Some([1, 2]),
+            "take_array returns the first two bytes and moves the cursor"
+        );
+        assert_eq!(position, 2, "the cursor is at two after the first take");
+        assert_eq!(
+            take_array::<3>(&bytes, &mut position),
+            Some([3, 4, 5]),
+            "take_array returns the next three bytes"
+        );
+        assert_eq!(position, 5, "the cursor is at five after the second take");
+        assert_eq!(
+            take_array::<1>(&bytes, &mut position),
+            None,
+            "a take past the end returns none"
+        );
     }
 
     #[test]
     fn take_array_does_not_overflow_on_a_huge_cursor() {
         let bytes = [1u8, 2, 3];
         let mut position = usize::MAX;
-        assert_eq!(take_array::<4>(&bytes, &mut position), None);
+        assert_eq!(
+            take_array::<4>(&bytes, &mut position),
+            None,
+            "a huge cursor does not overflow the take"
+        );
     }
 }

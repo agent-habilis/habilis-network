@@ -241,14 +241,20 @@ mod tests {
         let identity = Identity::generate();
         let bytes = b"canonical message bytes";
         let signature = identity.sign(bytes);
-        assert!(verify(&identity.public(), bytes, &signature));
+        assert!(
+            verify(&identity.public(), bytes, &signature),
+            "a signature verifies with its key"
+        );
     }
 
     #[test]
     fn tampered_bytes_fail_verification() {
         let identity = Identity::generate();
         let signature = identity.sign(b"original");
-        assert!(!verify(&identity.public(), b"tampered", &signature));
+        assert!(
+            !verify(&identity.public(), b"tampered", &signature),
+            "tampered bytes fail verification"
+        );
     }
 
     #[test]
@@ -257,16 +263,23 @@ mod tests {
         let other = Identity::generate();
         let bytes = b"hello";
         let signature = signer.sign(bytes);
-        assert!(!verify(&other.public(), bytes, &signature));
+        assert!(
+            !verify(&other.public(), bytes, &signature),
+            "a wrong key fails verification"
+        );
     }
 
     #[test]
     fn pubkey_hex_round_trip() {
         let identity = Identity::generate();
         let hex = encode_pubkey(&identity.public());
-        assert_eq!(hex.len(), 64);
+        assert_eq!(hex.len(), 64, "a public key hex is 64 characters");
         let key = AuthorKey::from_hex(&hex).unwrap();
-        assert_eq!(key.public_key(), Some(identity.public()));
+        assert_eq!(
+            key.public_key(),
+            Some(identity.public()),
+            "the public key survives a hex round trip"
+        );
     }
 
     #[test]
@@ -274,8 +287,11 @@ mod tests {
         let identity = Identity::generate();
         let signature = identity.sign(b"x");
         let hex = encode_hex(&signature.to_bytes());
-        assert_eq!(hex.len(), 128);
-        assert!(verify(&identity.public(), b"x", &decode_sig(&hex).unwrap()));
+        assert_eq!(hex.len(), 128, "a signature hex is 128 characters");
+        assert!(
+            verify(&identity.public(), b"x", &decode_sig(&hex).unwrap()),
+            "the signature survives a hex round trip"
+        );
     }
 
     /// Golden: the key is `SHA-256(pubkey text ‖ id bytes)[..16]`. The unsigned form hashes an
@@ -287,11 +303,13 @@ mod tests {
         id[15] = 1;
         assert_eq!(
             encode_hex(dedup_key16(AuthorKey::from_hex(pubkey).as_ref(), &id).as_bytes()),
-            "c7ba26a2ed0d21f0e8913dd8b4456086"
+            "c7ba26a2ed0d21f0e8913dd8b4456086",
+            "the dedup key is pinned for a fixed key and id"
         );
         assert_eq!(
             encode_hex(dedup_key16(None, &id).as_bytes()),
-            "7c3ccd10bb7ec37b46d37926ae627426"
+            "7c3ccd10bb7ec37b46d37926ae627426",
+            "the dedup key without a key is pinned"
         );
     }
 
@@ -304,10 +322,15 @@ mod tests {
             &identity.secret.to_bytes(),
             super::SEAL_ENC_LABEL,
         ));
-        assert_eq!(identity.seal_secret().to_bytes(), by_hand.to_bytes());
+        assert_eq!(
+            identity.seal_secret().to_bytes(),
+            by_hand.to_bytes(),
+            "the seal secret is the derivation of the identity seed"
+        );
         assert_eq!(
             identity.seal_public(),
-            x25519_dalek::PublicKey::from(&by_hand)
+            x25519_dalek::PublicKey::from(&by_hand),
+            "the seal public key matches the seal secret"
         );
     }
 
@@ -320,15 +343,32 @@ mod tests {
             }
         }
         let bytes = [0x00, 0x0f, 0xa5, 0xff];
-        assert_eq!(Hex(&bytes).to_string(), "000fa5ff");
-        assert_eq!(Hex(&bytes).to_string(), encode_hex(&bytes));
+        assert_eq!(
+            Hex(&bytes).to_string(),
+            "000fa5ff",
+            "bytes are formatted as lowercase hex"
+        );
+        assert_eq!(
+            Hex(&bytes).to_string(),
+            encode_hex(&bytes),
+            "the hex formatter matches encode_hex"
+        );
     }
 
     #[test]
     fn decode_rejects_bad_hex() {
-        assert!(AuthorKey::from_hex("zz").is_none());
-        assert!(AuthorKey::from_hex("abc").is_none()); // odd length
-        assert!(decode_sig("00").is_err()); // wrong length
+        assert!(
+            AuthorKey::from_hex("zz").is_none(),
+            "a hex string with non-hex characters is refused as an author key"
+        );
+        assert!(
+            AuthorKey::from_hex("abc").is_none(),
+            "an odd-length hex string is refused as an author key"
+        ); // odd length
+        assert!(
+            decode_sig("00").is_err(),
+            "a short signature hex is refused"
+        ); // wrong length
     }
 
     #[test]
@@ -338,9 +378,18 @@ mod tests {
         // 4 bytes) positioned so a 2-byte slice splits it used to panic on a
         // non-char-boundary slice — a one-message remote DoS reachable from
         // `verify_signature`. It must now decode byte-wise and return `Err`.
-        assert!(AuthorKey::from_hex("aéa").is_none());
-        assert!(decode_sig("aéa").is_err());
+        assert!(
+            AuthorKey::from_hex("aéa").is_none(),
+            "a non-ascii author hex is refused without a panic"
+        );
+        assert!(
+            decode_sig("aéa").is_err(),
+            "a non-ascii signature hex is refused without a panic"
+        );
         // Pure multibyte input of even byte length, too.
-        assert!(AuthorKey::from_hex("€€").is_none()); // 6 bytes, all continuation/non-hex
+        assert!(
+            AuthorKey::from_hex("€€").is_none(),
+            "a multi-byte author hex is refused without a panic"
+        ); // 6 bytes, all continuation/non-hex
     }
 }

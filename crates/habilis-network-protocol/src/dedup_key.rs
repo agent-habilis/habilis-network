@@ -69,9 +69,20 @@ mod tests {
     #[test]
     fn the_bounds_take_in_every_key() {
         let key = DedupKey::from([7; 16]);
-        assert!(DedupKey::MIN < key && key < DedupKey::MAX);
-        assert_eq!(DedupKey::MIN.to_bytes(), [0; 16]);
-        assert_eq!(DedupKey::MAX.to_bytes(), [u8::MAX; 16]);
+        assert!(
+            DedupKey::MIN < key && key < DedupKey::MAX,
+            "every key lies between the min and max bounds"
+        );
+        assert_eq!(
+            DedupKey::MIN.to_bytes(),
+            [0; 16],
+            "the min bound is all zeros"
+        );
+        assert_eq!(
+            DedupKey::MAX.to_bytes(),
+            [u8::MAX; 16],
+            "the max bound is all ff bytes"
+        );
     }
 
     #[test]
@@ -80,13 +91,24 @@ mod tests {
         low[15] = 1;
         let mut high = [0u8; 16];
         high[0] = 1;
-        assert!(DedupKey::from(low) < DedupKey::from(high));
+        assert!(
+            DedupKey::from(low) < DedupKey::from(high),
+            "dedup keys order by their bytes"
+        );
     }
 
     #[test]
     fn it_prints_as_hex() {
         let key = DedupKey::from([0xab; 16]);
-        assert_eq!(key.to_string(), "ab".repeat(16));
-        assert_eq!(format!("{key:?}"), format!("DedupKey({})", "ab".repeat(16)));
+        assert_eq!(
+            key.to_string(),
+            "ab".repeat(16),
+            "a dedup key prints as hex"
+        );
+        assert_eq!(
+            format!("{key:?}"),
+            format!("DedupKey({})", "ab".repeat(16)),
+            "a dedup key debug prints its hex"
+        );
     }
 }

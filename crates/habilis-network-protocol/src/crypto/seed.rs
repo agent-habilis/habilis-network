@@ -71,11 +71,13 @@ mod golden_tests {
         let seed = Seed::from_bytes(SEED);
         assert_eq!(
             rendezvous_id(Keying::Wire(&seed)).to_string(),
-            "f7172ec3cf80783eb9972177ba2ac384d4b30612c0892ec0fa8d4ee552190469"
+            "f7172ec3cf80783eb9972177ba2ac384d4b30612c0892ec0fa8d4ee552190469",
+            "the golden wire seed gives the golden rendezvous id"
         );
         assert_eq!(
             rendezvous_ports(Keying::Wire(&seed)),
-            [5931, 16498, 11165, 32352, 6312, 13555, 22811, 1032]
+            [5931, 16498, 11165, 32352, 6312, 13555, 22811, 1032],
+            "the golden wire seed gives the golden rendezvous ports"
         );
     }
 
@@ -86,15 +88,18 @@ mod golden_tests {
         let key = stretch_mesh_password(&password, &seed);
         assert_eq!(
             hex(key.as_bytes()),
-            "2ac1fef982a96d1f5051cbe48638f57d8484c22d159fff7c6e5459a8d6de94ba"
+            "2ac1fef982a96d1f5051cbe48638f57d8484c22d159fff7c6e5459a8d6de94ba",
+            "the golden password stretch is pinned"
         );
         assert_eq!(
             hex(&password_verifier(&key)),
-            "58756a1b4f3ce544517606c0abccdf8e"
+            "58756a1b4f3ce544517606c0abccdf8e",
+            "the golden password verifier is pinned"
         );
         assert_eq!(
             hex(invite_wrap_key(&password, &seed).as_bytes()),
-            "541efc2dd477ce08854291e7da56e3297d537044170c90f78373e84960ad58ab"
+            "541efc2dd477ce08854291e7da56e3297d537044170c90f78373e84960ad58ab",
+            "the golden invite wrap key is pinned"
         );
     }
 
@@ -107,15 +112,18 @@ mod golden_tests {
                 "{:?}",
                 derive_topic_id(Keying::Secret(&root), &name, b"fixed-config-bytes")
             ),
-            "TopicId(d4137216ab43c3277fa07d4a2abb128fd8b69a4dbfac3ddd1fecf27f8ea18107)"
+            "TopicId(d4137216ab43c3277fa07d4a2abb128fd8b69a4dbfac3ddd1fecf27f8ea18107)",
+            "the golden secret-keyed topic id is pinned"
         );
         assert_eq!(
             rendezvous_id(Keying::Secret(&root)).to_string(),
-            "6996293bba871f0c8b7adacb92463b5924a26c6555bcb0ebbf87f605be01bf50"
+            "6996293bba871f0c8b7adacb92463b5924a26c6555bcb0ebbf87f605be01bf50",
+            "the golden secret-keyed rendezvous id is pinned"
         );
         assert_eq!(
             rendezvous_ports(Keying::Secret(&root)),
-            [1131, 19491, 9656, 2645, 17345, 6055, 3587, 29121]
+            [1131, 19491, 9656, 2645, 17345, 6055, 3587, 29121],
+            "the golden secret-keyed rendezvous ports are pinned"
         );
     }
 
@@ -125,8 +133,14 @@ mod golden_tests {
         let old_secret = [64619, 51235, 41400, 1621, 17345, 37799, 35331, 60865];
         let wire = rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED)));
         let secret = rendezvous_ports(Keying::Secret(&SymmetricKey::from_bytes(ROOT)));
-        assert_ne!(wire, old_wire);
-        assert_ne!(secret, old_secret);
-        assert!(old_wire.iter().chain(&old_secret).any(|&port| port > 32767));
+        assert_ne!(wire, old_wire, "the old wire ladder is no longer derived");
+        assert_ne!(
+            secret, old_secret,
+            "the old secret ladder is no longer derived"
+        );
+        assert!(
+            old_wire.iter().chain(&old_secret).any(|&port| port > 32767),
+            "no old port is in the new ladders"
+        );
     }
 }

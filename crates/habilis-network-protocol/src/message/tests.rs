@@ -26,9 +26,19 @@ fn test_round_trip() {
     );
     let bytes = message.serialize().unwrap();
     let parsed = Message::parse(&bytes).unwrap();
-    assert_eq!(parsed.id, message.id);
-    assert_eq!(parsed.kind, MessageKind::app_broadcast("app_msg"));
-    assert_eq!(parsed.body, message.body);
+    assert_eq!(
+        parsed.id, message.id,
+        "the parsed id matches the id of the message"
+    );
+    assert_eq!(
+        parsed.kind,
+        MessageKind::app_broadcast("app_msg"),
+        "the parsed kind is an app broadcast with its tag"
+    );
+    assert_eq!(
+        parsed.body, message.body,
+        "the parsed body matches the body of the message"
+    );
 }
 
 #[test]
@@ -58,19 +68,27 @@ fn test_alive_round_trip() {
         parsed.kind,
         MessageKind::Presence {
             subtype: PresenceSubtype::Alive
-        }
+        },
+        "the parsed alive presence keeps its subtype"
     );
-    assert_eq!(parsed.body.as_str(), "");
+    assert_eq!(
+        parsed.body.as_str(),
+        "",
+        "an alive presence has an empty body"
+    );
 }
 
 #[test]
 fn test_ping_round_trip() {
     let message = Message::new_ping(&sid(), &nick("word-word"));
     let bytes = message.serialize().unwrap();
-    assert!(String::from_utf8_lossy(&bytes).contains("\"type\":\"ping\""));
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("\"type\":\"ping\""),
+        "a ping is written with the ping type"
+    );
     let parsed = Message::parse(&bytes).unwrap();
-    assert_eq!(parsed.kind, MessageKind::Ping);
-    assert_eq!(parsed.body.as_str(), "");
+    assert_eq!(parsed.kind, MessageKind::Ping, "the parsed kind is a ping");
+    assert_eq!(parsed.body.as_str(), "", "a ping has an empty body");
 }
 
 /// A browser builds and signs a link-state advertisement as a native node does: the builder
@@ -80,10 +98,21 @@ fn a_link_state_message_is_built_signed_and_round_tripped_on_every_target() {
     let identity = crate::identity::Identity::generate();
     let message = Message::new_link_state(&sid(), &nick("word-word"), MessageBody::from("{}"))
         .sign(&identity);
-    assert!(message.verify_signature());
+    assert!(
+        message.verify_signature(),
+        "a link state message verifies its signature"
+    );
     let parsed = Message::parse(message.serialize().unwrap().as_bytes()).unwrap();
-    assert_eq!(parsed.kind, MessageKind::LinkState);
-    assert_eq!(parsed.body.as_str(), "{}");
+    assert_eq!(
+        parsed.kind,
+        MessageKind::LinkState,
+        "the parsed kind is a link state message"
+    );
+    assert_eq!(
+        parsed.body.as_str(),
+        "{}",
+        "a link state message has an empty object body"
+    );
 }
 
 #[test]
@@ -93,8 +122,12 @@ fn test_pong_round_trip() {
     let message = Message::new_pong(&sid(), &nick("word-word"), target.clone(), &probe);
     let bytes = message.serialize().unwrap();
     let parsed = Message::parse(&bytes).unwrap();
-    assert_eq!(parsed.kind, MessageKind::Pong { to: target, probe });
-    assert_eq!(parsed.body.as_str(), "");
+    assert_eq!(
+        parsed.kind,
+        MessageKind::Pong { to: target, probe },
+        "the parsed kind is a pong to the probe's target"
+    );
+    assert_eq!(parsed.body.as_str(), "", "a pong has an empty body");
 }
 
 #[test]
@@ -112,11 +145,24 @@ fn test_task_status_round_trip() {
     );
     let bytes = message.serialize().unwrap();
     let wire = String::from_utf8_lossy(&bytes);
-    assert!(wire.contains("\"type\":\"app\""));
-    assert!(wire.contains("\"tag\":\"app_status\""));
+    assert!(
+        wire.contains("\"type\":\"app\""),
+        "a task status is written with the app type"
+    );
+    assert!(
+        wire.contains("\"tag\":\"app_status\""),
+        "a task status is written with its app status tag"
+    );
     let parsed = Message::parse(&bytes).unwrap();
-    assert_eq!(parsed.kind, MessageKind::app_to("app_status", target, None));
-    assert_eq!(parsed.body, message.body);
+    assert_eq!(
+        parsed.kind,
+        MessageKind::app_to("app_status", target, None),
+        "the parsed kind is an app status to the target"
+    );
+    assert_eq!(
+        parsed.body, message.body,
+        "the parsed body matches the body of the task status"
+    );
 }
 
 #[test]
@@ -129,11 +175,15 @@ fn test_task_artifact_round_trip() {
         MessageBody::from(r#"{"kind":"artifact-update"}"#),
     );
     let bytes = message.serialize().unwrap();
-    assert!(String::from_utf8_lossy(&bytes).contains("\"tag\":\"app_artifact\""));
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("\"tag\":\"app_artifact\""),
+        "a task artifact is written with its app artifact tag"
+    );
     let parsed = Message::parse(&bytes).unwrap();
     assert_eq!(
         parsed.kind,
-        MessageKind::app_to("app_artifact", target, None)
+        MessageKind::app_to("app_artifact", target, None),
+        "the parsed kind is an app artifact to the target"
     );
 }
 
@@ -152,8 +202,14 @@ fn test_ext_round_trip() {
     message.ext = serde_json::json!({"tags": ["rust", "p2p"], "priority": 1});
     let bytes = message.serialize().unwrap();
     let parsed = Message::parse(&bytes).unwrap();
-    assert_eq!(parsed.ext["tags"][0], "rust");
-    assert_eq!(parsed.ext["priority"], 1);
+    assert_eq!(
+        parsed.ext["tags"][0], "rust",
+        "the first extension tag survives a round trip"
+    );
+    assert_eq!(
+        parsed.ext["priority"], 1,
+        "the extension priority survives a round trip"
+    );
 }
 
 /// A valid UUID for the hand-written wire-JSON fixtures below (the
@@ -167,8 +223,15 @@ fn test_unknown_ext_fields_ignored() {
         r#"{{"v":"12.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi","ext":{{"future_field":"value","another":42}}}}"#
     );
     let parsed = Message::parse(json.as_bytes()).unwrap();
-    assert_eq!(parsed.body.as_str(), "hi");
-    assert_eq!(parsed.ext["future_field"], "value");
+    assert_eq!(
+        parsed.body.as_str(),
+        "hi",
+        "the body is read past unknown extension fields"
+    );
+    assert_eq!(
+        parsed.ext["future_field"], "value",
+        "an unknown extension field is kept in the extension"
+    );
 }
 
 #[test]
@@ -177,7 +240,11 @@ fn test_missing_ext_defaults_to_empty_object() {
         r#"{{"v":"12.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"}}"#
     );
     let parsed = Message::parse(json.as_bytes()).unwrap();
-    assert_eq!(parsed.ext, serde_json::json!({}));
+    assert_eq!(
+        parsed.ext,
+        serde_json::json!({}),
+        "a missing extension defaults to an empty object"
+    );
 }
 
 #[test]
@@ -187,7 +254,10 @@ fn test_version_mismatch_rejected() {
     let json = format!(
         r#"{{"v":"1.0","id":"{FIXTURE_ID}","type":"msg","mesh":"test","author":"a-b","ts":0,"body":"hi","ext":{{}}}}"#
     );
-    assert!(Message::parse(json.as_bytes()).is_err());
+    assert!(
+        Message::parse(json.as_bytes()).is_err(),
+        "a message with another version is refused"
+    );
 }
 
 // Crafted wire messages that a correct client never produces: the
@@ -197,7 +267,10 @@ fn test_version_mismatch_rejected() {
 #[test]
 fn parse_rejects_non_uuid_id() {
     let json = r#"{"v":"12.0","id":"not-a-uuid","type":"app","tag":"app_msg","mesh":"test","author":"a-b","ts":0,"body":"hi","ext":{}}"#;
-    assert!(Message::parse(json.as_bytes()).is_err());
+    assert!(
+        Message::parse(json.as_bytes()).is_err(),
+        "a message with a non-uuid id is refused"
+    );
 }
 
 #[test]
@@ -205,7 +278,10 @@ fn parse_rejects_control_char_body() {
     let json = format!(
         r#"{{"v":"12.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"test","author":"a-b","ts":0,"body":"evil\u0000body","ext":{{}}}}"#
     );
-    assert!(Message::parse(json.as_bytes()).is_err());
+    assert!(
+        Message::parse(json.as_bytes()).is_err(),
+        "a message with a control character in its body is refused"
+    );
 }
 
 #[test]
@@ -213,7 +289,10 @@ fn parse_rejects_unsafe_author_nickname() {
     let json = format!(
         r#"{{"v":"12.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"test","author":"a#b","ts":0,"body":"hi","ext":{{}}}}"#
     );
-    assert!(Message::parse(json.as_bytes()).is_err());
+    assert!(
+        Message::parse(json.as_bytes()).is_err(),
+        "a message with an unsafe author nickname is refused"
+    );
 }
 
 #[test]
@@ -260,10 +339,16 @@ fn parse_rejects_malformed_integrity_fields() {
         "ab".repeat(32),
         "cd".repeat(64)
     ));
-    assert!(Message::parse(ok.as_bytes()).is_ok());
+    assert!(
+        Message::parse(ok.as_bytes()).is_ok(),
+        "a message with well formed integrity fields parses"
+    );
     // A pubkey alone no longer parses: a message holds a key and its signature, or neither.
     let key_only = base(&format!(r#","pubkey":"{}""#, "ab".repeat(32)));
-    assert!(Message::parse(key_only.as_bytes()).is_err());
+    assert!(
+        Message::parse(key_only.as_bytes()).is_err(),
+        "a message with only a key field is refused"
+    );
 }
 
 #[test]
@@ -281,11 +366,15 @@ fn build_msg_bytes_message() {
         &identity,
     )
     .unwrap();
-    assert!(!built.id.as_str().is_empty());
-    assert!(!bytes.is_empty());
+    assert!(!built.id.as_str().is_empty(), "the built message has an id");
+    assert!(!bytes.is_empty(), "the built message has bytes");
     let message = Message::parse(bytes.as_bytes()).unwrap();
-    assert_eq!(message.body.as_str(), "hello");
-    assert_eq!(message.author, alice);
+    assert_eq!(
+        message.body.as_str(),
+        "hello",
+        "the built message keeps its body"
+    );
+    assert_eq!(message.author, alice, "the built message names its author");
 }
 
 mod signing {
@@ -301,8 +390,14 @@ mod signing {
     fn signed_message_verifies() {
         let message =
             Message::fixture(MessageKind::app_broadcast("app_msg"), "hello").sign(&identity());
-        assert!(message.signer.is_some());
-        assert!(message.verify_signature());
+        assert!(
+            message.signer.is_some(),
+            "a signed message carries a signer"
+        );
+        assert!(
+            message.verify_signature(),
+            "a signed message verifies its signature"
+        );
     }
 
     #[test]
@@ -320,7 +415,10 @@ mod signing {
             .sign(&identity())
             .into_message();
         message.body = "tampered".into();
-        assert!(!message.verify_signature());
+        assert!(
+            !message.verify_signature(),
+            "a tampered body breaks the signature"
+        );
     }
 
     #[test]
@@ -329,7 +427,10 @@ mod signing {
             .sign(&identity())
             .into_message();
         message.author = "impostor-bot".into();
-        assert!(!message.verify_signature());
+        assert!(
+            !message.verify_signature(),
+            "a tampered author breaks the signature"
+        );
     }
 
     #[test]
@@ -340,7 +441,10 @@ mod signing {
         )
         .sign(&identity())
         .into_message();
-        assert!(message.verify_signature());
+        assert!(
+            message.verify_signature(),
+            "a tampered task target keeps the signature valid"
+        );
         message.kind = MessageKind::app_to("app_status", "evil-otter".into(), None);
         assert!(
             !message.verify_signature(),
@@ -373,8 +477,14 @@ mod signing {
         let message =
             Message::fixture(MessageKind::app_broadcast("app_msg"), "hi").sign(&identity());
         let parsed = Message::parse(message.serialize().unwrap().as_bytes()).unwrap();
-        assert!(parsed.verify_signature());
-        assert_eq!(parsed.signer, message.signer);
+        assert!(
+            parsed.verify_signature(),
+            "the signature survives a wire round trip"
+        );
+        assert_eq!(
+            parsed.signer, message.signer,
+            "the signer survives a wire round trip"
+        );
     }
 
     #[test]
@@ -406,16 +516,35 @@ mod chain {
         let signed = message("hi")
             .with_chain(5, Some(previous))
             .sign(&Identity::generate());
-        assert_eq!(signed.seq, Some(5));
-        assert_eq!(signed.previous, Some(previous));
-        assert!(signed.verify_signature());
+        assert_eq!(
+            signed.seq,
+            Some(5),
+            "the chained message carries its sequence number"
+        );
+        assert_eq!(
+            signed.previous,
+            Some(previous),
+            "the chained message carries its previous link"
+        );
+        assert!(
+            signed.verify_signature(),
+            "the chained message verifies its signature"
+        );
     }
 
     #[test]
     fn content_hash_is_stable_and_64_hex() {
         let stamped = message("x").with_chain(0, None);
-        assert_eq!(stamped.content_hash(), stamped.content_hash());
-        assert_eq!(stamped.content_hash().to_string().len(), 64);
+        assert_eq!(
+            stamped.content_hash(),
+            stamped.content_hash(),
+            "the content hash of a message is stable"
+        );
+        assert_eq!(
+            stamped.content_hash().to_string().len(),
+            64,
+            "the content hash is 64 hex characters"
+        );
     }
 
     #[test]
@@ -424,7 +553,11 @@ mod chain {
         // seq hash differently, so a receiver can prove the fork.
         let alpha = message("alpha").with_chain(1, None);
         let beta = message("beta").with_chain(1, None);
-        assert_ne!(alpha.content_hash(), beta.content_hash());
+        assert_ne!(
+            alpha.content_hash(),
+            beta.content_hash(),
+            "a fork pair hashes differently"
+        );
     }
 
     #[test]
@@ -447,10 +580,16 @@ mod chain {
             .with_chain(1, None)
             .with_parents(parents.clone())
             .sign(&Identity::generate());
-        assert_eq!(signed.parents, parents);
+        assert_eq!(
+            signed.parents, parents,
+            "the signed message keeps its parents"
+        );
         let parsed = Message::parse(signed.serialize().unwrap().as_bytes()).unwrap();
-        assert_eq!(parsed.parents, parents);
-        assert!(parsed.verify_signature());
+        assert_eq!(parsed.parents, parents, "the parents survive a round trip");
+        assert!(
+            parsed.verify_signature(),
+            "the parsed message verifies its signature"
+        );
     }
 
     #[test]
@@ -692,18 +831,22 @@ fn a_resend_trailer_is_outside_the_frame_and_the_signature() {
     let second = super::wire_with_resend_nonce(&frame, 8);
 
     assert_ne!(first, second, "each nonce gives the payload a new name");
-    assert_ne!(first, frame);
-    assert_eq!(first.len(), frame.len() + super::RESEND_TRAILER_LEN);
+    assert_ne!(first, frame, "the resend trailer is not part of the frame");
+    assert_eq!(
+        first.len(),
+        frame.len() + super::RESEND_TRAILER_LEN,
+        "the resend frame is the frame plus the trailer length"
+    );
     let (parsed, nonce) = Message::parse_wire(&first).unwrap();
-    assert_eq!(nonce, Some(7));
-    assert_eq!(parsed.id, message.id);
+    assert_eq!(nonce, Some(7), "the resend nonce is read from the trailer");
+    assert_eq!(parsed.id, message.id, "the resend keeps the message id");
     assert!(
         parsed.verify_signature_with(&parsed.canonical_bytes()),
         "the signature does not cover the trailer"
     );
     let (plain, no_nonce) = Message::parse_wire(&frame).unwrap();
-    assert_eq!(no_nonce, None);
-    assert_eq!(plain.id, message.id);
+    assert_eq!(no_nonce, None, "a frame with no trailer has no nonce");
+    assert_eq!(plain.id, message.id, "the plain frame keeps the message id");
 }
 
 #[test]
@@ -726,11 +869,15 @@ fn a_frame_of_the_largest_size_still_parses_with_the_trailer() {
     let wire = super::wire_with_resend_nonce(&frame, u64::MAX);
     assert_eq!(
         wire.len(),
-        habilis_network_util::consts::MAX_MESSAGE_SIZE + super::RESEND_TRAILER_LEN
+        habilis_network_util::consts::MAX_MESSAGE_SIZE + super::RESEND_TRAILER_LEN,
+        "the largest frame has the size limit"
     );
     let (parsed, nonce) = Message::parse_wire(&wire).unwrap();
-    assert_eq!(nonce, Some(u64::MAX));
-    assert_eq!(parsed.id, message.id);
+    assert_eq!(nonce, Some(u64::MAX), "the largest frame keeps its nonce");
+    assert_eq!(
+        parsed.id, message.id,
+        "the largest frame keeps the message id"
+    );
 }
 
 /// The wire form of a signed message, captured from the code at the base commit with a fixed key
@@ -825,19 +972,30 @@ fn a_signed_message_keeps_its_wire_form() {
         parsed.verify_signature(),
         "the literal carries a valid signature"
     );
-    assert_eq!(parsed.author_key().unwrap().to_string(), SIGNED_PUBKEY);
+    assert_eq!(
+        parsed.author_key().unwrap().to_string(),
+        SIGNED_PUBKEY,
+        "the parsed author key matches the signed key"
+    );
     assert_eq!(
         serde_json::to_string(&super::Wire(&parsed)).unwrap(),
-        SIGNED_WIRE
+        SIGNED_WIRE,
+        "the signed message keeps its wire form"
     );
-    assert_eq!(hex(&parsed.canonical_bytes()), SIGNED_CANONICAL_HEX);
+    assert_eq!(
+        hex(&parsed.canonical_bytes()),
+        SIGNED_CANONICAL_HEX,
+        "the canonical bytes keep their hex form"
+    );
     assert_eq!(
         parsed.content_hash().to_string(),
-        "2e680fcb3a8d77ef027e722046200cf0b07c8d77d7572b7e0712556bfaf76e0e"
+        "2e680fcb3a8d77ef027e722046200cf0b07c8d77d7572b7e0712556bfaf76e0e",
+        "the content hash keeps its hex form"
     );
     assert_eq!(
         hex(parsed.dedup_key().as_bytes()),
-        "c7ba26a2ed0d21f0e8913dd8b4456086"
+        "c7ba26a2ed0d21f0e8913dd8b4456086",
+        "the dedup key keeps its hex form"
     );
 }
 
@@ -846,16 +1004,28 @@ fn a_signed_message_keeps_its_wire_form() {
 #[test]
 fn a_message_with_no_key_fields_parses_as_unsigned() {
     let parsed = Message::parse(UNSIGNED_WIRE.as_bytes()).expect("the unsigned literal parses");
-    assert!(parsed.signer.is_none());
-    assert!(!parsed.verify_signature());
+    assert!(
+        parsed.signer.is_none(),
+        "a message with no key fields parses as unsigned"
+    );
+    assert!(
+        !parsed.verify_signature(),
+        "an unsigned message does not verify"
+    );
     assert_eq!(
         serde_json::to_string(&super::Wire(&parsed)).unwrap(),
-        UNSIGNED_WIRE
+        UNSIGNED_WIRE,
+        "the unsigned message keeps its wire form"
     );
-    assert_eq!(hex(&parsed.canonical_bytes()), UNSIGNED_CANONICAL_HEX);
+    assert_eq!(
+        hex(&parsed.canonical_bytes()),
+        UNSIGNED_CANONICAL_HEX,
+        "the unsigned canonical bytes keep their hex form"
+    );
     assert_eq!(
         parsed.content_hash().to_string(),
-        "7c4c2cb3f17ce751fec8a53c2d01198b424ce71aad8f5eb5747541222bd4c263"
+        "7c4c2cb3f17ce751fec8a53c2d01198b424ce71aad8f5eb5747541222bd4c263",
+        "the unsigned content hash keeps its hex form"
     );
 }
 
@@ -864,13 +1034,24 @@ fn a_message_with_no_key_fields_parses_as_unsigned() {
 #[test]
 fn empty_key_fields_parse_as_unsigned_and_serialize_without_the_keys() {
     let parsed = Message::parse(EMPTY_KEYS_WIRE.as_bytes()).expect("empty key fields parse");
-    assert!(parsed.signer.is_none());
-    assert!(!parsed.verify_signature());
+    assert!(
+        parsed.signer.is_none(),
+        "empty key fields parse as unsigned"
+    );
+    assert!(
+        !parsed.verify_signature(),
+        "a message with empty key fields does not verify"
+    );
     assert_eq!(
         serde_json::to_string(&super::Wire(&parsed)).unwrap(),
-        UNSIGNED_WIRE
+        UNSIGNED_WIRE,
+        "empty key fields are left out of the wire form"
     );
-    assert_eq!(hex(&parsed.canonical_bytes()), UNSIGNED_CANONICAL_HEX);
+    assert_eq!(
+        hex(&parsed.canonical_bytes()),
+        UNSIGNED_CANONICAL_HEX,
+        "empty key fields keep the unsigned canonical form"
+    );
 }
 
 /// A key with no signature is a parse error, and so is a signature with no key: a message holds
@@ -880,12 +1061,23 @@ fn empty_key_fields_parse_as_unsigned_and_serialize_without_the_keys() {
 #[test]
 fn a_key_with_no_signature_is_rejected_and_so_is_a_signature_with_no_key() {
     let no_sig = Message::parse(KEY_ONLY_WIRE.as_bytes()).expect_err("a key with no signature");
-    assert_eq!(no_sig.to_string(), "pubkey without a signature");
+    assert_eq!(
+        no_sig.to_string(),
+        "pubkey without a signature",
+        "a key with no signature is named in the error"
+    );
 
     let sig_only = SIGNED_WIRE.replace(&format!(r#""pubkey":"{SIGNED_PUBKEY}","#), "");
-    assert!(!sig_only.contains("pubkey"));
+    assert!(
+        !sig_only.contains("pubkey"),
+        "a signature with no key does not show a key"
+    );
     let no_key = Message::parse(sig_only.as_bytes()).expect_err("a signature with no key");
-    assert_eq!(no_key.to_string(), "signature without a pubkey");
+    assert_eq!(
+        no_key.to_string(),
+        "signature without a pubkey",
+        "a signature with no key is named in the error"
+    );
 }
 
 mod verified {
@@ -902,12 +1094,16 @@ mod verified {
         let identity = Identity::generate();
         let key = identity.author_key();
         let verified = message("hello").sign(&identity);
-        assert_eq!(verified.key(), key);
+        assert_eq!(verified.key(), key, "a verified message keeps its key");
         let back = verified
             .into_message()
             .verify()
             .expect("a signed message verifies");
-        assert_eq!(back.author_key(), Some(key));
+        assert_eq!(
+            back.author_key(),
+            Some(key),
+            "the parsed message keeps its author key"
+        );
     }
 
     #[test]
@@ -917,8 +1113,15 @@ mod verified {
             .clone()
             .verify()
             .expect_err("an unsigned message does not verify");
-        assert_eq!(back.body.as_str(), unsigned.body.as_str());
-        assert!(back.signer.is_none());
+        assert_eq!(
+            back.body.as_str(),
+            unsigned.body.as_str(),
+            "an unsigned message is given back by verify with its body"
+        );
+        assert!(
+            back.signer.is_none(),
+            "an unsigned message is given back with no signer"
+        );
     }
 
     #[test]
@@ -928,7 +1131,11 @@ mod verified {
         let back = tampered
             .verify()
             .expect_err("a tampered body does not verify");
-        assert_eq!(back.body.as_str(), "tampered");
+        assert_eq!(
+            back.body.as_str(),
+            "tampered",
+            "a tampered body fails verify and is given back"
+        );
     }
 
     #[test]
@@ -943,7 +1150,10 @@ mod verified {
             wire.as_bytes(),
             "the original signature is kept"
         );
-        assert!(unmodified.into_message().verify().is_ok());
+        assert!(
+            unmodified.into_message().verify().is_ok(),
+            "a fixture keeps the signature as parsed"
+        );
 
         let mut tampered = parsed;
         tampered.body = "tampered".into();
@@ -963,7 +1173,11 @@ mod verified {
             .clone()
             .verify_canonical()
             .expect("the original verifies");
-        assert_eq!(canonical, original.canonical_bytes());
+        assert_eq!(
+            canonical,
+            original.canonical_bytes(),
+            "the canonical bytes are the original's"
+        );
 
         let mut edited = original;
         edited.body = "edited".into();
@@ -971,13 +1185,21 @@ mod verified {
             edited.clone().verify_canonical().is_err(),
             "an edited clone does not verify, so no proof is made over its bytes"
         );
-        assert_ne!(edited.canonical_bytes(), canonical);
+        assert_ne!(
+            edited.canonical_bytes(),
+            canonical,
+            "an edited clone has different canonical bytes"
+        );
     }
 
     #[test]
     fn verified_serializes_to_the_same_bytes_as_its_message() {
         let parsed = Message::parse(SIGNED_WIRE.as_bytes()).expect("the signed literal parses");
         let verified = parsed.verify().expect("the golden signature verifies");
-        assert_eq!(serde_json::to_string(&verified).unwrap(), SIGNED_WIRE);
+        assert_eq!(
+            serde_json::to_string(&verified).unwrap(),
+            SIGNED_WIRE,
+            "a verified message serializes to the same bytes as its message"
+        );
     }
 }

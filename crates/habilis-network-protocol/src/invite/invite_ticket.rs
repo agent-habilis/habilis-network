@@ -358,14 +358,19 @@ mod tests {
 
     #[test]
     fn encode_matches_the_golden_string() {
-        assert_eq!(fixed_ticket().encode(), GOLDEN);
+        assert_eq!(
+            fixed_ticket().encode(),
+            GOLDEN,
+            "the invite encodes to the golden string"
+        );
     }
 
     #[test]
     fn decode_of_the_golden_string_gives_the_same_fields() {
         assert_eq!(
             InviteTicket::decode(GOLDEN).expect("decode"),
-            fixed_ticket()
+            fixed_ticket(),
+            "the golden string decodes to the same fields"
         );
     }
 
@@ -374,8 +379,11 @@ mod tests {
     #[test]
     fn minted_invite_is_bare_base58() {
         let token = mint(&creator(), Some(Duration::from_hours(1)), None).unwrap();
-        assert!(token.is_ascii());
-        assert!(!token.contains("://"));
+        assert!(token.is_ascii(), "a minted invite is ascii");
+        assert!(
+            !token.contains("://"),
+            "a minted invite carries no url scheme"
+        );
     }
 
     #[test]
@@ -384,9 +392,16 @@ mod tests {
         let redeemed = minted(&mesh, Some(Duration::from_hours(1)), None)
             .redeem(None)
             .unwrap();
-        assert!(redeemed.requires_invite());
+        assert!(
+            redeemed.requires_invite(),
+            "a redeemed invite requires an invite"
+        );
         // The gate works: same root ⇒ same topic ⇒ they actually meet.
-        assert_eq!(redeemed.topic_id(), mesh.topic_id());
+        assert_eq!(
+            redeemed.topic_id(),
+            mesh.topic_id(),
+            "a redeemed invite derives the creator's topic id"
+        );
     }
 
     #[test]
@@ -404,8 +419,15 @@ mod tests {
     fn a_ttl_past_the_range_saturates_the_expiry() {
         let mesh = creator();
         let ticket = minted(&mesh, Some(Duration::from_secs(u64::MAX)), None);
-        assert_eq!(ticket.expiry, UnixSecs::MAX);
-        assert!(ticket.redeem(None).is_ok());
+        assert_eq!(
+            ticket.expiry,
+            UnixSecs::MAX,
+            "a ttl past the range saturates the expiry at the maximum"
+        );
+        assert!(
+            ticket.redeem(None).is_ok(),
+            "a saturated invite still redeems"
+        );
     }
 
     /// The expiry is a whole second. A ttl with a part of a second rounds up, so that a ttl
@@ -446,7 +468,10 @@ mod tests {
             .unwrap();
         // The redeemer has the join root (it derived the topic) but no issuer
         // key, so it can neither mint nor sign a forgery.
-        assert!(redeemed.issuer_secret().is_none());
+        assert!(
+            redeemed.issuer_secret().is_none(),
+            "a redeemer holds the root but cannot mint"
+        );
         assert!(
             mint(&redeemed, Some(Duration::from_hours(1)), None).is_err(),
             "a non-creator must not be able to mint a valid invite"
@@ -461,7 +486,10 @@ mod tests {
             MeshConfig::loopback(),
         )
         .unwrap();
-        assert!(mint(&plain, Some(Duration::from_hours(1)), None).is_err());
+        assert!(
+            mint(&plain, Some(Duration::from_hours(1)), None).is_err(),
+            "minting refuses a mesh that is not invite-only"
+        );
     }
 
     // ── adversarial: forged / tampered signatures ─────────────────────────
@@ -507,7 +535,10 @@ mod tests {
         let mesh = creator();
         let mut ticket = minted(&mesh, Some(Duration::from_hours(1)), None);
         ticket.expiry = UnixSecs::MAX;
-        assert!(ticket.redeem(None).is_err());
+        assert!(
+            ticket.redeem(None).is_err(),
+            "a tampered expiry is refused on redeem"
+        );
     }
 
     #[test]
@@ -549,14 +580,21 @@ mod tests {
     fn a_password_wrapped_invite_needs_the_right_password() {
         let mesh = creator();
         let ticket = minted(&mesh, Some(Duration::from_hours(1)), Some(&pw("hunter2")));
-        assert!(ticket.requires_password());
+        assert!(
+            ticket.requires_password(),
+            "a password-wrapped invite requires its password"
+        );
         assert!(ticket.redeem(None).is_err(), "missing password");
         assert!(
             ticket.redeem(Some(&pw("wrong"))).is_err(),
             "a wrong password must not unwrap the root (AEAD self-verifies)"
         );
         let ok = ticket.redeem(Some(&pw("hunter2"))).unwrap();
-        assert_eq!(ok.topic_id(), mesh.topic_id());
+        assert_eq!(
+            ok.topic_id(),
+            mesh.topic_id(),
+            "the password-wrapped invite derives the creator's topic id"
+        );
     }
 
     #[test]
@@ -565,7 +603,8 @@ mod tests {
         assert!(
             minted(&mesh, Some(Duration::from_hours(1)), None)
                 .redeem(Some(&pw("x")))
-                .is_err()
+                .is_err(),
+            "a plain invite refuses a stray password"
         );
     }
 
@@ -580,7 +619,10 @@ mod tests {
             MeshConfig::loopback(),
         )
         .unwrap();
-        assert!(InviteTicket::decode(&plain.to_string()).is_err());
+        assert!(
+            InviteTicket::decode(&plain.to_string()).is_err(),
+            "a mesh id is not an invite"
+        );
     }
 
     #[test]
@@ -588,7 +630,10 @@ mod tests {
         let mut token = mint(&creator(), Some(Duration::from_hours(1)), None).unwrap();
         let last = token.pop().unwrap();
         token.push(if last == '1' { '2' } else { '1' });
-        assert!(InviteTicket::decode(&token).is_err());
+        assert!(
+            InviteTicket::decode(&token).is_err(),
+            "a bad checksum is refused as an invite"
+        );
     }
 
     #[test]

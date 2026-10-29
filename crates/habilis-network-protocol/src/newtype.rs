@@ -39,12 +39,33 @@ mod tests {
     /// have silently dropped.
     #[test]
     fn deserialization_still_rejects_what_new_rejects() {
-        assert!(serde_json::from_str::<Nickname>("\"has space\"").is_err());
-        assert!(serde_json::from_str::<MessageId>("\"not-a-uuid\"").is_err());
-        assert!(serde_json::from_str::<MessageBody>("\"\\u0007\"").is_err());
-        assert!(serde_json::from_str::<AppTag>("\"has space\"").is_err());
-        assert!(serde_json::from_str::<CorrId>("\"\"").is_err());
-        assert!(serde_json::from_str::<ShardGroup>("\"not-a-uuid\"").is_err());
-        assert!(serde_json::from_str::<MeshId>("\"!!\"").is_err());
+        assert!(
+            serde_json::from_str::<Nickname>("\"has space\"").is_err(),
+            "a json nickname with a space is refused"
+        );
+        assert!(
+            serde_json::from_str::<MessageId>("\"not-a-uuid\"").is_err(),
+            "a json message id that is not a uuid is refused"
+        );
+        assert!(
+            serde_json::from_str::<MessageBody>("\"\\u0007\"").is_err(),
+            "a json message body with a bell is refused"
+        );
+        assert!(
+            serde_json::from_str::<AppTag>("\"has space\"").is_err(),
+            "a json app tag with a space is refused"
+        );
+        assert!(
+            serde_json::from_str::<CorrId>("\"\"").is_err(),
+            "an empty json correlation id is refused"
+        );
+        assert!(
+            serde_json::from_str::<ShardGroup>("\"not-a-uuid\"").is_err(),
+            "a json shard group that is not a uuid is refused"
+        );
+        assert!(
+            serde_json::from_str::<MeshId>("\"!!\"").is_err(),
+            "a json mesh id of punctuation is refused"
+        );
     }
 }
