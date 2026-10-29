@@ -28,7 +28,7 @@ fn payload(len: usize) -> Vec<u8> {
 
 /// A producer on `relay`, with `--robot` notes on stderr, sent line by line.
 fn producer(relay: &str) -> (Child, mpsc::Receiver<serde_json::Value>) {
-    let mut child = Command::new(BINARY)
+    let mut child: Child = Command::new(BINARY)
         .args(["--lookup", "relay", "--relay-url", relay, "--robot"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -91,7 +91,7 @@ fn bytes_piped_in_come_out_of_another_binary_byte_exact() {
 
             let ready = note(&notes, "ready", "");
             let hash = ready["hash"].as_str().expect("a hash").to_owned();
-            let mut reader = Command::new(BINARY)
+            let mut reader: Child = Command::new(BINARY)
                 .arg(&hash)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -136,7 +136,7 @@ fn a_producer_stopped_by_sigterm_abandons_its_reader_at_once() {
                 .as_str()
                 .expect("a hash")
                 .to_owned();
-            let mut reader = Command::new(BINARY)
+            let mut reader: Child = Command::new(BINARY)
                 .arg(&hash)
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
@@ -145,7 +145,7 @@ fn a_producer_stopped_by_sigterm_abandons_its_reader_at_once() {
             note(&notes, "note", "a reader attached; streaming stdin");
 
             let stopped = Instant::now();
-            let killed = Command::new("kill")
+            let killed: std::process::ExitStatus = Command::new("kill")
                 .args(["-TERM", &producer.id().to_string()])
                 .status()
                 .expect("kill");

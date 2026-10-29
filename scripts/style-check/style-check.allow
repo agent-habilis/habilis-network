@@ -376,7 +376,6 @@ untyped_long_chain_let|crates/habilis-network-protocol/src/mesh/lookup.rs|1|kept
 untyped_long_chain_let|crates/habilis-network-protocol/src/mesh/name_error.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-protocol/src/mesh/transport.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-protocol/src/reassembly/reassembly_store.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
-untyped_long_chain_let|crates/habilis-network-stream-cli/tests/binary.rs|4|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-test-tracing/src/guard.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-test-tracing/tests/atexit.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 untyped_long_chain_let|crates/habilis-network-test-tracing/tests/twice.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
