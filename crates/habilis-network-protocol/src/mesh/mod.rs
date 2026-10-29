@@ -37,10 +37,10 @@ pub use transport::{Transport, TransportPolicy};
 const VERSION: u8 = 2;
 const SEED_LEN: usize = 32;
 /// Wire bound for the encoded name in bytes. `MeshName::try_new` caps the
-/// name at `ident::MAX_CHARS` scalar values; each is at most 4 UTF-8
+/// name at `identifier::MAX_CHARS` scalar values; each is at most 4 UTF-8
 /// bytes, so the encoded form fits this many bytes (and inside the
 /// 1-byte length field).
-const NAME_MAX_BYTES: usize = super::ident::MAX_CHARS * 4;
+const NAME_MAX_BYTES: usize = super::identifier::MAX_CHARS * 4;
 
 mod choice_error;
 mod locked_mesh;

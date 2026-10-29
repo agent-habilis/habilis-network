@@ -80,7 +80,7 @@ pub fn rung_of(path: &PathSelectionData<'_>, custom: impl Fn(u64) -> Rung) -> Ru
     match path.network_path().remote() {
         Addr::Ip(_) => Rung::Ip,
         Addr::Relay(..) => Rung::Relay,
-        Addr::Custom(addr) => custom(addr.id()),
+        Addr::Custom(address) => custom(address.id()),
     }
 }
 
@@ -157,8 +157,8 @@ pub fn ip_remote(path: &PathSelectionData<'_>) -> Option<std::net::SocketAddr> {
 /// transport carries no single remote (a multihop address is a route), so those
 /// give `None`.
 #[must_use]
-pub fn remote_id_of(addr: &Addr) -> Option<iroh::EndpointId> {
-    match addr {
+pub fn remote_id_of(address: &Addr) -> Option<iroh::EndpointId> {
+    match address {
         Addr::Relay(_, id) => Some(*id),
         Addr::Custom(custom) if custom.id() == WEBRTC_TRANSPORT_ID => {
             let bytes: [u8; 32] = custom.data().try_into().ok()?;

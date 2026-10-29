@@ -168,8 +168,11 @@ async fn connection_to(remote: EndpointId) -> Result<Connection, JsValue> {
     if let Some(connection) = open {
         return Ok(connection);
     }
-    let addr = EndpointAddr::from_parts(remote, [TransportAddr::Custom(custom_addr(remote))]);
-    let connection = endpoint.connect(addr, BENCH_ALPN).await.map_err(js_error)?;
+    let address = EndpointAddr::from_parts(remote, [TransportAddr::Custom(custom_addr(remote))]);
+    let connection = endpoint
+        .connect(address, BENCH_ALPN)
+        .await
+        .map_err(js_error)?;
     with_state(|state| {
         state.connection = Some((remote, connection.clone()));
         Ok(())

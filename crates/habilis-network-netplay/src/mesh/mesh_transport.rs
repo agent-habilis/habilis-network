@@ -116,7 +116,7 @@ impl<T: Config> MeshTransport<T> {
 /// key that signs its frames, and pretending the address type is open would
 /// mean inventing a conversion that only ever has one sensible implementation.
 impl<T: Config<Address = AuthorKey>> Transport<T> for MeshTransport<T> {
-    fn send_to(&mut self, message: &Message<T::Input>, addr: &AuthorKey) {
+    fn send_to(&mut self, message: &Message<T::Input>, address: &AuthorKey) {
         let Some(payload) = rollback_driver::encode(message) else {
             return;
         };
@@ -124,9 +124,10 @@ impl<T: Config<Address = AuthorKey>> Transport<T> for MeshTransport<T> {
         // loop, which must not block on the event loop draining. A full
         // queue means the loop is badly backed up, and dropping is the right
         // answer anyway — the protocol resends unacked inputs.
-        let _ = self
-            .outbox
-            .try_send(Outbound::Rollback { to: *addr, payload });
+        let _ = self.outbox.try_send(Outbound::Rollback {
+            to: *address,
+            payload,
+        });
     }
 
     fn receive_all(&mut self) -> Vec<(AuthorKey, Message<T::Input>)> {

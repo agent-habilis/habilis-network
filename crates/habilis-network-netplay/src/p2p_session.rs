@@ -107,9 +107,9 @@ impl<T: Config, Link: Transport<T>> P2PSession<T, Link> {
         let peers: Vec<PeerProtocol<T>> = players
             .into_iter()
             .enumerate()
-            .map(|(index, addr)| (PlayerHandle::new(index), addr))
+            .map(|(index, address)| (PlayerHandle::new(index), address))
             .filter(|(handle, _)| *handle != local_handle)
-            .map(|(handle, addr)| PeerProtocol::new(addr, handle, magic))
+            .map(|(handle, address)| PeerProtocol::new(address, handle, magic))
             .collect();
         Ok(Self {
             sync: Sync::new(num_players, max_prediction, input_delay, local_handle),
@@ -152,8 +152,8 @@ impl<T: Config, Link: Transport<T>> P2PSession<T, Link> {
         let mut replies: Vec<(T::Address, Message<T::Input>)> = Vec::new();
 
         let mut unaddressed = 0u32;
-        for (addr, message) in self.transport.receive_all() {
-            let Some(peer) = self.peers.iter_mut().find(|peer| peer.addr == addr) else {
+        for (address, message) in self.transport.receive_all() {
+            let Some(peer) = self.peers.iter_mut().find(|peer| peer.address == address) else {
                 // Not a participant in this match. Counted rather than
                 // ignored: if the roster's addresses and the transport's
                 // disagree, *every* packet lands here and the session sits in
@@ -164,14 +164,18 @@ impl<T: Config, Link: Transport<T>> P2PSession<T, Link> {
             let handle = peer.handle;
             let mut peer_replies = Vec::new();
             let (inputs, events) = peer.on_message(&message, &mut peer_replies);
-            replies.extend(peer_replies.into_iter().map(|reply| (addr.clone(), reply)));
+            replies.extend(
+                peer_replies
+                    .into_iter()
+                    .map(|reply| (address.clone(), reply)),
+            );
 
             for (frame, input) in inputs {
                 // An out-of-range handle is impossible here — handles come
                 // from our own construction — so this cannot fail.
                 let _ = self.sync.add_remote_input(handle, frame, input);
             }
-            self.record_events(&addr, events);
+            self.record_events(&address, events);
         }
 
         if unaddressed > 0 {
@@ -189,8 +193,8 @@ impl<T: Config, Link: Transport<T>> P2PSession<T, Link> {
             }
         }
 
-        for (addr, message) in &replies {
-            self.transport.send_to(message, addr);
+        for (address, message) in &replies {
+            self.transport.send_to(message, address);
         }
 
         let mut outgoing: Vec<(T::Address, Message<T::Input>)> = Vec::new();
@@ -201,28 +205,36 @@ impl<T: Config, Link: Transport<T>> P2PSession<T, Link> {
         let mut peer_events: Vec<(T::Address, Vec<PeerEvent>)> = Vec::new();
         for peer in &mut self.peers {
             let (messages, events) = peer.tick(current);
-            let addr = peer.addr.clone();
-            outgoing.extend(messages.into_iter().map(|message| (addr.clone(), message)));
+            let address = peer.address.clone();
+            outgoing.extend(
+                messages
+                    .into_iter()
+                    .map(|message| (address.clone(), message)),
+            );
             skip = skip.max(peer.recommend_skip());
-            peer_events.push((addr, events));
+            peer_events.push((address, events));
         }
-        for (addr, events) in peer_events {
-            self.record_events(&addr, events);
+        for (address, events) in peer_events {
+            self.record_events(&address, events);
         }
         self.skip_frames = skip;
-        for (addr, message) in &outgoing {
-            self.transport.send_to(message, addr);
+        for (address, message) in &outgoing {
+            self.transport.send_to(message, address);
         }
 
         self.refresh_state();
         self.refresh_confirmed_frame();
     }
 
-    fn record_events(&mut self, addr: &T::Address, events: Vec<PeerEvent>) {
+    fn record_events(&mut self, address: &T::Address, events: Vec<PeerEvent>) {
         for event in events {
             self.events.push(match event {
-                PeerEvent::Synchronized => Event::Synchronized { addr: addr.clone() },
-                PeerEvent::Disconnected => Event::Disconnected { addr: addr.clone() },
+                PeerEvent::Synchronized => Event::Synchronized {
+                    address: address.clone(),
+                },
+                PeerEvent::Disconnected => Event::Disconnected {
+                    address: address.clone(),
+                },
                 PeerEvent::Desync {
                     frame,
                     local,
@@ -348,10 +360,10 @@ impl<T: Config, Link: Transport<T>> P2PSession<T, Link> {
 
         let mut outgoing = Vec::new();
         for peer in &mut self.peers {
-            outgoing.push((peer.addr.clone(), peer.checksum_message(frame, checksum)));
+            outgoing.push((peer.address.clone(), peer.checksum_message(frame, checksum)));
         }
-        for (addr, message) in &outgoing {
-            self.transport.send_to(message, addr);
+        for (address, message) in &outgoing {
+            self.transport.send_to(message, address);
         }
     }
 }

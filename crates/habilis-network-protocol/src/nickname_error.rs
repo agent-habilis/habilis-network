@@ -90,8 +90,8 @@ impl fmt::Display for NicknameError {
                 write!(
                     formatter,
                     "nickname must be {}..={} characters, got {len}",
-                    super::ident::MIN_CHARS,
-                    super::ident::MAX_CHARS
+                    super::identifier::MIN_CHARS,
+                    super::identifier::MAX_CHARS
                 )
             }
             NicknameError::Charset(value) => {
@@ -116,10 +116,10 @@ impl Nickname {
     pub fn try_new(value: &str) -> Result<Self, NicknameError> {
         let value: String = value.to_owned();
         let count = value.chars().count();
-        if !(super::ident::MIN_CHARS..=super::ident::MAX_CHARS).contains(&count) {
+        if !(super::identifier::MIN_CHARS..=super::identifier::MAX_CHARS).contains(&count) {
             return Err(NicknameError::Length(count));
         }
-        if value.chars().any(super::ident::is_forbidden) {
+        if value.chars().any(super::identifier::is_forbidden) {
             return Err(NicknameError::Charset(value));
         }
         Ok(Self(value))
@@ -170,7 +170,7 @@ mod tests {
             Nickname::try_new("").is_err(),
             "an empty nickname is refused"
         );
-        let too_long = "a".repeat(super::super::ident::MAX_CHARS + 1);
+        let too_long = "a".repeat(super::super::identifier::MAX_CHARS + 1);
         assert!(
             Nickname::try_new(&too_long).is_err(),
             "an overlong nickname is refused"

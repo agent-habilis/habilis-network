@@ -255,23 +255,6 @@ untyped_long_chain_let|crates/habilis-network/tests/unknown_peer_requests_loopba
 
 # abbrev_name: identifiers that are still letter-deleted abbreviations (ctx, addr, conn, msg, buf, opts, prev, ...).
 # Each row goes down as the names are renamed; a new one fails the check. Reason: a follow-up rename of an existing name.
-abbrev_name|crates/habilis-network-bench-wasm/src/browser.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-gossip-transport/src/lib.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-transport-util/src/rung.rs|4|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-iroh-webrtc-transport/src/lib.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-logging/src/filter.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-netplay/src/mesh/rollback_driver.rs|11|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-netplay/src/mesh/mesh_transport.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-netplay/src/peer_protocol.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-netplay/src/p2p_session.rs|24|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-netplay/src/event.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-netplay/src/transport.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/lib.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-protocol/src/mesh/name_error.rs|8|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream-cli/src/args.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network-stream-cli/src/main.rs|3|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/daemon/shutdown.rs|1|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
-abbrev_name|crates/habilis-network/src/lookup/endpoint.rs|1|moved from mod.rs with the endpoint builders; the rename to a full word is a follow-up that lowers this count
 
 
 long_chain|crates/habilis-network-chunks/src/fs/disk_store.rs|2|kept: statements with a chain of five or more calls, moved with fs.rs (P15 rollout)
@@ -287,7 +270,6 @@ long_chain|crates/habilis-network-protocol/src/mesh/mesh.rs|1|kept: statements w
 long_chain|crates/habilis-network/src/beacon/dependents.rs|2|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/message/wire_in.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-protocol/src/message/wire_out.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
-abbrev_name|crates/habilis-network/src/beacon/rival_probe.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network/src/beacon/rung_watch.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 untyped_long_chain_let|crates/habilis-network/src/beacon/rung_watch.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 long_chain|crates/habilis-network/src/beacon/rung_ladder.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
@@ -299,6 +281,5 @@ untyped_long_chain_let|crates/habilis-network/src/beacon/tests.rs|1|kept: a let 
 long_chain|crates/habilis-network/src/lookup/tests.rs|3|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 untyped_long_chain_let|crates/habilis-network/src/lookup/tests.rs|2|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 
-abbrev_name|crates/habilis-network/src/lookup/transport_opts.rs|2|existing letter-deleted names; the rename to a full word is a follow-up that lowers this count
 long_chain|crates/habilis-network-iroh-multihop-transport/src/underlay/forwarder.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)
 long_chain|crates/habilis-network-util/src/clock.rs|1|kept: statements with a chain of five or more calls, to be split by a named step (P15 rollout)

@@ -140,9 +140,9 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
     /// before `Node::spawn` has access to `HandlerCtx` — so this is the
     /// first chance to record it. [`super::MeshTransport::local_pubkey`] surfaces
     /// it to the frame loop, which needs it to build a [`super::Lobby`].
-    async fn on_startup(&mut self, _state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    async fn on_startup(&mut self, _state: &mut EventLoopState, context: &HandlerCtx<'_>) {
         if let Ok(mut slot) = self.mailboxes.local_pubkey.lock() {
-            *slot = Some(ctx.our_pubkey);
+            *slot = Some(context.our_pubkey);
         }
     }
 
@@ -150,7 +150,7 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
         &mut self,
         request: Outbound,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
         match request {
             Outbound::Rollback { to, payload } => {
@@ -173,11 +173,11 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                     );
                     return false;
                 };
-                let Some(frame) = frame_for(ctx, ROLLBACK_TAG, Some(nickname), &payload) else {
+                let Some(frame) = frame_for(context, ROLLBACK_TAG, Some(nickname), &payload) else {
                     return false;
                 };
                 let class = self.classify(&frame.authored());
-                send(state, ctx, frame, class).await
+                send(state, context, frame, class).await
             }
             Outbound::Lobby { payload } => {
                 // Addressed to every roster member individually — never a
@@ -192,11 +192,11 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                     .collect();
                 let mut delivered = false;
                 for peer in peers {
-                    let Some(frame) = frame_for(ctx, LOBBY_TAG, Some(peer), &payload) else {
+                    let Some(frame) = frame_for(context, LOBBY_TAG, Some(peer), &payload) else {
                         continue;
                     };
                     let class = self.classify(&frame.authored());
-                    delivered |= send(state, ctx, frame, class).await;
+                    delivered |= send(state, context, frame, class).await;
                 }
                 delivered
             }
@@ -206,7 +206,7 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
 
 /// The frame of one `send_app`, or `None` for a tag or a payload the wire refuses.
 fn frame_for(
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     tag: &str,
     to: Option<Nickname>,
     payload: &str,
@@ -215,7 +215,7 @@ fn frame_for(
         return None;
     };
     Some(habilis_network::ops::app_frame(
-        ctx,
+        context,
         AppFrameParams::new(tag, to, None, body),
     ))
 }
@@ -227,11 +227,11 @@ fn frame_for(
 /// error even if it had it.
 async fn send(
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
+    context: &HandlerCtx<'_>,
     frame: Verified,
     class: AppClass,
 ) -> bool {
-    habilis_network::ops::send_app(state, ctx, frame, class)
+    habilis_network::ops::send_app(state, context, frame, class)
         .await
         .is_ok()
 }

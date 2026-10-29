@@ -78,7 +78,7 @@ pub(crate) enum PeerEvent {
 
 /// One remote peer's connection.
 pub(crate) struct PeerProtocol<T: Config> {
-    pub(crate) addr: T::Address,
+    pub(crate) address: T::Address,
     /// Which player handle this peer drives.
     pub(crate) handle: PlayerHandle,
     state: PeerState,
@@ -125,7 +125,7 @@ impl<T: Config> std::fmt::Debug for PeerProtocol<T> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("PeerProtocol")
-            .field("addr", &self.addr)
+            .field("addr", &self.address)
             .field("handle", &self.handle)
             .field("state", &self.state)
             .field("last_received_frame", &self.last_received_frame)
@@ -135,9 +135,9 @@ impl<T: Config> std::fmt::Debug for PeerProtocol<T> {
 }
 
 impl<T: Config> PeerProtocol<T> {
-    pub(crate) fn new(addr: T::Address, handle: PlayerHandle, magic: u32) -> Self {
+    pub(crate) fn new(address: T::Address, handle: PlayerHandle, magic: u32) -> Self {
         Self {
-            addr,
+            address,
             handle,
             state: PeerState::Syncing,
             magic,

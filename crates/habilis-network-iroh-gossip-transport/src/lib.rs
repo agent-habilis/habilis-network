@@ -4,7 +4,7 @@
 //! Built in steps. Step 2 is the frame codec. Step 3 is the transport itself,
 //! over a sink that the caller attaches after the endpoint exists.
 
-mod addr;
+mod address;
 mod budget;
 mod counters;
 mod delivery;
@@ -19,7 +19,7 @@ mod receive_loop;
 mod recursion;
 mod shared;
 
-pub use addr::{gossip_addr, parse_gossip_addr};
+pub use address::{gossip_addr, parse_gossip_addr};
 pub use budget::DEFAULT_BUDGET_BYTES_PER_SEC;
 pub use counters::Stats;
 pub use delivery::Delivery;

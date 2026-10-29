@@ -352,8 +352,9 @@ function countAbbrevNames(raw: string): number {
     .replace(/\bPayload\s*\{[^}]*\}/g, (literal) => literal.replace(/\bmsg\b/g, "_"));
   let count = 0;
   // A name after a dot is a method call or a field access: the name is declared elsewhere, where it counts,
-  // or it belongs to a foreign API (`endpoint.addr()`) that this crate cannot rename.
-  for (const m of text.matchAll(/(?<!::)(?<!:)(?<!\.)\b([A-Za-z_]\w*)\b/g)) {
+  // or it belongs to a foreign API (`endpoint.addr()`) that this crate cannot rename. A macro call (`cfg!(...)`)
+  // is the compiler's name, not ours, so it is not counted; `!=` after a name is still a comparison.
+  for (const m of text.matchAll(/(?<!::)(?<!:)(?<!\.)\b([A-Za-z_]\w*)\b(?![ \t]*!(?!=))/g)) {
     if (ABBREVIATIONS.has(m[1]!)) count++;
   }
   return count;

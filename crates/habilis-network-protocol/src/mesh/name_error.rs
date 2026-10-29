@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use crate::{ident, wordlist};
+use crate::{identifier, wordlist};
 
 /// A human-readable mesh label, bound cryptographically into the topic id.
 ///
@@ -60,8 +60,8 @@ impl fmt::Display for NameError {
                 write!(
                     formatter,
                     "mesh name must be {}..={} characters, got {len}",
-                    ident::MIN_CHARS,
-                    ident::MAX_CHARS
+                    identifier::MIN_CHARS,
+                    identifier::MAX_CHARS
                 )
             }
             NameError::Charset(value) => {
@@ -131,10 +131,10 @@ impl MeshName {
     pub fn try_new(value: &str) -> Result<Self, NameError> {
         let value: String = value.to_owned();
         let count = value.chars().count();
-        if !(ident::MIN_CHARS..=ident::MAX_CHARS).contains(&count) {
+        if !(identifier::MIN_CHARS..=identifier::MAX_CHARS).contains(&count) {
             return Err(NameError::Length(count));
         }
-        if value.chars().any(ident::is_forbidden_mesh_name) {
+        if value.chars().any(identifier::is_forbidden_mesh_name) {
             return Err(NameError::Charset(value));
         }
         Ok(Self(value))
@@ -155,9 +155,9 @@ impl MeshName {
     /// URL scheme (`https://`, `git://`, …) is dropped so the name reads
     /// cleanly, and for an http(s) URL the `?query`/`#fragment` are dropped too
     /// (display only — the seed still hashes the full string); then every run of
-    /// invalid chars ([`ident::is_forbidden_mesh_name`] —
+    /// invalid chars ([`identifier::is_forbidden_mesh_name`] —
     /// whitespace, control, bidi, `< > #`) becomes a single `-`
-    /// (leading/trailing suppressed), capped at [`ident::MAX_CHARS`] scalar
+    /// (leading/trailing suppressed), capped at [`identifier::MAX_CHARS`] scalar
     /// values (an over-long name keeps the first `MAX_CHARS - 1` and ends in
     /// `…`), falling back to `topic` when nothing valid survives. Path
     /// separators `/ \` and the rest of the URL charset survive verbatim.
@@ -173,7 +173,7 @@ impl MeshName {
         let mut out = String::new();
         let mut pending_dash = false;
         for ch in topic_name_source(raw.trim()).chars() {
-            if ident::is_forbidden_mesh_name(ch) {
+            if identifier::is_forbidden_mesh_name(ch) {
                 // Any invalid char (incl. whitespace) → a single `-`; runs
                 // collapse and a leading `-` is suppressed. A trailing run
                 // leaves `pending_dash` set but is never emitted.
@@ -188,12 +188,12 @@ impl MeshName {
         }
 
         let chars: Vec<char> = out.chars().collect();
-        let name = if chars.len() <= ident::MAX_CHARS {
+        let name = if chars.len() <= identifier::MAX_CHARS {
             out
         } else {
             // Keep MAX_CHARS-1 scalar values, drop a trailing `-` a mid-run cut
             // may leave, then mark the truncation with `…` (total <= MAX_CHARS).
-            let mut head: String = chars[..ident::MAX_CHARS - 1].iter().collect();
+            let mut head: String = chars[..identifier::MAX_CHARS - 1].iter().collect();
             while head.ends_with('-') {
                 head.pop();
             }
@@ -221,7 +221,7 @@ impl MeshName {
 
 #[cfg(test)]
 mod tests {
-    use super::{MeshName, ident};
+    use super::{MeshName, identifier};
     use habilis_network_test_tracing::test;
 
     #[test]
@@ -331,7 +331,7 @@ mod tests {
         let name = MeshName::from_topic_string(&"x".repeat(100));
         assert_eq!(
             name.as_str().chars().count(),
-            ident::MAX_CHARS,
+            identifier::MAX_CHARS,
             "an overlong name is truncated to the character cap"
         );
         assert!(name.as_str().ends_with('…'), "got {name}");
@@ -364,14 +364,14 @@ mod tests {
         );
         for ch in url_specials.chars() {
             assert!(
-                !ident::is_forbidden_mesh_name(ch),
+                !identifier::is_forbidden_mesh_name(ch),
                 "URL char {ch:?} must be allowed in a mesh name"
             );
         }
         // The reserved trio stays forbidden.
         for ch in ['#', '<', '>'] {
             assert!(
-                ident::is_forbidden_mesh_name(ch),
+                identifier::is_forbidden_mesh_name(ch),
                 "{ch:?} must stay forbidden in a mesh name"
             );
         }

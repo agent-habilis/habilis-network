@@ -59,7 +59,7 @@ async fn run(args: &Args) -> Result<()> {
         if std::io::stdin().is_terminal() {
             bail!("pipe data in to stream it, or pass a hash to read one");
         }
-        let node = StreamNode::bind(&args.opts()).await?;
+        let node = StreamNode::bind(&args.options()).await?;
         let outcome = until_stopped(produce(args, &node)).await;
         (node, outcome)
     };
@@ -205,11 +205,11 @@ fn spawn_stdin() -> mpsc::Receiver<std::io::Result<Vec<u8>>> {
 /// Send `input` down `tx` in chunks until its end, or its first error. An
 /// `Interrupted` read is retried, not sent.
 fn forward(mut input: impl std::io::Read, tx: &mpsc::Sender<std::io::Result<Vec<u8>>>) {
-    let mut buf = vec![0_u8; CHUNK];
+    let mut buffer = vec![0_u8; CHUNK];
     loop {
-        let chunk = match input.read(&mut buf) {
+        let chunk = match input.read(&mut buffer) {
             Ok(0) => break,
-            Ok(len) => Ok(buf[..len].to_vec()),
+            Ok(len) => Ok(buffer[..len].to_vec()),
             // A signal landed mid-read; nothing was lost, so read again.
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => Err(error),
@@ -271,13 +271,13 @@ mod tests {
     }
 
     impl Read for InterruptedOnce {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
             if !self.interrupted {
                 self.interrupted = true;
                 return Err(Error::from(ErrorKind::Interrupted));
             }
-            let len = self.data.len().min(buf.len());
-            buf[..len].copy_from_slice(&self.data[..len]);
+            let len = self.data.len().min(buffer.len());
+            buffer[..len].copy_from_slice(&self.data[..len]);
             self.data = &self.data[len..];
             Ok(len)
         }

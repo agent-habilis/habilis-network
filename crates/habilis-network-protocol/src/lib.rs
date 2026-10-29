@@ -15,7 +15,7 @@ mod content_hash;
 pub mod crypto;
 mod dedup_key;
 pub mod directory;
-mod ident;
+mod identifier;
 mod newtype;
 mod topic_id;
 use topic_id as topic;

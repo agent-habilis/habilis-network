@@ -9,14 +9,14 @@ pub enum Event<Peer> {
     /// A peer finished its handshake.
     Synchronized {
         /// Who.
-        addr: Peer,
+        address: Peer,
     },
     /// Every peer has synchronized; the match starts now.
     Running,
     /// A peer went silent past the timeout.
     Disconnected {
         /// Who.
-        addr: Peer,
+        address: Peer,
     },
     /// A peer's checksum disagrees with ours: the two are no longer
     /// simulating the same game. Unrecoverable — see

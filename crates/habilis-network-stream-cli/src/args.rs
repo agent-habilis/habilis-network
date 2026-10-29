@@ -35,7 +35,7 @@ pub(crate) struct Args {
 impl Args {
     /// The producing node's options. Every lookup when none is named: the
     /// hash is useless to a reader that cannot find the producer.
-    pub(crate) fn opts(&self) -> StreamOpts {
+    pub(crate) fn options(&self) -> StreamOpts {
         let lookup = if self.lookup.is_empty() {
             vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay]
         } else {
@@ -67,12 +67,12 @@ mod tests {
     #[test]
     fn a_bare_producer_uses_every_lookup_and_a_named_one_replaces_them() {
         assert_eq!(
-            parse(&[]).opts().lookup,
+            parse(&[]).options().lookup,
             vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay],
             "a bare producer uses every lookup"
         );
         assert_eq!(
-            parse(&["--lookup", "mdns,relay"]).opts().lookup,
+            parse(&["--lookup", "mdns,relay"]).options().lookup,
             vec![Lookup::Mdns, Lookup::Relay],
             "a named lookup replaces the default lookups"
         );
@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn transport_is_a_comma_list_of_known_names() {
         assert_eq!(
-            parse(&["--transport", "udp,relay"]).opts().transport,
+            parse(&["--transport", "udp,relay"]).options().transport,
             vec![Transport::Udp, Transport::Relay],
             "transport is a comma list of known names"
         );

@@ -124,7 +124,7 @@ pub trait Transport<T: Config> {
     /// Send to one peer. Failure is not reported — this layer treats the
     /// transport as lossy regardless, and a caller that cannot act on the
     /// error would only be able to log it.
-    fn send_to(&mut self, message: &Message<T::Input>, addr: &T::Address);
+    fn send_to(&mut self, message: &Message<T::Input>, address: &T::Address);
 
     /// Everything received since the last call, oldest first.
     fn receive_all(&mut self) -> Vec<(T::Address, Message<T::Input>)>;

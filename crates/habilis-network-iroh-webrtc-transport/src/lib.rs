@@ -42,7 +42,7 @@
 //! same iroh relay rather than to a second relay at the ICE layer. Neither
 //! backend has a TURN client, and neither should grow one.
 
-mod addr;
+mod address;
 mod consts;
 mod drop_policy;
 mod ice_uri;
@@ -89,7 +89,7 @@ pub use web_rtc_preferred::{block_ip_paths, block_ip_to, block_rung, block_rung_
 mod signal_envelope;
 mod signal_error;
 
-pub use addr::{WEBRTC_TRANSPORT_ID, custom_addr, parse_custom_addr};
+pub use address::{WEBRTC_TRANSPORT_ID, custom_addr, parse_custom_addr};
 pub use consts::{DATA_CHANNEL_LABEL, DEFAULT_STUN_HOSTS};
 #[cfg(any(feature = "native", feature = "web"))]
 pub(crate) use consts::{IN_QUEUE, OUT_QUEUE};
