@@ -18,6 +18,7 @@ use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
+use tokio::time;
 const FORMATION: Duration = Duration::from_mins(1);
 /// The local request goes out this long after the send, so that the send is already in the loop.
 const ASK_AFTER: Duration = Duration::from_millis(200);
@@ -142,7 +143,7 @@ fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
                 Instant::now() < formation_ends,
                 "alice did not learn bob within {FORMATION:?}"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         alice
             .block_ip_to(bob.membership.node.bound_ports().to_vec())
@@ -156,7 +157,7 @@ fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
                 Instant::now() < block_ends,
                 "the path of alice to bob did not leave UDP within {BLOCK_TAKES_EFFECT:?}"
             );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            time::sleep(Duration::from_millis(100)).await;
         }
 
         // Forget the connection to bob, so that the send dials in the common case. A probe of the direct
@@ -174,7 +175,7 @@ fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
             (verdict, started.elapsed())
         };
         let local = async {
-            tokio::time::sleep(ASK_AFTER).await;
+            time::sleep(ASK_AFTER).await;
             let _ = alice.message_log_len().await;
             started.elapsed()
         };

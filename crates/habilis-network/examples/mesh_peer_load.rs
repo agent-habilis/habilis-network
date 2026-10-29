@@ -52,9 +52,12 @@ use habilis_network::util::resident_memory;
 use tokio::sync::{mpsc, oneshot};
 
 use habilis_network::net::test_relay;
+use habilis_network::{net, runtime};
+use std::{env, io};
+use tokio::{signal, task, time};
 /// A number from the environment, `0` when it is unset or not a number.
 fn env_number(name: &str) -> u64 {
-    let raw = std::env::var(name).ok();
+    let raw = env::var(name).ok();
     raw.and_then(|value| value.parse().ok()).unwrap_or(0)
 }
 
@@ -63,7 +66,7 @@ fn env_number(name: &str) -> u64 {
 /// leaves the line without a role.
 fn flood_plan() -> (usize, &'static str) {
     let peers = usize::try_from(env_number("MESH_FLOOD_PEERS")).unwrap_or(0);
-    let senders: Option<u64> = std::env::var("MESH_FLOOD_SENDERS")
+    let senders: Option<u64> = env::var("MESH_FLOOD_SENDERS")
         .ok()
         .and_then(|senders| -> Option<u64> { senders.parse().ok() });
     match senders {
@@ -75,7 +78,7 @@ fn flood_plan() -> (usize, &'static str) {
 
 /// The transport list of the mesh the creator mints.
 fn transports() -> anyhow::Result<Vec<Transport>> {
-    if let Ok(list) = std::env::var("MESH_TRANSPORTS") {
+    if let Ok(list) = env::var("MESH_TRANSPORTS") {
         return list
             .split(',')
             .filter(|name| !name.is_empty())
@@ -85,8 +88,8 @@ fn transports() -> anyhow::Result<Vec<Transport>> {
             })
             .collect();
     }
-    let multihop = std::env::var("MESH_MULTIHOP").as_deref() != Ok("off");
-    match std::env::var("MESH_TRANSPORT").as_deref() {
+    let multihop = env::var("MESH_MULTIHOP").as_deref() != Ok("off");
+    match env::var("MESH_TRANSPORT").as_deref() {
         Ok("webrtc") => Ok(vec![Transport::WebRtc]),
         Ok("udp" | "") | Err(_) if multihop => Ok(vec![Transport::Udp, Transport::Multihop]),
         Ok("udp" | "") | Err(_) => Ok(vec![Transport::Udp]),
@@ -168,7 +171,7 @@ async fn flood(
                 return Ok(());
             }
         }
-        tokio::task::yield_now().await;
+        task::yield_now().await;
     }
 }
 
@@ -203,7 +206,7 @@ fn init_logging() {
         .unwrap_or_else(|_| "habilis_network=info".into());
     tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+        .with_writer(io::stderr)
         .init();
 }
 
@@ -232,18 +235,18 @@ async fn redial_counts(sender: &mpsc::Sender<Request>) -> [u64; 6] {
 async fn main() -> anyhow::Result<()> {
     init_logging();
 
-    let traffic = std::env::var("MESH_TRAFFIC").as_deref() != Ok("off");
+    let traffic = env::var("MESH_TRAFFIC").as_deref() != Ok("off");
     let block_udp_after = Some(env_number("MESH_BLOCK_UDP_AFTER_SECS")).filter(|secs| *secs > 0);
     let traffic_until = Some(env_number("MESH_TRAFFIC_UNTIL_SECS")).filter(|secs| *secs > 0);
-    let bursty = std::env::var("MESH_TRAFFIC_BURSTY").as_deref() == Ok("1");
+    let bursty = env::var("MESH_TRAFFIC_BURSTY").as_deref() == Ok("1");
     let (flood_peers, role) = flood_plan();
     let mut flooding = false;
-    if std::env::var("MESH_UNDERLAY_LEG").as_deref() == Ok("off") {
-        habilis_network::net::set_underlay_leg_off(true);
+    if env::var("MESH_UNDERLAY_LEG").as_deref() == Ok("off") {
+        net::set_underlay_leg_off(true);
     }
 
     let mut relay_server = None;
-    let options = if let Some(id) = std::env::args().nth(1) {
+    let options = if let Some(id) = env::args().nth(1) {
         JoinOptions::default().mesh(Some(id))
     } else {
         let (url, server) = test_relay::spawn_plain().await?;
@@ -258,7 +261,7 @@ async fn main() -> anyhow::Result<()> {
     let (inbound_tx, mut inbound) = mpsc::channel(INBOUND_CAP);
     let max_peers = usize::try_from(env_number("MESH_MAX_PEERS")).unwrap_or(0);
     let max_direct = usize::try_from(env_number("MESH_MAX_DIRECT")).unwrap_or(0);
-    let config: habilis_network::runtime::EventLoopConfig = setup_mesh(
+    let config: runtime::EventLoopConfig = setup_mesh(
         kind,
         SetupParams::new(author.clone(), SilentSink::default())
             .max_peers(max_peers)
@@ -284,7 +287,7 @@ async fn main() -> anyhow::Result<()> {
     let mut next_burst = rand::Rng::random_range(&mut rand::rng(), 60..=240);
     let ticker = async {
         loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
             let elapsed = started.elapsed().as_secs();
             if let Some(after) = block_udp_after
                 && !blocked
@@ -325,7 +328,7 @@ async fn main() -> anyhow::Result<()> {
     };
     tokio::select! {
         _ = ticker => {}
-        _ = tokio::signal::ctrl_c() => {}
+        _ = signal::ctrl_c() => {}
     }
     node.leave().await?;
     drop(relay_server);

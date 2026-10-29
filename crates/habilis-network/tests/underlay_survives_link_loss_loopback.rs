@@ -20,6 +20,7 @@ use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 
 use habilis_network::net;
+use tokio::time;
 const STEP_DEADLINE: Duration = Duration::from_mins(3);
 
 /// How long both ends tick after the close.
@@ -102,7 +103,7 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
                 meshing.elapsed() < STEP_DEADLINE,
                 "the two never formed a mesh"
             );
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
         let started = Instant::now();
         while underlay_sessions(&alice).await == 0 || underlay_sessions(&bob).await == 0 {
@@ -115,7 +116,7 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
             let _ = alice
                 .request(|reply| Request::Send { to, body, reply })
                 .await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
 
         let alice_id = alice
@@ -145,7 +146,7 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
                     .await
                     .expect("the loop answers");
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            time::sleep(Duration::from_millis(5)).await;
         }
         assert!(
             neighbor_down(since, &alice_id, &bob_id) && neighbor_down(since, &bob_id, &alice_id),

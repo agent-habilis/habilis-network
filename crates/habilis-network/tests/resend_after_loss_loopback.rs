@@ -17,6 +17,7 @@ use habilis_network::protocol::Lookup;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
+use tokio::time;
 /// One heal tick (15 s) to resubscribe, the re-graft, and an anti-entropy cycle, with margin.
 /// Less than the 90 s dedup of the gossip layer: a message that waits for the dedup is a failure.
 const RECOVERY: Duration = Duration::from_secs(75);
@@ -127,7 +128,7 @@ impl Member {
             if self.saw(text) {
                 return Some(started.elapsed());
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         self.saw(text).then(|| started.elapsed())
     }
@@ -143,7 +144,7 @@ async fn meshed_pair(relay: &RelayUrl) -> (Member, Member) {
             "the pair never met\n{}",
             trace()
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     (alice, bob)
 }

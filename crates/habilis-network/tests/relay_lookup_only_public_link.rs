@@ -12,7 +12,7 @@
 
 use habilis_network::protocol::message::Authored;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
@@ -26,6 +26,7 @@ use habilis_network::runtime::{
 use tokio::sync::Notify;
 
 use habilis_network::net::test_relay;
+use tokio::time;
 struct Probe;
 
 #[habilis_network::async_trait]
@@ -81,12 +82,12 @@ impl Joined {
                 changed.await;
             }
         };
-        tokio::time::timeout(deadline, wait).await.is_ok() || seen()
+        time::timeout(deadline, wait).await.is_ok() || seen()
     }
 }
 
 async fn wait_for_log(needle: &str, deadline: Duration) -> bool {
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     loop {
         if habilis_network_test_tracing::captured_logs().contains(needle) {
             return true;
@@ -94,7 +95,7 @@ async fn wait_for_log(needle: &str, deadline: Duration) -> bool {
         if started.elapsed() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -206,7 +207,7 @@ fn a_webrtc_only_peer_links_through_the_beacon_lane() {
         // Stagger like a real join: the first node claims the beacon, the second
         // finds it held. Simultaneous starts race both into the claim and leave
         // two same-id rendezvous copies shedding each other for the whole test.
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        time::sleep(Duration::from_secs(10)).await;
         let bob_transports: TransportOpts = TransportOpts::default()
             .udp(false)
             .relay(true)

@@ -15,15 +15,16 @@ use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
+use tokio::{sync, time};
 /// A JSEP round and a graft, with room to spare: a healthy pair is direct in
 /// about 4 s. Below the 15 s heal tick on purpose, so a pair that only links
 /// once a heal re-grafts it fails here instead of passing slowly.
 const LINK_DEADLINE: Duration = Duration::from_secs(12);
 const PAYLOAD_DEADLINE: Duration = Duration::from_secs(20);
 
-fn serial() -> &'static tokio::sync::Mutex<()> {
-    static SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))
+fn serial() -> &'static sync::Mutex<()> {
+    static SERIAL: OnceLock<sync::Mutex<()>> = OnceLock::new();
+    SERIAL.get_or_init(|| sync::Mutex::new(()))
 }
 
 fn logs() -> String {
@@ -68,7 +69,7 @@ async fn eventually(deadline: Duration, mut done: impl FnMut() -> bool) -> bool 
         if done() {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     done()
 }
@@ -215,7 +216,7 @@ async fn linked_pair(relay: &RelayUrl, transport: Vec<Transport>) -> (Member, Me
             "the pair never went direct: {alice_roster} / {bob_roster}\n{}",
             link_trace()
         );
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
     (alice, bob)
 }
@@ -261,7 +262,7 @@ async fn every_lane_carries(alice: &mut Member, bob: &mut Member) {
             started.elapsed() < PAYLOAD_DEADLINE,
             "bob never got the state merge"
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -410,7 +411,7 @@ fn pair_races_again_when_udp_drops(bob_is_higher: Option<bool>) {
         // 3 s dial, then 5 s for UDP to be selected). Waiting 9 s past the attach
         // lets it end first, so the session is kept and the watcher, not the
         // race, has to drop it once UDP is back.
-        tokio::time::sleep(Duration::from_secs(9)).await;
+        time::sleep(Duration::from_secs(9)).await;
         let carried_on_webrtc = if raced {
             alice.send(None, "over the data channel").await;
             eventually(PAYLOAD_DEADLINE, || {

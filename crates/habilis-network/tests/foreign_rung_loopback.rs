@@ -9,26 +9,28 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use habilis_network::iroh::Endpoint;
 use habilis_network::iroh::endpoint::presets;
 use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::{Mesh, MeshConfig, MeshName, Seed};
 
+use std::{process, thread};
+use tokio::{task, time};
 const MEET_DEADLINE: Duration = Duration::from_secs(90);
 
 /// A seed that differs from run to run, so that the ladder of one run is not the ladder of another
 /// run on the same host.
 fn fresh_seed() -> Seed {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .expect("after the epoch")
         .as_nanos();
     let mut bytes = [0u8; 32];
     for (index, chunk) in bytes.chunks_mut(16).enumerate() {
         let value = nanos.rotate_left(u32::try_from(index * 17).expect("small"))
-            ^ u128::from(std::process::id());
+            ^ u128::from(process::id());
         chunk.copy_from_slice(&value.to_le_bytes());
     }
     Seed::new(bytes)
@@ -36,7 +38,7 @@ fn fresh_seed() -> Seed {
 
 /// A listener on `port` that serves one ALPN, so it answers a gossip dial with a TLS alert. It is a
 /// plain accept loop: an iroh `Router` would log every failed accept as a warning of its own.
-async fn foreign_on(port: u16) -> (Endpoint, tokio::task::JoinHandle<()>) {
+async fn foreign_on(port: u16) -> (Endpoint, task::JoinHandle<()>) {
     let builder = Endpoint::builder(presets::Minimal)
         .alpns(vec![b"foreign".to_vec()])
         .clear_ip_transports();
@@ -88,7 +90,7 @@ async fn meet(foreign_rungs: &[usize]) -> (bool, [u16; 8]) {
         if ladder[0] < ladder[1] {
             break (mesh, ladder);
         }
-        std::thread::sleep(Duration::from_millis(1));
+        thread::sleep(Duration::from_millis(1));
     };
     let mut foreign = Vec::new();
     for &rung in foreign_rungs {
@@ -117,7 +119,7 @@ async fn meet(foreign_rungs: &[usize]) -> (bool, [u16; 8]) {
             met = true;
             break;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     let _ = alice.node.leave().await;
     let _ = bob.node.leave().await;

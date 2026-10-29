@@ -30,6 +30,8 @@ use habilis_network::runtime::{
 use tokio::sync::Notify;
 
 use habilis_network::net::test_relay;
+use habilis_network::runtime;
+use tokio::time;
 /// The do-nothing application: presence alone forms a mesh.
 struct Probe;
 
@@ -91,7 +93,7 @@ impl Joined {
                 changed.await;
             }
         };
-        tokio::time::timeout(deadline, wait).await.is_ok() || seen()
+        time::timeout(deadline, wait).await.is_ok() || seen()
     }
 }
 
@@ -124,7 +126,7 @@ async fn spawn(
     let params = SetupParams::new(author, sink)
         .max_peers(16)
         .transports(transports);
-    let config: habilis_network::runtime::EventLoopConfig = setup_mesh(
+    let config: runtime::EventLoopConfig = setup_mesh(
         SetupKind::Topic {
             mesh,
             topic_string: topic.to_owned(),
@@ -154,7 +156,7 @@ async fn pair_links(relay: &RelayUrl, relay_transport: bool, deadline: Duration)
     // Let alice's probe-before-claim finish and the beacon come up before
     // bob joins, as a creator does in practice; two simultaneous starts
     // both claim the beacon and spend the run shedding the rival copy.
-    tokio::time::sleep(Duration::from_secs(12)).await;
+    time::sleep(Duration::from_secs(12)).await;
     let bob = spawn(&topic, "bob", relay, relay_transport, Arc::clone(&bob_saw)).await;
 
     let bob_nick = Nickname::try_new("bob").expect("valid");

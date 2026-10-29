@@ -21,6 +21,7 @@ use habilis_network::runtime::{
 };
 use tokio::sync::Notify;
 
+use tokio::time;
 /// The do-nothing application: presence alone forms a mesh.
 struct Probe;
 
@@ -82,7 +83,7 @@ impl Joined {
                 changed.await;
             }
         };
-        tokio::time::timeout(deadline, wait).await.is_ok() || seen()
+        time::timeout(deadline, wait).await.is_ok() || seen()
     }
 }
 

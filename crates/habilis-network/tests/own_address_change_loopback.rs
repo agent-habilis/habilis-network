@@ -23,6 +23,8 @@ use habilis_network::protocol::Lookup;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
+use std::net;
+use tokio::time;
 /// The address that the member adds: a documentation range (RFC 5737), so no
 /// real interface carries it and no other log line names it.
 const NEW_ADDR: &str = "192.0.2.77:4000";
@@ -50,7 +52,7 @@ async fn eventually(deadline: Duration, mut done: impl FnMut() -> bool) -> bool 
         if done() {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     done()
 }
@@ -100,7 +102,7 @@ impl Member {
             .unwrap_or(0)
     }
 
-    async fn add_external_addr(&self, address: std::net::SocketAddr) {
+    async fn add_external_addr(&self, address: net::SocketAddr) {
         self.membership
             .request(|reply| Request::AddExternalAddr { address, reply })
             .await
@@ -125,7 +127,7 @@ fn a_member_that_changes_its_own_address_floods_it_again() {
                 "the pair never linked\n{}",
                 trace()
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         assert_eq!(
             lines_naming_new_addr("peerinfo flooded"),

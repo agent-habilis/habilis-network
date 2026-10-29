@@ -21,6 +21,7 @@ use habilis_network::protocol::Lookup;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
+use tokio::time;
 /// Past the point where the relay policy closes a gossip link that stayed on the
 /// relay: the probe deadline of 15 s, and a margin. A broadcast sent before it can
 /// still arrive over the relay, which proves nothing about recovery.
@@ -130,7 +131,7 @@ fn a_gossip_pair_that_never_sent_unicast_recovers_when_ip_is_lost() {
                 linking.elapsed() < Duration::from_mins(1),
                 "the pair never linked"
             );
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
 
         // Both ends lose IP to each other. Nothing has been sent between them.
@@ -144,7 +145,7 @@ fn a_gossip_pair_that_never_sent_unicast_recovers_when_ip_is_lost() {
             lowest = lowest
                 .min(alice.roster_len().await)
                 .min(bob.roster_len().await);
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
         eprintln!("lowest roster during the settle: {lowest}");
 
@@ -164,7 +165,7 @@ fn a_gossip_pair_that_never_sent_unicast_recovers_when_ip_is_lost() {
                     seen = true;
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                time::sleep(Duration::from_millis(250)).await;
             }
             if seen {
                 break true;

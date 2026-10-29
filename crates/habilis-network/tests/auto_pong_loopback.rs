@@ -22,14 +22,17 @@ use habilis_network::runtime::{
 };
 use tokio::sync::{Notify, oneshot};
 
+use habilis_network::ops;
+use std::{env, fs};
+use tokio::time;
 type Rtts = Vec<(Nickname, u64)>;
 
 /// The last lines of the log, for the message of a failed assertion. The log is
 /// also written to the file that `HABILIS_TEST_LOG_DUMP` names, if set.
 fn trace() -> String {
     let log = habilis_network_test_tracing::captured_logs();
-    if let Ok(path) = std::env::var("HABILIS_TEST_LOG_DUMP") {
-        let _ = std::fs::write(path, &log);
+    if let Ok(path) = env::var("HABILIS_TEST_LOG_DUMP") {
+        let _ = fs::write(path, &log);
     }
     let lines: Vec<&str> = log.lines().collect();
     lines[lines.len().saturating_sub(200)..].join("\n")
@@ -66,7 +69,7 @@ impl NodeDriver for Pinger {
         state: &mut EventLoopState,
         context: &HandlerCtx<'_>,
     ) -> bool {
-        habilis_network::ops::start_ping_round(state, context, Some(response)).await;
+        ops::start_ping_round(state, context, Some(response)).await;
         true
     }
 }
@@ -106,7 +109,7 @@ impl Joined {
                 changed.await;
             }
         };
-        tokio::time::timeout(deadline, wait).await.is_ok() || seen()
+        time::timeout(deadline, wait).await.is_ok() || seen()
     }
 }
 

@@ -20,6 +20,7 @@ use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 
 use habilis_network::net::test_relay;
+use tokio::time;
 const MEMBERS: usize = 4;
 const CAP: usize = 2;
 const MESH_DEADLINE: Duration = Duration::from_mins(3);
@@ -108,19 +109,19 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
                         meshing.elapsed() < MESH_DEADLINE,
                         "the members never saw each other"
                     );
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    time::sleep(Duration::from_millis(500)).await;
                     continue 'mesh;
                 }
             }
             break;
         }
-        tokio::time::sleep(SETTLE).await;
+        time::sleep(SETTLE).await;
 
         let mut per_window = Vec::new();
         let mut totals = Vec::new();
         for window in 0..WINDOWS {
             let before = evictions();
-            tokio::time::sleep(WINDOW).await;
+            time::sleep(WINDOW).await;
             let sessions = sessions_of_all(&members).await;
             let count = evictions() - before;
             eprintln!(

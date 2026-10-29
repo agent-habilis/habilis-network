@@ -30,6 +30,7 @@ use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
+use tokio::time;
 const ROSTER_DEADLINE: Duration = Duration::from_mins(2);
 const FRAME_DEADLINE: Duration = Duration::from_mins(2);
 /// How long a lane pair may take from the roster to a frame in both directions. The session is
@@ -147,7 +148,7 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
         if started.elapsed() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -163,7 +164,7 @@ async fn delivered(from: &Member, to: &mut Member, to_nick: &str, text: &str) ->
         if started.elapsed() >= FRAME_DEADLINE {
             return false;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -209,7 +210,7 @@ fn a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts() {
                 started.elapsed() < Duration::from_secs(30),
                 "alice still counts {units} units ({over} over) 30 s after the last send"
             );
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
 
         for member in [alice, bob, carol, dave] {
@@ -257,7 +258,7 @@ fn a_lane_pair_delivers_a_frame_sent_as_soon_as_the_roster_forms() {
             if alice.rung_to("bob").await == Some("webrtc") {
                 first_session = Some(formed.elapsed());
             } else {
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                time::sleep(Duration::from_millis(250)).await;
             }
         }
         eprintln!(

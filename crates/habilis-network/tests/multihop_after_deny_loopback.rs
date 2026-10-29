@@ -32,6 +32,7 @@ use habilis_network_iroh_multihop_transport::MultihopCounters;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net;
+use tokio::time;
 /// Long enough for the climb to multihop and for the topology to hold the route.
 const STEP_DEADLINE: Duration = Duration::from_mins(3);
 /// The WARN that the underlay logs for a hop that stays on the relay for longer than the stuck limit.
@@ -184,7 +185,7 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
         if started.elapsed() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -245,7 +246,7 @@ fn a_pair_that_denied_each_other_still_gets_a_message_through_a_third_member() {
             if rung == Some("multihop") {
                 break;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
         assert_eq!(
             rung,
@@ -265,7 +266,7 @@ fn a_pair_that_denied_each_other_still_gets_a_message_through_a_third_member() {
             );
             probes += 1;
             let _ = bob.send("carol", &format!("forward probe {probes}")).await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
 
         // A payload goes from bob to carol over the hop: the message arrives, and alice has
@@ -282,7 +283,7 @@ fn a_pair_that_denied_each_other_still_gets_a_message_through_a_third_member() {
                 "the message never reached carol over the hop: {}",
                 counters_of(&alice, &bob, &carol).await
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         assert!(
             alice.forwarded_cells().await > before,

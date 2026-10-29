@@ -21,6 +21,7 @@ use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net;
+use tokio::time;
 /// Long enough for an ICE round, or for a multihop route to be advertised once
 /// (every 15 s) and then used.
 const STEP_DEADLINE: Duration = Duration::from_mins(2);
@@ -184,7 +185,7 @@ impl Member {
             {
                 return rung;
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
         panic!("{step}: expected one of the rungs {expected:?}, the last rung read was {seen:?}");
     }
@@ -203,7 +204,7 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
         if started.elapsed() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -320,9 +321,9 @@ fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
                 lost_at.elapsed() < STEP_DEADLINE,
                 "the pair never left WebRTC after the block"
             );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            time::sleep(Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
         assert!(
             !alice.has_route("bob").await,
             "alice has a route to bob after the loss although her link-vector is withdrawn"
@@ -426,7 +427,7 @@ fn the_multihop_rung_forwards_through_a_third_member() {
                 "alice reached bob on the multihop rung, but carol forwarded no cell: \
              the pair used a link that is not a hop"
             );
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
 
         for member in [alice, bob, carol] {

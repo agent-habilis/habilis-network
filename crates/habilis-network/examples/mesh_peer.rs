@@ -22,6 +22,7 @@
 
 use habilis_network::protocol::message::Authored;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SilentSink,
@@ -33,6 +34,11 @@ use habilis_network::runtime::{
     CreateParams, JoinParams, LiveCount, Node, Resolved, SetupParams, SignalHandling, setup_mesh,
 };
 
+use habilis_network::protocol::RelayChoice;
+use habilis_network::runtime::SetupKind;
+use habilis_network::{protocol, runtime};
+use std::{env, io};
+use tokio::{signal, time};
 /// The do-nothing application. A peer that only carries presence still forms a
 /// mesh — payload handling is a separate concern from membership.
 struct Probe;
@@ -66,13 +72,13 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "habilis_network=info".into());
     tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+        .with_writer(io::stderr)
         .init();
 
     // Env var rather than a flag: this example takes exactly one positional
     // argument and adding a parser for one knob is not worth it. The real CLI
     // surface is `--transport`, on `agent-share`.
-    let udp = match std::env::var("MESH_TRANSPORT").as_deref() {
+    let udp = match env::var("MESH_TRANSPORT").as_deref() {
         Ok("webrtc") => false,
         Ok(other) if !other.is_empty() => {
             anyhow::bail!("unknown MESH_TRANSPORT {other:?}; expected `webrtc`")
@@ -84,50 +90,45 @@ async fn main() -> anyhow::Result<()> {
     // by topic, so the two sides meet on one string. `MESH_RELAY_URLS`
     // (comma-separated) swaps the default ladder — with a topic it is part
     // of the derived id, so both sides must pass the same list.
-    let relay_urls = std::env::var("MESH_RELAY_URLS")
+    let relay_urls = env::var("MESH_RELAY_URLS")
         .ok()
         .filter(|urls| !urls.is_empty());
-    if let Ok(topic) = std::env::var("MESH_TOPIC") {
+    if let Ok(topic) = env::var("MESH_TOPIC") {
         let ladder = match &relay_urls {
             Some(urls) => {
                 let fields = urls.split(',');
                 let parsed: Result<Vec<iroh::RelayUrl>, _> =
                     fields.map(|url| url.trim().parse()).collect();
-                habilis_network::protocol::RelayChoice::Custom(parsed?)
+                RelayChoice::Custom(parsed?)
             }
-            None => habilis_network::protocol::RelayChoice::Pinned,
+            None => RelayChoice::Pinned,
         };
         let transport = TransportPolicy::default()
-            .relay_transport(
-                std::env::var_os("MESH_RELAY_TRANSPORT").is_some_and(|value| value == "on"),
-            )
+            .relay_transport(env::var_os("MESH_RELAY_TRANSPORT").is_some_and(|value| value == "on"))
             .udp(udp);
-        let mesh: habilis_network::protocol::Mesh =
-            habilis_network::runtime::derive_topic_mesh_config(
-                &topic,
-                MeshConfig::new(
-                    LookupOpts::new(ladder).mdns(true).dht(true),
-                    None,
-                    None,
-                    transport,
-                ),
-            )?;
+        let mesh: protocol::Mesh = runtime::derive_topic_mesh_config(
+            &topic,
+            MeshConfig::new(
+                LookupOpts::new(ladder).mdns(true).dht(true),
+                None,
+                None,
+                transport,
+            ),
+        )?;
         return run_peer(
-            habilis_network::runtime::SetupKind::Topic {
+            SetupKind::Topic {
                 mesh,
                 topic_string: topic,
             },
-            habilis_network::protocol::Nickname::random(),
+            protocol::Nickname::random(),
         )
         .await;
     }
 
-    let arg = std::env::args().nth(1);
+    let arg = env::args().nth(1);
     // Baked into the id, so a joiner inherits it: only the creator reads the env var.
     let create_transport = TransportPolicy::default()
-        .relay_transport(
-            std::env::var_os("MESH_RELAY_TRANSPORT").is_some_and(|value| value == "on"),
-        )
+        .relay_transport(env::var_os("MESH_RELAY_TRANSPORT").is_some_and(|value| value == "on"))
         .udp(udp);
     let Resolved {
         kind,
@@ -157,10 +158,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Stand the peer up and print its per-second status until ctrl-c.
-async fn run_peer(
-    kind: habilis_network::runtime::SetupKind,
-    author: habilis_network::protocol::Nickname,
-) -> anyhow::Result<()> {
+async fn run_peer(kind: SetupKind, author: protocol::Nickname) -> anyhow::Result<()> {
     // The live peer count, mirrored out of the loop on every roster change and
     // on the periodic refresh. Lock-free, so reading it per second costs
     // nothing and needs no request/response hop into the loop.
@@ -184,13 +182,13 @@ async fn run_peer(
 
     let ticker = async {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
             println!("peers   {}", live.load(Ordering::Relaxed));
         }
     };
     tokio::select! {
         () = ticker => {}
-        _ = tokio::signal::ctrl_c() => {}
+        _ = signal::ctrl_c() => {}
     }
     node.leave().await?;
     Ok(())

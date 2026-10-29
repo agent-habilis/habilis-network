@@ -18,6 +18,7 @@ use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::Lookup;
 
 use habilis_network::net::test_relay;
+use tokio::time;
 const OLD_MEMBERS: usize = 6;
 const RELEASE_LINKS: usize = 3;
 const PRECONDITION_DEADLINE: Duration = Duration::from_mins(1);
@@ -109,7 +110,7 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
                 beacon_wait.elapsed() < Duration::from_mins(1),
                 "the creator never claimed the beacon"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         let mesh = creator.node.mesh_id().to_string();
         let mut members = vec![creator];
@@ -121,7 +122,7 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
                 )
                 .await,
             );
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
 
         let formation = Instant::now();
@@ -138,7 +139,7 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
                 "the old mesh never formed\n{}",
                 release_lines()
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
 
         let precondition = Instant::now();
@@ -149,7 +150,7 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
              inside {PRECONDITION_DEADLINE:?}\n{}",
                 release_lines()
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
 
         let late = open(
@@ -176,7 +177,7 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
             if late_learned_all.is_none() && roster(&late).await.len() >= OLD_MEMBERS {
                 late_learned_all = Some(started.elapsed());
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
 
         eprintln!("old members that learned the joiner, after the join: {old_learned:?}");

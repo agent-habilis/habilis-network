@@ -16,6 +16,8 @@ use habilis_network::runtime::tuning::{Tuning, init};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
+use std::{env, fs};
+use tokio::time;
 /// The creator, who hosts the rendezvous, and three joiners. Each joiner ends with three links,
 /// which is the release count.
 const GROUP: usize = 4;
@@ -58,8 +60,8 @@ fn rendezvous_trace() -> String {
 
 /// The whole log, written to the file that `HABILIS_TEST_LOG_DUMP` names, if set.
 fn dump_logs() {
-    if let Ok(path) = std::env::var("HABILIS_TEST_LOG_DUMP") {
-        let _ = std::fs::write(path, logs());
+    if let Ok(path) = env::var("HABILIS_TEST_LOG_DUMP") {
+        let _ = fs::write(path, logs());
     }
 }
 
@@ -69,7 +71,7 @@ async fn eventually(deadline: Duration, mut done: impl FnMut() -> bool) -> bool 
         if done() {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     done()
 }
@@ -138,7 +140,7 @@ fn a_member_that_let_go_of_the_rendezvous_comes_back_and_lets_go_again() {
         for index in 1..GROUP {
             let member = Member::join(&format!("member-{index}"), &members[0]).await;
             members.push(member);
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
         let joiners = GROUP - 1;
         let formed = eventually(Duration::from_mins(1), || {

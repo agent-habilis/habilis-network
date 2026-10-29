@@ -8,7 +8,7 @@
 #![cfg(feature = "host")]
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
@@ -21,7 +21,9 @@ use habilis_network::runtime::{
     CoHostPolicy, Node, SetupKind, SetupParams, SignalHandling, setup_mesh,
 };
 use tokio::sync::Notify;
+use tokio::time;
 
+use std::process;
 /// Half of the reclaim ticker, which is when a joiner's first dial could be replaced at the
 /// earliest: with the busy rung read before that dial, the link is one loopback handshake.
 const FIRST_LINK: Duration = Duration::from_millis(500);
@@ -29,14 +31,14 @@ const FIRST_LINK: Duration = Duration::from_millis(500);
 /// A seed that differs from run to run, so that the ladder of one run is not the ladder of another
 /// run on the same host.
 fn fresh_seed() -> Seed {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .expect("after the epoch")
         .as_nanos();
     let mut bytes = [0u8; 32];
     for (index, chunk) in bytes.chunks_mut(16).enumerate() {
         let value = nanos.rotate_left(u32::try_from(index * 17).expect("small"))
-            ^ u128::from(std::process::id());
+            ^ u128::from(process::id());
         chunk.copy_from_slice(&value.to_le_bytes());
     }
     Seed::new(bytes)
@@ -112,7 +114,7 @@ impl Joined {
                 changed.await;
             }
         };
-        tokio::time::timeout(deadline, wait).await.is_ok() || seen()
+        time::timeout(deadline, wait).await.is_ok() || seen()
     }
 }
 
@@ -160,7 +162,7 @@ fn a_joiner_meets_a_running_beacon_before_the_grace() {
         let (origin, _origin_saw) = spawn(&mesh, "origin", CoHostPolicy::Eager).await;
         // The origin binds its rung at once; a moment, so that the rung is busy when the joiner
         // looks.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
         let started = Instant::now();
         let (joiner, joiner_saw) = spawn(&mesh, "joiner", CoHostPolicy::Deferred).await;
         let met = joiner_saw.wait_for(&nick("origin"), FIRST_LINK).await;

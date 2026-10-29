@@ -22,8 +22,9 @@
 #![cfg(feature = "host")]
 
 use habilis_network::protocol::message::Authored;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
+use tokio::sync;
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
@@ -35,6 +36,9 @@ use habilis_network::runtime::{
 };
 use tokio::sync::Notify;
 
+use futures_util::future;
+use std::{env, fs, io, path, process};
+use tokio::time;
 /// The time that a mesh of members has to converge. A quiet run converges in 15 to 25
 /// seconds. The merge is a race over several rounds of the re-check, so the bound is
 /// the one of `agent-gossip` `topic_split.rs`.
@@ -64,22 +68,22 @@ const CONTROL_ROUNDS: usize = 5;
 
 /// Tests of this file take turns: each one runs real mDNS responders, and two of
 /// them on one host starve each other past their deadlines.
-static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static SERIAL: sync::Mutex<()> = sync::Mutex::const_new(());
 
 /// The file that the log of the running round goes to. Rounds run one after the other.
-static ROUND_LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
+static ROUND_LOG: Mutex<Option<fs::File>> = Mutex::new(None);
 
 struct RoundLogWriter;
 
-impl std::io::Write for RoundLogWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+impl io::Write for RoundLogWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if let Some(file) = ROUND_LOG.lock().expect("no poison").as_mut() {
             file.write_all(bytes)?;
         }
         Ok(bytes.len())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
@@ -91,9 +95,9 @@ impl std::io::Write for RoundLogWriter {
 /// `RUST_LOG=habilis_network=debug,iroh_gossip=debug` to fill it. The log of one process
 /// has no tag per member, so a line names its member only when it has a `local=` or
 /// `node=` field.
-fn round_log_path(topic: &str) -> std::path::PathBuf {
-    let prefix: String = std::env::var("HABILIS_TEST_LOG_DUMP").unwrap_or_else(|_| {
-        std::env::temp_dir()
+fn round_log_path(topic: &str) -> path::PathBuf {
+    let prefix: String = env::var("HABILIS_TEST_LOG_DUMP").unwrap_or_else(|_| {
+        env::temp_dir()
             .join("simultaneous-start")
             .display()
             .to_string()
@@ -102,7 +106,7 @@ fn round_log_path(topic: &str) -> std::path::PathBuf {
 }
 
 fn init_process() -> habilis_network_test_tracing::Guard {
-    static ONCE: std::sync::Once = std::sync::Once::new();
+    static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let tuning = Tuning::DEFAULTS
             .heal_interval(Duration::from_secs(5))
@@ -195,7 +199,7 @@ impl Joined {
             }
         };
         let left = until.saturating_duration_since(Instant::now());
-        let done: bool = tokio::time::timeout(left, wait).await.is_ok() || {
+        let done: bool = time::timeout(left, wait).await.is_ok() || {
             others.iter().all(|nick| self.has_seen(nick))
         };
         done.then(Instant::now)
@@ -241,12 +245,12 @@ enum Start {
 async fn round(members: usize, start: Start, index: usize) -> Result<Duration, String> {
     let topic = format!(
         "simultaneous-start-{}-{}",
-        std::process::id(),
+        process::id(),
         rand::random::<u64>()
     );
     let log_path = round_log_path(&topic);
     *ROUND_LOG.lock().expect("no poison") =
-        Some(std::fs::File::create(&log_path).expect("create the log file of the round"));
+        Some(fs::File::create(&log_path).expect("create the log file of the round"));
     let names: Vec<String> = (0..members).map(|number| format!("peer{number}")).collect();
     let parsed = names.iter().map(|name| {
         let text = name.as_str();
@@ -259,7 +263,7 @@ async fn round(members: usize, start: Start, index: usize) -> Result<Duration, S
     let began = Instant::now();
     let nodes = match start {
         Start::Together => {
-            futures_util::future::join_all(
+            future::join_all(
                 names
                     .iter()
                     .zip(&sinks)
@@ -271,7 +275,7 @@ async fn round(members: usize, start: Start, index: usize) -> Result<Duration, S
             let mut nodes = Vec::new();
             for (name, sink) in names.iter().zip(&sinks) {
                 nodes.push(spawn(&topic, name, Arc::clone(sink)).await);
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                time::sleep(Duration::from_secs(3)).await;
             }
             nodes
         }
@@ -305,7 +309,7 @@ async fn round(members: usize, start: Start, index: usize) -> Result<Duration, S
     }
     *ROUND_LOG.lock().expect("no poison") = None;
     if index >= KEEP_FIRST_ROUNDS && matches!(verdict, Ok(time) if time <= KEEP_LOG_OVER) {
-        let _ = std::fs::remove_file(&log_path);
+        let _ = fs::remove_file(&log_path);
     }
     verdict
 }

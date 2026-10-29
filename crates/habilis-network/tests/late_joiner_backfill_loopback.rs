@@ -23,6 +23,7 @@ use habilis_network::runtime::{
 use tokio::sync::{Notify, oneshot};
 
 use habilis_network::runtime::tuning;
+use tokio::time::{self, Instant};
 /// The agent-gossip late-joiner test's log size: two and a half answers.
 const WRITES: usize = 160;
 /// Changes one digest answer carries (the default `ANTIENTROPY_MAX_RESEND`).
@@ -121,7 +122,7 @@ impl Joined {
                 changed.await;
             }
         };
-        tokio::time::timeout(deadline, wait).await.is_ok() || seen()
+        time::timeout(deadline, wait).await.is_ok() || seen()
     }
 }
 
@@ -189,13 +190,13 @@ fn key_count(document: &serde_json::Value) -> usize {
 /// How many of the log's changes `node` holds once it has a full answer, or
 /// when [`BUDGET`] runs out.
 async fn held_after_first_answer(node: &Node<Store>) -> usize {
-    let started = tokio::time::Instant::now();
+    let started = Instant::now();
     loop {
         let held = key_count(&read(node).await);
         if held >= ONE_ANSWER || started.elapsed() > BUDGET {
             return held;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -316,7 +317,7 @@ fn a_late_joiner_pulls_a_long_history_in_fast_rounds() {
         // FAST is the time that the fast rounds take on a quiet host, and it is reported. The claim is
         // that they pull the whole history, and a shared runner can be ten times slower and still be
         // right: the test fails only when the history is not held after BUDGET, as its siblings do.
-        let started = tokio::time::Instant::now();
+        let started = Instant::now();
         let mut held = 0;
         let mut held_at_fast = None;
         while started.elapsed() < BUDGET {
@@ -327,7 +328,7 @@ fn a_late_joiner_pulls_a_long_history_in_fast_rounds() {
             if held >= LONG {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            time::sleep(Duration::from_millis(100)).await;
         }
         eprintln!(
             "late held {} of alice's {LONG} changes {FAST:?} after meeting the pair, {held} after {:?}",

@@ -18,6 +18,8 @@ use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 
 use habilis_network::net::test_relay;
+use std::{env, fs};
+use tokio::{sync, time};
 /// One more than `MAX_DIRECT_PEERS + 1`, so that a node cannot hold a session
 /// to every other member and still keep one for the rendezvous.
 const MEMBERS: usize = 18;
@@ -25,9 +27,9 @@ const FORMATION_DEADLINE: Duration = Duration::from_mins(2);
 
 /// The tests share one log buffer, and a test counts lines in it, so a second test that runs at
 /// the same time adds its own lines to the count.
-fn serial() -> &'static tokio::sync::Mutex<()> {
-    static SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))
+fn serial() -> &'static sync::Mutex<()> {
+    static SERIAL: OnceLock<sync::Mutex<()>> = OnceLock::new();
+    SERIAL.get_or_init(|| sync::Mutex::new(()))
 }
 
 fn logs() -> String {
@@ -79,7 +81,7 @@ async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
             beacon_wait.elapsed() < Duration::from_mins(1),
             "the creator never claimed the beacon"
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
 
     let mesh = creator.node.mesh_id().to_string();
@@ -92,7 +94,7 @@ async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
             )
             .await,
         );
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
     members
 }
@@ -120,7 +122,7 @@ async fn rosters_until(members: &[Membership], peers: usize, deadline: Duration)
         if rosters.iter().all(|len| *len == peers) {
             break;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
     rosters
 }
@@ -215,7 +217,7 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
              hold it\n{}",
                 come_back_trace()
             );
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
 
         let mesh = members[0].node.mesh_id().to_string();
@@ -240,8 +242,8 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
 
 /// The whole log, written to the file that `HABILIS_TEST_LOG_DUMP` names, if set.
 fn dump_logs() {
-    if let Ok(path) = std::env::var("HABILIS_TEST_LOG_DUMP") {
-        let _ = std::fs::write(path, logs());
+    if let Ok(path) = env::var("HABILIS_TEST_LOG_DUMP") {
+        let _ = fs::write(path, logs());
     }
 }
 

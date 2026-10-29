@@ -29,6 +29,7 @@
 
 mod common;
 use habilis_network::net;
+use tokio::time;
 mod until_known;
 
 use std::time::{Duration, Instant};
@@ -460,7 +461,7 @@ impl Member {
             if seen == Some(expected) {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
         panic!("cell {cell}: expected the rung {expected}, the last rung read was {seen:?}");
     }
@@ -496,7 +497,7 @@ impl Member {
             } else {
                 held_since = None;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
         panic!(
             "cell {cell}: expected the rung {expected}, the last rung read was {seen:?} \
@@ -550,7 +551,7 @@ async fn triangle_linked(members: [(&str, &Member); 3], deadline: Duration) -> b
         if started.elapsed() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -567,7 +568,7 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
         if started.elapsed() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -727,7 +728,7 @@ async fn probe_until_forwarded(name: &str, alice: &Member, carol: &Member) {
         let _ = alice
             .send("bob", &format!("forward probe {name} {probes}"))
             .await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -812,7 +813,7 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
                             waiting.elapsed() < LEAVE_DIRECT_DEADLINE,
                             "{name}: the pair never left its path after the cut"
                         );
-                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        time::sleep(Duration::from_millis(250)).await;
                     }
                 }
                 let text = format!("matrix {name}");
@@ -826,7 +827,7 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
                             started.elapsed() < PAYLOAD_DEADLINE,
                             "{name}: the message never reached bob on {expected:?}"
                         );
-                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        time::sleep(Duration::from_millis(250)).await;
                     }
                     // The message did not move the pair: it is still where it settled.
                     let after = alice.rung_to("bob").await;
@@ -848,7 +849,7 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
                                 started.elapsed()
                             );
                         }
-                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        time::sleep(Duration::from_millis(250)).await;
                     }
                 }
             }
@@ -875,7 +876,7 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
                 warned_after.elapsed() < Duration::from_mins(1),
                 "{name}: the underlay never logged that it stays on the relay"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
     }
 
@@ -946,7 +947,7 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_parks_a_frame() {
                     on_the_rung_since = None;
                 }
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
         let on_the_rung = on_the_rung_since.unwrap_or_else(|| {
             panic!(
@@ -968,7 +969,7 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_parks_a_frame() {
                     waiting.elapsed() < PAYLOAD_DEADLINE,
                     "{NAME}: the frame {text:?} was parked and never reached bob"
                 );
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                time::sleep(Duration::from_millis(250)).await;
             }
             late = late.max(on_the_rung.elapsed());
         }
@@ -2066,7 +2067,7 @@ fn a_send_with_gossip_off_and_no_direct_path_fails_with_a_clear_error() {
                 waiting.elapsed() < LEAVE_DIRECT_DEADLINE,
                 "{NAME}: the pair never left IP after the cut"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
 
         let text = format!("matrix {NAME}");
@@ -2078,7 +2079,7 @@ fn a_send_with_gossip_off_and_no_direct_path_fails_with_a_clear_error() {
             refusal.contains(LOOKUP_ONLY),
             "{NAME}: the error must give the reason, got: {refusal}"
         );
-        tokio::time::sleep(REFUSAL_WINDOW).await;
+        time::sleep(REFUSAL_WINDOW).await;
         assert!(!bob.saw_msg(&text), "{NAME}: the refused message arrived");
         for member in [alice, bob, carol] {
             member.leave().await;

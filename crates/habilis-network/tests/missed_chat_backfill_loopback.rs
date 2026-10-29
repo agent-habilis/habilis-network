@@ -24,7 +24,9 @@ use habilis_network::runtime::{
 };
 use tokio::sync::{Notify, oneshot};
 
+use habilis_network::ops;
 use habilis_network::runtime::tuning;
+use tokio::time::{self, Instant};
 /// Bounds a slow join only: with the tick pinned away, nothing but the ask on
 /// the first link can deliver.
 const BUDGET: Duration = Duration::from_secs(15);
@@ -93,7 +95,7 @@ impl NodeDriver for Chat {
         frame.timestamp = frame.timestamp + AHEAD;
         let frame = frame.sign(context.identity);
         let bytes = frame.serialize().expect("serialize");
-        let _ = habilis_network::ops::deliver(&frame, bytes.clone(), state, context.sender)
+        let _ = ops::deliver(&frame, bytes.clone(), state, context.sender)
             .await
             .expect("a meshed node broadcasts");
         // The sender keeps its own frame, as a chat app does, so any peer late
@@ -116,7 +118,7 @@ impl Chat {
                 changed.await;
             }
         };
-        tokio::time::timeout(deadline, wait).await.is_ok() || seen()
+        time::timeout(deadline, wait).await.is_ok() || seen()
     }
 }
 
@@ -155,7 +157,7 @@ impl Joined {
                 changed.await;
             }
         };
-        tokio::time::timeout(deadline, wait).await.is_ok() || seen()
+        time::timeout(deadline, wait).await.is_ok() || seen()
     }
 }
 
@@ -215,7 +217,7 @@ fn a_node_gets_the_chat_it_missed_on_its_first_real_peer_link() {
             "early never got the frame, so it cannot hold it for late"
         );
 
-        let started = tokio::time::Instant::now();
+        let started = Instant::now();
         let (late, late_chat, late_saw) = spawn(&topic, "late").await;
         assert!(
             late_saw.wait_for(&nick("early"), BUDGET).await,

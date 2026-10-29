@@ -26,6 +26,8 @@ use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
+use std::any;
+use tokio::time;
 /// Long enough for the gossip path to be tried and chosen: a probe goes every second.
 const STEP_DEADLINE: Duration = Duration::from_mins(2);
 const PAYLOAD_DEADLINE: Duration = Duration::from_secs(20);
@@ -179,7 +181,7 @@ impl Member {
             } else {
                 held_since = None;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
         panic!(
             "{name}: expected the rung {expected}, the last rung read was {seen:?} after {probes} probes"
@@ -204,7 +206,7 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
         if started.elapsed() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -215,7 +217,7 @@ struct Fixture {
     bob: Member,
     carol: Member,
     dave: Member,
-    _relay: Box<dyn std::any::Any + Send>,
+    _relay: Box<dyn any::Any + Send>,
 }
 
 impl Fixture {
@@ -295,7 +297,7 @@ fn a_directed_message_crosses_a_pair_with_no_other_path_on_the_gossip_rung() {
                 started.elapsed() < PAYLOAD_DEADLINE,
                 "{NAME}: the message never reached carol on the gossip rung"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
 
         let reply = format!("{NAME} carol to alice");
@@ -310,7 +312,7 @@ fn a_directed_message_crosses_a_pair_with_no_other_path_on_the_gossip_rung() {
                 reply_started.elapsed() < PAYLOAD_DEADLINE,
                 "{NAME}: the reply never reached alice on the gossip rung"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
 
         assert_eq!(
@@ -388,7 +390,7 @@ fn a_pair_with_only_the_gossip_rung_does_not_churn_its_gossip_link() {
                 .alice
                 .send("carol", &format!("churn probe {NAME} {probes}"))
                 .await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
         let closes = fixture.alice.recursion_closes().await - before;
         eprintln!("DIAG {NAME}: {closes} closes of the recursion rule in {CHURN_WINDOW:?}");
@@ -440,7 +442,7 @@ fn state_written_by_alice_reaches_carol_while_the_pair_has_only_the_gossip_rung(
                 started.elapsed() < PAYLOAD_DEADLINE,
                 "{NAME}: carol never held alice's change"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         fixture.leave().await;
     });

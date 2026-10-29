@@ -27,6 +27,7 @@ use habilis_network::runtime::{
 };
 use tokio::sync::oneshot;
 
+use tokio::{sync, time};
 /// Two anti-entropy cycles (10 s each) and margin, less than the 90 s dedup of the gossip layer.
 const REPAIR: Duration = Duration::from_secs(40);
 const MEETING: Duration = Duration::from_mins(1);
@@ -35,9 +36,9 @@ const MEETING: Duration = Duration::from_mins(1);
 /// answer point-to-point (seen at 29 s in the run without the nonce).
 const REPAIR_STATE: Duration = Duration::from_secs(20);
 
-fn serial() -> &'static tokio::sync::Mutex<()> {
-    static SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))
+fn serial() -> &'static sync::Mutex<()> {
+    static SERIAL: OnceLock<sync::Mutex<()>> = OnceLock::new();
+    SERIAL.get_or_init(|| sync::Mutex::new(()))
 }
 
 fn logs() -> String {
@@ -218,7 +219,7 @@ async fn assert_dropped_once(node: &Node<Chat>) {
             count == 0 && started.elapsed() < Duration::from_secs(10),
             "the hook dropped {count} frames, not one"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -266,7 +267,7 @@ async fn waits_for(
         if has_read(read, text) {
             return Some(started.elapsed());
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     has_read(read, text).then(|| started.elapsed())
 }
@@ -291,7 +292,7 @@ fn a_frame_the_app_dropped_is_repaired_by_anti_entropy() {
         while !(has_read(&bob_read, "hello") && has_read(&carol_read, "hello")) {
             assert!(meeting.elapsed() < MEETING, "the three never meshed");
             say(&alice, "hello").await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
 
         drop_inbound(&bob, TestDrop::AppBody("dropped-once".to_owned())).await;
@@ -332,7 +333,7 @@ fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
         while !has_read(&bob_read, "hello") {
             assert!(meeting.elapsed() < MEETING, "the pair never meshed");
             say(&alice, "hello").await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
 
         // Alice must hold the proof of bob before she forgets it, or the first `PeerInfo` of bob, late,
@@ -346,7 +347,7 @@ fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
                 waiting.elapsed() < MEETING,
                 "alice never took the PeerInfo of bob"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         // The forget models a member whose `PeerInfo` does not reach the asker side, the state the
         // gossip answer exists for; the wait below forgets again after every poll.
@@ -366,7 +367,7 @@ fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
             );
             // A PeerInfo of bob restores the proof; forgetting it again keeps the answer on gossip.
             forget_proof(&alice, "bob").await;
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         eprintln!(
             "the dropped state change reached the app after: {:?}",
@@ -408,12 +409,12 @@ fn a_peer_does_not_resend_to_its_author_the_frame_she_kept() {
         while !has_read(&bob_read, "hello") {
             assert!(meeting.elapsed() < MEETING, "the pair never meshed");
             say(&alice, "hello").await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
         // One digest round of each node to settle, then two rounds in which nothing may be resent.
-        tokio::time::sleep(Duration::from_secs(12)).await;
+        time::sleep(Duration::from_secs(12)).await;
         let before = logs().len();
-        tokio::time::sleep(Duration::from_secs(25)).await;
+        time::sleep(Duration::from_secs(25)).await;
         let log = logs();
         let resends: Vec<&str> = log[before..]
             .lines()
@@ -451,7 +452,7 @@ fn a_frame_the_app_dropped_comes_back_from_its_author_when_she_kept_it() {
         while !has_read(&bob_read, "hello") {
             assert!(meeting.elapsed() < MEETING, "the pair never meshed");
             say(&alice, "hello").await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
 
         drop_inbound(&bob, TestDrop::AppBody("dropped-once".to_owned())).await;

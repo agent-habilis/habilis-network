@@ -28,6 +28,7 @@ use habilis_network::protocol::Lookup;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
+use tokio::time;
 /// The probe deadline of 15 s and 10 s more: a link that stayed on the relay
 /// would be closed inside it, and a session round takes a few seconds.
 const WINDOW: Duration = Duration::from_secs(25);
@@ -55,7 +56,7 @@ async fn eventually(deadline: Duration, mut done: impl FnMut() -> bool) -> bool 
         if done() {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     done()
 }
@@ -154,7 +155,7 @@ fn the_rendezvous_link_stays_up_when_ip_is_lost() {
                 "the pair never linked\n{}",
                 trace()
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         // The roster is presence, not a gossip link. Cut IP only once the member pair is a
         // neighbor on both ends, or the test cuts a link that was never up.

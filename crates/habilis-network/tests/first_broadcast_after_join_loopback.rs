@@ -55,6 +55,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 
 use habilis_network::net::test_relay;
+use tokio::time;
 /// How long a broadcast may take to reach the creator before the test calls it lost.
 const EXPECTED: Duration = Duration::from_mins(1);
 /// How long the test keeps looking, to tell a late message from one that never comes: past the
@@ -407,7 +408,7 @@ async fn watch<P: Peer>(
         if probes.iter().all(Probe::observed) {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -449,7 +450,7 @@ async fn wait_until_meshed<P: Peer>(members: [&P; 3]) {
     for member in members {
         while member.peer_count().await < members.len() - 1 {
             assert!(Instant::now() < deadline, "the mesh did not settle");
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
     }
 }
@@ -483,7 +484,7 @@ async fn measure_race<P: Peer>(
         wait_until_meshed([&creator, &j1, &j2]).await;
     }
     let before = log_lens([&creator, &j1, &j2]).await;
-    tokio::time::sleep(delay).await;
+    time::sleep(delay).await;
     let first = Probe::sent(format!("{name} one"));
     j1.broadcast(&first.text)
         .await

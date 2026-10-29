@@ -48,7 +48,7 @@
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, UdpSocket};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
 use std::time::{Duration, Instant};
 
 use habilis_network::membership::{self, Membership, Request};
@@ -56,7 +56,10 @@ use habilis_network::protocol::LockedMesh;
 use habilis_network::runtime::tuning::{Tuning, init};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use tokio::sync::mpsc;
+use futures_util::future;
+use std::{env, fs, io, process};
+use tokio::sync::{self, mpsc};
+use tokio::time;
 /// How long the setup of a split waits for the rosters of its two groups to settle.
 const COUNTS_DEADLINE: Duration = Duration::from_secs(10);
 
@@ -85,22 +88,22 @@ const RELEASE_DEADLINE: Duration = Duration::from_secs(90);
 const RELEASE_LINKS: usize = 3;
 
 /// Tests of this file take turns: they share the log of the round and the loopback ports.
-static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static SERIAL: sync::Mutex<()> = sync::Mutex::const_new(());
 
 /// The file that the log of the running round goes to.
-static ROUND_LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
+static ROUND_LOG: Mutex<Option<fs::File>> = Mutex::new(None);
 
 struct RoundLogWriter;
 
-impl std::io::Write for RoundLogWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+impl io::Write for RoundLogWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if let Some(file) = ROUND_LOG.lock().expect("no poison").as_mut() {
             file.write_all(bytes)?;
         }
         Ok(bytes.len())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
@@ -108,7 +111,7 @@ impl std::io::Write for RoundLogWriter {
 /// One global subscriber that writes to the file of the running round. A per-round
 /// `set_default` would lose the events of the worker threads.
 fn init_process() -> habilis_network_test_tracing::Guard {
-    static ONCE: std::sync::Once = std::sync::Once::new();
+    static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         init(
             Tuning::DEFAULTS
@@ -136,20 +139,20 @@ impl Round {
 
     fn begin(name: &'static str) -> Self {
         let log = init_process();
-        let prefix: String = std::env::var("HABILIS_TEST_LOG_DUMP").unwrap_or_else(|_| {
-            std::env::temp_dir()
+        let prefix: String = env::var("HABILIS_TEST_LOG_DUMP").unwrap_or_else(|_| {
+            env::temp_dir()
                 .join("loopback-room-split")
                 .display()
                 .to_string()
         });
-        let path: PathBuf = format!("{prefix}.{name}.{}", std::process::id()).into();
+        let path: PathBuf = format!("{prefix}.{name}.{}", process::id()).into();
         *ROUND_LOG.lock().expect("no poison") =
-            Some(std::fs::File::create(&path).expect("create the log file of the round"));
+            Some(fs::File::create(&path).expect("create the log file of the round"));
         Self { name, path, log }
     }
 
     fn log(&self) -> String {
-        std::fs::read_to_string(&self.path).unwrap_or_default()
+        fs::read_to_string(&self.path).unwrap_or_default()
     }
 
     /// The `(node, port)` of every beacon that was bound on a rung, in order.
@@ -211,10 +214,10 @@ impl Round {
                     self.name
                 );
                 // A green round that nobody can read gives no reason why it is green.
-                if std::env::var_os("HABILIS_TEST_KEEP_LOG").is_some() {
+                if env::var_os("HABILIS_TEST_KEEP_LOG").is_some() {
                     eprintln!("ROUND {} log kept in {}", self.name, self.path.display());
                 } else {
-                    let _ = std::fs::remove_file(&self.path);
+                    let _ = fs::remove_file(&self.path);
                 }
             }
             Err(text) => panic!(
@@ -345,7 +348,7 @@ async fn become_one_mesh(members: &[&Member], deadline: Duration) -> Result<Dura
                 members.len()
             ));
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -357,7 +360,7 @@ async fn wait_for_beacons(round: &Round, count: usize) -> Result<(), String> {
                 "no beacon was bound on a rung inside {BEACON_DEADLINE:?}"
             ));
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     Ok(())
 }
@@ -370,7 +373,7 @@ async fn wait_for_rung_of(round: &Round, node: &str) -> Result<(), String> {
                 "precondition: member {node} bound no rung inside {BEACON_DEADLINE:?}"
             ));
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     Ok(())
 }
@@ -396,14 +399,14 @@ async fn wait_for_releases(round: &Round, count: usize) -> Result<(), String> {
                 round.members_released_with_enough_links()
             ));
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     Ok(())
 }
 
 async fn open_joiners(members: &mut Vec<Member>, mesh: &str, names: &[String]) {
     for nick in names {
-        tokio::time::sleep(SPACING).await;
+        time::sleep(SPACING).await;
         members.push(Member::open(nick, Some(mesh)).await);
     }
 }
@@ -488,7 +491,7 @@ async fn four_joiners_together_after_a_long_run(
         members.remove(0).leave().await;
     }
     let names = nicks("burst", 4);
-    let opened = futures_util::future::join_all(
+    let opened = future::join_all(
         names
             .iter()
             .map(|nick| Member::open(nick, Some(mesh.as_str()))),
@@ -509,7 +512,7 @@ async fn wait_for_counts(first: &Member, second: &Member, count: usize) -> (usiz
         if counts == (count, count) || started.elapsed() >= COUNTS_DEADLINE {
             return counts;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -571,7 +574,7 @@ impl Drop for BlindNewMembers {
 /// open comes after a walk that read the truth, and that walk is the one that the cases are about.
 async fn open_starters_blind(names: &[String], mesh: &str) -> Vec<Member> {
     let _blind = BlindNewMembers::on();
-    futures_util::future::join_all(names.iter().map(|nick| Member::open(nick, Some(mesh)))).await
+    future::join_all(names.iter().map(|nick| Member::open(nick, Some(mesh)))).await
 }
 
 /// The creator mints the room and leaves, so that no beacon holds a rung. `starters`
@@ -664,7 +667,7 @@ async fn start_burst_on_a_host_that_answers_late(
 
     let names = nicks("starter", 2);
     let opened = open_starters_blind(&names, &mesh).await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    time::sleep(Duration::from_secs(3)).await;
     for member in &opened {
         member.unblind_rung_probes().await;
     }
@@ -700,7 +703,7 @@ async fn holder_whose_beacon_stops_answering(
                     .to_owned(),
             );
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     let mesh = members[0].mesh_id();
     open_joiners(members, &mesh, &nicks("late", 1)).await;
@@ -732,7 +735,7 @@ async fn open_watched(nick: &str, mesh: &str) -> (Member, UnboundedReceiver<Stri
 async fn hold_every_rung(ports: &[u16]) -> Result<Vec<UdpSocket>, String> {
     let until = Instant::now() + Duration::from_secs(10);
     loop {
-        let sockets: Result<Vec<UdpSocket>, std::io::Error> = ports
+        let sockets: Result<Vec<UdpSocket>, io::Error> = ports
             .iter()
             .map(|port| UdpSocket::bind((Ipv4Addr::LOCALHOST, *port)))
             .collect();
@@ -741,7 +744,7 @@ async fn hold_every_rung(ports: &[u16]) -> Result<Vec<UdpSocket>, String> {
             Err(error) if Instant::now() >= until => {
                 return Err(format!("could not hold the ports {ports:?}: {error}"));
             }
-            Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+            Err(_) => time::sleep(Duration::from_millis(250)).await,
         }
     }
 }
@@ -782,7 +785,7 @@ async fn ladder_held_by_other_processes(
     let started = Instant::now();
     let mut seen = Vec::new();
     let first: String = loop {
-        match tokio::time::timeout(
+        match time::timeout(
             NO_RUNG_DEADLINE.saturating_sub(started.elapsed()),
             events.recv(),
         )
@@ -805,7 +808,7 @@ async fn ladder_held_by_other_processes(
         ));
     }
 
-    tokio::time::sleep(NO_RUNG_QUIET).await;
+    time::sleep(NO_RUNG_QUIET).await;
     let mut again = 0;
     while let Ok(line) = events.try_recv() {
         if is_taken_ladder_info(&line) {

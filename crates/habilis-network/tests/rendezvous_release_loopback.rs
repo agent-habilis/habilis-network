@@ -17,13 +17,15 @@ use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
+use std::{env, fs};
+use tokio::{sync, time};
 /// Members of the first group: the creator, who hosts the rendezvous, and five
 /// joiners. Each joiner ends with five links, above the release count of three.
 const GROUP: usize = 6;
 
-fn serial() -> &'static tokio::sync::Mutex<()> {
-    static SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))
+fn serial() -> &'static sync::Mutex<()> {
+    static SERIAL: OnceLock<sync::Mutex<()>> = OnceLock::new();
+    SERIAL.get_or_init(|| sync::Mutex::new(()))
 }
 
 fn logs() -> String {
@@ -142,8 +144,8 @@ fn rendezvous_trace() -> String {
 
 /// The whole log, written to the file that `HABILIS_TEST_LOG_DUMP` names, if set.
 fn dump_logs() {
-    if let Ok(path) = std::env::var("HABILIS_TEST_LOG_DUMP") {
-        let _ = std::fs::write(path, logs());
+    if let Ok(path) = env::var("HABILIS_TEST_LOG_DUMP") {
+        let _ = fs::write(path, logs());
     }
 }
 
@@ -153,7 +155,7 @@ async fn eventually(deadline: Duration, mut done: impl FnMut() -> bool) -> bool 
         if done() {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     done()
 }
@@ -293,7 +295,7 @@ async fn rosters_until(members: &[&Member], peers: usize, deadline: Duration) ->
         if rosters.iter().all(|len| *len == peers) || started.elapsed() >= deadline {
             return rosters;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -311,7 +313,7 @@ async fn group_that_let_go(relay: &RelayUrl) -> Vec<Member> {
     for index in 1..GROUP {
         let member = Member::join(&format!("member-{index}"), &members[0]).await;
         members.push(member);
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
     assert!(
         all_rosters_hold(&refs(&members), GROUP - 1, Duration::from_mins(1)).await,
@@ -454,7 +456,7 @@ fn a_link_left_on_the_relay_is_closed_and_the_heal_brings_it_back() {
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(90) {
             alice.send("after the heal").await;
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            time::sleep(Duration::from_secs(2)).await;
             if bob.saw_msg("after the heal") {
                 healed = true;
                 break;
@@ -523,7 +525,7 @@ fn a_cut_between_two_members_closes_their_link_and_leaves_the_others() {
                 "member-1 and member-2 never linked to each other before the cut\n{}",
                 rendezvous_trace()
             );
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
 
         // Cut member-1 from member-2, and nobody else. Every check about the cut reads the log from here.
@@ -560,7 +562,7 @@ fn a_cut_between_two_members_closes_their_link_and_leaves_the_others() {
         let started = Instant::now();
         while started.elapsed() < Duration::from_mins(2) {
             members[1].send("after the cut").await;
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            time::sleep(Duration::from_secs(2)).await;
             if members[2].saw_msg("after the cut") {
                 healed = true;
                 break;

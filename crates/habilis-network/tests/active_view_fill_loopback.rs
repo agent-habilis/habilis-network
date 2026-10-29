@@ -22,6 +22,8 @@ use habilis_network::util::tuning::STARVED;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
+use std::future;
+use tokio::{task, time};
 /// Long enough for a mesh of ten to form and for the alive ticks to fill what the
 /// first grafts missed.
 const FILL_DEADLINE: Duration = Duration::from_mins(3);
@@ -121,11 +123,11 @@ impl Member {
 }
 
 /// `count` members on a local relay, each with the active view cap `max_peers`.
-async fn mesh(count: usize, max_peers: usize) -> (Vec<Member>, tokio::task::JoinHandle<()>) {
+async fn mesh(count: usize, max_peers: usize) -> (Vec<Member>, task::JoinHandle<()>) {
     let (relay, server) = test_relay::spawn_plain().await.expect("local relay");
     let keep = tokio::spawn(async move {
         let _server = server;
-        std::future::pending::<()>().await;
+        future::pending::<()>().await;
     });
     let first = Member::create("m0", &relay, max_peers).await;
     let mut members = Vec::with_capacity(count);
@@ -160,7 +162,7 @@ async fn until_every_view_holds(
         if started.elapsed() >= deadline {
             return Err(counts);
         }
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        time::sleep(Duration::from_secs(10)).await;
     }
 }
 
@@ -259,7 +261,7 @@ fn a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation() {
             if started.elapsed() >= settle {
                 previous = now;
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            time::sleep(Duration::from_secs(5)).await;
         }
         let minutes = CHURN_WINDOW.as_secs_f64() / 60.0;
         let per_member_per_minute =
@@ -335,7 +337,7 @@ fn a_mesh_larger_than_g_plus_one_reaches_g_everywhere_and_the_churn_is_reported(
             if started.elapsed() >= FILL_DEADLINE {
                 previous = now;
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            time::sleep(Duration::from_secs(5)).await;
         }
         let minutes = STABLE_FOR.as_secs_f64() / 60.0;
         eprintln!(

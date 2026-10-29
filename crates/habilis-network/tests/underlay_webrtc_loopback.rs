@@ -19,6 +19,7 @@ use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net;
+use tokio::time;
 /// Long enough for an ICE round on the application pair, then for the alive tick
 /// that offers the underlay session, then for a second ICE round.
 const STEP_DEADLINE: Duration = Duration::from_mins(3);
@@ -206,7 +207,7 @@ impl Member {
             if seen == Some(expected) {
                 return;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
         panic!(
             "{step}: expected the rung {expected}, the last rung read was {seen:?} \
@@ -223,7 +224,7 @@ impl Member {
             if self.underlay_sessions().await >= 1 {
                 return;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
         panic!("{step}: the underlay never opened a WebRTC session");
     }
@@ -242,7 +243,7 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
         if started.elapsed() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -436,7 +437,7 @@ fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member() {
             );
             probes += 1;
             let _ = alice.send("bob", &format!("forward probe {probes}")).await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
 
         // A payload cell goes from alice to bob over the hop: the message arrives, and
@@ -453,7 +454,7 @@ fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member() {
                 sent_at.elapsed() < PAYLOAD_DEADLINE,
                 "the message never reached bob over the hop"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         assert!(
             carol.forwarded_cells().await > before,
@@ -468,7 +469,7 @@ fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member() {
                 warned_after.elapsed() < Duration::from_secs(45),
                 "the underlay never logged that it stays on the relay"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
 
         for member in [alice, bob, carol] {
