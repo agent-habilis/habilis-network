@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
-// A `pub trait` is refused unless `pub-trait.allow` names its file with the exact count and a
-// reason. The guide defines a trait only for a generic bound, a dyn object, an extension trait or a
-// sealed trait, and the reason says which. A new trait fails the check until someone adds a row.
+// A `pub trait` is justified when a crate file uses it as a generic bound, a dyn object, an impl bound
+// or a supertrait. Any other `pub trait` is refused unless `pub-trait.allow` names its file with the
+// exact count and a reason.
 // `pub-trait.test.ts` plants one file of each kind.
 
 import { spawnSync } from "node:child_process";
@@ -24,9 +24,23 @@ function listFiles(): string[] {
   return (proc.stdout ?? "").split("\0").filter((file) => SCOPE.test(file));
 }
 
-function countIn(file: string): number {
+// A trait is justified when some crate file uses it as a generic bound, a dyn object, an impl
+// bound or a supertrait. A trait that nothing uses that way is code organization, and is counted.
+function usedAsBound(name: string, texts: string[]): boolean {
+  const uses = [
+    new RegExp(`\\bdyn\\s+${name}\\b`),
+    new RegExp(`\\bimpl\\s+(?:[^{;=]*\\+\\s*)?${name}\\b`),
+    new RegExp(`<[^>\\n]*\\b\\w+\\s*:\\s*[^>\\n]*\\b${name}\\b`),
+    new RegExp(`\\bwhere\\b[^{;]*\\b\\w+\\s*:\\s*[^{;]*\\b${name}\\b`),
+    new RegExp(`\\bpub trait\\s+\\w+\\s*:\\s*[^{]*\\b${name}\\b`),
+  ];
+  return texts.some((text) => uses.some((use) => use.test(text)));
+}
+
+function unjustifiedIn(file: string, texts: string[]): number {
   const text = readFileSync(path.join(ROOT, file), "utf8");
-  return text.match(TRAIT)?.length ?? 0;
+  const names = [...text.matchAll(/^\s*pub trait\s+(\w+)/gm)].map((m) => m[1]!);
+  return names.filter((name) => !usedAsBound(name, texts)).length;
 }
 
 function readAllow(): { allowed: Map<string, number>; problems: string[] } {
@@ -48,8 +62,10 @@ function readAllow(): { allowed: Map<string, number>; problems: string[] } {
 function main(): number {
   const { allowed, problems } = readAllow();
   const found = new Map<string, number>();
-  for (const file of listFiles()) {
-    const count = countIn(file);
+  const files = listFiles();
+  const texts = files.map((file) => readFileSync(path.join(ROOT, file), "utf8"));
+  for (const file of files) {
+    const count = unjustifiedIn(file, texts);
     if (count > 0) found.set(file, count);
   }
   for (const [file, count] of [...found].sort()) {

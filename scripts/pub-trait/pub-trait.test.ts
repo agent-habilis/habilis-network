@@ -70,3 +70,31 @@ test("a pub trait outside crates is not counted", () => {
 test("two rows for one file are refused", () => {
   expectExit({ "crates/x/src/a.rs": trait }, 1, "crates/x/src/a.rs|1|a\ncrates/x/src/a.rs|1|b");
 });
+
+// A trait that a crate file uses as a bound, a dyn object or a supertrait is justified, with no row.
+test("a pub trait used as a dyn object is clean", () => {
+  expectExit({ "crates/x/src/a.rs": trait, "crates/x/src/b.rs": "fn f(s: &dyn Sink) { let _ = s; }" }, 0);
+});
+
+test("a pub trait used as a generic bound is clean", () => {
+  expectExit({ "crates/x/src/a.rs": trait, "crates/x/src/b.rs": "fn f<T: Sink>(s: T) { let _ = s; }" }, 0);
+});
+
+test("a pub trait used in a where clause is clean", () => {
+  expectExit({ "crates/x/src/a.rs": trait, "crates/x/src/b.rs": "fn f<T>(s: T) where T: Sink { let _ = s; }" }, 0);
+});
+
+test("a pub trait used as an impl bound is clean", () => {
+  expectExit({ "crates/x/src/a.rs": trait, "crates/x/src/b.rs": "fn f(s: impl Sink) { let _ = s; }" }, 0);
+});
+
+test("a pub trait used as a supertrait is clean", () => {
+  expectExit(
+    { "crates/x/src/a.rs": trait, "crates/x/src/b.rs": "pub trait Proof: Sink {}", "crates/x/src/c.rs": "fn f<T: Proof>(t: T) { let _ = t; }" },
+    0,
+  );
+});
+
+test("a field of a type with the trait's name is not a use", () => {
+  expectExit({ "crates/x/src/a.rs": trait, "crates/x/src/b.rs": "struct S { sink: Sink }" }, 1);
+});
