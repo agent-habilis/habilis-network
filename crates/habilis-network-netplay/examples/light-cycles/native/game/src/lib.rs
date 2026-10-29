@@ -4,12 +4,6 @@
 //! `tests/` integration tests can drive `Game` directly — for a
 //! binary-only crate, an integration test would have no way to reach any
 //! of this at all.
-//!
-//! The unstable-feature gate lives here, not in `main.rs`: only `ui.rs`
-//! writes components with the bare `yield` keyword, and that code lives
-//! in this library. The root `rust-toolchain.toml` pins a nightly for
-//! the whole project, which is what `native/` needs.
-#![feature(coroutines, yield_expr)]
 
 pub mod app;
 pub mod grid;

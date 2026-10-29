@@ -6,8 +6,6 @@
 # The guard of a test must survive a test that panicked, or it hides the failure that matters.
 
 # The light-cycles example uses native generators, a nightly-only feature.
-feature|crates/habilis-network-netplay/examples/light-cycles/native/game/src/lib.rs|1|coroutines, yield_expr (nightly example)
-feature|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/lib.rs|1|coroutines, coroutine_trait (nightly example)
 
 # A panic must not cross the C boundary: this is the defence in depth that the guide allows.
 catch_unwind|crates/habilis-network-ffi/src/ffi.rs|1|FFI boundary

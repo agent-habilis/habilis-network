@@ -97,7 +97,7 @@ pub fn untrack<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// Clears whatever tracking window is currently open, if any — used when
-/// adopting a render thunk: reads made above the `yield` (setup, which
+/// adopting a render thunk: reads made above the thunk (setup, which
 /// runs exactly once) are discarded, so only the thunk's own reads become
 /// dependencies. Mirrors `#adopt`'s `deps.clear()`.
 pub fn clear_current_tracking() {

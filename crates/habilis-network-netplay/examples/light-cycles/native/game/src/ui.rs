@@ -17,9 +17,7 @@
 //! configured for that name in their own terminal theme, rather than
 //! forcing a specific RGB value that might clash with it.
 
-use std::pin::Pin;
-
-use visage_rust_tui::component::{ComponentCoroutine, Yield};
+use visage_rust_tui::component::{Component, Step};
 use visage_rust_tui::reactive::Signal;
 use visage_rust_tui::tui::color::palette;
 use visage_rust_tui::view::{Align, Border, BoxProps, Direction, Justify, Padding, View};
@@ -70,16 +68,28 @@ fn dim() -> i32 {
 /// `View::component`'s nested-instance isolation, which pays off when
 /// *most* of a tree stays still and only a small part changes.
 #[must_use]
-pub fn app(snapshot: Signal<Snapshot>) -> Pin<Box<ComponentCoroutine>> {
-    Box::pin(
-        #[coroutine]
-        move || {
-            loop {
-                let current = snapshot.get();
-                yield Yield::View(render(&current));
-            }
-        },
-    )
+pub fn app(snapshot: Signal<Snapshot>) -> UiComponent {
+    UiComponent { snapshot }
+}
+
+/// The root component's state: the snapshot it reads on every step.
+pub struct UiComponent {
+    snapshot: Signal<Snapshot>,
+}
+
+impl Component for UiComponent {
+    fn step(&mut self) -> Option<Step> {
+        let current = self.snapshot.get();
+        Some(Step::View(render(&current)))
+    }
+}
+
+impl std::fmt::Debug for UiComponent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UiComponent")
+            .finish_non_exhaustive()
+    }
 }
 
 fn render(s: &Snapshot) -> View {

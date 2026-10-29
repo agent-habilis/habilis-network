@@ -596,7 +596,7 @@ const RULES: Rule[] = [
     name: "feature",
     pattern: /^\s*#!?\[(cfg_attr\([^\]]*, *)?feature\(/,
     glob: "*.rs",
-    why: "No unstable features. The light-cycles example is the one exception. The project toolchain is a nightly, so only this rule stops a new #![feature].",
+    why: "No unstable features. The project toolchain is a nightly, so only this rule stops a new #![feature].",
   },
   {
     name: "catch_unwind",

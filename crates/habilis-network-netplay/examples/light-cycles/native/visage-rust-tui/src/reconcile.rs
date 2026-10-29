@@ -20,10 +20,9 @@
 //! optimal, fine for a grid + HUD whose structure is mostly static.
 
 use std::collections::HashSet;
-use std::ops::Coroutine;
 use std::rc::Rc;
 
-use crate::component::{Instance, Yield};
+use crate::component::{Component, Instance};
 use crate::host::Host;
 use crate::reactive::SubscriberId;
 use crate::view::{BoxProps, ComponentView, View};
@@ -140,7 +139,7 @@ fn mount_component<H: Host>(
     })
 }
 
-/// Mounts the tree's root component directly from a coroutine, with no
+/// Mounts the tree's root component directly, with no
 /// parent to ever compare identity against — unlike a nested
 /// [`ComponentView`] (built via [`View::component`]), the root is never
 /// re-mounted-vs-reused by a `patch` call, so it needs no `type_key` and
@@ -150,19 +149,19 @@ fn mount_component<H: Host>(
 ///
 /// # Panics
 ///
-/// If the root component's coroutine completes instead of yielding on its
-/// very first resume — every real component loops forever, so this would
-/// indicate a broken coroutine body, not a normal outcome.
+/// If the root component finishes instead of producing a step on its very
+/// first render — every real component loops forever, so this would indicate
+/// a broken component, not a normal outcome.
 pub fn mount_root<H: Host>(
     host: &mut H,
     root: H::Node,
-    coro: impl Coroutine<(), Yield = Yield, Return = ()> + 'static,
+    component: impl Component + 'static,
 ) -> Mounted<H::Node> {
-    let mut instance = Instance::new(coro);
+    let mut instance = Instance::new(component);
     let id = instance.subscriber_id();
     let view = instance
         .mount()
-        .expect("the root component must yield a view on mount");
+        .expect("the root component must produce a view on mount");
     let child = Box::new(mount(host, root, None, view));
     Mounted::Component(ComponentMount {
         id,
@@ -414,16 +413,18 @@ mod tests {
         // which has a real reactive loop to drive) — just confirms
         // `mount`/`patch` don't hit the old borrowed-`View` split's
         // unreachable panic when a Component sits inside a Box's children.
-        use crate::component::Yield;
-        use std::pin::Pin;
+        use crate::component::{Component, ComponentBox, Step};
 
-        fn child() -> Pin<Box<crate::component::ComponentCoroutine>> {
-            Box::pin(
-                #[coroutine]
-                || {
-                    yield Yield::View(View::text("child"));
-                },
-            )
+        struct Child;
+
+        impl Component for Child {
+            fn step(&mut self) -> Option<Step> {
+                Some(Step::View(View::text("child")))
+            }
+        }
+
+        fn child() -> ComponentBox {
+            Box::new(Child)
         }
 
         let mut host = TuiHost::new();

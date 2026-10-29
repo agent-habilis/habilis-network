@@ -5,10 +5,9 @@
 //! `tui::color`, absolute-cell sizing only — no percentages, no `auto` vs
 //! explicit distinction beyond `Option`).
 
-use std::pin::Pin;
 use std::rc::Rc;
 
-use crate::component::ComponentCoroutine;
+use crate::component::ComponentBox;
 use crate::tui::color::DEFAULT_COLOR;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -105,9 +104,9 @@ impl Default for BoxProps {
     }
 }
 
-/// A nested component: its own independent coroutine, mounted (or
+/// A nested component: its own independent component, mounted (or
 /// reused) as a first-class part of the tree — this is what makes
-/// children generators too, matching `visage-dom`'s `comp` fiber, rather
+/// children components too, matching `visage-dom`'s `comp` fiber, rather
 /// than plain declarative data the parent alone re-renders wholesale.
 ///
 /// `type_key` is how the reconciler decides "the same component slot as
@@ -118,10 +117,10 @@ impl Default for BoxProps {
 /// reference does in JS.
 pub struct ComponentView {
     pub(crate) type_key: usize,
-    pub(crate) build: Box<dyn FnOnce() -> Pin<Box<ComponentCoroutine>>>,
+    pub(crate) build: Box<dyn FnOnce() -> ComponentBox>,
 }
 
-/// A declarative view tree, as yielded by a component. Not `Clone` as a
+/// A declarative view tree, as produced by a component. Not `Clone` as a
 /// whole (`Component` owns a one-shot builder closure, consumed exactly
 /// once when it's actually mounted) — nothing in this crate needs to
 /// clone a whole `View`; `patch()` takes one by reference and clones only
@@ -154,7 +153,7 @@ impl View {
         View::Box(props, children)
     }
 
-    /// Yields a nested component: `component_fn` is a plain function
+    /// Produces a nested component: `component_fn` is a plain function
     /// (never a closure) so its pointer is stable across every render —
     /// the same identity JS gets for free by comparing a component's
     /// function reference. `props` is captured once, at the moment this
@@ -167,10 +166,7 @@ impl View {
     /// captured by both sides, the same as any other reactive read.
     ///
     /// [`Signal`]: crate::reactive::Signal
-    pub fn component<P: 'static>(
-        component_fn: fn(P) -> Pin<Box<ComponentCoroutine>>,
-        props: P,
-    ) -> Self {
+    pub fn component<P: 'static>(component_fn: fn(P) -> ComponentBox, props: P) -> Self {
         View::Component(ComponentView {
             type_key: component_fn as usize,
             build: Box::new(move || component_fn(props)),

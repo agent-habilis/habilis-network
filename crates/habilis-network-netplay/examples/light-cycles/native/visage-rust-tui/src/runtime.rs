@@ -5,14 +5,12 @@
 //! treats the whole tree uniformly: whichever instance's own signal
 //! changed is the one that re-renders, root or nested, ancestor or leaf.
 
-use std::collections::HashSet;
-use std::ops::Coroutine;
-
-use crate::component::Yield;
+use crate::component::Component;
 use crate::host::Host;
 use crate::reactive::{self, SubscriberId};
 use crate::reconcile::{self, Mounted};
 use crate::tui;
+use std::collections::HashSet;
 
 /// A running app.
 // No `Debug` derive: it would force a `H: Debug` bound onto every `Host`
@@ -26,13 +24,9 @@ pub struct Runtime<H: Host> {
 }
 
 impl<H: Host> Runtime<H> {
-    /// Mounts `coro` as the root component and does the first render.
-    pub fn new(
-        mut host: H,
-        root: H::Node,
-        coro: impl Coroutine<(), Yield = Yield, Return = ()> + 'static,
-    ) -> Self {
-        let mounted = reconcile::mount_root(&mut host, root, coro);
+    /// Mounts `component` as the root component and does the first render.
+    pub fn new(mut host: H, root: H::Node, component: impl Component + 'static) -> Self {
+        let mounted = reconcile::mount_root(&mut host, root, component);
         Self {
             host,
             root,
@@ -73,12 +67,12 @@ impl<H: Host> Runtime<H> {
 
 impl Runtime<tui::host_impl::TuiHost> {
     /// Convenience for the terminal backend: builds a `TuiHost`, creates
-    /// its root node, and mounts `coro` — the one-liner a real terminal
+    /// its root node, and mounts `component` — the one-liner a real terminal
     /// app calls.
-    pub fn terminal(coro: impl Coroutine<(), Yield = Yield, Return = ()> + 'static) -> Self {
+    pub fn terminal(component: impl Component + 'static) -> Self {
         let mut host = tui::host_impl::TuiHost::new();
         let root = host.create_root();
-        Self::new(host, root, coro)
+        Self::new(host, root, component)
     }
 }
 
@@ -106,29 +100,29 @@ pub fn render_frame(
 
 #[cfg(test)]
 mod tests {
-    use crate::component::Yield;
+    use crate::component::{Component, Step};
     use crate::reactive::Signal;
     use crate::runtime::Runtime;
     use crate::tui::layout::LayoutState;
     use crate::view::{BoxProps, View};
     use habilis_network_test_tracing::test;
 
+    struct Counter(Signal<i32>);
+
+    impl Component for Counter {
+        fn step(&mut self) -> Option<Step> {
+            let n = self.0.get();
+            Some(Step::View(View::boxed(
+                BoxProps::default(),
+                vec![View::text(format!("count is {n}"))],
+            )))
+        }
+    }
+
     #[test]
     fn a_running_app_repaints_only_after_a_signal_changes() {
         let count = Signal::new(0);
-        let count_in_component = count.clone();
-        let mut app = Runtime::terminal(
-            #[coroutine]
-            move || {
-                loop {
-                    let n = count_in_component.get();
-                    yield Yield::View(View::boxed(
-                        BoxProps::default(),
-                        vec![View::text(format!("count is {n}"))],
-                    ));
-                }
-            },
-        );
+        let mut app = Runtime::terminal(Counter(count.clone()));
 
         let mut layout_state = LayoutState::new();
         let (first_bytes, first_buffer) =
@@ -169,6 +163,22 @@ mod tests {
         );
     }
 
+    struct Parent {
+        renders: std::rc::Rc<std::cell::RefCell<i32>>,
+        child_count: Signal<i32>,
+    }
+
+    impl Component for Parent {
+        fn step(&mut self) -> Option<Step> {
+            *self.renders.borrow_mut() += 1;
+            let child_count = self.child_count.clone();
+            Some(Step::View(View::boxed(
+                BoxProps::default(),
+                vec![View::component(child_component, child_count)],
+            )))
+        }
+    }
+
     #[test]
     fn a_nested_components_own_signal_change_never_re_renders_its_parent() {
         use std::cell::RefCell;
@@ -177,21 +187,10 @@ mod tests {
         let parent_renders = Rc::new(RefCell::new(0));
         let child_count = Signal::new(0);
 
-        let parent_renders_in_component = Rc::clone(&parent_renders);
-        let child_count_for_child = child_count.clone();
-        let mut app = Runtime::terminal(
-            #[coroutine]
-            move || {
-                loop {
-                    *parent_renders_in_component.borrow_mut() += 1;
-                    let child_count_for_child = child_count_for_child.clone();
-                    yield Yield::View(View::boxed(
-                        BoxProps::default(),
-                        vec![View::component(child_component, child_count_for_child)],
-                    ));
-                }
-            },
-        );
+        let mut app = Runtime::terminal(Parent {
+            renders: Rc::clone(&parent_renders),
+            child_count: child_count.clone(),
+        });
 
         let mut layout_state = LayoutState::new();
         let (_bytes, buffer) = super::render_frame(&mut app, &mut layout_state, None, 20, 1);
@@ -206,8 +205,8 @@ mod tests {
             "the nested buffer shows the updated child text"
         );
 
-        // The CHILD's own signal changes — the parent's coroutine must
-        // not be resumed again; only the child re-renders.
+        // The CHILD's own signal changes — the parent must not be stepped
+        // again; only the child re-renders.
         child_count.set(7);
         assert!(app.tick(), "the tick after the child change repaints");
         assert_eq!(
@@ -225,18 +224,19 @@ mod tests {
         );
     }
 
-    fn child_component(
-        count: Signal<i32>,
-    ) -> std::pin::Pin<Box<crate::component::ComponentCoroutine>> {
-        Box::pin(
-            #[coroutine]
-            move || {
-                loop {
-                    let n = count.get();
-                    yield Yield::View(View::text(format!("child sees {n}")));
-                }
-            },
-        )
+    struct Child(Signal<i32>);
+
+    impl Component for Child {
+        fn step(&mut self) -> Option<Step> {
+            Some(Step::View(View::text(format!(
+                "child sees {}",
+                self.0.get()
+            ))))
+        }
+    }
+
+    fn child_component(count: Signal<i32>) -> crate::component::ComponentBox {
+        Box::new(Child(count))
     }
 
     fn row_text(buffer: &crate::tui::paint::ScreenBuffer) -> String {
