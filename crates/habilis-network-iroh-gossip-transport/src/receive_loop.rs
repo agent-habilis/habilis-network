@@ -1,7 +1,6 @@
 //! The task that reads a gossip topic into a handle.
 
 use iroh_gossip::api::{Event, GossipReceiver};
-use n0_future::StreamExt as _;
 
 use crate::GossipHandle;
 
@@ -15,6 +14,7 @@ pub type ReceiveLoop = n0_future::task::JoinHandle<()>;
 /// it hands anything to a handle (design doc, section 2.5): this loop does not.
 #[must_use]
 pub fn spawn_receive_loop(mut receiver: GossipReceiver, handle: GossipHandle) -> ReceiveLoop {
+    use n0_future::StreamExt as _;
     n0_future::task::spawn(async move {
         while let Some(Ok(event)) = receiver.next().await {
             handle_event(&handle, event);

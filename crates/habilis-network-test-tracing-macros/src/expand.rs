@@ -1,7 +1,6 @@
 //! The expansion of the `test` attribute.
 
 use quote::quote;
-use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::{Expr, ExprLit, ItemFn, Lit, Meta, Token};
 
@@ -9,6 +8,7 @@ pub(crate) fn expand(
     args: proc_macro2::TokenStream,
     mut function: ItemFn,
 ) -> syn::Result<proc_macro2::TokenStream> {
+    use syn::parse::Parser as _;
     let options = Punctuated::<Meta, Token![,]>::parse_terminated.parse2(args)?;
     let mut multi_thread = false;
     let mut workers = None;

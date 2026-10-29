@@ -7,7 +7,6 @@
 //! like any peer link. iroh-gossip's dialer has no handshake timeout, so the
 //! far side simply waits.
 
-use futures_util::StreamExt as _;
 use habilis_network_iroh_webrtc_transport::WebRtcHandle;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
@@ -122,6 +121,7 @@ pub(super) fn watch_relay_policy(
     gossip_conn: &Connection,
     path_sink: Option<mpsc::UnboundedSender<super::probe::PathChange>>,
 ) {
+    use futures_util::StreamExt as _;
     let weak = gossip_conn.weak_handle();
     let mut events = gossip_conn.path_events();
     n0_future::task::spawn(async move {

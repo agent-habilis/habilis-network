@@ -25,7 +25,6 @@ use iroh::endpoint::transports::{CustomEndpoint, CustomSender, RecvInfo, Transmi
 use iroh_base::CustomAddr;
 use js_sys::Reflect;
 use n0_watcher::Watchable;
-use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::{Closure, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{MessageEvent, RtcDataChannel, RtcPeerConnection, RtcPeerConnectionState};
@@ -188,6 +187,7 @@ async fn selected_pair_from_stats(
 /// map entries; anything else-shaped is skipped rather than trusted. Shared
 /// so a browser changing the entry shape is fixed once, not once per reader.
 async fn stats_rows(peer_connection: &RtcPeerConnection) -> Option<Vec<(String, js_sys::Object)>> {
+    use wasm_bindgen::JsCast as _;
     let report = JsFuture::from(peer_connection.get_stats()).await.ok()?;
     let iter = js_sys::try_iter(&report).ok().flatten()?;
     let mut rows = Vec::new();
@@ -383,6 +383,7 @@ impl CustomEndpoint for BrowserHubEndpoint {
 }
 
 pub(crate) fn message_bytes(event: &MessageEvent) -> Option<Vec<u8>> {
+    use wasm_bindgen::JsCast as _;
     let data = event.data();
     if let Ok(buffer) = data.clone().dyn_into::<js_sys::ArrayBuffer>() {
         return Some(js_sys::Uint8Array::new(&buffer).to_vec());

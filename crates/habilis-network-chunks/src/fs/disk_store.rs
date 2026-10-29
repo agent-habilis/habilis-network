@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -29,6 +28,7 @@ where
 /// leaves either the old content or the new, never a torn chunk under a name
 /// that claims to address it.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ChunkError> {
+    use std::io::Write as _;
     let parent = path
         .parent()
         .ok_or_else(|| ChunkError::Malformed("a chunk path has a parent".to_owned()))?;

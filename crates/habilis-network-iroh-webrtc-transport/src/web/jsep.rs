@@ -12,7 +12,6 @@
 //! timed out).
 
 use futures::channel::oneshot;
-use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::{Closure, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
@@ -84,6 +83,7 @@ pub async fn offer(
     local: EndpointId,
     ice: &IceServers,
 ) -> Result<(PendingOffer, SignalEnvelope), JsValue> {
+    use wasm_bindgen::JsCast as _;
     let (peer_connection, expects_srflx) = create_peer_connection(ice)?;
     let peer_connection = OpenPeerConnection::new(peer_connection);
     // Unreliable + unordered: the channel carries QUIC datagrams, and QUIC
@@ -135,6 +135,7 @@ pub async fn answer(
     offer: &SignalEnvelope,
     ice: &IceServers,
 ) -> Result<(PendingAnswer, SignalEnvelope), JsValue> {
+    use wasm_bindgen::JsCast as _;
     let SignalEnvelope::Offer { sdp, .. } = offer else {
         return Err(JsValue::from_str("expected an offer envelope"));
     };

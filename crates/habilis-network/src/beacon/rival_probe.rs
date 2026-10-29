@@ -1,7 +1,6 @@
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use n0_future::task::JoinHandle;
 use tokio::sync::oneshot;
-use tracing::Instrument as _;
 
 use crate::lookup::{TransportHandles, build_endpoint, probe_connect};
 use crate::protocol::mesh::LookupOpts;
@@ -145,6 +144,7 @@ pub(crate) async fn spawn_rival_probe(
     params: &RendezvousParams,
     node: EndpointId,
 ) -> Option<RivalProbe> {
+    use tracing::Instrument as _;
     let target = match rendezvous_addr(params) {
         Some(addr) => addr,
         // Nothing to name (relay disabled, no ladder). The bare id is a

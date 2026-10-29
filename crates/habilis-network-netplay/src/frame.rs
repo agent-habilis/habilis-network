@@ -2,8 +2,6 @@
 
 use std::ops::{Add, AddAssign, Sub};
 
-use serde::de::Error as _;
-use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A simulation frame number.
@@ -27,6 +25,7 @@ pub struct Frame(i32);
 
 impl Serialize for Frame {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::Error as _;
         if self.0 < 0 {
             return Err(S::Error::custom(format!(
                 "frame {} is negative, and no frame is an absent field",
@@ -41,6 +40,7 @@ impl<'de> Deserialize<'de> for Frame {
     fn deserialize<Decoder: Deserializer<'de>>(
         deserializer: Decoder,
     ) -> Result<Self, Decoder::Error> {
+        use serde::de::Error as _;
         let number = i32::deserialize(deserializer)?;
         if number < 0 {
             return Err(Decoder::Error::custom(format!(

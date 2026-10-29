@@ -11,7 +11,6 @@ use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::{Context, SubscriberExt as _};
-use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{Layer, fmt as tracing_fmt};
 
 static INSTALLED: OnceLock<Mode> = OnceLock::new();
@@ -278,6 +277,7 @@ fn install<Writer>(mode: Mode, default_directives: &str, writer: Writer)
 where
     Writer: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
+    use tracing_subscriber::util::SubscriberInitExt as _;
     #[cfg(not(target_arch = "wasm32"))]
     fail_the_binary_on_a_late_event_at_exit();
     let installed = *INSTALLED.get_or_init(|| {

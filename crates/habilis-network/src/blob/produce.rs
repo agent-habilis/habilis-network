@@ -8,7 +8,6 @@
 mod blob_server;
 mod serve_limits;
 
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,7 +18,6 @@ use iroh::Endpoint;
 use iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
 use rand::RngCore;
 use sha2::Sha256;
-use tokio::io::AsyncReadExt as _;
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
@@ -350,6 +348,7 @@ async fn serve_stream(
 
 /// Stream `path` to `send` in bounded chunks — constant memory.
 async fn stream_file(path: &Path, send: &mut SendStream) -> Result<()> {
+    use tokio::io::AsyncReadExt as _;
     let mut file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("opening spooled blob {} failed", path.display()))?;
@@ -371,6 +370,7 @@ async fn stream_file(path: &Path, send: &mut SendStream) -> Result<()> {
 /// loading it whole. Returns the digest and byte length.
 async fn hash_file(path: PathBuf) -> Result<(BlobDigest, u64)> {
     use sha2::Digest;
+    use std::io::Read as _;
     tokio::task::spawn_blocking(move || {
         let mut file = std::fs::File::open(&path)
             .with_context(|| format!("opening {} failed", path.display()))?;

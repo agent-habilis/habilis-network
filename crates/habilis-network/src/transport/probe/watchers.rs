@@ -11,7 +11,6 @@ use super::{kinds, pair_to_climb, step};
 use crate::transport::UdpTransport;
 use std::collections::HashMap;
 
-use futures_util::StreamExt as _;
 use iroh::EndpointId;
 
 use crate::daemon::handler_ctx::HandlerCtx;
@@ -45,6 +44,7 @@ pub(crate) fn ensure_watchers(
     local: EndpointId,
     rendezvous: EndpointId,
 ) {
+    use futures_util::StreamExt as _;
     if state.webrtc.is_none() || state.local_udp_transport == UdpTransport::Absent {
         return;
     }

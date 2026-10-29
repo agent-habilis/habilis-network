@@ -39,7 +39,6 @@ use crate::util::tuning::{
     ALIVE_INTERVAL, LINKSTATE_INTERVAL, RECLAIM_INTERVAL, STATE_REFRESH, antientropy_interval,
     heal_interval, sweep_interval,
 };
-use n0_future::StreamExt as _;
 use n0_future::time::Instant as TokioInstant;
 // Gated with `spawn_orphan_watch`, its only caller.
 use crate::{beacon, gossip, lifecycle};
@@ -729,6 +728,7 @@ fn log_daemon_start(author: &Nickname) {
     reason = "the daemon's central select! loop: one arm per event source (ipc, http, gossip, the maintenance ticks, quit); each arm delegates to a helper, but the arm list itself is irreducibly long"
 )]
 async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result<()> {
+    use n0_future::StreamExt as _;
     let EventLoop {
         mut sender,
         mut receiver,

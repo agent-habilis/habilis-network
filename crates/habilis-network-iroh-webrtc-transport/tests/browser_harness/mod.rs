@@ -68,7 +68,6 @@ use habilis_network_iroh_webrtc_transport::iroh::{
 use habilis_network_iroh_webrtc_transport::{
     BrowserHubTransport, IceServers, WebRtcHandle, browser_answer, browser_offer, custom_addr,
 };
-use wasm_bindgen::JsCast as _;
 
 #[allow(
     unused_imports,

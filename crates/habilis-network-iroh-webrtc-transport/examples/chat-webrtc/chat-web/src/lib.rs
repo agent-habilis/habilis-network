@@ -35,7 +35,6 @@ use chat_proto::{
     CHAT_ALPN, ClientMsg, FRAME_HEADER_LEN, SIGNAL_ALPN, ServerMsg, Ticket, decode_body,
     decode_frame_len, encode_frame,
 };
-use futures::StreamExt as _;
 use futures::channel::mpsc;
 use habilis_network_iroh_webrtc_transport::iroh::endpoint::{
     Connection, Path, RecvStream, presets,
@@ -375,6 +374,7 @@ fn spawn_reader(mut recv: RecvStream, emit: Emitter) {
 
 /// Drain the outbox onto the stream.
 fn spawn_writer(mut send: endpoint::SendStream, emit: Emitter) -> mpsc::UnboundedSender<String> {
+    use futures::StreamExt as _;
     let (tx, mut rx) = mpsc::unbounded::<String>();
     wasm_bindgen_futures::spawn_local(async move {
         while let Some(text) = rx.next().await {

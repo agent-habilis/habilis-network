@@ -14,7 +14,6 @@ use habilis_network::net::{TransportOpts, add_peer_addr, address_book};
 use habilis_network::protocol::{
     LookupOpts, MeshConfig, RelayChoice, RelayLadder, RelayLadderError, Transport, TransportPolicy,
 };
-use rand::RngCore as _;
 use zeroize::Zeroizing;
 
 use super::{ONLINE_WAIT, StreamOpts};
@@ -140,6 +139,7 @@ impl StreamNode {
     /// the endpoint to reach its home relay, so the hash carries it. Here and
     /// not in `bind`: a node that only reads never pays for it.
     pub async fn create(&self) -> Producer {
+        use rand::RngCore as _;
         // `online` resolves only once a home relay is reached, so without a
         // relay lookup it would cost the whole wait.
         if self.lookups.relay_lookup != RelayChoice::Disabled {

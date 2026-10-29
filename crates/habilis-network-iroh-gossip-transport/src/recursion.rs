@@ -8,7 +8,6 @@
 
 use iroh::TransportAddr;
 use iroh::endpoint::Connection;
-use n0_future::StreamExt as _;
 
 use crate::GOSSIP_TRANSPORT_ID;
 
@@ -32,6 +31,7 @@ pub fn watch_recursion(
     code: u32,
     on_close: impl FnOnce() + Send + 'static,
 ) {
+    use n0_future::StreamExt as _;
     let weak = connection.weak_handle();
     let mut events = connection.path_events();
     n0_future::task::spawn(async move {

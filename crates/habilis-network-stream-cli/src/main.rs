@@ -22,7 +22,6 @@ mod args;
 use std::io::{IsTerminal as _, Write as _};
 
 use anyhow::{Context as _, Result, bail};
-use clap::Parser as _;
 use habilis_network_stream::{Producer, StreamHash, StreamNode};
 use tokio::sync::mpsc;
 
@@ -33,6 +32,7 @@ const CHUNK: usize = 64 * 1024;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
+    use clap::Parser as _;
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

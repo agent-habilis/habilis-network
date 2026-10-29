@@ -8,7 +8,6 @@
 
 use std::time::Duration;
 
-use futures_util::StreamExt as _;
 use iroh::endpoint::Connection;
 
 use super::LOG_TARGET;
@@ -198,6 +197,7 @@ async fn wait_selected_outcome(
     deadline: Duration,
     selected: fn(&Connection) -> bool,
 ) -> PathWait {
+    use futures_util::StreamExt as _;
     let mut events = conn.path_events();
     let proven = async {
         loop {
