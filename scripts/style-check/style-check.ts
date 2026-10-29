@@ -352,12 +352,13 @@ function countAbbrevNames(raw: string): number {
   return count;
 }
 
-// A public fn that returns a Vec. The guide prefers an iterator, so a Vec needs a counted allow row with its reason.
+// A public fn that returns a Vec of values. A Vec<u8> is a byte buffer and is not counted.
 function countPubVecReturn(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   let count = 0;
   for (const m of text.matchAll(PUB_FN)) {
-    if (/\bVec\s*</.test(returnType(text, m.index! + m[0].length))) count++;
+    const ret = returnType(text, m.index! + m[0].length);
+    if (/\bVec\s*</.test(ret) && !/\bVec\s*<\s*u8\s*>/.test(ret)) count++;
   }
   return count;
 }

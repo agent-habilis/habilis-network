@@ -454,15 +454,6 @@ untyped_long_chain_let|crates/habilis-network/tests/underlay_survives_link_loss_
 untyped_long_chain_let|crates/habilis-network/tests/unknown_peer_requests_loopback.rs|1|kept: a let of a chain of five or more calls with no type; the type is to be named (P5 rollout)
 # pub_vec_return: a public function returns a Vec. The guide prefers an iterator. These keep a Vec:
 # each one returns an owned byte buffer or an owned list that the caller keeps.
-pub_vec_return|crates/habilis-network-doc/src/mesh_doc.rs|1|build_change: the owned bytes of a change frame, the wire encoding
-pub_vec_return|crates/habilis-network-doc/src/wire.rs|1|parse_change_body: the owned decoded bytes of a change body
-pub_vec_return|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|1|benchmark harness behind the bench feature: payload is an owned byte buffer, rtt_samples an owned list
-pub_vec_return|crates/habilis-network-protocol/src/base58_error.rs|1|decode: the owned decoded bytes
-pub_vec_return|crates/habilis-network-protocol/src/identity.rs|1|decode_hex: the owned decoded bytes
-pub_vec_return|crates/habilis-network-protocol/src/mesh/lookup.rs|1|to_bytes: the owned encoded byte buffer
-pub_vec_return|crates/habilis-network-protocol/src/message/message.rs|2|canonical_bytes: the owned byte buffer that is signed; verify_canonical: the owned bytes returned with the verified message
-pub_vec_return|crates/habilis-network-protocol/src/seal_error.rs|2|seal_symmetric: the owned ciphertext; open_symmetric: the owned plaintext
-pub_vec_return|crates/habilis-network-wasm/src/stream_node.rs|1|read: the owned bytes handed to JavaScript
 
 # pub_vec_param: a public function takes a Vec. The guide prefers impl IntoIterator when the function
 # only iterates. These keep the list, sort it, or hand it on as an owned value.

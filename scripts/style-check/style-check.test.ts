@@ -363,13 +363,19 @@ test("untyped_long_chain_let: the exact count is allowed", () => {
 
 // The pub_vec_return rule: a public function returns a Vec, outside tests and examples.
 test("pub_vec_return: a pub fn that returns a Vec counts", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Vec<u8> { Vec::new() }", 1);
+  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Vec<String> { Vec::new() }", 1);
 });
 test("pub_vec_return: a multi-line signature counts", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(\n    x: u8,\n) -> Vec<u8> {\n    vec![x]\n}", 1);
+  expectExit("crates/demo/src/lib.rs", "pub fn f(\n    x: u8,\n) -> Vec<String> {\n    vec![x.to_string()]\n}", 1);
 });
 test("pub_vec_return: a Vec inside a Result counts", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Result<Vec<u8>, ()> { Ok(Vec::new()) }", 1);
+  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Result<Vec<String>, ()> { Ok(Vec::new()) }", 1);
+});
+test("pub_vec_return: a pub fn that returns a byte buffer is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Vec<u8> { Vec::new() }", 0);
+});
+test("pub_vec_return: a byte buffer inside a Result is clean", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Result<Vec<u8>, ()> { Ok(Vec::new()) }", 0);
 });
 test("pub_vec_return: an iterator is clean", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f() -> impl Iterator<Item = u8> { std::iter::empty() }", 0);
@@ -384,7 +390,7 @@ test("pub_vec_return: an example is clean", () => {
   expectExit("crates/demo/examples/e.rs", "pub fn f() -> Vec<u8> { Vec::new() }", 0);
 });
 test("pub_vec_return: an allowed row with its count passes", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Vec<u8> { Vec::new() }", 0, "pub_vec_return|crates/demo/src/lib.rs|1|the owned bytes");
+  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Vec<String> { Vec::new() }", 0, "pub_vec_return|crates/demo/src/lib.rs|1|the owned names");
 });
 
 // The pub_vec_param rule: a public function takes a Vec parameter, outside tests and examples.
