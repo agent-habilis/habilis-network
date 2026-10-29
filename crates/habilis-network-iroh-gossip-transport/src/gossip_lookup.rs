@@ -71,7 +71,8 @@ mod tests {
 
         assert_eq!(
             answer(&handle, id(2)).await,
-            Some(vec![TransportAddr::Custom(crate::gossip_addr(id(2)))])
+            Some(vec![TransportAddr::Custom(crate::gossip_addr(id(2)))]),
+            "the lookup answers a peer with its gossip address once attached"
         );
     }
 
@@ -80,6 +81,10 @@ mod tests {
         let handle = GossipHandle::new(id(1));
         Hub::new().join(&handle);
 
-        assert_eq!(answer(&handle, id(1)).await, None);
+        assert_eq!(
+            answer(&handle, id(1)).await,
+            None,
+            "the lookup does not answer for the node itself"
+        );
     }
 }

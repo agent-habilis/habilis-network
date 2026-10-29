@@ -210,7 +210,10 @@ mod tests {
             .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
             .spawn();
         let connection = alice.connect(bob.addr(), ALPN).await.expect("connect");
-        assert!(!selected_is_gossip(&connection));
+        assert!(
+            !selected_is_gossip(&connection),
+            "a connection on ip is left open"
+        );
 
         watch_recursion(&connection, CODE, || panic!("closed a connection on IP"));
         tokio::time::sleep(Duration::from_millis(800)).await;

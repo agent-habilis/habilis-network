@@ -52,7 +52,11 @@ mod tests {
     /// that they stay equal.
     #[test]
     fn the_ladder_knows_the_gossip_transport_id_of_this_crate() {
-        assert_eq!(super::custom_rung(crate::GOSSIP_TRANSPORT_ID), Rung::Gossip);
+        assert_eq!(
+            super::custom_rung(crate::GOSSIP_TRANSPORT_ID),
+            Rung::Gossip,
+            "the ladder knows the gossip transport id of this crate"
+        );
     }
 
     use std::time::Duration;
@@ -130,7 +134,10 @@ mod tests {
     async fn an_endpoint_with_ip_and_gossip_selects_ip() {
         let hub = Hub::new();
         let (alice, bob) = (node(31, &hub, true).await, node(32, &hub, true).await);
-        assert!(selects_ip(&alice, &bob).await);
+        assert!(
+            selects_ip(&alice, &bob).await,
+            "an endpoint with ip and gossip selects ip"
+        );
         alice.close().await;
     }
 
@@ -139,7 +146,10 @@ mod tests {
     async fn without_the_ladder_an_endpoint_with_ip_and_gossip_selects_gossip() {
         let hub = Hub::new();
         let (alice, bob) = (node(33, &hub, false).await, node(34, &hub, false).await);
-        assert!(!selects_ip(&alice, &bob).await);
+        assert!(
+            !selects_ip(&alice, &bob).await,
+            "without the ladder an endpoint with ip and gossip selects gossip"
+        );
         alice.close().await;
     }
 
@@ -173,7 +183,10 @@ mod tests {
             )
             .await
             .expect("connect");
-        assert!(crate::selected_is_gossip(&connection));
+        assert!(
+            crate::selected_is_gossip(&connection),
+            "the ladder selects gossip when it is the only path"
+        );
         router.shutdown().await.expect("shutdown");
         alice.close().await;
     }

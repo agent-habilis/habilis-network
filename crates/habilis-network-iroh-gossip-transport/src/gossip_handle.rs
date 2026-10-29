@@ -420,7 +420,7 @@ mod tests {
             .await
             .expect("the echo timed out")
             .expect("read the echo");
-        assert_eq!(echoed, message);
+        assert_eq!(echoed, message, "the echo returns the message");
     }
 
     /// Two nodes with gossip as the only transport, joined by an in-memory flood.
@@ -552,12 +552,19 @@ mod tests {
         })
         .encode()
         .expect("a frame");
-        assert_eq!(handle.deliver(&from_bob), Delivery::Queued);
+        assert_eq!(
+            handle.deliver(&from_bob),
+            Delivery::Queued,
+            "a delivery from bob is accepted"
+        );
         assert_eq!(waker.0.load(Ordering::SeqCst), 1, "one wake per delivery");
 
         let second = endpoint.poll_recv(&mut cx, &mut bufs, &mut metas, &mut infos);
         assert!(matches!(second, Poll::Ready(Ok(1))), "{second:?}");
-        assert_eq!(metas[0].len, 100);
+        assert_eq!(
+            metas[0].len, 100,
+            "the delivery reports the frame length of one hundred"
+        );
     }
 
     #[test]
@@ -571,8 +578,16 @@ mod tests {
         .encode()
         .expect("frame");
 
-        assert_eq!(handle.deliver(&for_carol), Delivery::NotForUs);
-        assert_eq!(handle.deliver(b"{\"kind\":\"chat\"}"), Delivery::Malformed);
+        assert_eq!(
+            handle.deliver(&for_carol),
+            Delivery::NotForUs,
+            "a frame for another member is not queued"
+        );
+        assert_eq!(
+            handle.deliver(b"{\"kind\":\"chat\"}"),
+            Delivery::Malformed,
+            "a bad frame is not queued"
+        );
     }
 
     /// A frame with a forged source arrives for a connection that exists. It must
@@ -641,10 +656,15 @@ mod tests {
         let sent: Vec<_> = hub.sent().collect();
         assert_eq!(
             alice_stats.frames_out + bob_stats.frames_out,
-            sent.len() as u64
+            sent.len() as u64,
+            "an echo moves the frame counters of both ends"
         );
         let flooded: usize = sent.iter().map(Bytes::len).sum();
-        assert_eq!(alice_stats.bytes_out + bob_stats.bytes_out, flooded as u64);
+        assert_eq!(
+            alice_stats.bytes_out + bob_stats.bytes_out,
+            flooded as u64,
+            "an echo moves the byte counters of both ends"
+        );
         assert_eq!(
             alice_stats.frames_in, bob_stats.frames_out,
             "alice reads what bob sent"
@@ -672,11 +692,24 @@ mod tests {
         handle.shared.send_datagram(bob, &[1u8; 100]);
 
         let stats = handle.stats();
-        assert_eq!(stats.dropped_no_sink, 1);
-        assert_eq!(stats.dropped_too_large, 1);
-        assert_eq!(stats.dropped_empty, 1);
-        assert_eq!(stats.frames_out, 1);
-        assert_eq!(stats.bytes_out, (frame::HEADER_LEN + 100) as u64);
+        assert_eq!(
+            stats.dropped_no_sink, 1,
+            "a datagram with no sink is counted as no sink"
+        );
+        assert_eq!(
+            stats.dropped_too_large, 1,
+            "a too-large datagram is counted as too large"
+        );
+        assert_eq!(
+            stats.dropped_empty, 1,
+            "an empty datagram is counted as empty"
+        );
+        assert_eq!(stats.frames_out, 1, "one frame is counted as out");
+        assert_eq!(
+            stats.bytes_out,
+            (frame::HEADER_LEN + 100) as u64,
+            "the bytes out match the frame length"
+        );
     }
 
     #[test]
@@ -706,19 +739,33 @@ mod tests {
         }
 
         let stats = handle.stats();
-        assert_eq!(stats.frames_in, INBOUND_CAP as u64 + 3);
+        assert_eq!(
+            stats.frames_in,
+            INBOUND_CAP as u64 + 3,
+            "a frame that arrives is counted as in"
+        );
         assert_eq!(
             stats.queued, INBOUND_CAP as u64,
             "the queue holds its capacity"
         );
-        assert_eq!(stats.queue_full, 1);
-        assert_eq!(stats.not_for_us, 1);
-        assert_eq!(stats.malformed, 1);
+        assert_eq!(
+            stats.queue_full, 1,
+            "a frame that finds the queue full is counted as queue full"
+        );
+        assert_eq!(
+            stats.not_for_us, 1,
+            "a frame for another member is counted as not for us"
+        );
+        assert_eq!(
+            stats.malformed, 1,
+            "a malformed frame is counted as malformed"
+        );
         assert_eq!(
             stats.bytes_in,
             (INBOUND_CAP as u64 + 1) * (frame::HEADER_LEN as u64 + 50)
                 + (frame::HEADER_LEN as u64 + 1)
-                + 2
+                + 2,
+            "the bytes in match the arrived frames"
         );
     }
 
@@ -737,8 +784,16 @@ mod tests {
 
         let sent = locked(&recorder.0).clone();
         assert_eq!(sent.len(), 1, "only the frame to carol");
-        assert_eq!(frame::decode(&sent[0]).expect("a frame").dst, carol);
-        assert_eq!(handle.stats().dropped_not_allowed, 1);
+        assert_eq!(
+            frame::decode(&sent[0]).expect("a frame").dst,
+            carol,
+            "a destination that is not allowed gets no frame"
+        );
+        assert_eq!(
+            handle.stats().dropped_not_allowed,
+            1,
+            "the disallowed destination is counted as not allowed"
+        );
 
         handle.allow(bob, true);
         handle.shared.send_datagram(bob, &[1u8; 100]);
@@ -754,8 +809,16 @@ mod tests {
 
         handle.shared.send_datagram(secret(9).public(), &[1u8; 100]);
 
-        assert_eq!(locked(&recorder.0).len(), 1);
-        assert_eq!(handle.stats().dropped_not_allowed, 0);
+        assert_eq!(
+            locked(&recorder.0).len(),
+            1,
+            "a destination that was never named is allowed"
+        );
+        assert_eq!(
+            handle.stats().dropped_not_allowed,
+            0,
+            "an allowed destination is not counted as not allowed"
+        );
     }
 
     /// A dial by id alone reaches the peer: the lookup supplies the gossip address.
@@ -810,18 +873,30 @@ mod tests {
             handle.shared.send_datagram(bob, &[1u8; 100]);
         }
         assert_eq!(locked(&recorder.0).len(), 6, "six frames fit the burst");
-        assert_eq!(handle.stats().dropped_budget, 2);
+        assert_eq!(
+            handle.stats().dropped_budget,
+            2,
+            "an established destination is charged the budget"
+        );
 
         // Carol has no connection: her handshake passes with the budget spent.
         handle.shared.send_datagram(carol, &[1u8; 100]);
         assert_eq!(locked(&recorder.0).len(), 7, "the handshake passed");
-        assert_eq!(handle.stats().exempt_frames, 1);
+        assert_eq!(
+            handle.stats().exempt_frames,
+            1,
+            "a handshake is exempt from the budget"
+        );
 
         // Once she has a connection, her frames are charged and refused.
         handle.set_established(carol, true);
         handle.shared.send_datagram(carol, &[1u8; 100]);
         assert_eq!(locked(&recorder.0).len(), 7, "charged, and refused");
-        assert_eq!(handle.stats().dropped_budget, 3);
+        assert_eq!(
+            handle.stats().dropped_budget,
+            3,
+            "a charged destination is counted as budget dropped"
+        );
     }
 
     #[test]
@@ -836,8 +911,16 @@ mod tests {
             handle.shared.send_datagram(bob, &[1u8; 1000]);
         }
 
-        assert_eq!(locked(&recorder.0).len(), 100);
-        assert_eq!(handle.stats().dropped_budget, 0);
+        assert_eq!(
+            locked(&recorder.0).len(),
+            100,
+            "without a budget nothing is queued past the limit"
+        );
+        assert_eq!(
+            handle.stats().dropped_budget,
+            0,
+            "without a budget nothing is dropped for bytes"
+        );
     }
 
     /// A packet larger than the buffer iroh offers is dropped, counted, and does
@@ -869,17 +952,33 @@ mod tests {
         .encode()
         .expect("a frame");
 
-        assert_eq!(handle.deliver(&big), Delivery::Queued);
+        assert_eq!(
+            handle.deliver(&big),
+            Delivery::Queued,
+            "an oversized packet is refused"
+        );
         let first = endpoint.poll_recv(&mut cx, &mut bufs, &mut metas, &mut infos);
         assert!(
             first.is_pending(),
             "the only packet was too large: {first:?}"
         );
-        assert_eq!(handle.stats().dropped_oversized_in, 1);
+        assert_eq!(
+            handle.stats().dropped_oversized_in,
+            1,
+            "an oversized packet is counted as oversized"
+        );
 
-        assert_eq!(handle.deliver(&small), Delivery::Queued);
+        assert_eq!(
+            handle.deliver(&small),
+            Delivery::Queued,
+            "the next packet is accepted after the oversized one"
+        );
         let second = endpoint.poll_recv(&mut cx, &mut bufs, &mut metas, &mut infos);
         assert!(matches!(second, Poll::Ready(Ok(1))), "{second:?}");
-        assert_eq!(handle.stats().dropped_oversized_in, 1);
+        assert_eq!(
+            handle.stats().dropped_oversized_in,
+            1,
+            "the oversized count stays at one after the next packet"
+        );
     }
 }

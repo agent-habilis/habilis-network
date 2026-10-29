@@ -58,7 +58,10 @@ mod tests {
         let t0 = Instant::now();
         let mut budget = Budget::new(1000, t0);
 
-        assert!(budget.take(t0, 600));
+        assert!(
+            budget.take(t0, 600),
+            "a budget admits one second of burst and then refuses"
+        );
         assert!(!budget.take(t0, 600), "600 more is over the burst");
         assert!(budget.take(t0, 400), "the rest of the burst");
         assert!(!budget.take(t0, 1), "nothing is left");
@@ -68,11 +71,17 @@ mod tests {
     fn a_budget_refills_with_time_up_to_the_burst_and_no_more() {
         let t0 = Instant::now();
         let mut budget = Budget::new(1000, t0);
-        assert!(budget.take(t0, 1000));
+        assert!(
+            budget.take(t0, 1000),
+            "a budget takes a full burst after refilling"
+        );
 
         let half = t0 + Duration::from_millis(500);
         assert!(budget.take(half, 500), "half a second refilled 500");
-        assert!(!budget.take(half, 1));
+        assert!(
+            !budget.take(half, 1),
+            "a budget refuses a second take before it refills"
+        );
 
         let long = half + Duration::from_secs(10);
         assert!(budget.take(long, 1000), "refilled to the burst");

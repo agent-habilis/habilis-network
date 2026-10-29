@@ -114,7 +114,11 @@ mod tests {
         let (alice_stats, bob_stats) = (alice_handle.stats(), bob_handle.stats());
         assert_eq!(alice_stats.frames_out, 1, "{alice_stats:?}");
         assert_eq!(bob_stats.frames_in, 1, "{bob_stats:?}");
-        assert_eq!(bob_stats.bytes_in, (frame::HEADER_LEN + 100) as u64);
+        assert_eq!(
+            bob_stats.bytes_in,
+            (frame::HEADER_LEN + 100) as u64,
+            "a frame through a real topic reaches the other member's byte counter"
+        );
         reader.abort();
         alice_router.shutdown().await.expect("shutdown");
         bob_router.shutdown().await.expect("shutdown");
@@ -266,7 +270,10 @@ mod tests {
             .expect("the echo timed out")
             .expect("read");
 
-        assert_eq!(echoed, b"through the flood");
+        assert_eq!(
+            echoed, b"through the flood",
+            "a quic echo between members with no direct path completes over gossip"
+        );
         let selected_is_gossip: bool = connection.paths().iter().any(|path| {
             path.is_selected()
                 && matches!(path.remote_addr(), iroh::TransportAddr::Custom(address) if address.id() == crate::GOSSIP_TRANSPORT_ID)
@@ -344,7 +351,11 @@ mod tests {
         super::handle_event(&handle, Event::Lagged);
         super::handle_event(&handle, Event::NeighborUp(secret(2).public()));
 
-        assert_eq!(handle.stats().topic_lagged, 2);
-        assert_eq!(handle.stats().frames_in, 0);
+        assert_eq!(handle.stats().topic_lagged, 2, "a lagged event is counted");
+        assert_eq!(
+            handle.stats().frames_in,
+            0,
+            "a lagged event does not count the frames in"
+        );
     }
 }

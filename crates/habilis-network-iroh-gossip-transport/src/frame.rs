@@ -167,9 +167,9 @@ mod tests {
         .expect("a datagram that fits");
         let frame = decode(&bytes).expect("a frame");
 
-        assert_eq!(frame.dst, id(1));
-        assert_eq!(frame.src, id(2));
-        assert_eq!(frame.datagram, datagram);
+        assert_eq!(frame.dst, id(1), "a frame round trips its destination");
+        assert_eq!(frame.src, id(2), "a frame round trips its source");
+        assert_eq!(frame.datagram, datagram, "a frame round trips its datagram");
     }
 
     /// The layout is a wire contract: a second build must read what this one writes.
@@ -183,12 +183,27 @@ mod tests {
         .encode()
         .expect("a frame");
 
-        assert_eq!(bytes[0], FRAME_KIND);
-        assert_eq!(bytes[1], FRAME_VERSION);
-        assert_eq!(&bytes[2..34], id(1).as_bytes());
-        assert_eq!(&bytes[34..66], id(2).as_bytes());
-        assert_eq!(&bytes[66..], [9, 9, 9]);
-        assert_eq!(bytes.len(), HEADER_LEN + 3);
+        assert_eq!(bytes[0], FRAME_KIND, "the first byte is the frame kind");
+        assert_eq!(
+            bytes[1], FRAME_VERSION,
+            "the second byte is the frame version"
+        );
+        assert_eq!(
+            &bytes[2..34],
+            id(1).as_bytes(),
+            "bytes 2 to 34 hold the destination"
+        );
+        assert_eq!(
+            &bytes[34..66],
+            id(2).as_bytes(),
+            "bytes 34 to 66 hold the source"
+        );
+        assert_eq!(&bytes[66..], [9, 9, 9], "the tail holds the datagram");
+        assert_eq!(
+            bytes.len(),
+            HEADER_LEN + 3,
+            "the frame is the header plus the datagram"
+        );
     }
 
     #[test]
@@ -196,7 +211,10 @@ mod tests {
         let fits = vec![1u8; MAX_DATAGRAM_LEN];
         let over = vec![1u8; MAX_DATAGRAM_LEN + 1];
 
-        assert_eq!(MAX_DATAGRAM_LEN, 3774);
+        assert_eq!(
+            MAX_DATAGRAM_LEN, 3774,
+            "the largest datagram length is 3774"
+        );
         assert_eq!(
             Frame {
                 dst: id(1),
@@ -206,7 +224,8 @@ mod tests {
             .encode()
             .expect("fits")
             .len(),
-            MAX_FRAME_LEN
+            MAX_FRAME_LEN,
+            "the largest datagram fits"
         );
         assert_eq!(
             Frame {
@@ -215,7 +234,8 @@ mod tests {
                 datagram: &over
             }
             .encode(),
-            Err(EncodeError::TooLarge { len: over.len() })
+            Err(EncodeError::TooLarge { len: over.len() }),
+            "one byte more than the largest datagram does not fit"
         );
     }
 
@@ -228,13 +248,18 @@ mod tests {
                 datagram: &[]
             }
             .encode(),
-            Err(EncodeError::Empty)
+            Err(EncodeError::Empty),
+            "an empty datagram is not framed"
         );
     }
 
     #[test]
     fn a_mesh_message_is_not_a_frame() {
-        assert_eq!(decode(br#"{"kind":"chat"}"#), Err(DecodeError::NotAFrame));
+        assert_eq!(
+            decode(br#"{"kind":"chat"}"#),
+            Err(DecodeError::NotAFrame),
+            "a mesh message is not a frame"
+        );
     }
 
     #[test]
@@ -249,7 +274,11 @@ mod tests {
         .to_vec();
         bytes[1] = 2;
 
-        assert_eq!(decode(&bytes), Err(DecodeError::UnknownVersion(2)));
+        assert_eq!(
+            decode(&bytes),
+            Err(DecodeError::UnknownVersion(2)),
+            "an unknown version is refused"
+        );
     }
 
     #[test]
@@ -262,9 +291,21 @@ mod tests {
         .encode()
         .expect("a frame");
 
-        assert_eq!(decode(&bytes[..HEADER_LEN]), Err(DecodeError::Truncated));
-        assert_eq!(decode(&bytes[..10]), Err(DecodeError::Truncated));
-        assert_eq!(decode(&[FRAME_KIND]), Err(DecodeError::Truncated));
+        assert_eq!(
+            decode(&bytes[..HEADER_LEN]),
+            Err(DecodeError::Truncated),
+            "a frame with no datagram is truncated"
+        );
+        assert_eq!(
+            decode(&bytes[..10]),
+            Err(DecodeError::Truncated),
+            "a frame cut to ten bytes is truncated"
+        );
+        assert_eq!(
+            decode(&[FRAME_KIND]),
+            Err(DecodeError::Truncated),
+            "a frame cut to its kind byte is truncated"
+        );
     }
 
     #[test]
@@ -277,7 +318,8 @@ mod tests {
             decode(&bytes),
             Err(DecodeError::TooLarge {
                 len: MAX_FRAME_LEN + 1
-            })
+            }),
+            "a frame over the gossip budget is refused on read"
         );
     }
 
@@ -289,7 +331,8 @@ mod tests {
     fn the_largest_frame_equals_the_engine_message_cap() {
         assert_eq!(
             MAX_FRAME_LEN,
-            habilis_network_util::consts::MAX_MESSAGE_SIZE
+            habilis_network_util::consts::MAX_MESSAGE_SIZE,
+            "the largest frame equals the engine message cap"
         );
     }
 }
