@@ -36,7 +36,7 @@ pub(crate) fn build_rtc(now: Instant) -> Rtc {
 pub(crate) async fn bind_ephemeral_udp() -> std::io::Result<(UdpSocket, SocketAddr)> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
     let local = socket.local_addr()?;
-    let ip = if local.ip().is_unspecified() {
+    let ip: std::net::IpAddr = if local.ip().is_unspecified() {
         if_addrs::get_if_addrs()
             .ok()
             .into_iter()

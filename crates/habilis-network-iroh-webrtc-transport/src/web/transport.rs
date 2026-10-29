@@ -298,7 +298,7 @@ async fn selected_candidate_from_stats(
         .ok()
         .and_then(|value| value.as_string())?;
     let remote = by_id.get(&remote_id)?;
-    let address = Reflect::get(remote, &JsValue::from_str("address"))
+    let address: String = Reflect::get(remote, &JsValue::from_str("address"))
         .ok()
         .and_then(|value| value.as_string())
         .or_else(|| {
@@ -307,14 +307,14 @@ async fn selected_candidate_from_stats(
                 .and_then(|value| value.as_string())
         })
         .unwrap_or_default();
-    let kind = Reflect::get(remote, &JsValue::from_str("candidateType"))
+    let kind: String = Reflect::get(remote, &JsValue::from_str("candidateType"))
         .ok()
         .and_then(|value| value.as_string())
         .unwrap_or_else(|| "unknown".to_owned());
     // Suffix-compared case-insensitively: DNS labels are case-insensitive by
     // spec, and going through `str::ends_with` with a dotted literal reads to
     // clippy as a file-extension test, which this is not.
-    let is_mdns = address
+    let is_mdns: bool = address
         .len()
         .checked_sub(MDNS_SUFFIX.len())
         .is_some_and(|start| address[start..].eq_ignore_ascii_case(MDNS_SUFFIX));

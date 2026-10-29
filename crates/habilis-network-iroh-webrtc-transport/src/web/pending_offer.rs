@@ -63,7 +63,7 @@ impl PendingOffer {
         // toward the direct-peer total, answered `has_session` so the pair was
         // never retried, and told QUIC it was a valid send address.
         let pc = peer_connection.release();
-        let guard = hub
+        let guard: super::transport::BrowserSessionGuard = hub
             .attach(remote, pc.clone(), data_channel.clone(), callbacks)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         wait_channel_open(&data_channel, &pc).await?;

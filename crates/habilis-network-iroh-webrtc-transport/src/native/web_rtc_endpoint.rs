@@ -67,7 +67,7 @@ impl CustomEndpoint for WebRtcEndpoint {
         metas: &mut [noq_udp::RecvMeta],
         recv_infos: &mut [RecvInfo],
     ) -> Poll<io::Result<usize>> {
-        let slots = bufs.len().min(metas.len()).min(recv_infos.len());
+        let slots: usize = bufs.len().min(metas.len()).min(recv_infos.len());
         if slots == 0 {
             return Poll::Ready(Ok(0));
         }
