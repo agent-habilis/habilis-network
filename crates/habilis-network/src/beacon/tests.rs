@@ -12,17 +12,27 @@ use iroh::SecretKey;
 use iroh_gossip::proto::TopicId;
 use tokio::sync::{oneshot, watch};
 
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use crate::beacon;
 use crate::daemon::setup;
+use crate::lookup;
+#[cfg(feature = "host")]
+use crate::testing;
+use crate::transport::PayloadPath;
 use crate::util::tuning;
 use iroh::address_lookup::memory;
+use n0_future::{task, task as n0future_task, time as n0future_time};
+use std::time::{Duration, Duration as std_Duration};
+use std::{future, net};
 use tokio::sync::mpsc;
+use tokio::{task as tokio_task, time, time as tokio_time};
 /// Two ports of a ladder: the first is taken by `held` (a socket that says nothing, or another
 /// mesh's beacon), the second is free.
-fn ladder_of_two() -> (std::net::UdpSocket, Vec<u16>) {
-    let first = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+fn ladder_of_two() -> (net::UdpSocket, Vec<u16>) {
+    let first = net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0))
         .expect("a loopback socket for the first rung");
-    let bound = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .and_then(|socket| socket.local_addr());
+    let bound =
+        net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0)).and_then(|socket| socket.local_addr());
     let second = bound.expect("a free loopback port").port();
     let ports = vec![first.local_addr().expect("its address").port(), second];
     (first, ports)
@@ -38,7 +48,7 @@ fn one_walk_that_meets_a_silent_rung_binds_nothing_and_costs_one_attempt() {
         let mut params = public_params();
         params.bind_ports = ports;
         let peer = loopback_endpoint().await;
-        let book = crate::lookup::address_book(&peer);
+        let book = lookup::address_book(&peer);
         let mut beacon = None;
         let mut probe = None;
 
@@ -56,7 +66,7 @@ fn one_walk_that_meets_a_silent_rung_binds_nothing_and_costs_one_attempt() {
             "the walk read a rung that said nothing as foreign and bound the next one"
         );
         assert!(
-            took < std::time::Duration::from_millis(1500),
+            took < std_Duration::from_millis(1500),
             "the walk of a silent rung took {took:?}: one attempt is 1 s"
         );
     });
@@ -76,7 +86,7 @@ fn a_walk_that_meets_another_meshs_beacon_binds_the_next_rung_at_once() {
         other.secret = other_secret;
         other.bind_ports = vec![first];
         let other_peer = loopback_endpoint().await;
-        let other_book = crate::lookup::address_book(&other_peer);
+        let other_book = lookup::address_book(&other_peer);
         let mut other_beacon = None;
         let mut other_probe = None;
         assert!(
@@ -95,7 +105,7 @@ fn a_walk_that_meets_another_meshs_beacon_binds_the_next_rung_at_once() {
         let mut params = public_params();
         params.bind_ports = ports;
         let peer = loopback_endpoint().await;
-        let book = crate::lookup::address_book(&peer);
+        let book = lookup::address_book(&peer);
         let mut beacon = None;
         let mut probe = None;
         let started = Instant::now();
@@ -115,7 +125,7 @@ fn a_walk_that_meets_another_meshs_beacon_binds_the_next_rung_at_once() {
             "a foreign beacon is read as foreign: the next rung is bound"
         );
         assert!(
-            took < std::time::Duration::from_millis(1500),
+            took < std_Duration::from_millis(1500),
             "the walk took {took:?} to bind the rung after a foreign one"
         );
     });
@@ -135,20 +145,20 @@ fn a_probe_tells_ours_from_foreign_from_no_answer() {
 
         // One prober per probe: iroh dials an identity and keeps every path it learned for it, so
         // a second dial of the same id from one endpoint can complete on the path of the first.
-        async fn asked(address: EndpointAddr, timeout: std::time::Duration) -> ProbeAnswer {
+        async fn asked(address: EndpointAddr, timeout: std_Duration) -> ProbeAnswer {
             let prober = loopback_endpoint().await;
             let answer = probe_answer(&prober, address, timeout).await;
             prober.close().await;
             answer
         }
 
-        let bound = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-            .and_then(|socket| socket.local_addr());
+        let bound =
+            net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).and_then(|socket| socket.local_addr());
         let port = bound.expect("a free loopback port").port();
         let mut params = public_params();
         params.bind_ports = vec![port];
         let holder = loopback_endpoint().await;
-        let holder_book = crate::lookup::address_book(&holder);
+        let holder_book = lookup::address_book(&holder);
         let mut beacon = None;
         let mut holder_probe = None;
         assert!(
@@ -164,17 +174,17 @@ fn a_probe_tells_ours_from_foreign_from_no_answer() {
             "the beacon claims the rung"
         );
         let silent =
-            std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("a silent loopback socket");
+            net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("a silent loopback socket");
         let at = |id: EndpointId, rung: u16| {
             EndpointAddr::new(id).with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, rung)))
         };
-        let timeout = std::time::Duration::from_secs(2);
+        let timeout = std_Duration::from_secs(2);
 
         let ours = asked(at(params.id, port), timeout).await;
         let foreign = asked(at(SecretKey::generate().public(), port), timeout).await;
         let none = asked(
             at(params.id, silent.local_addr().expect("its address").port()),
-            std::time::Duration::from_secs(1),
+            std_Duration::from_secs(1),
         )
         .await;
 
@@ -210,7 +220,7 @@ fn a_rung_that_stays_silent_for_the_whole_window_is_bound_at_a_later_walk() {
         let mut params = public_params();
         params.bind_ports = ports;
         let peer = loopback_endpoint().await;
-        let book = crate::lookup::address_book(&peer);
+        let book = lookup::address_book(&peer);
         let mut beacon = None;
         let mut probe = None;
         let (reports, mut arrivals) = mpsc::unbounded_channel();
@@ -227,7 +237,7 @@ fn a_rung_that_stays_silent_for_the_whole_window_is_bound_at_a_later_walk() {
             &mut rungs,
         )
         .await;
-        let report = tokio::time::timeout(std::time::Duration::from_secs(5), arrivals.recv())
+        let report = tokio_time::timeout(std_Duration::from_secs(5), arrivals.recv())
             .await
             .expect("a probe task reports")
             .expect("the channel is open");
@@ -245,7 +255,7 @@ fn a_rung_that_stays_silent_for_the_whole_window_is_bound_at_a_later_walk() {
         .await;
         let kept_free = beacon.is_none();
         // The rung has been silent for the window already.
-        rungs.age_silence(first, RECLAIM_WINDOW + std::time::Duration::from_secs(1));
+        rungs.age_silence(first, RECLAIM_WINDOW + std_Duration::from_secs(1));
         let later = walk_ladder(
             &params,
             &peer,
@@ -298,7 +308,7 @@ fn two_silent_rungs_are_asked_at_once_and_passed_and_the_free_one_after_them_is_
         let mut params = public_params();
         params.bind_ports = ports;
         let peer = loopback_endpoint().await;
-        let book = crate::lookup::address_book(&peer);
+        let book = lookup::address_book(&peer);
         let mut beacon = None;
         let mut probe = None;
         let (reports, mut arrivals) = mpsc::unbounded_channel();
@@ -317,14 +327,14 @@ fn two_silent_rungs_are_asked_at_once_and_passed_and_the_free_one_after_them_is_
         // Both rungs are out at once: both report inside one second, not two.
         let started = Instant::now();
         for _ in 0..2 {
-            let report = tokio::time::timeout(std::time::Duration::from_secs(5), arrivals.recv())
+            let report = tokio_time::timeout(std_Duration::from_secs(5), arrivals.recv())
                 .await
                 .expect("a probe task reports")
                 .expect("the channel is open");
             rungs.note(report, Instant::now());
         }
-        let both_asked_at_once = started.elapsed() < std::time::Duration::from_millis(1800);
-        let window = RECLAIM_WINDOW + std::time::Duration::from_secs(1);
+        let both_asked_at_once = started.elapsed() < std_Duration::from_millis(1800);
+        let window = RECLAIM_WINDOW + std_Duration::from_secs(1);
         rungs.age_silence(first, window);
         rungs.age_silence(second, window);
         let later = walk_ladder(
@@ -382,7 +392,7 @@ fn one_silent_report_is_not_a_window_of_silence_however_late_it_is_read() {
         then,
     );
 
-    let late = then + RECLAIM_WINDOW + std::time::Duration::from_secs(1);
+    let late = then + RECLAIM_WINDOW + std_Duration::from_secs(1);
     assert_eq!(
         rungs.reading(4242, late),
         RungRead::Silent,
@@ -401,7 +411,7 @@ fn the_late_report_of_a_probe_that_was_given_up_does_not_stop_its_replacement() 
 
         let params = public_params();
         let node = SecretKey::generate().public();
-        crate::beacon::set_blind_rung_probes(node, true);
+        beacon::set_blind_rung_probes(node, true);
         let (reports, mut arrivals) = mpsc::unbounded_channel();
         let mut rungs = RungWatch::new(reports);
         let port = 4242;
@@ -419,7 +429,7 @@ fn the_late_report_of_a_probe_that_was_given_up_does_not_stop_its_replacement() 
         rungs.note(new, now);
         let waiting_after = rungs.waiting();
         let read_after = rungs.reading(port, now);
-        crate::beacon::set_blind_rung_probes(node, false);
+        beacon::set_blind_rung_probes(node, false);
 
         assert!(
             waiting,
@@ -500,7 +510,7 @@ fn an_old_report_does_not_make_a_newer_reading_fresh_again() {
 
         let params = public_params();
         let node = SecretKey::generate().public();
-        crate::beacon::set_blind_rung_probes(node, true);
+        beacon::set_blind_rung_probes(node, true);
         let (reports, mut arrivals) = mpsc::unbounded_channel();
         let mut rungs = RungWatch::new(reports);
         let port = 4242;
@@ -513,13 +523,13 @@ fn an_old_report_does_not_make_a_newer_reading_fresh_again() {
 
         let first = Instant::now();
         rungs.note(new, first);
-        rungs.note(old, first + std::time::Duration::from_secs(5));
+        rungs.note(old, first + std_Duration::from_secs(5));
         let stored = rungs
             .readings
             .get(&port)
             .expect("the reading of the second probe")
             .read_at;
-        crate::beacon::set_blind_rung_probes(node, false);
+        beacon::set_blind_rung_probes(node, false);
 
         assert_eq!(
             stored, first,
@@ -539,7 +549,7 @@ fn a_late_report_of_a_probe_that_was_given_up_does_not_come_back_after_a_bind() 
 
         let params = public_params();
         let node = SecretKey::generate().public();
-        crate::beacon::set_blind_rung_probes(node, true);
+        beacon::set_blind_rung_probes(node, true);
         let (reports, mut arrivals) = mpsc::unbounded_channel();
         let mut rungs = RungWatch::new(reports);
         let port = 4242;
@@ -555,7 +565,7 @@ fn a_late_report_of_a_probe_that_was_given_up_does_not_come_back_after_a_bind() 
         rungs.forget();
         rungs.note(old, now);
         let read = rungs.reading(port, now);
-        crate::beacon::set_blind_rung_probes(node, false);
+        beacon::set_blind_rung_probes(node, false);
 
         assert_eq!(
             read,
@@ -583,7 +593,7 @@ fn two_silent_reports_a_window_apart_pass_the_rung() {
     };
     rungs.note(report, then);
 
-    let again = then + RECLAIM_WINDOW + std::time::Duration::from_secs(1);
+    let again = then + RECLAIM_WINDOW + std_Duration::from_secs(1);
     rungs.note(report, again);
 
     assert_eq!(
@@ -608,7 +618,7 @@ fn a_fresh_reading_in_the_map_is_read_without_asking_again() {
         let mut params = public_params();
         params.bind_ports = ports;
         let peer = loopback_endpoint().await;
-        let book = crate::lookup::address_book(&peer);
+        let book = lookup::address_book(&peer);
         let mut beacon = None;
         let mut probe = None;
         let mut rungs = RungWatch::detached();
@@ -684,7 +694,7 @@ fn a_walk_that_reads_every_rung_as_taken_says_so() {
         let mut params = public_params();
         params.bind_ports = vec![first, second];
         let peer = loopback_endpoint().await;
-        let book = crate::lookup::address_book(&peer);
+        let book = lookup::address_book(&peer);
         let mut beacon = None;
         let mut probe = None;
         let mut rungs = RungWatch::detached();
@@ -735,7 +745,7 @@ fn the_walk_of_a_claim_tick_returns_at_once_on_a_rung_that_says_nothing() {
         let mut params = public_params();
         params.bind_ports = ports;
         let peer = loopback_endpoint().await;
-        let book = crate::lookup::address_book(&peer);
+        let book = lookup::address_book(&peer);
         let mut beacon = None;
         let mut probe = None;
 
@@ -761,7 +771,7 @@ fn the_walk_of_a_claim_tick_returns_at_once_on_a_rung_that_says_nothing() {
         drop(silent);
         assert_eq!(held, Held::Idle, "a silent rung binds nothing in one walk");
         assert!(
-            took < std::time::Duration::from_millis(100),
+            took < std_Duration::from_millis(100),
             "the walk of a claim tick waited {took:?} for a rung that says nothing"
         );
     });
@@ -774,14 +784,14 @@ fn a_walk_that_reads_a_holder_of_our_mesh_says_so() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
         use super::{Held, claim};
 
-        let bound = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        let bound = net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0))
             .and_then(|socket| socket.local_addr());
         let port = bound.expect("a free loopback port").port();
         let mut params = public_params();
         params.bind_ports = vec![port];
 
         let first = loopback_endpoint().await;
-        let first_book = crate::lookup::address_book(&first);
+        let first_book = lookup::address_book(&first);
         let mut first_beacon = None;
         let mut first_probe = None;
         let claimed = claim::ensure_holder(
@@ -795,7 +805,7 @@ fn a_walk_that_reads_a_holder_of_our_mesh_says_so() {
         .await;
 
         let second = loopback_endpoint().await;
-        let second_book = crate::lookup::address_book(&second);
+        let second_book = lookup::address_book(&second);
         let mut second_beacon = None;
         let mut second_probe = None;
         let read = claim::ensure_holder(
@@ -873,12 +883,12 @@ fn a_session_of_our_own_endpoints_is_no_dependent() {
 /// 127.0.0.1 with relay, mDNS, DHT and the portmapper all off, so these
 /// tests make zero external network calls.
 async fn loopback_endpoint() -> Endpoint {
-    crate::lookup::build_endpoint(
+    lookup::build_endpoint(
         &LookupOpts::loopback(),
         None,
         None,
         Vec::new(),
-        crate::lookup::TransportHandles::default(),
+        lookup::TransportHandles::default(),
     )
     .await
     .expect("loopback endpoint")
@@ -891,7 +901,7 @@ async fn probe_for(rx: oneshot::Receiver<bool>) -> (RivalProbe, Endpoint) {
     let endpoint = loopback_endpoint().await;
     let probe = RivalProbe {
         rx,
-        task: n0_future::task::spawn(std::future::pending()),
+        task: n0future_task::spawn(future::pending()),
         endpoint: Some(endpoint.clone()),
         cancel: None,
     };
@@ -901,13 +911,13 @@ async fn probe_for(rx: oneshot::Receiver<bool>) -> (RivalProbe, Endpoint) {
 /// A beacon holding `endpoint`, whose co-host task is already finished —
 /// the "dead beacon" `releasable` is meant to clear.
 async fn dead_beacon(endpoint: Endpoint) -> Rendezvous {
-    let task = n0_future::task::spawn(async {});
+    let task = n0future_task::spawn(async {});
     // Let it finish, so `task.is_finished()` is true below.
     for _ in 0..100 {
         if task.is_finished() {
             break;
         }
-        tokio::task::yield_now().await;
+        tokio_task::yield_now().await;
     }
     assert!(task.is_finished(), "the co-host task should have ended");
     Rendezvous {
@@ -932,7 +942,7 @@ fn public_params() -> RendezvousParams {
         bind_ports: Vec::new(),
         id,
         lookups: LookupOpts::loopback(),
-        relay_transport: crate::transport::PayloadPath::DirectOnly,
+        relay_transport: PayloadPath::DirectOnly,
         bootstrap_relay: None,
         rung_tx: watch::channel(None).0,
     }
@@ -945,7 +955,7 @@ async fn settle(endpoint: &Endpoint) {
         if endpoint.is_closed() {
             return;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio_time::sleep(std_Duration::from_millis(10)).await;
     }
 }
 
@@ -954,15 +964,15 @@ async fn settle(endpoint: &Endpoint) {
 #[test]
 fn a_dropped_rival_probe_closes_its_endpoint() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-        let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .expect("a silent loopback socket");
+        let silent =
+            net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0)).expect("a silent loopback socket");
         let mut params = public_params();
         params.bind_ports = vec![silent.local_addr().expect("its address").port()];
         let probe = spawn_rival_probe(&params, SecretKey::generate().public())
             .await
             .expect("a probe with a rung to dial");
         let prober = probe.endpoint.clone().expect("the probe dials");
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio_time::sleep(std_Duration::from_millis(200)).await;
 
         drop(probe);
 
@@ -971,7 +981,7 @@ fn a_dropped_rival_probe_closes_its_endpoint() {
             if prober.is_closed() {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio_time::sleep(std_Duration::from_millis(10)).await;
         }
         assert!(
             prober.is_closed(),
@@ -1007,8 +1017,8 @@ fn abort_and_close_waits_out_a_probe_mid_handshake() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
         // Bound and never read: the handshake's packets vanish without an
         // answer, as they do into a relay rung nobody serves.
-        let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .expect("a silent loopback socket");
+        let silent =
+            net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0)).expect("a silent loopback socket");
         let mut params = public_params();
         params.bind_ports = vec![silent.local_addr().expect("its address").port()];
         let probe = spawn_rival_probe(&params, SecretKey::generate().public())
@@ -1016,7 +1026,7 @@ fn abort_and_close_waits_out_a_probe_mid_handshake() {
             .expect("a probe with a rung to dial");
         let prober = probe.endpoint.clone().expect("the probe dials");
         // Let the handshake start, so there is a connection to drain.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio_time::sleep(std_Duration::from_millis(200)).await;
 
         probe.abort_and_close().await;
 
@@ -1034,21 +1044,20 @@ fn abort_and_close_waits_out_a_probe_mid_handshake() {
 #[test]
 fn abort_and_close_lets_a_probe_finish_closing_its_own_endpoint() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-        let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .expect("a silent loopback socket");
+        let silent =
+            net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0)).expect("a silent loopback socket");
         let silent_socket = silent.local_addr().expect("its address");
         let target =
             iroh::EndpointAddr::new(SecretKey::generate().public()).with_ip_addr(silent_socket);
         let prober = loopback_endpoint().await;
         let dialer = prober.clone();
-        let task = n0_future::task::spawn(async move {
+        let task = n0future_task::spawn(async move {
             // The dial gives up almost at once, leaving a handshake to drain,
             // and the task moves on to its own close, as the real one does.
-            crate::lookup::probe_connect(&dialer, target, std::time::Duration::from_millis(200))
-                .await;
+            lookup::probe_connect(&dialer, target, std_Duration::from_millis(200)).await;
             dialer.close().await;
         });
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        tokio_time::sleep(std_Duration::from_millis(400)).await;
         let probe = RivalProbe {
             rx: oneshot::channel().1,
             task,
@@ -1073,20 +1082,20 @@ fn abort_and_close_lets_a_probe_finish_closing_its_own_endpoint() {
 #[test]
 fn shed_and_wait_mid_rewalk_closes_the_monitor_probe_endpoint() {
     let _guard = ::habilis_network_test_tracing::init();
-    let (_silent, rung) = crate::testing::silent_relay_rung();
+    let (_silent, rung) = testing::silent_relay_rung();
 
-    let errors = crate::testing::errors_through_runtime_drop(async {
+    let errors = testing::errors_through_runtime_drop(async {
         let endpoint = loopback_endpoint().await;
-        let monitor = crate::lookup::spawn_relay_monitor(
+        let monitor = lookup::spawn_relay_monitor(
             endpoint.clone(),
             vec![rung],
             watch::channel(None).0,
             false,
         );
         // Let the walk bind its probe and start waiting for the relay.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio_time::sleep(std_Duration::from_millis(200)).await;
         let rendezvous = Rendezvous {
-            task: n0_future::task::spawn(std::future::pending()),
+            task: n0future_task::spawn(future::pending()),
             monitor: Some(monitor),
             endpoint,
             lane: None,
@@ -1112,8 +1121,7 @@ fn a_claim_leaves_the_endpoint_knowing_only_the_rung_it_bound() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
         let sockets: Vec<_> = (0..3)
             .map(|_| {
-                std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-                    .expect("a free loopback port")
+                net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0)).expect("a free loopback port")
             })
             .collect();
         let socket_refs = sockets.iter();
@@ -1123,7 +1131,7 @@ fn a_claim_leaves_the_endpoint_knowing_only_the_rung_it_bound() {
         let mut params = public_params();
         params.bind_ports = rungs.clone();
         let peer = loopback_endpoint().await;
-        let book = crate::lookup::address_book(&peer);
+        let book = lookup::address_book(&peer);
         setup::register_rendezvous(&book, &params, &[]);
         peer.add_endpoint_addr(rendezvous_addr(&params).expect("the ladder"))
             .await
@@ -1153,7 +1161,7 @@ fn a_claim_leaves_the_endpoint_knowing_only_the_rung_it_bound() {
             .get_endpoint_info(params.id)
             .expect("an entry")
             .into_endpoint_addr();
-        let booked: Vec<u16> = entry.ip_addrs().map(std::net::SocketAddr::port).collect();
+        let booked: Vec<u16> = entry.ip_addrs().map(net::SocketAddr::port).collect();
         if let Some(held) = beacon.take() {
             held.shed_and_wait().await;
         }
@@ -1181,8 +1189,7 @@ fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
         let sockets: Vec<_> = (0..2)
             .map(|_| {
-                std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-                    .expect("a free loopback port")
+                net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0)).expect("a free loopback port")
             })
             .collect();
         let socket_refs = sockets.iter();
@@ -1192,7 +1199,7 @@ fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
         let mut params = public_params();
         params.bind_ports = rungs.clone();
         let holder_peer = loopback_endpoint().await;
-        let holder_book = crate::lookup::address_book(&holder_peer);
+        let holder_book = lookup::address_book(&holder_peer);
         let mut beacon = None;
         assert!(
             claim::claim(&params, &holder_peer, &holder_book, &mut beacon).await,
@@ -1203,11 +1210,8 @@ fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
         let stale = rungs[1 - on];
 
         let member = loopback_endpoint().await;
-        let book = crate::lookup::address_book(&member);
-        crate::lookup::replace_peer_addr(
-            &book,
-            rung_ladder::rendezvous_holder_addr(&params, stale),
-        );
+        let book = lookup::address_book(&member);
+        lookup::replace_peer_addr(&book, rung_ladder::rendezvous_holder_addr(&params, stale));
         let (reports, mut arrivals) = mpsc::unbounded_channel();
         let mut rungs_watch = super::RungWatch::new(reports);
         for _ in 0..3 {
@@ -1217,7 +1221,7 @@ fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
                 .map(EndpointInfo::into_endpoint_addr);
             let held_ref = held.as_ref();
             let single = held_ref.is_some_and(|address| address.ip_addrs().count() == 1);
-            let on_rung = |socket: &std::net::SocketAddr| socket.port() == rungs[on];
+            let on_rung = |socket: &net::SocketAddr| socket.port() == rungs[on];
             let ours: bool = single
                 && held
                     .as_ref()
@@ -1226,7 +1230,7 @@ fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
                 break;
             }
             if let Ok(Some(report)) =
-                n0_future::time::timeout(std::time::Duration::from_secs(5), arrivals.recv()).await
+                n0future_time::timeout(std_Duration::from_secs(5), arrivals.recv()).await
             {
                 rungs_watch.note(report, Instant::now());
             }
@@ -1237,7 +1241,7 @@ fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
             .get_endpoint_info(params.id)
             .expect("an entry")
             .into_endpoint_addr();
-        let kept: Vec<u16> = entry.ip_addrs().map(std::net::SocketAddr::port).collect();
+        let kept: Vec<u16> = entry.ip_addrs().map(net::SocketAddr::port).collect();
         if let Some(held) = beacon.take() {
             held.shed_and_wait().await;
         }
@@ -1252,14 +1256,13 @@ fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
 /// heal.
 #[tokio::test]
 async fn a_rung_that_this_member_binds_is_no_longer_foreign() {
-    let socket = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .expect("a free loopback port");
+    let socket = net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0)).expect("a free loopback port");
     let rung = socket.local_addr().expect("its address").port();
     drop(socket);
     let mut params = public_params();
     params.bind_ports = vec![rung];
     let peer = loopback_endpoint().await;
-    let book = crate::lookup::address_book(&peer);
+    let book = lookup::address_book(&peer);
     let mut beacon = None;
     let mut rungs = super::RungWatch::detached();
     rungs.mark_foreign(rung);
@@ -1287,15 +1290,13 @@ fn a_claim_keeps_the_relay_rung_of_the_rendezvous() {
     let mut params = public_params();
     params.bootstrap_relay = Some("https://relay.example/".parse().expect("relay url"));
     let at = |port: u16| {
-        iroh::EndpointAddr::new(params.id).with_ip_addr(std::net::SocketAddr::from((
-            std::net::Ipv4Addr::LOCALHOST,
-            port,
-        )))
+        iroh::EndpointAddr::new(params.id)
+            .with_ip_addr(net::SocketAddr::from((net::Ipv4Addr::LOCALHOST, port)))
     };
     let book = memory::MemoryLookup::new();
-    crate::lookup::add_peer_addr(&book, at(4000));
+    lookup::add_peer_addr(&book, at(4000));
 
-    crate::lookup::replace_peer_addr(&book, rung_ladder::holder_entry(at(5000), &params, &[]));
+    lookup::replace_peer_addr(&book, rung_ladder::holder_entry(at(5000), &params, &[]));
 
     let entry = book
         .get_endpoint_info(params.id)
@@ -1308,7 +1309,7 @@ fn a_claim_keeps_the_relay_rung_of_the_rendezvous() {
             .any(|address| matches!(address, iroh::TransportAddr::Relay(_))),
         "the relay rung that the mesh registered is gone"
     );
-    let ports: Vec<u16> = entry.ip_addrs().map(std::net::SocketAddr::port).collect();
+    let ports: Vec<u16> = entry.ip_addrs().map(net::SocketAddr::port).collect();
     assert_eq!(ports, vec![5000], "the address of a former holder stays");
 }
 
@@ -1442,11 +1443,8 @@ fn a_probe_whose_task_dies_frees_the_slot_too() {
 fn no_probe_means_the_arm_never_fires() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
         let mut slot: Option<RivalProbe> = None;
-        let pending = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            probe_verdict(&mut slot),
-        )
-        .await;
+        let pending =
+            tokio_time::timeout(std_Duration::from_millis(50), probe_verdict(&mut slot)).await;
         assert!(pending.is_err(), "an empty slot pends instead of firing");
     });
 }
@@ -1525,7 +1523,7 @@ fn a_live_beacon_keeps_the_slot_and_its_endpoint() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
         let endpoint = loopback_endpoint().await;
         let mut slot = Some(Rendezvous {
-            task: n0_future::task::spawn(std::future::pending()),
+            task: task::spawn(future::pending()),
             monitor: None,
             endpoint: endpoint.clone(),
             lane: None,
@@ -1553,14 +1551,14 @@ fn a_rendezvous_does_not_dial_its_own_peer() {
         use futures_util::StreamExt as _;
         use iroh_gossip::api::Event;
 
-        let bound = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        let bound = net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0))
             .and_then(|socket| socket.local_addr());
         let port = bound.expect("a free loopback port").port();
         let mut params = public_params();
         params.bind_ports = vec![port];
 
         let peer = loopback_endpoint().await;
-        let (gossip, router, _book) = crate::lookup::build_mesh(
+        let (gossip, router, _book) = lookup::build_mesh(
             peer.clone(),
             tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
             None,
@@ -1575,7 +1573,7 @@ fn a_rendezvous_does_not_dial_its_own_peer() {
             .expect("subscribe without a bootstrap")
             .split();
 
-        let book = crate::lookup::address_book(&peer);
+        let book = lookup::address_book(&peer);
         let mut beacon = None;
         let mut probe = None;
         assert!(
@@ -1583,12 +1581,12 @@ fn a_rendezvous_does_not_dial_its_own_peer() {
             "a free ladder rung is claimed"
         );
 
-        let first_neighbor = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let first_neighbor = tokio_time::timeout(std_Duration::from_secs(2), async {
             loop {
                 match receiver.next().await {
                     Some(Ok(Event::NeighborUp(id))) => return id,
                     Some(_) => {}
-                    None => std::future::pending::<()>().await,
+                    None => future::pending::<()>().await,
                 }
             }
         })
@@ -1618,7 +1616,7 @@ fn a_holder_reaches_its_own_public_rendezvous_without_lookups() {
 
         let params = public_params();
         let peer = loopback_endpoint().await;
-        let (gossip, router, _book) = crate::lookup::build_mesh(
+        let (gossip, router, _book) = lookup::build_mesh(
             peer.clone(),
             tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
             None,
@@ -1633,7 +1631,7 @@ fn a_holder_reaches_its_own_public_rendezvous_without_lookups() {
             .expect("subscribe without a bootstrap")
             .split();
 
-        let book = crate::lookup::address_book(&peer);
+        let book = lookup::address_book(&peer);
         let mut beacon = None;
         let mut probe = None;
         assert!(
@@ -1644,12 +1642,12 @@ fn a_holder_reaches_its_own_public_rendezvous_without_lookups() {
             .join_peers(vec![params.id])
             .await
             .expect("ask the gossip to join the rendezvous");
-        let linked = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let linked = tokio_time::timeout(std_Duration::from_secs(5), async {
             loop {
                 match receiver.next().await {
                     Some(Ok(Event::NeighborUp(id))) if id == params.id => return,
                     Some(_) => {}
-                    None => std::future::pending::<()>().await,
+                    None => future::pending::<()>().await,
                 }
             }
         })
@@ -1677,7 +1675,7 @@ fn a_member_that_links_to_the_beacon_is_reported_to_its_holder() {
 
         let params = public_params();
         let peer = loopback_endpoint().await;
-        let (gossip, router, _book) = crate::lookup::build_mesh(
+        let (gossip, router, _book) = lookup::build_mesh(
             peer.clone(),
             tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
             None,
@@ -1692,7 +1690,7 @@ fn a_member_that_links_to_the_beacon_is_reported_to_its_holder() {
             .expect("subscribe without a bootstrap")
             .split();
 
-        let book = crate::lookup::address_book(&peer);
+        let book = lookup::address_book(&peer);
         let mut beacon = None;
         let mut probe = None;
         assert!(
@@ -1703,12 +1701,12 @@ fn a_member_that_links_to_the_beacon_is_reported_to_its_holder() {
             .join_peers(vec![params.id])
             .await
             .expect("ask the gossip to join the rendezvous");
-        let linked = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let linked = tokio_time::timeout(std_Duration::from_secs(5), async {
             loop {
                 match receiver.next().await {
                     Some(Ok(Event::NeighborUp(id))) if id == params.id => return,
                     Some(_) => {}
-                    None => std::future::pending::<()>().await,
+                    None => future::pending::<()>().await,
                 }
             }
         })
@@ -1716,10 +1714,10 @@ fn a_member_that_links_to_the_beacon_is_reported_to_its_holder() {
         .is_ok();
         let mut arrivals = Vec::new();
         if let Some(held) = beacon.as_mut() {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let _ = tokio_time::timeout(std_Duration::from_secs(2), async {
                 while arrivals.is_empty() {
                     arrivals.extend(held.take_arrivals());
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    tokio_time::sleep(std_Duration::from_millis(20)).await;
                 }
             })
             .await;
@@ -1746,7 +1744,7 @@ fn ensure_starts_the_probe_instead_of_waiting_for_it() {
         // 3s budget expired and the graceful `Left` was never sent.
         let params = public_params();
         let peer = loopback_endpoint().await;
-        let book = crate::lookup::address_book(&peer);
+        let book = lookup::address_book(&peer);
         let mut beacon = None;
         let mut probe = None;
 
@@ -1769,7 +1767,7 @@ fn ensure_starts_the_probe_instead_of_waiting_for_it() {
         );
         assert!(beacon.is_none(), "and stand no beacon up");
         assert!(
-            elapsed < std::time::Duration::from_secs(1),
+            elapsed < std_Duration::from_secs(1),
             "ensure must return without waiting out the probe, took {elapsed:?}"
         );
 
@@ -1781,7 +1779,7 @@ fn ensure_starts_the_probe_instead_of_waiting_for_it() {
             "ensure starts the probe instead of waiting for it"
         );
         assert!(
-            before.elapsed() < std::time::Duration::from_secs(1),
+            before.elapsed() < std_Duration::from_secs(1),
             "and neither must the next tick"
         );
 
@@ -1798,16 +1796,15 @@ fn ensure_starts_the_probe_instead_of_waiting_for_it() {
 #[test]
 fn a_rung_watch_that_asks_and_then_finishes_leaves_no_open_endpoint() {
     let _guard = ::habilis_network_test_tracing::init();
-    let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .expect("a free loopback port");
+    let silent = net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0)).expect("a free loopback port");
     let port = silent.local_addr().expect("its address").port();
     let params = public_params();
-    let errors = crate::testing::errors_through_runtime_drop(async {
+    let errors = testing::errors_through_runtime_drop(async {
         let (reports, _arrivals) = mpsc::unbounded_channel();
         let mut rungs = super::RungWatch::new(reports);
         rungs.ask(&params, SecretKey::generate().public(), port, false);
         // Let the probe bind its endpoint and start its dial on the silent rung.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        time::sleep(Duration::from_millis(200)).await;
         rungs.finish().await;
     });
     drop(silent);

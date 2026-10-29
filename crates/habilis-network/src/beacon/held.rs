@@ -13,6 +13,8 @@ use super::{
     releasable, rung_is_busy, spawn_rival_probe,
 };
 
+use n0_future::task;
+use std::time;
 /// What the busy rungs of a private ladder answer to an identity probe, by port, before a joiner's
 /// first dial. The book must name the rung that serves our beacon before the joiner subscribes:
 /// a first dial with no address that answers is one the gossip layer keeps for seconds before a
@@ -23,7 +25,7 @@ use super::{
 /// task: closing one that dialed a silent rung takes seconds.
 pub(crate) async fn read_busy_rungs(
     params: &RendezvousParams,
-    budget: std::time::Duration,
+    budget: time::Duration,
 ) -> Vec<(u16, ProbeAnswer)> {
     let probes: Vec<_> = params
         .bind_ports
@@ -32,7 +34,7 @@ pub(crate) async fn read_busy_rungs(
         .filter(|&port| rung_is_busy(port))
         .map(|port| {
             let id = params.id;
-            n0_future::task::spawn(async move {
+            task::spawn(async move {
                 let prober = match build_endpoint(
                     &LookupOpts::loopback(),
                     None,
@@ -52,7 +54,7 @@ pub(crate) async fn read_busy_rungs(
                     .with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
                 let answer = probe_answer(&prober, address, budget).await;
                 tracing::debug!(target: "habilis_network::beacon", port, ?answer, "busy rung read at setup");
-                drop(n0_future::task::spawn(async move { prober.close().await }));
+                drop(task::spawn(async move { prober.close().await }));
                 Some((port, answer))
             })
         })

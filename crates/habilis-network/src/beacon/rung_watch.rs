@@ -11,6 +11,10 @@ use crate::util::tuning::{RECLAIM_WINDOW, RENDEZVOUS_CLOSE, RENDEZVOUS_PROBE, he
 
 use super::{RendezvousParams, rung_answer, rung_is_busy, rung_probes_are_blind};
 
+use n0_future::{task, time};
+use std::mem;
+#[cfg(test)]
+use std::time::Duration;
 /// What a busy rung said when it was last asked.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RungReading {
@@ -334,7 +338,7 @@ impl RungWatch {
         let id = params.id;
         let blind = blindable && rung_probes_are_blind(node);
         self.tasks.retain(|task| !task.is_finished());
-        self.tasks.push(n0_future::task::spawn(async move {
+        self.tasks.push(task::spawn(async move {
             // A throwaway identity, for the reason `rung_answer` gives, and with no address
             // lookup: the dial carries the one address that it asks about, and a lookup could
             // hand it another path of the id, which would answer for the id and not the rung.
@@ -374,8 +378,8 @@ impl RungWatch {
     /// then takes about 3 s to close, and the departure of a node would otherwise drop it open.
     /// The bound is the dial and the close, which `NODE_LEAVE` leaves room for.
     pub(crate) async fn finish(&mut self) {
-        let tasks = std::mem::take(&mut self.tasks);
-        let _ = n0_future::time::timeout(RENDEZVOUS_PROBE + RENDEZVOUS_CLOSE, async {
+        let tasks = mem::take(&mut self.tasks);
+        let _ = time::timeout(RENDEZVOUS_PROBE + RENDEZVOUS_CLOSE, async {
             for task in tasks {
                 let _ = task.await;
             }
@@ -417,7 +421,7 @@ impl RungWatch {
 
     /// Tests only: say that `port` has been silent for `by` already.
     #[cfg(test)]
-    pub(crate) fn age_silence(&mut self, port: u16, by: std::time::Duration) {
+    pub(crate) fn age_silence(&mut self, port: u16, by: Duration) {
         if let Some(reading) = self.readings.get_mut(&port) {
             reading.silent_since = Instant::now().checked_sub(by);
         }

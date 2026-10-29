@@ -5,6 +5,11 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 use crate::lookup::{ProbeAnswer, probe_answer};
 use crate::util::tuning::RENDEZVOUS_PROBE;
 
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use std::collections;
+use std::net;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use std::sync;
 /// Probe a `AddrInUse` private rung: is the listener *our* mesh's
 /// rendezvous, or an unrelated mesh that happened to derive the same
 /// port? A loopback `connect` to `rendezvous_id` succeeds only if the
@@ -50,8 +55,8 @@ pub(crate) async fn rung_answer(
 /// too loaded to answer, and it is per member: a process-wide dial would make every in-process
 /// member misread at once, which is not what a loaded host does.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-static BLIND_RUNG_PROBES: std::sync::Mutex<std::collections::BTreeSet<EndpointId>> =
-    std::sync::Mutex::new(std::collections::BTreeSet::new());
+static BLIND_RUNG_PROBES: sync::Mutex<collections::BTreeSet<EndpointId>> =
+    sync::Mutex::new(collections::BTreeSet::new());
 
 /// Make the rung probe of `member` read silence (`blind`), or let it read the truth again.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -84,5 +89,5 @@ pub(crate) fn rung_probes_are_blind(member: EndpointId) -> bool {
 /// Whether somebody holds `port`: a socket of ours cannot be bound there. Instant, and no side
 /// effect, so a walk can tell which rungs of a ladder are busy without binding one.
 pub(crate) fn rung_is_busy(port: u16) -> bool {
-    std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, port)).is_err()
+    net::UdpSocket::bind((Ipv4Addr::LOCALHOST, port)).is_err()
 }

@@ -4,6 +4,7 @@ use tokio::sync::watch;
 
 use crate::protocol::mesh::LookupOpts;
 
+use crate::transport;
 /// Everything [`ensure`] needs to (re)build the rendezvous endpoint.
 /// Cheap to clone-hold for the event loop's lifetime.
 #[derive(Debug)]
@@ -28,7 +29,7 @@ pub(crate) struct RendezvousParams {
     /// The mesh's `transport.relay_transport`. With it off, the beacon holds every
     /// inbound gossip connection — a joiner's first link — until iroh selects
     /// a direct path on it, so no frame ever crosses the relay.
-    pub(crate) relay_transport: crate::transport::PayloadPath,
+    pub(crate) relay_transport: transport::PayloadPath,
     /// The single relay **rung** the beacon homes on — initialized to
     /// the first ladder rung (optimistic, unprobed) at setup and
     /// corrected off the event loop: a backgrounded startup probe and

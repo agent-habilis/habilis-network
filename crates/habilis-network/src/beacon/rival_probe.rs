@@ -8,6 +8,8 @@ use crate::util::tuning::{HEAL_PROBE, RENDEZVOUS_CLOSE, heal_interval};
 
 use super::{RendezvousParams, beacon_lookups, rendezvous_addr};
 
+use n0_future::{task, time};
+use std::future;
 /// A public probe-before-claim running **off** the event loop.
 ///
 /// The probe answers one question — does a beacon already serve this
@@ -60,7 +62,7 @@ impl RivalProbe {
         if let Some(cancel) = self.cancel.take() {
             let _ = cancel.send(());
         }
-        if n0_future::time::timeout(RENDEZVOUS_CLOSE, &mut self.task)
+        if time::timeout(RENDEZVOUS_CLOSE, &mut self.task)
             .await
             .is_err()
         {
@@ -93,7 +95,7 @@ impl Drop for RivalProbe {
 /// [`recv_opt`]: crate::daemon::event_loop
 pub(crate) async fn probe_verdict(probe: &mut Option<RivalProbe>) -> bool {
     let Some(active) = probe.as_mut() else {
-        return std::future::pending().await;
+        return future::pending().await;
     };
     // `&mut Receiver` so a losing `select!` arm drops this future without
     // dropping the receiver — the verdict survives to the next poll.
@@ -159,7 +161,7 @@ pub(crate) async fn spawn_rival_probe(
             let _ = tx.send(true);
             return Some(RivalProbe {
                 rx,
-                task: n0_future::task::spawn(async {}),
+                task: task::spawn(async {}),
                 endpoint: None,
                 cancel: None,
             });
@@ -195,7 +197,7 @@ pub(crate) async fn spawn_rival_probe(
         "rival_probe",
         node = %node.fmt_short()
     );
-    let task = n0_future::task::spawn(
+    let task = task::spawn(
         async move {
             let found_rival = tokio::select! {
                 found = probe_connect(&prober, target, budget) => found,

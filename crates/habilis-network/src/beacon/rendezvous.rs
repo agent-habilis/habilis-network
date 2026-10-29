@@ -7,6 +7,12 @@ use crate::util::tuning::RENDEZVOUS_CLOSE;
 
 use super::{Dependents, rung_of};
 
+use crate::{lookup, transport};
+use n0_future::{task, time};
+#[cfg(test)]
+use std::future;
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::runtime;
 /// A live co-hosted rendezvous endpoint. Dropping it aborts both tasks,
 /// releasing the endpoint + router (and, private, freeing the
 /// deterministic port for the next member to claim).
@@ -16,7 +22,7 @@ pub(crate) struct Rendezvous {
     pub(crate) task: JoinHandle<()>,
     /// The relay-rung liveness/discovery monitor (`spawn_relay_monitor`).
     /// `None` for private / relay-disabled meshes (nothing to monitor).
-    pub(crate) monitor: Option<crate::lookup::StoppableTask>,
+    pub(crate) monitor: Option<lookup::StoppableTask>,
     /// The co-hosted endpoint itself, retained so [`Self::shed`] and
     /// [`Self::shed_and_wait`] can close it gracefully — a plain drop (task
     /// abort) skips the orderly QUIC close, and the peer's link to its own
@@ -39,7 +45,7 @@ pub(crate) struct Rendezvous {
 /// A beacon's `WebRTC` answerer and the table that admits its sessions.
 pub(crate) type RendezvousLane = Option<(
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
-    crate::transport::SignalAdmission,
+    transport::SignalAdmission,
 )>;
 
 impl Rendezvous {
@@ -85,7 +91,7 @@ impl Rendezvous {
     #[cfg(test)]
     pub(crate) fn for_test(endpoint: Endpoint, lane: RendezvousLane) -> Self {
         Self {
-            task: n0_future::task::spawn(std::future::pending()),
+            task: task::spawn(future::pending()),
             monitor: None,
             endpoint,
             lane,
@@ -110,7 +116,7 @@ impl Rendezvous {
         let endpoint = self.endpoint.clone();
         let (done, closed) = oneshot::channel();
         let shed_at = Instant::now();
-        n0_future::task::spawn(async move {
+        task::spawn(async move {
             endpoint.close().await;
             tracing::debug!(
                 target: "habilis_network::beacon",
@@ -151,7 +157,7 @@ impl Rendezvous {
         drop(self);
         tokio::join!(
             async {
-                if n0_future::time::timeout(RENDEZVOUS_CLOSE, endpoint.close())
+                if time::timeout(RENDEZVOUS_CLOSE, endpoint.close())
                     .await
                     .is_err()
                 {
@@ -192,10 +198,10 @@ impl Drop for Rendezvous {
 /// is nothing to run the close, and the endpoint is dropped as before.
 fn close_detached(endpoint: Endpoint) {
     #[cfg(not(target_arch = "wasm32"))]
-    if tokio::runtime::Handle::try_current().is_err() {
+    if runtime::Handle::try_current().is_err() {
         return;
     }
-    drop(n0_future::task::spawn(async move {
+    drop(task::spawn(async move {
         endpoint.close().await;
     }));
 }

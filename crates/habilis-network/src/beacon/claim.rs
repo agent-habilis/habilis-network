@@ -10,6 +10,13 @@ use super::{Held, Rendezvous, RendezvousParams, RungWatch, Walk, bind};
 #[cfg(test)]
 use super::{RivalProbe, walk_ladder};
 
+use crate::{lookup, transport};
+use iroh_gossip::api::Event;
+use n0_future::task;
+#[cfg(test)]
+use n0_future::time;
+#[cfg(test)]
+use std::time::Duration;
 /// [`walk_ladder`] for a test that has no loop: it waits for the probe tasks that the walk
 /// asked for, and walks again, until the walk has nothing left to wait for.
 #[cfg(test)]
@@ -41,11 +48,8 @@ pub(crate) async fn ensure_holder(
             habilis_network_test_tracing::at_end(async move { rungs.finish().await });
             return held;
         }
-        if let Ok(Some(report)) = n0_future::time::timeout(
-            RECLAIM_WINDOW + std::time::Duration::from_secs(4),
-            arrivals.recv(),
-        )
-        .await
+        if let Ok(Some(report)) =
+            time::timeout(RECLAIM_WINDOW + Duration::from_secs(4), arrivals.recv()).await
         {
             rungs.note(report, Instant::now());
         } else {
@@ -122,7 +126,7 @@ pub(crate) async fn claim_holder(
             (
                 handle,
                 admission,
-                crate::transport::IceProfile { host_only: false },
+                transport::IceProfile { host_only: false },
             )
         }),
         // The rendezvous serves no caller protocol either — it is a meeting
@@ -158,7 +162,7 @@ pub(crate) async fn claim_holder(
     // stall rendezvous bridging. Spawned whenever relay is enabled
     // (public + a non-empty ladder) — *not* gated on currently holding a
     // rung, so a relay-less beacon keeps probing to rediscover one.
-    let ladder: Vec<_> = crate::lookup::relay_ladder(&params.lookups.relay_lookup).collect();
+    let ladder: Vec<_> = lookup::relay_ladder(&params.lookups.relay_lookup).collect();
     let monitors_relay = !params.lookups.is_loopback() && !ladder.is_empty();
     let monitor_endpoint = endpoint.clone();
     let monitor_homed = params.bootstrap_relay.is_some();
@@ -167,7 +171,7 @@ pub(crate) async fn claim_holder(
     // A bounded channel and `try_send`: a sign that is lost to a burst is one of many.
     let (arrivals_tx, arrivals) = mpsc::channel(32);
 
-    let task = n0_future::task::spawn(async move {
+    let task = task::spawn(async move {
         use futures_util::StreamExt as _;
 
         // Keep the gossip frontend + the Router's accept loop alive
@@ -191,7 +195,7 @@ pub(crate) async fn claim_holder(
         // overlay. Who links to it is reported to the holder, which reads it as a sign of
         // another group. Ends when the topic terminally closes.
         while let Some(event) = receiver.next().await {
-            if let Ok(iroh_gossip::api::Event::NeighborUp(id)) = event {
+            if let Ok(Event::NeighborUp(id)) = event {
                 let _ = arrivals_tx.try_send(id);
             }
         }
@@ -201,7 +205,7 @@ pub(crate) async fn claim_holder(
     // probing, backs off while relay-less. `None` when relay is disabled
     // (private / empty ladder).
     let monitor = monitors_relay.then(|| {
-        crate::lookup::spawn_relay_monitor(monitor_endpoint, ladder, monitor_rung_tx, monitor_homed)
+        lookup::spawn_relay_monitor(monitor_endpoint, ladder, monitor_rung_tx, monitor_homed)
     });
 
     tracing::info!(target: "habilis_network::beacon", node = %peer.id().fmt_short(), "beacon role active: serving the rendezvous");

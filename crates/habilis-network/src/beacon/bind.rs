@@ -8,6 +8,7 @@ use crate::lookup::{TransportHandles, build_endpoint};
 use super::rung_ladder::{admit_rung, forget_rungs};
 use super::{RendezvousParams, RungRead, RungWatch, Walk, beacon_lookups, rung_is_busy};
 
+use crate::{lookup, transport};
 /// Build the rendezvous endpoint (see module docs for the one-beacon /
 /// claim-if-free / identity-probe rationale). Public: one
 /// ephemeral-port endpoint. Private: bind the first **free** ladder
@@ -33,10 +34,10 @@ pub(crate) async fn build_rendezvous_endpoint(
         // JSEP: a browser-shaped peer has no IP to punch with, so on a mesh
         // whose relay is lookup only the data channel is the only path its
         // rendezvous link can ever be admitted on.
-        let webrtc = crate::lookup::build_webrtc_handle(params.secret.public());
+        let webrtc = lookup::build_webrtc_handle(params.secret.public());
         // Made before the endpoint: the endpoint reports its connections to it
         // from the first handshake on.
-        let admission = crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS);
+        let admission = transport::SignalAdmission::new(transport::MAX_DIRECT_PEERS);
         let transport_handles = TransportHandles {
             webrtc: Some(webrtc.clone()),
             admission: Some(admission.clone()),
