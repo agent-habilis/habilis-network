@@ -74,8 +74,9 @@ mod tests {
         assert!(queue.push(1u32));
         assert!(queue.push(2));
         assert!(!queue.push(3), "rejected when full — nothing evicted");
+        let taken: Vec<_> = queue.take().into_iter().collect();
         assert_eq!(
-            queue.take().into_iter().collect::<Vec<_>>(),
+            taken,
             vec![1, 2],
             "the oldest-first prefix is retained intact",
         );
@@ -86,7 +87,8 @@ mod tests {
         let mut queue = BoundedQueue::new(8);
         assert!(queue.push("a"));
         assert!(queue.push("b"));
-        assert_eq!(queue.take().into_iter().collect::<Vec<_>>(), vec!["a", "b"]);
+        let taken: Vec<_> = queue.take().into_iter().collect();
+        assert_eq!(taken, vec!["a", "b"]);
         assert!(queue.take().is_empty(), "second take is empty");
     }
 

@@ -187,14 +187,13 @@ fn load_binds(path: &Path) -> HashMap<String, (u64, i64, Root)> {
         // A malformed row costs that row, not the whole table: losing one
         // binding means re-hashing one file, losing the table means re-hashing
         // the tree.
-        let (Ok(size), Ok(mtime), Ok(root)) = (
-            size.parse::<u64>(),
-            mtime.parse::<i64>(),
-            Root::from_hex(root),
-        ) else {
+        let parsed_size: Result<u64, _> = size.parse();
+        let parsed_mtime: Result<i64, _> = mtime.parse();
+        let (Ok(bytes), Ok(modified), Ok(root)) = (parsed_size, parsed_mtime, Root::from_hex(root))
+        else {
             continue;
         };
-        binds.insert(unescape(key), (size, mtime, root));
+        binds.insert(unescape(key), (bytes, modified, root));
     }
     binds
 }

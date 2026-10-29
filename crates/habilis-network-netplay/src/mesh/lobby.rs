@@ -597,19 +597,15 @@ mod tests {
     fn a_presence_with_a_nickname_the_wire_refuses_is_dropped() {
         let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         lobby.on_message(&key(0xbb), r#"{"Present":{"nick":""}}"#, Tick::new(0));
-        assert_eq!(
-            lobby.present().collect::<Vec<_>>(),
-            vec![(key(0xaa), nick("alice"))]
-        );
+        let present: Vec<_> = lobby.present().collect();
+        assert_eq!(present, vec![(key(0xaa), nick("alice"))]);
     }
 
     #[test]
     fn a_peer_is_present_in_its_own_lobby() {
         let lobby = Lobby::new(key(0xaa), nick("alice"));
-        assert_eq!(
-            lobby.present().collect::<Vec<_>>(),
-            vec![(key(0xaa), nick("alice"))]
-        );
+        let present: Vec<_> = lobby.present().collect();
+        assert_eq!(present, vec![(key(0xaa), nick("alice"))]);
     }
 
     #[test]
@@ -783,8 +779,9 @@ mod tests {
         assert_eq!(lobby.present().count(), 2);
 
         lobby.expire(Tick::new(160), TickSpan::new(50));
+        let present: Vec<_> = lobby.present().collect();
         assert_eq!(
-            lobby.present().collect::<Vec<_>>(),
+            present,
             vec![(key(0xaa), nick("alice"))],
             "bob went quiet for longer than the ttl and must not be proposed into a match"
         );
@@ -806,10 +803,8 @@ mod tests {
         // We never receive our own presence, so our stamp stays at 0 —
         // expiring on that would delete the one peer that is certainly here.
         lobby.expire(Tick::new(10_000), TickSpan::new(50));
-        assert_eq!(
-            lobby.present().collect::<Vec<_>>(),
-            vec![(key(0xaa), nick("alice"))]
-        );
+        let present: Vec<_> = lobby.present().collect();
+        assert_eq!(present, vec![(key(0xaa), nick("alice"))]);
     }
 
     #[test]

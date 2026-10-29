@@ -111,6 +111,7 @@ fn measure_box(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h:
     let (own_w, own_h, frame, pad_h, pad_v, direction, gap, children) = {
         let node = arena.get(id);
         let frame = frame_of(node);
+        let children: Vec<_> = arena.children(id).collect();
         (
             resolve_dim(node.width, avail_w),
             resolve_dim(node.height, avail_h),
@@ -119,7 +120,7 @@ fn measure_box(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h:
             2 * frame + i32::from(node.padding.top) + i32::from(node.padding.bottom),
             node.direction,
             i32::from(node.gap),
-            arena.children(id).collect::<Vec<_>>(),
+            children,
         )
     };
     let _ = frame;

@@ -203,13 +203,11 @@ fn two_bots_play_a_match_and_agree_on_its_outcome() {
                 bots.iter().all(|bot| bot.game.snapshot().match_number == 2)
             })
             .await;
-            assert!(
-                rematched,
-                "no rematch was agreed: {:?}",
-                bots.iter()
-                    .map(|bot| bot.game.snapshot().match_number)
-                    .collect::<Vec<_>>()
-            );
+            let matches: Vec<_> = bots
+                .iter()
+                .map(|bot| bot.game.snapshot().match_number)
+                .collect();
+            assert!(rematched, "no rematch was agreed: {:?}", matches);
             assert_ne!(
                 positions(&bots[0].game.snapshot().world),
                 first_arena,

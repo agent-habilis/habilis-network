@@ -85,10 +85,8 @@ mod tests {
         ] {
             let hash = sample(transport);
             assert_eq!(StreamHash::decode(&hash.encode()).expect("decodes"), hash);
-            assert_eq!(
-                hash.to_string().parse::<StreamHash>().expect("parses"),
-                hash
-            );
+            let reparsed: StreamHash = hash.to_string().parse().expect("parses");
+            assert_eq!(reparsed, hash);
         }
     }
 

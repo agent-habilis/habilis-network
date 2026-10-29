@@ -638,7 +638,7 @@ mod tests {
             alice_stats.queued > 0 && bob_stats.queued > 0,
             "{alice_stats:?} {bob_stats:?}"
         );
-        let sent = hub.sent().collect::<Vec<_>>();
+        let sent: Vec<_> = hub.sent().collect();
         assert_eq!(
             alice_stats.frames_out + bob_stats.frames_out,
             sent.len() as u64

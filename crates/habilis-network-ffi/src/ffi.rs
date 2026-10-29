@@ -159,7 +159,8 @@ where
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
         .map(|entry| {
-            entry.parse::<T>().map_err(|error| {
+            let parsed: Result<T, _> = entry.parse();
+            parsed.map_err(|error| {
                 set_error(&error.to_string());
             })
         })

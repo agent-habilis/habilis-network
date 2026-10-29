@@ -273,7 +273,8 @@ mod tests {
         arena.append(parent, a);
         arena.append(parent, b);
         arena.append(parent, c);
-        assert_eq!(arena.children(parent).collect::<Vec<_>>(), vec![a, b, c]);
+        let kids_1: Vec<_> = arena.children(parent).collect();
+        assert_eq!(kids_1, vec![a, b, c]);
         assert_eq!(arena.get(parent).child_count, 3);
     }
 
@@ -287,7 +288,8 @@ mod tests {
         arena.append(parent, a);
         arena.append(parent, c);
         arena.insert_before(parent, b, Some(c));
-        assert_eq!(arena.children(parent).collect::<Vec<_>>(), vec![a, b, c]);
+        let kids_1: Vec<_> = arena.children(parent).collect();
+        assert_eq!(kids_1, vec![a, b, c]);
     }
 
     #[test]
@@ -301,7 +303,8 @@ mod tests {
         arena.append(parent, b);
         arena.append(parent, c);
         arena.detach(b);
-        assert_eq!(arena.children(parent).collect::<Vec<_>>(), vec![a, c]);
+        let kids_1: Vec<_> = arena.children(parent).collect();
+        assert_eq!(kids_1, vec![a, c]);
         assert_eq!(arena.get(parent).child_count, 2);
         assert_eq!(arena.get(b).parent, None);
     }
@@ -316,7 +319,8 @@ mod tests {
         arena.append(parent, b);
         // Move `a` to the end.
         arena.insert_before(parent, a, None);
-        assert_eq!(arena.children(parent).collect::<Vec<_>>(), vec![b, a]);
+        let kids_1: Vec<_> = arena.children(parent).collect();
+        assert_eq!(kids_1, vec![b, a]);
     }
 
     #[test]
@@ -328,7 +332,8 @@ mod tests {
         arena.append(parent, a);
         arena.append(parent, b);
         arena.insert_before(parent, a, Some(a));
-        assert_eq!(arena.children(parent).collect::<Vec<_>>(), vec![a, b]);
+        let kids_1: Vec<_> = arena.children(parent).collect();
+        assert_eq!(kids_1, vec![a, b]);
     }
 
     #[test]

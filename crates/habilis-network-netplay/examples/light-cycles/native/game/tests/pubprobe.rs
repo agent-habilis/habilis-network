@@ -136,12 +136,15 @@ fn public_path_probe() {
                 first != Outcome::InProgress && bots.iter().all(|bot| bot.game.outcome() == first)
             })
             .await;
+            let snapshots: Vec<_> = bots.iter().map(|bot| bot.game.snapshot()).collect();
+            let pairs = bots.iter().zip(&snapshots);
+            let outcomes: Vec<_> = pairs
+                .map(|(bot, snapshot)| (bot.game.outcome(), snapshot.world.tick))
+                .collect();
             assert!(
                 agreed,
                 "the two bots never agreed on who won: {:?}",
-                bots.iter()
-                    .map(|bot| (bot.game.outcome(), bot.game.snapshot().world.tick))
-                    .collect::<Vec<_>>()
+                outcomes
             );
 
             // A match that ends before it starts would satisfy every assertion
@@ -181,13 +184,11 @@ fn public_path_probe() {
                 bots.iter().all(|bot| bot.game.snapshot().match_number == 2)
             })
             .await;
-            assert!(
-                rematched,
-                "no rematch was agreed: {:?}",
-                bots.iter()
-                    .map(|bot| bot.game.snapshot().match_number)
-                    .collect::<Vec<_>>()
-            );
+            let matches: Vec<_> = bots
+                .iter()
+                .map(|bot| bot.game.snapshot().match_number)
+                .collect();
+            assert!(rematched, "no rematch was agreed: {:?}", matches);
             assert_ne!(
                 spawns(&bots),
                 first_arena,

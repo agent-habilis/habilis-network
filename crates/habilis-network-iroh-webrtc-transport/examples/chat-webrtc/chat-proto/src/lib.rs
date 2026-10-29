@@ -244,10 +244,8 @@ impl Ticket {
             None
         } else {
             let text = std::str::from_utf8(relay_bytes).context("relay URL is not utf8")?;
-            Some(
-                text.parse::<RelayUrl>()
-                    .context("ticket holds an invalid relay URL")?,
-            )
+            let relay: RelayUrl = text.parse().context("ticket holds an invalid relay URL")?;
+            Some(relay)
         };
 
         Ok(Self { id, relay })

@@ -45,6 +45,7 @@ impl PathSelector for GossipLadder {
 mod tests {
     use habilis_network_iroh_transport_util::Rung;
     use habilis_network_test_tracing::test;
+    use std::net::SocketAddr;
 
     /// The ladder names this crate's transport by the id that the transport uses. The id is
     /// written twice, here and in the util crate, which is below this one; this is the guard
@@ -84,11 +85,7 @@ mod tests {
         let builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
-            .bind_addr(
-                "127.0.0.1:0"
-                    .parse::<std::net::SocketAddr>()
-                    .expect("loopback"),
-            )
+            .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
             .expect("bind address")
             .add_custom_transport(handle.custom_transport());
         let builder = if ladder {

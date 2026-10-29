@@ -243,5 +243,6 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>, RelayLadderError
     if urls.is_empty() {
         return Ok(None);
     }
-    urls.join(",").parse::<RelayLadder>().map(Some)
+    let ladder: Result<RelayLadder, _> = urls.join(",").parse();
+    ladder.map(Some)
 }

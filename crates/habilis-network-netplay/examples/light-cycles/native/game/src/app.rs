@@ -356,7 +356,7 @@ impl Game {
             None => self.session.is_none(),
             Some(since) => self.ticks.saturating_sub(since) >= REMATCH_GRACE_TICKS,
         };
-        let present = lobby.present().collect::<Vec<_>>();
+        let present: Vec<_> = lobby.present().collect();
         let lowest = present
             .first()
             .is_some_and(|(pubkey, _)| self.transport.local_pubkey() == Some(*pubkey));

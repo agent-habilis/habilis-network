@@ -93,7 +93,7 @@ fn pressure_level() -> u64 {
         .split('&')
         .filter_map(|pair| pair.split_once('='))
         .find(|(key, _)| *key == "pressure")
-        .and_then(|(_, value)| value.parse::<u64>().ok())
+        .and_then(|(_, value)| -> Option<u64> { value.parse().ok() })
         .unwrap_or(0)
 }
 

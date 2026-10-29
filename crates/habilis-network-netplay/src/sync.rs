@@ -440,9 +440,7 @@ mod tests {
             InputStatus::Predicted,
             "the absent peer's is a guess"
         );
-        assert_eq!(
-            sync.last_added_frames().collect::<Vec<_>>(),
-            vec![Frame::new(0), Frame::NULL]
-        );
+        let added: Vec<_> = sync.last_added_frames().collect();
+        assert_eq!(added, vec![Frame::new(0), Frame::NULL]);
     }
 }

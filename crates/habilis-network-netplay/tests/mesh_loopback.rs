@@ -287,14 +287,8 @@ fn two_peers_play_a_match_over_a_loopback_mesh() {
                 players.iter().all(|player| player.state.frame >= 30)
             })
             .await;
-            assert!(
-                played,
-                "frames did not advance: {:?}",
-                players
-                    .iter()
-                    .map(|player| player.state.frame)
-                    .collect::<Vec<_>>()
-            );
+            let frame_numbers: Vec<_> = players.iter().map(|player| player.state.frame).collect();
+            assert!(played, "frames did not advance: {frame_numbers:?}");
 
             // The claim under test: both peers, having exchanged only inputs,
             // independently agree on the state — and say so via checksums.

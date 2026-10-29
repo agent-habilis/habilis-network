@@ -414,10 +414,7 @@ mod tests {
     fn xor_mapped_ipv4_is_unmasked() {
         let message = response(ATTR_XOR_MAPPED_ADDRESS, &xor_ipv4_value(), TXID);
         let addr = parse_binding_response(&message, &TXID).expect("parse");
-        assert_eq!(
-            addr,
-            "203.0.113.7:41234".parse::<SocketAddr>().expect("addr")
-        );
+        assert_eq!(addr, SocketAddr::from(([203, 0, 113, 7], 41234)));
     }
 
     #[test]
@@ -428,10 +425,7 @@ mod tests {
         value.extend_from_slice(&[203, 0, 113, 7]);
         let message = response(ATTR_MAPPED_ADDRESS, &value, TXID);
         let addr = parse_binding_response(&message, &TXID).expect("parse");
-        assert_eq!(
-            addr,
-            "203.0.113.7:41234".parse::<SocketAddr>().expect("addr")
-        );
+        assert_eq!(addr, SocketAddr::from(([203, 0, 113, 7], 41234)));
     }
 
     #[test]
@@ -590,7 +584,8 @@ mod tests {
             if name.starts_with("hung") {
                 return std::future::pending().await;
             }
-            Ok(name.parse::<SocketAddr>().ok())
+            let parsed: Option<SocketAddr> = name.parse().ok();
+            Ok(parsed)
         })
         .await;
         let elapsed = start.elapsed();
@@ -616,7 +611,8 @@ mod tests {
         };
         let reflexive = super::gather_with_resolver(&client, &config, |name: String| async move {
             tokio::time::sleep(Duration::from_millis(1200)).await;
-            Ok(name.parse::<SocketAddr>().ok())
+            let parsed: Option<SocketAddr> = name.parse().ok();
+            Ok(parsed)
         })
         .await;
         server.abort();
@@ -676,7 +672,8 @@ mod tests {
             stun_timeout: Duration::from_secs(2),
         };
         let reflexive = super::gather_with_resolver(&socket, &config, |name: String| async move {
-            Ok(name.parse::<SocketAddr>().ok())
+            let parsed: Option<SocketAddr> = name.parse().ok();
+            Ok(parsed)
         })
         .await;
         assert_eq!(

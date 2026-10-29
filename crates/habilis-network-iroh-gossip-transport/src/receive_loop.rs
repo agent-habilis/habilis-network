@@ -36,6 +36,7 @@ pub(crate) fn handle_event(handle: &GossipHandle, event: Event) {
 #[cfg(test)]
 mod tests {
     use habilis_network_test_tracing::test;
+    use std::net::SocketAddr;
     use std::time::Duration;
 
     use iroh::address_lookup::memory::MemoryLookup;
@@ -57,11 +58,7 @@ mod tests {
         let endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(secret(seed))
             .relay_mode(RelayMode::Disabled)
-            .bind_addr(
-                "127.0.0.1:0"
-                    .parse::<std::net::SocketAddr>()
-                    .expect("loopback"),
-            )
+            .bind_addr(SocketAddr::from(([127, 0, 0, 1], 0)))
             .expect("bind address")
             .address_lookup(lookup.clone())
             .bind()
@@ -201,9 +198,8 @@ mod tests {
                 .path_selector(std::sync::Arc::new(Ladder))
                 .address_lookup(lookup.clone());
             for bind in binds {
-                builder = builder
-                    .bind_addr(bind.parse::<std::net::SocketAddr>().expect("loopback"))
-                    .expect("bind address");
+                let bind: SocketAddr = bind.parse().expect("loopback");
+                builder = builder.bind_addr(bind).expect("bind address");
             }
             let endpoint = builder.bind().await.expect("bind");
             nodes.push((endpoint, handle));

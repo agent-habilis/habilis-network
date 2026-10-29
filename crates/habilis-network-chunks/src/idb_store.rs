@@ -450,14 +450,14 @@ impl IdbStore {
             };
             // A malformed row costs that row, not the table: losing one binding
             // re-hashes one file, losing the table re-hashes everything.
-            let (Ok(size), Ok(mtime), Ok(root)) = (
-                size.parse::<u64>(),
-                mtime.parse::<i64>(),
-                Root::from_hex(root),
-            ) else {
+            let parsed_size: Result<u64, _> = size.parse();
+            let parsed_mtime: Result<i64, _> = mtime.parse();
+            let (Ok(file_len), Ok(file_mtime), Ok(root)) =
+                (parsed_size, parsed_mtime, Root::from_hex(root))
+            else {
                 continue;
             };
-            binds.push((key.to_owned(), size, mtime, root));
+            binds.push((key.to_owned(), file_len, file_mtime, root));
         }
         binds
     }
