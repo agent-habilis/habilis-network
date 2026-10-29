@@ -80,11 +80,9 @@ fn place_spawns(rng: &mut SplitMix64, count: usize) -> Vec<Spawn> {
         for _ in 0..16 {
             let x = MARGIN + u8::try_from(rng.next_bounded(u64::from(usable_w))).unwrap_or(0);
             let y = MARGIN + u8::try_from(rng.next_bounded(u64::from(usable_h))).unwrap_or(0);
-            let min_dist: u32 = placed
-                .iter()
-                .map(|&(px, py)| u32::from(x.abs_diff(px)).max(u32::from(y.abs_diff(py))))
-                .min()
-                .unwrap_or(u32::MAX);
+            let gap =
+                |&(px, py): &(u8, u8)| u32::from(x.abs_diff(px)).max(u32::from(y.abs_diff(py)));
+            let min_dist: u32 = placed.iter().map(gap).min().unwrap_or(u32::MAX);
             if best.is_none() || min_dist >= min_separation {
                 best = Some((x, y));
                 if min_dist >= min_separation {

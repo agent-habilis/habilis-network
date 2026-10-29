@@ -170,9 +170,11 @@ impl Instance {
 
 impl std::fmt::Debug for Instance {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Instance")
+        let mut debug = f.debug_struct("Instance");
+        debug
             .field("id", &self.id)
-            .field("finished", &self.finished)
+            .field("finished", &self.finished);
+        debug
             .field("parked", &self.thunk.is_some())
             .finish_non_exhaustive()
     }

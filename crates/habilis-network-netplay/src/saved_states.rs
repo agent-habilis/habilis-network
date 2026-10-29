@@ -16,9 +16,10 @@ pub(crate) struct SavedStates<S> {
 
 impl<S> std::fmt::Debug for SavedStates<S> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let capacity = self.cells.len();
         formatter
             .debug_struct("SavedStates")
-            .field("capacity", &self.cells.len())
+            .field("capacity", &capacity)
             .field("head", &self.head)
             .finish_non_exhaustive()
     }

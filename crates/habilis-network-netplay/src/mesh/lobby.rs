@@ -415,15 +415,16 @@ impl Lobby {
         // proposal race, and it is the one transition a consumer can miss:
         // it changes the agreed session id without changing the epoch, so a
         // consumer that only re-arms on a new epoch keeps the old match.
+        let replaced = self
+            .started
+            .as_ref()
+            .is_some_and(|current| current.epoch == epoch);
         tracing::debug!(
             epoch = epoch.get(),
             session_id = session_id.get(),
             local_handle = local_handle.index(),
             players = players.len(),
-            replaced = self
-                .started
-                .as_ref()
-                .is_some_and(|current| current.epoch == epoch),
+            replaced,
             "adopted a match"
         );
         self.epoch = epoch;

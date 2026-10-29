@@ -159,12 +159,14 @@ pub fn status_line(s: &Snapshot) -> String {
     }
     match crate::sim::outcome(&s.world) {
         Outcome::InProgress => String::new(),
-        Outcome::Winner(i) => format!(
-            "{} WINS",
-            s.roster
-                .get(i)
-                .map_or("?".to_owned(), |(_, nick)| nick.to_uppercase())
-        ),
+        Outcome::Winner(i) => {
+            format!(
+                "{} WINS",
+                s.roster
+                    .get(i)
+                    .map_or("?".to_owned(), |(_, nick)| nick.to_uppercase())
+            )
+        }
         Outcome::Draw => "DRAW".to_owned(),
     }
 }

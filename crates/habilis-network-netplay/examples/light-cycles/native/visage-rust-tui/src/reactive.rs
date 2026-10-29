@@ -207,11 +207,10 @@ impl<T: PartialEq + Clone> Signal<T> {
 
     fn notify(&self) {
         let subscribers: Vec<SubscriberId> = REGISTRY.with(|r| {
-            r.subs
-                .borrow()
-                .get(self.0.id.0 as usize)
-                .map(|set| set.iter().copied().collect())
-                .unwrap_or_default()
+            let subs = r.subs.borrow();
+            let found = subs.get(self.0.id.0 as usize);
+            let members: Option<Vec<SubscriberId>> = found.map(|set| set.iter().copied().collect());
+            members.unwrap_or_default()
         });
         for sub in subscribers {
             schedule_update(sub);

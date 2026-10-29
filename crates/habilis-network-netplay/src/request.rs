@@ -49,12 +49,11 @@ impl<S> Default for StateCell<S> {
 impl<S> std::fmt::Debug for StateCell<S> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let inner = self.0.lock().map_err(|_| std::fmt::Error)?;
-        formatter
-            .debug_struct("StateCell")
+        let mut debug = formatter.debug_struct("StateCell");
+        debug
             .field("frame", &inner.frame)
-            .field("has_state", &inner.state.is_some())
-            .field("checksum", &inner.checksum)
-            .finish()
+            .field("has_state", &inner.state.is_some());
+        debug.field("checksum", &inner.checksum).finish()
     }
 }
 

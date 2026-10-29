@@ -157,12 +157,10 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                 // Resolve and release the lock *before* awaiting: holding a
                 // `std::sync::Mutex` guard across an await is denied
                 // workspace-wide, and rightly so.
-                let nickname: Option<Nickname> = self
-                    .mailboxes
-                    .directory
-                    .lock()
-                    .ok()
-                    .and_then(|directory| directory.get(&to).cloned());
+                let nickname: Option<Nickname> = {
+                    let book = self.mailboxes.directory.lock().ok();
+                    book.and_then(|directory| directory.get(&to).cloned())
+                };
                 let Some(nickname) = nickname else {
                     // We have never heard from this peer, so we cannot
                     // address it. The lobby only admits peers we have heard

@@ -171,33 +171,34 @@ impl Game {
             .descriptor
             .as_ref()
             .map(|desc| {
-                desc.roster
-                    .iter()
-                    .map(|pubkey| (pubkey.clone(), self.nick_for(pubkey).to_owned()))
-                    .collect()
+                let entry = |pubkey: &String| (pubkey.clone(), self.nick_for(pubkey).to_owned());
+                desc.roster.iter().map(entry).collect()
             })
             .unwrap_or_default();
+        let my_pubkey = self
+            .transport
+            .local_pubkey()
+            .map(|key| key.to_string())
+            .unwrap_or_default();
+        let present = self
+            .lobby
+            .as_ref()
+            .map_or(1, |lobby| lobby.present().count());
+        let syncing = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.state() != SessionState::Running);
         Snapshot {
             match_number: self.match_number,
             room: self.room.clone(),
             world: self.world.clone(),
             roster,
-            my_pubkey: self
-                .transport
-                .local_pubkey()
-                .map(|key| key.to_string())
-                .unwrap_or_default(),
-            present: self
-                .lobby
-                .as_ref()
-                .map_or(1, |lobby| lobby.present().count()),
+            my_pubkey,
+            present,
             waiting: self.session.is_none(),
             desynced: self.desynced,
             blocked: self.blocked.clone(),
-            syncing: self
-                .session
-                .as_ref()
-                .is_some_and(|session| session.state() != SessionState::Running),
+            syncing,
         }
     }
 

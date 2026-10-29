@@ -50,12 +50,11 @@ pub struct SyncTestSession<T: Config> {
 
 impl<T: Config> std::fmt::Debug for SyncTestSession<T> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SyncTestSession")
+        let mut debug = formatter.debug_struct("SyncTestSession");
+        debug
             .field("num_players", &self.num_players)
-            .field("check_distance", &self.check_distance)
-            .field("sync", &self.sync)
-            .finish_non_exhaustive()
+            .field("check_distance", &self.check_distance);
+        debug.field("sync", &self.sync).finish_non_exhaustive()
     }
 }
 

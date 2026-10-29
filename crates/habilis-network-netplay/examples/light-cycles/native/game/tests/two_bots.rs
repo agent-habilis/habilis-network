@@ -164,10 +164,10 @@ fn two_bots_play_a_match_and_agree_on_its_outcome() {
                     });
                 }
                 let first = first_match[0].as_ref().map(|seen| seen.outcome);
-                first.is_some()
-                    && first_match
-                        .iter()
-                        .all(|seen| seen.as_ref().map(|seen| seen.outcome) == first)
+                let agreed = first_match
+                    .iter()
+                    .all(|seen| seen.as_ref().map(|seen| seen.outcome) == first);
+                first.is_some() && agreed
             })
             .await;
             assert!(

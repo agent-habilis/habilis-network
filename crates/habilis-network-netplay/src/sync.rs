@@ -45,11 +45,12 @@ pub(crate) struct Sync<T: Config> {
 
 impl<T: Config> std::fmt::Debug for Sync<T> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Sync")
+        let mut debug = formatter.debug_struct("Sync");
+        debug
             .field("current_frame", &self.current_frame)
             .field("last_confirmed_frame", &self.last_confirmed_frame)
-            .field("max_prediction", &self.max_prediction)
+            .field("max_prediction", &self.max_prediction);
+        debug
             .field("players", &self.input_queues.len())
             .finish_non_exhaustive()
     }
@@ -180,12 +181,12 @@ impl<T: Config> Sync<T> {
     /// The earliest frame any player's real input contradicted our guess, or
     /// [`Frame::NULL`] if every guess is still holding.
     fn first_incorrect_frame(&self) -> Frame {
-        self.input_queues
+        let holding = self
+            .input_queues
             .iter()
             .map(InputQueue::first_incorrect_frame)
-            .filter(|frame| *frame != Frame::NULL)
-            .min()
-            .unwrap_or(Frame::NULL)
+            .filter(|frame| *frame != Frame::NULL);
+        holding.min().unwrap_or(Frame::NULL)
     }
 
     /// If a prediction turned out wrong, emit the requests that undo and

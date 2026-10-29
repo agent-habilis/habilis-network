@@ -69,11 +69,10 @@ impl<N> std::fmt::Debug for Mounted<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Mounted::Text(_, text) => f.debug_tuple("Text").field(text).finish(),
-            Mounted::Box(_, props, children) => f
-                .debug_tuple("Box")
-                .field(props)
-                .field(&children.len())
-                .finish(),
+            Mounted::Box(_, props, children) => {
+                let count = children.len();
+                f.debug_tuple("Box").field(props).field(&count).finish()
+            }
             Mounted::Hole(_) => write!(f, "Hole"),
             Mounted::Component(c) => f.debug_tuple("Component").field(c).finish(),
         }

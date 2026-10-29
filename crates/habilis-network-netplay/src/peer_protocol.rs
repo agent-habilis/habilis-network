@@ -123,11 +123,12 @@ pub(crate) struct PeerProtocol<T: Config> {
 
 impl<T: Config> std::fmt::Debug for PeerProtocol<T> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PeerProtocol")
+        let mut debug = formatter.debug_struct("PeerProtocol");
+        debug
             .field("addr", &self.address)
             .field("handle", &self.handle)
-            .field("state", &self.state)
+            .field("state", &self.state);
+        debug
             .field("last_received_frame", &self.last_received_frame)
             .field("last_acked_frame", &self.last_acked_frame)
             .finish_non_exhaustive()

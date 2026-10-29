@@ -58,10 +58,11 @@ pub struct P2PSession<T: Config, Link: Transport<T>> {
 
 impl<T: Config, Link: Transport<T>> std::fmt::Debug for P2PSession<T, Link> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("P2PSession")
+        let mut debug = formatter.debug_struct("P2PSession");
+        debug
             .field("state", &self.state)
-            .field("local_handle", &self.local_handle)
+            .field("local_handle", &self.local_handle);
+        debug
             .field("peers", &self.peers)
             .field("sync", &self.sync)
             .finish_non_exhaustive()
@@ -104,10 +105,11 @@ impl<T: Config, Link: Transport<T>> P2PSession<T, Link> {
             max_prediction,
             "session built, synchronizing"
         );
-        let peers: Vec<PeerProtocol<T>> = players
+        let handles = players
             .into_iter()
             .enumerate()
-            .map(|(index, address)| (PlayerHandle::new(index), address))
+            .map(|(index, address)| (PlayerHandle::new(index), address));
+        let peers: Vec<PeerProtocol<T>> = handles
             .filter(|(handle, _)| *handle != local_handle)
             .map(|(handle, address)| PeerProtocol::new(address, handle, magic))
             .collect();
@@ -266,13 +268,11 @@ impl<T: Config, Link: Transport<T>> P2PSession<T, Link> {
 
     /// The highest frame every player has a real input for.
     fn refresh_confirmed_frame(&mut self) {
-        let Some(confirmed) = self
+        let live = self
             .peers
             .iter()
-            .filter(|peer| peer.state() != PeerState::Disconnected)
-            .map(PeerProtocol::last_received_frame)
-            .min()
-        else {
+            .filter(|peer| peer.state() != PeerState::Disconnected);
+        let Some(confirmed) = live.map(PeerProtocol::last_received_frame).min() else {
             // No live peers: everything we have simulated is confirmed.
             self.sync.confirm_through(self.sync.current_frame());
             return;

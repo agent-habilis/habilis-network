@@ -91,11 +91,10 @@ fn measure_text(arena: &mut Arena, id: NodeId, avail_w: i32, avail_h: i32) {
     };
     let wrap_width = if own_w >= 0 { own_w } else { avail_w };
     let lines = wrap_text(&text, usize::try_from(wrap_width.max(0)).unwrap_or(0), wrap);
-    let widest = lines
+    let widths = lines
         .iter()
-        .map(|l| i32::try_from(string_width(l)).unwrap_or(i32::MAX))
-        .max()
-        .unwrap_or(0);
+        .map(|l| i32::try_from(string_width(l)).unwrap_or(i32::MAX));
+    let widest = widths.max().unwrap_or(0);
     let node = arena.get_mut(id);
     let line_count = i32::try_from(lines.len()).unwrap_or(i32::MAX);
     node.lines = Some(lines);

@@ -75,11 +75,12 @@ pub(crate) struct InputQueue<T: Config> {
 
 impl<T: Config> std::fmt::Debug for InputQueue<T> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("InputQueue")
+        let mut debug = formatter.debug_struct("InputQueue");
+        debug
             .field("length", &self.length)
             .field("last_added_frame", &self.last_added_frame)
-            .field("first_incorrect_frame", &self.first_incorrect_frame)
+            .field("first_incorrect_frame", &self.first_incorrect_frame);
+        debug
             .field("predicting", &(self.prediction.frame != Frame::NULL))
             .finish_non_exhaustive()
     }
