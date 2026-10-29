@@ -75,9 +75,7 @@ impl MeshId {
         if !value.chars().all(is_base58_char) {
             return Err(MeshIdError::Charset(value));
         }
-        value
-            .parse::<LockedMesh>()
-            .map_err(|_| MeshIdError::InvalidHash)?;
+        let _: LockedMesh = value.parse().map_err(|_| MeshIdError::InvalidHash)?;
         Ok(Self(value))
     }
 }
@@ -170,7 +168,7 @@ mod mesh_id_tests {
     #[test]
     fn every_mesh_id_decodes_as_a_mesh() {
         let id = MeshId::try_new(valid_id()).unwrap();
-        id.as_str().parse::<LockedMesh>().unwrap();
+        let _: LockedMesh = id.as_str().parse().unwrap();
     }
 
     #[test]

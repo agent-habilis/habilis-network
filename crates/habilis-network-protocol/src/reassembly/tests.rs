@@ -673,11 +673,12 @@ fn repair_tickets_target_stalled_big_groups_once_per_window() {
     );
 
     // Not stalled yet — no tickets.
-    assert!(store.repair_tickets(start).collect::<Vec<_>>().is_empty());
+    let early: Vec<_> = store.repair_tickets(start).collect();
+    assert!(early.is_empty());
 
     // Stalled: only the big group is ticketed, with exactly its gaps.
     let stalled = start + REASSEMBLY_REPAIR_IDLE;
-    let tickets = store.repair_tickets(stalled).collect::<Vec<_>>();
+    let tickets: Vec<_> = store.repair_tickets(stalled).collect();
     assert_eq!(tickets.len(), 1, "small groups heal via anti-entropy");
     assert_eq!(tickets[0].group, big);
     assert_eq!(tickets[0].author.as_str(), "author");
@@ -686,10 +687,12 @@ fn repair_tickets_target_stalled_big_groups_once_per_window() {
     assert!(tickets[0].missing.contains(&1));
 
     // Asked once per window — the immediate re-check yields nothing.
-    assert!(store.repair_tickets(stalled).collect::<Vec<_>>().is_empty());
+    let asked_again: Vec<_> = store.repair_tickets(stalled).collect();
+    assert!(asked_again.is_empty());
     // The next window asks again.
     let next = stalled + REASSEMBLY_REPAIR_IDLE;
-    assert_eq!(store.repair_tickets(next).collect::<Vec<_>>().len(), 1);
+    let next_tickets: Vec<_> = store.repair_tickets(next).collect();
+    assert_eq!(next_tickets.len(), 1);
 }
 
 #[test]
@@ -700,22 +703,17 @@ fn shard_cache_serves_requested_frames_and_evicts_whole_groups() {
     let frame =
         |tag: u8, len: usize| crate::message::WireFrame::new(bytes::Bytes::from(vec![tag; len]));
     cache.insert(first.clone(), vec![frame(1, 10), frame(2, 10)]);
-    let served = cache.frames(&first, &[1, 7]).collect::<Vec<_>>();
+    let served: Vec<_> = cache.frames(&first, &[1, 7]).collect();
     assert_eq!(served.len(), 1, "out-of-range idx skipped");
     assert_eq!(served[0].as_bytes()[0], 2);
 
     // A budget-filling newcomer evicts the oldest group whole.
     let second = group("00000000-0000-4000-8000-0000000000c2");
     cache.insert(second.clone(), vec![frame(3, SHARD_CACHE_BUDGET_BYTES)]);
-    assert!(
-        cache.frames(&first, &[0]).collect::<Vec<_>>().is_empty(),
-        "old group evicted"
-    );
-    assert_eq!(
-        cache.frames(&second, &[0]).collect::<Vec<_>>().len(),
-        1,
-        "the newest group always stays"
-    );
+    let evicted: Vec<_> = cache.frames(&first, &[0]).collect();
+    assert!(evicted.is_empty(), "old group evicted");
+    let kept: Vec<_> = cache.frames(&second, &[0]).collect();
+    assert_eq!(kept.len(), 1, "the newest group always stays");
 }
 
 #[test]

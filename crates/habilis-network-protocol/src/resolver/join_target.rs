@@ -35,7 +35,8 @@ impl FromStr for JoinTarget {
         if let Ok(invite) = InviteTicket::decode(trimmed) {
             return Ok(JoinTarget::Invite(invite));
         }
-        match trimmed.parse::<MeshId>() {
+        let parsed: Result<MeshId, MeshIdError> = trimmed.parse();
+        match parsed {
             Ok(id) => Ok(JoinTarget::Mesh(id)),
             // Wrong length or wrong charset means it was never a token; a
             // payload that decodes far enough to fail on its *contents* is a

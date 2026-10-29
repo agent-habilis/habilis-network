@@ -71,11 +71,12 @@ impl TryFrom<WireIn> for Message {
             .as_deref()
             .map(|hash| ContentHash::from_hex(hash).ok_or("malformed prev hash"))
             .transpose()?;
-        let parents = wire
+        let parents: Result<Vec<ContentHash>, &str> = wire
             .parents
             .iter()
             .map(|hash| ContentHash::from_hex(hash).ok_or("malformed parent hash"))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
+        let parents = parents?;
         let signer = match (key, wire.signature.is_empty()) {
             (None, true) => None,
             (Some(_), true) => return Err("pubkey without a signature"),

@@ -11,9 +11,8 @@ pub fn resolve(target: &JoinTarget) -> Result<LockedMesh, ResolveError> {
         JoinTarget::Mesh(id) => {
             // Refusing an invite-only id is `LockedMesh::unlock`'s job, the one
             // place a bare hash can become a joinable mesh.
-            id.as_str()
-                .parse::<LockedMesh>()
-                .map_err(|error| ResolveError::InvalidId(error.to_string()))
+            let locked: Result<LockedMesh, _> = id.as_str().parse();
+            locked.map_err(|error| ResolveError::InvalidId(error.to_string()))
         }
         // An invite carries the join key and needs the password to unwrap it, so
         // it is redeemed in `JoinParams::resolve`; `resolve` never sees it alone.

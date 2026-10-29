@@ -76,16 +76,14 @@ pub fn endpoint_addr_from_json(
     let mut addr = EndpointAddr::new(endpoint_id);
     if let Some(ips) = json["ips"].as_array() {
         for ip in ips {
-            if let Some(text) = ip.as_str()
-                && let Ok(socket) = text.parse::<SocketAddr>()
-            {
+            let socket: Option<SocketAddr> = ip.as_str().and_then(|text| text.parse().ok());
+            if let Some(socket) = socket {
                 addr = addr.with_ip_addr(socket);
             }
         }
     }
-    if let Some(relay) = json["relay"].as_str()
-        && let Ok(url) = relay.parse::<RelayUrl>()
-    {
+    let url: Option<RelayUrl> = json["relay"].as_str().and_then(|relay| relay.parse().ok());
+    if let Some(url) = url {
         addr = addr.with_relay_url(url);
     }
     Ok((endpoint_id, addr))

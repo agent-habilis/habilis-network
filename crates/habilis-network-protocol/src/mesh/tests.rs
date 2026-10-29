@@ -123,12 +123,8 @@ fn validate_rejects_a_relay_url_over_the_wire_ceiling() {
 #[test]
 fn seed_drives_rendezvous_identity() {
     let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
-    let decoded = mesh
-        .to_string()
-        .parse::<LockedMesh>()
-        .unwrap()
-        .unlock(None)
-        .unwrap();
+    let locked: LockedMesh = mesh.to_string().parse().unwrap();
+    let decoded = locked.unlock(None).unwrap();
     assert_eq!(decoded.rendezvous_id(), mesh.rendezvous_id());
     assert_eq!(decoded.rendezvous_ports(), mesh.rendezvous_ports());
 }
@@ -230,10 +226,8 @@ fn set_password_bakes_verifier_and_unlock_verifies_it() {
     assert_eq!(joiner.rendezvous_ports(), creator.rendezvous_ports());
 
     // Wrong password fails locally, against the verifier.
-    let error = creator
-        .to_string()
-        .parse::<LockedMesh>()
-        .unwrap()
+    let creator_locked: LockedMesh = creator.to_string().parse().unwrap();
+    let error = creator_locked
         .unlock(Some(&Password::new("hunter3".to_owned())))
         .unwrap_err();
     assert_eq!(error, UnlockError::WrongPassword);
@@ -406,10 +400,8 @@ fn a_prefixed_id_is_rejected() {
         .to_string();
     for prefix in ["💬", "💬://", "sw1", "xyz", "ahs"] {
         let bad = format!("{prefix}{encoded}");
-        assert!(
-            bad.parse::<LockedMesh>().is_err(),
-            "expected reject for prefix {prefix}",
-        );
+        let parsed: Result<LockedMesh, _> = bad.parse();
+        assert!(parsed.is_err(), "expected reject for prefix {prefix}");
     }
 }
 
@@ -422,7 +414,8 @@ fn invalid_checksum_rejected() {
     let last_index = bad.len() - 1;
     let replacement = if bad.ends_with('1') { "2" } else { "1" };
     bad.replace_range(last_index.., replacement);
-    assert!(bad.parse::<LockedMesh>().is_err());
+    let parsed: Result<LockedMesh, _> = bad.parse();
+    assert!(parsed.is_err());
 }
 
 #[test]

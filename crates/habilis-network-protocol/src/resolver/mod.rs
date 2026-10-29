@@ -19,9 +19,8 @@ mod tests {
     // variant, so the trimmed input has to survive classification verbatim.
     #[test]
     fn a_non_token_string_is_unrecognized_and_echoes_its_input() {
-        let error = "  github.com/alice/proj "
-            .parse::<JoinTarget>()
-            .unwrap_err();
+        let parsed: Result<JoinTarget, _> = "  github.com/alice/proj ".parse();
+        let error = parsed.unwrap_err();
         assert_eq!(
             error,
             JoinTargetError::Unrecognized("github.com/alice/proj".to_owned())
@@ -56,14 +55,16 @@ mod tests {
         let mut mistyped = known_mesh_id();
         let replacement = if mistyped.ends_with('1') { "2" } else { "1" };
         mistyped.replace_range(mistyped.len() - 1.., replacement);
-        let error = mistyped.parse::<JoinTarget>().unwrap_err();
+        let parsed: Result<JoinTarget, _> = mistyped.parse();
+        let error = parsed.unwrap_err();
         assert_eq!(error.to_string(), "invalid gossip hash");
     }
 
     #[test]
     fn join_target_classifies_valid_id() {
         let id = known_mesh_id();
-        assert!(matches!(id.parse::<JoinTarget>(), Ok(JoinTarget::Mesh(_))));
+        let parsed: Result<JoinTarget, _> = id.parse();
+        assert!(matches!(parsed, Ok(JoinTarget::Mesh(_))));
     }
 
     fn invite_only_mesh() -> crate::mesh::Mesh {
@@ -100,9 +101,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(matches!(
-            token.parse::<JoinTarget>(),
-            Ok(JoinTarget::Invite(_))
-        ));
+        let parsed: Result<JoinTarget, _> = token.parse();
+        assert!(matches!(parsed, Ok(JoinTarget::Invite(_))));
     }
 }

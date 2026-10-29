@@ -151,9 +151,9 @@ fn note_found_then_updated_then_expire_lost() {
     assert_eq!(dir.snapshot().next().expect("one listing").peers, 5);
 
     // No fresh ad past the ttl ⇒ expired/Lost.
-    let lost = dir
+    let lost: Vec<_> = dir
         .expire(Duration::from_mins(1), start + Duration::from_secs(200))
-        .collect::<Vec<_>>();
+        .collect();
     assert_eq!(lost.len(), 1);
     assert!(dir.snapshot().next().is_none());
 }
