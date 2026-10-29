@@ -1,3 +1,4 @@
+use std::{error, fmt};
 /// Why the event loop of a mesh stopped with an error.
 ///
 /// [`EventLoopError::Internal`] holds the causes that no caller acts on: the loop ended
@@ -19,7 +20,7 @@
 #[must_use]
 pub enum EventLoopError {
     /// A cause no caller acts on. It keeps its text and its chain.
-    Internal(Box<dyn std::error::Error + Send + Sync>),
+    Internal(Box<dyn error::Error + Send + Sync>),
 }
 
 impl EventLoopError {
@@ -29,16 +30,16 @@ impl EventLoopError {
     }
 }
 
-impl std::fmt::Display for EventLoopError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for EventLoopError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Internal(error) => std::fmt::Display::fmt(error.as_ref(), formatter),
+            Self::Internal(error) => fmt::Display::fmt(error.as_ref(), formatter),
         }
     }
 }
 
-impl std::error::Error for EventLoopError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl error::Error for EventLoopError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Internal(error) => error.source(),
         }

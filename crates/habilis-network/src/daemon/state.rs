@@ -77,9 +77,12 @@ mod tests {
     use n0_future::time::Instant as TokioInstant;
 
     use crate::protocol::message;
+    use crate::transport::PayloadPath;
     use crate::transport::probe::PathKind;
     use crate::util::tuning;
+    use crate::{lookup, protocol};
     use iroh::address_lookup::memory;
+    use std::net;
     fn lower_and_higher() -> (EndpointId, EndpointId) {
         let first = endpoint_id(1);
         let second = endpoint_id(2);
@@ -648,7 +651,7 @@ mod tests {
             "the book starts empty"
         );
 
-        crate::lookup::add_peer_addr(
+        lookup::add_peer_addr(
             state.address_book(),
             iroh::EndpointAddr::new(bob).with_ip_addr("192.0.2.1:4000".parse().expect("address")),
         );
@@ -1205,7 +1208,7 @@ mod tests {
     /// An unsigned chat message carrying `id` — enough to exercise
     /// `mark_seen`, which keys on `dedup_key()` (`SHA-256(pubkey ‖ id)`).
     fn msg_with_id(id: &MessageId) -> message::Verified {
-        plain_with_id(id).sign(&crate::protocol::Identity::generate())
+        plain_with_id(id).sign(&protocol::Identity::generate())
     }
 
     fn plain_with_id(id: &MessageId) -> Message {
@@ -1213,7 +1216,7 @@ mod tests {
             &MeshId::from("test"),
             &nick("author-nick"),
             AppFrameParams::new(
-                crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                 None,
                 None,
                 MessageBody::from("body"),
@@ -1495,7 +1498,7 @@ mod tests {
         // The mapping only reaches `RelayOnly` on a mesh whose relay may carry
         // payload; the lookup-only half is
         // `a_relay_reading_never_demotes_a_proven_peer_on_a_lookup_only_mesh`.
-        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
+        state.relay_transport = PayloadPath::RelayAllowed;
         state.observe_path(endpoint_id(1), PathSummary::Direct);
         state.observe_path(endpoint_id(2), PathSummary::Relay);
         state.direct.insert(endpoint_id(3), DirectState::Pending);
@@ -1551,7 +1554,7 @@ mod tests {
         use crate::gossip::PathSummary;
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
+        state.relay_transport = PayloadPath::DirectOnly;
         state.direct.insert(endpoint_id(1), DirectState::Direct);
         state.observe_path(endpoint_id(1), PathSummary::Relay);
         assert_eq!(
@@ -1562,7 +1565,7 @@ mod tests {
 
         // With the relay allowed as transport the reading is real news: the
         // peer is reachable, over the relay, and the lanes may use it.
-        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
+        state.relay_transport = PayloadPath::RelayAllowed;
         state.observe_path(endpoint_id(1), PathSummary::Relay);
         assert_eq!(
             state.direct.get(&endpoint_id(1)),
@@ -1836,8 +1839,8 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let id = endpoint_id(1);
         let relay: iroh::RelayUrl = "https://relay.example".parse().expect("a relay url");
-        let ip: std::net::SocketAddr = "192.0.2.1:4000".parse().expect("an address");
-        let other_ip: std::net::SocketAddr = "192.0.2.2:4000".parse().expect("an address");
+        let ip: net::SocketAddr = "192.0.2.1:4000".parse().expect("an address");
+        let other_ip: net::SocketAddr = "192.0.2.2:4000".parse().expect("an address");
         let without_relay = iroh::EndpointAddr::new(id).with_ip_addr(ip);
         let with_relay = without_relay.clone().with_relay_url(relay.clone());
 
@@ -1880,8 +1883,8 @@ mod tests {
     fn the_order_of_the_addresses_does_not_make_an_address_differ() {
         let _guard = ::habilis_network_test_tracing::init();
         let id = endpoint_id(1);
-        let first: std::net::SocketAddr = "192.0.2.1:4000".parse().expect("an address");
-        let second: std::net::SocketAddr = "192.0.2.2:4000".parse().expect("an address");
+        let first: net::SocketAddr = "192.0.2.1:4000".parse().expect("an address");
+        let second: net::SocketAddr = "192.0.2.2:4000".parse().expect("an address");
         let mut state = fresh_state();
         state.last_flooded_addr = Some(
             iroh::EndpointAddr::new(id)

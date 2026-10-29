@@ -1,3 +1,5 @@
+use crate::protocol;
+use std::time;
 mod bound;
 mod digest_window;
 mod missing_query;
@@ -17,7 +19,7 @@ pub(crate) use window_range::WindowRange;
 fn bound_after((timestamp, key): Bound) -> Bound {
     match u128::from_be_bytes(key.to_bytes()).checked_add(1) {
         Some(next) => (timestamp, DedupKey::from(next.to_be_bytes())),
-        None => (timestamp + std::time::Duration::from_secs(1), DedupKey::MIN),
+        None => (timestamp + time::Duration::from_secs(1), DedupKey::MIN),
     }
 }
 
@@ -199,7 +201,7 @@ impl MessageLog {
     /// call site, so the `total`-sized allocation is safe.
     pub(crate) fn collect_shards<'a>(
         &'a self,
-        group: &crate::protocol::ShardGroup,
+        group: &protocol::ShardGroup,
         author: &AuthorKey,
         total: u32,
     ) -> Vec<Option<&'a Verified>> {
@@ -422,6 +424,7 @@ mod tests {
     };
     use crate::protocol::Message;
 
+    use crate::protocol;
     /// A whole-log gap query for `requester` with nothing already held — the
     /// shape every gate test wants.
     fn all_missing_for<'a>(
@@ -449,13 +452,13 @@ mod tests {
 
     fn plain(id: &str) -> Message {
         Message::new_app(
-            &crate::protocol::MeshId::from("test"),
+            &protocol::MeshId::from("test"),
             &Nickname::from("author"),
-            crate::protocol::AppFrameParams::new(
-                crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+            protocol::AppFrameParams::new(
+                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                 None,
                 None,
-                crate::protocol::MessageBody::from(id),
+                protocol::MessageBody::from(id),
             ),
         )
     }
@@ -620,13 +623,13 @@ mod tests {
 
     fn plain_to(body: &str, ts: i64, to: &str) -> Message {
         let mut message = Message::new_app(
-            &crate::protocol::MeshId::from("test"),
+            &protocol::MeshId::from("test"),
             &Nickname::from("author"),
-            crate::protocol::AppFrameParams::new(
-                crate::protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+            protocol::AppFrameParams::new(
+                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                 Some(Nickname::from(to)),
                 None,
-                crate::protocol::MessageBody::from(body),
+                protocol::MessageBody::from(body),
             ),
         );
         message.timestamp = UnixSecs::from(ts);
@@ -1043,8 +1046,9 @@ mod tests {
 
         use super::{MessageLog, message};
 
+        use crate::proptest_support;
         proptest! {
-            #![proptest_config(crate::proptest_support::config())]
+            #![proptest_config(proptest_support::config())]
             #[test]
             fn prop_message_log_never_exceeds_capacity(
                 cap in 1..50usize,

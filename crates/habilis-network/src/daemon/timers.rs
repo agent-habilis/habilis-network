@@ -12,6 +12,8 @@ use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::util::clock::{Instant, millis_saturating};
 use crate::util::{resident_memory, tuning, unix_secs};
 
+use crate::gossip::PathSummary;
+use crate::net;
 use crate::transport::payload_path;
 /// The warn-only resident-memory leak check, run on the slow (1-minute)
 /// housekeeping tick (see `run`'s `intervals.prune`). Kept on this tick now
@@ -161,11 +163,11 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
     let (mut direct, mut relay, mut other) = (0usize, 0usize, 0usize);
     let linked: Vec<_> = state.linked_endpoints.iter().copied().collect();
     for peer_id in linked {
-        let (connection, relay_url) = crate::net::conn_path(endpoint, peer_id).await;
+        let (connection, relay_url) = net::conn_path(endpoint, peer_id).await;
         match connection {
-            crate::gossip::PathSummary::Direct => direct += 1,
-            crate::gossip::PathSummary::Relay => relay += 1,
-            crate::gossip::PathSummary::Mixed | crate::gossip::PathSummary::Unknown => other += 1,
+            PathSummary::Direct => direct += 1,
+            PathSummary::Relay => relay += 1,
+            PathSummary::Mixed | PathSummary::Unknown => other += 1,
         }
         // A link that was relayed at `NeighborUp` and has since punched a
         // direct path: refresh the reading the roster and lanes consult.

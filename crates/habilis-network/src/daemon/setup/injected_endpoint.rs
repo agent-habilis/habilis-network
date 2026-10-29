@@ -5,6 +5,8 @@ use iroh::Endpoint;
 
 use crate::protocol::mesh::LookupOpts;
 
+use crate::{lookup, transport};
+use std::fmt;
 /// An endpoint the caller already built, shared with the mesh.
 ///
 /// Lets one process run an application protocol and a mesh node on **one**
@@ -60,11 +62,11 @@ pub struct InjectedEndpoint {
     /// The admission table the endpoint's connection hook reports to. The mesh
     /// enforces its direct-peer cap on this table, so a table made elsewhere would
     /// get no report from the hook.
-    pub(super) admission: crate::transport::SignalAdmission,
+    pub(super) admission: transport::SignalAdmission,
     /// The handle of the mDNS address lookup of the endpoint, when `bind` wired one.
     /// The mesh hears the other members of its mesh on the LAN through it, and marks
     /// the endpoint as a member in the record it announces.
-    pub(super) mdns: Option<crate::lookup::MdnsHandle>,
+    pub(super) mdns: Option<lookup::MdnsHandle>,
 }
 
 impl InjectedEndpoint {
@@ -83,7 +85,7 @@ impl InjectedEndpoint {
         lookups: &LookupOpts,
         secret: iroh::SecretKey,
         alpns: Vec<Vec<u8>>,
-        transports: crate::lookup::TransportHandles,
+        transports: lookup::TransportHandles,
         max_direct: usize,
     ) -> Result<Self, SetupError> {
         Self::bind_checked(lookups, secret, alpns, transports, max_direct)
@@ -95,7 +97,7 @@ impl InjectedEndpoint {
         lookups: &LookupOpts,
         secret: iroh::SecretKey,
         alpns: Vec<Vec<u8>>,
-        mut transports: crate::lookup::TransportHandles,
+        mut transports: lookup::TransportHandles,
         max_direct: usize,
     ) -> Result<Self> {
         anyhow::ensure!(
@@ -110,18 +112,13 @@ impl InjectedEndpoint {
         super::check_webrtc_key(bound, &webrtc)?;
         #[cfg(feature = "multihop")]
         super::check_hop_key(bound, transports.multihop.as_ref())?;
-        let admission = crate::transport::SignalAdmission::new(max_direct);
+        let admission = transport::SignalAdmission::new(max_direct);
         transports.admission = Some(admission.clone());
         #[cfg(all(feature = "multihop", feature = "host"))]
         let multihop = transports.multihop.clone();
-        let (endpoint, mdns) = crate::lookup::build_endpoint_keeping_mdns(
-            lookups,
-            Some(secret),
-            None,
-            alpns,
-            transports,
-        )
-        .await?;
+        let (endpoint, mdns) =
+            lookup::build_endpoint_keeping_mdns(lookups, Some(secret), None, alpns, transports)
+                .await?;
         Ok(Self {
             endpoint,
             webrtc,
@@ -138,18 +135,18 @@ impl InjectedEndpoint {
     /// where it is not the handle is `Infallible`, which is `Copy`: one `clone` call cannot suit
     /// both builds.
     #[cfg(all(feature = "host", feature = "mdns"))]
-    pub(super) fn mdns_handle(&self) -> Option<crate::lookup::MdnsHandle> {
+    pub(super) fn mdns_handle(&self) -> Option<lookup::MdnsHandle> {
         self.mdns.clone()
     }
 
     #[cfg(all(feature = "host", not(feature = "mdns")))]
-    pub(super) fn mdns_handle(&self) -> Option<crate::lookup::MdnsHandle> {
+    pub(super) fn mdns_handle(&self) -> Option<lookup::MdnsHandle> {
         self.mdns
     }
 }
 
-impl std::fmt::Debug for InjectedEndpoint {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for InjectedEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("InjectedEndpoint")
             .field("id", &self.endpoint.id())

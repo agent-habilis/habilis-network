@@ -50,6 +50,7 @@ use crate::util::tuning;
 use iroh::address_lookup::memory;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::{beacon, gossip, protocol, transport};
 /// All mutable state owned by the event loop.
 ///
 /// Grouped into a single struct so handlers and timer ticks can take
@@ -102,7 +103,7 @@ pub struct EventLoopState {
     /// carrying payload.
     pub(crate) direct: HashMap<EndpointId, DirectState>,
     /// Mirrors `TransportPolicy::relay`, set once at loop start.
-    pub(crate) relay_transport: crate::transport::PayloadPath,
+    pub(crate) relay_transport: transport::PayloadPath,
     /// Where a direct-path probe reports its verdict; the loop's receiver
     /// grafts on it (`transport::probe::on_outcome`). A detached sender until
     /// the real loop installs its channel.
@@ -181,7 +182,7 @@ pub struct EventLoopState {
     digest_unreadable: Cooldown<AuthorKey>,
     /// Where a digest answer goes, so that the loop never waits to send it. The
     /// task that drains it takes `resend_receiver` when the loop starts.
-    pub(crate) resend_outbox: crate::transport::ResendOutbox,
+    pub(crate) resend_outbox: transport::ResendOutbox,
     /// Tests only: the one inbound frame to drop before the app reads it, as a full queue between
     /// the gossip layer and the loop does. The gossip layer has counted it as delivered.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -189,7 +190,7 @@ pub struct EventLoopState {
     /// Tests only: how many frames the hook dropped.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) test_drops_fired: u32,
-    pub(crate) resend_receiver: Option<mpsc::Receiver<crate::transport::Resend>>,
+    pub(crate) resend_receiver: Option<mpsc::Receiver<transport::Resend>>,
     /// When each asker's state or meta digest was last served, per plane. A
     /// new node sends a digest pair for every peer it sees, all with the same
     /// heads, and every holder hears each one; the plane is in the key so the
@@ -385,7 +386,7 @@ pub struct EventLoopState {
     /// detached pool; the real loop replaces it with an endpoint-backed one.
     /// Independent of `linked_endpoints` by design (unicast can reach a
     /// non-neighbor). See [`crate::transport`].
-    pub(crate) unicast_pool: crate::transport::UnicastPool,
+    pub(crate) unicast_pool: transport::UnicastPool,
     /// The multi-hop transport handle, when the mesh policy registered it
     /// on the peer endpoint. Owns the routing table (fed from received
     /// `LinkState` frames) and the underlay endpoint. `None` when multihop is off
@@ -423,7 +424,7 @@ pub struct EventLoopState {
     pub(crate) claims_held: bool,
     /// What this node knows of the busy rungs of a private ladder, and the probe tasks that find
     /// out more. The claim walk and the check of the lower rungs read it and never wait.
-    pub(crate) rungs: crate::beacon::RungWatch,
+    pub(crate) rungs: beacon::RungWatch,
     /// Tests only: the beacon is shed at the top of the next turn of the loop, as a re-check
     /// shed does (`Request::ShedBeacon`).
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -448,14 +449,14 @@ pub struct EventLoopState {
     /// Shared with the signal *acceptor* on the Router, not owned by the loop,
     /// so the direct-peer ceiling is one number for this node rather than one
     /// per role. See [`crate::transport::SignalAdmission`].
-    pub(crate) webrtc_admission: crate::transport::SignalAdmission,
+    pub(crate) webrtc_admission: transport::SignalAdmission,
     /// The address book of the member endpoint (`lookup::address_book`): where the addresses of the
     /// peers are registered with `lookup::add_peer_addr`.
     pub(crate) address_book: memory::MemoryLookup,
     /// How far ICE may reach when this peer gathers candidates. Host-only on a
     /// loopback mesh, which promises to make no external network call —
     /// `IceConfig::default()` would query two public STUN servers.
-    pub(crate) webrtc_ice: crate::transport::IceProfile,
+    pub(crate) webrtc_ice: transport::IceProfile,
     /// When `Some(deadline)` and not yet elapsed, the event loop runs
     /// a fast `beacon::ensure` burst (event-driven failover). Armed by
     /// `arm_reclaim`, mostly on `NeighborDown` — the beacon may have just
@@ -647,7 +648,7 @@ impl EventLoopState {
             key: mesh_key,
         } = secrets;
         let (resend_outbox, resend_receiver) =
-            crate::transport::ResendOutbox::new(tuning::RESEND_OUTBOX_CAP);
+            transport::ResendOutbox::new(tuning::RESEND_OUTBOX_CAP);
         // Per-channel encryption keys, domain-separated from each other and from
         // every other seed-derived secret. `None` (passwordless) ⇒ the docs and
         // broadcast chat stay plaintext, exactly as before.
@@ -658,7 +659,7 @@ impl EventLoopState {
             linked_endpoints: HashSet::new(),
             zero_links_since: None,
             direct: HashMap::new(),
-            relay_transport: crate::transport::PayloadPath::DirectOnly,
+            relay_transport: transport::PayloadPath::DirectOnly,
             direct_proven: mpsc::unbounded_channel().0,
             gossip_handle: None,
             path_changes: mpsc::unbounded_channel().0,
@@ -722,7 +723,7 @@ impl EventLoopState {
             local_udp_transport: UdpTransport::Present,
             announced: false,
             meshed: false,
-            unicast_pool: crate::transport::UnicastPool::disconnected(),
+            unicast_pool: transport::UnicastPool::disconnected(),
             #[cfg(feature = "multihop")]
             multihop: None,
             #[cfg(feature = "multihop")]
@@ -739,7 +740,7 @@ impl EventLoopState {
             linkstate_held: false,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             claims_held: false,
-            rungs: crate::beacon::RungWatch::detached(),
+            rungs: beacon::RungWatch::detached(),
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             shed_requested: false,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -825,7 +826,7 @@ impl EventLoopState {
                 last_seen_secs_ago: self.last_seen.get(nick).map(secs_since),
                 quiet: false,
                 reach: self.reach_of(nick),
-                transport: crate::transport::lane_for(nick, self),
+                transport: transport::lane_for(nick, self),
             })
             .chain(self.quiet.iter().map(|nick| RosterEntry {
                 nickname: nick.clone(),
@@ -835,7 +836,7 @@ impl EventLoopState {
                 last_seen_secs_ago: self.quiet_since.get(nick).map(secs_since),
                 quiet: true,
                 reach: Reach::Gossip,
-                transport: crate::transport::lane_for(nick, self),
+                transport: transport::lane_for(nick, self),
             }))
             .collect();
         // Most-recently-seen first; unknown recency (no heartbeat yet) sorts last.
@@ -1191,7 +1192,7 @@ impl EventLoopState {
         if !self.hosts_rendezvous {
             return;
         }
-        if (crate::beacon::Contest { own, rival: sender }).own_yields() {
+        if (beacon::Contest { own, rival: sender }).own_yields() {
             self.yield_to_lower = true;
             self.next_rival_recheck = Some(now);
         } else if newly {
@@ -1479,7 +1480,7 @@ impl EventLoopState {
         }
         // The concatenation of valid bodies is itself valid (no new control
         // chars), but fail closed rather than surface a malformed body.
-        let body = crate::protocol::MessageBody::try_new(&body).ok()?;
+        let body = protocol::MessageBody::try_new(&body).ok()?;
         let header = slots[0].expect("shard 0 present");
         Some(reassembly::synthesize_from(header, body, &shard.group))
     }
@@ -1493,8 +1494,8 @@ impl EventLoopState {
     /// underneath. Demoting on it would stop every payload lane to a peer that
     /// is proven direct. `gossip::recv` gates its own call for this reason;
     /// the census tick in `daemon::timers` does not, so the gate lives here.
-    pub(crate) fn observe_path(&mut self, peer: EndpointId, summary: crate::gossip::PathSummary) {
-        if !self.relay_transport.relay_allowed() && summary == crate::gossip::PathSummary::Relay {
+    pub(crate) fn observe_path(&mut self, peer: EndpointId, summary: gossip::PathSummary) {
+        if !self.relay_transport.relay_allowed() && summary == gossip::PathSummary::Relay {
             return;
         }
         if let Some(state) = DirectState::classify(summary) {
@@ -1689,19 +1690,19 @@ impl EventLoopState {
     /// The shared document for `channel`. Replaces a `match` on
     /// [`Channel`](crate::protocol::Channel) at every call site.
     #[must_use]
-    pub fn doc(&self, channel: crate::protocol::Channel) -> &MeshDoc {
+    pub fn doc(&self, channel: protocol::Channel) -> &MeshDoc {
         match channel {
-            crate::protocol::Channel::State => &self.state_doc,
-            crate::protocol::Channel::Meta => &self.meta_doc,
+            protocol::Channel::State => &self.state_doc,
+            protocol::Channel::Meta => &self.meta_doc,
             _ => unreachable!("a channel added later needs its own document"),
         }
     }
 
     /// Mutable [`Self::doc`], for applying a local change before broadcast.
-    pub fn doc_mut(&mut self, channel: crate::protocol::Channel) -> &mut MeshDoc {
+    pub fn doc_mut(&mut self, channel: protocol::Channel) -> &mut MeshDoc {
         match channel {
-            crate::protocol::Channel::State => &mut self.state_doc,
-            crate::protocol::Channel::Meta => &mut self.meta_doc,
+            protocol::Channel::State => &mut self.state_doc,
+            protocol::Channel::Meta => &mut self.meta_doc,
             _ => unreachable!("a channel added later needs its own document"),
         }
     }

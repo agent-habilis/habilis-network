@@ -26,6 +26,9 @@ use crate::protocol::{crypto, identity};
 use crate::transport::underlay_webrtc;
 use iroh::address_lookup::memory;
 
+use crate::{doc, lookup, protocol, transport};
+use iroh_gossip::net;
+use std::{fmt, sync};
 /// Configuration for the event loop, shared by `create` and `join`.
 /// The driver-specific channels live in [`DriverMode`].
 /// Opaque to consumers: built whole by
@@ -54,11 +57,11 @@ pub struct EventLoopConfig {
     /// terminally ends (for example when the actor drops the
     /// subscription; a lag does not end it); without this handle the
     /// daemon would stay permanently deaf (review finding H1).
-    pub(crate) gossip: iroh_gossip::net::Gossip,
+    pub(crate) gossip: net::Gossip,
     pub(crate) author: Nickname,
     /// This member's signing identity (Ed25519), minted in `setup_mesh`.
     /// In-process / ephemeral for now (see [`crate::protocol::identity`]).
-    pub(crate) identity: std::sync::Arc<identity::Identity>,
+    pub(crate) identity: sync::Arc<identity::Identity>,
     pub(crate) mesh: MeshId,
     /// Decoded mesh name (from the mesh id). Carried so the
     /// shutdown path can print `left #NAME` without re-parsing
@@ -79,12 +82,12 @@ pub struct EventLoopConfig {
     /// derive the per-channel keys that encrypt the `state`/`meta` docs and
     /// broadcast chat. `None` for a passwordless mesh — those stay plaintext.
     /// Wiped on drop.
-    pub(crate) mesh_key: Option<crate::protocol::SymmetricKey>,
+    pub(crate) mesh_key: Option<protocol::SymmetricKey>,
     /// Per-loop generic event sink (the tapped `Output`, wrapped as a
     /// [`NodeSink`]). The engine emits `NodeEvent`s through it and hands a clone
     /// to every handler, so multiple in-process sessions each have their own and
     /// never race a shared global.
-    pub(crate) sink: std::sync::Arc<dyn NodeSink>,
+    pub(crate) sink: sync::Arc<dyn NodeSink>,
     /// The invite-only **creator's** mesh, retained (in-memory, secrets and
     /// all) so the `invite` command can mint from its issuer key + root. `Some`
     /// only on the creator of an invite-only mesh; `None` everywhere else (a
@@ -114,7 +117,7 @@ pub struct EventLoopConfig {
     pub(crate) rung_rx: watch::Receiver<Option<iroh::RelayUrl>>,
     /// The backgrounded startup probe behind `rung_rx`, released on the way
     /// out with the rendezvous. `None` for an empty ladder.
-    pub(crate) rung_probe: Option<crate::lookup::StoppableTask>,
+    pub(crate) rung_probe: Option<lookup::StoppableTask>,
     /// When this member may serve the rendezvous (beacon role).
     pub(crate) cohost: CoHostPolicy,
     /// The consumer's per-user runtime base — the root the control socket, the
@@ -142,7 +145,7 @@ pub struct EventLoopConfig {
     pub(crate) underlay_webrtc: Option<underlay_webrtc::UnderlayWebRtc>,
     /// The members of this mesh that the LAN announces, read by the event loop. `None` when the
     /// endpoint has no mDNS handle: there is no LAN arm then.
-    pub(crate) lan_contacts: Option<mpsc::Receiver<crate::lookup::LanEvent>>,
+    pub(crate) lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
     /// This peer's `WebRTC` transport handle. Portable: it is the browser's
     /// only direct path onto the mesh, and an extra candidate path for a native
     /// peer. `run()` moves it into `EventLoopState::webrtc`.
@@ -156,13 +159,13 @@ pub struct EventLoopConfig {
     /// The negotiation-slot table this peer's Router acceptor was built with.
     /// `run()` moves it into `EventLoopState::webrtc_admission`, so the dialing
     /// side and the answering side share one direct-peer ceiling.
-    pub(crate) webrtc_admission: crate::transport::SignalAdmission,
+    pub(crate) webrtc_admission: transport::SignalAdmission,
     /// The address book of the member endpoint. `run()` moves it into
     /// `EventLoopState::address_book`, where the addresses of the peers are registered.
     pub(crate) address_book: memory::MemoryLookup,
     /// How far ICE may reach when gathering — host-only on a loopback mesh.
     /// `run()` moves it into `EventLoopState::webrtc_ice`.
-    pub(crate) webrtc_ice: crate::transport::IceProfile,
+    pub(crate) webrtc_ice: transport::IceProfile,
     /// Inbound unicast frames from the `UNICAST_ALPN` acceptor. The event loop
     /// drains this into `gossip::ingest` (the same path as gossip), so both
     /// transports share signature-verify + dedup. Built in `setup_mesh`.
@@ -174,7 +177,7 @@ pub struct EventLoopConfig {
     pub(crate) live_count: Option<LiveCount>,
     /// `TransportPolicy::relay`, read from the mesh config — never from a
     /// per-node option, so every member agrees.
-    pub(crate) relay_transport: crate::transport::PayloadPath,
+    pub(crate) relay_transport: transport::PayloadPath,
     /// Who drives the loop (CLI / in-process) and the channels that driver
     /// needs. Assigned by [`Node::spawn`](crate::daemon::node::Node::spawn) for an in-process
     /// consumer; a config handed straight to [`run`](crate::daemon::run) keeps the CLI
@@ -184,7 +187,7 @@ pub struct EventLoopConfig {
     /// The `meta` channel's per-peer write gate, when the application keeps a
     /// per-peer map there (see [`crate::doc::SelfWriteGate`]). `None` leaves the
     /// channel free-form.
-    pub(crate) per_peer_gate: Option<crate::doc::SelfWriteGate>,
+    pub(crate) per_peer_gate: Option<doc::SelfWriteGate>,
     /// The process a CLI daemon lives for, set by
     /// [`set_owner_pid`](Self::set_owner_pid). `None` keeps the parent watch.
     #[cfg(feature = "host")]
@@ -253,8 +256,8 @@ impl EventLoopConfig {
     }
 }
 
-impl std::fmt::Debug for EventLoopConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for EventLoopConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EventLoopConfig").finish_non_exhaustive()
     }
 }

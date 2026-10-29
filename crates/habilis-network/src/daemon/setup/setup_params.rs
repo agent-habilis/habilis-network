@@ -8,6 +8,8 @@ use crate::daemon::CoHostPolicy;
 
 use std::sync::atomic;
 
+use crate::{doc, lookup};
+use std::{fmt, ops, sync};
 /// The per-session inputs to [`setup_mesh`](super::setup_mesh) that are independent of the
 /// [`SetupKind`](super::SetupKind): this member's identity/io/tuning and the localhost
 /// binding request. Bundled so the one-shot assembly stays within the
@@ -42,7 +44,7 @@ pub struct SetupParams {
     /// Where the daemon writes its identity and readiness JSON. `None` writes none.
     pub state_file: Option<PathBuf>,
     /// Where the node emits its events (`NodeEvent`).
-    pub sink: std::sync::Arc<dyn NodeSink>,
+    pub sink: sync::Arc<dyn NodeSink>,
     /// Share the caller's endpoint instead of minting one. `None` ⇒ the mesh
     /// builds its own, which is right for a standalone peer and wrong for a
     /// process that also speaks its own protocol.
@@ -58,11 +60,11 @@ pub struct SetupParams {
     /// The shipped surfaces pass the default. Narrowing it by hand is the test
     /// harness's lever to force a relay-only path. Never part of the mesh id —
     /// see the type.
-    pub transports: crate::lookup::TransportOpts,
+    pub transports: lookup::TransportOpts,
     /// The `meta` channel's per-peer write gate, when the application keeps a
     /// per-peer map there (see [`crate::doc::SelfWriteGate`]). `None` leaves the
     /// channel free-form.
-    pub per_peer_gate: Option<crate::doc::SelfWriteGate>,
+    pub per_peer_gate: Option<doc::SelfWriteGate>,
     /// Override the co-host policy the [`SetupKind`](super::SetupKind) would imply. `None` keeps
     /// the derived one; a directory session passes its own (see
     /// [`DIRECTORY_ADVERTISER_COHOST`](crate::daemon::config::DIRECTORY_ADVERTISER_COHOST)).
@@ -85,10 +87,10 @@ impl SetupParams {
             runtime_base: None,
             state_file: None,
             // trait object: the loop and the setup share the sink through this Arc
-            sink: std::sync::Arc::new(sink),
+            sink: sync::Arc::new(sink),
             endpoint: None,
             protocols: habilis_network_iroh_transport_util::ProtocolSet::default(),
-            transports: crate::lookup::TransportOpts::default(),
+            transports: lookup::TransportOpts::default(),
             per_peer_gate: None,
             cohost: None,
             live_count: None,
@@ -145,13 +147,13 @@ impl SetupParams {
 
     /// Narrow this node's own paths.
     #[must_use]
-    pub fn transports(self, transports: crate::lookup::TransportOpts) -> Self {
+    pub fn transports(self, transports: lookup::TransportOpts) -> Self {
         Self { transports, ..self }
     }
 
     /// Set the `meta` channel's per-peer write gate.
     #[must_use]
-    pub fn per_peer_gate(self, per_peer_gate: crate::doc::SelfWriteGate) -> Self {
+    pub fn per_peer_gate(self, per_peer_gate: doc::SelfWriteGate) -> Self {
         Self {
             per_peer_gate: Some(per_peer_gate),
             ..self
@@ -177,8 +179,8 @@ impl SetupParams {
     }
 }
 
-impl std::fmt::Debug for SetupParams {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for SetupParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SetupParams").finish_non_exhaustive()
     }
 }
@@ -200,15 +202,15 @@ impl std::fmt::Debug for SetupParams {
 
 #[derive(Debug, Default)]
 // the counter is shared by the setup and the caller, which reads it
-pub struct LiveCount(std::sync::Arc<atomic::AtomicUsize>);
+pub struct LiveCount(sync::Arc<atomic::AtomicUsize>);
 
 impl Clone for LiveCount {
     fn clone(&self) -> Self {
-        Self(std::sync::Arc::clone(&self.0))
+        Self(sync::Arc::clone(&self.0))
     }
 }
 
-impl std::ops::Deref for LiveCount {
+impl ops::Deref for LiveCount {
     type Target = atomic::AtomicUsize;
 
     fn deref(&self) -> &Self::Target {

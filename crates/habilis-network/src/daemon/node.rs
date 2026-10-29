@@ -14,6 +14,10 @@ use crate::protocol::message::Authored;
 use crate::protocol::{MeshId, Nickname};
 use crate::util::tuning::{NODE_LEAVE, SESSION_REQUEST_CAP};
 
+use crate::{daemon, transport};
+use n0_future::{task, time};
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use std::net;
 /// Whether a session registers the process-wide ctrl-c and SIGTERM listeners.
 ///
 /// # Examples
@@ -126,7 +130,7 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
             .endpoint
             .bound_sockets()
             .iter()
-            .map(std::net::SocketAddr::port)
+            .map(net::SocketAddr::port)
             .collect();
         #[cfg(all(
             feature = "iroh-test-utils",
@@ -145,7 +149,7 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
         });
         #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
         let crash_handles = (config.webrtc_handle(), config.endpoint.clone());
-        let task = n0_future::task::spawn(crate::daemon::run(config, app, Some(req_rx), None));
+        let task = task::spawn(daemon::run(config, app, Some(req_rx), None));
         Self {
             mesh_id,
             name,
@@ -252,11 +256,11 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
     ///
     /// # Errors
     /// Fails if the event loop has stopped (its receiver dropped).
-    pub async fn send(&self, request: Driver::Session) -> Result<(), crate::transport::SendError> {
+    pub async fn send(&self, request: Driver::Session) -> Result<(), transport::SendError> {
         self.req_tx
             .send(request)
             .await
-            .map_err(|_| crate::transport::SendError::Stopped)
+            .map_err(|_| transport::SendError::Stopped)
     }
 
     /// A cloneable handle to the same request channel [`Self::send`] uses.
@@ -282,15 +286,15 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
     ///
     /// # Errors
     /// Returns an error if the event-loop task panicked or returned an error.
-    pub async fn leave(mut self) -> Result<(), crate::transport::SendError> {
+    pub async fn leave(mut self) -> Result<(), transport::SendError> {
         let _ = self.quit_tx.send(()).await;
         if let Some(task) = self.task.take() {
-            let timeout = n0_future::time::sleep(NODE_LEAVE);
+            let timeout = time::sleep(NODE_LEAVE);
             tokio::select! {
                 joined = task => {
                     joined
-                        .map_err(|error| crate::transport::SendError::internal(anyhow::anyhow!("mesh task panicked: {error}")))?
-                        .map_err(crate::transport::SendError::EventLoop)?;
+                        .map_err(|error| transport::SendError::internal(anyhow::anyhow!("mesh task panicked: {error}")))?
+                        .map_err(transport::SendError::EventLoop)?;
                 }
                 () = timeout => {}
             }

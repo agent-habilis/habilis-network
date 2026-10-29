@@ -48,7 +48,10 @@ use crate::protocol::mesh::MeshName;
 use crate::protocol::{MeshId, Nickname};
 use crate::util::unix_secs;
 
+use crate::util;
+use std::io::ErrorKind;
 use std::sync::atomic;
+use std::{error, ffi, fmt, fs, io, process, sync};
 /// Owns a session state file for the lifetime of a daemon process.
 /// Drop removes the file (best effort), but because the daemon exits
 /// via `std::process::exit`, callers must also call `remove()`
@@ -80,7 +83,7 @@ pub struct StateFile {
     /// Extra fields the application publishes for its local clients to discover
     /// (see [`Self::set_discovery`]). Opaque to the engine, and the reason every
     /// write is 0o600: an app may put a bearer token in here.
-    discovery: std::sync::Mutex<serde_json::Map<String, serde_json::Value>>,
+    discovery: sync::Mutex<serde_json::Map<String, serde_json::Value>>,
     write_failing: atomic::AtomicBool,
 }
 
@@ -97,7 +100,7 @@ impl StateFile {
             nickname,
             topic: None,
             owner_pid: None,
-            discovery: std::sync::Mutex::new(serde_json::Map::new()),
+            discovery: sync::Mutex::new(serde_json::Map::new()),
             write_failing: atomic::AtomicBool::new(false),
         }
     }
@@ -162,7 +165,7 @@ impl StateFile {
         match self.try_write(peer_count, ready) {
             Ok(()) => self.write_failing.store(false, Ordering::Relaxed),
             Err(error) => {
-                let _ = std::fs::remove_file(tmp_sibling(&self.path));
+                let _ = fs::remove_file(tmp_sibling(&self.path));
                 // Warn once per failing streak: the heartbeat retries every
                 // few seconds, and a full disk fails every one of them.
                 if !self.write_failing.swap(true, Ordering::Relaxed) {
@@ -177,7 +180,7 @@ impl StateFile {
         }
     }
 
-    fn try_write(&self, peer_count: usize, ready: bool) -> std::io::Result<()> {
+    fn try_write(&self, peer_count: usize, ready: bool) -> io::Result<()> {
         // The state file carries the full mesh id, and whatever the application
         // published as discovery fields (possibly a bearer token).
         // It is born 0o600 below, but the enclosing directory must
@@ -185,7 +188,7 @@ impl StateFile {
         // closed when the target is under it (the default path, and the plugin's
         // `--state-file <base>/sessions/...`), and just creates
         // the parent for an override that points elsewhere.
-        crate::util::ensure_parent_private(self.base.as_deref(), &self.path)?;
+        util::ensure_parent_private(self.base.as_deref(), &self.path)?;
         let mut obj = serde_json::Map::new();
         obj.insert("gossip".into(), self.mesh.clone().into());
         obj.insert("name".into(), self.name.clone().into());
@@ -193,7 +196,7 @@ impl StateFile {
         if let Some(topic) = &self.topic {
             obj.insert("topic".into(), topic.clone().into());
         }
-        obj.insert("pid".into(), std::process::id().into());
+        obj.insert("pid".into(), process::id().into());
         if let Some(owner_pid) = self.owner_pid {
             obj.insert("owner_pid".into(), owner_pid.into());
         }
@@ -211,7 +214,7 @@ impl StateFile {
             "last_updated".into(),
             unix_secs::UnixSecs::now().as_secs().into(),
         );
-        let mut json = serde_json::to_vec(&obj).map_err(std::io::Error::other)?;
+        let mut json = serde_json::to_vec(&obj).map_err(io::Error::other)?;
         json.push(b'\n');
 
         // No fsync: statusline is best-effort; kernel buffer-writeback
@@ -228,7 +231,7 @@ impl StateFile {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt as _;
-                let mut options = std::fs::OpenOptions::new();
+                let mut options = fs::OpenOptions::new();
                 options.write(true).create(true).truncate(true).mode(0o600);
                 options.open(&temp)?
             }
@@ -238,12 +241,12 @@ impl StateFile {
             }
         };
         file.write_all(&json)?;
-        std::fs::rename(&temp, &self.path)
+        fs::rename(&temp, &self.path)
     }
 
     /// Delete the state file. Safe to call on a path that does not exist.
     pub(crate) fn remove(&self) {
-        let _ = std::fs::remove_file(&self.path);
+        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -328,7 +331,7 @@ pub struct SessionIdentity {
 /// ```
 #[must_use]
 pub fn read_identity(path: &Path) -> SessionIdentity {
-    let parsed: Option<serde_json::Value> = std::fs::read_to_string(path)
+    let parsed: Option<serde_json::Value> = fs::read_to_string(path)
         .ok()
         .and_then(|contents| serde_json::from_str(&contents).ok());
     let field = |key: &str| {
@@ -408,7 +411,7 @@ pub struct SessionEntry {
 /// ```
 #[must_use]
 pub fn read_session_entry(path: &Path) -> Option<SessionEntry> {
-    let parsed: serde_json::Value = std::fs::read_to_string(path)
+    let parsed: serde_json::Value = fs::read_to_string(path)
         .ok()
         .and_then(|contents| serde_json::from_str(&contents).ok())?;
     parsed.as_object()?;
@@ -453,9 +456,9 @@ pub fn read_session_entry(path: &Path) -> Option<SessionEntry> {
 /// assert!(read_snapshot(Path::new("/nonexistent/ready.json")).expect("a missing file is not an error").is_none());
 /// ```
 pub fn read_snapshot(path: &Path) -> Result<Option<ReadySnapshot>, StateFileError> {
-    let contents = match std::fs::read_to_string(path) {
+    let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(source) => {
             return Err(StateFileError::Unreadable {
                 path: path.to_path_buf(),
@@ -490,9 +493,9 @@ pub fn read_snapshot(path: &Path) -> Result<Option<ReadySnapshot>, StateFileErro
 fn tmp_sibling(path: &Path) -> PathBuf {
     let mut file_name = path
         .file_name()
-        .map(std::ffi::OsStr::to_os_string)
+        .map(ffi::OsStr::to_os_string)
         .unwrap_or_default();
-    file_name.push(format!(".tmp.{}", std::process::id()));
+    file_name.push(format!(".tmp.{}", process::id()));
     path.with_file_name(file_name)
 }
 
@@ -502,6 +505,9 @@ mod tests {
 
     use super::StateFileError;
 
+    use crate::testing;
+    use std::error::Error;
+    use std::{env, fs, io, process};
     /// The variants of a public error hold a boxed source, so no third-party type is named in
     /// the public API. This builds them that way.
     #[test]
@@ -512,17 +518,17 @@ mod tests {
             path: PathBuf::from("state.json"),
             source: Box::new(parse),
         };
-        let io = std::io::Error::other("unreadable");
+        let io = io::Error::other("unreadable");
         let unreadable = StateFileError::Unreadable {
             path: PathBuf::from("state.json"),
             source: Box::new(io),
         };
         assert!(
-            std::error::Error::source(&unparsable).is_some(),
+            Error::source(&unparsable).is_some(),
             "an unparsable state file keeps its parse source"
         );
         assert!(
-            std::error::Error::source(&unreadable).is_some(),
+            Error::source(&unreadable).is_some(),
             "an unreadable state file keeps its io source"
         );
     }
@@ -535,10 +541,10 @@ mod tests {
     }
 
     fn unique_path(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
+        env::temp_dir().join(format!(
             "habilis-network-state-test-{}-{}-{}.json",
             tag,
-            std::process::id(),
+            process::id(),
             clock::unix_nanos(),
         ))
     }
@@ -549,21 +555,21 @@ mod tests {
         let path = unique_path("failed");
         // A non-empty directory at the target makes the final rename fail
         // after the temp file is fully written.
-        std::fs::create_dir_all(path.join("occupied")).unwrap();
+        fs::create_dir_all(path.join("occupied")).unwrap();
         let state_file = StateFile::new(
             path.clone(),
             &MeshId::from("abcd"),
             &Nickname::from("treat-empire"),
             &name("cool-team"),
         );
-        let (logs, guard) = crate::testing::LogCapture::start(tracing::Level::INFO);
+        let (logs, guard) = testing::LogCapture::start(tracing::Level::INFO);
         state_file.write(1, true);
         state_file.write(1, true);
         drop(guard);
         let temp = super::tmp_sibling(&path);
         let leftover = temp.exists();
-        let _ = std::fs::remove_file(&temp);
-        std::fs::remove_dir_all(&path).unwrap();
+        let _ = fs::remove_file(&temp);
+        fs::remove_dir_all(&path).unwrap();
         assert!(
             !leftover,
             "a failed write must not leave {}",
@@ -600,7 +606,7 @@ mod tests {
         );
         assert_eq!(
             owned.pid,
-            Some(std::process::id()),
+            Some(process::id()),
             "the entry records this process's pid"
         );
     }
@@ -617,7 +623,7 @@ mod tests {
             &name("cool-team"),
         );
         state_file.write(3, true);
-        let contents = std::fs::read_to_string(&path).unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
         assert_eq!(
             parsed["gossip"],
@@ -639,7 +645,7 @@ mod tests {
         );
         assert_eq!(
             parsed["pid"],
-            std::process::id(),
+            process::id(),
             "the written file records this process's pid"
         );
         assert!(
@@ -669,7 +675,7 @@ mod tests {
         .topic(Some(raw));
         state_file.write(1, true);
         let parsed: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             parsed["topic"], raw,
             "the topic is written whole to the file"
@@ -702,7 +708,7 @@ mod tests {
         state_file.write(1, true);
         state_file.write(7, true);
         let parsed: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             parsed["peer_count"], 7,
             "a second write updates the peer count to seven"
@@ -747,14 +753,14 @@ mod tests {
     #[test]
     fn creates_parent_dir() {
         let _guard = ::habilis_network_test_tracing::init();
-        let mut path = std::env::temp_dir();
+        let mut path = env::temp_dir();
         path.push(format!(
             "habilis-network-state-test-parent-{}",
-            std::process::id()
+            process::id()
         ));
         path.push("sessions");
         path.push("x.json");
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
         let state_file = StateFile::new(
             path.clone(),
             &MeshId::from("test"),
@@ -767,17 +773,17 @@ mod tests {
             "the file is written inside the new directory"
         );
         state_file.remove();
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
     fn replaces_existing_file() {
         let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("replace");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
         // A pre-existing file with stale/foreign keys is fully replaced —
         // the daemon is the sole writer, so nothing is merged or preserved.
-        std::fs::write(&path, br#"{"name":"stale","auto_reply":false,"junk":1}"#).unwrap();
+        fs::write(&path, br#"{"name":"stale","auto_reply":false,"junk":1}"#).unwrap();
         let mesh = MeshId::from("fresh");
         let state_file = StateFile::new(
             path.clone(),
@@ -787,7 +793,7 @@ mod tests {
         );
         state_file.write(3, true);
         let parsed: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             parsed["gossip"],
             mesh.as_str(),
@@ -910,7 +916,7 @@ mod tests {
         );
         assert_eq!(
             entry.pid,
-            Some(std::process::id()),
+            Some(process::id()),
             "the entry carries this process's pid"
         );
         state_file.remove();
@@ -920,8 +926,8 @@ mod tests {
     fn read_session_entry_tolerates_a_pre_pid_file() {
         let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("session-entry-old");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
             &path,
             r#"{"last_updated":1,"name":"old","nickname":"n-n","peer_count":1,"ready":true,"gossip":"old"}"#,
         )
@@ -933,7 +939,7 @@ mod tests {
             "an old entry without a pid still reads its mesh"
         );
         assert_eq!(entry.pid, None, "an old entry without a pid has no pid");
-        let _ = std::fs::remove_file(&path);
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
@@ -944,8 +950,8 @@ mod tests {
         // field as an unreapable orphan daemon.
         let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("session-entry-legacy-room");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
             &path,
             r#"{"last_updated":1,"name":"old","nickname":"n-n","participant_count":1,"pid":7,"ready":true,"room":"legacy"}"#,
         )
@@ -962,7 +968,7 @@ mod tests {
             Some("legacy"),
             "a room-keyed file maps its mesh in the identity"
         );
-        let _ = std::fs::remove_file(&path);
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
@@ -974,13 +980,13 @@ mod tests {
             "a missing session file reads as no entry"
         );
         let malformed = unique_path("session-entry-malformed");
-        std::fs::create_dir_all(malformed.parent().unwrap()).unwrap();
-        std::fs::write(&malformed, b"not json").unwrap();
+        fs::create_dir_all(malformed.parent().unwrap()).unwrap();
+        fs::write(&malformed, b"not json").unwrap();
         assert!(
             super::read_session_entry(&malformed).is_none(),
             "a malformed session file reads as no entry"
         );
-        let _ = std::fs::remove_file(&malformed);
+        let _ = fs::remove_file(&malformed);
     }
 
     #[test]
@@ -1008,26 +1014,26 @@ mod tests {
     fn read_snapshot_errors_on_malformed() {
         let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("malformed");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
         // Not JSON.
-        std::fs::write(&path, b"not json").unwrap();
+        fs::write(&path, b"not json").unwrap();
         assert!(
             super::read_snapshot(&path).is_err(),
             "a malformed snapshot reads as an error"
         );
         // JSON object missing the `ready` / `last_updated` fields the gate needs.
-        std::fs::write(&path, r#"{"gossip":"x","name":"n"}"#).unwrap();
+        fs::write(&path, r#"{"gossip":"x","name":"n"}"#).unwrap();
         assert!(
             super::read_snapshot(&path).is_err(),
             "a malformed snapshot reads as an error"
         );
         // Has `ready` but still missing `last_updated`.
-        std::fs::write(&path, r#"{"ready":true,"gossip":"round"}"#).unwrap();
+        fs::write(&path, r#"{"ready":true,"gossip":"round"}"#).unwrap();
         assert!(
             super::read_snapshot(&path).is_err(),
             "a malformed snapshot reads as an error"
         );
-        let _ = std::fs::remove_file(&path);
+        let _ = fs::remove_file(&path);
     }
 }
 
@@ -1053,14 +1059,14 @@ pub enum StateFileError {
         /// The file.
         path: PathBuf,
         /// The read error.
-        source: Box<dyn std::error::Error + Send + Sync>,
+        source: Box<dyn error::Error + Send + Sync>,
     },
     /// The file is not valid JSON.
     Unparsable {
         /// The file.
         path: PathBuf,
         /// The parse error.
-        source: Box<dyn std::error::Error + Send + Sync>,
+        source: Box<dyn error::Error + Send + Sync>,
     },
     /// The file lacks a field the snapshot needs.
     MissingField {
@@ -1071,8 +1077,8 @@ pub enum StateFileError {
     },
 }
 
-impl std::fmt::Display for StateFileError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for StateFileError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unreadable { path, .. } => write!(formatter, "reading {}", path.display()),
             Self::Unparsable { path, .. } => write!(formatter, "parsing {}", path.display()),
@@ -1083,8 +1089,8 @@ impl std::fmt::Display for StateFileError {
     }
 }
 
-impl std::error::Error for StateFileError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl error::Error for StateFileError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Unreadable { source, .. } | Self::Unparsable { source, .. } => {
                 Some(source.as_ref())

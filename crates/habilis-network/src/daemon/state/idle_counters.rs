@@ -1,3 +1,4 @@
+use std::mem;
 /// Wakeup attribution for the idle-cost work: one counter per `select!` arm,
 /// reported as a delta on each `mesh census` line and reset there.
 ///
@@ -43,6 +44,6 @@ impl IdleCounters {
     /// interval's own work rather than a running total a reader has to
     /// difference (and that a rotated log would corrupt).
     pub(crate) fn take(&mut self) -> Self {
-        std::mem::take(self)
+        mem::take(self)
     }
 }

@@ -4,6 +4,7 @@
 //! Split out of `event_loop` for the same reason as `cohost_arm` — this is
 //! recovery, not the loop, and it reads better without the tick arms around it.
 
+use std::mem;
 mod gossip_link;
 mod resubscribe;
 mod resubscribe_env;
@@ -177,7 +178,7 @@ pub(super) async fn resubscribe_tick(
 ) -> Result<()> {
     match try_resubscribe(env, state, link.attempts).await {
         Resubscribe::Restored(new_sender, new_receiver) => {
-            let mut dead_receiver = std::mem::replace(link.receiver, new_receiver);
+            let mut dead_receiver = mem::replace(link.receiver, new_receiver);
             if let Some(handle) = &state.gossip_handle {
                 handle.attach_gossip(new_sender.clone());
             }
@@ -313,9 +314,25 @@ mod tests {
     use std::time::Duration;
 
     #[cfg(feature = "host")]
+    use crate::beacon;
+    #[cfg(feature = "host")]
     use crate::gossip::split;
     #[cfg(feature = "host")]
+    use crate::membership;
+    #[cfg(feature = "host")]
     use crate::protocol::mesh;
+    #[cfg(feature = "host")]
+    use crate::testing;
+    #[cfg(feature = "host")]
+    use crate::transport;
+    #[cfg(feature = "host")]
+    use crate::transport::PayloadPath;
+    #[cfg(feature = "host")]
+    use iroh_gossip::proto;
+    #[cfg(feature = "host")]
+    use std::env;
+    #[cfg(feature = "host")]
+    use std::process;
     #[cfg(feature = "host")]
     use tokio::sync::mpsc;
     #[cfg(feature = "host")]
@@ -337,9 +354,9 @@ mod tests {
             use crate::testing::LaneNode;
             use crate::util::tuning::RESUBSCRIBE_MAX_ATTEMPTS;
 
-            if std::env::var_os(FATAL_CHILD).is_some() {
+            if env::var_os(FATAL_CHILD).is_some() {
                 let node = LaneNode::start().await;
-                let topic_id = iroh_gossip::proto::TopicId::from_bytes([8u8; 32]);
+                let topic_id = proto::TopicId::from_bytes([8u8; 32]);
                 let topic = split::subscribe_mesh(
                     &node.gossip,
                     topic_id,
@@ -349,18 +366,18 @@ mod tests {
                 .await
                 .expect("subscribe while the actor lives");
                 let (gossip_sender, gossip_receiver) = topic.split();
-                let mut sender = crate::transport::MeshSender::new(gossip_sender);
+                let mut sender = transport::MeshSender::new(gossip_sender);
                 let mut receiver = split::spawn_split(gossip_receiver, None);
                 node.stop_gossip().await;
 
                 let secret = iroh::SecretKey::generate();
-                let params = crate::beacon::RendezvousParams {
+                let params = beacon::RendezvousParams {
                     topic_id,
                     id: secret.public(),
                     secret,
                     bind_ports: Vec::new(),
                     lookups: mesh::LookupOpts::loopback(),
-                    relay_transport: crate::transport::PayloadPath::DirectOnly,
+                    relay_transport: PayloadPath::DirectOnly,
                     bootstrap_relay: None,
                     rung_tx: watch::channel(None).0,
                 };
@@ -371,7 +388,7 @@ mod tests {
                     identity: &node.identity,
                     our_pubkey: node.our_pubkey,
                     max_peers: 16,
-                    rendezvous_id: crate::testing::endpoint_id(9),
+                    rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &node.sink,
                 };
@@ -382,7 +399,7 @@ mod tests {
                 };
                 let mut state = node.state();
                 let (inbound, _unread) = mpsc::channel(1);
-                let mut app = crate::membership::MembershipApp::new(inbound);
+                let mut app = membership::MembershipApp::new(inbound);
                 let mut attempts = 0;
                 let mut outcome = Ok(());
                 for _ in 0..RESUBSCRIBE_MAX_ATTEMPTS {
@@ -402,8 +419,7 @@ mod tests {
                 node.endpoint.close().await;
                 return;
             }
-            let mut command =
-                std::process::Command::new(std::env::current_exe().expect("the test binary"));
+            let mut command = process::Command::new(env::current_exe().expect("the test binary"));
             command
                 .args([
                     "--exact",

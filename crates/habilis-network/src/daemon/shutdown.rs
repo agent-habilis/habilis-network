@@ -3,6 +3,11 @@
 //! Split out of `event_loop` because none of it is the loop — it is what runs
 //! once, on the way out, and it was the largest block of the file that never
 //! touched a tick.
+
+use std::mem;
+#[cfg(feature = "host")]
+use tokio::signal;
+
 mod owned_endpoints;
 #[cfg(feature = "host")]
 mod owner;
@@ -26,6 +31,9 @@ use crate::util::tuning;
 
 #[cfg(feature = "host")]
 use crate::util::process;
+use n0_future::time as n0future_time;
+#[cfg(feature = "host")]
+use std::process as std_process;
 #[cfg(feature = "host")]
 #[cfg(unix)]
 use tokio::signal::unix;
@@ -76,7 +84,7 @@ pub(super) async fn shutdown<Driver: NodeDriver>(
     .await;
     // After the broadcast, so peers get the `Left` even when logging fails.
     lifecycle::log_leaving(quit.name.as_str());
-    n0_future::time::sleep(Duration::from_millis(500)).await;
+    n0future_time::sleep(Duration::from_millis(500)).await;
 }
 /// Announce departure, and say whether the loop must hard-exit the process once it has ended.
 ///
@@ -120,7 +128,7 @@ pub(super) fn spawn_quit_signal_tasks(
     let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
     let ctrl_c_tx = quit_tx.clone();
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
+        let _ = signal::ctrl_c().await;
         let _ = ctrl_c_tx.send(()).await;
     });
     #[cfg(unix)]
@@ -174,7 +182,7 @@ fn owner_start(pid: u32) -> Result<u64, OwnerPidError> {
     if pid <= 1 {
         return Err(OwnerPidError::Reserved(pid));
     }
-    if pid == std::process::id() {
+    if pid == std_process::id() {
         return Err(OwnerPidError::OwnSelf(pid));
     }
     process::live_start_time(pid).ok_or(OwnerPidError::NotRunning(pid))
@@ -206,7 +214,7 @@ fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>, owner: Option<Owner>) {
     }
     tokio::spawn(async move {
         loop {
-            n0_future::time::sleep(interval).await;
+            n0future_time::sleep(interval).await;
             // SAFETY: `getppid` takes no argument and always succeeds.
             let current_ppid = unsafe { libc::getppid() };
             if parent_lost(original_ppid, current_ppid) {
@@ -221,7 +229,7 @@ fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>, owner: Option<Owner>) {
 #[cfg(all(unix, feature = "host"))]
 async fn watch_owner(owner: Owner, interval: Duration, quit_tx: mpsc::Sender<()>) {
     loop {
-        n0_future::time::sleep(interval).await;
+        n0future_time::sleep(interval).await;
         if owner.lost() {
             let _ = quit_tx.send(()).await;
             return;
@@ -248,7 +256,7 @@ pub(super) fn parent_lost(original_ppid: i32, current_ppid: i32) -> bool {
 /// forever. The loop's quit arm then only ever fires from `external_quit_rx`.
 pub(super) fn never_quit() -> mpsc::Receiver<()> {
     let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
-    std::mem::forget(quit_tx);
+    mem::forget(quit_tx);
     quit_rx
 }
 
@@ -262,6 +270,10 @@ mod tests {
 
     use super::{Owner, orphan_watch_warranted, parent_lost, validate_owner_pid, watch_owner};
 
+    use crate::{membership, protocol};
+    use std::time::{Instant, Instant as std_Instant};
+    use std::{env, process, thread};
+    use tokio::time;
     const TICK: Duration = Duration::from_millis(10);
 
     fn spawn_owner() -> Child {
@@ -275,7 +287,7 @@ mod tests {
     async fn watch_quits(owner: Owner, within: Duration) -> bool {
         let (quit_tx, mut quit_rx) = mpsc::channel(1);
         let watch = tokio::spawn(watch_owner(owner, TICK, quit_tx));
-        let quit = tokio::time::timeout(within, quit_rx.recv()).await.is_ok();
+        let quit = time::timeout(within, quit_rx.recv()).await.is_ok();
         watch.abort();
         quit
     }
@@ -351,7 +363,7 @@ mod tests {
             validate_owner_pid(pid).is_ok(),
             "a live other process is an accepted owner pid"
         );
-        for refused in [0, 1, std::process::id()] {
+        for refused in [0, 1, process::id()] {
             let error = validate_owner_pid(refused)
                 .expect_err("refused")
                 .to_string();
@@ -360,10 +372,10 @@ mod tests {
         child.kill().unwrap();
         // SIGKILL lands asynchronously, so poll until the unreaped child is a
         // zombie; it stays one until the `wait` below.
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let deadline = std_Instant::now() + Duration::from_secs(2);
         while validate_owner_pid(pid).is_ok() {
-            assert!(std::time::Instant::now() < deadline, "a zombie is refused");
-            std::thread::sleep(TICK);
+            assert!(Instant::now() < deadline, "a zombie is refused");
+            thread::sleep(TICK);
         }
         child.wait().unwrap();
         assert!(validate_owner_pid(pid).is_err(), "a dead pid is refused");
@@ -373,10 +385,7 @@ mod tests {
     fn owner_refuses_init_self_and_a_dead_pid() {
         let _guard = ::habilis_network_test_tracing::init();
         assert!(Owner::try_new(0).is_err(), "pid 0 is refused as an owner");
-        assert!(
-            Owner::try_new(std::process::id()).is_err(),
-            "self is no owner"
-        );
+        assert!(Owner::try_new(process::id()).is_err(), "self is no owner");
         let init = Owner::try_new(1).expect_err("init refused").to_string();
         assert!(!init.contains('\n'), "one error line: {init}");
         assert!(!init.contains("agent"), "engine vocabulary only: {init}");
@@ -436,13 +445,13 @@ mod tests {
             use super::{QuitParams, announce_departure};
             use crate::testing::LaneNode;
 
-            if std::env::var_os(QUIT_CHILD).is_some() {
+            if env::var_os(QUIT_CHILD).is_some() {
                 let node = LaneNode::start().await;
                 let context = node.context();
                 let mut state = node.state();
                 let (inbound, _unread) = mpsc::channel(1);
-                let mut app = crate::membership::MembershipApp::new(inbound);
-                let name = crate::protocol::MeshName::try_new("test").expect("a name");
+                let mut app = membership::MembershipApp::new(inbound);
+                let name = protocol::MeshName::try_new("test").expect("a name");
                 let exit = announce_departure(
                     &mut state,
                     &mut app,
@@ -458,7 +467,7 @@ mod tests {
                 node.endpoint.close().await;
                 return;
             }
-            let mut command = Command::new(std::env::current_exe().expect("the test binary"));
+            let mut command = Command::new(env::current_exe().expect("the test binary"));
             command
                 .args([
                     "--exact",

@@ -9,6 +9,7 @@ use crate::protocol::message::Authored;
 use crate::protocol::{AuthorKey, MeshId, Nickname};
 use crate::transport::MeshSender;
 
+use std::fmt;
 /// Immutable loop-level context threaded through every handler.
 /// Bundles the refs a handler may need but never mutates itself.
 ///
@@ -60,8 +61,8 @@ pub struct HandlerCtx<'node> {
 // Manual: `sink` is a `&dyn NodeSink` trait object with no `Debug` bound, so
 // the struct can't derive. The identity fields below are what a log reader cares
 // about; the borrowed handles are elided.
-impl std::fmt::Debug for HandlerCtx<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for HandlerCtx<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = formatter.debug_struct("HandlerCtx");
         debug.field("mesh", &self.mesh);
         debug.field("author", &self.author);

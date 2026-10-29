@@ -123,10 +123,12 @@ mod chain_tests {
 
     use super::SetupError;
 
+    use std::io;
+    use std::io::ErrorKind;
     #[test]
     fn an_internal_cause_keeps_its_chain() {
         let _guard = ::habilis_network_test_tracing::init();
-        let io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
+        let io = io::Error::new(ErrorKind::AddrInUse, "Address already in use");
         let cause = anyhow::Error::new(io).context("bind the endpoint");
         let error = anyhow::Error::new(SetupError::internal(cause));
         let text = format!("{error:#}");

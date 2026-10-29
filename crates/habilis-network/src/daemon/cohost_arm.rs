@@ -18,8 +18,11 @@ use crate::gossip::event::NodeEvent;
 use crate::util::clock::Instant;
 
 use crate::gossip::heal;
+use crate::lookup;
 use crate::transport::webrtc;
 use crate::util::tuning;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use std::mem;
 /// Close the co-hosted rendezvous endpoint before this loop's stack unwinds.
 ///
 /// The `Rendezvous` is a loop local, and letting it merely *drop* aborts its
@@ -48,7 +51,7 @@ use crate::util::tuning;
 pub(super) async fn release_rendezvous(
     rendezvous: &mut Option<beacon::Rendezvous>,
     probe: &mut Option<beacon::RivalProbe>,
-    rung_probe: &mut Option<crate::lookup::StoppableTask>,
+    rung_probe: &mut Option<lookup::StoppableTask>,
     rungs: &mut beacon::RungWatch,
     owned: super::shutdown::OwnedEndpoints,
 ) {
@@ -347,7 +350,7 @@ pub(super) fn stall_on_request(
     state: &mut EventLoopState,
     rendezvous: Option<&beacon::Rendezvous>,
 ) {
-    if std::mem::take(&mut state.stall_requested)
+    if mem::take(&mut state.stall_requested)
         && let Some(held) = rendezvous
     {
         tracing::info!(
@@ -366,7 +369,7 @@ pub(super) fn shed_on_request(
     params: &beacon::RendezvousParams,
     rendezvous: &mut Option<beacon::Rendezvous>,
 ) {
-    if std::mem::take(&mut state.shed_requested) {
+    if mem::take(&mut state.shed_requested) {
         shed_beacon(state, params, rendezvous);
     }
 }
@@ -636,8 +639,14 @@ mod tests {
     use crate::beacon::claim;
     use crate::daemon::{config, state};
     use crate::protocol::mesh;
+    use crate::transport::PayloadPath;
     use crate::util::{clock, tuning};
+    use crate::{beacon, lookup, protocol, testing};
+    use iroh_gossip::proto;
+    use n0_future::task;
+    use std::{future, net};
     use tokio::sync::{mpsc, watch};
+    use tokio::time;
     /// A shed cuts the rendezvous a browser reached us through, and the tab
     /// has nothing else: its roster empties mid-transfer. Observed as a
     /// terminal cycling claim and release while a tab saw no peers at all.
@@ -649,15 +658,15 @@ mod tests {
     }
 
     /// Public-mesh rendezvous parameters: the rival re-check applies to them.
-    fn public_params() -> crate::beacon::RendezvousParams {
+    fn public_params() -> beacon::RendezvousParams {
         let secret = iroh::SecretKey::generate();
-        crate::beacon::RendezvousParams {
-            topic_id: iroh_gossip::proto::TopicId::from_bytes([7u8; 32]),
+        beacon::RendezvousParams {
+            topic_id: proto::TopicId::from_bytes([7u8; 32]),
             id: secret.public(),
             secret,
             bind_ports: Vec::new(),
             lookups: mesh::LookupOpts::loopback(),
-            relay_transport: crate::transport::PayloadPath::DirectOnly,
+            relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: None,
             rung_tx: watch::channel(None).0,
         }
@@ -665,12 +674,12 @@ mod tests {
 
     /// An endpoint on loopback, closed at the end of the test whatever the test does with it.
     async fn loopback_endpoint() -> iroh::Endpoint {
-        let endpoint = crate::lookup::build_endpoint(
+        let endpoint = lookup::build_endpoint(
             &mesh::LookupOpts::loopback(),
             None,
             None,
             Vec::new(),
-            crate::lookup::TransportHandles::default(),
+            lookup::TransportHandles::default(),
         )
         .await
         .expect("loopback endpoint");
@@ -682,15 +691,15 @@ mod tests {
     /// A held beacon with one tab negotiating on it. The tab counts as a
     /// dependent for as long as the returned guard lives.
     fn beacon_with_a_negotiating_tab(
-        params: &crate::beacon::RendezvousParams,
+        params: &beacon::RendezvousParams,
         endpoint: iroh::Endpoint,
-    ) -> (Option<crate::beacon::Rendezvous>, impl Sized) {
+    ) -> (Option<beacon::Rendezvous>, impl Sized) {
         use crate::transport::{MAX_DIRECT_PEERS, SignalAdmission};
-        let handle = crate::lookup::build_webrtc_handle(params.id);
+        let handle = lookup::build_webrtc_handle(params.id);
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let tab = iroh::SecretKey::generate().public();
         let round = admission.try_admit(tab, &handle).expect("a free slot");
-        let rendezvous = crate::beacon::Rendezvous::for_test(endpoint, Some((handle, admission)));
+        let rendezvous = beacon::Rendezvous::for_test(endpoint, Some((handle, admission)));
         (Some(rendezvous), round)
     }
 
@@ -708,7 +717,7 @@ mod tests {
                 params: &params,
                 started: clock::Instant::now(),
             };
-            let mut state = crate::testing::fresh_state();
+            let mut state = testing::fresh_state();
             state.next_rival_recheck = Some(clock::Instant::now());
             let (mut rendezvous, _round) =
                 beacon_with_a_negotiating_tab(&params, loopback_endpoint().await);
@@ -732,7 +741,7 @@ mod tests {
     #[test]
     fn a_known_holder_keeps_us_from_probing_to_claim() {
         let _guard = ::habilis_network_test_tracing::init();
-        let mut state = crate::testing::fresh_state();
+        let mut state = testing::fresh_state();
         let own = iroh::SecretKey::generate().public();
         let holder = iroh::SecretKey::generate().public();
         let now = clock::Instant::now();
@@ -740,7 +749,7 @@ mod tests {
 
         state.note_rival_beacon_flag(
             own,
-            crate::protocol::AuthorKey::from([9u8; 32]),
+            protocol::AuthorKey::from([9u8; 32]),
             holder,
             RivalFlag {
                 proven: true,
@@ -752,7 +761,7 @@ mod tests {
 
         state.note_rival_beacon_flag(
             own,
-            crate::protocol::AuthorKey::from([9u8; 32]),
+            protocol::AuthorKey::from([9u8; 32]),
             holder,
             RivalFlag {
                 proven: true,
@@ -768,7 +777,7 @@ mod tests {
     #[test]
     fn a_probe_that_read_free_does_not_claim_while_a_holder_is_known() {
         let _guard = ::habilis_network_test_tracing::init();
-        let mut state = crate::testing::fresh_state();
+        let mut state = testing::fresh_state();
         let own = iroh::SecretKey::generate().public();
         let holder = iroh::SecretKey::generate().public();
         assert!(
@@ -778,7 +787,7 @@ mod tests {
 
         state.note_rival_beacon_flag(
             own,
-            crate::protocol::AuthorKey::from([9u8; 32]),
+            protocol::AuthorKey::from([9u8; 32]),
             holder,
             RivalFlag {
                 proven: true,
@@ -809,7 +818,7 @@ mod tests {
                 params: &params,
                 started: clock::Instant::now(),
             };
-            let mut state = crate::testing::fresh_state();
+            let mut state = testing::fresh_state();
             state.next_rival_recheck = Some(clock::Instant::now());
             state.yield_to_lower = true;
             let (mut rendezvous, _round) =
@@ -835,7 +844,7 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let params = public_params();
             let endpoint = loopback_endpoint().await;
-            let mut state = crate::testing::fresh_state();
+            let mut state = testing::fresh_state();
             state.yield_to_lower = true;
 
             super::schedule_rival_recheck(
@@ -862,7 +871,7 @@ mod tests {
                 started: clock::Instant::now(),
             };
             let endpoint = loopback_endpoint().await;
-            let mut state = crate::testing::fresh_state();
+            let mut state = testing::fresh_state();
             // The previous beacon waited its limit.
             state.rival_recheck_deferrals = MAX_SHED_DEFERRALS;
 
@@ -940,28 +949,28 @@ mod tests {
             use crate::transport::MeshSender;
             use crate::util::clock::Instant;
 
-            let port: u16 = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            let port: u16 = net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0))
                 .and_then(|socket| socket.local_addr())
                 .expect("a free loopback port")
                 .port();
             let secret = iroh::SecretKey::generate();
-            let params = crate::beacon::RendezvousParams {
-                topic_id: iroh_gossip::proto::TopicId::from_bytes([5u8; 32]),
+            let params = beacon::RendezvousParams {
+                topic_id: proto::TopicId::from_bytes([5u8; 32]),
                 id: secret.public(),
                 secret,
                 bind_ports: vec![port],
                 lookups: LookupOpts::loopback(),
-                relay_transport: crate::transport::PayloadPath::DirectOnly,
+                relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: watch::channel(None).0,
             };
 
-            let endpoint = crate::lookup::build_endpoint(
+            let endpoint = lookup::build_endpoint(
                 &LookupOpts::loopback(),
                 None,
                 None,
                 Vec::new(),
-                crate::lookup::TransportHandles::default(),
+                lookup::TransportHandles::default(),
             )
             .await
             .expect("loopback endpoint");
@@ -1037,25 +1046,25 @@ mod tests {
         use crate::transport::MeshSender;
         use crate::util::clock::Instant;
 
-        let port: u16 = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        let port: u16 = net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0))
             .and_then(|socket| socket.local_addr())
             .expect("a free loopback port")
             .port();
         let secret = iroh::SecretKey::generate();
-        let params = crate::beacon::RendezvousParams {
-            topic_id: iroh_gossip::proto::TopicId::from_bytes([6u8; 32]),
+        let params = beacon::RendezvousParams {
+            topic_id: proto::TopicId::from_bytes([6u8; 32]),
             id: secret.public(),
             secret,
             bind_ports: vec![port],
             lookups: LookupOpts::loopback(),
-            relay_transport: crate::transport::PayloadPath::DirectOnly,
+            relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: None,
             rung_tx: watch::channel(None).0,
         };
 
         // The holder: another member of the same room, on the only rung.
         let holder_endpoint = loopback_endpoint().await;
-        let holder_book = crate::lookup::address_book(&holder_endpoint);
+        let holder_book = lookup::address_book(&holder_endpoint);
         let mut held = None;
         let mut holder_probe = None;
         assert!(
@@ -1101,7 +1110,7 @@ mod tests {
         state.meshed = true;
         configure(&mut state);
         let (reports, mut arrivals) = mpsc::unbounded_channel();
-        state.rungs = crate::beacon::RungWatch::new(reports);
+        state.rungs = beacon::RungWatch::new(reports);
         let mut rendezvous = None;
         let mut probe = None;
         let arm = CohostArm {
@@ -1116,7 +1125,7 @@ mod tests {
             if !state.rungs.waiting() {
                 break;
             }
-            match tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await {
+            match time::timeout(Duration::from_secs(5), arrivals.recv()).await {
                 Ok(Some(report)) => state.rungs.note(report, Instant::now()),
                 Ok(None) | Err(_) => break,
             }
@@ -1144,9 +1153,7 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (state, holds_nothing) = Box::pin(heal_tick_beside_a_foreign_holder(|state| {
                 state.rendezvous_release_links = 1;
-                state
-                    .linked_endpoints
-                    .insert(crate::testing::endpoint_id(1));
+                state.linked_endpoints.insert(testing::endpoint_id(1));
             }))
             .await;
 
@@ -1166,12 +1173,10 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (state, holds_nothing) = Box::pin(heal_tick_beside_a_foreign_holder(|state| {
                 state.rendezvous_release_links = 1;
-                state
-                    .linked_endpoints
-                    .insert(crate::testing::endpoint_id(1));
+                state.linked_endpoints.insert(testing::endpoint_id(1));
                 state.rival_holders.insert(
-                    crate::protocol::AuthorKey::from([9u8; 32]),
-                    crate::testing::endpoint_id(2),
+                    protocol::AuthorKey::from([9u8; 32]),
+                    testing::endpoint_id(2),
                 );
             }))
             .await;
@@ -1229,19 +1234,19 @@ mod tests {
                 "no rendezvous port is free: other processes hold every port of this room",
             );
 
-            let port: u16 = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            let port: u16 = net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0))
                 .and_then(|socket| socket.local_addr())
                 .expect("a free loopback port")
                 .port();
             let params_of = |seed: u8| {
                 let secret = iroh::SecretKey::generate();
-                crate::beacon::RendezvousParams {
-                    topic_id: iroh_gossip::proto::TopicId::from_bytes([seed; 32]),
+                beacon::RendezvousParams {
+                    topic_id: proto::TopicId::from_bytes([seed; 32]),
                     id: secret.public(),
                     secret,
                     bind_ports: vec![port],
                     lookups: LookupOpts::loopback(),
-                    relay_transport: crate::transport::PayloadPath::DirectOnly,
+                    relay_transport: PayloadPath::DirectOnly,
                     bootstrap_relay: None,
                     rung_tx: watch::channel(None).0,
                 }
@@ -1251,7 +1256,7 @@ mod tests {
             // The beacon of another mesh holds the only rung.
             let other = params_of(9);
             let other_endpoint = loopback_endpoint().await;
-            let other_book = crate::lookup::address_book(&other_endpoint);
+            let other_book = lookup::address_book(&other_endpoint);
             let mut other_held = None;
             let mut other_probe = None;
             assert!(
@@ -1296,7 +1301,7 @@ mod tests {
             let mut state = fresh_state();
             state.meshed = true;
             let (reports, mut arrivals) = mpsc::unbounded_channel();
-            state.rungs = crate::beacon::RungWatch::new(reports);
+            state.rungs = beacon::RungWatch::new(reports);
             let mut rendezvous = None;
             let mut probe = None;
             let arm = CohostArm {
@@ -1310,7 +1315,7 @@ mod tests {
                 if !state.rungs.waiting() {
                     break;
                 }
-                match tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await {
+                match time::timeout(Duration::from_secs(5), arrivals.recv()).await {
                     Ok(Some(report)) => state.rungs.note(report, Instant::now()),
                     Ok(None) | Err(_) => break,
                 }
@@ -1342,49 +1347,49 @@ mod tests {
     /// first rung is taken by a beacon of another mesh while this member walks, so that it binds
     /// the second; the first rung is then free, or served by another member of this mesh.
     struct HolderOnTheSecondRung {
-        params: crate::beacon::RendezvousParams,
+        params: beacon::RendezvousParams,
         endpoint: iroh::Endpoint,
-        rendezvous: Option<crate::beacon::Rendezvous>,
-        probe: Option<crate::beacon::RivalProbe>,
+        rendezvous: Option<beacon::Rendezvous>,
+        probe: Option<beacon::RivalProbe>,
         first_port: u16,
         state: state::EventLoopState,
-        arrivals: mpsc::UnboundedReceiver<crate::beacon::RungReport>,
+        arrivals: mpsc::UnboundedReceiver<beacon::RungReport>,
     }
 
     impl HolderOnTheSecondRung {
         async fn new() -> Self {
             let free_port = || {
-                let socket = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                let socket = net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0))
                     .expect("a free loopback port");
                 socket.local_addr().expect("a free loopback port").port()
             };
             let (first_port, second_port) = (free_port(), free_port());
             let secret = iroh::SecretKey::generate();
-            let params = crate::beacon::RendezvousParams {
-                topic_id: iroh_gossip::proto::TopicId::from_bytes([8u8; 32]),
+            let params = beacon::RendezvousParams {
+                topic_id: proto::TopicId::from_bytes([8u8; 32]),
                 id: secret.public(),
                 secret,
                 bind_ports: vec![first_port, second_port],
                 lookups: mesh::LookupOpts::loopback(),
-                relay_transport: crate::transport::PayloadPath::DirectOnly,
+                relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: watch::channel(None).0,
             };
             // A beacon of another mesh holds the first rung: this member reads it as foreign and
             // binds the second.
             let other_secret = iroh::SecretKey::generate();
-            let other = crate::beacon::RendezvousParams {
-                topic_id: iroh_gossip::proto::TopicId::from_bytes([9u8; 32]),
+            let other = beacon::RendezvousParams {
+                topic_id: proto::TopicId::from_bytes([9u8; 32]),
                 id: other_secret.public(),
                 secret: other_secret,
                 bind_ports: vec![first_port],
                 lookups: mesh::LookupOpts::loopback(),
-                relay_transport: crate::transport::PayloadPath::DirectOnly,
+                relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: watch::channel(None).0,
             };
             let other_endpoint = loopback_endpoint().await;
-            let other_book = crate::lookup::address_book(&other_endpoint);
+            let other_book = lookup::address_book(&other_endpoint);
             let mut other_beacon = None;
             let mut other_probe = None;
             assert!(
@@ -1401,7 +1406,7 @@ mod tests {
             );
 
             let endpoint = loopback_endpoint().await;
-            let book = crate::lookup::address_book(&endpoint);
+            let book = lookup::address_book(&endpoint);
             let mut rendezvous = None;
             let mut probe = None;
             assert!(
@@ -1420,10 +1425,10 @@ mod tests {
                 held.shed_and_wait().await;
             }
             other_endpoint.close().await;
-            let mut state = crate::testing::fresh_state();
+            let mut state = testing::fresh_state();
             state.meshed = true;
             let (reports, arrivals) = mpsc::unbounded_channel();
-            state.rungs = crate::beacon::RungWatch::new(reports);
+            state.rungs = beacon::RungWatch::new(reports);
             Self {
                 params,
                 endpoint,
@@ -1438,9 +1443,9 @@ mod tests {
         /// A member of this mesh takes the first rung, which the foreign beacon left free.
         async fn another_member_takes_the_first_rung(
             &self,
-        ) -> (iroh::Endpoint, crate::beacon::Rendezvous) {
+        ) -> (iroh::Endpoint, beacon::Rendezvous) {
             let member = loopback_endpoint().await;
-            let book = crate::lookup::address_book(&member);
+            let book = lookup::address_book(&member);
             let mut beacon = None;
             let mut probe = None;
             assert!(
@@ -1506,7 +1511,7 @@ mod tests {
                 if !self.state.rungs.waiting() {
                     break;
                 }
-                match tokio::time::timeout(Duration::from_secs(5), self.arrivals.recv()).await {
+                match time::timeout(Duration::from_secs(5), self.arrivals.recv()).await {
                     Ok(Some(report)) => self.state.rungs.note(report, Instant::now()),
                     Ok(None) | Err(_) => break,
                 }
@@ -1555,9 +1560,8 @@ mod tests {
                 holder.heal_tick().await;
                 assert!(holder.rendezvous.is_some(), "the first rung is free");
             }
-            let silent =
-                std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, holder.first_port))
-                    .expect("the first rung, taken by a socket that says nothing");
+            let silent = net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, holder.first_port))
+                .expect("the first rung, taken by a socket that says nothing");
             for _ in 0..2 {
                 holder.heal_tick().await;
                 assert!(
@@ -1604,7 +1608,7 @@ mod tests {
                 ) {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                time::sleep(Duration::from_millis(50)).await;
             }
 
             holder.close().await;
@@ -1647,7 +1651,7 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let mut holder = HolderOnTheSecondRung::new().await;
             let (lower_endpoint, lower_beacon) = holder.another_member_takes_the_first_rung().await;
-            crate::beacon::set_blind_rung_probes(holder.endpoint.id(), true);
+            beacon::set_blind_rung_probes(holder.endpoint.id(), true);
 
             holder.heal_tick().await;
             let shed = holder.rendezvous.is_none();
@@ -1659,7 +1663,7 @@ mod tests {
             holder.heal_tick().await;
             let peer = holder.rendezvous.is_none();
 
-            crate::beacon::set_blind_rung_probes(holder.endpoint.id(), false);
+            beacon::set_blind_rung_probes(holder.endpoint.id(), false);
             holder.close().await;
             lower_beacon.shed_and_wait().await;
             lower_endpoint.close().await;
@@ -1684,12 +1688,12 @@ mod tests {
                 started: clock::Instant::now(),
             };
             let endpoint = loopback_endpoint().await;
-            let mut state = crate::testing::fresh_state();
+            let mut state = testing::fresh_state();
             state.next_rival_recheck = Some(clock::Instant::now());
             let old_beacon = iroh::EndpointAddr::new(params.id)
                 .with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
-            crate::lookup::add_peer_addr(&state.address_book, old_beacon);
-            let mut rendezvous = Some(crate::beacon::Rendezvous::for_test(endpoint, None));
+            lookup::add_peer_addr(&state.address_book, old_beacon);
+            let mut rendezvous = Some(beacon::Rendezvous::for_test(endpoint, None));
 
             assert!(
                 super::shed_rival_beacon_if_due(
@@ -1716,17 +1720,17 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let params = public_params();
             let endpoint = loopback_endpoint().await;
-            let mut state = crate::testing::fresh_state();
+            let mut state = testing::fresh_state();
             state.rendezvous_id = Some(params.id);
-            let hub = crate::lookup::build_webrtc_handle(endpoint.id());
+            let hub = lookup::build_webrtc_handle(endpoint.id());
             let held_round = state
                 .webrtc_admission
                 .try_admit(params.id, &hub)
                 .expect("a free slot");
             let epoch = held_round.epoch();
-            let task = n0_future::task::spawn(async move {
+            let task = task::spawn(async move {
                 let _held_round = held_round;
-                std::future::pending::<()>().await;
+                future::pending::<()>().await;
             });
             state
                 .webrtc_admission
@@ -1772,28 +1776,28 @@ mod tests {
             use crate::transport::MeshSender;
             use crate::util::clock::Instant;
 
-            let port: u16 = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            let port: u16 = net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0))
                 .and_then(|socket| socket.local_addr())
                 .expect("a free loopback port")
                 .port();
             let secret = iroh::SecretKey::generate();
-            let params = crate::beacon::RendezvousParams {
-                topic_id: iroh_gossip::proto::TopicId::from_bytes([5u8; 32]),
+            let params = beacon::RendezvousParams {
+                topic_id: proto::TopicId::from_bytes([5u8; 32]),
                 id: secret.public(),
                 secret,
                 bind_ports: vec![port],
                 lookups: LookupOpts::loopback(),
-                relay_transport: crate::transport::PayloadPath::DirectOnly,
+                relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: watch::channel(None).0,
             };
 
-            let endpoint = crate::lookup::build_endpoint(
+            let endpoint = lookup::build_endpoint(
                 &LookupOpts::loopback(),
                 None,
                 None,
                 Vec::new(),
-                crate::lookup::TransportHandles::default(),
+                lookup::TransportHandles::default(),
             )
             .await
             .expect("loopback endpoint");
@@ -1825,15 +1829,15 @@ mod tests {
             let mut state = fresh_state();
             state.meshed = true;
             state.rendezvous_id = Some(params.id);
-            let hub = crate::lookup::build_webrtc_handle(endpoint.id());
+            let hub = lookup::build_webrtc_handle(endpoint.id());
             let held_round = state
                 .webrtc_admission
                 .try_admit(params.id, &hub)
                 .expect("a free slot");
             let epoch = held_round.epoch();
-            let task = n0_future::task::spawn(async move {
+            let task = task::spawn(async move {
                 let _held_round = held_round;
-                std::future::pending::<()>().await;
+                future::pending::<()>().await;
             });
             state
                 .webrtc_admission
@@ -1877,28 +1881,28 @@ mod tests {
             use crate::testing::{fresh_state, nick};
             use crate::transport::MeshSender;
 
-            let port: u16 = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            let port: u16 = net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0))
                 .and_then(|socket| socket.local_addr())
                 .expect("a free loopback port")
                 .port();
             let secret = iroh::SecretKey::generate();
-            let params = crate::beacon::RendezvousParams {
-                topic_id: iroh_gossip::proto::TopicId::from_bytes([5u8; 32]),
+            let params = beacon::RendezvousParams {
+                topic_id: proto::TopicId::from_bytes([5u8; 32]),
                 id: secret.public(),
                 secret,
                 bind_ports: vec![port],
                 lookups: LookupOpts::loopback(),
-                relay_transport: crate::transport::PayloadPath::DirectOnly,
+                relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: watch::channel(None).0,
             };
 
-            let endpoint = crate::lookup::build_endpoint(
+            let endpoint = lookup::build_endpoint(
                 &LookupOpts::loopback(),
                 None,
                 None,
                 Vec::new(),
-                crate::lookup::TransportHandles::default(),
+                lookup::TransportHandles::default(),
             )
             .await
             .expect("loopback endpoint");
@@ -1929,15 +1933,15 @@ mod tests {
 
             let mut state = fresh_state();
             state.rendezvous_id = Some(params.id);
-            let hub = crate::lookup::build_webrtc_handle(endpoint.id());
+            let hub = lookup::build_webrtc_handle(endpoint.id());
             let held_round = state
                 .webrtc_admission
                 .try_admit(params.id, &hub)
                 .expect("a free slot");
             let epoch = held_round.epoch();
-            let task = n0_future::task::spawn(async move {
+            let task = task::spawn(async move {
                 let _held_round = held_round;
-                std::future::pending::<()>().await;
+                future::pending::<()>().await;
             });
             state
                 .webrtc_admission
@@ -2226,7 +2230,7 @@ mod tests {
         );
 
         // What `apply_rung_change` now does on a rehome.
-        let mut state = crate::testing::fresh_state();
+        let mut state = testing::fresh_state();
         state.rival_recheck_rounds = 5;
         state.rival_recheck_rounds = 0;
         assert_eq!(

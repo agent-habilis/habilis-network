@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::protocol::Nickname;
 
+use crate::transport;
 /// One peer in a [`RosterSnapshot`](super::RosterSnapshot). `last_seen_secs_ago` is
 /// `None` until the peer's first heartbeat is timed; `quiet` marks a
 /// peer heartbeat-evicted past `ALIVE_TIMEOUT` (still returnable);
@@ -36,5 +37,5 @@ pub struct RosterEntry {
     /// How the member is reached.
     pub reach: Reach,
     /// The transport that carries the member's traffic.
-    pub transport: crate::transport::Lane,
+    pub transport: transport::Lane,
 }

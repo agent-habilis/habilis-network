@@ -8,6 +8,20 @@
 //! the daemon-internal plumbing (`config`/`ctx`/`ipc`/`state`/`timers`/
 //! `setup`) are siblings under `super`.
 
+#[cfg(feature = "multihop")]
+use crate::protocol;
+#[cfg(feature = "host")]
+use crate::util;
+use crate::{lookup, transport};
+use iroh_gossip::net;
+use n0_future::{task, time};
+#[cfg(feature = "host")]
+use serde::de;
+#[cfg(feature = "host")]
+use std::path;
+use std::{future, process};
+#[cfg(feature = "multihop")]
+use tokio::sync;
 pub(super) mod ctx_parts;
 mod event_loop_error;
 pub(super) mod tick_gap;
@@ -183,8 +197,7 @@ async fn run_checked<Driver: NodeDriver>(
         .or_else(|| {
             let base = runtime_base.as_deref()?;
             exit_on_quit.then(|| {
-                crate::util::mesh_runtime_dir(base, mesh_str.as_str())
-                    .join(format!("{author}.state.json"))
+                util::mesh_runtime_dir(base, mesh_str.as_str()).join(format!("{author}.state.json"))
             })
         })
         .map(|path| {
@@ -246,7 +259,7 @@ async fn run_checked<Driver: NodeDriver>(
     // pairs a higher rung carries.
     state.gossip_handle = state.webrtc_admission.gossip_handle();
     state.unicast_pool =
-        crate::transport::UnicastPool::new(endpoint.clone(), relay_transport.relay_allowed());
+        transport::UnicastPool::new(endpoint.clone(), relay_transport.relay_allowed());
     state
         .unicast_pool
         .set_admission(state.webrtc_admission.clone());
@@ -342,7 +355,7 @@ async fn run_checked<Driver: NodeDriver>(
     // The task that sends the digest answers, so that the loop never waits for
     // the gossip actor to take them.
     if let Some(resends) = state.resend_receiver.take() {
-        n0_future::task::spawn(outbox::drain(
+        task::spawn(outbox::drain(
             resends,
             sender.clone(),
             state.unicast_pool.clone(),
@@ -614,8 +627,8 @@ async fn advertise_links(
     // replaces this one, and peers never log what they receive (see
     // `is_loggable`), so a retained copy would be one that nobody else holds and
     // that every digest asks us for again.
-    let vector_msg = crate::protocol::Message::new_link_state(context.mesh, context.author, body)
-        .sign(&state.identity);
+    let vector_msg =
+        protocol::Message::new_link_state(context.mesh, context.author, body).sign(&state.identity);
     gossip::broadcast_msg(context.sender, &vector_msg).await;
     // The vector that this node just sent is what a peer that turned our offer away lacked: the
     // wait that its turn-aways earned ends, and the underlay offers again at once. One offer per
@@ -667,7 +680,7 @@ struct EventLoop<Driver: NodeDriver> {
     /// after the stream terminally ends (see the heal arm) — without it
     /// a closed subscription (e.g. lag-evicted by the actor) would
     /// leave the daemon permanently deaf.
-    gossip: iroh_gossip::net::Gossip,
+    gossip: net::Gossip,
     endpoint: Endpoint,
     mesh: MeshId,
     name: MeshName,
@@ -695,7 +708,7 @@ struct EventLoop<Driver: NodeDriver> {
     /// self-monitor); the loop applies changes via the rung-update arm.
     rung_rx: watch::Receiver<Option<RelayUrl>>,
     /// The startup probe behind `rung_rx`, released with the rendezvous.
-    rung_probe: Option<crate::lookup::StoppableTask>,
+    rung_probe: Option<lookup::StoppableTask>,
     /// What the probe tasks of the private ladder found, and the walk that asked for it.
     rung_reports: mpsc::UnboundedReceiver<beacon::RungReport>,
     /// When this member may serve the rendezvous (see [`CoHostPolicy`]).
@@ -716,7 +729,7 @@ struct EventLoop<Driver: NodeDriver> {
     unicast_rx: Option<mpsc::Receiver<bytes::Bytes>>,
     /// The members of this mesh that the LAN announces (`gossip::lan`). `Option` so the arm is
     /// off without an mDNS handle and when the channel closes.
-    lan_contacts: Option<mpsc::Receiver<crate::lookup::LanEvent>>,
+    lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
     /// Direct-path probe verdicts (`transport::probe`). Never closes: `state`
     /// holds a sender for the loop's lifetime.
     direct_rx: mpsc::UnboundedReceiver<probe::DirectOutcome>,
@@ -1040,7 +1053,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                         // The CLI exits with code 1 once everything is released.
                         #[cfg(not(feature = "dhat-heap"))]
                         if exit_on_quit {
-                            std::process::exit(1);
+                            process::exit(1);
                         }
                         return Err(error);
                     }
@@ -1204,7 +1217,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
     )
     .await;
     if exit_after_release {
-        std::process::exit(0);
+        process::exit(0);
     }
     Ok(())
 }
@@ -1216,9 +1229,9 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
 /// `disabled` is set by the in-process drivers (library API / MCP), which use
 /// the typed `session_rx` and bind no socket.
 #[cfg(feature = "host")]
-fn spawn_ipc_rx<Cmd: serde::de::DeserializeOwned + Send + 'static>(
+fn spawn_ipc_rx<Cmd: de::DeserializeOwned + Send + 'static>(
     disabled: bool,
-    runtime_base: Option<&std::path::Path>,
+    runtime_base: Option<&path::Path>,
     mesh: &MeshId,
     author: &Nickname,
     // the IPC server takes its own clone of the shared sink
@@ -1259,8 +1272,8 @@ fn spawn_ipc_rx<Cmd: serde::de::DeserializeOwned + Send + 'static>(
 /// `state` across the await (the deadline is copied out beforehand).
 async fn sleep_until_opt(deadline: Option<TokioInstant>) {
     match deadline {
-        Some(at) => n0_future::time::sleep_until(at).await,
-        None => std::future::pending::<()>().await,
+        Some(at) => time::sleep_until(at).await,
+        None => future::pending::<()>().await,
     }
 }
 
@@ -1275,10 +1288,10 @@ pub(crate) fn route_wake_arm(state: &mut EventLoopState, context: &HandlerCtx<'_
 /// hop and when it admits one that it refused.
 #[cfg(feature = "multihop")]
 // the wake is the multihop handle's, which the loop and the handle share
-fn route_wake_of(state: &EventLoopState) -> Arc<tokio::sync::Notify> {
+fn route_wake_of(state: &EventLoopState) -> Arc<sync::Notify> {
     state.multihop.as_ref().map_or_else(
         // without a handle, a fresh wake that nothing rings
-        || Arc::new(tokio::sync::Notify::new()),
+        || Arc::new(sync::Notify::new()),
         habilis_network_iroh_multihop_transport::MultihopHandle::route_wake,
     )
 }
@@ -1295,10 +1308,10 @@ fn route_wake_of(_state: &EventLoopState) -> Arc<tokio::sync::Notify> {
 /// underlay ends, whatever its end. It is the table of the underlay, not `webrtc_admission`.
 #[cfg(feature = "multihop")]
 // the wake is the underlay admission's, which the loop and the underlay share
-fn underlay_slot_freed_of(state: &EventLoopState) -> Arc<tokio::sync::Notify> {
+fn underlay_slot_freed_of(state: &EventLoopState) -> Arc<sync::Notify> {
     state.underlay_webrtc.as_ref().map_or_else(
         // without an underlay, a fresh wake that nothing rings
-        || Arc::new(tokio::sync::Notify::new()),
+        || Arc::new(sync::Notify::new()),
         |underlay| underlay.admission.slot_freed(),
     )
 }
@@ -1378,20 +1391,20 @@ impl TickAnchors {
 
 /// The time-driven maintenance tickers.
 struct MaintenanceIntervals {
-    prune: n0_future::time::Interval,
-    alive: n0_future::time::Interval,
-    sweep: n0_future::time::Interval,
-    heal: n0_future::time::Interval,
+    prune: time::Interval,
+    alive: time::Interval,
+    sweep: time::Interval,
+    heal: time::Interval,
     /// Fast event-driven failover burst; only does work while
     /// `state.reclaim_until` is open (armed on `NeighborDown`).
-    reclaim: n0_future::time::Interval,
+    reclaim: time::Interval,
     /// Periodic anti-entropy digest broadcast (recover messages missed
     /// while partitioned/asleep).
-    antientropy: n0_future::time::Interval,
-    state_refresh: n0_future::time::Interval,
+    antientropy: time::Interval,
+    state_refresh: time::Interval,
     /// Periodic relay link-state re-broadcast (our own measured links), so peers
     /// keep a fresh routing graph.
-    linkstate: n0_future::time::Interval,
+    linkstate: time::Interval,
 }
 
 /// Build the maintenance tickers, eating the first immediate tick on
@@ -1407,27 +1420,27 @@ struct MaintenanceIntervals {
 async fn build_maintenance_intervals() -> MaintenanceIntervals {
     use n0_future::time::MissedTickBehavior::Skip;
 
-    let mut prune = n0_future::time::interval(Duration::from_mins(1));
+    let mut prune = time::interval(Duration::from_mins(1));
     prune.set_missed_tick_behavior(Skip);
-    let mut alive = n0_future::time::interval(ALIVE_INTERVAL);
+    let mut alive = time::interval(ALIVE_INTERVAL);
     alive.set_missed_tick_behavior(Skip);
     alive.tick().await;
-    let mut sweep = n0_future::time::interval(sweep_interval());
+    let mut sweep = time::interval(sweep_interval());
     sweep.set_missed_tick_behavior(Skip);
     sweep.tick().await;
-    let mut heal = n0_future::time::interval(heal_interval());
+    let mut heal = time::interval(heal_interval());
     heal.set_missed_tick_behavior(Skip);
     heal.tick().await;
-    let mut reclaim = n0_future::time::interval(RECLAIM_INTERVAL);
+    let mut reclaim = time::interval(RECLAIM_INTERVAL);
     reclaim.set_missed_tick_behavior(Skip);
     reclaim.tick().await;
-    let mut antientropy = n0_future::time::interval(antientropy_interval());
+    let mut antientropy = time::interval(antientropy_interval());
     antientropy.set_missed_tick_behavior(Skip);
     antientropy.tick().await;
-    let mut state_refresh = n0_future::time::interval(STATE_REFRESH);
+    let mut state_refresh = time::interval(STATE_REFRESH);
     state_refresh.set_missed_tick_behavior(Skip);
     state_refresh.tick().await;
-    let mut linkstate = n0_future::time::interval(LINKSTATE_INTERVAL);
+    let mut linkstate = time::interval(LINKSTATE_INTERVAL);
     linkstate.set_missed_tick_behavior(Skip);
     linkstate.tick().await;
     MaintenanceIntervals {
@@ -1454,14 +1467,14 @@ async fn closed_opt(rx: &mut Option<oneshot::Receiver<()>>) {
         Some(rx) => {
             let _ = rx.await;
         }
-        None => std::future::pending::<()>().await,
+        None => future::pending::<()>().await,
     }
 }
 
 async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
     match rx.as_mut() {
         Some(rx) => rx.recv().await,
-        None => std::future::pending().await,
+        None => future::pending().await,
     }
 }
 
@@ -1471,10 +1484,11 @@ mod tests {
 
     use tokio::sync::oneshot;
 
+    use n0_future::time;
     /// The wake for the close of a shed beacon: pending with no shed, ready when the close reports,
     /// ready when the close task is lost.
     async fn wakes_within_a_moment(closing: &mut Option<oneshot::Receiver<()>>) -> bool {
-        n0_future::time::timeout(Duration::from_millis(100), super::closed_opt(closing))
+        time::timeout(Duration::from_millis(100), super::closed_opt(closing))
             .await
             .is_ok()
     }
@@ -1534,6 +1548,7 @@ mod route_wake_tests {
     use crate::testing::{LaneNode, nick};
     use crate::transport::probe::{PathKind, nudge_climbing_pairs};
 
+    use crate::testing;
     async fn multihop_handle() -> MultihopHandle {
         let secret = SecretKey::generate();
         let underlay: Endpoint = Endpoint::builder(presets::Minimal)
@@ -1622,7 +1637,7 @@ mod route_wake_tests {
                 // A browser underlay: no IP socket, and a relay that it has not reached yet, so it
                 // binds and has no address. (An endpoint with neither does not bind at all.) The relay
                 // here is a listener that never answers.
-                let (_silent, relay) = crate::testing::silent_relay_rung();
+                let (_silent, relay) = testing::silent_relay_rung();
                 let secret = SecretKey::generate();
                 let builder = Endpoint::builder(presets::Minimal)
                     .secret_key(underlay_secret(&secret))
@@ -1834,10 +1849,12 @@ mod chain_tests {
 
     use super::EventLoopError;
 
+    use std::io;
+    use std::io::ErrorKind;
     #[test]
     fn an_internal_cause_keeps_its_chain() {
         let _guard = ::habilis_network_test_tracing::init();
-        let io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
+        let io = io::Error::new(ErrorKind::AddrInUse, "Address already in use");
         let cause = anyhow::Error::new(io).context("bind the endpoint");
         let error = anyhow::Error::new(EventLoopError::internal(cause));
         let text = format!("{error:#}");

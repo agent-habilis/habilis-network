@@ -1,3 +1,7 @@
+#[cfg(feature = "host")]
+use std::error;
+#[cfg(feature = "host")]
+use std::fmt;
 /// Why a pid cannot be the owner of a detached daemon.
 ///
 /// # Examples
@@ -23,8 +27,8 @@ pub enum OwnerPidError {
 }
 
 #[cfg(feature = "host")]
-impl std::fmt::Display for OwnerPidError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for OwnerPidError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Reserved(pid) => write!(
                 formatter,
@@ -37,4 +41,4 @@ impl std::fmt::Display for OwnerPidError {
 }
 
 #[cfg(feature = "host")]
-impl std::error::Error for OwnerPidError {}
+impl error::Error for OwnerPidError {}
