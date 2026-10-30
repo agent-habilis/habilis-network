@@ -261,10 +261,6 @@ allow_attributes = "warn"
 # Forbid `_ =>` catch-all arms on enum matches: a new variant must be
 # handled explicitly rather than silently swallowed by a wildcard.
 wildcard_enum_match_arm = "warn"
-# Transitive duplicate crate versions are not controllable from a leaf
-# binary (verified: ~16 dup crates, all pulled by iroh/reqwest/etc.);
-# the lint is noise here, not an actionable signal.
-multiple_crate_versions = "allow"
 # An impl stays async like its trait, and the work waits for the poll.
 unused_async_trait_impl = "allow"
 # Google Rust Style Guide (issue 29): at most three path segments; a longer path imports its parent module.
