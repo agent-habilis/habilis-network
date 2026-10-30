@@ -353,7 +353,9 @@ async fn run_cell(cell: Cell, pressure: u64) -> (Verdict, Option<f64>, (u64, u64
                 .map(|pair| pair.exchange(cell.direction, cell.size, cell.deadline(pressure))),
         )
         .await;
-        for (index, outcome) in outcomes.iter().enumerate() {
+        let indexed_outcomes: Vec<(usize, &anyhow::Result<()>)> =
+            outcomes.iter().enumerate().collect();
+        for (index, outcome) in indexed_outcomes {
             if let Err(error) = outcome {
                 failures.push(format!("round {round} pair {index}: {error}"));
             }

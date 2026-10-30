@@ -49,11 +49,10 @@ impl IceServers {
             // reaches the browser. TURN cannot be configured here even by
             // mistake, and a query string Safari would throw on is stripped
             // before it can take down the whole peer connection.
-            for url in server
-                .urls
-                .iter()
-                .filter_map(|url| crate::accept_ice_uri(url))
-            {
+            for url in &server.urls {
+                let Some(url) = crate::accept_ice_uri(url) else {
+                    continue;
+                };
                 urls.push(&JsValue::from_str(&url));
             }
             if urls.length() == 0 {

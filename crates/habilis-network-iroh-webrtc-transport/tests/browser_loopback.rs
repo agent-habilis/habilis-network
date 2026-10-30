@@ -191,7 +191,8 @@ async fn concurrent_bulk_transfers_all_complete() {
     // exactly where a lane that silently discards would start doing so — and
     // QUIC would paper over it with retransmits, so the transfers could all
     // pass while the lane was in fact dropping steadily.
-    for (index, pair) in pairs.iter().enumerate() {
+    let indexed_pairs: Vec<(usize, &Pair)> = pairs.iter().enumerate().collect();
+    for (index, pair) in indexed_pairs {
         let counters = pair
             .client_hub
             .session_counters(&pair.server_id)
