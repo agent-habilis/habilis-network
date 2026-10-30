@@ -41,9 +41,9 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use crate::daemon::state_file::StateFile;
 use crate::doc::SelfWriteGate;
 use crate::gossip::event::{NodeEvent, NodeSink};
-use crate::protocol::meshes::MeshName;
+use crate::protocol::meshes::{Mesh, MeshName};
 use crate::protocol::messages::{Authored, Verified};
-use crate::protocol::{MeshId, Nickname, UnixSecs};
+use crate::protocol::{MeshId, Nickname, UnixSecs, identity};
 use crate::transport::{IpcMessage, MeshSender};
 use crate::util::clock::{Instant, millis_saturating};
 // The timer-driver clock, distinct from `clock::Instant` off wasm32 (there it is
@@ -150,7 +150,12 @@ async fn run_checked<Driver: NodeDriver>(
     let started = Instant::now();
     let leave_label = leave_label(&mesh);
     let mut state = initial_state(
-        &mut mesh,
+        mesh.identity,
+        MeshSecrets {
+            password: mesh.mesh_password.take(),
+            key: mesh.mesh_key.take(),
+        },
+        mesh.mint_mesh.take(),
         &transports,
         runtime.per_peer_gate.take(),
         started,
@@ -180,44 +185,22 @@ async fn run_checked<Driver: NodeDriver>(
     .await;
     let (sender, receiver) = join_gossip(&mut state, endpoints.topic);
 
-    #[cfg(feature = "host")]
-    let ipc_rx: Option<mpsc::Receiver<IpcMessage<Driver::Ipc>>> = spawn_ipc_rx(
+    let ipc_rx = control_socket::<Driver::Ipc>(
         ipc_listener_disabled,
         runtime.runtime_base.as_deref(),
         &mesh.mesh,
         &mesh.author,
         &runtime.sink,
     );
-    // A browser binds no control socket. The loop keeps its IPC `select!` arm —
-    // `IpcMessage` is portable — and the arm simply never fires.
-    #[cfg(not(feature = "host"))]
-    let ipc_rx: Option<mpsc::Receiver<IpcMessage<Driver::Ipc>>> = {
-        drop(runtime.runtime_base);
-        None
-    };
 
     // Arrival announce is deferred to the first `NeighborUp` — see
     // `gossip::handle_gossip_event`.
 
     let intervals = build_maintenance_intervals().await;
-    // A session inside a foreground command that owns its own lifetime
-    // (a `--advertise` transfer, a directory browse) must not register
-    // process-wide signal handlers — doing so suppresses the OS
-    // default-terminate forever and the host command stops dying on
-    // ctrl-c. Give the loop a quit channel that never fires instead;
-    // shutdown comes from `external_quit_rx` / drop. A browser is always this
-    // case: there are no process signals to listen for.
     #[cfg(feature = "host")]
-    let quit_rx = if handle_signals == SignalHandling::Handle {
-        shutdown::spawn_quit_signal_tasks(exit_on_quit, runtime.owner)
-    } else {
-        never_quit()
-    };
+    let quit_rx = quit_channel(handle_signals, exit_on_quit, runtime.owner);
     #[cfg(not(feature = "host"))]
-    let quit_rx = {
-        let _ = handle_signals;
-        never_quit()
-    };
+    let quit_rx = quit_channel(handle_signals, exit_on_quit);
 
     // Flip `ready` to `true` only once the daemon can actually serve, then
     // re-write the state file (the earlier write reported `ready: false`) and
@@ -315,6 +298,57 @@ fn driver_channels(
     }
 }
 
+/// The control socket of the daemon, bound here, before the caller marks the session ready. `None`
+/// when the driver has no socket: in-process drivers take requests on their own channel.
+#[cfg(feature = "host")]
+fn control_socket<Ipc: de::DeserializeOwned + Send + 'static>(
+    disabled: bool,
+    runtime_base: Option<&path::Path>,
+    mesh_id: &MeshId,
+    author: &Nickname,
+    sink: &Arc<dyn NodeSink>,
+) -> Option<mpsc::Receiver<IpcMessage<Ipc>>> {
+    spawn_ipc_rx(disabled, runtime_base, mesh_id, author, sink)
+}
+
+/// A browser binds no control socket. The loop keeps its IPC `select!` arm — `IpcMessage` is
+/// portable — and the arm simply never fires.
+#[cfg(not(feature = "host"))]
+fn control_socket<Ipc>(
+    _disabled: bool,
+    _runtime_base: Option<&path::Path>,
+    _mesh_id: &MeshId,
+    _author: &Nickname,
+    _sink: &Arc<dyn NodeSink>,
+) -> Option<mpsc::Receiver<IpcMessage<Ipc>>> {
+    None
+}
+
+/// The loop's quit channel. A session inside a foreground command that owns its own lifetime
+/// (a `--advertise` transfer, a directory browse) must not register process-wide signal
+/// handlers — doing so suppresses the OS default-terminate forever and the host command stops
+/// dying on ctrl-c. Give the loop a quit channel that never fires instead; shutdown comes from
+/// `external_quit_rx` / drop. A browser is always this case: there are no process signals to
+/// listen for.
+#[cfg(feature = "host")]
+fn quit_channel(
+    handle_signals: SignalHandling,
+    exit_on_quit: bool,
+    owner: Option<shutdown::Owner>,
+) -> mpsc::Receiver<()> {
+    if handle_signals == SignalHandling::Handle {
+        shutdown::spawn_quit_signal_tasks(exit_on_quit, owner)
+    } else {
+        never_quit()
+    }
+}
+
+#[cfg(not(feature = "host"))]
+fn quit_channel(handle_signals: SignalHandling, _exit_on_quit: bool) -> mpsc::Receiver<()> {
+    let _ = handle_signals;
+    never_quit()
+}
+
 /// The state file of a host daemon, seeded by the app. `None` when there is no file to write: an
 /// in-process session that keeps no file.
 #[cfg(feature = "host")]
@@ -366,7 +400,9 @@ type StateFileSeed = Option<path::PathBuf>;
 /// The event loop's state, with the mesh's identity and secrets moved in. The state file goes
 /// with it, so the first write the loop makes lands in the right place.
 fn initial_state(
-    mesh: &mut MeshSpec,
+    identity: Arc<identity::Identity>,
+    secrets: MeshSecrets,
+    mint_mesh: Option<Mesh>,
     transports: &TransportSet,
     per_peer_gate: Option<SelfWriteGate>,
     started: Instant,
@@ -378,11 +414,8 @@ fn initial_state(
         state::StateInit {
             #[cfg(feature = "host")]
             state_file,
-            identity: Arc::clone(&mesh.identity),
-            secrets: MeshSecrets {
-                password: mesh.mesh_password.take(),
-                key: mesh.mesh_key.take(),
-            },
+            identity,
+            secrets,
             per_peer_gate,
             // The *same* table the Router's signal acceptor holds, not a fresh
             // one: the cap only counts if both roles count against it together.
@@ -392,7 +425,7 @@ fn initial_state(
         },
         started,
     );
-    state.mint_mesh = mesh.mint_mesh.take(); // creator-only: backs the `invite` command
+    state.mint_mesh = mint_mesh; // creator-only: backs the `invite` command
     state
 }
 

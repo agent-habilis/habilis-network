@@ -115,11 +115,11 @@ Status: the 65 sites were reviewed by declaration in an earlier round of this au
 
 Every `Arc`/`Rc` site was read again with its enclosing function. Struct field declarations are the type of the shared value, not a copy, so they are not counted as removals.
 
-- Removed: 0.
+- Removed: 1 (the event loop's `identity` clone, below).
 - Kept, with the reason per site type:
   - Shared between an owner and a spawned task or a closure that outlives the borrow: the IPC accept loop's sink (`spawn_ipc_rx`), the outbox's dropped counter, the split's high-water gauge, the mesh sender's gossip handle, the `SetupParams` sink, the loop's identity (held across `&mut state`, as the loop's comment says).
   - Owned value that outlives a lock or a call: the victims' hub copy (`take_victims`, used after the lock is dropped), the slot-freed and route-wake notifiers (the loop's `select!` holds them across state mutation).
   - Returned to a caller that needs an owned handle: `join`'s sink, `json_sink`, `high_water_gauge`, the multihop route-wake handle.
   - Trait objects the API takes as `Arc`: the signal admission's hub, the sink of `SetupParams`.
-- Considered and not changed: the event loop's `identity` clone (`daemon/event_loop.rs`, `initial_state`). Passing `mesh.identity` by value would let the clone go, but `initial_state` takes `&mut MeshSpec` to take the secrets and the mint, and moving the arguments out pushes `run_checked` past the 120-line limit (`too_many_lines`). Splitting `run_checked` is a larger change than this clone is worth, so the clone stays.
+- Removed: the event loop's `identity` clone (`daemon/event_loop.rs`, `initial_state`). `initial_state` now takes the identity and the secrets by value, and `run_checked` moves them out of the mesh. The split that keeps `run_checked` under its 120-line limit: the control socket and the quit channel are named helpers (`control_socket`, `quit_channel`), each with a host and a browser variant.
 - Test sites (`lookup/tests.rs`, the `admission.rs` test module) are outside the non-test rule and are kept.
