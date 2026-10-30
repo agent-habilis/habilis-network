@@ -65,7 +65,7 @@ pub(crate) fn detach_session_under_udp(
     peer: EndpointId,
     needs_lane: bool,
 ) -> bool {
-    let Some(handle) = state.webrtc.clone() else {
+    let Some(handle) = &state.webrtc else {
         return false;
     };
     if needs_lane
@@ -91,7 +91,7 @@ pub(crate) async fn detach_sessions_under_udp(
     state: &mut state::EventLoopState,
     context: &HandlerCtx<'_>,
 ) {
-    let Some(handle) = state.webrtc.clone() else {
+    let Some(handle) = &state.webrtc else {
         return;
     };
     if handle.session_count() == 0 {
