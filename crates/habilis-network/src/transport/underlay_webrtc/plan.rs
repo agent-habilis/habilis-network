@@ -68,19 +68,16 @@ pub(super) fn wanted_underlays(
     neighbors: &[(EndpointId, iroh::EndpointAddr)],
     local_has_udp: UdpTransport,
     kind_of: impl Fn(EndpointId) -> Option<PathKind>,
-) -> Vec<iroh::EndpointAddr> {
+) -> Vec<&iroh::EndpointAddr> {
     if local_has_udp == UdpTransport::Absent {
-        return neighbors
-            .iter()
-            .map(|(_, address)| address.clone())
-            .collect();
+        return neighbors.iter().map(|(_, address)| address).collect();
     }
     neighbors
         .iter()
         .filter(|(member, address)| {
             kind_of(*member) == Some(PathKind::WebRtc) || address.ip_addrs().next().is_none()
         })
-        .map(|(_, address)| address.clone())
+        .map(|(_, address)| address)
         .collect()
 }
 

@@ -127,7 +127,7 @@ pub(crate) fn tick(state: &state::EventLoopState, underlay: &UnderlayWebRtc) {
             underlay.handle.clone(),
             underlay.admission.clone(),
         );
-        let address = address.clone();
+        let address = (*address).clone();
         let ice = state.webrtc_ice;
         let epoch = guard.epoch();
         let task = task::spawn(async move {

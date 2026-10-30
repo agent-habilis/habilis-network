@@ -155,7 +155,7 @@ mod tests {
         );
         assert_eq!(
             wanted,
-            vec![neighbors[0].1.clone()],
+            vec![&neighbors[0].1],
             "only a neighbor whose application path is webrtc is wanted"
         );
     }
@@ -185,7 +185,7 @@ mod tests {
         let on_relay = |_member: EndpointId| Some(PathKind::Relay);
         assert_eq!(
             plan::wanted_underlays(&neighbors, UdpTransport::Present, on_relay),
-            vec![neighbors[0].1.clone()],
+            vec![&neighbors[0].1],
             "a neighbor whose underlay has no ip is wanted by a node with udp"
         );
     }
@@ -224,10 +224,7 @@ mod tests {
             UdpTransport::Absent,
             neighbor_kinds(webrtc, ip, relay),
         );
-        let all: Vec<EndpointAddr> = neighbors
-            .iter()
-            .map(|(_, address)| address.clone())
-            .collect();
+        let all: Vec<&EndpointAddr> = neighbors.iter().map(|(_, address)| address).collect();
         assert_eq!(
             wanted, all,
             "a node without udp wants a session to every neighbor"
