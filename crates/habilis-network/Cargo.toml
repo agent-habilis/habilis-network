@@ -162,7 +162,7 @@ iroh-mainline-address-lookup = { workspace = true, optional = true }
 # Argon2id password stretching for `--password` (mesh hash verifier + ticket
 # handshake tokens). default-features off: no `password-hash` string format —
 # we only need the raw `hash_password_into` KDF.
-argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 futures-util = "0.3"
 # End-to-end sealing of directed frames: a NaCl-style sealed box (ephemeral
 # X25519 ECDH → ChaCha20-Poly1305) so only the addressed recipient can read a
