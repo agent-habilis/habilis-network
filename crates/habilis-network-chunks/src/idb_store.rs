@@ -27,6 +27,7 @@ use std::collections::HashSet;
 
 use crate::ChunkError;
 use js_sys::Uint8Array;
+use num_traits::ToPrimitive;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::JsFuture;
@@ -151,15 +152,7 @@ fn version_of(db: &IdbDatabase) -> u32 {
     // not worth trusting into an arithmetic that decides a schema upgrade.
     let raw = db.version();
     if raw.is_finite() && (1.0..=f64::from(u32::MAX - 1)).contains(&raw) {
-        // Truncation is impossible inside the range checked above.
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "bounded to 1..=u32::MAX-1 immediately above"
-        )]
-        {
-            raw as u32
-        }
+        raw.to_u32().unwrap_or(1)
     } else {
         1
     }
