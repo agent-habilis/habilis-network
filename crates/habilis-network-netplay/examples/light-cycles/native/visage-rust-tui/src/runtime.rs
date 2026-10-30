@@ -12,16 +12,20 @@ use crate::reconcile::{self, Mounted};
 use crate::tui;
 use std::collections::HashSet;
 
+use std::{fmt, mem};
+
 /// A running app.
-// No `Debug` derive: it would force a `H: Debug` bound onto every `Host`
-// backend for a trace nobody's asked for yet. Add one (manual, printing
-// the instance and node count) if a debugging need actually shows up.
-use std::mem;
-#[allow(missing_debug_implementations)]
 pub struct Runtime<H: Host> {
     host: H,
     root: H::Node,
     mounted: Mounted<H::Node>,
+}
+
+// Manual, so a `Host` backend need not implement `Debug` to make a `Runtime` printable.
+impl<H: Host> fmt::Debug for Runtime<H> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Runtime").finish_non_exhaustive()
+    }
 }
 
 impl<H: Host> Runtime<H> {
