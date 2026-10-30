@@ -192,7 +192,8 @@ mod tests {
     #[test]
     fn encode_decode_roundtrips() {
         let _guard = ::habilis_network_test_tracing::init();
-        let route = Route::try_new(vec![hop(1), hop(2), hop(3)]).unwrap();
+        let route = Route::try_new(vec![hop(1), hop(2), hop(3)])
+            .expect("a route of distinct hops is valid");
         let address = route.encode();
         assert_eq!(
             Route::decode(&address).expect("decodes"),
@@ -217,10 +218,10 @@ mod tests {
                 underlay_id: UnderlayId::new(id(4)),
             },
         ])
-        .unwrap();
+        .expect("a route of distinct hops is valid");
         let mut data = String::new();
         for byte in route.encode().data() {
-            write!(data, "{byte:02x}").unwrap();
+            write!(data, "{byte:02x}").expect("writing to a String cannot fail");
         }
         assert_eq!(
             data,
@@ -237,7 +238,7 @@ mod tests {
     #[test]
     fn wrong_transport_id_does_not_decode() {
         let _guard = ::habilis_network_test_tracing::init();
-        let route = Route::try_new(vec![hop(1)]).unwrap();
+        let route = Route::try_new(vec![hop(1)]).expect("a route of distinct hops is valid");
         let address = route.encode();
         let foreign = iroh_base::CustomAddr::from_parts(0x99, address.data());
         assert!(
@@ -249,7 +250,8 @@ mod tests {
     #[test]
     fn empty_route_does_not_decode() {
         let _guard = ::habilis_network_test_tracing::init();
-        let bytes = postcard::to_allocvec(&Vec::<RouteHop>::new()).unwrap();
+        let bytes = postcard::to_allocvec(&Vec::<RouteHop>::new())
+            .expect("postcard encodes a route of plain hops");
         let address = iroh_base::CustomAddr::from_parts(crate::MULTIHOP_TRANSPORT_ID, &bytes);
         assert!(
             Route::decode(&address).is_none(),
@@ -321,7 +323,7 @@ mod tests {
         let hops: Vec<RouteHop> = (0..=MAX_ROUTE_HOPS)
             .map(|seed| hop(u8::try_from(seed).expect("seed fits")))
             .collect();
-        let bytes = postcard::to_allocvec(&hops).unwrap();
+        let bytes = postcard::to_allocvec(&hops).expect("postcard encodes a route of plain hops");
         let address = iroh_base::CustomAddr::from_parts(crate::MULTIHOP_TRANSPORT_ID, &bytes);
         assert!(
             Route::decode(&address).is_none(),
@@ -333,7 +335,7 @@ mod tests {
     fn a_cyclic_route_does_not_decode() {
         let _guard = ::habilis_network_test_tracing::init();
         let hops = vec![hop(1), hop(2), hop(1)];
-        let bytes = postcard::to_allocvec(&hops).unwrap();
+        let bytes = postcard::to_allocvec(&hops).expect("postcard encodes a route of plain hops");
         let address = iroh_base::CustomAddr::from_parts(crate::MULTIHOP_TRANSPORT_ID, &bytes);
         assert!(
             Route::decode(&address).is_none(),

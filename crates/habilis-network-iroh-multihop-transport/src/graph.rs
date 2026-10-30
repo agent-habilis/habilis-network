@@ -433,7 +433,10 @@ mod tests {
         );
         for path in &paths {
             assert_eq!(
-                *path.hops.last().unwrap(),
+                *path
+                    .hops
+                    .last()
+                    .expect("a path built by disjoint_paths has at least one hop"),
                 nd,
                 "each disjoint path ends at the destination"
             );

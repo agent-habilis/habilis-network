@@ -106,22 +106,26 @@ mod tests {
         let raw = postcard::to_allocvec(&id).expect("an endpoint id serializes");
 
         assert_eq!(
-            postcard::to_allocvec(&AppId::new(id)).unwrap(),
+            postcard::to_allocvec(&AppId::new(id)).expect("a plain id serialises to postcard"),
             raw,
             "an app id has the bytes of the endpoint id it wraps"
         );
         assert_eq!(
-            postcard::to_allocvec(&UnderlayId::new(id)).unwrap(),
+            postcard::to_allocvec(&UnderlayId::new(id)).expect("a plain id serialises to postcard"),
             raw,
             "an underlay id has the bytes of the endpoint id it wraps"
         );
         assert_eq!(
-            postcard::from_bytes::<AppId>(&raw).unwrap().get(),
+            postcard::from_bytes::<AppId>(&raw)
+                .expect("the bytes were just serialised from this id")
+                .get(),
             id,
             "an app id deserializes from those bytes"
         );
         assert_eq!(
-            postcard::from_bytes::<UnderlayId>(&raw).unwrap().get(),
+            postcard::from_bytes::<UnderlayId>(&raw)
+                .expect("the bytes were just serialised from this id")
+                .get(),
             id,
             "an underlay id deserializes from those bytes"
         );
