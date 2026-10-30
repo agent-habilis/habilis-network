@@ -184,7 +184,7 @@ The `transport` target has no pin. Its lines appear only when `RUST_LOG` names t
 
 The Google Rust Style Guide is the reference for Rust style in this repository: https://google.github.io/styleguide/rustguide.html
 
-Issue #29 records each decision. The record of the `Arc`/`Rc` (B1) and clone (B3) audit, with the reason for each kept site, is in `docs/clone-audit/`.
+Issue #29 records each decision.
 
 ### What each gate refuses
 
