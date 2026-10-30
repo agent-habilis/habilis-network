@@ -1,7 +1,7 @@
 //! The mesh's `WebRTC` signalling plane: how two peers that cannot reach each
 //! other over IP still end up holding a direct data channel.
 //!
-//! The engine already carries a [`WebRtcHandle`] into `build_endpoint`
+//! The engine already carries a `WebRtcHandle` into `build_endpoint`
 //! (`lookup::TransportHandles`), but until this module nothing ever *filled*
 //! it: the transport was registered and permanently empty, because a session
 //! only exists once two peers have exchanged SDP, and nothing exchanged SDP.
@@ -19,11 +19,11 @@
 //! connection to the peer completes: that is when iroh opens new paths and
 //! re-runs selection (the pinned fork's Initial fan-out patch). Grafting on the
 //! attach event gives the pair that connection. A connection that stays up
-//! across a later attach, as in a re-race, is moved by a [`nudge`].
+//! across a later attach, as in a re-race, is moved by a `nudge`.
 //!
 //! Both roles are written once and split by target only where the JSEP APIs
 //! genuinely differ (str0m natively, `RTCPeerConnection` in a tab). The wire
-//! format — [`SignalEnvelope`] — is shared, so a browser and a CLI peer
+//! format — `SignalEnvelope` — is shared, so a browser and a CLI peer
 //! negotiate with each other without either knowing which it is talking to.
 
 // Per-target JSEP: only these two helpers differ by backend. Everything above — the ALPN, the

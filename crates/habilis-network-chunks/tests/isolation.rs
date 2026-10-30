@@ -104,7 +104,7 @@ fn no_obviously_host_only_dependency_crept_in() {
     }
 }
 
-/// bao is what this crate exists to *replace*, and a stray dependency on it
+/// Bao is what this crate exists to *replace*, and a stray dependency on it
 /// would mean someone reached for position-bound hashes again.
 ///
 /// The distinction is the crate's whole premise: BLAKE3 threads a chunk counter

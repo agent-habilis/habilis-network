@@ -1,7 +1,7 @@
 //! What crosses the wire, and the seam it crosses through.
 //!
 //! The real transport is a habilis-network mesh — that is what this crate is for, and
-//! [`crate::habilis_network_transport`] is the implementation consumers actually use.
+//! `crate::habilis_network_transport` is the implementation consumers actually use.
 //! The trait exists for two reasons: the protocol below has to be testable
 //! against injected packet loss and reordering without standing up a mesh,
 //! and a consumer embedding this somewhere other than habilis-network should not have

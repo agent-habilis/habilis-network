@@ -12,7 +12,7 @@ use crate::mesh::outbound::Outbound;
 use std::fmt;
 /// A transport waiting for the node's sender.
 ///
-/// See [`RollbackDriver::new`].
+/// See `RollbackDriver::new`.
 ///
 /// # Examples
 ///

@@ -49,7 +49,7 @@ pub(crate) fn rendezvous_graftable(state: &state::EventLoopState) -> bool {
 /// (no IP transports) has exactly one way to produce one: the data channel.
 /// The beacon answers JSEP for precisely this case, so the tab offers.
 ///
-/// Unlike [`negotiate_session`], the lower-id rule does not apply — the
+/// Unlike `negotiate_session`, the lower-id rule does not apply — the
 /// beacon holds no address for a tab and can never be the dialer — and the
 /// peer-address lane check is skipped: the rendezvous address is a bare
 /// registered id, which reads as "unknown", not "browser". Everything else

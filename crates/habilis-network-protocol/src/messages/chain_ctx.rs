@@ -4,7 +4,7 @@ use crate::ContentHash;
 
 /// The per-author log + DAG position to stamp on an outbound `Msg`: the
 /// chain `seq`/`prev` (Phase 2) and the DAG `parents` (Phase 3). Bundled so
-/// [`super::build_msg_bytes`] stays within the argument budget. Test-only now that the
+/// [`super::build_msg_bytes()`] stays within the argument budget. Test-only now that the
 /// send path (`gossip::broadcast`) stamps the chain inline to interleave it with
 /// the multipart split.
 ///

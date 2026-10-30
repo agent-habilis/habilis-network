@@ -1,6 +1,6 @@
 //! A warm connection a send can use right away, or the dial that will make one.
 
-/// What [`UnicastPool::send_if_warm`] did with the frame.
+/// What `UnicastPool::send_if_warm` did with the frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WarmSend {
     /// Handed to a warm connection.

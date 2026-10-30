@@ -327,7 +327,7 @@ pub(crate) async fn build_peer_multihop(
     Ok((endpoint, handle, webrtc))
 }
 
-/// [`build_peer_multihop`], and with `underlay_cap` set the underlay also gets a
+/// `build_peer_multihop`, and with `underlay_cap` set the underlay also gets a
 /// `WebRTC` leg: its own `WebRtcHandle`, an admission table with that cap (G),
 /// and the signal protocol on its router, answered for gossip neighbors only.
 /// See [`crate::transport::underlay_webrtc`]. `None`, or an instance with

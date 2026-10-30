@@ -30,14 +30,14 @@ use std::sync;
 /// very link whose existence it is asking about — and on a ticker, kill
 /// it again every time it was re-established. From a throwaway identity
 /// the beacon sees a stranger arrive and leave, which costs it nothing.
-/// [`spawn_rival_probe`] takes the same precaution for the public path.
+/// `spawn_rival_probe` takes the same precaution for the public path.
 ///
 /// **One attempt, and four answers.** A rung whose listener failed the identity is foreign for
 /// certain: the verifier rejected its key, or iroh reads the identity as another. A rung that
 /// refused or said nothing is not: a busy or starting beacon of our own mesh refuses, a host too
 /// loaded to answer reads as silence, and a bind cannot be taken back. So the walk binds on
 /// [`ProbeAnswer::Foreign`] at once, and on silence or a refusal only after the rung has stayed
-/// silent for [`RECLAIM_WINDOW`] across walks (see `build_rendezvous_endpoint`). A walk costs
+/// silent for `RECLAIM_WINDOW` across walks (see `build_rendezvous_endpoint`). A walk costs
 /// one attempt on a silent rung, not three.
 pub(crate) async fn rung_answer(
     prober: &Endpoint,

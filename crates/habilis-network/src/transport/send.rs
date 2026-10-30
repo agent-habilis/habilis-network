@@ -1,5 +1,5 @@
 //! The single send decision. Every outbound message funnels through
-//! [`deliver`]: a broadcast (no sole addressee) rides gossip, structurally; a
+//! [`deliver()`]: a broadcast (no sole addressee) rides gossip, structurally; a
 //! directed message goes over the unicast connection only — warm pooled
 //! connection first, a dial on a task of its own otherwise — and gossip never carries it. The
 //! bytes are the same canonical wire `Message` on both planes, so the

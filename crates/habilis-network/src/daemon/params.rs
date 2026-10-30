@@ -3,7 +3,7 @@
 //! The CLI (`clap`), the in-process driver (public API), and the MCP server
 //! (`serde`) each have their own native input struct, but they all want the
 //! same thing: turn a name + config + nickname (create) or a target +
-//! nickname (join) into a [`SetupKind`] plus the resolved author and the
+//! nickname (join) into a `SetupKind` plus the resolved author and the
 //! directory to advertise into. [`CreateParams`]/[`JoinParams`] are that
 //! common shape; `resolve` is the single place the nickname default, the
 //! advertise validation, and the target resolution live — instead of three

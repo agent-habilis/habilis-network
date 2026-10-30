@@ -420,7 +420,7 @@ impl Forwarder {
     /// Refusing rather than evicting is deliberate: the next-hop id comes off the
     /// wire, so evicting would let a flood of invented hops walk the real
     /// neighbours out of the map. A refused flood instead clears itself, because
-    /// each spawned writer gives up after [`DIAL_ATTEMPTS`] and removes its own
+    /// each spawned writer gives up after `DIAL_ATTEMPTS` and removes its own
     /// entry on the way out.
     fn spawn_writer(&self, hop: &RouteHop) -> Option<mpsc::Sender<Cell>> {
         let dst = self.dial_addr(hop);

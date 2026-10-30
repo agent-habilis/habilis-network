@@ -29,7 +29,7 @@ pub(crate) enum ProbeAnswer {
     NoAnswer,
 }
 
-/// [`probe_connect`] with the failure told apart: a listener that answered and refused is not a
+/// `probe_connect` with the failure told apart: a listener that answered and refused is not a
 /// listener that said nothing, and a listener that failed the identity is not one that refused.
 /// A caller that must not act on silence (a bind cannot be taken back) acts on
 /// [`ProbeAnswer::Foreign`] only and waits on [`ProbeAnswer::Refused`] and

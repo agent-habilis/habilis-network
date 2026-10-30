@@ -9,7 +9,7 @@ use std::time;
 /// would not do: that is a process-wide `OnceLock`, and these tests run in
 /// parallel in one process.
 ///
-/// [`JSEP_DEADLINE`] is deliberately *not* in here. It is consumed inside the
+/// `JSEP_DEADLINE` is deliberately *not* in here. It is consumed inside the
 /// backends' `complete()`, which the browser backend does not even accept a
 /// deadline for, so threading it would buy an injectability only half the
 /// targets could honour. [`Self::round`] bounds it from the outside on both.

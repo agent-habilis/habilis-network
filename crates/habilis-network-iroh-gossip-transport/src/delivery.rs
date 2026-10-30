@@ -20,6 +20,6 @@ pub enum Delivery {
     NotForUs,
     /// Not a frame this build reads.
     Malformed,
-    /// iroh is not reading fast enough, or has stopped.
+    /// Iroh is not reading fast enough, or has stopped.
     QueueFull,
 }

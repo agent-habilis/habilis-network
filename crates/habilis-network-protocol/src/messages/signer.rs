@@ -41,7 +41,7 @@ pub struct Signer {
 }
 
 impl Signer {
-    /// Pair a key with the signature it made. Nothing checks it here: [`Message::verify_signature_with`]
+    /// Pair a key with the signature it made. Nothing checks it here: `Message::verify_signature_with`
     /// does.
     #[must_use]
     pub(crate) fn new(key: AuthorKey, signature: Signature) -> Self {

@@ -151,7 +151,7 @@ pub(crate) struct Endpoints {
     /// Who bound `endpoint`. The loop closes only an endpoint it owns: a shared
     /// one carries the caller's protocols too.
     pub(crate) endpoint_owner: EndpointOwner,
-    /// iroh router whose accept loop routes inbound gossip
+    /// Iroh router whose accept loop routes inbound gossip
     /// connections. Must be held alive for the whole event loop —
     /// dropping it kills the accept task and makes the daemon
     /// unreachable to new peers.

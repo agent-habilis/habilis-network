@@ -101,7 +101,7 @@ jobs:
       # method renamed out from under its own docs.
       - name: Doc links
         env:
-          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links --document-private-items
         run: cargo doc --workspace --no-deps --all-features
 
       - name: Check

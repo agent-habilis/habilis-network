@@ -79,7 +79,7 @@ pub(super) async fn release_rendezvous(
 }
 /// Whether a co-hosting member probes the rendezvous before claiming it —
 /// the single source of truth for the `probe_first` flag passed to
-/// [`beacon::ensure`] from every claim site (startup, heal tick, reclaim
+/// `beacon::ensure` from every claim site (startup, heal tick, reclaim
 /// window). Only `Eager` (the mesh origin) skips the probe: a brand-new
 /// mesh has no peers to self-collide with. Every other policy probes, so
 /// it never binds a duplicate of a rendezvous a peer already serves — the

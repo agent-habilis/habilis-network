@@ -20,7 +20,7 @@ pub(crate) struct StoppableTask {
 
 impl StoppableTask {
     /// Spawn `run`, which must return promptly once its receiver reports the
-    /// sender gone (see [`select_bootstrap_rung`]).
+    /// sender gone (see `select_bootstrap_rung`).
     pub(crate) fn spawn<Fut>(run: impl FnOnce(watch::Receiver<()>) -> Fut) -> Self
     where
         Fut: Future<Output = ()> + Send + 'static,

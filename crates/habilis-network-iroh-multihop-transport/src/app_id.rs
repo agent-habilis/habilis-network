@@ -3,7 +3,7 @@
 //! A node holds two endpoints with two keys. The application endpoint is the
 //! identity that the topology, the routes and the signed link vectors name. The
 //! underlay endpoint carries the cells, and a forwarder dials it. Both are an
-//! [`EndpointId`](iroh::EndpointId), and a call that mixes them up compiles and
+//! [`iroh::EndpointId`], and a call that mixes them up compiles and
 //! dials the wrong key. One type per role stops that at compile time.
 
 use std::fmt;

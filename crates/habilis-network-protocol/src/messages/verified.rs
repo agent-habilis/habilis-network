@@ -297,7 +297,7 @@ impl Proof for Authored {
 
 /// The JSON record of a verified message, for the places that echo or compare it: the IPC echo and
 /// the tests. It skips the `MAX_MESSAGE_SIZE` gate of `Message::serialize`, and it is never a wire
-/// door: the wire takes a [`WireFrame`](super::WireFrame) from [`Verified::serialize`].
+/// door: the wire takes a [`super::WireFrame`] from [`Verified::serialize`].
 impl Serialize for Verified {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         Serialize::serialize(&super::Wire(&self.message), serializer)
@@ -310,7 +310,7 @@ impl Serialize for Verified {
 ///
 /// The `Deref` to [`Message`] is a read door, not a wire door. `Message` has no public `Serialize`,
 /// so `&*authored` does not serialize either: only [`Verified::serialize`] makes a
-/// [`WireFrame`](super::WireFrame), and every sender takes one.
+/// [`super::WireFrame`], and every sender takes one.
 ///
 /// # Examples
 ///

@@ -109,7 +109,7 @@ pub(crate) async fn on_outcome(
     }
 }
 
-/// Ask gossip for the link to `peer`, in the way [`graft_request`] says.
+/// Ask gossip for the link to `peer`, in the way [`graft_request()`] says.
 pub(crate) async fn request_graft(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
@@ -164,7 +164,7 @@ pub(crate) async fn graft_proven(
 /// The alive-tick retry: every known peer that is neither linked nor mid-probe
 /// gets another `ensure_direct`, subject to the relink cooldown. While the relay
 /// may carry payload there is no probe to hold a graft, so the tick fills the
-/// active view instead, one member per tick (see [`fill_active_view`]). The
+/// active view instead, one member per tick (see `fill_active_view`). The
 /// rendezvous is skipped: it accepts no unicast, so it cannot be probed; its
 /// link is gated on the beacon's side.
 ///

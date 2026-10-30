@@ -16,7 +16,7 @@
 //! whose stats are not readable yet, and re-selection that fires only on
 //! connection/path events with no periodic pass. A `WebRTC` path that opens a
 //! moment before its first RTT sample is skipped exactly once and the relay
-//! stays selected for the life of the connection. [`best_of`] is the fix: an
+//! stays selected for the life of the connection. `best_of` is the fix: an
 //! unmeasured path is a live candidate, not a non-candidate.
 //!
 //! # Why this is not "drop the relay"

@@ -20,7 +20,7 @@
 //! *inside* the engine's event loop. The game's frame loop runs outside it.
 //! So sends cannot happen where the session wants to make them.
 //!
-//! Instead [`MeshTransport::send_to`] enqueues onto the node's session
+//! Instead `MeshTransport::send_to` enqueues onto the node's session
 //! channel (`Node::sender()`), and the driver drains it inside
 //! `handle_session` where the engine hands it the state it needs. Inbound
 //! goes the other way: `on_app_frame` fires in the event loop and drops

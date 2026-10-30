@@ -87,7 +87,7 @@ pub(crate) async fn claim(
         == Held::Claimed
 }
 
-/// [`claim`], with what the walk read when it did not bind.
+/// `claim`, with what the walk read when it did not bind.
 pub(crate) async fn claim_holder(
     params: &RendezvousParams,
     peer: &Endpoint,

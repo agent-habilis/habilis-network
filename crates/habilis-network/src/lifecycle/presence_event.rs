@@ -10,9 +10,9 @@ use super::membership_update;
 use crate::gossip;
 use crate::util::clock::Instant;
 
-/// A received `Presence` frame plus the roster delta [`membership_update::observe`]
+/// A received `Presence` frame plus the roster delta `membership_update::observe`
 /// already computed for it, passed to [`handle_presence`]. Constructed by
-/// [`crate::gossip::recv::ingest`], across the `gossip`/`lifecycle` module
+/// `crate::gossip::recv::ingest`, across the `gossip`/`lifecycle` module
 /// boundary — hence `pub(crate)` rather than module-private.
 #[derive(Debug, Clone)]
 pub(crate) struct PresenceEvent<'message> {

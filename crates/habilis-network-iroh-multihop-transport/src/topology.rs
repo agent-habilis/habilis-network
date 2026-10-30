@@ -770,7 +770,7 @@ mod tests {
         );
     }
 
-    /// iroh names a path by the bytes of its address, so two spellings of one route are two
+    /// Iroh names a path by the bytes of its address, so two spellings of one route are two
     /// paths. Two ends hold different versions of a vector for a while (a relay switch, a new
     /// IP), so the bytes of a route must depend on the ids of its hops and on nothing else.
     #[test]

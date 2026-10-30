@@ -34,7 +34,7 @@ pub(crate) struct RivalProbe {
     pub(crate) rx: oneshot::Receiver<bool>,
     pub(crate) task: JoinHandle<()>,
     /// The throwaway prober endpoint, retained for the same reason
-    /// [`Rendezvous`] retains its own: aborting the task drops the endpoint
+    /// `Rendezvous` retains its own: aborting the task drops the endpoint
     /// open, and iroh tears an unclosed endpoint down ungracefully. The
     /// task closes it on the happy path; this is for the departure that
     /// cancels it first. `None` when the probe never dialed — an
@@ -48,7 +48,7 @@ pub(crate) struct RivalProbe {
 impl RivalProbe {
     /// Stop the probe and wait for its endpoint to close gracefully — the
     /// departure counterpart to letting the task finish, and the same bounded
-    /// shape as [`Rendezvous::shed_and_wait`] for the same reason.
+    /// shape as `Rendezvous::shed_and_wait` for the same reason.
     ///
     /// The task closes its own endpoint, so this cancels the dial and waits for
     /// the task rather than aborting it. An abort could land while the task is

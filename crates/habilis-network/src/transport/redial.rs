@@ -3,7 +3,7 @@
 //! The idle close of a connection saves memory, and costs a dial when the peer is needed
 //! again. A harness that samples the peers (once per second is enough) counts, for plain
 //! QUIC connections and for `WebRTC` sessions apart, the closes and the reconnects within
-//! [`REDIAL_WINDOW`] of a close. The share of closes that are followed by a reconnect says
+//! `REDIAL_WINDOW` of a close. The share of closes that are followed by a reconnect says
 //! whether the idle timeout is too short for the traffic.
 
 mod redials;

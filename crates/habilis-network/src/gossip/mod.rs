@@ -1,5 +1,5 @@
 //! The **gossip subsystem**: the message transport plane. The outbound
-//! send plane is [`broadcast`] (broadcast/buffer, presence/`PeerInfo`,
+//! send plane is `broadcast` (broadcast/buffer, presence/`PeerInfo`,
 //! the broadcast stdin path); the inbound plane is [`recv`] (the
 //! gossip-event pump, neighbor up/down bookkeeping, the per-message
 //! router); anti-entropy and the healer are [`antientropy`] / [`heal`].

@@ -8,7 +8,7 @@ use crate::protocol::identity::Identity;
 use iroh::address_lookup::memory;
 
 use crate::{doc, transport};
-/// Everything [`EventLoopState::new`] needs beyond the clock, grouped for the
+/// Everything `EventLoopState::new` needs beyond the clock, grouped for the
 /// same reason [`MeshSecrets`] is: the argument budget. `now` stays separate
 /// because tests pin it to a deterministic instant.
 #[derive(Debug)]

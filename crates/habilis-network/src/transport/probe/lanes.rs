@@ -10,7 +10,7 @@ use crate::transport::webrtc;
 /// The members of `lane` that a pass offers a session to: at most
 /// [`LANE_OFFERS_IN_FLIGHT`](crate::util::tuning::LANE_OFFERS_IN_FLIGHT) less the `in_flight`
 /// rounds. The natives come before every browser and each group is ordered by id, as in
-/// [`next_fill`]; `pick` is the random start in each group, so that the members of a mesh do not
+/// `next_fill`; `pick` is the random start in each group, so that the members of a mesh do not
 /// all offer to the same few. The others are left as they are: no mark, no want.
 pub(crate) fn plan_lane_offers(
     lane: Vec<iroh::EndpointAddr>,

@@ -1,7 +1,7 @@
 use crate::blob::{BlobDigest, ContentId};
 
 /// The content identity of a file being snapshotted into the store —
-/// [`BlobStore::snapshot`]'s content-addressing key plus the content group it
+/// `BlobStore::snapshot`'s content-addressing key plus the content group it
 /// is offloaded under, which becomes one of the blob's owners.
 #[derive(Debug, Clone)]
 pub(crate) struct ContentMeta {

@@ -75,9 +75,9 @@ pub(crate) fn tag_as_member(endpoint: &Endpoint, topic: &proto::TopicId) -> Resu
     Ok(())
 }
 
-/// [`build_endpoint`], and the mDNS handle when the endpoint has one.
+/// `build_endpoint`, and the mDNS handle when the endpoint has one.
 /// # Errors
-/// As [`build_endpoint`].
+/// As `build_endpoint`.
 #[cfg_attr(
     not(feature = "host"),
     expect(

@@ -54,7 +54,7 @@ impl Serialize for HexOut<'_> {
 }
 
 /// The wire form of a message. The serde impl lives on this private wrapper, not on [`Message`], so a
-/// message that a caller holds through a `Deref` (an [`Authored`] view) has no public `Serialize`.
+/// message that a caller holds through a `Deref` (an `Authored` view) has no public `Serialize`.
 #[derive(Clone)]
 pub(super) struct Wire<'message>(pub(super) &'message Message);
 

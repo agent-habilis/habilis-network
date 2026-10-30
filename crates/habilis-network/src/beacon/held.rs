@@ -105,7 +105,7 @@ pub(crate) async fn read_ladder(
     }
 }
 
-/// What [`build_rendezvous_endpoint`] ended with.
+/// What `build_rendezvous_endpoint` ended with.
 #[derive(Clone)]
 pub(crate) enum Walk {
     /// A rung was free (or, public, the endpoint was built): the beacon can stand up on it.
@@ -120,7 +120,7 @@ pub(crate) enum Walk {
     NoRung,
 }
 
-/// What a call of [`ensure_holder`] left behind.
+/// What a call of `ensure_holder` left behind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Held {
     /// This call stood up the rendezvous: a `None`/dead to live transition.
@@ -142,7 +142,7 @@ pub(crate) enum Held {
 /// **Nothing slow happens on the caller's task.** A public member that must
 /// probe before claiming starts the probe (`spawn_rival_probe`) and returns
 /// immediately; the verdict lands on the event loop's own arm, which calls
-/// [`claim_after_probe`]. The private ladder walk is instant too: a rung that
+/// `claim_after_probe`. The private ladder walk is instant too: a rung that
 /// is bound by somebody else is read from `rungs`, and what is not known is
 /// asked by probe tasks whose reports land on the loop's own arm, which walks
 /// again. The bind is milliseconds, and `subscribe_and_join` runs inside the

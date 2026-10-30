@@ -16,7 +16,7 @@ pub const MESH_WEBRTC_SIGNAL_ALPN: &[u8] = b"habilis-mesh/webrtc-signal/1";
 ///
 /// Compiled on both targets so the arithmetic below is target-independent.
 /// Only the native backend passes it *into* str0m — the browser backend takes
-/// no deadline parameter at all, so for a tab [`SignalDeadlines::round`] is the
+/// no deadline parameter at all, so for a tab `SignalDeadlines::round` is the
 /// only bound that exists.
 #[cfg_attr(
     target_arch = "wasm32",

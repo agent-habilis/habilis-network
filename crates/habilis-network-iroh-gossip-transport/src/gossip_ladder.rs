@@ -4,7 +4,7 @@
 //! iroh's default selector treats a custom transport as primary, so an endpoint that registers
 //! the gossip transport beside IP would select the gossip path over a direct one, and the mesh
 //! topic would carry the bytes of every pair. This selector keeps gossip below every direct
-//! path and above the relay. The order is the one of [`Rung`], shared with the selectors of the
+//! path and above the relay. The order is the one of `Rung`, shared with the selectors of the
 //! other transports.
 
 use habilis_network_iroh_transport_util::{

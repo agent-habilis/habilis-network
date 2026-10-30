@@ -130,7 +130,7 @@ pub(crate) fn ensure_watchers(
 
 /// Record `peer` as proven direct again; whether frames parked while it was
 /// not now need a flush. The race's offer round restores `Direct` through
-/// [`graft_proven`], but UDP can come back before any round attaches.
+/// `graft_proven`, but UDP can come back before any round attaches.
 pub(crate) fn mark_proven(state: &mut EventLoopState, peer: EndpointId) -> bool {
     let was = state.direct.insert(peer, DirectState::Direct);
     was != Some(DirectState::Direct)

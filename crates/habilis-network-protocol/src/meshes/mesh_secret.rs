@@ -11,7 +11,7 @@ use iroh_base::SecretKey;
 /// ever meant to be set: an invite-only mesh's password wraps its tickets and
 /// never folds into the topic, so "invite root" and "stretched password key"
 /// are alternatives, not a pair. The old shape let a caller set both and left
-/// [`Mesh::effective_seed`] to pick, which is a precedence rule nothing stated.
+/// `Mesh::effective_seed` to pick, which is a precedence rule nothing stated.
 #[derive(Clone)]
 pub(super) enum MeshSecret {
     /// No password applied and no invite redeemed: derivations use the wire

@@ -16,7 +16,7 @@ const MAX_LEN: usize = 512;
 /// A mesh identifier — the encoded bare `Base58Check` string.
 ///
 /// Construction validates the length, Base58 charset, checksum, version, and
-/// complete payload. Consequently every `MeshId` can be decoded as a [`LockedMesh`](super::LockedMesh).
+/// complete payload. Consequently every `MeshId` can be decoded as a [`super::LockedMesh`].
 ///
 /// # Examples
 ///

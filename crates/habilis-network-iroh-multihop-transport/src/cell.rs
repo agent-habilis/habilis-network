@@ -53,7 +53,7 @@ impl Cell {
         self.path.hop_at(self.position as usize + 1)
     }
 
-    /// Advance to the successor hop. Caller must have checked [`next_hop`] first.
+    /// Advance to the successor hop. Caller must have checked `next_hop` first.
     pub(crate) fn advanced(&self) -> Cell {
         Cell {
             path: self.path.clone(),

@@ -16,7 +16,7 @@ pub(crate) struct Owner {
 #[cfg(feature = "host")]
 impl Owner {
     /// # Errors
-    /// See [`validate_owner_pid`].
+    /// See `validate_owner_pid`.
     pub(crate) fn try_new(pid: u32) -> Result<Self, OwnerPidError> {
         Ok(Self {
             pid,

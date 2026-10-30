@@ -2,7 +2,7 @@
 //! `NeighborUp` / `NeighborDown` / `Lagged` / stream end), neighbor
 //! up/down bookkeeping, the per-message router (parse → self-echo drop →
 //! rate-check → lifecycle observe → dispatch by kind → message-log), and
-//! `PeerInfo` linking. Outbound/send lives in [`super::broadcast`]; this
+//! `PeerInfo` linking. Outbound/send lives in `super::broadcast`; this
 //! layer never touches the peer roster directly — it calls into
 //! `lifecycle::observe` and dispatches by kind.
 

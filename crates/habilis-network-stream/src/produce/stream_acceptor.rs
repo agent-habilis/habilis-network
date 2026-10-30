@@ -19,7 +19,7 @@ use std::error;
 const PRE_AUTH: Duration = Duration::from_secs(10);
 
 /// The `ProtocolHandler` for [`crate::STREAM_ALPN`]: admit one consumer to one
-/// stream and hand its connection to the waiting [`Producer`].
+/// stream and hand its connection to the waiting `Producer`.
 #[derive(Debug, Clone)]
 pub(crate) struct StreamAcceptor {
     // the acceptor shares the registry with the node, which holds the producers

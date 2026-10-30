@@ -1,6 +1,6 @@
 //! [`MeshName`] — a human-readable mesh label, bound cryptographically
 //! into the topic id. Nearly the same charset as `Nickname` (see
-//! [`crate::ident`]) but, unlike a nickname, a mesh name may contain
+//! `crate::ident`) but, unlike a nickname, a mesh name may contain
 //! the path separators `/ \` (it is never a filename), so it can be a URL. The
 //! newtype is the single validation point.
 

@@ -233,7 +233,7 @@ pub struct EventLoopState {
     /// sybil stream of one-shot nicknames would grow it without bound.
     pub(crate) quiet: BoundedFifoSet<Nickname>,
     /// Recency companion to `quiet`: nickname -> the `last_seen` instant a
-    /// quiet peer had when it was evicted, so [`roster_snapshot`] can still
+    /// quiet peer had when it was evicted, so `roster_snapshot` can still
     /// report how long ago it was last heard (the eviction drops its
     /// `last_seen` entry). Pruned to `quiet`'s membership on every sweep, so
     /// it stays bounded by `QUIET_CAP`; `roster_snapshot` only reads it for
@@ -512,7 +512,7 @@ pub struct EventLoopState {
     pub(crate) mesh_password: Option<crypto::Password>,
     /// The invite-only **creator's** mesh (secrets and all), retained so the
     /// `invite` IPC command can mint. `Some` only on the creator; set from
-    /// [`EventLoopConfig`] after construction, so `new` defaults it to `None`
+    /// `EventLoopConfig` after construction, so `new` defaults it to `None`
     /// and the many test call sites need no new argument.
     pub(crate) mint_mesh: Option<Mesh>,
     /// Symmetric key for broadcast-chat app bodies on a passworded
@@ -1296,7 +1296,7 @@ impl EventLoopState {
 
     /// Record `message` as seen and report whether it was *already* seen.
     /// `true` => this is a duplicate delivery the caller must drop. Keys on
-    /// the author-bound [`Message::dedup_key`], so a forgery reusing a
+    /// the author-bound `Message::dedup_key`, so a forgery reusing a
     /// victim's id hashes to a different key and cannot suppress the genuine
     /// message. Delegates to the bounded [`BoundedFifoSet`], inverting its
     /// "was newly inserted" answer into "was a duplicate".
@@ -1312,7 +1312,7 @@ impl EventLoopState {
     /// Try to reassemble the sharded body the `trigger` shard belongs to:
     /// buffer it in the dedicated [`reassembly`](Self::reassembly) store and,
     /// when it completes its group (and the group has not been surfaced
-    /// before), return the synthesized logical [`Message`] — a surfacing view
+    /// before), return the synthesized logical `Message` — a surfacing view
     /// whose `id` is the group, so sender and receivers name it alike.
     ///
     /// Small (logged) groups get a second completion path off the message

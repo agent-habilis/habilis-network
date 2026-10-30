@@ -1870,7 +1870,7 @@ struct MaintenanceIntervals {
 /// Build the maintenance tickers, eating the first immediate tick on
 /// the ones that must wait a full period (we just announced `Joined`).
 ///
-/// Every ticker uses [`MissedTickBehavior::Skip`]: after the monotonic clock
+/// Every ticker uses `MissedTickBehavior::Skip`: after the monotonic clock
 /// jumps (an App Nap throttle, a SIGSTOP freeze), a default `Burst` ticker
 /// fires a catch-up salvo — several anti-entropy digests back-to-back, a
 /// heal immediately after the hard re-bootstrap it just ran, a prune replaying

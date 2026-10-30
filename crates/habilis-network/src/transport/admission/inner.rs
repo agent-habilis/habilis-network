@@ -45,12 +45,12 @@ pub(crate) struct Inner {
     /// The peers that we evicted. A peer whose session we detach has no connection to read the code
     /// on, so we refuse its offer for the same minute instead.
     pub(crate) we_evicted: ceiling::EvictionBackoff,
-    /// The peers that a test denied (see [`SignalAdmission::deny`]). Empty in a product build:
+    /// The peers that a test denied (see `SignalAdmission::deny`). Empty in a product build:
     /// only `deny` fills it.
     pub(crate) denied: HashSet<EndpointId>,
     /// When the recursion rule last closed a gossip connection of a peer. The closed connection
     /// leaves the table at once, so this is what keeps the pair reading as the gossip rung while
-    /// the event loop handles the loss of the link (see [`SignalAdmission::selected_kind`]).
+    /// the event loop handles the loss of the link (see `SignalAdmission::selected_kind`).
     pub(crate) closed_on_rung: HashMap<EndpointId, Instant>,
 }
 
@@ -155,7 +155,7 @@ impl Inner {
 
     /// Tell the gossip transport what the table sees, for every peer with a slot: a peer with a
     /// live connection is established, and frames go to a peer only when no higher rung carries
-    /// the pair (see [`gossip_view`]). Called when a connection is noted and on every sweep, so
+    /// the pair (see `gossip_view`). Called when a connection is noted and on every sweep, so
     /// both ids of a pair get it, not only the lower one that has a path watcher. A peer without
     /// a live connection is established no more, and allowed again: a destination that was never
     /// named is allowed, so that a handshake to a new peer is not dropped.

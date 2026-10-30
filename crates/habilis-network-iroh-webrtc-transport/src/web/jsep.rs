@@ -55,7 +55,7 @@ const POLL_MS: i32 = 50;
 /// refuses a server entry.
 ///
 /// The constructor validates every ICE URL and throws on the first bad one, so
-/// a single unusable entry costs the whole connection. [`accept_ice_uri`]
+/// a single unusable entry costs the whole connection. `accept_ice_uri`
 /// filters what we control, but the configuration can still be rejected for a
 /// reason we have not met yet — and a peer connection with no ICE servers still
 /// gathers host candidates, which is strictly better than none at all.

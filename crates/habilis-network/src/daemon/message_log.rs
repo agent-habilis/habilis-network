@@ -388,7 +388,7 @@ impl MessageLog {
 /// afterwards would still consume a slot and truncate the genuinely-missing
 /// tail.
 ///
-/// Note the advertise side ([`MessageLog::window_at`] and friends) deliberately
+/// Note the advertise side (`MessageLog::window_at` and friends) deliberately
 /// does **not** filter: a directed frame the addressee holds must keep
 /// appearing in its digest ids, or the author would see it as perpetually
 /// missing and re-send it every round forever.

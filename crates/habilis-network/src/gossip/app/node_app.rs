@@ -24,7 +24,7 @@ use crate::protocol::messages::Authored;
 /// ```
 #[async_trait::async_trait]
 pub trait NodeApp: Send {
-    /// Classify one inbound `App` frame by tag/payload — see [`AppClass`](super::AppClass).
+    /// Classify one inbound `App` frame by tag/payload — see [`super::AppClass`].
     fn classify(&self, message: &Authored) -> AppClass;
 
     /// Dispatch an inbound `App` frame (addressed to us, or broadcast) after

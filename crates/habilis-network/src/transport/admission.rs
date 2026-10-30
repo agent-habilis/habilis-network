@@ -36,7 +36,7 @@
 //! attached all 24 — eight over a ceiling whose own comment claimed to be
 //! enforced. The header rendered `24/16`.
 //!
-//! **In-flight rounds do not count against the ceiling.** [`Self::try_admit`] keeps one round
+//! **In-flight rounds do not count against the ceiling.** `Self::try_admit` keeps one round
 //! per peer, and the ceiling counts attached units only: it acts when a session attaches, and
 //! evicts then (see [`super::ceiling`]). So a pass of the retry tick may admit a round for every
 //! peer, and the count can pass the ceiling by the rounds that attach together. That is by

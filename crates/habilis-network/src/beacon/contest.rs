@@ -21,7 +21,7 @@ impl Contest {
 
 /// Apply an off-loop probe's verdict: claim the rendezvous if it is free.
 ///
-/// Re-checks the beacon slot first, because up to [`HEAL_PROBE`] passed
+/// Re-checks the beacon slot first, because up to `HEAL_PROBE` passed
 /// while the probe ran and the loop kept moving — a reclaim tick or a
 /// re-stand-up may have taken the role in the meantime, and claiming twice
 /// binds the duplicate same-id copy the probe exists to prevent.

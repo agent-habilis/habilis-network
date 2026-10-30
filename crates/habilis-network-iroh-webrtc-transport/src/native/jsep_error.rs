@@ -20,7 +20,7 @@ use std::{error, fmt};
 pub enum JsepError {
     /// The UDP socket for the negotiation could not bind.
     Bind(BoxedError),
-    /// str0m had no pending change to turn into an offer.
+    /// Str0m had no pending change to turn into an offer.
     NoOffer,
     /// The envelope is not the kind this step takes.
     Envelope {
@@ -36,7 +36,7 @@ pub enum JsepError {
         /// The error from the SDP parser or from str0m.
         source: BoxedError,
     },
-    /// str0m failed while it drove the negotiation.
+    /// Str0m failed while it drove the negotiation.
     Engine {
         /// The step that failed, for example `str0m poll_output`.
         step: &'static str,

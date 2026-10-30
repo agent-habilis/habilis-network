@@ -359,7 +359,7 @@ impl Message {
 
     /// The key that signed this message, or `None` for an unsigned message. Outside this module
     /// a message that is not known to be signed has no proven key: a [`Verified`] or an
-    /// [`Authored`] gives it through `key()`, with no `Option`.
+    /// `Authored` gives it through `key()`, with no `Option`.
     #[must_use]
     pub(crate) fn author_key(&self) -> Option<AuthorKey> {
         self.signer.map(|signed| signed.key)

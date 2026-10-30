@@ -12,14 +12,14 @@ use super::{RendezvousParams, RungRead, RungWatch, rung_is_busy};
 ///
 /// One construction, two callers that must not drift — the hint a joiner
 /// pre-registers on its peer endpoint (`daemon::setup::register_rendezvous`)
-/// and the target [`spawn_rival_probe`] dials. They are the same address by
+/// and the target `spawn_rival_probe` dials. They are the same address by
 /// definition: the probe asks "is anyone serving the identity a joiner would
 /// reach?", so asking it anywhere else answers a different question.
 ///
 /// - Private (a non-empty ladder): every loopback rung, because iroh's
 ///   node-id dial reaches whichever rung our beacon actually bound.
 /// - Public: `bootstrap_relay`, the single rung the beacon homes on
-///   ([`beacon_lookups`]) — a relay-direct dial with no lookup round-trip.
+///   (`beacon_lookups`) — a relay-direct dial with no lookup round-trip.
 /// - `None`: relay disabled and no ladder, so there is nothing to name and
 ///   only mDNS/DHT can resolve the id.
 pub(crate) fn rendezvous_addr(params: &RendezvousParams) -> Option<EndpointAddr> {

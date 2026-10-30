@@ -72,7 +72,7 @@ pub struct P2PSession<T: Config, Link: Transport<T>> {
     local_handle: PlayerHandle,
     state: SessionState,
     events: Vec<Event<T::Address>>,
-    /// Frames to skip so peers can catch up, from [`TimeSync`].
+    /// Frames to skip so peers can catch up, from `TimeSync`.
     skip_frames: u32,
     /// Last frame we told peers a checksum for.
     last_checksum_frame: Frame,

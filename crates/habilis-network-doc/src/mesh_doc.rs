@@ -1480,7 +1480,7 @@ mod tests {
         );
     }
 
-    /// automerge takes one change per `(actor, seq)`. A frame whose signer does
+    /// Automerge takes one change per `(actor, seq)`. A frame whose signer does
     /// not own the change's actor could take an author's next seq, and the
     /// author's real change would then be refused on every replica.
     #[test]
