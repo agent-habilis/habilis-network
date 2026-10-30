@@ -37,7 +37,10 @@ async fn probe_checked(timeout: Duration) -> Result<NetworkCapability> {
 
     let capability = match report {
         Some(report) => {
-            let preferred = report.preferred_relay.clone();
+            let mapping_varies_by_dest = report.mapping_varies_by_dest();
+            let public_v4 = report.global_v4.map(|address| address.to_string());
+            let public_v6 = report.global_v6.map(|address| address.to_string());
+            let preferred = report.preferred_relay;
             let preferred_relay_latency_ms: Option<u64> = preferred.as_ref().and_then(|url| {
                 let latencies = report
                     .relay_latency
@@ -46,9 +49,6 @@ async fn probe_checked(timeout: Duration) -> Result<NetworkCapability> {
                     .map(|(_, _, latency)| latency);
                 latencies.min().map(clock::millis_saturating)
             });
-            let mapping_varies_by_dest = report.mapping_varies_by_dest();
-            let public_v4 = report.global_v4.map(|address| address.to_string());
-            let public_v6 = report.global_v6.map(|address| address.to_string());
             let preferred_relay = preferred.map(|url| url.to_string());
             NetworkCapability {
                 node_id,
