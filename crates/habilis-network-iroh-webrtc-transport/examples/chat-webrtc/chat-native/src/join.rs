@@ -172,9 +172,10 @@ async fn chat(connection: &Connection, nick: &str) -> Result<()> {
 
     // The reader owns the stream in a task of its own; `wire::read_msg` is two
     // reads and must never be cancelled between them.
-    let (tx, incoming) = mpsc::channel::<ServerMsg>(INBOX_CAPACITY);
+    let (tx, incoming): (mpsc::Sender<ServerMsg>, mpsc::Receiver<ServerMsg>) =
+        mpsc::channel(INBOX_CAPACITY);
     tokio::spawn(async move {
-        while let Ok(message) = wire::read_msg::<ServerMsg>(&mut recv).await {
+        while let Ok(message) = wire::read_msg(&mut recv).await {
             if tx.send(message).await.is_err() {
                 break;
             }

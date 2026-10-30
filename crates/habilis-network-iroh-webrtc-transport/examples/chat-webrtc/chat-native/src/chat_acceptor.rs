@@ -86,9 +86,10 @@ async fn serve(room: &Room, connection: Connection) -> Result<()> {
     // and then a body sized by it, so it must never be a `select!` branch — a
     // cancellation between the two leaves the stream mid-frame. An mpsc
     // receiver in its place is cancel-safe.
-    let (tx, mut rx) = mpsc::channel::<ClientMsg>(INBOX_CAPACITY);
+    let (tx, mut rx): (mpsc::Sender<ClientMsg>, mpsc::Receiver<ClientMsg>) =
+        mpsc::channel(INBOX_CAPACITY);
     let reader = tokio::spawn(async move {
-        while let Ok(message) = wire::read_msg::<ClientMsg>(&mut recv).await {
+        while let Ok(message) = wire::read_msg(&mut recv).await {
             if tx.send(message).await.is_err() {
                 break;
             }
