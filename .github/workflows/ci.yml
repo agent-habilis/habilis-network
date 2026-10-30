@@ -72,6 +72,12 @@ jobs:
           bun test scripts/pub-trait/pub-trait.test.ts
           bun scripts/pub-trait/pub-trait.ts
 
+      # A pub struct with all-pub fields implements Debug (R12); an error of Copy-able fields is Copy (R13).
+      - name: Derives
+        run: |
+          bun test scripts/derive-check/derive-check.test.ts
+          bun scripts/derive-check/derive-check.ts
+
       # A leaf file is named for its primary public type (O9).
       - name: Module layout
         run: |
