@@ -160,7 +160,7 @@ impl Arena {
         &self.nodes[id.0 as usize]
     }
 
-    pub fn get_mut(&mut self, id: NodeId) -> &mut TuiNode {
+    pub fn node_mut(&mut self, id: NodeId) -> &mut TuiNode {
         &mut self.nodes[id.0 as usize]
     }
 
@@ -171,25 +171,25 @@ impl Arena {
             (node.parent, node.prev, node.next)
         };
         match prev {
-            Some(p) => self.get_mut(p).next = next,
+            Some(p) => self.node_mut(p).next = next,
             None => {
                 if let Some(par) = parent {
-                    self.get_mut(par).first_child = next;
+                    self.node_mut(par).first_child = next;
                 }
             }
         }
         match next {
-            Some(n) => self.get_mut(n).prev = prev,
+            Some(n) => self.node_mut(n).prev = prev,
             None => {
                 if let Some(par) = parent {
-                    self.get_mut(par).last_child = prev;
+                    self.node_mut(par).last_child = prev;
                 }
             }
         }
         if let Some(par) = parent {
-            self.get_mut(par).child_count -= 1;
+            self.node_mut(par).child_count -= 1;
         }
-        let node = self.get_mut(id);
+        let node = self.node_mut(id);
         node.parent = None;
         node.prev = None;
         node.next = None;
@@ -208,27 +208,27 @@ impl Arena {
         match before {
             None => {
                 let last = self.get(parent).last_child;
-                self.get_mut(node).prev = last;
-                self.get_mut(node).next = None;
+                self.node_mut(node).prev = last;
+                self.node_mut(node).next = None;
                 match last {
-                    Some(l) => self.get_mut(l).next = Some(node),
-                    None => self.get_mut(parent).first_child = Some(node),
+                    Some(l) => self.node_mut(l).next = Some(node),
+                    None => self.node_mut(parent).first_child = Some(node),
                 }
-                self.get_mut(parent).last_child = Some(node);
+                self.node_mut(parent).last_child = Some(node);
             }
             Some(before_id) => {
                 let prev = self.get(before_id).prev;
-                self.get_mut(node).prev = prev;
-                self.get_mut(node).next = Some(before_id);
-                self.get_mut(before_id).prev = Some(node);
+                self.node_mut(node).prev = prev;
+                self.node_mut(node).next = Some(before_id);
+                self.node_mut(before_id).prev = Some(node);
                 match prev {
-                    Some(p) => self.get_mut(p).next = Some(node),
-                    None => self.get_mut(parent).first_child = Some(node),
+                    Some(p) => self.node_mut(p).next = Some(node),
+                    None => self.node_mut(parent).first_child = Some(node),
                 }
             }
         }
-        self.get_mut(node).parent = Some(parent);
-        self.get_mut(parent).child_count += 1;
+        self.node_mut(node).parent = Some(parent);
+        self.node_mut(parent).child_count += 1;
     }
 
     pub fn append(&mut self, parent: NodeId, node: NodeId) {
@@ -241,13 +241,13 @@ impl Arena {
         let mut child = self.get(parent).first_child;
         while let Some(id) = child {
             let next = self.get(id).next;
-            let node = self.get_mut(id);
+            let node = self.node_mut(id);
             node.parent = None;
             node.prev = None;
             node.next = None;
             child = next;
         }
-        let node = self.get_mut(parent);
+        let node = self.node_mut(parent);
         node.first_child = None;
         node.last_child = None;
         node.child_count = 0;

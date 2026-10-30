@@ -415,7 +415,7 @@ mod tests {
         let mut arena = Arena::new();
         let root = arena.create(Tag::Text);
         {
-            let n = arena.get_mut(root);
+            let n = arena.node_mut(root);
             n.text = Some("hi".to_string());
             n.lx = 0;
             n.ly = 0;
@@ -436,7 +436,7 @@ mod tests {
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
         {
-            let n = arena.get_mut(root);
+            let n = arena.node_mut(root);
             n.bg = color::palette(1);
             n.lx = 0;
             n.ly = 0;
@@ -460,7 +460,7 @@ mod tests {
         let mut arena = Arena::new();
         let root = arena.create(Tag::Text);
         {
-            let n = arena.get_mut(root);
+            let n = arena.node_mut(root);
             n.text = Some("字a".to_string());
             n.lx = 0;
             n.ly = 0;
@@ -491,7 +491,7 @@ mod tests {
         let mut arena = Arena::new();
         let root = arena.create(Tag::Text);
         {
-            let n = arena.get_mut(root);
+            let n = arena.node_mut(root);
             n.text = Some("toolong".to_string());
             n.lx = 0;
             n.ly = 0;

@@ -60,14 +60,14 @@ fn measure(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h: i32
         }
     }
     let (tag, visible) = {
-        let node = arena.get_mut(id);
+        let node = arena.node_mut(id);
         node.m_epoch = epoch;
         node.m_avail_w = avail_w;
         node.m_avail_h = avail_h;
         (node.tag, node.visible)
     };
     if tag == Tag::Hole || !visible {
-        let node = arena.get_mut(id);
+        let node = arena.node_mut(id);
         node.mw = 0;
         node.mh = 0;
         return;
@@ -96,7 +96,7 @@ fn measure_text(arena: &mut Arena, id: NodeId, avail_w: i32, avail_h: i32) {
         .iter()
         .map(|l| i32::try_from(string_width(l)).unwrap_or(i32::MAX));
     let widest = widths.max().unwrap_or(0);
-    let node = arena.get_mut(id);
+    let node = arena.node_mut(id);
     let line_count = i32::try_from(lines.len()).unwrap_or(i32::MAX);
     node.lines = Some(lines);
     node.mw = if own_w >= 0 {
@@ -149,7 +149,7 @@ fn measure_box(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h:
         main += gap * (count - 1);
     }
 
-    let node = arena.get_mut(id);
+    let node = arena.node_mut(id);
     node.mw = if own_w >= 0 {
         own_w
     } else {
@@ -172,7 +172,7 @@ fn arrange(
     height: i32,
 ) {
     {
-        let node = arena.get_mut(id);
+        let node = arena.node_mut(id);
         node.lx = left;
         node.ly = top;
         node.lw = width;
@@ -233,7 +233,7 @@ fn arrange_children(
             (n.tag, n.visible)
         };
         if tag == Tag::Hole || !visible {
-            let n = arena.get_mut(child);
+            let n = arena.node_mut(child);
             n.lx = cx;
             n.ly = cy;
             n.lw = 0;
@@ -387,13 +387,13 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
-        arena.get_mut(root).direction = Direction::Row;
+        arena.node_mut(root).direction = Direction::Row;
         let a = arena.create(Tag::Box);
-        arena.get_mut(a).width = 5;
-        arena.get_mut(a).height = 3;
+        arena.node_mut(a).width = 5;
+        arena.node_mut(a).height = 3;
         let b = arena.create(Tag::Box);
-        arena.get_mut(b).width = 7;
-        arena.get_mut(b).height = 3;
+        arena.node_mut(b).width = 7;
+        arena.node_mut(b).height = 3;
         arena.append(root, a);
         arena.append(root, b);
 
@@ -416,11 +416,11 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
-        arena.get_mut(root).direction = Direction::Row;
+        arena.node_mut(root).direction = Direction::Row;
         let fixed = arena.create(Tag::Box);
-        arena.get_mut(fixed).width = 10;
+        arena.node_mut(fixed).width = 10;
         let flexed = arena.create(Tag::Box);
-        arena.get_mut(flexed).flex = 1;
+        arena.node_mut(flexed).flex = 1;
         arena.append(root, fixed);
         arena.append(root, flexed);
 
@@ -440,12 +440,12 @@ mod tests {
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
         {
-            let n = arena.get_mut(root);
+            let n = arena.node_mut(root);
             n.direction = Direction::Row;
             n.justify = Justify::End;
         }
         let a = arena.create(Tag::Box);
-        arena.get_mut(a).width = 4;
+        arena.node_mut(a).width = 4;
         arena.append(root, a);
 
         LayoutState::new().layout(&mut arena, root, 10, 3);
@@ -463,12 +463,12 @@ mod tests {
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
         {
-            let n = arena.get_mut(root);
+            let n = arena.node_mut(root);
             n.border = Border::Single;
             n.padding = view::Padding::all(1);
         }
         let child = arena.create(Tag::Box);
-        arena.get_mut(child).flex = 1;
+        arena.node_mut(child).flex = 1;
         arena.append(root, child);
 
         LayoutState::new().layout(&mut arena, root, 10, 10);
@@ -491,10 +491,10 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
-        arena.get_mut(root).direction = Direction::Row;
+        arena.node_mut(root).direction = Direction::Row;
         let hole = arena.create(Tag::Hole);
         let a = arena.create(Tag::Box);
-        arena.get_mut(a).width = 5;
+        arena.node_mut(a).width = 5;
         arena.append(root, hole);
         arena.append(root, a);
 

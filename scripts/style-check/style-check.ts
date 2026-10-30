@@ -752,7 +752,7 @@ const RULES: Rule[] = [
   {
     name: "pub_vec_return",
     scan: countPubVecReturn,
-    skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
+    skip: /^(?!crates\/)/,
     glob: "crates/**/*.rs",
     why: "A public function returns an iterator, not a Vec. A Vec is allowed where the caller needs an owned collection or the function builds a byte buffer, and each such function has a counted row with its reason.",
   },
@@ -766,7 +766,7 @@ const RULES: Rule[] = [
   {
     name: "pub_impl_into",
     scan: countPubImplInto,
-    skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
+    skip: /^(?!crates\/)/,
     glob: "crates/**/*.rs",
     why: "A public function takes a concrete type, not impl Into<T>. A library fn takes &str or the owned type, so the caller sees what it stores.",
   },
@@ -780,14 +780,14 @@ const RULES: Rule[] = [
   {
     name: "accessor_name",
     scan: countAccessorNames,
-    skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
+    skip: /^(?!crates\/)/,
     glob: "crates/**/*.rs",
     why: "A public accessor follows the guide: no get_ prefix, replace_ returns the old value, take_ clears through &mut self, _mut returns &mut, set_ takes its value by value.",
   },
   {
     name: "bool_param_comment",
     scan: countBoolParamNoComment,
-    skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
+    skip: /^(?!crates\/)/,
     glob: "crates/**/*.rs",
     why: "A public function with a bool parameter writes its purpose in a comment above the parameter, so a call site says what true means.",
   },
@@ -801,7 +801,7 @@ const RULES: Rule[] = [
   {
     name: "generic_name",
     scan: countGenericNames,
-    skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
+    skip: /^(?!crates\/)/,
     glob: "crates/**/*.rs",
     why: "A generic parameter is T, U, E, K, V, F, I, R or S, or a CamelCase word of three letters or more.",
   },

@@ -394,10 +394,10 @@ impl Peer for LoggingMember {
 /// Poll until both broadcasts reached both observers, or `OBSERVE` has passed. The observers of
 /// the first broadcast are the creator and joiner two, and of the second the creator and joiner
 /// one.
-async fn watch<P: Peer>(
-    creator: &mut P,
-    joiner_one: &mut P,
-    joiner_two: &mut P,
+async fn watch<Participant: Peer>(
+    creator: &mut Participant,
+    joiner_one: &mut Participant,
+    joiner_two: &mut Participant,
     probes: &mut [Probe; 2],
 ) {
     let started = Instant::now();
@@ -419,7 +419,7 @@ async fn watch<P: Peer>(
 }
 
 /// The lengths of the three message logs: the creator, joiner one and joiner two.
-async fn log_lens<P: Peer>(members: [&P; 3]) -> [usize; 3] {
+async fn log_lens<Participant: Peer>(members: [&Participant; 3]) -> [usize; 3] {
     [
         members[0].log_len().await,
         members[1].log_len().await,
@@ -451,7 +451,7 @@ fn report(
 }
 
 /// Wait until every member lists the other two; the roster does not list its owner.
-async fn wait_until_meshed<P: Peer>(members: [&P; 3]) {
+async fn wait_until_meshed<Participant: Peer>(members: [&Participant; 3]) {
     let deadline = Instant::now() + MESH_DEADLINE;
     for member in members {
         while member.peer_count().await < members.len() - 1 {
@@ -464,12 +464,12 @@ async fn wait_until_meshed<P: Peer>(members: [&P; 3]) {
 /// Both joiners are in the mesh, then each broadcasts `delay` after its `join` returned. Each
 /// broadcast is observed by the creator and by the other joiner, and must reach the creator
 /// within `expected`. With `settle`, the race waits first until every member lists the others.
-async fn run_race<P: Peer>(
+async fn run_race<Participant: Peer>(
     name: &str,
     delay: Duration,
     expected: Duration,
     settle: bool,
-    members: [P; 3],
+    members: [Participant; 3],
 ) {
     if let Err(line) = measure_race(name, delay, expected, settle, members).await {
         panic!(
@@ -479,12 +479,12 @@ async fn run_race<P: Peer>(
 }
 
 /// [`run_race`] that returns the report line of a failed race instead of panicking.
-async fn measure_race<P: Peer>(
+async fn measure_race<Participant: Peer>(
     name: &str,
     delay: Duration,
     expected: Duration,
     settle: bool,
-    [mut creator, mut j1, mut j2]: [P; 3],
+    [mut creator, mut j1, mut j2]: [Participant; 3],
 ) -> Result<(), String> {
     if settle {
         wait_until_meshed([&creator, &j1, &j2]).await;
@@ -504,7 +504,7 @@ async fn measure_race<P: Peer>(
     watch(&mut creator, &mut j1, &mut j2, &mut probes).await;
     let line = report(
         name,
-        P::APP,
+        Participant::APP,
         &probes,
         before,
         log_lens([&creator, &j1, &j2]).await,

@@ -167,7 +167,7 @@ impl View {
     /// captured by both sides, the same as any other reactive read.
     ///
     /// [`Signal`]: crate::reactive::Signal
-    pub fn component<P: 'static>(component_fn: fn(P) -> ComponentBox, props: P) -> Self {
+    pub fn component<Props: 'static>(component_fn: fn(Props) -> ComponentBox, props: Props) -> Self {
         View::Component(ComponentView {
             type_key: component_fn as usize,
             build: Box::new(move || component_fn(props)),

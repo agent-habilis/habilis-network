@@ -34,18 +34,18 @@ use std::fmt;
 /// their own — `child` is what actually occupies this position in the
 /// tree, exactly as `visage-dom`'s `comp` fiber is transparent and
 /// `domOf` walks straight through to its child.
-pub struct ComponentMount<N> {
+pub struct ComponentMount<Handle> {
     id: SubscriberId,
     type_key: usize,
     instance: Instance,
-    child: Box<Mounted<N>>,
+    child: Box<Mounted<Handle>>,
 }
 
-// Hand-written rather than derived: deriving would require `N: Debug`, a
+// Hand-written rather than derived: deriving would require `Handle: Debug`, a
 // bound this type otherwise has no reason to carry (a `Host::Node` like
 // `NodeId` happens to implement it, but nothing here should depend on
 // that).
-impl<N> fmt::Debug for ComponentMount<N> {
+impl<Handle> fmt::Debug for ComponentMount<Handle> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ComponentMount")
             .field("id", &self.id)
@@ -57,16 +57,16 @@ impl<N> fmt::Debug for ComponentMount<N> {
 /// what shape (and, for `Component`, *which* instance) produced each
 /// node — the minimum a non-keyed reconciler needs to decide "patch in
 /// place" vs "replace".
-pub enum Mounted<N> {
-    Text(N, Rc<str>),
-    Box(N, BoxProps, Vec<Mounted<N>>),
-    Hole(N),
-    Component(ComponentMount<N>),
+pub enum Mounted<Handle> {
+    Text(Handle, Rc<str>),
+    Box(Handle, BoxProps, Vec<Mounted<Handle>>),
+    Hole(Handle),
+    Component(ComponentMount<Handle>),
 }
 
 // Hand-written for the same reason as `ComponentMount`'s: no need to
-// require `N: Debug` just for a trace.
-impl<N> fmt::Debug for Mounted<N> {
+// require `Handle: Debug` just for a trace.
+impl<Handle> fmt::Debug for Mounted<Handle> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Mounted::Text(_, text) => f.debug_tuple("Text").field(text).finish(),
@@ -82,7 +82,7 @@ impl<N> fmt::Debug for Mounted<N> {
 
 /// The host node a `Mounted` subtree actually starts at — for `Component`,
 /// its child's, recursively, since a component is transparent.
-fn node_of<N: Copy>(mounted: &Mounted<N>) -> N {
+fn node_of<Handle: Copy>(mounted: &Mounted<Handle>) -> Handle {
     match mounted {
         Mounted::Text(n, _) | Mounted::Box(n, _, _) | Mounted::Hole(n) => *n,
         Mounted::Component(c) => node_of(&c.child),
@@ -90,12 +90,12 @@ fn node_of<N: Copy>(mounted: &Mounted<N>) -> N {
 }
 
 /// Mounts `view` fresh under `parent`, immediately before `before`.
-pub fn mount<H: Host>(
-    host: &mut H,
-    parent: H::Node,
-    before: Option<H::Node>,
+pub fn mount<Backend: Host>(
+    host: &mut Backend,
+    parent: Backend::Node,
+    before: Option<Backend::Node>,
     view: View,
-) -> Mounted<H::Node> {
+) -> Mounted<Backend::Node> {
     match view {
         View::Text(text) => {
             let node = host.create_text(&text);
@@ -122,12 +122,12 @@ pub fn mount<H: Host>(
 
 /// Constructs and mounts a nested component from an owned [`ComponentView`]
 /// — the one path that actually calls its builder.
-fn mount_component<H: Host>(
-    host: &mut H,
-    parent: H::Node,
-    before: Option<H::Node>,
+fn mount_component<Backend: Host>(
+    host: &mut Backend,
+    parent: Backend::Node,
+    before: Option<Backend::Node>,
     comp: ComponentView,
-) -> Mounted<H::Node> {
+) -> Mounted<Backend::Node> {
     let ComponentView { type_key, build } = comp;
     let mut instance = Instance::boxed(build());
     let id = instance.subscriber_id();
@@ -154,11 +154,11 @@ fn mount_component<H: Host>(
 /// If the root component finishes instead of producing a step on its very
 /// first render — every real component loops forever, so this would indicate
 /// a broken component, not a normal outcome.
-pub fn mount_root<H: Host>(
-    host: &mut H,
-    root: H::Node,
+pub fn mount_root<Backend: Host>(
+    host: &mut Backend,
+    root: Backend::Node,
     component: impl Component + 'static,
-) -> Mounted<H::Node> {
+) -> Mounted<Backend::Node> {
     let mut instance = Instance::new(component);
     let id = instance.subscriber_id();
     let view = instance
@@ -177,7 +177,7 @@ pub fn mount_root<H: Host>(
 /// `Instance` (via `ComponentMount`'s own field, once this whole value is
 /// dropped) is what approximates `gen.return()`'s cleanup role — see
 /// `component.rs`'s module doc.
-pub fn unmount<H: Host>(host: &mut H, mounted: &Mounted<H::Node>) {
+pub fn unmount<Backend: Host>(host: &mut Backend, mounted: &Mounted<Backend::Node>) {
     match mounted {
         Mounted::Component(c) => unmount(host, &c.child),
         Mounted::Text(..) | Mounted::Box(..) | Mounted::Hole(_) => host.remove(node_of(mounted)),
@@ -192,12 +192,12 @@ pub fn unmount<H: Host>(host: &mut H, mounted: &Mounted<H::Node>) {
 /// running instance and its own state exactly as it was, not feeding it
 /// anything from this render (v1 has no live-props channel — see the
 /// crate's port-report notes).
-pub fn patch<H: Host>(
-    host: &mut H,
-    parent: H::Node,
-    old: Mounted<H::Node>,
+pub fn patch<Backend: Host>(
+    host: &mut Backend,
+    parent: Backend::Node,
+    old: Mounted<Backend::Node>,
     view: View,
-) -> Mounted<H::Node> {
+) -> Mounted<Backend::Node> {
     match (old, view) {
         (Mounted::Text(node, prev_text), View::Text(next_text)) => {
             if prev_text.as_ref() != next_text.as_ref() {
@@ -230,12 +230,12 @@ pub fn patch<H: Host>(
     }
 }
 
-fn patch_children<H: Host>(
-    host: &mut H,
-    parent: H::Node,
-    old_children: Vec<Mounted<H::Node>>,
+fn patch_children<Backend: Host>(
+    host: &mut Backend,
+    parent: Backend::Node,
+    old_children: Vec<Mounted<Backend::Node>>,
     new_children: Vec<View>,
-) -> Vec<Mounted<H::Node>> {
+) -> Vec<Mounted<Backend::Node>> {
     let mut old_iter = old_children.into_iter();
     let mut result = Vec::with_capacity(new_children.len());
     for view in new_children {
@@ -262,12 +262,12 @@ fn patch_children<H: Host>(
 /// tick. `dirty` membership is what keeps the *work* (calling `render()`)
 /// proportional to what actually changed, which is the property that
 /// matters.
-pub fn patch_dirty<H: Host, S: BuildHasher>(
-    host: &mut H,
-    parent: H::Node,
-    mounted: Mounted<H::Node>,
+pub fn patch_dirty<Backend: Host, S: BuildHasher>(
+    host: &mut Backend,
+    parent: Backend::Node,
+    mounted: Mounted<Backend::Node>,
     dirty: &HashSet<SubscriberId, S>,
-) -> Mounted<H::Node> {
+) -> Mounted<Backend::Node> {
     match mounted {
         Mounted::Component(mut comp) => {
             if dirty.contains(&comp.id)
@@ -312,7 +312,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
-        let mounted = mount(&mut host, root, None, View::text("hi"));
+        let mounted = mount(&mut host, root, None, View::text("hi".into()));
         assert_eq!(
             host.arena.children(root).count(),
             1,
@@ -326,10 +326,10 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
-        let mounted = mount(&mut host, root, None, View::text("first"));
+        let mounted = mount(&mut host, root, None, View::text("first".into()));
         let before_ids: Vec<_> = host.arena.children(root).collect();
 
-        let mounted = patch(&mut host, root, mounted, View::text("second"));
+        let mounted = patch(&mut host, root, mounted, View::text("second".into()));
         let after_ids: Vec<_> = host.arena.children(root).collect();
 
         assert_eq!(
@@ -383,11 +383,11 @@ mod tests {
         let root = host.create_root();
         let view = View::boxed(
             BoxProps::default(),
-            vec![View::text("a"), View::text("b"), View::text("c")],
+            vec![View::text("a".into()), View::text("b".into()), View::text("c".into())],
         );
         let mounted = mount(&mut host, root, None, view);
 
-        let view2 = View::boxed(BoxProps::default(), vec![View::text("a")]);
+        let view2 = View::boxed(BoxProps::default(), vec![View::text("a".into())]);
         let mounted = patch(&mut host, root, mounted, view2);
 
         let Mounted::Box(box_node, _, _) = &mounted else {
@@ -405,10 +405,10 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
-        let view = View::boxed(BoxProps::default(), vec![View::text("a")]);
+        let view = View::boxed(BoxProps::default(), vec![View::text("a".into())]);
         let mounted = mount(&mut host, root, None, view);
 
-        let view2 = View::boxed(BoxProps::default(), vec![View::text("a"), View::text("b")]);
+        let view2 = View::boxed(BoxProps::default(), vec![View::text("a".into()), View::text("b".into())]);
         let mounted = patch(&mut host, root, mounted, view2);
 
         let Mounted::Box(box_node, _, _) = &mounted else {
@@ -433,7 +433,7 @@ mod tests {
 
         impl Component for Child {
             fn step(&mut self) -> Option<Step> {
-                Some(Step::View(View::text("child")))
+                Some(Step::View(View::text("child".into())))
             }
         }
 

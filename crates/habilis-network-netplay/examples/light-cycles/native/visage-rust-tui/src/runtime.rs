@@ -15,22 +15,22 @@ use std::collections::HashSet;
 use std::{fmt, mem};
 
 /// A running app.
-pub struct Runtime<H: Host> {
-    host: H,
-    root: H::Node,
-    mounted: Mounted<H::Node>,
+pub struct Runtime<Backend: Host> {
+    host: Backend,
+    root: Backend::Node,
+    mounted: Mounted<Backend::Node>,
 }
 
 // Manual, so a `Host` backend need not implement `Debug` to make a `Runtime` printable.
-impl<H: Host> fmt::Debug for Runtime<H> {
+impl<Backend: Host> fmt::Debug for Runtime<Backend> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("Runtime").finish_non_exhaustive()
     }
 }
 
-impl<H: Host> Runtime<H> {
+impl<Backend: Host> Runtime<Backend> {
     /// Mounts `component` as the root component and does the first render.
-    pub fn new(mut host: H, root: H::Node, component: impl Component + 'static) -> Self {
+    pub fn new(mut host: Backend, root: Backend::Node, component: impl Component + 'static) -> Self {
         let mounted = reconcile::mount_root(&mut host, root, component);
         Self {
             host,
@@ -40,11 +40,11 @@ impl<H: Host> Runtime<H> {
     }
 
     #[must_use]
-    pub fn host(&self) -> &H {
+    pub fn host(&self) -> &Backend {
         &self.host
     }
 
-    pub fn host_mut(&mut self) -> &mut H {
+    pub fn host_mut(&mut self) -> &mut Backend {
         &mut self.host
     }
 
@@ -62,7 +62,7 @@ impl<H: Host> Runtime<H> {
         true
     }
 
-    fn take_mounted(&mut self) -> Mounted<H::Node> {
+    fn take_mounted(&mut self) -> Mounted<Backend::Node> {
         // `Mounted` has no `Default`/empty state to swap in temporarily,
         // so this exists to move it out of `&mut self` for `patch_dirty`'s
         // by-value signature without a placeholder allocation.

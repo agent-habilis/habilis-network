@@ -51,13 +51,13 @@ impl Host for TuiHost {
 
     fn create_box(&mut self, props: &BoxProps) -> NodeId {
         let id = self.arena.create(Tag::Box);
-        apply_box_props(self.arena.get_mut(id), props);
+        apply_box_props(self.arena.node_mut(id), props);
         id
     }
 
     fn create_text(&mut self, value: &str) -> NodeId {
         let id = self.arena.create(Tag::Text);
-        self.arena.get_mut(id).text = Some(value.to_string());
+        self.arena.node_mut(id).text = Some(value.to_string());
         id
     }
 
@@ -66,11 +66,11 @@ impl Host for TuiHost {
     }
 
     fn set_text(&mut self, node: NodeId, value: &str) {
-        self.arena.get_mut(node).text = Some(value.to_string());
+        self.arena.node_mut(node).text = Some(value.to_string());
     }
 
     fn set_box_props(&mut self, node: NodeId, props: &BoxProps) {
-        apply_box_props(self.arena.get_mut(node), props);
+        apply_box_props(self.arena.node_mut(node), props);
     }
 
     fn insert(&mut self, parent: NodeId, node: NodeId, before: Option<NodeId>) {
