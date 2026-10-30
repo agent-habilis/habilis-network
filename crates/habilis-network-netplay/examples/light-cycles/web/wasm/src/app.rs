@@ -299,11 +299,8 @@ impl Game {
         // Truncating to the low 32 bits is fine: this only has to
         // distinguish *this* match's packets from the previous one's, and
         // the lobby's epoch already guarantees a fresh id per match.
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "deliberately the low half of the session id; see above"
-        )]
-        let magic = agreed.session_id.get() as u32;
+        let magic = u32::try_from(agreed.session_id.get() & u64::from(u32::MAX))
+            .expect("the mask leaves the low half of the session id");
         let Ok(session) = P2PSession::new(
             agreed.players.clone(),
             agreed.local_handle,
