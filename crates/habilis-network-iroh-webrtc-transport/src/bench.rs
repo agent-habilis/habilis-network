@@ -200,10 +200,7 @@ const BLOCK: [u8; 251] = {
     let mut block = [0u8; 251];
     let mut index = 0;
     while index < block.len() {
-        #[expect(clippy::cast_possible_truncation, reason = "index < 251")]
-        {
-            block[index] = index as u8;
-        }
+        block[index] = index.to_le_bytes()[0];
         index += 1;
     }
     block
