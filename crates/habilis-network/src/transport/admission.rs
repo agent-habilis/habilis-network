@@ -322,7 +322,9 @@ mod tests {
         let hub = hub();
         let _guard = admission.try_admit(peer(1), &hub).expect("first admit");
         assert_eq!(
-            admission.try_admit(peer(1), &hub).unwrap_err(),
+            admission
+                .try_admit(peer(1), &hub)
+                .expect_err("a peer being dialled holds its slot, so a second dial is refused"),
             Refusal::InFlight,
             "the second admit for a dialled peer is refused as in flight"
         );
@@ -375,7 +377,9 @@ mod tests {
         let two = admission.try_admit(peer(2), &hub).expect("second admit");
         assert_eq!(admission.room(), 0, "the rounds in flight count");
         assert_eq!(
-            admission.try_admit(peer(3), &hub).unwrap_err(),
+            admission
+                .try_admit(peer(3), &hub)
+                .expect_err("a route at the cap is refused"),
             Refusal::AtCapacity,
             "a route at the cap is refused and no one is evicted"
         );
@@ -384,7 +388,9 @@ mod tests {
         drop(one);
         assert_eq!(admission.room(), 0, "one unit and one round in flight");
         assert_eq!(
-            admission.try_admit(peer(3), &hub).unwrap_err(),
+            admission
+                .try_admit(peer(3), &hub)
+                .expect_err("a route at the cap is refused"),
             Refusal::AtCapacity,
             "the refusal at the cap holds on a second try"
         );
@@ -397,7 +403,9 @@ mod tests {
         );
         let _three = admission.try_admit(peer(3), &hub).expect("room again");
         assert_eq!(
-            admission.try_admit(peer(4), &hub).unwrap_err(),
+            admission
+                .try_admit(peer(4), &hub)
+                .expect_err("a route at the cap is refused"),
             Refusal::AtCapacity,
             "peer 4 is refused once the table is full"
         );
@@ -411,7 +419,9 @@ mod tests {
         let hub = hub();
         admission.note_refused(peer(1));
         assert_eq!(
-            admission.try_admit(peer(1), &hub).unwrap_err(),
+            admission
+                .try_admit(peer(1), &hub)
+                .expect_err("a peer refused at its cap is still refused"),
             Refusal::Cooling,
             "a refused peer waits out its cooldown"
         );
@@ -429,7 +439,9 @@ mod tests {
         let hub = hub();
         admission.close();
         assert_eq!(
-            admission.try_admit(peer(1), &hub).unwrap_err(),
+            admission
+                .try_admit(peer(1), &hub)
+                .expect_err("after close every admit is refused"),
             Refusal::ShuttingDown,
             "a closed table refuses every peer as shutting down"
         );
@@ -603,7 +615,9 @@ mod tests {
             "one slot is still in flight after the round answers"
         );
         assert_eq!(
-            admission.try_admit(peer(1), &hub).unwrap_err(),
+            admission
+                .try_admit(peer(1), &hub)
+                .expect_err("an in-flight round refuses a second admit"),
             Refusal::InFlight,
             "a peer with an answered round is refused as in flight"
         );
@@ -628,7 +642,7 @@ mod tests {
         assert_eq!(
             admission
                 .try_admit_at(peer(1), &hub, now + Duration::from_secs(30))
-                .unwrap_err(),
+                .expect_err("a session evicted by the hub is refused for a minute"),
             Refusal::Evicted,
             "its offer within the minute"
         );
