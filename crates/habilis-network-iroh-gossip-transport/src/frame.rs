@@ -169,19 +169,19 @@ pub fn decode(bytes: &[u8]) -> Result<Frame<'_>, DecodeError> {
     if bytes.len() <= HEADER_LEN {
         return Err(DecodeError::Truncated);
     }
-    if bytes[1] != FRAME_VERSION {
-        return Err(DecodeError::UnknownVersion(bytes[1]));
+    let version = *bytes.get(1).ok_or(DecodeError::Truncated)?;
+    if version != FRAME_VERSION {
+        return Err(DecodeError::UnknownVersion(version));
     }
     let id_at = |start: usize| -> Result<EndpointId, DecodeError> {
-        let raw: [u8; 32] = bytes[start..start + 32]
-            .try_into()
-            .map_err(|_| DecodeError::Truncated)?;
+        let slice: &[u8] = bytes.get(start..start + 32).ok_or(DecodeError::Truncated)?;
+        let raw: [u8; 32] = slice.try_into().map_err(|_| DecodeError::Truncated)?;
         EndpointId::from_bytes(&raw).map_err(|_| DecodeError::BadId)
     };
     Ok(Frame {
         dst: id_at(2)?,
         src: id_at(34)?,
-        datagram: &bytes[HEADER_LEN..],
+        datagram: bytes.get(HEADER_LEN..).ok_or(DecodeError::Truncated)?,
     })
 }
 
