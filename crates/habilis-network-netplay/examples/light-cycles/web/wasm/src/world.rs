@@ -61,7 +61,7 @@ impl World {
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
         let mut eat = |byte: u8| {
             hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         };
         for byte in &self.grid {
             eat(*byte);
