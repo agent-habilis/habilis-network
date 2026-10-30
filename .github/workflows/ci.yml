@@ -445,3 +445,46 @@ jobs:
       - name: Typecheck
         working-directory: crates/habilis-network-netplay/examples/light-cycles/web
         run: bun run typecheck
+
+  # The IndexedDB backend in a real browser: the cases of idb_browser/cases.rs.
+  # `Check` only compiles them. Chrome and its chromedriver come from one Chrome
+  # for Testing release (the Stable channel, as tasks/src/util/cdp.rs reads it),
+  # so the two versions match by construction.
+  idb-browser:
+    name: IdbStore (browser)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      # The same rule as the Install wasm-bindgen-cli step of `Check (wasm32)`.
+      - name: Install wasm-bindgen-cli
+        run: |
+          version=$(cargo pkgid wasm-bindgen | sed 's/.*[@#]//')
+          echo "wasm-bindgen resolved to $version"
+          cargo install wasm-bindgen-cli --version "$version" --locked
+
+      - name: Chrome for Testing and its chromedriver
+        run: |
+          json=$(curl --fail --silent --show-error https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json)
+          chrome_url=$(jq -r '.channels.Stable.downloads.chrome[] | select(.platform == "linux64") | .url' <<<"$json")
+          driver_url=$(jq -r '.channels.Stable.downloads.chromedriver[] | select(.platform == "linux64") | .url' <<<"$json")
+          dir="$RUNNER_TEMP/cft"
+          mkdir -p "$dir"
+          curl --fail --silent --show-error --location -o "$dir/chrome.zip" "$chrome_url"
+          curl --fail --silent --show-error --location -o "$dir/driver.zip" "$driver_url"
+          unzip -q "$dir/chrome.zip" -d "$dir"
+          unzip -q "$dir/driver.zip" -d "$dir"
+          printf '{"goog:chromeOptions":{"binary":"%s"}}' "$dir/chrome-linux64/chrome" > "$dir/webdriver.json"
+          echo "CHROMEDRIVER=$dir/chromedriver-linux64/chromedriver" >> "$GITHUB_ENV"
+          echo "WASM_BINDGEN_TEST_WEBDRIVER_JSON=$dir/webdriver.json" >> "$GITHUB_ENV"
+
+      - name: IdbStore in Chrome
+        env:
+          WASM_BINDGEN_USE_BROWSER: "1"
+        run: cargo test --target wasm32-unknown-unknown -p habilis-network-chunks --test idb_browser
