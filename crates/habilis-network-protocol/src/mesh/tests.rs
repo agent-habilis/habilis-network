@@ -1,3 +1,4 @@
+use super::transport::Transport;
 use super::{
     LockedMesh, LookupOpts, Mesh, MeshConfig, MeshName, RelayChoice, SEED_LEN, TransportPolicy,
     UnlockError,
@@ -466,7 +467,10 @@ fn an_id_of_an_older_default_mesh_keeps_its_id_and_its_topic() {
     let _guard = ::habilis_network_test_tracing::init();
     let older = "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqay2YxkRe";
     let mesh: LockedMesh = older.parse().expect("an older id decodes");
-    assert!(!mesh.config().transport.gossip, "it has no gossip");
+    assert!(
+        !mesh.config().transport.allows(Transport::Gossip),
+        "it has no gossip"
+    );
     assert_eq!(mesh.to_string(), older, "and it keeps its id");
     let topic =
         crypto::derive_topic_id(Keying::Wire(mesh.seed()), mesh.name(), &mesh.config_bytes());
@@ -584,7 +588,7 @@ fn a_mesh_id_carries_the_transport_policy_for_every_list() {
     use super::lookup::Lookup;
     use super::transport::Transport::{Gossip, Multihop, Relay, Udp, WebRtc};
     let _guard = ::habilis_network_test_tracing::init();
-    let lists: [&[super::transport::Transport]; 10] = [
+    let lists: [&[Transport]; 10] = [
         &[],
         &[Udp],
         &[WebRtc],
@@ -612,7 +616,7 @@ fn a_mesh_id_carries_the_transport_policy_for_every_list() {
     }
     // An empty list is the default, `udp,webrtc,multihop,gossip`. A list names what it carries:
     // the same list without `gossip` is not the default.
-    let policy = |list: &[super::transport::Transport]| {
+    let policy = |list: &[Transport]| {
         MeshConfig::resolve(&[Lookup::Relay], None, list)
             .unwrap()
             .transport

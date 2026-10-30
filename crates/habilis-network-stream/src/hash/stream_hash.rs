@@ -11,7 +11,7 @@ use crate::error::HashError;
 use habilis_network::iroh::EndpointAddr;
 use habilis_network::net::{endpoint_addr_from_json, endpoint_addr_to_json};
 use habilis_network::protocol::base58check::{self, take_array};
-use habilis_network::protocol::{LookupOpts, TransportPolicy, ct_eq};
+use habilis_network::protocol::{LookupOpts, Transport, TransportPolicy, ct_eq};
 use zeroize::Zeroizing;
 
 /// A decoded stream hash.
@@ -73,13 +73,13 @@ impl StreamHash {
     pub fn encode(&self) -> String {
         let mut framed = vec![VERSION, KIND];
         let mut flags = 0;
-        if self.transport.relay_transport {
+        if self.transport.allows(Transport::Relay) {
             flags |= RELAY_TRANSPORT_BIT;
         }
-        if !self.transport.udp {
+        if !self.transport.allows(Transport::Udp) {
             flags |= NO_UDP_BIT;
         }
-        if !self.transport.webrtc {
+        if !self.transport.allows(Transport::WebRtc) {
             flags |= NO_WEBRTC_BIT;
         }
         framed.push(flags);

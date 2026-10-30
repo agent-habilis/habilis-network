@@ -332,12 +332,12 @@ const FEATURE_INVITE_ONLY: u8 = 0b0010;
 pub(super) const TRANSPORT_UDP: u8 = 0b0001;
 pub(super) const TRANSPORT_WEBRTC: u8 = 0b0010;
 pub(super) const TRANSPORT_MULTIHOP: u8 = 0b0100;
-/// The relay may carry payload ([`TransportPolicy::relay_transport`]). Off, the
+/// The relay may carry payload ([`Transport::Relay`]). Off, the
 /// relay serves the bootstrap dial, JSEP signalling and NAT-traversal frames
 /// only. In the mesh id rather than per node, because one relaying member
 /// would undo the saving for everyone it links.
 pub(super) const TRANSPORT_RELAY: u8 = 0b1000;
-/// Gossip as a path ([`TransportPolicy::gossip`]). Written after the relay's bit, so an id that
+/// Gossip as a path ([`Transport::Gossip`]). Written after the relay's bit, so an id that
 /// an older build made reads as gossip off and keeps its bytes.
 pub(super) const TRANSPORT_GOSSIP: u8 = 0b1_0000;
 pub(super) const KNOWN_TRANSPORT_BITS: u8 =
@@ -453,18 +453,18 @@ impl MeshConfig {
                 super::transport::MULTIHOP_ALONE.to_owned(),
             ));
         }
-        if !transport.udp && !transport.webrtc {
+        if !transport.allows(Transport::Udp) && !transport.allows(Transport::WebRtc) {
             return Err(ConfigError::Invalid(
                 "a mesh needs a direct path: transport `udp`, `webrtc`, or both".to_owned(),
             ));
         }
         let no_relay = self.lookups.relay_lookup == RelayChoice::Disabled;
-        if transport.relay_transport && no_relay {
+        if transport.allows(Transport::Relay) && no_relay {
             return Err(ConfigError::Invalid("transport `relay` needs lookup `relay`: with the relay disabled there is none to carry payload".to_owned()));
         }
         // A native member without UDP has no address a peer could reach, so the
         // JSEP exchange that opens its data channel can only cross the relay.
-        if !transport.udp && no_relay {
+        if !transport.allows(Transport::Udp) && no_relay {
             return Err(ConfigError::Invalid("a mesh without transport `udp` needs lookup `relay`: the relay is the only path its WebRTC offers can take".to_owned()));
         }
         Ok(())
@@ -1295,10 +1295,7 @@ mod lookup_tests {
     fn config_round_trips_relay_as_transport() {
         let _guard = ::habilis_network_test_tracing::init();
         let config = MeshConfig {
-            transport: TransportPolicy {
-                relay_transport: true,
-                ..TransportPolicy::default()
-            },
+            transport: TransportPolicy::default().relay_transport(true),
             ..MeshConfig::public_preset()
         };
         let bytes = config.to_bytes();
@@ -1325,14 +1322,16 @@ mod lookup_tests {
     fn relay_is_lookup_only_by_default() {
         let _guard = ::habilis_network_test_tracing::init();
         assert!(
-            !MeshConfig::public_preset().transport.relay_transport,
+            !MeshConfig::public_preset()
+                .transport
+                .allows(Transport::Relay),
             "the public preset keeps the relay lookup only"
         );
         assert!(
             !MeshConfig::try_from(&[0b0111, 0b0111])
                 .unwrap()
                 .transport
-                .relay_transport,
+                .allows(Transport::Relay),
             "the relay stays lookup-only when the flag is not set"
         );
     }
@@ -1342,10 +1341,13 @@ mod lookup_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let default = TransportPolicy::default();
         assert!(
-            default.udp && default.webrtc && default.multihop && !default.relay_transport,
+            default.allows(Transport::Udp)
+                && default.allows(Transport::WebRtc)
+                && default.allows(Transport::Multihop)
+                && !default.allows(Transport::Relay),
             "udp, webrtc, multihop and gossip are on by default"
         );
-        assert!(default.gossip, "gossip is on by default");
+        assert!(default.allows(Transport::Gossip), "gossip is on by default");
         assert_eq!(
             MeshConfig::public_preset().to_bytes(),
             vec![0b0111, 0b1_0111],
@@ -1358,10 +1360,10 @@ mod lookup_tests {
         );
         let with_relay = MeshConfig::try_from(&[0b0111, 0b1111]).unwrap().transport;
         assert!(
-            with_relay.udp
-                && with_relay.webrtc
-                && with_relay.multihop
-                && with_relay.relay_transport,
+            with_relay.allows(Transport::Udp)
+                && with_relay.allows(Transport::WebRtc)
+                && with_relay.allows(Transport::Multihop)
+                && with_relay.allows(Transport::Relay),
             "the relayed policy keeps the default paths on"
         );
     }
@@ -1393,17 +1395,26 @@ mod lookup_tests {
         );
         let udp = policy(&[Transport::Udp]);
         assert!(
-            udp.udp && !udp.webrtc && !udp.multihop && !udp.relay_transport,
+            udp.allows(Transport::Udp)
+                && !udp.allows(Transport::WebRtc)
+                && !udp.allows(Transport::Multihop)
+                && !udp.allows(Transport::Relay),
             "a udp list turns on udp alone"
         );
         let webrtc = policy(&[Transport::WebRtc]);
         assert!(
-            !webrtc.udp && webrtc.webrtc && !webrtc.multihop && !webrtc.relay_transport,
+            !webrtc.allows(Transport::Udp)
+                && webrtc.allows(Transport::WebRtc)
+                && !webrtc.allows(Transport::Multihop)
+                && !webrtc.allows(Transport::Relay),
             "a webrtc list turns on webrtc alone"
         );
         let multihop = policy(&[Transport::Udp, Transport::Multihop]);
         assert!(
-            multihop.udp && !multihop.webrtc && multihop.multihop && !multihop.relay_transport,
+            multihop.allows(Transport::Udp)
+                && !multihop.allows(Transport::WebRtc)
+                && multihop.allows(Transport::Multihop)
+                && !multihop.allows(Transport::Relay),
             "a multihop list turns on multihop alone"
         );
         let all = policy(&[
@@ -1413,7 +1424,10 @@ mod lookup_tests {
             Transport::Relay,
         ]);
         assert!(
-            all.udp && all.webrtc && all.multihop && all.relay_transport,
+            all.allows(Transport::Udp)
+                && all.allows(Transport::WebRtc)
+                && all.allows(Transport::Multihop)
+                && all.allows(Transport::Relay),
             "the full list turns on every path"
         );
     }
@@ -1506,10 +1520,7 @@ mod lookup_tests {
             "an older id decodes with gossip off"
         );
         let without_gossip = MeshConfig {
-            transport: TransportPolicy {
-                gossip: false,
-                ..TransportPolicy::default()
-            },
+            transport: TransportPolicy::default().gossip(false),
             ..MeshConfig::public_preset()
         };
         assert_eq!(
@@ -1525,7 +1536,7 @@ mod lookup_tests {
         let older = [0b0111, 0b0111];
         let decoded = MeshConfig::try_from(&older).unwrap();
         assert!(
-            !decoded.transport.gossip,
+            !decoded.transport.allows(Transport::Gossip),
             "an older id has gossip off after decoding"
         );
         assert_eq!(
@@ -1681,10 +1692,7 @@ mod lookup_tests {
             lookups: LookupOpts::public_preset(),
             password: Some([0xA5u8; 16]),
             issuer_pubkey: None,
-            transport: TransportPolicy {
-                relay_transport: true,
-                ..TransportPolicy::default()
-            },
+            transport: TransportPolicy::default().relay_transport(true),
         };
         let decoded = MeshConfig::try_from(config.to_bytes().as_slice()).unwrap();
         assert_eq!(
@@ -1697,10 +1705,7 @@ mod lookup_tests {
     fn config_rejects_relay_transport_on_without_a_relay_lookup() {
         let _guard = ::habilis_network_test_tracing::init();
         let config = MeshConfig {
-            transport: TransportPolicy {
-                relay_transport: true,
-                ..TransportPolicy::default()
-            },
+            transport: TransportPolicy::default().relay_transport(true),
             ..MeshConfig::loopback()
         };
         assert!(config.validate().is_err(), "no relay to carry payload");
@@ -1985,13 +1990,13 @@ mod choice_tests {
         assert!(
             !TransportPolicy::try_from(&[Transport::Udp])
                 .unwrap()
-                .relay_transport,
+                .allows(Transport::Relay),
             "udp alone keeps the relay off the payload path"
         );
         assert!(
             TransportPolicy::try_from(&[Transport::Udp, Transport::Relay])
                 .unwrap()
-                .relay_transport,
+                .allows(Transport::Relay),
             "a transport list with relay turns the relay on"
         );
     }
@@ -2012,7 +2017,7 @@ mod choice_tests {
             MeshConfig::resolve(&[Lookup::Relay], None, &[Transport::Udp, Transport::Relay])
                 .unwrap();
         assert!(
-            config.transport.relay_transport,
+            config.transport.allows(Transport::Relay),
             "the three choices resolve to a relay transport"
         );
         assert_eq!(
@@ -2028,7 +2033,7 @@ mod choice_tests {
         let bare = MeshConfig::resolve(&[], None, &[]).unwrap();
         assert!(bare.lookups.is_loopback(), "the bare config is loopback");
         assert!(
-            !bare.transport.relay_transport,
+            !bare.transport.allows(Transport::Relay),
             "the bare config has the relay transport off"
         );
     }
@@ -2046,7 +2051,7 @@ mod choice_tests {
                 RelayChoice::Pinned,
                 "a relay can be a lookup and nothing more"
             );
-            assert!(!config.transport.relay_transport, "{transports:?}");
+            assert!(!config.transport.allows(Transport::Relay), "{transports:?}");
             assert_eq!(
                 config,
                 MeshConfig::try_from(config.to_bytes().as_slice()).unwrap(),

@@ -15,7 +15,7 @@ use std::time::Duration;
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
-use habilis_network::protocol::{LookupOpts, MessageKind, Nickname, PresenceSubtype};
+use habilis_network::protocol::{LookupOpts, MessageKind, Nickname, PresenceSubtype, Transport};
 use habilis_network::runtime::{
     Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
 };
@@ -92,7 +92,7 @@ async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Probe> {
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
     assert!(
-        !mesh.transport().relay_transport,
+        !mesh.transport().allows(Transport::Relay),
         "the default policy keeps the relay for lookup only"
     );
     let author = Nickname::try_new(nick).expect("valid nickname");

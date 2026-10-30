@@ -141,6 +141,7 @@ mod topic_derivation_tests {
         LookupOpts, MeshConfig, TransportPolicy, derive_topic_mesh, derive_topic_mesh_config,
         derive_topic_mesh_with,
     };
+    use crate::protocol::mesh::Transport;
 
     /// The no-argument form must stay exactly what it always was, because the
     /// `--topic` id it derives is public API for every frontend that calls it.
@@ -235,11 +236,11 @@ mod topic_derivation_tests {
             "the relay transport changes the id"
         );
         assert!(
-            !lookup_only.transport().relay_transport,
+            !lookup_only.transport().allows(Transport::Relay),
             "the lookup-only mesh has the relay transport off"
         );
         assert!(
-            relayed.transport().relay_transport,
+            relayed.transport().allows(Transport::Relay),
             "the relayed mesh has the relay transport on"
         );
     }

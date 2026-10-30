@@ -51,8 +51,11 @@ fn an_empty_list_is_udp_and_webrtc_for_a_stream() {
             .await
             .expect("bind a loopback node");
         let policy = node.transport;
-        assert!(policy.udp && policy.webrtc, "udp and webrtc are on");
-        assert!(!policy.multihop, "multihop is off");
+        assert!(
+            policy.allows(Transport::Udp) && policy.allows(Transport::WebRtc),
+            "udp and webrtc are on"
+        );
+        assert!(!policy.allows(Transport::Multihop), "multihop is off");
         node.endpoint.close().await;
     });
 }
@@ -65,7 +68,7 @@ fn a_browser_refuses_a_list_with_no_path_it_can_run() {
     let refused = |transport: &[Transport]| {
         let config = MeshConfig::resolve(&[Lookup::Relay], None, transport).expect("valid");
         let transports = TransportOpts::default().within(&config.transport);
-        runtime::refuse_in_browser(&config.lookups, config.transport, transports).is_err()
+        runtime::refuse_in_browser(&config.lookups, &config.transport, transports).is_err()
     };
     assert!(refused(&[Transport::Udp]), "udp only");
     assert!(
@@ -83,7 +86,7 @@ fn a_browser_refuses_a_stream_with_no_relay_lookup() {
     let config = MeshConfig::resolve(&[Lookup::Dht], None, &[Transport::Udp, Transport::WebRtc])
         .expect("valid");
     let transports = TransportOpts::default().within(&config.transport);
-    let error = runtime::refuse_in_browser(&config.lookups, config.transport, transports)
+    let error = runtime::refuse_in_browser(&config.lookups, &config.transport, transports)
         .expect_err("no path to signal on");
     assert_eq!(
         error.to_string(),

@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, watch};
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::lookup;
 use crate::protocol::crypto::Password;
-use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
+use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName, Transport};
 use crate::protocol::{MeshId, Nickname};
 use crate::util::tuning::{RELAY_RUNG_PROBE, SETUP_RUNG_READ};
 use lookup::{
@@ -67,13 +67,14 @@ fn rendezvous_params(
     // via `rung_tx` if rung 0 turns out to be unreachable. Empty for
     // private / relay-disabled ⇒ `None`.
     let bootstrap_relay = relay_ladder(&lookups.relay_lookup).next();
+    let relay_transport = mesh.config().transport.allows(Transport::Relay);
     RendezvousParams {
         topic_id,
         secret: mesh.rendezvous_secret(),
         bind_ports,
         id: mesh.rendezvous_id(),
         lookups: lookups.clone(),
-        relay_transport: transport::PayloadPath::from(mesh.config().transport.relay_transport),
+        relay_transport: transport::PayloadPath::from(relay_transport),
         bootstrap_relay,
         rung_tx,
     }
@@ -398,9 +399,9 @@ pub const BROWSER_HAS_NO_PATH: &str = "a browser cannot carry payload in this me
 fn member_transports(
     lookups: &LookupOpts,
     transports: lookup::TransportOpts,
-    policy: crate_TransportPolicy,
+    policy: &crate_TransportPolicy,
 ) -> Result<lookup::TransportOpts> {
-    let transports = transports.within(&policy);
+    let transports = transports.within(policy);
     #[cfg(target_arch = "wasm32")]
     refuse_in_browser(lookups, policy, transports)?;
     anyhow::ensure!(
@@ -435,13 +436,13 @@ fn reaches_relay(lookups: &LookupOpts, transports: lookup::TransportOpts) -> boo
 /// use habilis_network::protocol::mesh::LookupOpts;
 /// use habilis_network::runtime::{SetupError, refuse_in_browser};
 ///
-/// # fn demo(lookups: &LookupOpts, policy: TransportPolicy, transports: TransportOpts) -> Result<(), SetupError> {
-/// refuse_in_browser(lookups, policy, transports)
+/// # fn demo(lookups: &LookupOpts, policy: &TransportPolicy, transports: TransportOpts) -> Result<(), SetupError> {
+/// refuse_in_browser(lookups, &policy, transports)
 /// # }
 /// ```
 pub fn refuse_in_browser(
     lookups: &LookupOpts,
-    policy: crate_TransportPolicy,
+    policy: &crate_TransportPolicy,
     transports: lookup::TransportOpts,
 ) -> Result<(), SetupError> {
     refuse_in_browser_checked(lookups, policy, transports).map_err(SetupError::internal)
@@ -449,14 +450,14 @@ pub fn refuse_in_browser(
 
 fn refuse_in_browser_checked(
     lookups: &LookupOpts,
-    policy: crate_TransportPolicy,
+    policy: &crate_TransportPolicy,
     transports: lookup::TransportOpts,
 ) -> Result<()> {
     anyhow::ensure!(
         reaches_relay(lookups, transports),
         BROWSER_NEEDS_RELAY_LOOKUP
     );
-    anyhow::ensure!(transports.carry_without_udp(&policy), BROWSER_HAS_NO_PATH);
+    anyhow::ensure!(transports.carry_without_udp(policy), BROWSER_HAS_NO_PATH);
     Ok(())
 }
 
@@ -644,12 +645,14 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     // yet, and an invalid one would produce an id every joiner rejects.
     mesh_config.validate()?;
     let lookups = mesh_config.lookups.clone();
-    let relay_transport = transport::PayloadPath::from(mesh_config.transport.relay_transport);
-    let transports = member_transports(&lookups, transports, mesh_config.transport)?;
+    let relay_transport =
+        transport::PayloadPath::from(mesh_config.transport.allows(Transport::Relay));
+    let transports = member_transports(&lookups, transports, &mesh_config.transport)?;
     // The mesh policy's `multihop`, on a node that has a direct path for its underlay to
     // forward over: UDP, or a WebRTC data channel when IP is cleared. With neither there is
     // no direct path, and no handle.
-    let multihop = mesh_config.transport.multihop && (transports.udp || transports.webrtc);
+    let multihop =
+        mesh_config.transport.allows(Transport::Multihop) && (transports.udp || transports.webrtc);
 
     // The off-loop rung channel: the backgrounded startup probe and the
     // beacon's liveness self-monitor publish a chosen rung here; the
@@ -1129,7 +1132,7 @@ mod tests {
         let policy =
             TransportPolicy::try_from(&[Transport::Udp, Transport::WebRtc]).expect("valid");
         let transports = lookup::TransportOpts::default().within(&policy);
-        let error = super::refuse_in_browser(&dht_only, policy, transports)
+        let error = super::refuse_in_browser(&dht_only, &policy, transports)
             .expect_err("no path to signal on");
         assert_eq!(
             error.to_string(),
@@ -1140,7 +1143,7 @@ mod tests {
         let relay = LookupOpts::new(RelayChoice::Pinned)
             .mdns(dht_only.mdns)
             .dht(dht_only.dht);
-        super::refuse_in_browser(&relay, policy, transports).expect("the relay signals");
+        super::refuse_in_browser(&relay, &policy, transports).expect("the relay signals");
     }
 
     // A native node without UDP signals its data channel over the relay, as a
@@ -1153,11 +1156,12 @@ mod tests {
         let policy =
             TransportPolicy::try_from(&[Transport::Udp, Transport::WebRtc]).expect("valid");
         let webrtc_only = lookup::TransportOpts::webrtc_only();
-        super::member_transports(&dht_only, webrtc_only, policy).expect_err("no path to signal on");
+        super::member_transports(&dht_only, webrtc_only, &policy)
+            .expect_err("no path to signal on");
         let relay = LookupOpts::new(RelayChoice::Pinned)
             .mdns(dht_only.mdns)
             .dht(dht_only.dht);
-        super::member_transports(&relay, webrtc_only, policy).expect("the relay signals");
+        super::member_transports(&relay, webrtc_only, &policy).expect("the relay signals");
     }
 
     // The relay lookup names a relay, but only this node's relay transport
@@ -1174,13 +1178,13 @@ mod tests {
         let webrtc =
             TransportPolicy::try_from(&[Transport::Udp, Transport::WebRtc]).expect("valid");
         drop(
-            super::refuse_in_browser(&lookups, webrtc, no_relay(&webrtc))
+            super::refuse_in_browser(&lookups, &webrtc, no_relay(&webrtc))
                 .expect_err("no relay to signal on"),
         );
         let relay_payload =
             TransportPolicy::try_from(&[Transport::Udp, Transport::Relay]).expect("valid");
         drop(
-            super::refuse_in_browser(&lookups, relay_payload, no_relay(&relay_payload))
+            super::refuse_in_browser(&lookups, &relay_payload, no_relay(&relay_payload))
                 .expect_err("no relay to carry payload"),
         );
     }

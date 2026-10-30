@@ -1,4 +1,4 @@
-use crate::protocol::mesh::TransportPolicy;
+use crate::protocol::mesh::{Transport, TransportPolicy};
 
 /// Whether gossip is one of the paths of an instance: a two-way choice, kept as an enum so that
 /// [`TransportOpts`] holds no more than three bools.
@@ -62,7 +62,7 @@ pub struct TransportOpts {
     /// Not the mesh policy: this says whether *this node* registers a relay
     /// transport at all, the way `udp` and `webrtc` do. Whether the relay may
     /// carry payload is mesh-wide and lives in the id, as
-    /// `protocol::TransportPolicy::relay_transport`.
+    /// `protocol::Transport::Relay`.
     pub relay: bool,
     /// QUIC over a `WebRTC` data channel. Off, the transport is not registered
     /// on the endpoint, no offer is answered and none is made — so a pair
@@ -177,12 +177,16 @@ impl TransportOpts {
     /// a browser has no UDP at all.
     #[must_use]
     pub fn within(self, policy: &TransportPolicy) -> Self {
+        let udp = policy.allows(Transport::Udp);
+        let webrtc = policy.allows(Transport::WebRtc);
         Self {
-            udp: self.udp && policy.udp && !cfg!(target_arch = "wasm32"),
-            webrtc: self.webrtc && policy.webrtc,
+            udp: self.udp && udp && !cfg!(target_arch = "wasm32"),
+            webrtc: self.webrtc && webrtc,
             // Set, not narrowed: the mesh decides, and it needs a direct path to ride.
             gossip: GossipPath::from(
-                policy.gossip && (policy.udp || policy.webrtc) && !cfg!(target_arch = "wasm32"),
+                policy.allows(Transport::Gossip)
+                    && (udp || webrtc)
+                    && !cfg!(target_arch = "wasm32"),
             ),
             ..self
         }
@@ -192,6 +196,6 @@ impl TransportOpts {
     /// browser: only a data channel or relay payload can.
     #[must_use]
     pub fn carry_without_udp(self, policy: &TransportPolicy) -> bool {
-        self.webrtc || policy.relay_transport
+        self.webrtc || policy.allows(Transport::Relay)
     }
 }

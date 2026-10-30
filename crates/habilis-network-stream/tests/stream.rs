@@ -422,7 +422,7 @@ fn a_relay_transport_stream_admits_a_consumer_with_no_direct_path() {
         let consumer_node = on_relay(&url, vec![Transport::WebRtc, Transport::Relay]).await;
         let producer = producer_node.create().await;
         assert!(
-            producer.hash().transport.relay_transport,
+            producer.hash().transport.allows(Transport::Relay),
             "the producer hash carries the relay transport"
         );
         let hash = producer.hash().clone();
@@ -454,7 +454,7 @@ fn a_webrtc_only_consumer_reads_over_the_data_channel() {
         let consumer_node = on_relay(&url, vec![Transport::WebRtc]).await;
         let producer = producer_node.create().await;
         assert!(
-            !producer.hash().transport.relay_transport,
+            !producer.hash().transport.allows(Transport::Relay),
             "the webrtc-only producer hash has no relay transport"
         );
         let hash = producer.hash().clone();

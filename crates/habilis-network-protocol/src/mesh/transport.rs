@@ -4,6 +4,7 @@
 //! module names neither: the one rule that needs both — letting the relay
 //! carry payload needs a relay lookup — lives in `MeshConfig`.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
@@ -25,23 +26,32 @@ use super::{ChoiceError, ConfigError};
 /// assert_eq!(Transport::WebRtc.as_str(), "webrtc");
 /// assert_eq!(Transport::Udp.as_str(), "udp");
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum Transport {
-    /// QUIC on a direct or hole-punched UDP socket. A browser has none.
+    /// QUIC on a direct or hole-punched UDP socket. A browser has none. Off, no
+    /// native member binds a UDP path, and a mesh with `webrtc` rides the data
+    /// channel alone.
     Udp,
     /// QUIC over a `WebRTC` data channel: a browser's only direct path, and a
-    /// native pair's when its UDP punch fails.
+    /// native pair's when its UDP punch fails. Off, no member opens or answers
+    /// an offer, browsers included.
     #[serde(rename = "webrtc")]
     WebRtc,
     /// Source-routed multi-hop: reach a peer with no direct path through other
     /// members. It forwards over a direct path, so the list names `udp` or `webrtc` next to it.
+    /// Native only; a browser ignores it, as it ignores `udp`.
     Multihop,
     /// Reach a peer with no other path through the frames of the mesh's own gossip topic. It
     /// rides the links that other paths carry, so the list names `udp` or `webrtc` next to it.
     Gossip,
-    /// Let payload also fall back to the relay when no direct path exists.
+    /// Let payload also fall back to the relay when no direct path exists. Off by default: the
+    /// relay is kept for lookup alone — the bootstrap dial, JSEP signalling and the NAT-traversal
+    /// frames of a freshly opened connection still cross it — and every payload lane refuses to
+    /// send while the relay is the only path to a peer. A pair with no direct path stays unlinked
+    /// for payload rather than relayed. Meaningless without a relay lookup, so rejected together
+    /// with [`RelayChoice::Disabled`](crate::RelayChoice).
     Relay,
 }
 
@@ -62,6 +72,17 @@ impl Transport {
             Self::Multihop => "multihop",
             Self::Gossip => "gossip",
             Self::Relay => "relay",
+        }
+    }
+
+    /// The bit this transport takes in the mesh id's transport byte.
+    fn bit(self) -> u8 {
+        match self {
+            Self::Udp => super::lookup::TRANSPORT_UDP,
+            Self::WebRtc => super::lookup::TRANSPORT_WEBRTC,
+            Self::Multihop => super::lookup::TRANSPORT_MULTIHOP,
+            Self::Gossip => super::lookup::TRANSPORT_GOSSIP,
+            Self::Relay => super::lookup::TRANSPORT_RELAY,
         }
     }
 }
@@ -97,41 +118,16 @@ impl fmt::Display for Transport {
 /// A policy turns each transport on or off, and the default keeps the usual ones on.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::TransportPolicy;
+/// use habilis_network_protocol::mesh::{Transport, TransportPolicy};
 ///
 /// let policy = TransportPolicy::default().udp(false);
-/// assert!(!policy.udp);
-/// assert!(policy.webrtc);
+/// assert!(!policy.allows(Transport::Udp));
+/// assert!(policy.allows(Transport::WebRtc));
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "one independent on/off per path; the id writes them as one bitset byte"
-)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TransportPolicy {
-    /// QUIC on UDP. Off, no native member binds a UDP path, and a mesh with
-    /// `webrtc` rides the data channel alone.
-    pub udp: bool,
-    /// QUIC over a `WebRTC` data channel. Off, no member opens or answers an
-    /// offer, browsers included.
-    pub webrtc: bool,
-    /// Source-routed multi-hop over a UDP underlay: a peer with no direct path
-    /// is reached through other members. Native only; a browser ignores it, as
-    /// it ignores `udp`. Needs `udp`, because its underlay is a UDP endpoint.
-    pub multihop: bool,
-    /// Gossip as a path: a peer with no other path is reached through the frames of the mesh's
-    /// gossip topic. It rides the links of the direct paths, so it needs `udp` or `webrtc`.
-    pub gossip: bool,
-    /// Whether the iroh relay may carry payload. Off by default: the relay is
-    /// kept for lookup alone — the bootstrap dial, JSEP signalling and the
-    /// NAT-traversal frames of a freshly opened connection still cross it —
-    /// and every payload lane refuses to send while the relay is the only
-    /// path to a peer. A pair with no direct path stays unlinked for payload
-    /// rather than relayed. `true` lets payload fall back to the relay;
-    /// meaningless without a relay lookup, so rejected together with
-    /// [`RelayChoice::Disabled`](crate::RelayChoice).
-    pub relay_transport: bool,
+    transports: BTreeSet<Transport>,
 }
 
 impl Default for TransportPolicy {
@@ -139,69 +135,82 @@ impl Default for TransportPolicy {
     /// lookup alone.
     fn default() -> Self {
         Self {
-            udp: true,
-            webrtc: true,
-            multihop: true,
-            gossip: true,
-            relay_transport: false,
+            transports: BTreeSet::from([
+                Transport::Udp,
+                Transport::WebRtc,
+                Transport::Multihop,
+                Transport::Gossip,
+            ]),
         }
     }
 }
 
 impl TransportPolicy {
-    /// Set the UDP transport. Start from `default()` and chain the `with_` methods.
+    /// Whether members may carry payload over `transport`.
+    #[must_use]
+    pub fn allows(&self, transport: Transport) -> bool {
+        self.transports.contains(&transport)
+    }
+
+    /// Turn `transport` on or off.
+    #[must_use]
+    fn set(mut self, transport: Transport, on: bool) -> Self {
+        if on {
+            self.transports.insert(transport);
+        } else {
+            self.transports.remove(&transport);
+        }
+        self
+    }
+
+    /// Set the UDP transport. Start from `default()` and chain the setters.
     #[must_use]
     pub fn udp(
-        mut self,
+        self,
         // true enables the UDP transport
         udp: bool,
     ) -> Self {
-        self.udp = udp;
-        self
+        self.set(Transport::Udp, udp)
     }
 
     /// Set the WebRTC transport.
     #[must_use]
     pub fn webrtc(
-        mut self,
+        self,
         // true enables the WebRTC transport
         webrtc: bool,
     ) -> Self {
-        self.webrtc = webrtc;
-        self
+        self.set(Transport::WebRtc, webrtc)
     }
 
     /// Set the multihop transport.
     #[must_use]
     pub fn multihop(
-        mut self,
+        self,
         // true enables the multihop transport
         multihop: bool,
     ) -> Self {
-        self.multihop = multihop;
-        self
+        self.set(Transport::Multihop, multihop)
     }
 
     /// Set the gossip transport.
     #[must_use]
     pub fn gossip(
-        mut self,
+        self,
         // true enables the gossip transport
         gossip: bool,
     ) -> Self {
-        self.gossip = gossip;
-        self
+        self.set(Transport::Gossip, gossip)
     }
 
     /// Set whether the relay carries payload.
     #[must_use]
     pub fn relay_transport(
-        mut self,
-        // true lets the relay carry payload
+        self,
+        // true enables the relay transport
         relay_transport: bool,
     ) -> Self {
-        self.relay_transport = relay_transport;
-        self
+        self.set(Transport::Relay, relay_transport)
     }
 }
 
@@ -209,29 +218,17 @@ impl TransportPolicy {
     /// `multihop` is on and neither `udp` nor `webrtc` is: the one rule that
     /// [`MULTIHOP_ALONE`] reports, for a list a create names and for a mesh id
     /// that is decoded alike.
-    pub(super) fn multihop_has_no_direct_path(self) -> bool {
-        self.multihop && !self.udp && !self.webrtc
+    pub(super) fn multihop_has_no_direct_path(&self) -> bool {
+        self.allows(Transport::Multihop)
+            && !self.allows(Transport::Udp)
+            && !self.allows(Transport::WebRtc)
     }
 
     /// The policy as the one byte the mesh id carries.
-    pub(crate) fn to_byte(self) -> u8 {
-        let mut byte = 0u8;
-        if self.udp {
-            byte |= super::lookup::TRANSPORT_UDP;
-        }
-        if self.webrtc {
-            byte |= super::lookup::TRANSPORT_WEBRTC;
-        }
-        if self.multihop {
-            byte |= super::lookup::TRANSPORT_MULTIHOP;
-        }
-        if self.gossip {
-            byte |= super::lookup::TRANSPORT_GOSSIP;
-        }
-        if self.relay_transport {
-            byte |= super::lookup::TRANSPORT_RELAY;
-        }
-        byte
+    pub(crate) fn to_byte(&self) -> u8 {
+        self.transports
+            .iter()
+            .fold(0, |byte, transport| byte | transport.bit())
     }
 }
 
@@ -250,18 +247,13 @@ impl TryFrom<&[Transport]> for TransportPolicy {
         if transports.is_empty() {
             return Ok(Self::default());
         }
-        let has = |transport: Transport| transports.contains(&transport);
-        let policy: Self = Self {
-            udp: has(Transport::Udp),
-            webrtc: has(Transport::WebRtc),
-            multihop: has(Transport::Multihop),
-            gossip: has(Transport::Gossip),
-            relay_transport: has(Transport::Relay),
+        let policy = Self {
+            transports: transports.iter().copied().collect(),
         };
         if policy.multihop_has_no_direct_path() {
             return Err(ConfigError::Invalid(MULTIHOP_ALONE.to_owned()));
         }
-        if !policy.udp && !policy.webrtc {
+        if !policy.allows(Transport::Udp) && !policy.allows(Transport::WebRtc) {
             return Err(ConfigError::Invalid(
                 "a transport list needs a direct path: name `udp`, `webrtc`, or both".to_owned(),
             ));
@@ -283,13 +275,17 @@ impl TryFrom<u8> for TransportPolicy {
                 "unsupported transport policy bits {byte:#04x}: upgrade to a newer build"
             )));
         }
-        Ok(Self {
-            udp: byte & super::lookup::TRANSPORT_UDP != 0,
-            webrtc: byte & super::lookup::TRANSPORT_WEBRTC != 0,
-            multihop: byte & super::lookup::TRANSPORT_MULTIHOP != 0,
-            gossip: byte & super::lookup::TRANSPORT_GOSSIP != 0,
-            relay_transport: byte & super::lookup::TRANSPORT_RELAY != 0,
-        })
+        let transports: BTreeSet<Transport> = [
+            Transport::Udp,
+            Transport::WebRtc,
+            Transport::Multihop,
+            Transport::Gossip,
+            Transport::Relay,
+        ]
+        .into_iter()
+        .filter(|transport| byte & transport.bit() != 0)
+        .collect();
+        Ok(Self { transports })
     }
 }
 

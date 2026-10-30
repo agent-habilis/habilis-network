@@ -101,7 +101,7 @@ impl StreamNode {
     /// As [`bind`](Self::bind): [`StreamError::Bind`] when the node does not start.
     pub async fn bind_for(hash: &StreamHash) -> Result<Self, StreamError> {
         let transports = TransportOpts::default().within(&hash.transport);
-        Self::bind_with(hash.lookups.clone(), hash.transport, transports).await
+        Self::bind_with(hash.lookups.clone(), hash.transport.clone(), transports).await
     }
 
     async fn bind_with(
@@ -110,7 +110,7 @@ impl StreamNode {
         transports: TransportOpts,
     ) -> Result<Self, StreamError> {
         #[cfg(target_arch = "wasm32")]
-        runtime::refuse_in_browser(&lookups, transport, transports)
+        runtime::refuse_in_browser(&lookups, &transport, transports)
             .map_err(StreamError::bind("start the stream node"))?;
         let (endpoint, webrtc) = build_peer_webrtc(&lookups, transports)
             .await
@@ -123,7 +123,7 @@ impl StreamNode {
             crate::STREAM_ALPN,
             StreamAcceptor {
                 registry: Arc::clone(&registry),
-                relay_transport: PayloadPath::from(transport.relay_transport),
+                relay_transport: PayloadPath::from(transport.allows(Transport::Relay)),
             },
         );
         if transports.webrtc {
@@ -174,7 +174,7 @@ impl StreamNode {
         let hash = StreamHash {
             address: self.endpoint.addr(),
             lookups: self.lookups.clone(),
-            transport: self.transport,
+            transport: self.transport.clone(),
             id: StreamId::from(id),
             secret: StreamSecret::from(secret),
         };
@@ -192,10 +192,11 @@ impl StreamNode {
         let needs_lane = pair_needs_lane(&hash.address, UdpTransport::from(self.transports.udp));
         // A data channel needs `webrtc` on both ends: the producer's list is in
         // the hash, and a producer without it answers no offer.
-        let can_lane = self.transports.webrtc && hash.transport.webrtc;
+        let can_lane = self.transports.webrtc && hash.transport.allows(Transport::WebRtc);
         // The relay carries the bytes only if both lists allow it: the
         // producer enforces its own, so this side enforces the consumer's.
-        let relay_ok = self.transport.relay_transport && hash.transport.relay_transport;
+        let relay_ok =
+            self.transport.allows(Transport::Relay) && hash.transport.allows(Transport::Relay);
         // Only a data channel could carry the bytes, and the pair has none:
         // what is left is the relay the stream refuses, so say so now rather
         // than after the direct-path probe.

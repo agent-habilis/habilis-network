@@ -583,7 +583,7 @@ mod tests {
             ..options()
         });
         assert!(
-            !lookup_only.transport.relay_transport,
+            !lookup_only.transport.allows(Transport::Relay),
             "the relay transport stays off when only the relay lookup is named"
         );
 
@@ -593,7 +593,7 @@ mod tests {
             ..options()
         });
         assert!(
-            relayed.transport.relay_transport,
+            relayed.transport.allows(Transport::Relay),
             "the relay transport is on when it is named"
         );
 
@@ -627,7 +627,7 @@ mod tests {
             "the relay serves lookup alone as a pinned relay"
         );
         assert!(
-            !create.transport.relay_transport,
+            !create.transport.allows(Transport::Relay),
             "the relay lookup alone leaves the relay transport off"
         );
 
@@ -645,7 +645,7 @@ mod tests {
             panic!("a topic selector must resolve to SetupKind::Topic")
         };
         assert!(
-            !mesh.transport().relay_transport,
+            !mesh.transport().allows(Transport::Relay),
             "the mesh transport has the relay transport off"
         );
         assert!(!mesh.is_loopback(), "the relay lookup is on");
@@ -803,11 +803,11 @@ mod tests {
             "the relay transport changes the topic string"
         );
         assert!(
-            relayed.transport().relay_transport,
+            relayed.transport().allows(Transport::Relay),
             "the relayed mesh has the relay transport on"
         );
         assert!(
-            !plain.transport().relay_transport,
+            !plain.transport().allows(Transport::Relay),
             "the plain mesh has the relay transport off"
         );
     }
