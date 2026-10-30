@@ -2014,6 +2014,7 @@ version = "0.6.0"
 dependencies = [
  "habilis-network-test-tracing",
  "libc",
+ "rustix",
  "tokio",
  "tracing",
  "vergen-gitcl",

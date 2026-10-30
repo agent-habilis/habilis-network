@@ -134,15 +134,14 @@ fn current_rss_bytes() -> Option<u64> {
 /// Linux: the resident pages of `/proc/self/statm` (its second field), times the
 /// size of a page.
 #[cfg(all(target_os = "linux", feature = "host"))]
-#[expect(unsafe_code, reason = "libc sysconf FFI for the page size")]
 fn current_rss_bytes() -> Option<u64> {
     use std::fs;
 
     let statm = fs::read_to_string("/proc/self/statm").ok()?;
     let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
-    // SAFETY: `sysconf` with a valid name has no memory effects.
-    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    u64::try_from(page).ok()?.checked_mul(pages)
+    u64::try_from(rustix::param::page_size())
+        .ok()?
+        .checked_mul(pages)
 }
 
 /// No reading: another target, or no `host` feature.

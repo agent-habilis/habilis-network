@@ -1,5 +1,8 @@
 use std::io;
 use std::io::ErrorKind;
+
+use rustix::io::Errno;
+use rustix::process::{Pid, Signal, kill_process, test_kill_process};
 #[cfg(target_os = "macos")]
 use std::mem;
 /// Bound on the parent-walk in [`ancestry_contains`]: real process trees are
@@ -169,24 +172,24 @@ pub fn comm_of(pid: u32) -> Option<String> {
 ///
 /// assert!(is_alive(std::process::id()));
 /// ```
-#[expect(
-    unsafe_code,
-    reason = "libc::kill(pid, 0) FFI; no safe existence probe exists"
-)]
 #[must_use]
 pub fn is_alive(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
+    let Some(pid) = process_id(pid) else {
         return false;
     };
-    // SAFETY: signal 0 sends no signal. The call reads no memory of ours, and `pid` is a valid
-    // `pid_t`.
-    let status = unsafe { libc::kill(pid, 0) };
-    status == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    match test_kill_process(pid) {
+        Ok(()) => true,
+        Err(error) => error == Errno::PERM,
+    }
+}
+
+/// The pid as rustix names it. Zero is refused: `kill(2)` reads it as our own process group.
+fn process_id(pid: u32) -> Option<Pid> {
+    Pid::from_raw(i32::try_from(pid).ok()?)
 }
 
 /// Ask a process to terminate (SIGTERM) — the graceful path: a mesh daemon
 /// catches it, broadcasts `left`, and removes its state file.
-#[expect(unsafe_code, reason = "libc::kill FFI; no safe wrapper")]
 /// # Errors
 /// `InvalidInput` for pid 0, which `kill(2)` reads as our own process group, and for a pid that
 /// does not fit a `pid_t`. Otherwise it propagates the `kill(2)` failure — no such process, or
@@ -205,18 +208,8 @@ pub fn is_alive(pid: u32) -> bool {
 /// # }
 /// ```
 pub fn terminate(pid: u32) -> io::Result<()> {
-    if pid == 0 {
-        return Err(io::Error::from(ErrorKind::InvalidInput));
-    }
-    let pid = libc::pid_t::try_from(pid).map_err(|_| io::Error::from(ErrorKind::InvalidInput))?;
-    // SAFETY: the call reads no memory of ours. `pid` is a valid `pid_t`, and the kernel checks
-    // the permission.
-    let status = unsafe { libc::kill(pid, libc::SIGTERM) };
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    let pid = process_id(pid).ok_or_else(|| io::Error::from(ErrorKind::InvalidInput))?;
+    kill_process(pid, Signal::TERM).map_err(io::Error::from)
 }
 
 /// Whether `ancestor` appears in `pid`'s parent chain (proper ancestors
@@ -258,6 +251,7 @@ pub fn ancestry_contains(pid: u32, ancestor: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{ancestry_contains, comm_of, is_alive, live_start_time, parent_of, terminate};
+    use rustix::process::getppid;
 
     use std::io::ErrorKind;
     use std::process;
@@ -280,12 +274,10 @@ mod tests {
     #[test]
     fn parent_of_self_is_our_ppid() {
         let _guard = ::habilis_network_test_tracing::init();
-        #[expect(unsafe_code, reason = "libc::getppid FFI; always succeeds")]
-        // SAFETY: `getppid` takes no argument and always succeeds.
-        let ppid = unsafe { libc::getppid() };
+        let ppid = getppid().map(|pid| pid.as_raw_nonzero().get());
         assert_eq!(
             parent_of(self_pid()),
-            u32::try_from(ppid).ok(),
+            ppid.and_then(|ppid| u32::try_from(ppid).ok()),
             "the parent of this process is its ppid"
         );
     }

@@ -6,6 +6,9 @@ use std::io;
 use std::io::ErrorKind;
 #[cfg(feature = "host")]
 use std::path;
+
+#[cfg(feature = "host")]
+use rustix::process::geteuid;
 /// The per-mesh folder name — the first 16 characters of the mesh
 /// identifier. The stem of every per-mesh file (socket / log / state), so it
 /// lives here rather than in any one module. See [`mesh_runtime_dir`].
@@ -71,14 +74,10 @@ pub fn runtime_base(product: &str) -> path::PathBuf {
 /// This process's effective user id — the id a newly created file/dir is
 /// *owned by*, so the id [`ensure_runtime_base`] must validate against (a
 /// `getuid`/`geteuid` split under a setuid wrapper would otherwise reject a
-/// base we just created ourselves). The one place the crate calls libc, so the
-/// single `unsafe` block has one documented home (mirrors the termios FFI in
-/// `main`). `geteuid` has no safety preconditions.
+/// base we just created ourselves).
 #[cfg(feature = "host")]
-#[expect(unsafe_code, reason = "libc::geteuid FFI; no safe std wrapper exists")]
 fn current_uid() -> u32 {
-    // SAFETY: geteuid cannot fail and reads no memory.
-    unsafe { libc::geteuid() }
+    geteuid().as_raw()
 }
 
 /// Ensure `base` (from [`runtime_base`]) exists as a private (`0700`) directory
