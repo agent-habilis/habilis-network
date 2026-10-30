@@ -41,7 +41,6 @@ export function paragraphs(src: string): [number, string][] {
 
 // Each sentence start that is a lowercase letter, with its word. Code spans and markdown links are
 // blanked first, so `foo_bar` and [`Name`] never count as prose.
-// Each entry is the word and the text before it, joined by a NUL byte.
 export function lowercaseStarts(text: string): string[] {
   const prose = text
     .replace(/`[^`]*`/g, "CODE")
@@ -54,14 +53,14 @@ export function lowercaseStarts(text: string): string[] {
     if (ABBREVIATION.test(before)) continue;
     const word = match[1] ?? "";
     if (prose.startsWith(`${word}.`, match.index ?? 0) && word.length === 1) continue;
-    if (/^[a-z]/.test(word) && !BRANDS.has(word)) starts.push(`${word}\u0000${before.slice(-40)}${word}`);
+    if (/^[a-z]/.test(word) && !BRANDS.has(word)) starts.push(word);
   }
   return starts;
 }
 
 export function scan(src: string): [number, string][] {
   return paragraphs(src).flatMap(([line, text]) =>
-    lowercaseStarts(text).map((hit): [number, string] => [line, hit.split("\u0000")[0] ?? ""]),
+    lowercaseStarts(text).map((word): [number, string] => [line, word]),
   );
 }
 
