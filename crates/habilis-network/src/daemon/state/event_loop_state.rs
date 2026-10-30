@@ -13,6 +13,7 @@ use crate::daemon::doc::MeshDoc;
 use crate::daemon::probe_backoff::ProbeBackoff;
 use crate::daemon::reassembly::{self, ReassemblyStore, ShardCache, ShardIngest};
 use crate::daemon::setup::LiveCount;
+use crate::doc;
 
 use crate::transport::UdpTransport;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -527,25 +528,11 @@ impl EventLoopState {
     /// tests can pin a deterministic instant. `secrets` is taken by value (not
     /// `&MeshSecrets`) so its `key` is dropped (zeroized) here once the
     /// per-channel keys are derived, rather than lingering in the caller.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one initializer for every field of the state"
-    )]
     pub(crate) fn new(init: StateInit, now: Instant) -> Self {
-        let StateInit {
-            #[cfg(feature = "host")]
-            state_file,
-            identity,
-            secrets,
-            per_peer_gate,
-            webrtc_admission,
-            address_book,
-            webrtc_ice,
-        } = init;
         let MeshSecrets {
             password: mesh_password,
             key: mesh_key,
-        } = secrets;
+        } = init.secrets;
         let (resend_outbox, resend_receiver) =
             transport::ResendOutbox::new(tuning::RESEND_OUTBOX_CAP);
         // Per-channel encryption keys, domain-separated from each other and from
@@ -626,9 +613,9 @@ impl EventLoopState {
             rungs: beacon::RungWatch::detached(),
             lan_grafts: lan::LanGrafts::default(),
             webrtc: None,
-            webrtc_admission,
-            address_book,
-            webrtc_ice,
+            webrtc_admission: init.webrtc_admission,
+            address_book: init.address_book,
+            webrtc_ice: init.webrtc_ice,
             reclaim_until: None,
             next_rival_recheck: None,
             rival_recheck_rounds: 0,
@@ -639,20 +626,16 @@ impl EventLoopState {
             seen: BoundedFifoSet::new(SEEN_IDS_CAP),
             pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
             #[cfg(feature = "host")]
-            state_file,
+            state_file: init.state_file,
             live_count: None,
             message_log: MessageLog::new(MESSAGE_LOG_SIZE),
             reassembled_groups: BoundedFifoSet::new(MESSAGE_LOG_SIZE),
             reassembly: ReassemblyStore::default(),
             shard_cache: ShardCache::default(),
             state_doc: MeshDoc::new_ungated().key(state_key),
-            meta_doc: match per_peer_gate {
-                Some(gate) => MeshDoc::new_gated(gate),
-                None => MeshDoc::new_ungated(),
-            }
-            .key(meta_key),
+            meta_doc: Self::meta_channel(init.per_peer_gate, meta_key),
             digest_cursor: 0,
-            identity,
+            identity: init.identity,
             self_seq: 0,
             self_prev: None,
             author_seqs: HashMap::new(),
@@ -668,6 +651,18 @@ impl EventLoopState {
             broadcast_key,
             idle: IdleCounters::default(),
         }
+    }
+
+    /// The `meta` channel: gated by the application's per-peer map when it keeps one, free-form otherwise.
+    fn meta_channel(
+        per_peer_gate: Option<doc::SelfWriteGate>,
+        key: Option<SymmetricKey>,
+    ) -> MeshDoc {
+        match per_peer_gate {
+            Some(gate) => MeshDoc::new_gated(gate),
+            None => MeshDoc::new_ungated(),
+        }
+        .key(key)
     }
 
     /// Write `peer_count = peers.len() + 1` (we add 1
