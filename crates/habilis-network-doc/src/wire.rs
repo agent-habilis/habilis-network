@@ -111,7 +111,8 @@ pub fn change_body(change: &[u8], merge: Option<&Value>) -> Result<MessageBody, 
 /// ```
 #[must_use]
 pub fn parse_change_body(body: &str) -> Option<Vec<u8>> {
-    match serde_json::from_str::<StateOp>(body).ok()? {
+    let op: StateOp = serde_json::from_str(body).ok()?;
+    match op {
         StateOp::Change { data, .. } => bs58::decode(&data).into_vec().ok(),
         StateOp::Merge { .. } | StateOp::Enc { .. } => None,
     }
@@ -170,7 +171,8 @@ pub fn encrypt_body(plain: &MessageBody, key: &SymmetricKey) -> Result<MessageBo
 /// ```
 #[must_use]
 pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
-    match serde_json::from_str::<StateOp>(body) {
+    let op: Result<StateOp, _> = serde_json::from_str(body);
+    match op {
         Ok(StateOp::Enc { data }) => {
             let key = key?;
             let blob = bs58::decode(&data).into_vec().ok()?;
