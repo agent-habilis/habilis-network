@@ -49,7 +49,6 @@ fn is_default(pen: Pen) -> bool {
 /// the ANSI bytes that repaint the terminal from one to the other. Empty
 /// when nothing changed.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn diff(prev: Option<&ScreenBuffer>, next: &ScreenBuffer) -> String {
     let full = prev.is_none_or(|p| p.width != next.width || p.height != next.height);
     let mut out = String::new();

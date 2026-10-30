@@ -211,7 +211,6 @@ fn arrange(arena: &mut Arena, epoch: i64, id: NodeId, x: i32, y: i32, w: i32, h:
     );
 }
 
-#[allow(clippy::too_many_lines)]
 fn arrange_children(
     arena: &mut Arena,
     epoch: i64,
