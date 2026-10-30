@@ -117,14 +117,15 @@ fn current_rss_bytes() -> Option<u64> {
     // valid value.
     let mut info: libc::mach_task_basic_info = unsafe { mem::zeroed() };
     let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
-    // SAFETY: `info` is a valid, unique `mach_task_basic_info`, `count` is its size
-    // in `natural_t` units as the call needs, and the selector is the documented
+    let info_ptr: *mut libc::integer_t = (&raw mut info).cast();
+    // SAFETY: `info_ptr` points to `info`, a valid, unique `mach_task_basic_info`, `count` is its
+    // size in `natural_t` units as the call needs, and the selector is the documented
     // `MACH_TASK_BASIC_INFO` for the current task.
     let status = unsafe {
         libc::task_info(
             libc::mach_task_self_,
             libc::MACH_TASK_BASIC_INFO,
-            (&raw mut info).cast::<libc::integer_t>(),
+            info_ptr,
             &raw mut count,
         )
     };
@@ -221,7 +222,7 @@ mod tests {
                 0,
             );
             assert_ne!(base, libc::MAP_FAILED, "the mapping");
-            let bytes = base.cast::<u8>();
+            let bytes: *mut u8 = base.cast();
             for page in (0..BLOCK).step_by(4096) {
                 bytes.add(page).write_volatile(1);
             }

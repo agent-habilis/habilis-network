@@ -16,7 +16,7 @@ fn bsdinfo_for(pid: u32) -> Option<libc::proc_bsdinfo> {
     let pid = libc::pid_t::try_from(pid).ok()?;
     // SAFETY: `proc_bsdinfo` is a plain C struct of integers and byte arrays, so all-zero bytes
     // are a valid value.
-    let mut info = unsafe { mem::zeroed::<libc::proc_bsdinfo>() };
+    let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
     let size = i32::try_from(size_of::<libc::proc_bsdinfo>()).ok()?;
     // SAFETY: `info` is a live, unique local of exactly `size` bytes, and `size` is the size that
     // the call gets, so the kernel writes inside the buffer. The kernel checks `pid`.
