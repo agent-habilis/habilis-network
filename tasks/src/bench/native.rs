@@ -101,24 +101,37 @@ pub(super) const RTT_ROUNDS: usize = 1000;
 
 /// The selected path of `connection`, named the way a cell expects it. The
 /// selected path, not any path: a cell that claims a rung must have used it.
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "`TransportAddr` is non-exhaustive: a rung this runner does not name is `other`"
-)]
 pub(crate) fn selected_path(connection: &Connection) -> String {
     connection
         .paths()
         .iter()
         .find(Path::is_selected)
-        .map_or("other", |path| match path.remote_addr() {
-            TransportAddr::Ip(_) => "ip",
-            TransportAddr::Relay(_) => "relay",
-            TransportAddr::Custom(addr) if addr.id() == WEBRTC_TRANSPORT_ID => "webrtc",
-            TransportAddr::Custom(addr) if addr.id() == MULTIHOP_TRANSPORT_ID => "multihop",
-            TransportAddr::Custom(addr) if addr.id() == GOSSIP_TRANSPORT_ID => "gossip",
-            _ => "other",
+        .map_or("other", |path| {
+            let addr = path.remote_addr();
+            if let TransportAddr::Ip(_) = addr {
+                "ip"
+            } else if let TransportAddr::Relay(_) = addr {
+                "relay"
+            } else if let TransportAddr::Custom(custom) = addr {
+                custom_name(custom.id())
+            } else {
+                "other"
+            }
         })
         .to_owned()
+}
+
+/// The name of a custom transport, or `other` for one this runner does not name.
+fn custom_name(id: u64) -> &'static str {
+    if id == WEBRTC_TRANSPORT_ID {
+        "webrtc"
+    } else if id == MULTIHOP_TRANSPORT_ID {
+        "multihop"
+    } else if id == GOSSIP_TRANSPORT_ID {
+        "gossip"
+    } else {
+        "other"
+    }
 }
 
 /// One ladder cell over one connection from `client` to `server`: the transfer
