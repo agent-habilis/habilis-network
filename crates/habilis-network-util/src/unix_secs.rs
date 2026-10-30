@@ -86,7 +86,7 @@ impl UnixSecs {
         Self(secs)
     }
 
-    /// Make a time from its eight big-endian bytes.
+    /// Make a time from its eight little-endian bytes.
     #[must_use]
     pub fn from_bytes(bytes: [u8; 8]) -> Self {
         Self(i64::from_le_bytes(bytes))
