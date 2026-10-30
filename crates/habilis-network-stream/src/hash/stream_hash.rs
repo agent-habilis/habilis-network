@@ -125,7 +125,9 @@ impl StreamHash {
         if kind != KIND {
             return Err(HashError::WrongKind);
         }
-        let payload = &framed[2..];
+        let payload = framed
+            .get(2..)
+            .ok_or(HashError::Truncated("stream hash too short"))?;
         let flags = *payload
             .first()
             .ok_or(HashError::Truncated("stream hash missing flags"))?;
