@@ -64,10 +64,10 @@ impl Pair {
             return "<report not iterable>".to_owned();
         };
         for entry in iter.flatten() {
-            let Ok(pair) = entry.dyn_into::<js_sys::Array>() else {
+            let Ok(pair): Result<js_sys::Array, JsValue> = entry.dyn_into() else {
                 continue;
             };
-            let Ok(object) = pair.get(1).dyn_into::<js_sys::Object>() else {
+            let Ok(object): Result<js_sys::Object, JsValue> = pair.get(1).dyn_into() else {
                 continue;
             };
             let field = Reflect::get(&object, &JsValue::from_str("type")).ok();

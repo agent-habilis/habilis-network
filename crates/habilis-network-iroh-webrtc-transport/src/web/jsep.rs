@@ -176,7 +176,10 @@ pub async fn answer(
     let (peer_connection, expects_srflx) = create_peer_connection(ice)?;
     let peer_connection = OpenPeerConnection::new(peer_connection);
 
-    let (channel_tx, channel_rx) = oneshot::channel::<RtcDataChannel>();
+    let (channel_tx, channel_rx): (
+        oneshot::Sender<RtcDataChannel>,
+        oneshot::Receiver<RtcDataChannel>,
+    ) = oneshot::channel();
     let channel_tx = cell::RefCell::new(Some(channel_tx));
     // Everything that arrives before the hub's own `onmessage` is installed.
     //
@@ -196,20 +199,21 @@ pub async fn answer(
     // `complete` hands the backlog to the hub in arrival order.
     let backlog = rc::Rc::new(cell::RefCell::new(PreAttachBacklog::new()));
     let mut callbacks: Vec<JsValue> = Vec::new();
-    let early = {
+    let early: Closure<dyn FnMut(web_sys::MessageEvent)> = {
         let backlog = rc::Rc::clone(&backlog);
-        Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+        Closure::new(move |event: web_sys::MessageEvent| {
             if let Some(bytes) = super::transport::message_bytes(&event) {
                 backlog.borrow_mut().push(bytes);
             }
         })
     };
-    let ondatachannel = {
-        let early = early.as_ref().unchecked_ref::<js_sys::Function>().clone();
-        Closure::<dyn FnMut(RtcDataChannelEvent)>::new(move |event: RtcDataChannelEvent| {
+    let ondatachannel: Closure<dyn FnMut(RtcDataChannelEvent)> = {
+        let early_function: &js_sys::Function = early.as_ref().unchecked_ref();
+        let early_handler = early_function.clone();
+        Closure::new(move |event: RtcDataChannelEvent| {
             let channel = event.channel();
             channel.set_binary_type(web_sys::RtcDataChannelType::Arraybuffer);
-            channel.set_onmessage(Some(&early));
+            channel.set_onmessage(Some(&early_handler));
             if let Some(tx) = channel_tx.borrow_mut().take() {
                 let _ = tx.send(channel);
             }

@@ -22,6 +22,9 @@ use crate::{IN_QUEUE, OUT_QUEUE, custom_addr};
 
 use std::fmt;
 use web_sys::console;
+
+type FrameChannel = (mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>);
+
 /// Factory for the browser `WebRTC` datagram lane of one iroh endpoint.
 ///
 /// # Examples
@@ -105,17 +108,18 @@ impl BrowserHubTransport {
         };
         let generation = reservation.generation();
 
-        let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUT_QUEUE);
-        let (mut inbound_sender, mut inbound_receiver) = mpsc::channel::<Vec<u8>>(IN_QUEUE);
+        let (out_tx, mut out_rx): FrameChannel = mpsc::channel(OUT_QUEUE);
+        let (mut inbound_sender, mut inbound_receiver): FrameChannel = mpsc::channel(IN_QUEUE);
         // the counters are shared by the hub and each session
         let counters = Arc::new(SessionCounters::default());
 
-        let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
-            let Some(bytes) = super::message_bytes(&event) else {
-                return;
-            };
-            let _ = inbound_sender.try_send(bytes);
-        });
+        let onmessage: Closure<dyn FnMut(MessageEvent)> =
+            Closure::new(move |event: MessageEvent| {
+                let Some(bytes) = super::message_bytes(&event) else {
+                    return;
+                };
+                let _ = inbound_sender.try_send(bytes);
+            });
         data_channel.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
         callbacks.push(onmessage.into_js_value());
 
@@ -132,7 +136,7 @@ impl BrowserHubTransport {
         // replacement instead.
         for event in ["close", "error"] {
             let sessions = Arc::clone(&self.sessions);
-            let hook = Closure::<dyn FnMut()>::new(move || {
+            let hook: Closure<dyn FnMut()> = Closure::new(move || {
                 let sessions = Arc::clone(&sessions);
                 wasm_bindgen_futures::spawn_local(async move {
                     if sessions.remove_if_generation(&remote, generation) {

@@ -71,8 +71,10 @@ fn fit(points: &[(f64, f64)]) -> Option<Fit> {
         return None;
     }
     let count = points.len().to_f64().unwrap_or(f64::NAN);
-    let mean_x = points.iter().map(|&(px, _)| px).sum::<f64>() / count;
-    let mean_y = points.iter().map(|&(_, py)| py).sum::<f64>() / count;
+    let sum_x: f64 = points.iter().map(|&(px, _)| px).sum();
+    let sum_y: f64 = points.iter().map(|&(_, py)| py).sum();
+    let mean_x = sum_x / count;
+    let mean_y = sum_y / count;
     let sxx: f64 = points.iter().map(|&(px, _)| (px - mean_x).powi(2)).sum();
     if sxx <= f64::EPSILON {
         return None;
@@ -103,7 +105,8 @@ fn std_dev(values: &[f64]) -> Option<f64> {
         return None;
     }
     let count = values.len().to_f64().unwrap_or(f64::NAN);
-    let mean = values.iter().sum::<f64>() / count;
+    let sum: f64 = values.iter().sum();
+    let mean = sum / count;
     let squares: f64 = values.iter().map(|value| (value - mean).powi(2)).sum();
     Some((squares / (count - 1.0)).sqrt())
 }
@@ -299,7 +302,8 @@ async fn run_peer() -> anyhow::Result<()> {
     while let Some(line) = lines.next_line().await? {
         let id = SecretKey::generate().public();
         let transport = WebRtcTransport::new(id);
-        match serde_json::from_str::<Msg>(&line)? {
+        let message: Msg = serde_json::from_str(&line)?;
+        match message {
             Msg::Offer { env: offer } => {
                 let (pending, env) = answer_with(id, &offer, &ice).await?;
                 reply(&mut out, &Msg::Answer { env }).await?;

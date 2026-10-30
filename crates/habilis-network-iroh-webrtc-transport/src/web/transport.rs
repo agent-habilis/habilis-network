@@ -119,7 +119,7 @@ fn watch_connection_state(
     peer_connection: &RtcPeerConnection,
 ) -> Closure<dyn FnMut()> {
     let watched = peer_connection.clone();
-    Closure::<dyn FnMut()>::new(move || {
+    Closure::new(move || {
         let now = watched.connection_state();
         match judge_state(phase_of(now), None) {
             Verdict::Keep => {}
@@ -196,13 +196,13 @@ async fn stats_rows(peer_connection: &RtcPeerConnection) -> Option<Vec<(String, 
     let iter = js_sys::try_iter(&report).ok().flatten()?;
     let mut rows = Vec::new();
     for entry in iter.flatten() {
-        let Ok(pair) = entry.dyn_into::<js_sys::Array>() else {
+        let Ok(pair): Result<js_sys::Array, JsValue> = entry.dyn_into() else {
             continue;
         };
         if pair.length() < 2 {
             continue;
         }
-        let Ok(obj) = pair.get(1).dyn_into::<js_sys::Object>() else {
+        let Ok(obj): Result<js_sys::Object, JsValue> = pair.get(1).dyn_into() else {
             continue;
         };
         rows.push((pair.get(0).as_string().unwrap_or_default(), obj));
@@ -390,10 +390,12 @@ impl CustomEndpoint for BrowserHubEndpoint {
 pub(crate) fn message_bytes(event: &MessageEvent) -> Option<Vec<u8>> {
     use wasm_bindgen::JsCast as _;
     let data = event.data();
-    if let Ok(buffer) = data.clone().dyn_into::<js_sys::ArrayBuffer>() {
+    let as_buffer: Result<js_sys::ArrayBuffer, JsValue> = data.clone().dyn_into();
+    if let Ok(buffer) = as_buffer {
         return Some(js_sys::Uint8Array::new(&buffer).to_vec());
     }
-    if let Ok(array) = data.dyn_into::<js_sys::Uint8Array>() {
+    let as_array: Result<js_sys::Uint8Array, JsValue> = data.dyn_into();
+    if let Ok(array) = as_array {
         return Some(array.to_vec());
     }
     None

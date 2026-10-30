@@ -275,6 +275,7 @@ impl<T> Drop for SessionGuard<T> {
 mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
+    use std::sync::Arc;
 
     use super::{EndpointId, Registry};
     fn peer(byte: u8) -> EndpointId {
@@ -296,10 +297,15 @@ mod tests {
         (Probe(Rc::clone(&dropped)), dropped)
     }
 
+    // `Registry::new` hands out the registry that the transport and its sessions share
+    fn probe_registry() -> Arc<Registry<Probe>> {
+        Registry::new()
+    }
+
     #[test]
     fn a_reservation_is_not_live() {
         let _guard = ::habilis_network_test_tracing::init();
-        let registry = Registry::<Probe>::new();
+        let registry = probe_registry();
         let reservation = registry.reserve(peer(1)).expect("first reserve");
         assert!(!registry.is_live(&peer(1)), "a reservation is not live");
         assert_eq!(
@@ -313,7 +319,7 @@ mod tests {
     #[test]
     fn dropping_a_reservation_frees_the_slot() {
         let _guard = ::habilis_network_test_tracing::init();
-        let registry = Registry::<Probe>::new();
+        let registry = probe_registry();
         drop(registry.reserve(peer(1)).expect("first reserve"));
         assert!(
             registry.reserve(peer(1)).is_some(),
@@ -324,7 +330,7 @@ mod tests {
     #[test]
     fn reserve_refuses_while_reserved_and_while_live() {
         let _guard = ::habilis_network_test_tracing::init();
-        let registry = Registry::<Probe>::new();
+        let registry = probe_registry();
         let reservation = registry.reserve(peer(1)).expect("first reserve");
         assert!(registry.reserve(peer(1)).is_none(), "reserved");
 
@@ -431,7 +437,7 @@ mod tests {
     #[test]
     fn with_live_skips_a_reservation() {
         let _guard = ::habilis_network_test_tracing::init();
-        let registry = Registry::<Probe>::new();
+        let registry = probe_registry();
         let reservation = registry.reserve(peer(1)).expect("first reserve");
         assert!(
             registry.with_live(&peer(1), |_| ()).is_none(),
@@ -449,7 +455,7 @@ mod tests {
     #[test]
     fn clear_takes_reservations_too_and_counts_only_live_ones() {
         let _guard = ::habilis_network_test_tracing::init();
-        let registry = Registry::<Probe>::new();
+        let registry = probe_registry();
         let reservation = registry.reserve(peer(1)).expect("reserve one");
         let reserved = registry.reserve(peer(2)).expect("reserve two");
         let guard = reserved.fulfil(probe().0).expect("slot is ours");
