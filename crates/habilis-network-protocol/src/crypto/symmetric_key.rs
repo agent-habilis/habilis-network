@@ -28,7 +28,7 @@ pub struct SymmetricKey(pub(super) Zeroizing<[u8; 32]>);
 /// holds: keep it in a [`Zeroizing`] when it is a secret.
 impl From<[u8; 32]> for SymmetricKey {
     fn from(bytes: [u8; 32]) -> Self {
-        Self(Zeroizing::new(bytes))
+        Self::from_bytes(bytes)
     }
 }
 
@@ -38,7 +38,7 @@ impl From<[u8; 32]> for SymmetricKey {
 /// read off a stream). The `[u8; 32]` conversion stays for raw input at an edge.
 impl From<Zeroizing<[u8; 32]>> for SymmetricKey {
     fn from(bytes: Zeroizing<[u8; 32]>) -> Self {
-        Self(bytes)
+        Self::from_zeroizing(bytes)
     }
 }
 
@@ -57,6 +57,18 @@ impl SymmetricKey {
     #[must_use]
     pub fn derive(&self, label: &[u8]) -> Self {
         Self::from(derive::derive_secret(&self.0, label))
+    }
+
+    /// Make a symmetric key from its 32 bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    /// Make a symmetric key from bytes already held in zeroizing memory.
+    #[must_use]
+    pub fn from_zeroizing(bytes: Zeroizing<[u8; 32]>) -> Self {
+        Self(bytes)
     }
 }
 

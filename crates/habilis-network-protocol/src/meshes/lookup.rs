@@ -735,9 +735,7 @@ impl OptFlag<MeshName> {
             DirectorySelection::Named(name) => Some(name.clone()),
         }
     }
-}
 
-impl From<Option<MeshName>> for OptFlag<MeshName> {
     /// Resolve a clap three-state `--advertise` optional-value flag
     /// (absent / bare / valued) — the one converter shared by every
     /// command that advertises (`create`, `pipe listen`, `file send`,
@@ -748,11 +746,18 @@ impl From<Option<MeshName>> for OptFlag<MeshName> {
     /// `Some(global)` — behaviorally identical to [`DirectorySelection::Default`]
     /// (both advertise into the well-known directory). `Unset` comes from the
     /// *absent* flag.
-    fn from(flag: Option<MeshName>) -> Self {
+    #[must_use]
+    pub fn from_option(flag: Option<MeshName>) -> Self {
         match flag {
             None => DirectorySelection::Unset,
             Some(directory) => DirectorySelection::Named(directory),
         }
+    }
+}
+
+impl From<Option<MeshName>> for OptFlag<MeshName> {
+    fn from(flag: Option<MeshName>) -> Self {
+        Self::from_option(flag)
     }
 }
 

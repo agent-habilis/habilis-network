@@ -25,7 +25,7 @@ pub struct TicketSecret(pub(super) Zeroizing<[u8; 32]>);
 /// holds: keep it in a [`Zeroizing`] when it is a secret.
 impl From<[u8; 32]> for TicketSecret {
     fn from(bytes: [u8; 32]) -> Self {
-        Self(Zeroizing::new(bytes))
+        Self::from_bytes(bytes)
     }
 }
 
@@ -35,7 +35,7 @@ impl From<[u8; 32]> for TicketSecret {
 /// read off a stream). The `[u8; 32]` conversion stays for raw input at an edge.
 impl From<Zeroizing<[u8; 32]>> for TicketSecret {
     fn from(bytes: Zeroizing<[u8; 32]>) -> Self {
-        Self(bytes)
+        Self::from_zeroizing(bytes)
     }
 }
 
@@ -44,6 +44,18 @@ impl TicketSecret {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    /// Make a ticket secret from its 32 bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    /// Make a ticket secret from bytes already held in zeroizing memory.
+    #[must_use]
+    pub fn from_zeroizing(bytes: Zeroizing<[u8; 32]>) -> Self {
+        Self(bytes)
     }
 }
 

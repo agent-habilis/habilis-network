@@ -28,7 +28,7 @@ pub struct AuthorKey([u8; 32]);
 
 impl From<[u8; 32]> for AuthorKey {
     fn from(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+        Self::from_bytes(bytes)
     }
 }
 
@@ -70,6 +70,12 @@ impl AuthorKey {
     #[must_use]
     pub fn public_key(&self) -> Option<PublicKey> {
         PublicKey::from_bytes(&self.0).ok()
+    }
+
+    /// Make an author key from its 32 bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 }
 

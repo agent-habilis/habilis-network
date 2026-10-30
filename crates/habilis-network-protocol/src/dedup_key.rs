@@ -24,9 +24,8 @@ use std::fmt;
 pub struct DedupKey([u8; 16]);
 
 impl From<[u8; 16]> for DedupKey {
-    /// Wrap 16 raw bytes.
     fn from(bytes: [u8; 16]) -> Self {
-        Self(bytes)
+        Self::from_bytes(bytes)
     }
 }
 
@@ -46,6 +45,12 @@ impl DedupKey {
     #[must_use]
     pub fn to_bytes(self) -> [u8; 16] {
         self.0
+    }
+
+    /// Wrap 16 raw bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
     }
 }
 
