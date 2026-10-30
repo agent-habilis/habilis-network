@@ -68,8 +68,8 @@ pub fn step(world: &mut World, inputs: &[Input]) {
         next.push(Some((cycle.x + dx, cycle.y + dy)));
     }
 
-    for (i, slot) in next.iter().enumerate() {
-        let Some((nx, ny)) = *slot else { continue };
+    for i in 0..n {
+        let Some((nx, ny)) = next[i] else { continue };
         let head_on = next
             .iter()
             .enumerate()
@@ -116,6 +116,7 @@ pub fn outcome(world: &World) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::{Outcome, World, outcome, step};
+    use crate::cycle::Cycle;
     use crate::dir::Dir;
     use crate::input::Input;
     use crate::round_descriptor::RoundDescriptor;
@@ -195,7 +196,8 @@ mod tests {
             long.tick > short.tick,
             "the longer run must advance further"
         );
-        for (index, owner) in short.grid.iter().enumerate() {
+        let indexed_cells: Vec<(usize, &u8)> = short.grid.iter().enumerate().collect();
+        for (index, owner) in indexed_cells {
             if *owner != 0 {
                 assert_eq!(
                     long.grid[index], *owner,
@@ -203,7 +205,8 @@ mod tests {
                 );
             }
         }
-        for (a, b) in short.cycles.iter().zip(long.cycles.iter()) {
+        let paired: Vec<(&Cycle, &Cycle)> = short.cycles.iter().zip(long.cycles.iter()).collect();
+        for (a, b) in paired {
             assert!(a.alive || !b.alive, "a dead cycle came back to life");
         }
     }

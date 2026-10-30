@@ -1,6 +1,7 @@
 use crate::cycle::Cycle;
 use crate::grid::{GRID_H, GRID_W};
 use crate::round_descriptor::RoundDescriptor;
+use crate::spawn::Spawn;
 
 /// `PartialEq` is what lets the JS side skip a redraw when a frame is
 /// unchanged from the last one; the derive deep-compares `grid` and
@@ -45,7 +46,8 @@ impl World {
             grid: vec![0; usize::from(GRID_W) * usize::from(GRID_H)],
             cycles,
         };
-        for (i, s) in desc.spawns.iter().enumerate() {
+        let indexed_spawns: Vec<(usize, &Spawn)> = desc.spawns.iter().enumerate().collect();
+        for (i, s) in indexed_spawns {
             world.mark(s.x, s.y, i);
         }
         world
