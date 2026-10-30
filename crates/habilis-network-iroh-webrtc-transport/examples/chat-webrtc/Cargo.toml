@@ -55,6 +55,7 @@ unsafe_code = "deny"
 missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
+allow_attributes = "deny"
 pedantic = { level = "warn", priority = -1 }
 # Example code is read more than it is run; a `_ =>` arm that silently swallows
 # a new protocol message is exactly the bug a reader would not spot.
