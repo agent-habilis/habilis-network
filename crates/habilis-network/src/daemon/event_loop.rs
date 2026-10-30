@@ -17,9 +17,7 @@ use iroh_gossip::net;
 use n0_future::{task, time};
 #[cfg(feature = "host")]
 use serde::de;
-#[cfg(feature = "host")]
-use std::path;
-use std::{future, process};
+use std::{future, path, process};
 #[cfg(feature = "multihop")]
 use tokio::sync;
 pub(super) mod ctx_parts;
@@ -35,11 +33,12 @@ use std::time::Duration;
 
 use anyhow::Result;
 use iroh::{Endpoint, RelayUrl, Watcher as _};
-use iroh_gossip::api::GossipReceiver;
+use iroh_gossip::api::{GossipReceiver, GossipTopic};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
+use crate::doc::SelfWriteGate;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::meshes::MeshName;
 use crate::protocol::messages::{Authored, Verified};
@@ -63,10 +62,9 @@ use super::cohost_arm::{
     offer_to_the_new_holder, probes_before_claim, release_rendezvous, schedule_rival_recheck,
     shed_rival_beacon_if_due, verdict_after_known_holders,
 };
-use super::config::{
-    CoHostPolicy, DriverMode, Endpoints, EventLoopConfig, MeshSpec, RendezvousConfig,
-    RuntimeConfig, TransportSet,
-};
+#[cfg(feature = "host")]
+use super::config::RuntimeConfig;
+use super::config::{CoHostPolicy, DriverMode, EventLoopConfig, MeshSpec, TransportSet};
 use super::handler_ctx::HandlerCtx;
 use super::heal::{GossipLink, ResubscribeEnv, apply_rung_change, resubscribe_tick, run_heal};
 use super::node::SignalHandling;
@@ -75,6 +73,7 @@ use super::shutdown;
 use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure, never_quit};
 use super::state::{EventLoopState, MeshSecrets};
 use super::timers;
+use crate::daemon::setup::LiveCount;
 use ctx_parts::CtxParts;
 pub use event_loop_error::EventLoopError;
 use tick_gap::TickGap;
@@ -123,10 +122,6 @@ pub async fn run<Driver: NodeDriver>(
         .map_err(EventLoopError::internal)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "session setup + secrets + sender/receiver wiring before handing off to event_loop; each step is a single call, and splitting further would only scatter sequential setup across helpers"
-)]
 async fn run_checked<Driver: NodeDriver>(
     config: EventLoopConfig,
     app: Driver,
@@ -134,267 +129,70 @@ async fn run_checked<Driver: NodeDriver>(
     http_rx: Option<mpsc::Receiver<Driver::Http>>,
 ) -> Result<()> {
     let EventLoopConfig {
-        mesh:
-            MeshSpec {
-                mesh: mesh_str,
-                name: mesh_name,
-                topic_string,
-                mesh_password,
-                mesh_key,
-                mint_mesh,
-                author,
-                identity,
-            },
-        transports:
-            TransportSet {
-                webrtc,
-                webrtc_enabled,
-                webrtc_admission,
-                webrtc_ice,
-                address_book,
-                local_udp_transport,
-                relay_transport,
-                #[cfg(feature = "multihop")]
-                multihop,
-                #[cfg(feature = "multihop")]
-                underlay_webrtc,
-            },
-        endpoints:
-            Endpoints {
-                topic,
-                gossip,
-                endpoint,
-                endpoint_owner,
-                router,
-                unicast_rx,
-                lan_contacts,
-            },
-        rendezvous:
-            RendezvousConfig {
-                rendezvous_params,
-                rung_rx,
-                rung_probe,
-                cohost,
-            },
-        runtime:
-            RuntimeConfig {
-                sink,
-                max_peers,
-                runtime_base,
-                state_file,
-                per_peer_gate,
-                live_count,
-                driver,
-                #[cfg(feature = "host")]
-                owner,
-            },
+        mut mesh,
+        transports,
+        endpoints,
+        rendezvous,
+        mut runtime,
     } = config;
 
     // Every driver-derived fact in one place. Only the CLI exits the
     // process on quit and binds the unix socket; in-process drivers
     // (in-process: library API or MCP) take typed requests on `session_rx` instead.
-    let (external_quit_rx, external_msg_tx, ipc_listener_disabled, exit_on_quit, handle_signals) =
-        match driver {
-            DriverMode::Cli => (None, None, false, true, SignalHandling::Handle),
-            DriverMode::InProcess {
-                msg_tx,
-                quit_rx,
-                handle_signals,
-            } => (Some(quit_rx), msg_tx, true, false, handle_signals),
-        };
-    let external_req_rx = session_rx;
-
-    let started = Instant::now();
-    // CLI `create`/`join` daemons default their state file into the mesh's
-    // runtime folder (`<prefix>/<nick>.state.json`, beside the socket + log)
-    // when no `--state-file` override is given. In-process in-process sessions
-    // (`!exit_on_quit`) keep writing nothing.
-    // Host-only: a browser node has no filesystem to write the session file to.
-    // The path is still carried on the config (a `PathBuf` costs nothing off
-    // wasm), it is only the `StateFile` that cannot exist.
+    let exit_on_quit = matches!(runtime.driver, DriverMode::Cli);
     #[cfg(feature = "host")]
-    let state_file = state_file
-        .or_else(|| {
-            let base = runtime_base.as_deref()?;
-            exit_on_quit.then(|| {
-                util::mesh_runtime_dir(base, mesh_str.as_str()).join(format!("{author}.state.json"))
-            })
-        })
-        .map(|path| {
-            let owner_pid = owner.map(shutdown::Owner::pid);
-            let file =
-                StateFile::new(path, &mesh_str, &author, &mesh_name).base(runtime_base.clone());
-            file.topic(topic_string.as_deref()).owner_pid(owner_pid)
-        });
+    let state_file = host_state_file(&app, &mesh, &runtime, exit_on_quit);
     #[cfg(not(feature = "host"))]
-    drop(state_file);
-    // The departure line's label: a topic gossip shows `topic` plus the raw
-    // string it was derived from (the name is lossy, and the wording mirrors
-    // the `joined topic …` startup line), every other gossip its `#name`.
-    let leave_label = topic_string.map_or_else(
-        || format!("#{mesh_name}"),
-        |raw_topic| format!("topic {raw_topic}"),
-    );
-    // Seed the state file with the application's own discovery fields before
-    // readiness is advertised — the local client reads them from this mode-600
-    // file. What those fields are is the app's business; the engine only writes.
-    #[cfg(feature = "host")]
-    app.init_state_file(state_file.as_ref());
-    let mut state = EventLoopState::new(
-        state::StateInit {
-            #[cfg(feature = "host")]
-            state_file,
-            identity,
-            secrets: MeshSecrets {
-                password: mesh_password,
-                key: mesh_key,
-            },
-            per_peer_gate,
-            // The *same* table the Router's signal acceptor holds, not a fresh
-            // one: the cap only counts if both roles count against it together.
-            webrtc_admission,
-            address_book,
-            webrtc_ice,
-        },
+    let state_file = runtime.state_file;
+    let (external_quit_rx, external_msg_tx, ipc_listener_disabled, handle_signals) =
+        driver_channels(runtime.driver);
+    let external_req_rx = session_rx;
+    let started = Instant::now();
+    let leave_label = leave_label(&mesh);
+    let mut state = new_state(
+        &mut mesh,
+        &transports,
+        runtime.per_peer_gate.take(),
         started,
+        state_file,
     );
-    state.mint_mesh = mint_mesh; // creator-only: backs the `invite` command
     let owned = OwnedEndpoints {
-        router,
-        owner: endpoint_owner,
+        router: endpoints.router,
+        owner: endpoints.endpoint_owner,
         // A handle that the caller injected is the caller's; `close` skips it with the endpoint.
         #[cfg(feature = "multihop")]
-        multihop: multihop.clone(),
+        multihop: transports.multihop.clone(),
     };
-    #[cfg(feature = "multihop")]
-    {
-        state.multihop = multihop; // the mesh policy's multihop: the registered transport's handle
-        state.underlay_webrtc = underlay_webrtc;
-    }
-    // The direct-path transport the session manager fills; `None` leaves
-    // every pair to iroh's own paths.
-    state.webrtc = webrtc_enabled.then_some(webrtc);
-    // The gossip transport of the member endpoint, when the mesh has gossip: the admission table
-    // made it with the endpoint and keeps it, to tell it which peers are established and which
-    // pairs a higher rung carries.
-    state.gossip_handle = state.webrtc_admission.gossip_handle();
-    state.unicast_pool =
-        transport::UnicastPool::new(endpoint.clone(), relay_transport.relay_allowed());
-    state
-        .unicast_pool
-        .set_admission(state.webrtc_admission.clone());
-    // Before the first write, so the initial advertisement carries a real count.
-    state.live_count = live_count;
-    state.relay_transport = relay_transport;
-    state.rendezvous_graft_needs_session = webrtc::session_policy::node_graft_needs_session(
-        relay_transport.relay_allowed(),
-        local_udp_transport,
+    let (direct_rx, path_rx, flush_failed_rx) = wire_transports(
+        &mut state,
+        &endpoints.endpoint,
+        transports,
+        runtime.live_count.take(),
+        &rendezvous.rendezvous_params,
     );
-    state.local_udp_transport = local_udp_transport;
-    // Direct-path probes report here; the loop grafts on the verdict.
-    let (direct_tx, direct_rx) = mpsc::unbounded_channel();
-    state.direct_proven = direct_tx;
-    state
-        .webrtc_admission
-        .set_proven_sink(state.direct_proven.clone());
-    // Path watchers report here; the loop re-races or detaches on it.
-    let (path_tx, path_rx) = mpsc::unbounded_channel();
-    state.webrtc_admission.set_path_sink(path_tx.clone());
-    state.path_changes = path_tx;
-    // A flushed frame whose dial failed comes back here; the loop buffers it again.
-    let (flush_failed_tx, flush_failed_rx) = mpsc::unbounded_channel();
-    state.flush_failed = flush_failed_tx;
-    state.rendezvous_id = Some(rendezvous_params.id);
-    state.rendezvous_answers_jsep = rendezvous_params.answers_jsep();
-    state.write_peer_count();
 
-    // An eager member co-hosts from t=0 so a beacon exists before any
-    // joiner subscribes; everyone else defers to the heal gate
-    // (`may_cohost`). `Eager` skips the probe (a brand-new mesh has no
-    // peers to self-collide with); `EagerProbed` probes first, so several
-    // advertisers sharing one directory `rendezvous_id` don't bind
-    // duplicate copies. Why: `EventLoopConfig::cohost`.
-    let mut rendezvous: Option<beacon::Rendezvous> = None;
-    // The probe tasks of the private ladder report here; the loop notes the reading and walks.
-    let (rung_report_tx, rung_reports) = mpsc::unbounded_channel();
-    state.rungs = beacon::RungWatch::new(rung_report_tx);
-    // The outstanding probe-before-claim, if any. Owned here beside the
-    // beacon it decides, because a probe outlives the tick that started it:
-    // its verdict arrives on the loop's own arm, up to `HEAL_PROBE`
-    // later.
-    let mut rival_probe: Option<beacon::RivalProbe> = None;
-    if claims_at_startup(cohost) {
-        let claimed = beacon::walk_ladder(
-            &rendezvous_params,
-            &endpoint,
-            &state.address_book,
-            &mut rendezvous,
-            probes_before_claim(cohost),
-            &mut rival_probe,
-            &mut state.rungs,
-        )
-        .await
-            == beacon::Held::Claimed;
-        if claimed {
-            schedule_rival_recheck(&mut state, cohost, &rendezvous_params, &endpoint);
-        }
-    } else if !rendezvous_params.bind_ports.is_empty() {
-        // A member that does not claim at startup walks first on the reclaim ticker, and its book
-        // left the busy rungs out: read them now, so its first link does not wait for that tick.
-        beacon::read_ladder(
-            &rendezvous_params,
-            &endpoint,
-            &state.address_book,
-            &mut state.rungs,
-        )
-        .await;
-    }
-
-    // Open the fast reclaim window for the first few seconds of the loop's
-    // life, so bootstrap gets the same event-driven retry that failover
-    // does.
-    //
-    // Every other path into this window is armed by a `NeighborDown`
-    // (`gossip::recv::arms_reclaim`), which a node that has *never* linked
-    // never receives. That node is not a hypothetical: two peers starting
-    // together race the beacon's own bind, and the one that dials the
-    // rendezvous in the millisecond before it accepts gets nothing, has no
-    // link to lose, and so arms nothing. Recovery then waited out the 15s
-    // heal cadence — long enough that a two-peer mesh looks simply broken.
-    // With the window open, `maybe_reclaim` re-grafts within
-    // `RECLAIM_INTERVAL` instead, and stops as soon as the link is up.
-    state.arm_reclaim(Instant::now());
-
-    let (gossip_sender, receiver) = topic.split();
-    if let Some(handle) = &state.gossip_handle {
-        handle.attach_gossip(gossip_sender.clone());
-    }
-    let receiver = gossip::split::spawn_split(receiver, state.gossip_handle.clone());
-
-    let sender = MeshSender::new(gossip_sender);
-    // The task that sends the digest answers, so that the loop never waits for
-    // the gossip actor to take them.
-    if let Some(resends) = state.resend_receiver.take() {
-        task::spawn(outbox::drain(
-            resends,
-            sender.clone(),
-            state.unicast_pool.clone(),
-        ));
-    }
+    let (rendezvous_state, rival_probe, rung_reports) = start_rendezvous(
+        &mut state,
+        &rendezvous.rendezvous_params,
+        &endpoints.endpoint,
+        rendezvous.cohost,
+    )
+    .await;
+    let (sender, receiver) = join_gossip(&mut state, endpoints.topic);
 
     #[cfg(feature = "host")]
     let ipc_rx = spawn_ipc_rx::<Driver::Ipc>(
         ipc_listener_disabled,
-        runtime_base.as_deref(),
-        &mesh_str,
-        &author,
-        &sink,
+        runtime.runtime_base.as_deref(),
+        &mesh.mesh,
+        &mesh.author,
+        &runtime.sink,
     );
     // A browser binds no control socket. The loop keeps its IPC `select!` arm —
     // `IpcMessage` is portable — and the arm simply never fires.
     #[cfg(not(feature = "host"))]
     let ipc_rx: Option<mpsc::Receiver<IpcMessage<Driver::Ipc>>> = {
-        drop(runtime_base);
+        drop(runtime.runtime_base);
         None
     };
 
@@ -411,7 +209,7 @@ async fn run_checked<Driver: NodeDriver>(
     // case: there are no process signals to listen for.
     #[cfg(feature = "host")]
     let quit_rx = if handle_signals == SignalHandling::Handle {
-        shutdown::spawn_quit_signal_tasks(exit_on_quit, owner)
+        shutdown::spawn_quit_signal_tasks(exit_on_quit, runtime.owner)
     } else {
         never_quit()
     };
@@ -439,13 +237,13 @@ async fn run_checked<Driver: NodeDriver>(
     // stdout event and the state-file flag a readiness gate polls — now
     // have one source and cannot disagree.
     if ipc_listener_disabled || ipc_rx.is_some() {
-        state.ready = true;
-        state.write_peer_count();
-        sink.emit(NodeEvent::Ready {
-            mesh: mesh_str.clone(),
-            name: mesh_name.clone(),
-            nickname: author.clone(),
-        });
+        announce_ready(
+            &mut state,
+            &runtime.sink,
+            &mesh.mesh,
+            &mesh.name,
+            &mesh.author,
+        );
     }
 
     // `router` stays owned in this scope so its accept loop outlives
@@ -461,25 +259,25 @@ async fn run_checked<Driver: NodeDriver>(
     Box::pin(event_loop(EventLoop {
         sender,
         receiver,
-        gossip,
-        endpoint,
-        mesh: mesh_str,
-        name: mesh_name,
+        gossip: endpoints.gossip,
+        endpoint: endpoints.endpoint,
+        mesh: mesh.mesh,
+        name: mesh.name,
         leave_label,
-        author,
-        sink,
-        max_peers,
+        author: mesh.author,
+        sink: runtime.sink,
+        max_peers: runtime.max_peers,
         state,
         app,
         ipc_rx,
         intervals,
-        rendezvous,
+        rendezvous: rendezvous_state,
         rival_probe,
-        rendezvous_params,
-        rung_rx,
-        rung_probe,
+        rendezvous_params: rendezvous.rendezvous_params,
+        rung_rx: rendezvous.rung_rx,
+        rung_probe: rendezvous.rung_probe,
         rung_reports,
-        cohost,
+        cohost: rendezvous.cohost,
         started,
         external_quit_rx,
         external_req_rx,
@@ -487,14 +285,286 @@ async fn run_checked<Driver: NodeDriver>(
         quit_rx,
         exit_on_quit,
         http_rx,
-        unicast_rx: Some(unicast_rx),
-        lan_contacts,
+        unicast_rx: Some(endpoints.unicast_rx),
+        lan_contacts: endpoints.lan_contacts,
         direct_rx,
         path_rx,
         flush_failed_rx,
         owned,
     }))
     .await
+}
+
+/// What the driver hands the loop: its quit and message channels, whether the loop binds the unix
+/// socket, and how it handles signals.
+fn driver_channels(
+    driver: DriverMode,
+) -> (
+    Option<mpsc::Receiver<()>>,
+    Option<broadcast::Sender<Authored>>,
+    bool,
+    SignalHandling,
+) {
+    match driver {
+        DriverMode::Cli => (None, None, false, SignalHandling::Handle),
+        DriverMode::InProcess {
+            msg_tx,
+            quit_rx,
+            handle_signals,
+        } => (Some(quit_rx), msg_tx, true, handle_signals),
+    }
+}
+
+/// The state file of a host daemon, seeded by the app. `None` when there is no file to write: an
+/// in-process session that keeps no file.
+#[cfg(feature = "host")]
+fn host_state_file<Driver: NodeDriver>(
+    app: &Driver,
+    mesh: &MeshSpec,
+    runtime: &RuntimeConfig,
+    exit_on_quit: bool,
+) -> Option<StateFile> {
+    let state_file = runtime
+        .state_file
+        .clone()
+        .or_else(|| {
+            let base = runtime.runtime_base.as_deref()?;
+            exit_on_quit.then(|| {
+                util::mesh_runtime_dir(base, mesh.mesh.as_str())
+                    .join(format!("{}.state.json", mesh.author))
+            })
+        })
+        .map(|path| {
+            let owner_pid = runtime.owner.map(shutdown::Owner::pid);
+            let file = StateFile::new(path, &mesh.mesh, &mesh.author, &mesh.name)
+                .base(runtime.runtime_base.clone());
+            file.topic(mesh.topic_string.as_deref())
+                .owner_pid(owner_pid)
+        });
+    // Seed the state file with the application's own discovery fields before readiness is
+    // advertised: the local client reads them from this mode-600 file.
+    app.init_state_file(state_file.as_ref());
+    state_file
+}
+
+/// The label of the departure line: a topic gossip shows `topic` plus the raw string it was
+/// derived from (the name is lossy, and the wording mirrors the `joined topic …` startup line),
+/// every other gossip its `#name`.
+fn leave_label(mesh: &MeshSpec) -> String {
+    mesh.topic_string.as_deref().map_or_else(
+        || format!("#{}", mesh.name),
+        |raw_topic| format!("topic {raw_topic}"),
+    )
+}
+
+/// The state file a daemon seeds its state with: a host daemon has one, and a browser keeps its path.
+#[cfg(feature = "host")]
+type StateFileSeed = Option<StateFile>;
+#[cfg(not(feature = "host"))]
+type StateFileSeed = Option<path::PathBuf>;
+
+/// The event loop's state, with the mesh's identity and secrets moved in. The state file goes
+/// with it, so the first write the loop makes lands in the right place.
+fn new_state(
+    mesh: &mut MeshSpec,
+    transports: &TransportSet,
+    per_peer_gate: Option<SelfWriteGate>,
+    started: Instant,
+    state_file: StateFileSeed,
+) -> EventLoopState {
+    #[cfg(not(feature = "host"))]
+    drop(state_file);
+    let mut state = EventLoopState::new(
+        state::StateInit {
+            #[cfg(feature = "host")]
+            state_file,
+            identity: Arc::clone(&mesh.identity),
+            secrets: MeshSecrets {
+                password: mesh.mesh_password.take(),
+                key: mesh.mesh_key.take(),
+            },
+            per_peer_gate,
+            // The *same* table the Router's signal acceptor holds, not a fresh
+            // one: the cap only counts if both roles count against it together.
+            webrtc_admission: transports.webrtc_admission.clone(),
+            address_book: transports.address_book.clone(),
+            webrtc_ice: transports.webrtc_ice,
+        },
+        started,
+    );
+    state.mint_mesh = mesh.mint_mesh.take(); // creator-only: backs the `invite` command
+    state
+}
+
+/// Wires the transports into the state, and returns the receivers of the three channels that
+/// report back to the loop: the direct-path probes, the path watchers and the failed flushes.
+fn wire_transports(
+    state: &mut EventLoopState,
+    endpoint: &Endpoint,
+    transports: TransportSet,
+    live_count: Option<LiveCount>,
+    rendezvous_params: &beacon::RendezvousParams,
+) -> (
+    mpsc::UnboundedReceiver<probe::DirectOutcome>,
+    mpsc::UnboundedReceiver<probe::PathChange>,
+    mpsc::UnboundedReceiver<(Verified, messages::WireFrame)>,
+) {
+    #[cfg(feature = "multihop")]
+    {
+        state.multihop = transports.multihop; // the mesh policy's multihop: the registered transport's handle
+        state.underlay_webrtc = transports.underlay_webrtc;
+    }
+    // The direct-path transport the session manager fills; `None` leaves
+    // every pair to iroh's own paths.
+    state.webrtc = transports.webrtc_enabled.then_some(transports.webrtc);
+    // The gossip transport of the member endpoint, when the mesh has gossip: the admission table
+    // made it with the endpoint and keeps it, to tell it which peers are established and which
+    // pairs a higher rung carries.
+    state.gossip_handle = state.webrtc_admission.gossip_handle();
+    state.unicast_pool =
+        transport::UnicastPool::new(endpoint.clone(), transports.relay_transport.relay_allowed());
+    state
+        .unicast_pool
+        .set_admission(state.webrtc_admission.clone());
+    // Before the first write, so the initial advertisement carries a real count.
+    state.live_count = live_count;
+    state.relay_transport = transports.relay_transport;
+    state.rendezvous_graft_needs_session = webrtc::session_policy::node_graft_needs_session(
+        transports.relay_transport.relay_allowed(),
+        transports.local_udp_transport,
+    );
+    state.local_udp_transport = transports.local_udp_transport;
+    // Direct-path probes report here; the loop grafts on the verdict.
+    let (direct_tx, direct_rx) = mpsc::unbounded_channel();
+    state.direct_proven = direct_tx;
+    state
+        .webrtc_admission
+        .set_proven_sink(state.direct_proven.clone());
+    // Path watchers report here; the loop re-races or detaches on it.
+    let (path_tx, path_rx) = mpsc::unbounded_channel();
+    state.webrtc_admission.set_path_sink(path_tx.clone());
+    state.path_changes = path_tx;
+    // A flushed frame whose dial failed comes back here; the loop buffers it again.
+    let (flush_failed_tx, flush_failed_rx) = mpsc::unbounded_channel();
+    state.flush_failed = flush_failed_tx;
+    state.rendezvous_id = Some(rendezvous_params.id);
+    state.rendezvous_answers_jsep = rendezvous_params.answers_jsep();
+    state.write_peer_count();
+    (direct_rx, path_rx, flush_failed_rx)
+}
+
+/// Starts the rendezvous: an eager member co-hosts from t=0, and everyone else defers to the heal
+/// gate. Returns the beacon, the probe of a claim that is still open, and the rung reports.
+async fn start_rendezvous(
+    state: &mut EventLoopState,
+    rendezvous_params: &beacon::RendezvousParams,
+    endpoint: &Endpoint,
+    cohost: CoHostPolicy,
+) -> (
+    Option<beacon::Rendezvous>,
+    Option<beacon::RivalProbe>,
+    mpsc::UnboundedReceiver<beacon::RungReport>,
+) {
+    // An eager member co-hosts from t=0 so a beacon exists before any
+    // joiner subscribes; everyone else defers to the heal gate
+    // (`may_cohost`). `Eager` skips the probe (a brand-new mesh has no
+    // peers to self-collide with); `EagerProbed` probes first, so several
+    // advertisers sharing one directory `rendezvous_id` don't bind
+    // duplicate copies. Why: `EventLoopConfig::cohost`.
+    let mut rendezvous: Option<beacon::Rendezvous> = None;
+    // The probe tasks of the private ladder report here; the loop notes the reading and walks.
+    let (rung_report_tx, rung_reports) = mpsc::unbounded_channel();
+    state.rungs = beacon::RungWatch::new(rung_report_tx);
+    // The outstanding probe-before-claim, if any. Owned here beside the
+    // beacon it decides, because a probe outlives the tick that started it:
+    // its verdict arrives on the loop's own arm, up to `HEAL_PROBE`
+    // later.
+    let mut rival_probe: Option<beacon::RivalProbe> = None;
+    if claims_at_startup(cohost) {
+        let claimed = beacon::walk_ladder(
+            rendezvous_params,
+            endpoint,
+            &state.address_book,
+            &mut rendezvous,
+            probes_before_claim(cohost),
+            &mut rival_probe,
+            &mut state.rungs,
+        )
+        .await
+            == beacon::Held::Claimed;
+        if claimed {
+            schedule_rival_recheck(state, cohost, rendezvous_params, endpoint);
+        }
+    } else if !rendezvous_params.bind_ports.is_empty() {
+        // A member that does not claim at startup walks first on the reclaim ticker, and its book
+        // left the busy rungs out: read them now, so its first link does not wait for that tick.
+        beacon::read_ladder(
+            rendezvous_params,
+            endpoint,
+            &state.address_book,
+            &mut state.rungs,
+        )
+        .await;
+    }
+
+    // Open the fast reclaim window for the first few seconds of the loop's
+    // life, so bootstrap gets the same event-driven retry that failover
+    // does.
+    //
+    // Every other path into this window is armed by a `NeighborDown`
+    // (`gossip::recv::arms_reclaim`), which a node that has *never* linked
+    // never receives. That node is not a hypothetical: two peers starting
+    // together race the beacon's own bind, and the one that dials the
+    // rendezvous in the millisecond before it accepts gets nothing, has no
+    // link to lose, and so arms nothing. Recovery then waited out the 15s
+    // heal cadence — long enough that a two-peer mesh looks simply broken.
+    // With the window open, `maybe_reclaim` re-grafts within
+    // `RECLAIM_INTERVAL` instead, and stops as soon as the link is up.
+    state.arm_reclaim(Instant::now());
+    (rendezvous, rival_probe, rung_reports)
+}
+
+/// Joins the gossip topic and starts the tasks that carry its frames: the split of the receiver,
+/// and the drain of the digest answers, so that the loop never waits for the gossip actor.
+fn join_gossip(
+    state: &mut EventLoopState,
+    topic: GossipTopic,
+) -> (MeshSender, gossip::split::MeshReceiver<GossipReceiver>) {
+    let (gossip_sender, receiver) = topic.split();
+    if let Some(handle) = &state.gossip_handle {
+        handle.attach_gossip(gossip_sender.clone());
+    }
+    let receiver = gossip::split::spawn_split(receiver, state.gossip_handle.clone());
+
+    let sender = MeshSender::new(gossip_sender);
+    // The task that sends the digest answers, so that the loop never waits for
+    // the gossip actor to take them.
+    if let Some(resends) = state.resend_receiver.take() {
+        task::spawn(outbox::drain(
+            resends,
+            sender.clone(),
+            state.unicast_pool.clone(),
+        ));
+    }
+    (sender, receiver)
+}
+
+/// Marks the loop ready and emits the `ready` event. See the call site for why it waits for the
+/// IPC socket.
+fn announce_ready(
+    state: &mut EventLoopState,
+    sink: &Arc<dyn NodeSink>,
+    mesh: &MeshId,
+    name: &MeshName,
+    author: &Nickname,
+) {
+    state.ready = true;
+    state.write_peer_count();
+    sink.emit(NodeEvent::Ready {
+        mesh: mesh.clone(),
+        name: name.clone(),
+        nickname: author.clone(),
+    });
 }
 
 /// The alive tick: note the gap, broadcast the keepalive presence, then pay a held-back `PeerInfo` flood.
