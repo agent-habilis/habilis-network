@@ -91,36 +91,74 @@ impl error::Error for BenchError {
 
 impl From<endpoint::BindError> for BenchError {
     fn from(error: endpoint::BindError) -> Self {
+        Self::from_bind_error(error)
+    }
+}
+
+impl BenchError {
+    /// Make a bench error from a bind error.
+    #[must_use]
+    pub fn from_bind_error(error: endpoint::BindError) -> Self {
         Self::Bind(error)
+    }
+
+    /// Make a bench error from a connection error.
+    #[must_use]
+    pub fn from_connection_error(error: endpoint::ConnectionError) -> Self {
+        Self::Connection(error)
+    }
+
+    /// Make a bench error from a write error.
+    #[must_use]
+    pub fn from_write_error(error: endpoint::WriteError) -> Self {
+        Self::Write(error)
+    }
+
+    /// Make a bench error from a closed stream.
+    #[must_use]
+    pub fn from_closed_stream(error: endpoint::ClosedStream) -> Self {
+        Self::Closed(error)
+    }
+
+    /// Make a bench error from a read-to-end error.
+    #[must_use]
+    pub fn from_read_to_end_error(error: endpoint::ReadToEndError) -> Self {
+        Self::Read(error)
+    }
+
+    /// Make a bench error from an integer conversion error.
+    #[must_use]
+    pub fn from_try_from_int_error(error: num::TryFromIntError) -> Self {
+        Self::Size(error)
     }
 }
 
 impl From<endpoint::ConnectionError> for BenchError {
     fn from(error: endpoint::ConnectionError) -> Self {
-        Self::Connection(error)
+        Self::from_connection_error(error)
     }
 }
 
 impl From<endpoint::WriteError> for BenchError {
     fn from(error: endpoint::WriteError) -> Self {
-        Self::Write(error)
+        Self::from_write_error(error)
     }
 }
 
 impl From<endpoint::ClosedStream> for BenchError {
     fn from(error: endpoint::ClosedStream) -> Self {
-        Self::Closed(error)
+        Self::from_closed_stream(error)
     }
 }
 
 impl From<endpoint::ReadToEndError> for BenchError {
     fn from(error: endpoint::ReadToEndError) -> Self {
-        Self::Read(error)
+        Self::from_read_to_end_error(error)
     }
 }
 
 impl From<num::TryFromIntError> for BenchError {
     fn from(error: num::TryFromIntError) -> Self {
-        Self::Size(error)
+        Self::from_try_from_int_error(error)
     }
 }
