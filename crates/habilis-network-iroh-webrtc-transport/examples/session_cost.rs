@@ -32,6 +32,7 @@ use habilis_network_iroh_webrtc_transport::{
     IceConfig, SignalEnvelope, WebRtcTransport, answer_with, offer_with,
 };
 use habilis_network_util::resident_memory;
+use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use tokio::io::{self, AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
@@ -65,12 +66,11 @@ struct Fit {
     slope_stderr: Option<f64>,
 }
 
-#[expect(clippy::cast_precision_loss, reason = "a handful of points")]
 fn fit(points: &[(f64, f64)]) -> Option<Fit> {
     if points.len() < 2 {
         return None;
     }
-    let count = points.len() as f64;
+    let count = points.len().to_f64().unwrap_or(f64::NAN);
     let mean_x = points.iter().map(|&(px, _)| px).sum::<f64>() / count;
     let mean_y = points.iter().map(|&(_, py)| py).sum::<f64>() / count;
     let sxx: f64 = points.iter().map(|&(px, _)| (px - mean_x).powi(2)).sum();
@@ -98,12 +98,11 @@ fn fit(points: &[(f64, f64)]) -> Option<Fit> {
 }
 
 /// The sample standard deviation, `None` with fewer than two values.
-#[expect(clippy::cast_precision_loss, reason = "a handful of values")]
 fn std_dev(values: &[f64]) -> Option<f64> {
     if values.len() < 2 {
         return None;
     }
-    let count = values.len() as f64;
+    let count = values.len().to_f64().unwrap_or(f64::NAN);
     let mean = values.iter().sum::<f64>() / count;
     let squares: f64 = values.iter().map(|value| (value - mean).powi(2)).sum();
     Some((squares / (count - 1.0)).sqrt())

@@ -21,6 +21,7 @@ path = "src/lib.rs"
 
 [dependencies]
 iroh.workspace = true
+num-traits = "0.2"
 # `CustomAddr` is not re-exported through `iroh`: name it from iroh-base like the
 # sibling transport crates, so that the graph carries one copy of it.
 iroh-base.workspace = true

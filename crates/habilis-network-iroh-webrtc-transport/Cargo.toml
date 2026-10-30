@@ -135,6 +135,7 @@ web-sys = { workspace = true, optional = true, features = [
 
 [dev-dependencies]
 habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
+num-traits = "0.2"
 tokio = { workspace = true, features = ["io-util"] }
 # Native only: `process` turns on `mio/net`, and `rt-multi-thread` and `io-std` are not on tokio's wasm list.
 # `process` and `io-std` drive the `session_cost` example's peer process over pipes.

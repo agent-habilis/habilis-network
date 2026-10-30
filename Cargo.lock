@@ -1842,6 +1842,7 @@ dependencies = [
  "n0-future",
  "n0-watcher",
  "noq-udp",
+ "num-traits",
  "tokio",
  "tracing",
 ]
@@ -1895,6 +1896,7 @@ dependencies = [
  "n0-future",
  "n0-watcher",
  "noq-udp",
+ "num-traits",
  "rand 0.9.4",
  "serde",
  "serde_json",

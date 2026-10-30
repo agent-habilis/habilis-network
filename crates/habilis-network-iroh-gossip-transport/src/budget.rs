@@ -5,6 +5,7 @@
 //! budget. A frame over the budget is dropped, and QUIC retransmits it.
 
 use n0_future::time::Instant;
+use num_traits::ToPrimitive;
 
 /// The first value of the budget, to be replaced by what the Phase 3 gossip cells
 /// measure.
@@ -42,9 +43,8 @@ impl Budget {
 }
 
 /// A byte count as a float. A budget is bytes per second, far below 2^52.
-#[expect(clippy::cast_precision_loss, reason = "a byte budget is below 2^52")]
 fn float(count: u64) -> f64 {
-    count as f64
+    count.to_f64().unwrap_or(f64::NAN)
 }
 
 #[cfg(test)]
