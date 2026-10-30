@@ -29,10 +29,15 @@ pub(super) fn split_resend_trailer(data: &[u8]) -> (&[u8], Option<u64>) {
     let Some(mark_at) = data.len().checked_sub(RESEND_TRAILER_LEN) else {
         return (data, None);
     };
-    if data[mark_at] != RESEND_TRAILER_MARK {
+    let Some((&mark, nonce_bytes)) = data.get(mark_at..).and_then(<[u8]>::split_first) else {
+        return (data, None);
+    };
+    let nonce: Result<[u8; RESEND_NONCE_LEN], _> = nonce_bytes.try_into();
+    let (Some(body), Ok(nonce)) = (data.get(..mark_at), nonce) else {
+        return (data, None);
+    };
+    if mark != RESEND_TRAILER_MARK {
         return (data, None);
     }
-    let mut nonce = [0u8; RESEND_NONCE_LEN];
-    nonce.copy_from_slice(&data[mark_at + 1..]);
-    (&data[..mark_at], Some(u64::from_be_bytes(nonce)))
+    (body, Some(u64::from_be_bytes(nonce)))
 }

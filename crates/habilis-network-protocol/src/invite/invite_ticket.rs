@@ -209,7 +209,9 @@ impl InviteTicket {
                 "not an invite ticket: wrong ticket kind",
             ));
         }
-        let payload = &framed[2..];
+        let payload = framed
+            .get(2..)
+            .ok_or(InviteError::Truncated("ticket too short"))?;
         let mut position = 0;
         let expiry_bytes: [u8; 8] =
             take_array(payload, &mut position).ok_or(InviteError::Truncated("missing expiry"))?;

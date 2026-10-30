@@ -317,7 +317,10 @@ pub(super) fn read_u16(bytes: &[u8], position: &mut usize) -> Result<u16, Config
         .get(*position..end)
         .ok_or(ConfigError::Truncated("truncated u16"))?;
     *position = end;
-    Ok(u16::from_le_bytes([slice[0], slice[1]]))
+    let pair: [u8; 2] = slice
+        .try_into()
+        .map_err(|_| ConfigError::Truncated("truncated u16"))?;
+    Ok(u16::from_le_bytes(pair))
 }
 
 /// Feature byte appended after the lookups when a mesh carries a password
