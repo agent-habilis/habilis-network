@@ -271,6 +271,21 @@ function countTurbofish(raw: string): number {
   return text.match(/(?<!\b(?:size_of|align_of))::</g)?.length ?? 0;
 }
 
+// A public error type, and a public type whose Drop acts, carry #[must_use] (U33, U34). Password
+// is the one Drop that only wipes memory, so dropping it unused costs nothing and it keeps none.
+const MUST_USE_EXEMPT = new Set(["Password"]);
+function countMustUseMissing(raw: string): number {
+  const text = blankStrings(stripComments(raw));
+  const dropTypes = new Set([...text.matchAll(/^impl(?:<[^>]*>)?\s+Drop\s+for\s+(\w+)/gm)].map((m) => m[1] ?? ""));
+  let count = 0;
+  for (const m of text.matchAll(/((?:#\[[^\]\n]*\]\s*)*)pub(?:\([a-z]+\))? (?:struct|enum) (\w+)/g)) {
+    const [, attrs = "", name = ""] = m;
+    if (attrs.includes("must_use")) continue;
+    if (/Error$/.test(name) || (dropTypes.has(name) && !MUST_USE_EXEMPT.has(name))) count++;
+  }
+  return count;
+}
+
 // A for loop whose iterator is a combinator chain on a collection, such as `v.iter().enumerate()`.
 // The loop header then hides a second step; a named step or a plain `for` reads it (P16).
 function countForChains(raw: string): number {
@@ -705,6 +720,12 @@ const RULES: Rule[] = [
     scan: countTurbofish,
     glob: "crates/**/*.rs",
     why: "Name the type on the variable, not in a turbofish (P2). Only size_of and align_of keep one: they have no value to infer the type from.",
+  },
+  {
+    name: "must_use_types",
+    scan: countMustUseMissing,
+    glob: "crates/**/*.rs",
+    why: "A public error type and a public guard whose Drop acts carry #[must_use], so a value dropped at once is seen (U33, U34).",
   },
   {
     name: "for_chain",

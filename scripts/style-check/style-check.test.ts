@@ -268,6 +268,17 @@ test("turbofish: a typed let passes", () => {
 test("turbofish: size_of and align_of pass", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f() -> bool {\n    size_of::<u8>() == 1 && align_of::<u16>() == 2\n}", 0, "");
 });
+// The must_use_types rule (U33, U34): a pub *Error type or a pub Drop type needs #[must_use].
+test("must_use_types: a pub error type without must_use fails", () => {
+  expectExit("crates/demo/src/lib.rs", "#[derive(Debug)]\npub enum DemoError {\n    Bad,\n}", 1, "");
+});
+test("must_use_types: a pub error type with must_use passes", () => {
+  expectExit("crates/demo/src/lib.rs", "#[derive(Debug)]\n#[must_use]\npub enum DemoError {\n    Bad,\n}", 0, "");
+});
+test("must_use_types: a pub guard whose Drop acts fails, Password is exempt", () => {
+  expectExit("crates/demo/src/lib.rs", "pub struct Guard;\nimpl Drop for Guard {\n    fn drop(&mut self) {}\n}", 1, "");
+  expectExit("crates/demo/src/lib.rs", "pub struct Password;\nimpl Drop for Password {\n    fn drop(&mut self) {}\n}", 0, "");
+});
 test("dyn_param: a dyn parameter counts", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(sink: &dyn Sink) {}", 1);
 });
