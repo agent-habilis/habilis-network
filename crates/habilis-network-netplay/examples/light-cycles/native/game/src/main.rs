@@ -376,17 +376,34 @@ fn is_quit_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
         || (modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c' | 'C')))
 }
 
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "only the arrow/WASD keys steer a light-cycle; crossterm's KeyCode has ~20 other \
-              variants (function keys, media keys, ...) irrelevant to this game"
-)]
 fn dir_for_key(code: KeyCode) -> Option<Dir> {
     match code {
         KeyCode::Up | KeyCode::Char('w' | 'W') => Some(Dir::Up),
         KeyCode::Down | KeyCode::Char('s' | 'S') => Some(Dir::Down),
         KeyCode::Left | KeyCode::Char('a' | 'A') => Some(Dir::Left),
         KeyCode::Right | KeyCode::Char('d' | 'D') => Some(Dir::Right),
-        _ => None,
+        KeyCode::Backspace
+        | KeyCode::Enter
+        | KeyCode::Home
+        | KeyCode::End
+        | KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::Tab
+        | KeyCode::BackTab
+        | KeyCode::Delete
+        | KeyCode::Insert
+        | KeyCode::F(_)
+        | KeyCode::Char(_)
+        | KeyCode::Null
+        | KeyCode::Esc
+        | KeyCode::CapsLock
+        | KeyCode::ScrollLock
+        | KeyCode::NumLock
+        | KeyCode::PrintScreen
+        | KeyCode::Pause
+        | KeyCode::Menu
+        | KeyCode::KeypadBegin
+        | KeyCode::Media(_)
+        | KeyCode::Modifier(_) => None,
     }
 }
