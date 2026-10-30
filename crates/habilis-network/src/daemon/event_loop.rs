@@ -141,7 +141,7 @@ async fn run_checked<Driver: NodeDriver>(
     // (in-process: library API or MCP) take typed requests on `session_rx` instead.
     let exit_on_quit = matches!(runtime.driver, DriverMode::Cli);
     #[cfg(feature = "host")]
-    let state_file = host_state_file(&app, &mesh, &runtime, exit_on_quit);
+    let state_file = host_state_file(&app, &mesh, &mut runtime, exit_on_quit);
     #[cfg(not(feature = "host"))]
     let state_file = runtime.state_file;
     let (external_quit_rx, external_msg_tx, ipc_listener_disabled, handle_signals) =
@@ -321,12 +321,12 @@ fn driver_channels(
 fn host_state_file<Driver: NodeDriver>(
     app: &Driver,
     mesh: &MeshSpec,
-    runtime: &RuntimeConfig,
+    runtime: &mut RuntimeConfig,
     exit_on_quit: bool,
 ) -> Option<StateFile> {
     let state_file: Option<StateFile> = runtime
         .state_file
-        .clone()
+        .take()
         .or_else(|| {
             let base = runtime.runtime_base.as_deref()?;
             exit_on_quit.then(|| {
@@ -1126,8 +1126,8 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         // The same for the sessions of the multihop underlay, which open
         // only to a neighbor that has no IP path to us.
         #[cfg(feature = "multihop")]
-        if let Some(underlay) = self.state.underlay_webrtc.clone() {
-            underlay_webrtc::tick(&self.state, &underlay);
+        if let Some(underlay) = &self.state.underlay_webrtc {
+            underlay_webrtc::tick(&self.state, underlay);
         }
         // Same cadence for the direct-path probes a lookup-only relay
         // holds grafts on: a peer whose punch missed the deadline, or
@@ -1800,11 +1800,8 @@ fn finalize_ping_round(state: &mut EventLoopState, sink: &dyn NodeSink) {
     // multihop metric is a future enhancement.)
     let mut peers: Vec<(Nickname, u64)> = round
         .pongs
-        .iter()
-        .map(|(nickname, rtt)| {
-            let rtt_ms = millis_saturating(*rtt);
-            (nickname.clone(), rtt_ms)
-        })
+        .into_iter()
+        .map(|(nickname, rtt)| (nickname, millis_saturating(rtt)))
         .collect();
     peers.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
     // The in-process `ping` request waits on this channel (no event stream to
