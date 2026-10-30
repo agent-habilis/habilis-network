@@ -97,37 +97,31 @@ impl From<endpoint::BindError> for BenchError {
 
 impl BenchError {
     /// Make a bench error from a bind error.
-    #[must_use]
     pub fn from_bind_error(error: endpoint::BindError) -> Self {
         Self::Bind(error)
     }
 
     /// Make a bench error from a connection error.
-    #[must_use]
     pub fn from_connection_error(error: endpoint::ConnectionError) -> Self {
         Self::Connection(error)
     }
 
     /// Make a bench error from a write error.
-    #[must_use]
     pub fn from_write_error(error: endpoint::WriteError) -> Self {
         Self::Write(error)
     }
 
     /// Make a bench error from a closed stream.
-    #[must_use]
     pub fn from_closed_stream(error: endpoint::ClosedStream) -> Self {
         Self::Closed(error)
     }
 
     /// Make a bench error from a read-to-end error.
-    #[must_use]
     pub fn from_read_to_end_error(error: endpoint::ReadToEndError) -> Self {
         Self::Read(error)
     }
 
     /// Make a bench error from an integer conversion error.
-    #[must_use]
     pub fn from_try_from_int_error(error: num::TryFromIntError) -> Self {
         Self::Size(error)
     }
