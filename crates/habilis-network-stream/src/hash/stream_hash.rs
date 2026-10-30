@@ -133,14 +133,12 @@ impl StreamHash {
             return Err(HashError::UnknownFlags(flags));
         }
         let mut position = 1;
-        let id = StreamId::from(
-            take_array::<ID_LEN>(payload, &mut position)
-                .ok_or(HashError::Truncated("stream hash missing id"))?,
-        );
-        let secret = StreamSecret::from(
-            take_array::<SECRET_LEN>(payload, &mut position)
-                .ok_or(HashError::Truncated("stream hash missing secret"))?,
-        );
+        let id_bytes: [u8; ID_LEN] = take_array(payload, &mut position)
+            .ok_or(HashError::Truncated("stream hash missing id"))?;
+        let id = StreamId::from(id_bytes);
+        let secret_bytes: [u8; SECRET_LEN] = take_array(payload, &mut position)
+            .ok_or(HashError::Truncated("stream hash missing secret"))?;
+        let secret = StreamSecret::from(secret_bytes);
         let lookups = LookupOpts::decode_from(payload, &mut position)
             .map_err(HashError::field("decode the lookups"))?;
         let addr_json = payload
