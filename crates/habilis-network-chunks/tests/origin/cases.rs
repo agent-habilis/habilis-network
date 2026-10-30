@@ -133,6 +133,26 @@ fn coverage_is_all_or_nothing_and_follows_the_file() {
     });
 }
 
+/// The read of a lookup happens when the lookup is made, so a file that is
+/// removed before the answer is awaited is still answered for.
+#[test]
+fn a_lookup_answers_for_the_file_as_it_was_when_it_was_made() {
+    let dir = TempDir::new("at-call");
+    let bytes = body(CHUNK_BYTES_USIZE, 4);
+    let path = write(&dir, "note.bin", &bytes);
+    let origin = DiskOrigin::new();
+
+    block_on(async {
+        origin.adopt(&describe(&path), &path).expect("adopt");
+        let pending = origin.has(chunk_hash(&bytes));
+        fs::remove_file(&path).expect("remove");
+        assert!(
+            pending.await.expect("has"),
+            "the lookup answers for the file it was made against"
+        );
+    });
+}
+
 /// The version gate on the read path, which is what stops an editor's save from
 /// being served as the file somebody started downloading.
 #[test]

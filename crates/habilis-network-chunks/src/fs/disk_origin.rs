@@ -237,6 +237,10 @@ impl DiskOrigin {
         Ok(Some(bytes))
     }
 
+    fn has_now(&self, hash: ChunkHash) -> Result<bool, ChunkError> {
+        Ok(self.get_now(hash)?.is_some())
+    }
+
     fn map_now(&self, root: Root) -> Result<Option<ChunkMap>, ChunkError> {
         Ok(self.borrowed(root)?.map(|borrowed| borrowed.map))
     }
@@ -275,8 +279,8 @@ impl ChunkSource for DiskOrigin {
         future::ready(self.get_now(hash))
     }
 
-    async fn has(&self, hash: ChunkHash) -> Result<bool, ChunkError> {
-        Ok(self.get(hash).await?.is_some())
+    fn has(&self, hash: ChunkHash) -> impl Future<Output = Result<bool, ChunkError>> {
+        future::ready(self.has_now(hash))
     }
 
     fn map(&self, root: Root) -> impl Future<Output = Result<Option<ChunkMap>, ChunkError>> {

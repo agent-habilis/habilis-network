@@ -731,6 +731,30 @@ async fn a_one_bit_difference_is_caught(harness: &impl Harness) {
     );
 }
 
+/// The work of a call runs when the call is made, not when its future is first
+/// awaited. A write that nobody awaits still lands, and a read answers for the
+/// store as it was when the read was made.
+async fn a_call_does_its_work_when_it_is_made(harness: &impl Harness) {
+    let store = harness.store();
+    let bytes = body(CHUNK_BYTES_USIZE * 2, 26);
+    let map = ChunkMap::build(&bytes);
+    store.put_map(&map).await.expect("put_map");
+    let before = store.coverage(map.root());
+
+    let first = map.leaf(0).expect("in range");
+    drop(store.put(first, &bytes[..CHUNK_BYTES_USIZE]));
+
+    assert!(
+        store.has(first).await.expect("has"),
+        "a write that nobody awaits is in place once its call returns"
+    );
+    assert_eq!(
+        before.await.expect("coverage").count(),
+        0,
+        "a read answers for the store as it was when the read was made"
+    );
+}
+
 /// A throwaway directory, removed on drop.
 ///
 /// Hand-rolled rather than pulling `tempfile` in: a dev-dependency is still a
@@ -954,6 +978,13 @@ mod mem {
             InMemoryStore::new(),
         )));
     }
+
+    #[test]
+    fn a_call_does_its_work_when_it_is_made() {
+        block_on(super::a_call_does_its_work_when_it_is_made(&MemHarness(
+            InMemoryStore::new(),
+        )));
+    }
 }
 
 /// The filesystem backend, held to exactly the same contract.
@@ -1108,6 +1139,13 @@ mod fs_store {
     #[test]
     fn a_one_bit_difference_is_caught() {
         block_on(super::a_one_bit_difference_is_caught(&FsHarness::new()));
+    }
+
+    #[test]
+    fn a_call_does_its_work_when_it_is_made() {
+        block_on(super::a_call_does_its_work_when_it_is_made(
+            &FsHarness::new(),
+        ));
     }
 }
 

@@ -257,6 +257,23 @@ impl DiskStore {
         }
     }
 
+    fn coverage_now(&self, root: Root) -> Result<Coverage, ChunkError> {
+        let Some(map) = self.map_now(root)? else {
+            return Ok(Coverage::empty(0));
+        };
+        // One `stat` per chunk. Derived rather than cached on purpose: an index
+        // of what we hold is a second source of truth, and the moment it drifts
+        // this peer starts advertising bytes it cannot serve.
+        let mut coverage = Coverage::empty(map.len());
+        let indexed_leaves: Enumerate<slice::Iter<'_, ChunkHash>> = map.leaves().iter().enumerate();
+        for (index, leaf) in indexed_leaves {
+            if self.chunk_path(*leaf).is_file() {
+                coverage.insert(index);
+            }
+        }
+        Ok(coverage)
+    }
+
     fn bind_now(&self, file: &FileId) -> Result<Option<Root>, ChunkError> {
         let binds = self
             .binds
@@ -345,21 +362,8 @@ impl ChunkSource for DiskStore {
         future::ready(self.map_now(root))
     }
 
-    async fn coverage(&self, root: Root) -> Result<Coverage, ChunkError> {
-        let Some(map) = self.map(root).await? else {
-            return Ok(Coverage::empty(0));
-        };
-        // One `stat` per chunk. Derived rather than cached on purpose: an index
-        // of what we hold is a second source of truth, and the moment it drifts
-        // this peer starts advertising bytes it cannot serve.
-        let mut coverage = Coverage::empty(map.len());
-        let indexed_leaves: Enumerate<slice::Iter<'_, ChunkHash>> = map.leaves().iter().enumerate();
-        for (index, leaf) in indexed_leaves {
-            if self.chunk_path(*leaf).is_file() {
-                coverage.insert(index);
-            }
-        }
-        Ok(coverage)
+    fn coverage(&self, root: Root) -> impl Future<Output = Result<Coverage, ChunkError>> {
+        future::ready(self.coverage_now(root))
     }
 
     fn bind(&self, file: &FileId) -> impl Future<Output = Result<Option<Root>, ChunkError>> {
