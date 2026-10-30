@@ -54,12 +54,12 @@ impl Cell {
     }
 
     /// Advance to the successor hop. Caller must have checked `next_hop` first.
-    pub(crate) fn advanced(&self) -> Cell {
+    pub(crate) fn advanced(self) -> Cell {
         Cell {
-            path: self.path.clone(),
+            path: self.path,
             position: self.position + 1,
             source: self.source,
-            packet: self.packet.clone(),
+            packet: self.packet,
         }
     }
 }
