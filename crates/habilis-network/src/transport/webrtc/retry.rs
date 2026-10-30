@@ -75,7 +75,9 @@ pub(crate) fn retry_sessions(state: &mut state::EventLoopState, context: &Handle
         .partition(|address| own_needs_lane || lane_needs::needs_webrtc_lane(address));
     let pick = probe::lane_pick();
     let lane = probe::plan_lane_offers(lane, state.webrtc_admission.in_flight(), pick);
-    for address in rest.into_iter().chain(lane) {
+    let mut offers: Vec<EndpointAddr> = rest;
+    offers.extend(lane);
+    for address in offers {
         negotiate_session::negotiate_session(state, context, address.id, address);
     }
 }

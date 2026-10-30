@@ -402,7 +402,8 @@ impl RungWatch {
     ) -> Option<u16> {
         let now = Instant::now();
         let mut answered = None;
-        for &port in params.bind_ports.iter().take(own) {
+        let lower_ports: &[u16] = &params.bind_ports[..own.min(params.bind_ports.len())];
+        for &port in lower_ports {
             match self.reading(port, now) {
                 RungRead::Ours => {
                     tracing::info!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "a lower rung answers as the beacon of our mesh");

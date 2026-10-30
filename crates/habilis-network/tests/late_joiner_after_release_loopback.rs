@@ -164,7 +164,8 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
         while started.elapsed() < LATE_JOINER_DEADLINE
             && (old_learned.len() < OLD_MEMBERS || late_learned_all.is_none())
         {
-            for (index, member) in members.iter().enumerate() {
+            let indexed: Vec<(usize, &Membership)> = members.iter().enumerate().collect();
+            for (index, member) in indexed {
                 if !old_learned.contains_key(&index)
                     && roster(member)
                         .await
@@ -194,7 +195,8 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
             "the joiner did not learn all {OLD_MEMBERS} members inside {LATE_JOINER_DEADLINE:?}\n{}",
             release_lines()
         );
-        for member in members.into_iter().chain([late]) {
+        members.push(late);
+        for member in members {
             let _ = member.node.leave().await;
         }
     });

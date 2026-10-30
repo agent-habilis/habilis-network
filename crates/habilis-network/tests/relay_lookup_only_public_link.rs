@@ -101,9 +101,10 @@ async fn wait_for_log(needle: &str, deadline: Duration) -> bool {
 
 fn dump_log_tail() {
     let logs = habilis_network_test_tracing::captured_logs();
-    let tail: Vec<&str> = logs.lines().rev().take(60).collect();
+    let mut tail: Vec<&str> = logs.lines().rev().take(60).collect();
+    tail.reverse();
     eprintln!("--- engine log tail ---");
-    for line in tail.into_iter().rev() {
+    for line in tail {
         eprintln!("{line}");
     }
 }

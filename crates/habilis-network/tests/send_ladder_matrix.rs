@@ -2209,7 +2209,9 @@ fn no_member_keeps_a_rung_that_another_member_has_cut() {
     let mut one_ended = Vec::new();
     for (name, cell) in CELLS {
         let mut taken = Vec::new();
-        for (rung, from, toward) in cell.cuts().into_iter().filter_map(Cut::rung_cut) {
+        let rung_cuts: Vec<(Rung, Who, Option<Who>)> =
+            cell.cuts().into_iter().filter_map(Cut::rung_cut).collect();
+        for (rung, from, toward) in rung_cuts {
             for to in Who::ALL {
                 if to != from && toward.is_none_or(|only| only == to) {
                     taken.push((rung, from, to));
@@ -2234,7 +2236,8 @@ fn no_member_keeps_a_rung_that_another_member_has_cut() {
 
 #[test]
 fn a_cell_name_is_in_the_table_once() {
-    for (index, (name, _)) in CELLS.iter().enumerate() {
+    let indexed: Vec<(usize, &(&str, Cell))> = CELLS.iter().enumerate().collect();
+    for (index, (name, _)) in indexed {
         assert!(
             CELLS.iter().skip(index + 1).all(|(other, _)| other != name),
             "{name} is twice in the table"

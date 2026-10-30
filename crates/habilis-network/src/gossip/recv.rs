@@ -2182,7 +2182,8 @@ mod evicted_orphan_tests {
 
             // Newest first: every frame but the root arrives as an orphan, so the
             // per-author ceiling evicts the stalest of them before the root lands.
-            for frame in frames.iter().rev() {
+            let newest_first: Vec<&Verified> = frames.iter().rev().collect();
+            for frame in newest_first {
                 super::ingest(wire(frame), &mut reader, &mut app, &context).await;
             }
             let missing: Vec<&Verified> = (0..frames.len())

@@ -104,8 +104,9 @@ async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
 /// it a few milliseconds apart, and the relay then logs a WARN for the connection that it
 /// replaced. That overlap is the contest the beacon resolves by design, and no test here is
 /// about it.
-async fn leave_all(members: Vec<Membership>) {
-    for member in members.into_iter().rev() {
+async fn leave_all(mut members: Vec<Membership>) {
+    members.reverse();
+    for member in members {
         let _ = member.node.leave().await;
     }
 }
@@ -265,10 +266,10 @@ fn rendezvous_visits() -> usize {
 fn rendezvous_holders(log: &str) -> usize {
     let after_the_crash = log.split("member crashed").nth(1).unwrap_or_default();
     let mut last_is_up = HashMap::new();
-    for line in after_the_crash
-        .lines()
-        .filter(|line| line.contains("is_rendezvous=true"))
-    {
+    for line in after_the_crash.lines() {
+        if !line.contains("is_rendezvous=true") {
+            continue;
+        }
         let up = line.contains("gossip neighbor up");
         if !up && !line.contains("gossip neighbor down") {
             continue;

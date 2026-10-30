@@ -2622,7 +2622,9 @@ mod tests {
                 state.relay_transport = PayloadPath::DirectOnly;
                 state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
                 let members: Vec<EndpointId> = (1..=6).map(testing::endpoint_id).collect();
-                for (index, id) in members.iter().enumerate() {
+                let indexed_members: Vec<(usize, &EndpointId)> =
+                    members.iter().enumerate().collect();
+                for (index, id) in indexed_members {
                     let address = EndpointAddr::new(*id)
                         .with_relay_url("https://relay.invalid".parse().expect("relay url"));
                     state
@@ -2696,7 +2698,9 @@ mod tests {
                 state.relay_transport = PayloadPath::DirectOnly;
                 state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
                 let members: Vec<EndpointId> = (1..=6).map(testing::endpoint_id).collect();
-                for (index, id) in members.iter().enumerate() {
+                let indexed_members: Vec<(usize, &EndpointId)> =
+                    members.iter().enumerate().collect();
+                for (index, id) in indexed_members {
                     let address = EndpointAddr::new(*id)
                         .with_relay_url("https://relay.invalid".parse().expect("relay url"));
                     state

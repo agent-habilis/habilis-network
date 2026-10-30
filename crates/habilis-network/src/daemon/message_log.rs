@@ -975,7 +975,8 @@ mod tests {
         let authors = ["aa", "bb", "cc"];
         let build = || {
             let mut batch = Vec::new();
-            for (index, author) in authors.iter().enumerate() {
+            let indexed_authors: Vec<(usize, &&str)> = authors.iter().enumerate().collect();
+            for (index, author) in indexed_authors {
                 for step in 0..4i64 {
                     let mut message = plain_at(&format!("{author}-{step}"), 1_700_000_000 + step);
                     // One author also stamps far ahead, the shape that used to
@@ -997,7 +998,9 @@ mod tests {
             forward.push(message);
         }
         let mut backward = MessageLog::new(6);
-        for message in build().into_iter().rev() {
+        let mut reversed: Vec<Verified> = build();
+        reversed.reverse();
+        for message in reversed {
             backward.push(message);
         }
 

@@ -1148,7 +1148,10 @@ mod tests {
         let mut had_a_turn = HashSet::new();
         for round in 0..200 {
             let id = format!("digest-{round}");
-            for me in members.iter().filter(|me| *me != asker) {
+            for me in &members {
+                if me == asker {
+                    continue;
+                }
                 if super::answers_digest(me, asker, &id, members.iter()) {
                     had_a_turn.insert(me.clone());
                 }
@@ -1163,7 +1166,10 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let members = members(3);
         let asker = &members[0];
-        for me in members.iter().filter(|me| *me != asker) {
+        for me in &members {
+            if me == asker {
+                continue;
+            }
             assert!(
                 super::answers_digest(me, asker, "digest-1", members.iter()),
                 "a small mesh answers the digest from every member"
@@ -1716,7 +1722,8 @@ mod tests {
             let mut node = fresh_state();
             node.joined_at = UnixSecs::from(1_699_999_999);
             let mut lost = HashSet::new();
-            for (index, message) in all.iter().enumerate() {
+            let indexed: Vec<(usize, &Verified)> = all.iter().enumerate().collect();
+            for (index, message) in indexed {
                 holder.push(message.clone());
                 if index % 4 == 0 {
                     lost.insert(message.dedup_key());
@@ -1757,7 +1764,8 @@ mod tests {
         let mut holder = MessageLog::new(1000);
         let mut node = fresh_state();
         node.joined_at = UnixSecs::from(1_699_999_999);
-        for (index, message) in all.iter().enumerate() {
+        let indexed: Vec<(usize, &Verified)> = all.iter().enumerate().collect();
+        for (index, message) in indexed {
             holder.push(message.clone());
             if index != ANTIENTROPY_DIGEST_WINDOW_IDS {
                 node.message_log.push(message.clone());
@@ -1863,7 +1871,8 @@ mod tests {
             let mut node = fresh_state();
             node.joined_at = UnixSecs::from(base - 1);
             let lost = all[lost_index].dedup_key();
-            for (index, message) in all.iter().enumerate() {
+            let indexed: Vec<(usize, &Verified)> = all.iter().enumerate().collect();
+            for (index, message) in indexed {
                 holder.push(message.clone());
                 if index != lost_index {
                     node.message_log.push(message.clone());
@@ -1922,7 +1931,8 @@ mod tests {
         let mut newer = fresh_state();
         newer.joined_at = UnixSecs::from(base + 1);
         newer.message_log = MessageLog::new(100);
-        for message in earlier.iter().chain(&common) {
+        let history: Vec<&Verified> = earlier.iter().chain(&common).collect();
+        for message in history {
             older.message_log.push(message.clone());
         }
         for message in &common {

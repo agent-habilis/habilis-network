@@ -246,7 +246,8 @@ fn a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation() {
         let mut previous: Vec<BTreeSet<String>> = Vec::new();
         while started.elapsed() < settle + CHURN_WINDOW {
             let mut now = Vec::with_capacity(members.len());
-            for (index, member) in members.iter().enumerate() {
+            let indexed: Vec<(usize, &Member)> = members.iter().enumerate().collect();
+            for (index, member) in indexed {
                 let links = member.linked_set().await;
                 if let Some(before) = previous.get(index) {
                     link_ups += u32::try_from(links.difference(before).count()).unwrap_or(u32::MAX);
@@ -321,7 +322,8 @@ fn a_mesh_larger_than_g_plus_one_reaches_g_everywhere_and_the_churn_is_reported(
         let window = FILL_DEADLINE + STABLE_FOR;
         while started.elapsed() < window {
             let mut now = Vec::with_capacity(members.len());
-            for (index, member) in members.iter().enumerate() {
+            let indexed: Vec<(usize, &Member)> = members.iter().enumerate().collect();
+            for (index, member) in indexed {
                 let links = member.linked_set().await;
                 reached[index] |= links.len() == VIEW_CAP;
                 // Only after the fill deadline do samples count toward the fraction.

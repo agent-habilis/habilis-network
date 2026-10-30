@@ -270,7 +270,9 @@ async fn round(members: usize, start: Start, index: usize) -> Result<Duration, S
         }
         Start::Staggered => {
             let mut nodes = Vec::new();
-            for (name, sink) in names.iter().zip(&sinks) {
+            // Each sink is shared with the task of its member.
+            let named_sinks: Vec<(&String, &Arc<Joined>)> = names.iter().zip(&sinks).collect();
+            for (name, sink) in named_sinks {
                 nodes.push(spawn(&topic, name, Arc::clone(sink)).await);
                 time::sleep(Duration::from_secs(3)).await;
             }
@@ -281,7 +283,9 @@ async fn round(members: usize, start: Start, index: usize) -> Result<Duration, S
     let until = began + MERGE_BUDGET;
     let mut slowest = Duration::ZERO;
     let mut stuck = Vec::new();
-    for (member, sink) in sinks.iter().enumerate() {
+    // Each sink is shared with the task of its member.
+    let indexed_sinks: Vec<(usize, &Arc<Joined>)> = sinks.iter().enumerate().collect();
+    for (member, sink) in indexed_sinks {
         let candidates = nicks
             .iter()
             .enumerate()

@@ -65,7 +65,8 @@ pub(crate) async fn build_rendezvous_endpoint(
     // foreign (by answer, or by silence for the whole window), reads what the probe tasks
     // reported about the busy ones, and asks for what it does not know.
     let now = Instant::now();
-    for (index, &port) in params.bind_ports.iter().enumerate() {
+    let ladder: Vec<(usize, u16)> = params.bind_ports.iter().copied().enumerate().collect();
+    for (index, port) in ladder {
         // The bind is what says that a rung is free, rung by rung: it is instant, and the answer
         // of a socket check could differ from it. A rung that does not bind is read.
         match build_endpoint(
@@ -112,7 +113,7 @@ pub(crate) async fn build_rendezvous_endpoint(
                 // rungs are resolved in one window, not eight. The socket check only picks the
                 // rungs to ask early; the walk itself binds or reads one rung at a time.
                 rungs.ask(params, node, port, true);
-                for &later_port in params.bind_ports.iter().skip(index + 1) {
+                for &later_port in &params.bind_ports[index + 1..] {
                     if rung_is_busy(later_port)
                         && rungs.reading(later_port, now) == RungRead::Unknown
                     {
