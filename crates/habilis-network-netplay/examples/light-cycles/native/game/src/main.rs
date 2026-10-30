@@ -197,7 +197,7 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
     // tokio's signal handler suppresses the OS default-terminate for the
     // whole process, permanently. This CLI races its own `ctrl_c()` in
     // `render_loop` instead, and always reaches `node.leave()` below.
-    let (driver, pending) = RollbackDriver::<LightCycles>::new();
+    let (driver, pending): (RollbackDriver<LightCycles>, _) = RollbackDriver::new();
     let node: Node<RollbackDriver<LightCycles>> =
         Node::spawn(config, driver, None, SignalHandling::Leave);
     let mut game = Game::new(pending.connect(node.sender()), room.to_string(), my_nick);

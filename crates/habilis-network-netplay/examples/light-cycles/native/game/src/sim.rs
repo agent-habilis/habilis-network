@@ -114,7 +114,9 @@ mod tests {
     use crate::dir::Dir;
     use crate::input::Input;
     use crate::round_descriptor::RoundDescriptor;
-    use proptest::prelude::{Just, Strategy, any, prop, prop_assert_eq, prop_oneof, proptest};
+    use proptest::prelude::{
+        Arbitrary, Just, Strategy, prop, prop_assert_eq, prop_oneof, proptest,
+    };
 
     /// Runs `count` ticks with nobody steering.
     fn coast(desc: &RoundDescriptor, count: u16) -> World {
@@ -216,7 +218,7 @@ mod tests {
         /// uses to detect desync.
         #[test]
         fn stepping_is_a_pure_function_of_its_inputs(
-            seed in any::<u64>(),
+            seed in u64::arbitrary(),
             player_count in 2usize..5,
             script in prop::collection::vec(
                 prop::collection::vec(prop::option::of(arbitrary_dir()), 2..5),
@@ -242,7 +244,7 @@ mod tests {
 
         #[test]
         fn a_finished_outcome_never_reverts_to_in_progress(
-            seed in any::<u64>(),
+            seed in u64::arbitrary(),
             player_count in 2usize..5,
         ) {
             let _guard = ::habilis_network_test_tracing::init();

@@ -48,7 +48,7 @@ async fn spawn_bot(topic: &str, nick: &str) -> Bot {
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
 
-    let (driver, pending) = RollbackDriver::<LightCycles>::new();
+    let (driver, pending): (RollbackDriver<LightCycles>, _) = RollbackDriver::new();
     let node: Node<RollbackDriver<LightCycles>> =
         Node::spawn(config, driver, None, SignalHandling::Leave);
     let game = Game::new(pending.connect(node.sender()), topic.to_string(), author);

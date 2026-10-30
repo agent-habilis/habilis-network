@@ -73,7 +73,7 @@ fn the_simulation_survives_a_rollback_on_every_frame() {
         world: World::spawn(&descriptor),
     };
 
-    let mut session = SyncTestSession::<LightCycles>::new(PLAYERS, 4);
+    let mut session: SyncTestSession<LightCycles> = SyncTestSession::new(PLAYERS, 4);
     for frame in 0..400 {
         for player in 0..PLAYERS {
             session
