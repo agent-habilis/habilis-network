@@ -188,9 +188,10 @@ pub fn ping_window() -> Duration {
     current().ping_window
 }
 
-/// How often the CLI daemon re-reads its parent pid to detect orphaning.
-/// Hidden flag `--ppid-watch-interval-ms` so the subprocess test sees the
-/// self-exit in milliseconds instead of the production seconds.
+/// How often the CLI daemon re-reads its owner (every OS) or its parent pid
+/// (Unix, with no owner) to detect orphaning. Hidden flag
+/// `--ppid-watch-interval-ms` so the subprocess test sees the self-exit in
+/// milliseconds instead of the production seconds.
 ///
 /// Ungated, unlike its accessor: [`Tuning::DEFAULTS`] is one `const` for every
 /// target and cannot name a field that disappears off a host.
@@ -198,13 +199,23 @@ pub const PPID_WATCH_INTERVAL: Duration = Duration::from_millis(1500);
 
 /// The live value, after any CLI override of [`PPID_WATCH_INTERVAL`].
 ///
-/// Gated with its only caller (`daemon::event_loop::spawn_orphan_watch`): the
-/// orphan watch is `libc::getppid`, which arrives with `host`.
-#[cfg(all(unix, feature = "host"))]
+/// Gated with its only caller (`daemon::shutdown::spawn_orphan_watch`), which
+/// reads processes, and that arrives with `host`.
+#[cfg(feature = "host")]
 #[must_use]
 pub fn ppid_watch_interval() -> Duration {
     current().ppid_watch_interval.max(Duration::from_millis(1))
 }
+
+/// How long `file_retry::retry_while_shared` runs a rename or a remove again
+/// while a reader blocks it, on Windows. With a `PowerShell` reader in a tight
+/// loop the worst wait measured was 18 ms, for a remove, so 50 ms covers it, and it
+/// bounds the stall of the daemon loop, which writes the state file in line.
+pub const SHARED_FILE_RETRY_DEADLINE: Duration = Duration::from_millis(50);
+
+/// The sleep between two runs of `file_retry::retry_while_shared`. A read of a
+/// small file takes well under it.
+pub const SHARED_FILE_RETRY_STEP: Duration = Duration::from_millis(1);
 
 /// Process tuning sourced **once** at daemon startup from the hidden CLI
 /// flags (`--alive-timeout-secs`, …). Replaces the former env-var reads: an

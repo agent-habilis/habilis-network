@@ -15,13 +15,14 @@ use super::ctx::HandlerCtx;
 use super::state::EventLoopState;
 use crate::gossip::event::NodeEvent;
 use crate::protocol::{MeshName, Message};
-#[cfg(all(unix, feature = "host"))]
+#[cfg(feature = "host")]
 use crate::util::tuning::ppid_watch_interval;
 
 /// Graceful shutdown: remove the statusline state file first, then
 /// announce `Left` and give the broadcast a moment to reach peers.
-/// Shared by both the external-quit and ctrl-c/SIGTERM/SIGHUP paths so
-/// they can't drift apart.
+/// Shared by the external-quit path and the quit channel (ctrl-c, SIGTERM,
+/// SIGHUP, the console events and the end of the session on Windows, the
+/// owner watch, the IPC `quit` on Windows) so they can't drift apart.
 ///
 /// The state-file removal is the time-critical step: an external reader
 /// (the shell statusline) shows the mesh pill while the file is fresh,
@@ -41,6 +42,12 @@ pub(super) async fn shutdown<A: NodeDriver>(
     #[cfg(feature = "host")]
     if let Some(sf) = state.state_file.as_ref() {
         sf.remove();
+    }
+    // Explicit, not a `Drop`: in CLI mode the process leaves through
+    // `std::process::exit`, which runs no destructor.
+    #[cfg(all(windows, feature = "host"))]
+    if let Some(marker) = state.ipc_marker.as_ref() {
+        marker.remove_if_ours();
     }
     ctx.sink
         .emit(NodeEvent::Info(format!("left {}", quit.leave_label)));
@@ -91,8 +98,15 @@ pub(super) async fn announce_departure<A: NodeDriver>(
     shutdown(state, app, ctx, &quit).await;
     quit.exit_on_quit && !cfg!(feature = "dhat-heap")
 }
-/// Spawn ctrl-c (all platforms) plus SIGTERM/SIGHUP/SIGQUIT (unix)
-/// listener tasks feeding a single internal quit channel.
+/// Spawn ctrl-c (all platforms) plus SIGTERM/SIGHUP/SIGQUIT (unix) or the
+/// console events (Windows, [`spawn_console_event_tasks`]) listener tasks,
+/// and for the CLI daemon the owner or parent watch
+/// ([`spawn_orphan_watch`]) and on Windows the window of the end of the
+/// session ([`spawn_session_end_watch`]), all feeding a single internal quit
+/// channel.
+/// On Windows it returns both ends: the sender also goes to the IPC accept
+/// loop, whose `quit` feeds the same channel. On Unix it returns the receiver,
+/// as before the port.
 /// `tokio::signal::ctrl_c()` inside a `select!` branch doesn't reliably
 /// interrupt a blocking stdin read, so we offload signal listening to
 /// dedicated tasks.
@@ -104,16 +118,18 @@ pub(super) async fn announce_departure<A: NodeDriver>(
 /// the default action terminated the daemon without cleanup, stranding a
 /// ghost pill on the statusline. Only SIGKILL stays uncatchable.
 #[cfg(feature = "host")]
-pub(super) fn spawn_quit_signal_tasks(
-    exit_on_quit: bool,
-    owner: Option<Owner>,
-) -> mpsc::Receiver<()> {
+pub(super) fn spawn_quit_signal_tasks(exit_on_quit: bool, owner: Option<Owner>) -> QuitChannel {
     let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
-    let ctrl_c_tx = quit_tx.clone();
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        let _ = ctrl_c_tx.send(()).await;
-    });
+    #[cfg(not(windows))]
+    {
+        let ctrl_c_tx = quit_tx.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            let _ = ctrl_c_tx.send(()).await;
+        });
+    }
+    #[cfg(windows)]
+    spawn_console_event_tasks(&quit_tx);
     #[cfg(unix)]
     for kind in [
         tokio::signal::unix::SignalKind::terminate(),
@@ -131,11 +147,141 @@ pub(super) fn spawn_quit_signal_tasks(
     // Only the CLI daemon owns a process to exit; the in-process driver runs
     // in-process with no parent of its own to lose, so it must never self-quit
     // on a host reparent.
-    #[cfg(unix)]
     if exit_on_quit {
-        spawn_orphan_watch(quit_tx, owner);
+        spawn_orphan_watch(quit_tx.clone(), owner);
+        #[cfg(windows)]
+        spawn_session_end_watch(&quit_tx);
     }
-    quit_rx
+    #[cfg(windows)]
+    let channel = (quit_tx, quit_rx);
+    #[cfg(not(windows))]
+    let channel = quit_rx;
+    channel
+}
+
+/// What [`spawn_quit_signal_tasks`] and [`never_quit`] give: on Windows the
+/// sender and the receiver of the quit channel, because the IPC `quit` feeds
+/// it too; on other OSes the receiver alone.
+#[cfg(all(windows, feature = "host"))]
+pub(super) type QuitChannel = (mpsc::Sender<()>, mpsc::Receiver<()>);
+#[cfg(not(all(windows, feature = "host")))]
+pub(super) type QuitChannel = mpsc::Receiver<()>;
+/// The console events of Windows (R7 of `docs/windows.md`): ctrl-c,
+/// ctrl-break, the close of the console, a logoff and a shutdown all feed the
+/// quit channel, so they take the path of SIGTERM.
+///
+/// The listeners are made here, before the `tokio::spawn`, so the handler of
+/// tokio and its receivers exist when the node is ready. An event with no live
+/// receiver goes to the default handler, which ends the process with no
+/// `Left`. On a close, a logoff or a shutdown the handler of tokio never
+/// returns, because Windows ends the process when it does; the process lives
+/// until the `std::process::exit` of the quit path, or until the deadline of
+/// Windows (about 5 s).
+///
+/// A logoff and a shutdown do not reach these listeners. Windows does not give
+/// them to the console handler of a process that loaded `user32.dll`, and a
+/// node loads it: iroh's `netwatch` uses COM through `wmi`, and the runtime
+/// base uses `SHGetKnownFolderPath`. A CLI daemon gets them through the window
+/// of [`spawn_session_end_watch`]. The listeners stay, at no cost, for a build
+/// that does not load it. A process with no console gets no console event at
+/// all, and a process in a new process group ignores ctrl-c.
+#[cfg(all(windows, feature = "host"))]
+fn spawn_console_event_tasks(quit_tx: &mpsc::Sender<()>) {
+    use tokio::signal::windows;
+
+    let register = "failed to register a console event handler";
+    let mut ctrl_c = windows::ctrl_c().expect(register);
+    let mut ctrl_break = windows::ctrl_break().expect(register);
+    let mut ctrl_close = windows::ctrl_close().expect(register);
+    let mut ctrl_logoff = windows::ctrl_logoff().expect(register);
+    let mut ctrl_shutdown = windows::ctrl_shutdown().expect(register);
+    spawn_console_event(quit_tx, "ctrl_c", async move {
+        ctrl_c.recv().await;
+    });
+    spawn_console_event(quit_tx, "ctrl_break", async move {
+        ctrl_break.recv().await;
+    });
+    spawn_console_event(quit_tx, "ctrl_close", async move {
+        ctrl_close.recv().await;
+    });
+    spawn_console_event(quit_tx, "ctrl_logoff", async move {
+        ctrl_logoff.recv().await;
+    });
+    spawn_console_event(quit_tx, "ctrl_shutdown", async move {
+        ctrl_shutdown.recv().await;
+    });
+}
+/// Wait for one console event, log it, and feed the quit channel.
+#[cfg(all(windows, feature = "host"))]
+fn spawn_console_event(
+    quit_tx: &mpsc::Sender<()>,
+    event: &'static str,
+    received: impl Future<Output = ()> + Send + 'static,
+) {
+    let quit_tx = quit_tx.clone();
+    tokio::spawn(async move {
+        received.await;
+        tracing::info!(
+            target: "habilis_network::lifecycle",
+            event,
+            "console event; leaving"
+        );
+        let _ = quit_tx.send(()).await;
+    });
+}
+/// The end of the Windows session (R13 of `docs/windows.md`): a logoff, a
+/// shutdown, or a close by the Restart Manager, and a `WM_CLOSE`, which
+/// `taskkill /PID` without `/F` sends. Each feeds the quit channel. Windows
+/// does not give the end of the session to the console handler of a process
+/// that loaded `user32.dll`, only to its windows, so the daemon has a hidden
+/// one ([`crate::util::win_session`]). Only the CLI daemon has it: it alone
+/// exits the process, and it must hold the end of the session until it does.
+///
+/// Windows ends the process when the window procedure returns from
+/// `WM_ENDSESSION`, so on the end of the session the window thread never
+/// returns: it parks until the `std::process::exit` of the quit path, or until
+/// the deadline of Windows (`WaitToKillAppTimeout`, 5 s by default). A
+/// `WM_CLOSE` has no deadline, so the window thread returns from it and still
+/// gets a later end of the session.
+///
+/// With no window, the daemon runs on, and a logoff or a shutdown ends it with
+/// no `Left`, as before R13.
+#[cfg(all(windows, feature = "host"))]
+fn spawn_session_end_watch(quit_tx: &mpsc::Sender<()>) {
+    use crate::util::win_session::{SessionEvent, watch_session_end};
+
+    let quit_tx = quit_tx.clone();
+    // `try_send`: the window thread is not a task of tokio. A full channel is a
+    // quit already on its way, and a closed one is a loop that has ended. The
+    // send comes before the log, so the quit does not wait for it. The call
+    // blocks this worker until the window exists: a few milliseconds, once.
+    let watched = watch_session_end(move |event| match event {
+        SessionEvent::End(kind) => {
+            let _ = quit_tx.try_send(());
+            tracing::info!(
+                target: "habilis_network::lifecycle",
+                ?kind,
+                "session end; leaving"
+            );
+            loop {
+                std::thread::park();
+            }
+        }
+        SessionEvent::Close => {
+            let _ = quit_tx.try_send(());
+            tracing::info!(
+                target: "habilis_network::lifecycle",
+                "window close; leaving"
+            );
+        }
+    });
+    if let Err(error) = watched {
+        tracing::warn!(
+            target: "habilis_network::lifecycle",
+            %error,
+            "no window for the end of the session; a logoff or a shutdown ends this daemon with no Left"
+        );
+    }
 }
 /// Whether `pid` can own a daemon, with the checks and messages of
 /// `EventLoopConfig::with_owner_pid`. For a launcher that must refuse a bad
@@ -143,7 +289,8 @@ pub(super) fn spawn_quit_signal_tasks(
 ///
 /// # Errors
 /// `pid` is 0 or 1, the calling process's own pid, or no live process has it
-/// (a zombie counts as dead). The message is one line.
+/// (a zombie counts as dead), or this process cannot read it (on Windows, an
+/// owner of another account). The message is one line.
 #[cfg(feature = "host")]
 pub fn validate_owner_pid(pid: u32) -> anyhow::Result<()> {
     owner_start(pid).map(drop)
@@ -159,8 +306,13 @@ fn owner_start(pid: u32) -> anyhow::Result<u64> {
         pid != std::process::id(),
         "owner pid {pid} is this process itself"
     );
-    crate::util::process::live_start_time(pid)
-        .ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running"))
+    #[cfg(windows)]
+    let start = crate::util::process::live_start_time(pid)
+        .ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running or cannot be read"));
+    #[cfg(not(windows))]
+    let start = crate::util::process::live_start_time(pid)
+        .ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running"));
+    start
 }
 /// The process a detached daemon lives for, in place of its parent. The pid
 /// alone cannot tell the owner from a later process that reuses the pid, so
@@ -187,6 +339,9 @@ impl Owner {
         self.pid
     }
 
+    /// The owner exited, or its pid now names another process. On Windows
+    /// `live_start_time` gives `None` also for an owner that this process can no
+    /// longer read, which counts as lost: the watch fails closed.
     fn lost(self) -> bool {
         crate::util::process::live_start_time(self.pid) != Some(self.start)
     }
@@ -194,23 +349,36 @@ impl Owner {
 /// Detect orphaning by the spawning agent and route it through the same quit
 /// channel as a signal. A hard-killed parent (`kill -9`, a reinstall, an IDE
 /// restart) can't run any cleanup, so the spawned daemon is reparented instead
-/// of terminated and would otherwise linger in the mesh forever. The daemon
-/// watches its *own* parent — the only mechanism that survives SIGKILL and is
-/// identical on macOS and Linux (`PR_SET_PDEATHSIG` and kqueue `NOTE_EXIT` are
-/// each platform-specific). When the parent vanishes we feed `quit_tx`, reusing
-/// the SIGTERM path that broadcasts `left` and exits cleanly.
-// `unix` alone is not enough: `libc` arrives with the `host` feature.
-#[cfg(all(unix, feature = "host"))]
-#[expect(
-    unsafe_code,
-    reason = "libc::getppid FFI; no safe wrapper, always succeeds"
-)]
+/// of terminated and would otherwise linger in the mesh forever. When the
+/// owner or the parent vanishes we feed `quit_tx`, reusing the SIGTERM path
+/// that broadcasts `left` and exits cleanly.
+///
+/// With an [`Owner`], every OS watches the owner. Without one, Unix watches
+/// the parent ([`spawn_parent_watch`]), and Windows watches nothing: it does
+/// not reparent an orphan, and the pid of a dead parent can be reused, so
+/// there is nothing to compare. A Windows launcher passes `--owner-pid`.
+#[cfg(feature = "host")]
 fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>, owner: Option<Owner>) {
     let interval = ppid_watch_interval();
     if let Some(owner) = owner {
         tokio::spawn(watch_owner(owner, interval, quit_tx));
         return;
     }
+    #[cfg(unix)]
+    spawn_parent_watch(quit_tx, interval);
+    #[cfg(not(unix))]
+    drop(quit_tx);
+}
+/// The watch of a daemon with no [`Owner`]: its *own* parent — the only
+/// mechanism that survives SIGKILL and is identical on macOS and Linux
+/// (`PR_SET_PDEATHSIG` and kqueue `NOTE_EXIT` are each platform-specific).
+// `unix` alone is not enough: `libc` arrives with the `host` feature.
+#[cfg(all(unix, feature = "host"))]
+#[expect(
+    unsafe_code,
+    reason = "libc::getppid FFI; no safe wrapper, always succeeds"
+)]
+fn spawn_parent_watch(quit_tx: mpsc::Sender<()>, interval: Duration) {
     let original_ppid = unsafe { libc::getppid() };
     if !orphan_watch_warranted(original_ppid) {
         return;
@@ -226,13 +394,20 @@ fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>, owner: Option<Owner>) {
         }
     });
 }
-/// The orphan watch of a daemon with an [`Owner`]: its parent is init, so the
-/// owner's exit is the one event that ends it.
-#[cfg(all(unix, feature = "host"))]
+/// The orphan watch of a daemon with an [`Owner`], on every OS: its parent is
+/// init (or, on Windows, of no use), so the owner's exit is the one event that
+/// ends it. The start time of [`Owner::lost`] guards against pid reuse.
+#[cfg(feature = "host")]
 async fn watch_owner(owner: Owner, interval: Duration, quit_tx: mpsc::Sender<()>) {
     loop {
         n0_future::time::sleep(interval).await;
         if owner.lost() {
+            #[cfg(windows)]
+            tracing::info!(
+                target: "habilis_network::lifecycle",
+                owner_pid = owner.pid(),
+                "owner exited; leaving"
+            );
             let _ = quit_tx.send(()).await;
             return;
         }
@@ -254,12 +429,42 @@ pub(super) fn orphan_watch_warranted(original_ppid: i32) -> bool {
 pub(super) fn parent_lost(original_ppid: i32, current_ppid: i32) -> bool {
     original_ppid != current_ppid
 }
-/// A quit channel whose sender is deliberately leaked, so the receiver parks
-/// forever. The loop's quit arm then only ever fires from `external_quit_rx`.
-pub(super) fn never_quit() -> mpsc::Receiver<()> {
+/// A quit channel that no signal feeds. Its sender is leaked, so the receiver
+/// never reads `None` (the loop's quit arm fires on one). On Windows a clone is
+/// leaked and the sender goes back to the caller, so the arm fires only from
+/// `external_quit_rx` or an IPC `quit`; only a CLI session binds an IPC
+/// endpoint, and it always has its signals. Elsewhere the arm fires only from
+/// `external_quit_rx`.
+pub(super) fn never_quit() -> QuitChannel {
     let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
-    std::mem::forget(quit_tx);
-    quit_rx
+    #[cfg(all(windows, feature = "host"))]
+    let channel = {
+        std::mem::forget(quit_tx.clone());
+        (quit_tx, quit_rx)
+    };
+    #[cfg(not(all(windows, feature = "host")))]
+    let channel = {
+        std::mem::forget(quit_tx);
+        quit_rx
+    };
+    channel
+}
+
+#[cfg(all(test, windows, feature = "host"))]
+mod never_quit_tests {
+    use habilis_network_test_tracing::test;
+    use std::time::Duration;
+
+    use super::never_quit;
+
+    #[test]
+    async fn a_never_quit_channel_stays_open_when_its_sender_drops() {
+        let (quit_tx, mut quit_rx) = never_quit();
+        drop(quit_tx);
+        // A closed channel would give `None` at once, and the quit arm fires on it.
+        let read = tokio::time::timeout(Duration::from_millis(100), quit_rx.recv()).await;
+        assert!(read.is_err(), "the channel closed: {read:?}");
+    }
 }
 
 /// What the loop closes as it ends: the router with its endpoint, and the multi-hop
@@ -298,24 +503,39 @@ impl OwnedEndpoints {
     }
 }
 
-#[cfg(all(unix, feature = "host"))]
-#[cfg(test)]
+#[cfg(all(test, feature = "host"))]
 mod tests {
     use habilis_network_test_tracing::test;
-    use std::process::{Child, Command};
+    use std::process::{Child, Command, Stdio};
     use std::time::Duration;
 
     use tokio::sync::mpsc;
 
-    use super::{Owner, orphan_watch_warranted, parent_lost, validate_owner_pid, watch_owner};
+    use super::{Owner, validate_owner_pid, watch_owner};
 
     const TICK: Duration = Duration::from_millis(10);
 
+    /// A process that lives for about 30 s. Each OS has its own idle command,
+    /// as in the `idle_child` of the util crate.
     fn spawn_owner() -> Child {
-        Command::new("sleep")
-            .arg("30")
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = Command::new("sleep");
+            command.arg("30");
+            command
+        };
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("ping");
+            command.args(["-n", "30", "127.0.0.1"]);
+            command
+        };
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
-            .expect("spawn sleep")
+            .expect("spawn an idle owner")
     }
 
     /// Run the owner watch; `true` when it quit within `within`.
@@ -345,6 +565,8 @@ mod tests {
         assert!(watch_quits(owner, Duration::from_secs(2)).await);
     }
 
+    /// On Windows the killed child is held open by its `Child`, which is the
+    /// case "exited, but still open" of `live_start_time`.
     #[test]
     async fn owner_watch_quits_when_the_owner_is_an_unreaped_zombie() {
         let mut child = spawn_owner();
@@ -406,25 +628,8 @@ mod tests {
         assert!(Owner::new(pid).is_err());
     }
 
-    #[test]
-    fn orphan_watch_fires_only_on_a_parent_change() {
-        // The agent that spawned us is alive ⇒ same ppid ⇒ stay running.
-        assert!(!parent_lost(4242, 4242));
-        // The agent died ⇒ reparented to launchd (1) ⇒ orphaned, quit.
-        assert!(parent_lost(4242, 1));
-        // …or, under a systemd subreaper, to some other pid ⇒ still orphaned.
-        assert!(parent_lost(4242, 990));
-    }
-
-    #[test]
-    fn orphan_watch_skips_an_already_detached_daemon() {
-        // Spawned by a normal agent ⇒ worth watching.
-        assert!(orphan_watch_warranted(4242));
-        // Launched detached straight from init/launchd ⇒ no parent to lose.
-        assert!(!orphan_watch_warranted(1));
-    }
-
     /// The test binary runs this test again, in a process of its own, with this variable set.
+    #[cfg(unix)]
     const QUIT_CHILD: &str = "HABILIS_TEST_CLI_QUIT_CHILD";
 
     /// A CLI quit announces the departure and asks the loop to exit the process, which it does
@@ -432,6 +637,7 @@ mod tests {
     /// that exits inside the announcement skips both: the peers of the beacon wait for its idle
     /// timeout, and its endpoints are never closed. The check runs in a child process, because
     /// an exit inside the announcement ends the process.
+    #[cfg(unix)]
     #[test]
     async fn a_cli_quit_leaves_the_exit_to_the_loop() {
         use super::{QuitParams, announce_departure};
@@ -477,5 +683,29 @@ mod tests {
             stdout.contains(&format!("QUIT_ANNOUNCED exit={exit}")),
             "the process exited inside the quit, before the loop released its endpoints: {stdout}"
         );
+    }
+}
+
+/// The watch of the parent pid, which only Unix has.
+#[cfg(all(test, unix, feature = "host"))]
+mod parent_watch_tests {
+    use super::{orphan_watch_warranted, parent_lost};
+
+    #[test]
+    fn orphan_watch_fires_only_on_a_parent_change() {
+        // The agent that spawned us is alive ⇒ same ppid ⇒ stay running.
+        assert!(!parent_lost(4242, 4242));
+        // The agent died ⇒ reparented to launchd (1) ⇒ orphaned, quit.
+        assert!(parent_lost(4242, 1));
+        // …or, under a systemd subreaper, to some other pid ⇒ still orphaned.
+        assert!(parent_lost(4242, 990));
+    }
+
+    #[test]
+    fn orphan_watch_skips_an_already_detached_daemon() {
+        // Spawned by a normal agent ⇒ worth watching.
+        assert!(orphan_watch_warranted(4242));
+        // Launched detached straight from init/launchd ⇒ no parent to lose.
+        assert!(!orphan_watch_warranted(1));
     }
 }

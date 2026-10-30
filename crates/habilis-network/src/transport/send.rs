@@ -36,7 +36,9 @@ pub type PendingSend = oneshot::Receiver<Result<()>>;
 /// It returns at once: it never waits on a dial, on the wait for a direct path, or on a write.
 /// A broadcast, a frame held for a direct path, a refused frame, and a send to a warm connection
 /// give their verdict here. A directed message to a cold peer is sent by a task, and the verdict
-/// comes through [`Delivered::Pending`].
+/// comes through [`Delivered::Pending`]. On Windows, a warm connection with no direct path
+/// selected gives its verdict through [`Delivered::Pending`], after a wait of up to the
+/// path-select budget.
 ///
 /// # Errors
 /// Propagates a gossip broadcast failure, a refused path, or a cold peer on the dial-failure
@@ -104,7 +106,8 @@ pub(crate) fn resolve(msg: &Verified, bytes: WireFrame, state: &EventLoopState) 
 ///   second never does, so a retry budget must not rely on it.
 /// - its only path is a relay that carries no payload. A connection dialed
 ///   moments ago reads the same way until its path is selected, for up to
-///   the path-select budget.
+///   the path-select budget. On Windows this case returns `true`: the send waits on a task, and
+///   a refusal at the end is only logged.
 /// - it is cold and on the per-peer dial-failure cooldown.
 /// - the gossip broadcast failed.
 ///
@@ -285,7 +288,14 @@ fn directly_meshed(nick: &Nickname, state: &EventLoopState) -> bool {
 async fn send_unicast(eid: EndpointId, bytes: WireFrame, pool: &UnicastPool) -> Result<Delivered> {
     match pool.send_if_warm(eid, bytes.clone().into_bytes()).await {
         WarmSend::Sent => Ok(Delivered::Done),
+        #[cfg(not(windows))]
         WarmSend::Refused => Err(anyhow::anyhow!("{}", super::RELAY_REFUSED)),
+        // Windows only (#45). A probe can pool a connection before iroh opens the selected path
+        // on it, and the connection then reads as no path selected. Here the send waits for a
+        // direct path as a cold send does, up to `PATH_SELECT_TIMEOUT`, and fails with the same
+        // refusal if none is selected.
+        #[cfg(windows)]
+        WarmSend::Refused => Ok(Delivered::Pending(send_after_path_wait(eid, bytes, pool))),
         WarmSend::Cold => {
             if pool.is_cooling(eid).await {
                 return Err(anyhow::anyhow!("{COOLDOWN_REFUSED}")
@@ -308,6 +318,27 @@ async fn send_unicast(eid: EndpointId, bytes: WireFrame, pool: &UnicastPool) -> 
             Ok(Delivered::Pending(outcome))
         }
     }
+}
+
+/// The send of a warm connection that has no direct path selected yet, on a task. The guard of
+/// the dial is taken first, as for a cold send, so a second send to the peer that also finds no
+/// direct path waits for this one. A send that finds a direct path does not wait, so the order
+/// of the two is not guaranteed. The wait counts as a dial attempt. The error is not given a
+/// context: a send that finds no direct path fails with the bare refusal.
+#[cfg(windows)]
+fn send_after_path_wait(eid: EndpointId, bytes: WireFrame, pool: &UnicastPool) -> PendingSend {
+    let registration = pool.register_dial(eid);
+    let (outcome_tx, outcome) = oneshot::channel();
+    let pool = pool.clone();
+    n0_future::task::spawn(async move {
+        let sent = pool
+            .send_registered(registration, eid, bytes.into_bytes())
+            .await;
+        if let Err(Err(error)) = outcome_tx.send(sent) {
+            tracing::debug!(target: "habilis_network::gossip", %eid, %error, "background send not delivered");
+        }
+    });
+    outcome
 }
 
 /// Send a courtesy reply from the receive path, where a stall is not this
@@ -768,6 +799,131 @@ mod tests {
         );
         returned_endpoint.close().await;
         endpoint.close().await;
+    }
+
+    /// Alice holds a warm connection to bob whose only path is a local relay, on a mesh whose
+    /// relay is lookup only: no direct path can be selected on it. Bob holds the connection and
+    /// reports a frame if one ever arrives.
+    async fn relay_only_warm_pair() -> RelayOnlyPair {
+        let (relay_url, relay_server) = crate::lookup::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let bind = || {
+            let relay_url = relay_url.clone();
+            async move {
+                iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                    .relay_mode(iroh::RelayMode::custom([relay_url]))
+                    .clear_ip_transports()
+                    .alpns(vec![crate::transport::UNICAST_ALPN.to_vec()])
+                    .bind()
+                    .await
+                    .expect("bind an endpoint on the relay")
+            }
+        };
+        let bob_endpoint = bind().await;
+        let endpoint = bind().await;
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let bob_addr = iroh::EndpointAddr::new(bob_endpoint.id()).with_relay_url(relay_url);
+        let state = state_with_pool(&endpoint, bob_addr);
+        let accepting = bob_endpoint.clone();
+        let received = tokio::spawn(async move {
+            let conn = accepting
+                .accept()
+                .await
+                .expect("an incoming connection")
+                .await
+                .expect("accept the connection");
+            match conn.accept_uni().await {
+                Ok(mut stream) => stream.read_to_end(64 * 1024).await.ok(),
+                Err(_) => None,
+            }
+        });
+        state
+            .unicast_pool
+            .warm_or_dial(endpoint_of_bob(&state))
+            .await
+            .expect("warm the pool over the relay");
+        RelayOnlyPair {
+            state,
+            endpoint,
+            sender: crate::transport::MeshSender::new(gossip_sender),
+            bob_endpoint,
+            received,
+            _relay_server: relay_server,
+        }
+    }
+
+    struct RelayOnlyPair {
+        state: EventLoopState,
+        endpoint: iroh::Endpoint,
+        sender: crate::transport::MeshSender,
+        bob_endpoint: iroh::Endpoint,
+        received: tokio::task::JoinHandle<Option<Vec<u8>>>,
+        _relay_server: iroh_relay::server::Server,
+    }
+
+    impl RelayOnlyPair {
+        /// Whether bob read a frame within a short wait after the verdict.
+        async fn bob_read_a_frame(self) -> bool {
+            let got =
+                tokio::time::timeout(std::time::Duration::from_millis(200), self.received).await;
+            self.bob_endpoint.close().await;
+            self.endpoint.close().await;
+            match got {
+                Err(_) => false,
+                Ok(joined) => joined.expect("bob's accept task").is_some(),
+            }
+        }
+    }
+
+    /// On Windows a warm connection with no direct path selected waits for one, as a cold send
+    /// does, and is refused with the bare refusal at the end of the path-select budget.
+    #[cfg(windows)]
+    #[test]
+    async fn on_windows_a_warm_send_with_no_direct_path_waits_then_is_refused() {
+        let pair = relay_only_warm_pair().await;
+        let msg = directed_msg();
+        let bytes = msg.serialize().expect("serialize");
+        let started = std::time::Instant::now();
+
+        let delivered = super::deliver(&msg, bytes, &pair.state, &pair.sender).await;
+
+        let Ok(super::Delivered::Pending(outcome)) = delivered else {
+            panic!("the warm send must wait on a task, got {delivered:?}");
+        };
+        let error = outcome
+            .await
+            .expect("the task answers")
+            .expect_err("no direct path can come over the relay");
+        assert_eq!(error.to_string(), crate::transport::RELAY_REFUSED);
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(5),
+            "the refusal came before the path-select budget: {:?}",
+            started.elapsed()
+        );
+        assert!(!pair.bob_read_a_frame().await, "the refused frame arrived");
+    }
+
+    /// Elsewhere a warm connection with no direct path selected is refused at once.
+    #[cfg(not(windows))]
+    #[test]
+    async fn a_warm_send_with_no_direct_path_is_refused_at_once() {
+        let pair = relay_only_warm_pair().await;
+        let msg = directed_msg();
+        let bytes = msg.serialize().expect("serialize");
+
+        let delivered = super::deliver(&msg, bytes, &pair.state, &pair.sender).await;
+
+        let Err(error) = delivered else {
+            panic!("the warm send must be refused at once, got {delivered:?}");
+        };
+        assert_eq!(error.to_string(), crate::transport::RELAY_REFUSED);
+        assert!(!pair.bob_read_a_frame().await, "the refused frame arrived");
     }
 
     fn endpoint_of_bob(state: &EventLoopState) -> EndpointId {

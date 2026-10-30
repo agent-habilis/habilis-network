@@ -140,6 +140,14 @@ pub enum Request {
         blocked: bool,
         reply: oneshot::Sender<()>,
     },
+    /// Tests only, Windows only: make this node re-select the path of its link to the
+    /// rendezvous now, as [`Request::BlockUdp`] does for its peers. iroh re-selects
+    /// only on path events, and a host with one address may give the link none
+    /// inside a test (#44). Nothing happens when the node holds no rendezvous link.
+    #[cfg(all(windows, feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    NudgeRendezvous {
+        reply: oneshot::Sender<()>,
+    },
     /// Tests only: add `addr` to the addresses this node advertises, as an
     /// external address. The address of the node's endpoint changes, which is
     /// what a late home relay or an interface change does.
@@ -957,6 +965,18 @@ impl NodeDriver for MembershipApp {
                     let peer = addr.id;
                     n0_future::task::spawn(async move {
                         crate::transport::webrtc::nudge(&endpoint, peer).await;
+                    });
+                }
+                let _ = reply.send(());
+                false
+            }
+            #[cfg(all(windows, feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::NudgeRendezvous { reply } => {
+                if state.rendezvous_linked {
+                    let endpoint = ctx.endpoint.clone();
+                    let rendezvous = ctx.rendezvous_id;
+                    n0_future::task::spawn(async move {
+                        crate::transport::webrtc::nudge(&endpoint, rendezvous).await;
                     });
                 }
                 let _ = reply.send(());

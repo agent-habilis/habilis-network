@@ -26,6 +26,11 @@ pub trait NodeDriver: NodeApp {
     /// `transport::ipc` socket server deserializes it (hence `DeserializeOwned`)
     /// and forwards it here; its variants are the app's own typed command set,
     /// opaque to the engine.
+    ///
+    /// On Windows the engine answers one command itself, before this type sees
+    /// the line: a JSON object whose `command` is `"quit"` and whose `mesh` is a
+    /// valid mesh id (`runtime::ipc::quit`). An app command with that shape
+    /// never arrives there. On Unix every line arrives.
     type Ipc: DeserializeOwned + Send + 'static;
 
     /// Seed the session state file with the app's discovery fields (the application
@@ -152,6 +157,9 @@ pub trait NodeDriver: NodeApp {
     ///
     /// Defaults to answering with a not-supported error and returning `false` —
     /// an app whose [`Self::Ipc`] is a trivial type serves no IPC command set.
+    ///
+    /// On Windows the `quit` of the engine never arrives here (see
+    /// [`Self::Ipc`]).
     async fn handle_ipc(
         &mut self,
         req: IpcRequest<'_, Self::Ipc>,

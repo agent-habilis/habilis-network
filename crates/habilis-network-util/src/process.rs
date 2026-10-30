@@ -81,8 +81,245 @@ pub fn comm_of(pid: u32) -> Option<String> {
     Some(comm.trim_end().to_string())
 }
 
+/// The Windows process queries. A handle is an [`OwnedHandle`], so each one
+/// closes on every path out.
+#[cfg(windows)]
+mod windows {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt as _;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, FILETIME, INVALID_HANDLE_VALUE, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+
+    /// 100 ns intervals from 1601-01-01 (`FILETIME`) to 1970-01-01.
+    const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
+
+    /// `MAX_PATH` is not a limit of the image name that the kernel returns, so
+    /// the buffer holds the longest path that NTFS allows.
+    const IMAGE_NAME_UTF16_MAX: usize = 32_768;
+
+    /// The error is read here, next to the call, so no other call can replace
+    /// `GetLastError` before the caller looks at it.
+    #[expect(unsafe_code, reason = "OpenProcess FFI; no safe std wrapper exists")]
+    fn open(pid: u32) -> std::io::Result<OwnedHandle> {
+        // SAFETY: the arguments are plain values. The call returns a new handle,
+        // or null with the error in `GetLastError`.
+        let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if raw.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `raw` is a handle that `OpenProcess` just made and nothing else
+        // owns or closes.
+        Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
+    }
+
+    /// Whether the process has not exited. A handle outlives its process, so a
+    /// process that has exited but that someone still holds open exists, and
+    /// reads as not active here.
+    ///
+    /// The two systems differ for an exited process that is not yet reaped (a
+    /// zombie): the Unix `is_alive` is `true` for it, because `kill(pid, 0)`
+    /// succeeds, and the Windows `is_alive` is `false`. `live_start_time` is
+    /// `None` for both.
+    ///
+    /// The limit is the R4 table as written: a process that exited with the
+    /// code 259 (`STILL_ACTIVE`) reads as active for as long as a handle to it
+    /// is open.
+    #[expect(unsafe_code, reason = "GetExitCodeProcess FFI; no safe std wrapper")]
+    fn still_active(handle: &OwnedHandle) -> Option<bool> {
+        let mut code = 0_u32;
+        // SAFETY: `handle` is open for the call, and `code` is a valid pointer
+        // to one `u32`.
+        let ok = unsafe { GetExitCodeProcess(handle.as_raw_handle(), &raw mut code) };
+        (ok != 0).then(|| code == STILL_ACTIVE.cast_unsigned())
+    }
+
+    pub(super) fn is_alive(pid: u32) -> bool {
+        match open(pid) {
+            Ok(handle) => still_active(&handle).unwrap_or(false),
+            // The twin of `EPERM`: a protected process refuses the query, and
+            // that refusal proves that it exists. A pid with no process gives
+            // `ERROR_INVALID_PARAMETER`.
+            Err(error) => error.raw_os_error() == i32::try_from(ERROR_ACCESS_DENIED).ok(),
+        }
+    }
+
+    /// The creation time of an open process as the raw `FILETIME` value: ticks
+    /// of 100 ns since 1601-01-01. The one source of the start time and of the
+    /// guard of `parent_of`, so the two times that the guard compares have the
+    /// same unit and the same clock.
+    #[expect(unsafe_code, reason = "GetProcessTimes FFI; no safe std wrapper")]
+    fn creation_ticks(handle: &OwnedHandle) -> Option<u64> {
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        // SAFETY: `handle` is open for the call, and the four pointers are valid
+        // and distinct. Only the creation time is read.
+        let ok = unsafe {
+            GetProcessTimes(
+                handle.as_raw_handle(),
+                &raw mut created,
+                &raw mut exited,
+                &raw mut kernel,
+                &raw mut user,
+            )
+        };
+        (ok != 0)
+            .then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+    }
+
+    /// The creation time, in microseconds since the Unix epoch.
+    pub(super) fn live_start_time(pid: u32) -> Option<u64> {
+        let handle = open(pid).ok()?;
+        if !still_active(&handle)? {
+            return None;
+        }
+        let ticks = creation_ticks(&handle)?;
+        Some(ticks.saturating_sub(FILETIME_UNIX_EPOCH) / 10)
+    }
+
+    #[expect(
+        unsafe_code,
+        reason = "QueryFullProcessImageNameW FFI; no safe wrapper"
+    )]
+    pub(super) fn comm_of(pid: u32) -> Option<String> {
+        let handle = open(pid).ok()?;
+        let mut buffer = vec![0_u16; IMAGE_NAME_UTF16_MAX];
+        let mut length = u32::try_from(buffer.len()).ok()?;
+        // SAFETY: `handle` is open for the call. `buffer` holds `length` code
+        // units, and the call writes at most that many, the terminating null
+        // included, then sets `length` to the count of units before the null.
+        let ok = unsafe {
+            QueryFullProcessImageNameW(
+                handle.as_raw_handle(),
+                0,
+                buffer.as_mut_ptr(),
+                &raw mut length,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        // `OsString`, not `String`: a path with an unpaired surrogate is a valid
+        // Windows path, and `String::from_utf16` would fail for the whole of it.
+        let image = OsString::from_wide(buffer.get(..usize::try_from(length).ok()?)?);
+        // The file stem, so `node.exe` and `node` compare equal: the Unix `comm`
+        // has no extension.
+        let stem = std::path::Path::new(&image).file_stem()?;
+        Some(stem.to_string_lossy().into_owned())
+    }
+
+    /// Walk a snapshot of the processes, and return the first value that `pick`
+    /// makes from an entry.
+    #[expect(unsafe_code, reason = "Toolhelp snapshot FFI; no safe std wrapper")]
+    pub(super) fn find_in_snapshot<T>(
+        mut pick: impl FnMut(&PROCESSENTRY32W) -> Option<T>,
+    ) -> Option<T> {
+        // SAFETY: the arguments are plain values. The call returns a new
+        // snapshot handle, or `INVALID_HANDLE_VALUE`.
+        let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if raw == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        // SAFETY: `raw` is a handle that the call above just made and nothing
+        // else owns or closes.
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: u32::try_from(size_of::<PROCESSENTRY32W>()).ok()?,
+            ..PROCESSENTRY32W::default()
+        };
+        // SAFETY: `snapshot` is open for the call, and `entry` is a valid pointer
+        // to a `PROCESSENTRY32W` with `dwSize` set, as the API requires.
+        let mut more = unsafe { Process32FirstW(snapshot.as_raw_handle(), &raw mut entry) } != 0;
+        while more {
+            if let Some(found) = pick(&entry) {
+                return Some(found);
+            }
+            // SAFETY: as for `Process32FirstW` above.
+            more = unsafe { Process32NextW(snapshot.as_raw_handle(), &raw mut entry) } != 0;
+        }
+        None
+    }
+
+    /// A parent is plausible when it was created no later than its child. Windows
+    /// does not reparent: after a creator exits, its pid can name a process that
+    /// was created after the child, and that process is not the parent.
+    pub(super) fn accepts_parent(parent_created: u64, child_created: u64) -> bool {
+        parent_created <= child_created
+    }
+
+    /// The creator of `pid`, when the creator is still a live process that was
+    /// created no later than `pid`. Both times come from `GetProcessTimes`. A
+    /// process that this user may not query has no verified parent, so it has
+    /// `None`: the guard fails closed.
+    pub(super) fn parent_of(pid: u32) -> Option<u32> {
+        let creator = find_in_snapshot(|entry| {
+            (entry.th32ProcessID == pid).then_some(entry.th32ParentProcessID)
+        })?;
+        let child_created = creation_ticks(&open(pid).ok()?)?;
+        let parent = open(creator).ok()?;
+        if !still_active(&parent)? {
+            return None;
+        }
+        accepts_parent(creation_ticks(&parent)?, child_created).then_some(creator)
+    }
+}
+
+/// The parent of `pid`: the process that created it. `None` for a pid that is
+/// not in the process snapshot, and for a creator that has exited or that was
+/// created after its child, because Windows does not reparent and the pid of an
+/// exited creator can name an unrelated process now. This guard goes beyond the
+/// R4 table of `docs/windows.md`. A process that this user may not query has no
+/// verified parent, so it also gives `None`.
+#[cfg(windows)]
+#[must_use]
+pub fn parent_of(pid: u32) -> Option<u32> {
+    windows::parent_of(pid)
+}
+
+/// The start time of a live process, in microseconds since the epoch. `None`
+/// for a pid with no process, or one that has exited but is still held open.
+#[cfg(windows)]
+#[must_use]
+pub fn live_start_time(pid: u32) -> Option<u64> {
+    windows::live_start_time(pid)
+}
+
+/// The image name of the process without `.exe`. `None` when the process is not
+/// there, or is one that this user may not query.
+///
+/// The names are not the same on every OS. Windows keeps the case of the file
+/// name and has no length limit, and Linux cuts `comm` at 15 bytes. A caller
+/// that compares a name must compare it on one OS only, or by a prefix.
+#[cfg(windows)]
+#[must_use]
+pub fn comm_of(pid: u32) -> Option<String> {
+    windows::comm_of(pid)
+}
+
+/// Whether a process with this pid exists and has not exited. A protected
+/// process that refuses the query still counts as alive, as `EPERM` does on
+/// Unix. An exited process that is held open does not; see `still_active` for
+/// the difference from the Unix zombie.
+#[cfg(windows)]
+#[must_use]
+pub fn is_alive(pid: u32) -> bool {
+    windows::is_alive(pid)
+}
+
 /// Whether a process with this pid exists (regardless of whether we could
 /// signal it: `EPERM` still proves existence).
+#[cfg(unix)]
 #[expect(
     unsafe_code,
     reason = "libc::kill(pid, 0) FFI; no safe existence probe exists"
@@ -98,6 +335,11 @@ pub fn is_alive(pid: u32) -> bool {
 
 /// Ask a process to terminate (SIGTERM) — the graceful path: a mesh daemon
 /// catches it, broadcasts `left`, and removes its state file.
+///
+/// This only signals a pid. To stop a daemon on every OS, use
+/// `runtime::ipc::terminate` of `habilis-network`: on Windows it sends the IPC
+/// `quit`, and on Unix it sends this signal.
+#[cfg(unix)]
 #[expect(unsafe_code, reason = "libc::kill FFI; no safe wrapper")]
 /// # Errors
 /// Propagates the `kill(2)` failure — no such process, or no permission.
@@ -110,6 +352,18 @@ pub fn terminate(pid: u32) -> std::io::Result<()> {
     } else {
         Err(std::io::Error::last_os_error())
     }
+}
+
+/// Windows has no polite signal, and `TerminateProcess` is a hard kill that
+/// skips the `left` broadcast. This crate sits below the IPC and holds only the
+/// pid, so it cannot stop a daemon here. `runtime::ipc::terminate` of
+/// `habilis-network` does, with the IPC `quit` command.
+///
+/// # Errors
+/// Always [`std::io::ErrorKind::Unsupported`].
+#[cfg(windows)]
+pub fn terminate(_pid: u32) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
 }
 
 /// Whether `ancestor` appears in `pid`'s parent chain (proper ancestors
@@ -144,6 +398,133 @@ mod tests {
         std::process::id()
     }
 
+    /// A child that lives long enough for a test to look at it, and that the
+    /// test must `kill` and `wait`. Each OS has its own idle command.
+    fn idle_child() -> std::process::Child {
+        use std::process::{Command, Stdio};
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = Command::new("sleep");
+            command.arg("30");
+            command
+        };
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("ping");
+            command.args(["-n", "30", "127.0.0.1"]);
+            command
+        };
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn an idle child")
+    }
+
+    #[test]
+    fn parent_of_a_child_is_this_process() {
+        let mut child = idle_child();
+        let parent = parent_of(child.id());
+        child.kill().expect("kill the child");
+        child.wait().expect("wait for the child");
+        assert_eq!(parent, Some(self_pid()));
+    }
+
+    /// The rule of the guard of `parent_of`, without a process: the parent is
+    /// accepted when it is not newer than the child. The rejection by a pid that
+    /// was reused cannot be made with real processes without a race.
+    #[cfg(windows)]
+    #[test]
+    fn a_parent_created_after_its_child_is_rejected() {
+        use super::windows::accepts_parent;
+        assert!(accepts_parent(100, 200));
+        assert!(accepts_parent(200, 200));
+        assert!(!accepts_parent(201, 200));
+    }
+
+    /// A launcher starts a child and exits, so the child's creator is gone. The
+    /// kept `Child` holds the launcher's handle, so its pid cannot be reused, and
+    /// the guard sees a dead creator.
+    #[cfg(windows)]
+    #[test]
+    fn parent_of_a_child_whose_creator_has_exited_is_none() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let mut launcher = Command::new("cmd")
+            .args(["/C", "start /B ping -n 10 127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the launcher");
+        let launcher_pid = launcher.id();
+        launcher.wait().expect("wait for the launcher");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let orphan = loop {
+            let found = super::windows::find_in_snapshot(|entry| {
+                (entry.th32ParentProcessID == launcher_pid).then_some(entry.th32ProcessID)
+            });
+            if let Some(pid) = found {
+                break pid;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the launcher's child is not there"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        // Not vacuous: the child is a live process, and only its creator is gone.
+        assert!(is_alive(orphan));
+        assert_eq!(parent_of(orphan), None);
+        drop(launcher);
+    }
+
+    /// The child is waited for and the `Child` is kept. On Windows, `Child` holds
+    /// the process handle, so the process still exists and its pid cannot be
+    /// reused: the case "exited, but held open". On Unix the wait reaps the
+    /// child, and no process has the pid.
+    #[test]
+    fn an_exited_child_has_no_live_start_time() {
+        let mut child = idle_child();
+        let pid = child.id();
+        assert!(live_start_time(pid).is_some(), "the child is live");
+        child.kill().expect("kill the child");
+        child.wait().expect("wait for the child");
+        assert_eq!(live_start_time(pid), None);
+        // Only here is the pid sure to be unused by another process: the handle
+        // of `child` is still open.
+        #[cfg(windows)]
+        assert!(!is_alive(pid));
+        drop(child);
+    }
+
+    /// The Unix case that the Windows test above cannot have: a killed child
+    /// that nobody has waited for is a zombie. It still exists, so `is_alive` is
+    /// `true`, and it has no start time. The Windows `is_alive` is `false` here;
+    /// see `still_active`.
+    #[cfg(unix)]
+    #[test]
+    fn a_zombie_child_is_alive_but_has_no_live_start_time() {
+        let mut child = idle_child();
+        let pid = child.id();
+        child.kill().expect("kill the child");
+        // SIGKILL is asynchronous: wait for the child to become a zombie.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while live_start_time(pid).is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child did not die"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let alive = is_alive(pid);
+        child.wait().expect("wait for the child");
+        assert!(alive, "a zombie still exists");
+    }
+
+    #[cfg(unix)]
     #[test]
     fn parent_of_self_is_our_ppid() {
         #[expect(unsafe_code, reason = "libc::getppid FFI; always succeeds")]

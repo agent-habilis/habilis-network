@@ -88,6 +88,8 @@ async-trait = "0.1.89"
 uuid = { version = "1", features = ["v4"] }
 # ── The iroh family: every one a direct git dep, and no patch table at all ───
 #
+# One temporary exception: the `[patch]` at the end of this file, for #31.
+#
 # This block is the single source of truth for which iroh a consumer gets. A
 # consumer of this workspace declares **nothing** from the iroh family and
 # carries **no** `[patch.crates-io]`; it reaches iroh through `habilis_network::iroh` and
@@ -186,6 +188,9 @@ automerge = "0.10"
 sha2 = "0.10"
 rand = "0.9"
 libc = "0.2"
+# Windows only. Each member names the features its code uses; the root turns
+# none on. 0.61 is the version `Cargo.lock` already holds for iroh and tokio.
+windows-sys = "0.61"
 # Shared dev-deps (unit + integration tests, benches).
 proptest = "1.6"
 insta = "1"
@@ -311,3 +316,15 @@ strip = "none"
 # and why each pin lives where it does. Re-introducing a patch here would mean
 # every consumer had to restate it, since cargo honours a patch only in a
 # workspace root and never inherits one.
+#
+# One temporary exception, for the Windows port (PR #5): the patch below points
+# the iroh family at the fix of #31 (the relay logs a client that reset its
+# connection as ERROR on Windows). It holds only in this workspace: a consumer
+# of habilis-network still gets a8c1c205 without the fix. It goes when the fix
+# is in agent-habilis/iroh and the pins above, and the three iroh-relay edges in
+# the crate manifests, move to it.
+[patch."https://github.com/agent-habilis/iroh"]
+iroh = { git = "https://github.com/saulraposo/iroh", rev = "fdf6cc27232ba56d98daebc1ff2e183e92ffa972" }
+iroh-base = { git = "https://github.com/saulraposo/iroh", rev = "fdf6cc27232ba56d98daebc1ff2e183e92ffa972" }
+iroh-dns = { git = "https://github.com/saulraposo/iroh", rev = "fdf6cc27232ba56d98daebc1ff2e183e92ffa972" }
+iroh-relay = { git = "https://github.com/saulraposo/iroh", rev = "fdf6cc27232ba56d98daebc1ff2e183e92ffa972" }

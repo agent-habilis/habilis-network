@@ -18,10 +18,12 @@ default = ["host"]
 #
 # `async-io` rides along: `bounded_read` exists only for the engine's IPC
 # listener, which is itself host-only.
-host = ["dep:libc", "async-io"]
+host = ["dep:libc", "dep:windows-sys", "async-io"]
 # Exposes helpers that exist only for assertions (clock::unix_nanos,
-# Cooldown::len). habilis-network turns it on through dev-dependencies.
-test-fixtures = []
+# Cooldown::len, and on Windows the console events of `win_console` and the
+# end-of-session messages of `win_session`).
+# habilis-network turns it on through dev-dependencies.
+test-fixtures = ["windows-sys?/Win32_System_Console"]
 # `bounded_read` is the crate's only async code, and its only consumer is the
 # engine's IPC listener. Gating it keeps tokio out of the wire crates
 # (habilis-network-protocol, -doc, -logging), which then have no async runtime at
@@ -43,10 +45,49 @@ path = "src/lib.rs"
 # here is either std, the two syscalls in `mesh_prefix`/`resident_memory`, or
 # tokio's `AsyncBufRead` for `bounded_read`.
 [dependencies]
-libc = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tracing.workspace = true
 web-time.workspace = true
+
+# Each is optional and turned on by `host`, so a `--no-default-features` build
+# on any target links neither.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true, optional = true }
+
+# Only the features that the code calls: `Win32_Foundation` for `HANDLE`,
+# `FILETIME`, `STILL_ACTIVE`, `LocalFree`, the generic rights, and the two
+# error codes of `file_retry.rs`,
+# `Win32_System_Threading` for the process and token queries,
+# `Win32_System_Diagnostics_ToolHelp` for the process snapshot. The runtime
+# base (`lib.rs`) adds `Win32_UI_Shell` for `SHGetKnownFolderPath`,
+# `Win32_System_Com` for `CoTaskMemFree`, and `Win32_Storage_FileSystem` for
+# the reparse-point attribute; `win_security.rs` uses it for `CreateFileW` and
+# the SQOS flags. `win_security.rs` adds `Win32_Security` for the token, the SID
+# calls and the owner flag, and `Win32_Security_Authorization` for the SID text
+# and `GetSecurityInfo`. `win_session.rs` adds `Win32_UI_WindowsAndMessaging`
+# for the window and its messages, `Win32_Graphics_Gdi`, which gates
+# `WNDCLASSW`, and `Win32_System_LibraryLoader` for `GetModuleHandleW`.
+# `test-fixtures` adds `Win32_System_Console` for the console calls of
+# `win_console.rs`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# The tests of `win_security.rs` make a server pipe with the raw call, so they do
+# not depend on `interprocess`.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_Pipes"] }
 
 # Stamps the build's git short hash + dirty flag into `version::VERSION`.
 [build-dependencies]

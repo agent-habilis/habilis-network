@@ -95,7 +95,7 @@ pub(crate) mod testing;
 pub mod util {
     // Listed rather than a glob, for the reason given on [`protocol`].
     pub use habilis_network_util::{
-        bounded_fifo_set, bounded_queue, clock, consts, cooldown, logs, mesh_prefix,
+        bounded_fifo_set, bounded_queue, clock, consts, cooldown, file_name, logs, mesh_prefix,
         resident_memory, tuning, version,
     };
     // The runtime-directory helpers are `host`-gated in the leaf crate: they
@@ -106,6 +106,10 @@ pub mod util {
         ensure_mesh_runtime_dir, ensure_parent_private, ensure_runtime_base, is_under_runtime_base,
         mesh_runtime_dir, runtime_base,
     };
+    // Unix only: on Windows the base is in the profile, which another user
+    // cannot create (R12 of `docs/windows.md`).
+    #[cfg(all(unix, feature = "host"))]
+    pub use habilis_network_util::{RuntimeBaseCheck, check_runtime_base};
     // `bounded_read` is gated on `habilis-network-util`'s `async-io`, which this crate
     // turns on unconditionally in its manifest — so it is always here, and a
     // `#[cfg(feature = "async-io")]` would be checking a feature *this* crate
@@ -114,6 +118,15 @@ pub mod util {
     pub use habilis_network_util::bounded_read;
     #[cfg(feature = "host")]
     pub use habilis_network_util::process;
+    // The retry of a rename or a remove that a reader blocks on Windows.
+    #[cfg(feature = "host")]
+    pub use habilis_network_util::file_retry;
+    // The Windows security calls of the IPC named pipe.
+    #[cfg(all(windows, feature = "host"))]
+    pub use habilis_network_util::win_security;
+    // The hidden window that gets the end of the Windows session (R13).
+    #[cfg(all(windows, feature = "host"))]
+    pub use habilis_network_util::win_session;
 
     /// Deferred `tracing` sink and the pinned directive filter.
     pub mod logging {

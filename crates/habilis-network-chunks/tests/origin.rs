@@ -215,47 +215,16 @@ fn bytes_that_changed_under_a_stable_stat_are_still_caught() {
 }
 
 /// Restore an mtime so the stat-based gate genuinely cannot tell the file
-/// changed. Uses `touch -t`, which is portable enough for the platforms this
-/// runs on and avoids a dependency for one syscall.
+/// changed. `File::set_modified` works on every OS the suite runs on, with no
+/// `touch` binary and no dependency.
 fn set_mtime(path: &Path, mtime: i64) {
-    let stamp = std::process::Command::new("touch")
-        .arg("-t")
-        .arg(format_stamp(mtime))
-        .arg(path)
-        .status();
-    assert!(stamp.is_ok_and(|status| status.success()), "touch");
-}
-
-/// `[[CC]YY]MMDDhhmm[.ss]`, which is what `touch -t` wants.
-fn format_stamp(mtime: i64) -> String {
-    // Days since epoch to a civil date, via the usual days-from-civil inverse.
-    let days = mtime.div_euclid(86_400);
-    let secs_of_day = mtime.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    let hour = secs_of_day / 3600;
-    let minute = (secs_of_day % 3600) / 60;
-    let second = secs_of_day % 60;
-    format!("{year:04}{month:02}{day:02}{hour:02}{minute:02}.{second:02}")
-}
-
-/// Howard Hinnant's `civil_from_days`, transcribed. Cheaper than a date crate
-/// for the one place a test needs it.
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let shifted = days + 719_468;
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = shifted.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
-    let month = if shifted_month < 10 {
-        shifted_month + 3
-    } else {
-        shifted_month - 9
-    };
-    (if month <= 2 { year + 1 } else { year }, month, day)
+    let seconds = u64::try_from(mtime).expect("mtime is after the epoch");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open for set_modified");
+    file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+        .expect("set_modified");
 }
 
 /// Two files sharing a chunk resolve that address to whichever was adopted

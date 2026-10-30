@@ -38,6 +38,12 @@
 //! Writes are atomic (tempfile + rename on the same filesystem), so a
 //! reader that opens the file mid-update always sees a consistent JSON
 //! document, and each write fully replaces any existing file.
+//!
+//! On Windows a reader that opens the file without `FILE_SHARE_DELETE` (the
+//! `Get-Content` of `PowerShell`) blocks the rename and the remove while it
+//! holds the file, so both run again for a short time
+//! (`util::file_retry::retry_while_shared`). A reader that uses `std::fs` never
+//! blocks them.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -47,6 +53,7 @@ use anyhow::{Context, Result};
 use crate::protocol::mesh::MeshName;
 use crate::protocol::{MeshId, Nickname};
 use crate::util::clock;
+use crate::util::file_retry::retry_while_shared;
 
 /// Owns a session state file for the lifetime of a daemon process.
 /// Drop removes the file (best effort), but because the daemon exits
@@ -198,39 +205,27 @@ impl StateFile {
         let mut json = serde_json::to_vec(&obj).map_err(std::io::Error::other)?;
         json.push(b'\n');
 
-        // No fsync: statusline is best-effort; kernel buffer-writeback
-        // is plenty. Atomic rename still gives readers a consistent view.
-        let tmp = tmp_sibling(&self.path);
-        // 0o600 at create, not chmod-after: an app's discovery fields may carry
-        // a bearer token, and a create-then-chmod sequence leaves a
-        // window where the token is written at the umask-default mode (often
-        // world-readable) — a local co-tenant polling the predictable tmp
-        // path could open an fd during that window (POSIX checks perms at
-        // open, not per read). Being born at 0o600 closes the window; the
-        // uniform mode also keeps the common (no-token) case indistinguishable.
-        let mut file = {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt as _;
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&tmp)?
-            }
-            #[cfg(not(unix))]
-            {
-                std::fs::File::create(&tmp)?
-            }
-        };
-        file.write_all(&json)?;
-        std::fs::rename(&tmp, &self.path)
+        write_private_atomic(&self.path, &json)
     }
 
-    /// Delete the state file. Safe to call on a path that does not exist.
+    /// Delete the state file. Safe to call on a path that does not exist. On
+    /// Windows it runs again for a short time while a reader holds the file,
+    /// and a file that still stays is logged. On Unix an error is ignored.
     pub(crate) fn remove(&self) {
+        #[cfg(not(windows))]
         let _ = std::fs::remove_file(&self.path);
+        #[cfg(windows)]
+        match retry_while_shared(|| std::fs::remove_file(&self.path)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                tracing::warn!(
+                    target: "habilis_network::lifecycle",
+                    path = %self.path.display(),
+                    %error,
+                    "state file remove failed"
+                );
+            }
+            _ => {}
+        }
     }
 }
 
@@ -377,6 +372,60 @@ pub fn read_snapshot(path: &Path) -> Result<Option<ReadySnapshot>> {
         ready,
         last_updated,
     }))
+}
+
+/// Write `bytes` to `path` so that a reader sees the old file or the new one,
+/// never half of one: a sibling `<file>.tmp.<pid>`, then a rename over the
+/// target. The one writer of the state file and of the IPC marker.
+///
+/// On Windows the rename runs again for a short time while a reader holds the
+/// target without `FILE_SHARE_DELETE` (R8 of `docs/windows.md`). The rename of
+/// `std` already replaces a file that a reader holds with `FILE_SHARE_DELETE`.
+///
+/// The tmp name carries the pid and is opened with `create` + `truncate`, not
+/// `create_new`: a tmp file that a killed process left behind is reused, and
+/// does not make every later write fail.
+///
+/// # Errors
+/// The create, the write, or the rename fails.
+pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // No fsync: statusline is best-effort; kernel buffer-writeback
+    // is plenty. Atomic rename still gives readers a consistent view.
+    let tmp = tmp_sibling(path);
+    // 0o600 at create, not chmod-after: an app's discovery fields may carry
+    // a bearer token, and a create-then-chmod sequence leaves a
+    // window where the token is written at the umask-default mode (often
+    // world-readable) — a local co-tenant polling the predictable tmp
+    // path could open an fd during that window (POSIX checks perms at
+    // open, not per read). Being born at 0o600 closes the window; the
+    // uniform mode also keeps the common (no-token) case indistinguishable.
+    let mut file = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::File::create(&tmp)?
+        }
+    };
+    file.write_all(bytes)?;
+    drop(file);
+    let renamed = retry_while_shared(|| std::fs::rename(&tmp, path));
+    // On Windows a failed rename removes the tmp file here, for the IPC
+    // marker. `StateFile::write` removes it on every OS after any error, as
+    // before the port.
+    #[cfg(windows)]
+    if renamed.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    renamed
 }
 
 fn tmp_sibling(path: &Path) -> PathBuf {
@@ -537,6 +586,86 @@ mod tests {
         state_file.write(0, false);
         assert!(path.exists());
         state_file.remove();
+        assert!(!path.exists());
+    }
+
+    /// A reader that uses `std::fs` opens with `FILE_SHARE_DELETE` on Windows,
+    /// so it never blocks a write. The readers of this workspace and of
+    /// agent-gossip all use `std::fs`.
+    #[test]
+    fn a_std_reader_does_not_block_a_write() {
+        let path = unique_path("std-reader");
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("test"),
+            &Nickname::from("n"),
+            &name("cool-team"),
+        );
+        state_file.write(1, false);
+        let reader = std::fs::File::open(&path).unwrap();
+        super::write_private_atomic(&path, b"{}\n").unwrap();
+        drop(reader);
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}\n");
+        state_file.remove();
+    }
+
+    /// `FILE_SHARE_READ` of Windows, with no `FILE_SHARE_DELETE`. This crate
+    /// has no `windows-sys`.
+    #[cfg(windows)]
+    const FILE_SHARE_READ: u32 = 1;
+
+    /// Open `path` as the `Get-Content` of `PowerShell` does: with no
+    /// `FILE_SHARE_DELETE`, and close it after 2 ms in a thread. The reader is
+    /// open before the call under test, so its first try always meets it, and
+    /// the short hold leaves most of the 50 ms deadline to a slow runner.
+    #[cfg(windows)]
+    fn hold_briefly(path: &std::path::Path) -> std::thread::JoinHandle<()> {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(path)
+            .unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            drop(reader);
+        })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_write_waits_for_a_reader_without_share_delete() {
+        let path = unique_path("held-write");
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("test"),
+            &Nickname::from("n"),
+            &name("cool-team"),
+        );
+        state_file.write(1, false);
+        let closer = hold_briefly(&path);
+        state_file.write(2, true);
+        closer.join().unwrap();
+        let snapshot = super::read_snapshot(&path).unwrap().expect("a snapshot");
+        state_file.remove();
+        assert!(snapshot.ready, "the second write replaced the file");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_remove_waits_for_a_reader_without_share_delete() {
+        let path = unique_path("held-remove");
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("test"),
+            &Nickname::from("n"),
+            &name("cool-team"),
+        );
+        state_file.write(1, false);
+        let closer = hold_briefly(&path);
+        state_file.remove();
+        closer.join().unwrap();
         assert!(!path.exists());
     }
 

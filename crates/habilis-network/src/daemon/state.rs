@@ -639,6 +639,11 @@ pub struct EventLoopState {
     pub(crate) pending_outbound: BoundedQueue<(Verified, WireFrame)>,
     #[cfg(feature = "host")]
     pub(crate) state_file: Option<StateFile>,
+    /// The marker that makes this daemon's IPC endpoint findable, on Windows.
+    /// Set once the endpoint is bound; `None` for an in-process node, which
+    /// binds none. The shutdown removes it, beside the state file.
+    #[cfg(all(windows, feature = "host"))]
+    pub(crate) ipc_marker: Option<crate::transport::ipc::IpcMarker>,
     /// Whether the event loop is serving IPC yet. Starts `false` (the
     /// pre-loop state-file write reports "identity up, not yet serving");
     /// flipped `true` once the loop is draining, so a state-file reader
@@ -1043,6 +1048,8 @@ impl EventLoopState {
             pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
             #[cfg(feature = "host")]
             state_file,
+            #[cfg(all(windows, feature = "host"))]
+            ipc_marker: None,
             ready: false,
             live_count: None,
             message_log: MessageLog::new(MESSAGE_LOG_SIZE),

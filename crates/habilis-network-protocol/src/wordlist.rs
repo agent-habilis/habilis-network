@@ -172,3 +172,36 @@ mod js_copy {
         );
     }
 }
+
+/// A generated nickname is the stem of the per-member files, and on Windows the
+/// engine refuses a local nickname that is no valid file stem. No pair of the
+/// list may ever trip that rule, or a node with no `--nickname` would fail to
+/// start on Windows. Plain lowercase ASCII words joined by a hyphen are safe:
+/// the hyphen keeps every pair apart from a device name.
+#[cfg(test)]
+mod windows_file_stem {
+    use super::WORDS;
+    use habilis_network_util::file_name::windows_file_stem_problem;
+
+    #[test]
+    fn every_word_is_lowercase_ascii_letters() {
+        for word in WORDS {
+            assert!(
+                !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_lowercase()),
+                "{word:?} is not lowercase ASCII letters only"
+            );
+        }
+    }
+
+    /// Every word in both places of a pair, so the test covers the whole list
+    /// and does not depend on what the generator draws.
+    #[test]
+    fn every_pair_is_a_valid_windows_file_stem() {
+        let sample = super::random_pair();
+        assert_eq!(windows_file_stem_problem(&sample), None, "{sample:?}");
+        for word in WORDS {
+            let pair = format!("{word}-{word}");
+            assert_eq!(windows_file_stem_problem(&pair), None, "{pair:?}");
+        }
+    }
+}
