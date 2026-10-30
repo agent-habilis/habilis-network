@@ -40,7 +40,7 @@ async fn roster_len(member: &Membership) -> usize {
         .request(|reply| Request::Inspect(Inspect::Peers { reply }))
         .await
         .unwrap_or_default();
-    let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
+    let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
     roster
         .and_then(|roster| roster["peers"].as_array().map(Vec::len))
         .unwrap_or(0)
@@ -128,7 +128,8 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
                 "WINDOW {window}: {count} evictions, underlay sessions per member {sessions:?}"
             );
             per_window.push(count);
-            totals.push(sessions.iter().sum::<usize>());
+            let total: usize = sessions.iter().sum();
+            totals.push(total);
         }
         for member in members {
             let _ = member.node.leave().await;

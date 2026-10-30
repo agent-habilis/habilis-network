@@ -49,8 +49,8 @@ async fn roster_len(member: &Membership) -> usize {
         .request(|reply| Request::Inspect(Inspect::Peers { reply }))
         .await
         .unwrap_or_default();
-    serde_json::from_str::<serde_json::Value>(&json)
-        .ok()
+    let decoded: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+    decoded
         .and_then(|roster| {
             // A swept peer stays in the roster as quiet, so count the live ones.
             roster["peers"].as_array().map(|peers| {

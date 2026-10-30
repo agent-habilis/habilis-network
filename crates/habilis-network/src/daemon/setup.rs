@@ -195,7 +195,8 @@ pub(crate) fn register_rendezvous(
 fn unicast_inbox(
     relay_transport: transport::PayloadPath,
 ) -> (mpsc::Receiver<bytes::Bytes>, transport::UnicastAcceptor) {
-    let (tx, rx) = mpsc::channel::<bytes::Bytes>(consts::UNICAST_INBOX_CAP);
+    let (tx, rx): (mpsc::Sender<bytes::Bytes>, mpsc::Receiver<bytes::Bytes>) =
+        mpsc::channel(consts::UNICAST_INBOX_CAP);
     (rx, transport::UnicastAcceptor::new(tx, relay_transport))
 }
 

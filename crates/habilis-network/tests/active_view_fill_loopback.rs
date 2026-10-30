@@ -127,7 +127,8 @@ async fn mesh(count: usize, max_peers: usize) -> (Vec<Member>, task::JoinHandle<
     let (relay, server) = test_relay::spawn_plain().await.expect("local relay");
     let keep = tokio::spawn(async move {
         let _server = server;
-        future::pending::<()>().await;
+        let forever: future::Pending<()> = future::pending();
+        forever.await;
     });
     let first = Member::create("m0", &relay, max_peers).await;
     let mut members = Vec::with_capacity(count);

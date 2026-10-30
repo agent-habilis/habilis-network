@@ -243,11 +243,8 @@ enum Start {
 
 /// The result of one round: the time to converge, or the text of the split.
 async fn round(members: usize, start: Start, index: usize) -> Result<Duration, String> {
-    let topic = format!(
-        "simultaneous-start-{}-{}",
-        process::id(),
-        rand::random::<u64>()
-    );
+    let nonce: u64 = rand::random();
+    let topic = format!("simultaneous-start-{}-{nonce}", process::id());
     let log_path = round_log_path(&topic);
     *ROUND_LOG.lock().expect("no poison") =
         Some(fs::File::create(&log_path).expect("create the log file of the round"));

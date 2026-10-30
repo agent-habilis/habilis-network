@@ -144,7 +144,8 @@ fn two_ip_peers_link_through_the_gated_rendezvous() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network=info");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
-        let topic = format!("scratch-link-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("scratch-link-{nonce}");
         // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
         // each member's sink is shared with the node that writes to it, and the test reads it
@@ -186,7 +187,8 @@ fn a_webrtc_only_peer_links_through_the_beacon_lane() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network=info");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
-        let topic = format!("scratch-lane-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("scratch-lane-{nonce}");
         // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
         // each member's sink is shared with the node that writes to it, and the test reads it

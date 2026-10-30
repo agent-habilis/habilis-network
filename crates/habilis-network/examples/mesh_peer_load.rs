@@ -84,7 +84,9 @@ fn transports() -> anyhow::Result<Vec<Transport>> {
             .split(',')
             .filter(|name| !name.is_empty())
             .map(|name| {
-                serde_json::from_str::<Transport>(&format!("\"{}\"", name.trim()))
+                let decoded: serde_json::Result<Transport> =
+                    serde_json::from_str(&format!("\"{}\"", name.trim()));
+                decoded
                     .map_err(|_| anyhow::anyhow!("unknown transport {name:?} in MESH_TRANSPORTS"))
             })
             .collect();

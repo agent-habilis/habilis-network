@@ -139,17 +139,18 @@ impl BlobTicket {
         }
         let payload = &framed[2..];
         let mut position = 0;
-        let secret = TicketSecret::from(
-            take_array::<SECRET_LEN>(payload, &mut position).context("ticket missing secret")?,
-        );
+        let secret_bytes: [u8; SECRET_LEN] =
+            take_array(payload, &mut position).context("ticket missing secret")?;
+        let secret = TicketSecret::from(secret_bytes);
         let flags = *payload.get(position).context("ticket missing flags")?;
         position += 1;
         let password = flags & PASSWORD_BIT != 0;
         let relay_transport = PayloadPath::from(flags & RELAY_TRANSPORT_BIT != 0);
-        let sha256 = BlobDigest::from(
-            take_array::<HASH_LEN>(payload, &mut position).context("ticket missing hash")?,
-        );
-        let size_bytes = take_array::<8>(payload, &mut position).context("ticket missing size")?;
+        let hash_bytes: [u8; HASH_LEN] =
+            take_array(payload, &mut position).context("ticket missing hash")?;
+        let sha256 = BlobDigest::from(hash_bytes);
+        let size_bytes: [u8; 8] =
+            take_array(payload, &mut position).context("ticket missing size")?;
         let size = u64::from_le_bytes(size_bytes);
         let lookups = LookupOpts::decode_from(payload, &mut position)?;
         let address_json = payload.get(position..).context("ticket missing address")?;

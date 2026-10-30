@@ -144,7 +144,8 @@ fn each_peer_linked_only_by_gossip_answers_the_others_ping() {
         "habilis_network=info,habilis_network::transport=debug",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let topic = format!("auto-pong-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("auto-pong-{nonce}");
         // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
         // each member's sink is shared with the node that writes to it, and the test reads it
@@ -193,7 +194,8 @@ fn a_ping_sent_before_any_link_exists_is_answered_after_the_second_probe() {
         "habilis_network=info,habilis_network::transport=debug",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let topic = format!("auto-pong-early-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("auto-pong-early-{nonce}");
 
         // each member's sink is shared with the node that writes to it, and the test reads it
         let alice = spawn(&topic, "alice", Arc::new(Joined::default())).await;

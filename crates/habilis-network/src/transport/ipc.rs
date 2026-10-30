@@ -234,7 +234,10 @@ mod tests {
             let mesh = MeshId::from(format!("ipctest{pid_b58}").as_str());
             let nickname = Nickname::from("test-nick");
 
-            let (tx, rx) = mpsc::channel::<IpcMessage<TestCommand>>(8);
+            let (tx, rx): (
+                mpsc::Sender<IpcMessage<TestCommand>>,
+                mpsc::Receiver<IpcMessage<TestCommand>>,
+            ) = mpsc::channel(8);
 
             // Bind synchronously (no sleep needed — the socket is accepting the
             // instant `bind` returns), then spawn the accept loop.
@@ -308,13 +311,15 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use interprocess::local_socket::tokio::Stream;
             use interprocess::local_socket::traits::tokio::Stream as _;
-            use interprocess::local_socket::{GenericFilePath, ToFsName};
             use tokio::io::AsyncReadExt;
 
             let pid_b58 = bs58::encode(process::id().to_le_bytes()).into_string();
             let mesh = MeshId::from(format!("ipcquiet{pid_b58}").as_str());
             let nickname = Nickname::from("idle-nick");
-            let (tx, rx) = mpsc::channel::<IpcMessage<TestCommand>>(8);
+            let (tx, rx): (
+                mpsc::Sender<IpcMessage<TestCommand>>,
+                mpsc::Receiver<IpcMessage<TestCommand>>,
+            ) = mpsc::channel(8);
             let listener = listener::bind(&test_base(), &mesh, &nickname).expect("bind IPC socket");
             let listener_handle = tokio::spawn(listener::serve(
                 listener,
@@ -328,10 +333,7 @@ mod tests {
 
             // Park a silent connection.
             let path = listener::socket_path(&test_base(), &mesh, &nickname);
-            let name = path
-                .clone()
-                .to_fs_name::<GenericFilePath>()
-                .expect("the socket path is a valid file name");
+            let name = listener::to_name(&path).expect("the socket path is a valid file name");
             let mut idle = Stream::connect(name)
                 .await
                 .expect("the idle connection reaches the listener");

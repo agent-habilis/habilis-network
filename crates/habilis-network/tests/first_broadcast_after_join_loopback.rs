@@ -548,7 +548,8 @@ fn membership_race(
 fn logging_race(name: &str, delay: Duration, expected: Duration, settle: bool) {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let topic = format!("first-broadcast-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("first-broadcast-{nonce}");
 
         let creator = LoggingMember::start(&topic, "creator").await;
         let j1 = LoggingMember::start(&topic, "joiner-one").await;
@@ -658,7 +659,8 @@ fn broadcasts_sent_right_after_join_reach_the_creator_under_load() {
         let races: Vec<_> = (0..PARALLEL_RACES)
             .map(|index| {
                 tokio::spawn(async move {
-                    let topic = format!("first-broadcast-load-{index}-{}", rand::random::<u64>());
+                    let nonce: u64 = rand::random();
+                    let topic = format!("first-broadcast-load-{index}-{nonce}");
                     let creator = LoggingMember::start(&topic, "creator").await;
                     let j1 = LoggingMember::start(&topic, "joiner-one").await;
                     let j2 = LoggingMember::start(&topic, "joiner-two").await;

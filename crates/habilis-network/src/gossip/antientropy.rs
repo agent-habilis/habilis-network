@@ -241,7 +241,8 @@ fn report_unreadable_digest(message: &Verified, state: &mut EventLoopState) {
 /// under the *other* window — wasting the shared resend budget on messages the
 /// peer already has and starving the genuinely-missing tail.
 pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, me: &Nickname) {
-    let Ok(body) = serde_json::from_str::<DigestBody>(message.body.as_str()) else {
+    let decoded: serde_json::Result<DigestBody> = serde_json::from_str(message.body.as_str());
+    let Ok(body) = decoded else {
         report_unreadable_digest(message, state);
         return;
     };
@@ -465,7 +466,8 @@ async fn ask_back(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) {
-    let Ok(body) = serde_json::from_str::<HeadsBody>(digest.body.as_str()) else {
+    let decoded: serde_json::Result<HeadsBody> = serde_json::from_str(digest.body.as_str());
+    let Ok(body) = decoded else {
         return;
     };
     if state.doc(channel).holds_heads(&body.heads) {
@@ -600,7 +602,8 @@ pub(crate) async fn handle_state_digest(
     context: &HandlerCtx<'_>,
 ) -> Answered {
     ask_back(channel, message, state, context).await;
-    if serde_json::from_str::<HeadsBody>(message.body.as_str()).is_ok_and(|body| body.closing) {
+    let decoded: serde_json::Result<HeadsBody> = serde_json::from_str(message.body.as_str());
+    if decoded.is_ok_and(|body| body.closing) {
         return Answered::default();
     }
     let now = Instant::now();
@@ -691,7 +694,8 @@ pub(crate) async fn handle_state_digest(
 /// hold we cannot tell what it has and send everything, but its own changes
 /// it always has. Empty for an undecodable digest body.
 fn missing_frames(channel: Channel, digest: &Verified, state: &EventLoopState) -> Vec<Verified> {
-    let Ok(body) = serde_json::from_str::<HeadsBody>(digest.body.as_str()) else {
+    let decoded: serde_json::Result<HeadsBody> = serde_json::from_str(digest.body.as_str());
+    let Ok(body) = decoded else {
         return Vec::new();
     };
     state
@@ -1499,8 +1503,9 @@ mod tests {
     fn a_digest_of_the_build_without_window_keys_does_not_decode() {
         let _guard = ::habilis_network_test_tracing::init();
         let old = r#"{"windows":[{"lo":1,"hi":2,"ids":""}]}"#;
+        let decoded: serde_json::Result<DigestBody> = serde_json::from_str(old);
         assert!(
-            serde_json::from_str::<DigestBody>(old).is_err(),
+            decoded.is_err(),
             "an old digest body without window keys does not decode"
         );
     }

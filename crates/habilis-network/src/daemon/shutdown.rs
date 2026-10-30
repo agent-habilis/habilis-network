@@ -125,7 +125,7 @@ pub(super) fn spawn_quit_signal_tasks(
     exit_on_quit: bool,
     owner: Option<Owner>,
 ) -> mpsc::Receiver<()> {
-    let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
+    let (quit_tx, quit_rx): (mpsc::Sender<()>, mpsc::Receiver<()>) = mpsc::channel(1);
     let ctrl_c_tx = quit_tx.clone();
     tokio::spawn(async move {
         let _ = signal::ctrl_c().await;
@@ -257,7 +257,7 @@ pub(super) fn parent_lost(original_ppid: i32, current_ppid: i32) -> bool {
 /// A quit channel whose sender is deliberately leaked, so the receiver parks
 /// forever. The loop's quit arm then only ever fires from `external_quit_rx`.
 pub(super) fn never_quit() -> mpsc::Receiver<()> {
-    let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
+    let (quit_tx, quit_rx): (mpsc::Sender<()>, mpsc::Receiver<()>) = mpsc::channel(1);
     mem::forget(quit_tx);
     quit_rx
 }

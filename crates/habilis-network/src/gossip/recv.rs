@@ -823,9 +823,9 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
         let Some(handle) = state.multihop.as_ref() else {
             return false; // multihop off: nothing consumes the routing table
         };
-        match serde_json::from_str::<habilis_network_iroh_multihop_transport::LinkVector>(
-            message.body.as_str(),
-        ) {
+        let decoded: serde_json::Result<habilis_network_iroh_multihop_transport::LinkVector> =
+            serde_json::from_str(message.body.as_str());
+        match decoded {
             Ok(vector) => {
                 // A signature proves who made the vector, not that the origin is
                 // a member: anyone holding the mesh id can mint keys. So the
@@ -1514,7 +1514,9 @@ async fn handle_peer_info(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) {
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(message.body.as_str()) else {
+    let decoded: serde_json::Result<serde_json::Value> =
+        serde_json::from_str(message.body.as_str());
+    let Ok(parsed) = decoded else {
         return;
     };
     let Ok((peer_id, peer_addr)) = peer_addr_error::endpoint_addr_from_json(&parsed) else {
@@ -2716,7 +2718,8 @@ mod first_contact_tests {
             let epoch = held_round.epoch();
             let task = task::spawn(async move {
                 let _held_round = held_round;
-                future::pending::<()>().await;
+                let forever: future::Pending<()> = future::pending();
+                forever.await;
             });
             state
                 .webrtc_admission

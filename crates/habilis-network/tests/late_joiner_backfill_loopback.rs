@@ -205,7 +205,8 @@ fn a_late_joiner_backfills_on_meeting_its_only_peer() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         pin_antientropy_tick();
-        let topic = format!("late-joiner-pair-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("late-joiner-pair-{nonce}");
         let (alice, _) = spawn(&topic, "alice").await;
         write_log(&alice, WRITES).await;
 
@@ -247,7 +248,8 @@ fn a_late_joiner_backfills_on_meeting_a_meshed_pair() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         pin_antientropy_tick();
-        let topic = format!("late-joiner-trio-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("late-joiner-trio-{nonce}");
 
         let (alice, _) = spawn(&topic, "alice").await;
         write_log(&alice, WRITES).await;
@@ -293,7 +295,8 @@ fn a_late_joiner_pulls_a_long_history_in_fast_rounds() {
         const LONG: usize = 300;
         const FAST: Duration = Duration::from_secs(5);
         pin_antientropy_tick();
-        let topic = format!("late-joiner-long-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("late-joiner-long-{nonce}");
 
         let (alice, _) = spawn(&topic, "alice").await;
         write_log(&alice, LONG).await;

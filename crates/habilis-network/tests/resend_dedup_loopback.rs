@@ -281,7 +281,8 @@ fn a_frame_the_app_dropped_is_repaired_by_anti_entropy() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _one_at_a_time = serial().lock().await;
-        let topic = format!("resend-dedup-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("resend-dedup-{nonce}");
 
         let (alice, _alice_read) = spawn(&topic, "alice").await;
         let (bob, bob_read) = spawn(&topic, "bob").await;
@@ -324,7 +325,8 @@ fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _one_at_a_time = serial().lock().await;
-        let topic = format!("resend-dedup-state-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("resend-dedup-state-{nonce}");
 
         let (alice, _alice_read) = spawn(&topic, "alice").await;
         let (bob, bob_read) = spawn(&topic, "bob").await;
@@ -400,7 +402,8 @@ fn a_peer_does_not_resend_to_its_author_the_frame_she_kept() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _one_at_a_time = serial().lock().await;
-        let topic = format!("resend-author-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("resend-author-{nonce}");
 
         let (alice, _alice_read) = spawn(&topic, "alice").await;
         let (bob, bob_read) = spawn(&topic, "bob").await;
@@ -443,7 +446,8 @@ fn a_frame_the_app_dropped_comes_back_from_its_author_when_she_kept_it() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _one_at_a_time = serial().lock().await;
-        let topic = format!("resend-author-dedup-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("resend-author-dedup-{nonce}");
 
         let (alice, _alice_read) = spawn(&topic, "alice").await;
         let (bob, bob_read) = spawn(&topic, "bob").await;

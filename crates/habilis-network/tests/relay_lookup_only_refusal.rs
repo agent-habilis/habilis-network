@@ -140,7 +140,8 @@ async fn spawn(
 
 /// Whether two relay-only nodes see each other join within `deadline`.
 async fn pair_links(relay: &RelayUrl, relay_transport: bool, deadline: Duration) -> bool {
-    let topic = format!("relay-refusal-{relay_transport}-{}", rand::random::<u64>());
+    let nonce: u64 = rand::random();
+    let topic = format!("relay-refusal-{relay_transport}-{nonce}");
     // each member's sink is shared with the node that writes to it, and the test reads it
     let alice_saw = Arc::new(Joined::default());
     // each member's sink is shared with the node that writes to it, and the test reads it

@@ -35,7 +35,8 @@ pub(crate) fn plan_lane_offers(
 
 /// The random start of a pass over the lane members.
 pub(crate) fn lane_pick() -> usize {
-    rand::random::<u32>() as usize
+    let start: u32 = rand::random();
+    start as usize
 }
 
 /// The candidates of a retry pass that need an offered session: a lane pair, and no session yet.

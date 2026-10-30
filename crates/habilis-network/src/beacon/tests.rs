@@ -479,6 +479,7 @@ fn a_refused_rung_is_withheld_until_it_answers_as_ours() {
         );
         watch.withheld_rungs()
     };
+    let no_rungs: Vec<u16> = Vec::new();
 
     assert_eq!(
         note(&mut rungs, ProbeAnswer::Refused),
@@ -487,7 +488,7 @@ fn a_refused_rung_is_withheld_until_it_answers_as_ours() {
     );
     assert_eq!(
         note(&mut rungs, ProbeAnswer::NoAnswer),
-        Vec::<u16>::new(),
+        no_rungs,
         "a no-answer report keeps the rung withheld"
     );
     assert_eq!(
@@ -497,7 +498,7 @@ fn a_refused_rung_is_withheld_until_it_answers_as_ours() {
     );
     assert_eq!(
         note(&mut rungs, ProbeAnswer::Ours),
-        Vec::<u16>::new(),
+        no_rungs,
         "the rung is released once it answers as ours"
     );
 }
@@ -1276,9 +1277,10 @@ async fn a_rung_that_this_member_binds_is_no_longer_foreign() {
     }
     peer.close().await;
     assert_eq!(outcome, super::Held::Claimed, "the free rung is claimed");
+    let no_rungs: Vec<u16> = Vec::new();
     assert_eq!(
         rungs.withheld_rungs(),
-        Vec::<u16>::new(),
+        no_rungs,
         "the rung of our own beacon is still read as foreign"
     );
 }
@@ -1427,7 +1429,7 @@ fn an_unanswerable_probe_reads_held_not_free() {
 #[test]
 fn a_probe_whose_task_dies_frees_the_slot_too() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-        let (tx, rx) = oneshot::channel::<bool>();
+        let (tx, rx): (oneshot::Sender<bool>, oneshot::Receiver<bool>) = oneshot::channel();
         let (probe, endpoint) = probe_for(rx).await;
         let mut slot = Some(probe);
         drop(tx);
@@ -1588,7 +1590,10 @@ fn a_rendezvous_does_not_dial_its_own_peer() {
                 match receiver.next().await {
                     Some(Ok(Event::NeighborUp(id))) => return id,
                     Some(_) => {}
-                    None => future::pending::<()>().await,
+                    None => {
+                        let forever: future::Pending<()> = future::pending();
+                        forever.await;
+                    }
                 }
             }
         })
@@ -1649,7 +1654,10 @@ fn a_holder_reaches_its_own_public_rendezvous_without_lookups() {
                 match receiver.next().await {
                     Some(Ok(Event::NeighborUp(id))) if id == params.id => return,
                     Some(_) => {}
-                    None => future::pending::<()>().await,
+                    None => {
+                        let forever: future::Pending<()> = future::pending();
+                        forever.await;
+                    }
                 }
             }
         })
@@ -1708,7 +1716,10 @@ fn a_member_that_links_to_the_beacon_is_reported_to_its_holder() {
                 match receiver.next().await {
                     Some(Ok(Event::NeighborUp(id))) if id == params.id => return,
                     Some(_) => {}
-                    None => future::pending::<()>().await,
+                    None => {
+                        let forever: future::Pending<()> = future::pending();
+                        forever.await;
+                    }
                 }
             }
         })

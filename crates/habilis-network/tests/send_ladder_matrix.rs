@@ -315,7 +315,7 @@ impl Member {
             .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
-        let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
+        let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
         roster
             .and_then(|roster| roster["peers"].as_array().map(Vec::len))
             .unwrap_or(0)
@@ -329,7 +329,7 @@ impl Member {
             .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
-        let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
+        let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
         roster
             .and_then(|roster| {
                 roster["peers"].as_array().map(|peers| {
@@ -349,7 +349,7 @@ impl Member {
             .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .expect("the loop answers");
-        let roster = serde_json::from_str::<serde_json::Value>(&json).ok()?;
+        let roster: serde_json::Value = serde_json::from_str(&json).ok()?;
         let mut entries = roster["peers"].as_array()?.iter();
         let found = entries.find(|entry| entry["nickname"] == peer);
         found.and_then(|entry| entry["transport"].as_str().map(str::to_owned))

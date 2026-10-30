@@ -181,7 +181,7 @@ async fn run_checked<Driver: NodeDriver>(
     let (sender, receiver) = join_gossip(&mut state, endpoints.topic);
 
     #[cfg(feature = "host")]
-    let ipc_rx = spawn_ipc_rx::<Driver::Ipc>(
+    let ipc_rx: Option<mpsc::Receiver<IpcMessage<Driver::Ipc>>> = spawn_ipc_rx(
         ipc_listener_disabled,
         runtime.runtime_base.as_deref(),
         &mesh.mesh,
@@ -1720,8 +1720,11 @@ fn spawn_ipc_rx<Cmd: de::DeserializeOwned + Send + 'static>(
             return None;
         }
     };
-    let (ipc_tx, rx) = mpsc::channel::<IpcMessage<Cmd>>(32);
-    tokio::spawn(ipc::serve::<Cmd>(listener, ipc_tx, Arc::clone(sink)));
+    let (ipc_tx, rx): (
+        mpsc::Sender<IpcMessage<Cmd>>,
+        mpsc::Receiver<IpcMessage<Cmd>>,
+    ) = mpsc::channel(32);
+    tokio::spawn(ipc::serve(listener, ipc_tx, Arc::clone(sink)));
     Some(rx)
 }
 
@@ -1730,9 +1733,11 @@ fn spawn_ipc_rx<Cmd: de::DeserializeOwned + Send + 'static>(
 /// that only fires while a round is in flight, without borrowing
 /// `state` across the await (the deadline is copied out beforehand).
 async fn sleep_until_opt(deadline: Option<TokioInstant>) {
-    match deadline {
-        Some(at) => time::sleep_until(at).await,
-        None => future::pending::<()>().await,
+    if let Some(at) = deadline {
+        time::sleep_until(at).await;
+    } else {
+        let forever: future::Pending<()> = future::pending();
+        forever.await;
     }
 }
 
@@ -1923,11 +1928,11 @@ async fn build_maintenance_intervals() -> MaintenanceIntervals {
 /// Pends while no shed runs; resolves once when the close of the shed beacon is done. A receiver
 /// whose sender was dropped also resolves, so a lost close task cannot hold the re-probe back.
 async fn closed_opt(rx: &mut Option<oneshot::Receiver<()>>) {
-    match rx.as_mut() {
-        Some(rx) => {
-            let _ = rx.await;
-        }
-        None => future::pending::<()>().await,
+    if let Some(rx) = rx.as_mut() {
+        let _ = rx.await;
+    } else {
+        let forever: future::Pending<()> = future::pending();
+        forever.await;
     }
 }
 
@@ -1985,7 +1990,7 @@ mod tests {
     #[test]
     fn a_lost_close_task_does_not_hold_the_re_probe_back() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let (done, closed) = oneshot::channel::<()>();
+            let (done, closed): (oneshot::Sender<()>, oneshot::Receiver<()>) = oneshot::channel();
             let mut closing = Some(closed);
 
             drop(done);

@@ -1747,7 +1747,8 @@ mod tests {
             let epoch = held_round.epoch();
             let task = task::spawn(async move {
                 let _held_round = held_round;
-                future::pending::<()>().await;
+                let forever: future::Pending<()> = future::pending();
+                forever.await;
             });
             state
                 .webrtc_admission
@@ -1854,7 +1855,8 @@ mod tests {
             let epoch = held_round.epoch();
             let task = task::spawn(async move {
                 let _held_round = held_round;
-                future::pending::<()>().await;
+                let forever: future::Pending<()> = future::pending();
+                forever.await;
             });
             state
                 .webrtc_admission
@@ -1958,7 +1960,8 @@ mod tests {
             let epoch = held_round.epoch();
             let task = task::spawn(async move {
                 let _held_round = held_round;
-                future::pending::<()>().await;
+                let forever: future::Pending<()> = future::pending();
+                forever.await;
             });
             state
                 .webrtc_admission

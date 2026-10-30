@@ -112,7 +112,8 @@ async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Probe> {
 fn two_loopback_nodes_mesh_with_the_relay_lookup_only() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let topic = format!("relay-lookup-only-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("relay-lookup-only-{nonce}");
         // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
         // each member's sink is shared with the node that writes to it, and the test reads it

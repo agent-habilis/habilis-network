@@ -115,8 +115,11 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
         push: Option<broadcast::Sender<Authored>>,
         handle_signals: SignalHandling,
     ) -> Self {
-        let (req_tx, req_rx) = mpsc::channel::<Driver::Session>(SESSION_REQUEST_CAP);
-        let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
+        let (req_tx, req_rx): (
+            mpsc::Sender<Driver::Session>,
+            mpsc::Receiver<Driver::Session>,
+        ) = mpsc::channel(SESSION_REQUEST_CAP);
+        let (quit_tx, quit_rx): (mpsc::Sender<()>, mpsc::Receiver<()>) = mpsc::channel(1);
         config.runtime.driver = DriverMode::InProcess {
             msg_tx: push,
             quit_rx,

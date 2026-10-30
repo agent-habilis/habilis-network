@@ -495,10 +495,8 @@ mod tests {
             r#"{"transports":{}}"#,
             r#"{"lookup":["public"]}"#,
         ] {
-            assert!(
-                serde_json::from_str::<JoinOptions>(stale).is_err(),
-                "{stale}"
-            );
+            let decoded: serde_json::Result<JoinOptions> = serde_json::from_str(stale);
+            assert!(decoded.is_err(), "{stale}");
         }
     }
 

@@ -251,7 +251,8 @@ mod tests {
             let epoch = guard.epoch();
             let task = n0future_task::spawn(async move {
                 let _guard = guard;
-                future::pending::<()>().await;
+                let forever: future::Pending<()> = future::pending();
+                forever.await;
             });
             admission.track(peer(1), epoch, task.abort_handle());
             admission.note_refused(peer(1));
@@ -460,7 +461,8 @@ mod tests {
             let task = n0future_task::spawn(async move {
                 let _guard = guard;
                 // Never returns on its own — only an abort ends this.
-                future::pending::<()>().await;
+                let forever: future::Pending<()> = future::pending();
+                forever.await;
             });
             admission.track(peer(1), epoch, task.abort_handle());
             assert_eq!(

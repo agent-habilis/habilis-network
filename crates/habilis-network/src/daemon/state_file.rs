@@ -513,7 +513,8 @@ mod tests {
     #[test]
     fn the_state_file_variants_hold_boxed_sources() {
         let _guard = ::habilis_network_test_tracing::init();
-        let parse = serde_json::from_str::<u8>("x").expect_err("not a number");
+        let decoded: serde_json::Result<u8> = serde_json::from_str("x");
+        let parse = decoded.expect_err("not a number");
         let unparsable = StateFileError::Unparsable {
             path: PathBuf::from("state.json"),
             source: Box::new(parse),

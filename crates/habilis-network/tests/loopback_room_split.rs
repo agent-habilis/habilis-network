@@ -268,8 +268,8 @@ impl Member {
             .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
+        let decoded: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+        decoded
             .and_then(|roster| {
                 roster["peers"].as_array().map(|peers| {
                     peers
@@ -751,7 +751,8 @@ async fn hold_every_rung(ports: &[u16]) -> Result<Vec<UdpSocket>, String> {
 
 /// Whether a line of the sink is the `Info` about a ladder that is taken.
 fn is_taken_ladder_info(line: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(line).is_ok_and(|event| {
+    let decoded: serde_json::Result<serde_json::Value> = serde_json::from_str(line);
+    decoded.is_ok_and(|event| {
         event["kind"] == "info"
             && event["text"]
                 .as_str()

@@ -88,7 +88,7 @@ impl Member {
             .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
-        let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
+        let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
         roster
             .and_then(|roster| roster["peers"].as_array().map(Vec::len))
             .unwrap_or(0)

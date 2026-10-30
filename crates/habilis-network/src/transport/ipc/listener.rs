@@ -34,8 +34,11 @@ pub(crate) fn socket_path(base: &path::Path, mesh: &MeshId, nickname: &Nickname)
 }
 
 pub(super) fn to_name(path: &str) -> Result<Name<'_>> {
-    use interprocess::local_socket::{GenericFilePath, ToFsName};
-    Ok(path.to_fs_name::<GenericFilePath>()?)
+    use interprocess::local_socket::{GenericFilePath, PathNameType};
+    use std::{borrow, ffi};
+    Ok(GenericFilePath::map(borrow::Cow::Borrowed(
+        ffi::OsStr::new(path),
+    ))?)
 }
 
 /// Bind the local IPC socket synchronously, returning the listening
@@ -104,7 +107,7 @@ pub(crate) async fn serve<Cmd>(
                 backoff = IPC_ACCEPT_BACKOFF_MIN;
                 failing = false;
                 let tx = tx.clone();
-                tokio::spawn(handle_connection::<Cmd>(stream, tx));
+                tokio::spawn(handle_connection(stream, tx));
             }
             Err(error) => {
                 if !failing {
@@ -164,7 +167,8 @@ where
         }
     };
 
-    let response = match serde_json::from_str::<Cmd>(line.trim()) {
+    let parsed: serde_json::Result<Cmd> = serde_json::from_str(line.trim());
+    let response = match parsed {
         Err(error) => json_reply::json_error(&format!("parse error: {error}")),
         Ok(command) => {
             let (resp_tx, resp_rx) = oneshot::channel();

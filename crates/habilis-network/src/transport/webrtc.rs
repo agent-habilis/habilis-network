@@ -2773,7 +2773,8 @@ mod tests {
                 let epoch = offer.epoch();
                 let offering = tokio::spawn(async move {
                     let _offer = offer;
-                    future::pending::<()>().await;
+                    let forever: future::Pending<()> = future::pending();
+                    forever.await;
                 });
                 higher_admission.track(lower.id(), epoch, offering.abort_handle());
 

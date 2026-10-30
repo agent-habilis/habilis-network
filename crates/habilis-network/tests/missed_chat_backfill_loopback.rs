@@ -197,7 +197,8 @@ fn a_node_gets_the_chat_it_missed_on_its_first_real_peer_link() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         pin_antientropy_tick();
-        let topic = format!("missed-chat-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("missed-chat-{nonce}");
 
         let (alice, _, alice_saw) = spawn(&topic, "alice").await;
         let (early, early_chat, _) = spawn(&topic, "early").await;
