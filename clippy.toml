@@ -12,9 +12,9 @@
 # test modules, so the crate facades and the test modules stay as they are.
 warn-on-all-wildcard-imports = true
 
-# Flag single-character identifiers; keep idiomatic generics and loop vars.
+# Flag single-character identifiers. No name is allowed: a generic is a word, and a loop variable is named.
 min-ident-chars-threshold = 1
-allowed-idents-below-min-chars = ["_", "T", "E", "K", "V", "R", "S", "i", "j"]
+allowed-idents-below-min-chars = []
 
 # Complexity ceilings (favor small, readable functions).
 cognitive-complexity-threshold = 20

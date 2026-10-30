@@ -263,7 +263,7 @@ allow_attributes = "warn"
 wildcard_enum_match_arm = "warn"
 # An impl stays async like its trait, and the work waits for the poll.
 unused_async_trait_impl = "allow"
-# Google Rust Style Guide (issue 29): at most three path segments; a longer path imports its parent module.
+# Google Rust Style Guide (issue 29): at most two path segments; a longer path imports its parent module.
 absolute_paths = "warn"
 
 # Dependencies get light optimization in dev/test builds; workspace members

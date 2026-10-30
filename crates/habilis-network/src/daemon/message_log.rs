@@ -1059,8 +1059,8 @@ mod tests {
             ) {
                 let _guard = ::habilis_network_test_tracing::init();
                 let mut log = MessageLog::new(cap);
-                for i in 0..n_pushes {
-                    log.push(message(&format!("m{i}")));
+                for pushed in 0..n_pushes {
+                    log.push(message(&format!("m{pushed}")));
                 }
                 prop_assert!(log.messages.len() <= cap);
                         }
