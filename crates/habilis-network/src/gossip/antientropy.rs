@@ -1440,21 +1440,24 @@ mod tests {
                     MessageBody::from(format!("m{index}").as_str()),
                 ),
             );
-            message.timestamp = UnixSecs::from(1_700_000_000 + i64::try_from(index).unwrap());
+            message.timestamp =
+                UnixSecs::from(1_700_000_000 + i64::try_from(index).expect("an index fits an i64"));
             log.push(message.sign(&Identity::generate()));
         }
-        let newest = log.recent_window(ANTIENTROPY_DIGEST_WINDOW_IDS).unwrap();
+        let newest = log
+            .recent_window(ANTIENTROPY_DIGEST_WINDOW_IDS)
+            .expect("the log holds more than one digest window");
         let older = log
             .older_window(
                 ANTIENTROPY_DIGEST_WINDOW_IDS,
                 0,
                 ANTIENTROPY_DIGEST_WINDOW_IDS,
             )
-            .unwrap();
+            .expect("the log holds an older window beyond the newest");
         let digest_body = DigestBody {
             windows: vec![WireWindow::encode(&newest), WireWindow::encode(&older)],
         };
-        let json = serde_json::to_string(&digest_body).unwrap();
+        let json = serde_json::to_string(&digest_body).expect("a digest body serializes to JSON");
         let body = MessageBody::try_new(&json).expect("digest body has no control chars");
 
         // Worst-case envelope: a realistically long mesh id.
@@ -2005,8 +2008,9 @@ mod tests {
                 },
             ],
         };
-        let json = serde_json::to_string(&body).unwrap();
-        let back: DigestBody = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&body).expect("a digest body serializes to JSON");
+        let back: DigestBody =
+            serde_json::from_str(&json).expect("the serialized digest body parses back");
         assert_eq!(
             back.windows.len(),
             2,
@@ -2014,12 +2018,18 @@ mod tests {
         );
         assert_eq!(back.windows[0].hi, i64::MAX, "open-ended bound preserved");
         assert_eq!(
-            back.windows[0].decode_ids().unwrap().len(),
+            back.windows[0]
+                .decode_ids()
+                .expect("the first window's ids decode")
+                .len(),
             1,
             "the first window of the round trip keeps one id"
         );
         assert_eq!(
-            back.windows[1].decode_ids().unwrap().len(),
+            back.windows[1]
+                .decode_ids()
+                .expect("the second window's ids decode")
+                .len(),
             2,
             "the second window of the round trip keeps two ids"
         );
