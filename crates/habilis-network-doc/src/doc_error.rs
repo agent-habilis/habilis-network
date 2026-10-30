@@ -34,6 +34,11 @@ impl DocError {
     pub(crate) fn encode(error: impl Into<Box<dyn error::Error + Send + Sync + 'static>>) -> Self {
         Self::Encode(error.into())
     }
+
+    /// Make a doc error from a body error.
+    pub fn from_body_error(error: BodyError) -> Self {
+        Self::Body(error)
+    }
 }
 
 impl fmt::Display for DocError {
@@ -60,6 +65,6 @@ impl error::Error for DocError {
 
 impl From<BodyError> for DocError {
     fn from(error: BodyError) -> Self {
-        Self::Body(error)
+        Self::from_body_error(error)
     }
 }
