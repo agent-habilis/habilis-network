@@ -61,6 +61,8 @@
 
 use std::time::Duration;
 
+use wasm_bindgen::JsCast;
+
 use habilis_network_iroh_webrtc_transport::iroh::protocol::Router;
 use habilis_network_iroh_webrtc_transport::iroh::{
     Endpoint, EndpointAddr, EndpointId, SecretKey, TransportAddr,

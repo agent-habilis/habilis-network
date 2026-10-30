@@ -89,7 +89,7 @@ fn pressure_level() -> u64 {
         return 0;
     };
     let query = search.trim_start_matches('?');
-    let pairs = query.split('&').filter_map(|pair| pair.split_once('='));
+    let mut pairs = query.split('&').filter_map(|pair| pair.split_once('='));
     let pressure = pairs.find(|(key, _)| *key == "pressure");
     pressure
         .and_then(|(_, value)| -> Option<u64> { value.parse().ok() })
