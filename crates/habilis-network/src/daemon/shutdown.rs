@@ -195,28 +195,22 @@ fn owner_start(pid: u32) -> Result<u64, OwnerPidError> {
 /// identical on macOS and Linux (`PR_SET_PDEATHSIG` and kqueue `NOTE_EXIT` are
 /// each platform-specific). When the parent vanishes we feed `quit_tx`, reusing
 /// the SIGTERM path that broadcasts `left` and exits cleanly.
-// `unix` alone is not enough: `libc` arrives with the `host` feature.
+// `unix` alone is not enough: `rustix` arrives with the `host` feature.
 #[cfg(all(unix, feature = "host"))]
-#[expect(
-    unsafe_code,
-    reason = "libc::getppid FFI; no safe wrapper, always succeeds"
-)]
 fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>, owner: Option<Owner>) {
     let interval = tuning::ppid_watch_interval();
     if let Some(owner) = owner {
         tokio::spawn(watch_owner(owner, interval, quit_tx));
         return;
     }
-    // SAFETY: `getppid` takes no argument and always succeeds.
-    let original_ppid = unsafe { libc::getppid() };
+    let original_ppid = parent_pid();
     if !orphan_watch_warranted(original_ppid) {
         return;
     }
     tokio::spawn(async move {
         loop {
             n0future_time::sleep(interval).await;
-            // SAFETY: `getppid` takes no argument and always succeeds.
-            let current_ppid = unsafe { libc::getppid() };
+            let current_ppid = parent_pid();
             if parent_lost(original_ppid, current_ppid) {
                 let _ = quit_tx.send(()).await;
                 return;
@@ -236,6 +230,14 @@ async fn watch_owner(owner: Owner, interval: Duration, quit_tx: mpsc::Sender<()>
         }
     }
 }
+/// The parent pid, or 0 when the kernel reports none.
+#[cfg(all(unix, feature = "host"))]
+fn parent_pid() -> i32 {
+    use rustix::process::getppid;
+
+    getppid().map_or(0, |pid| pid.as_raw_nonzero().get())
+}
+
 /// Whether the orphan watch is worth running. Skip it when the daemon already
 /// has no agent to lose — a parent pid of 1 means it was launched detached
 /// straight from init/launchd, so it must never self-terminate.

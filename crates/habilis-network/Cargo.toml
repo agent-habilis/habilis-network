@@ -102,7 +102,7 @@ host = [
     "habilis-network-logging/host",
     "multihop",
     "dep:interprocess",
-    "dep:libc",
+    "dep:rustix",
     # Base tokio is the portable floor (`sync`, `macros`, `time`, `rt`); these
     # are the pieces with no wasm32 equivalent. `net` in particular drags in
     # `mio`, which refuses to build for wasm32 at all.
@@ -153,7 +153,6 @@ habilis-network-logging = { path = "../habilis-network-logging", default-feature
 bs58.workspace = true
 sha2.workspace = true
 rand.workspace = true
-libc = { workspace = true, optional = true }
 # mDNS + mainline-DHT address-lookup providers were extracted from iroh core
 # in the 1.0 line; these companion crates restore the `--mdns` / `--dht` legs.
 # From the workspace, because they are forked to pin iroh — see the iroh family
@@ -192,6 +191,9 @@ habilis-network-iroh-gossip-transport = { workspace = true, features = ["test-fi
 # Split by target rather than by our own `host` feature, because which backend
 # compiles is a property of the target: a `--no-default-features` *native*
 # build still wants str0m, not the browser hub.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, optional = true }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 habilis-network-iroh-webrtc-transport = { path = "../habilis-network-iroh-webrtc-transport", features = ["native"] }
 # iroh's own defaults, re-added by name because the workspace entry turns them
