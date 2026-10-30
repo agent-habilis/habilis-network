@@ -357,7 +357,8 @@ mod tests {
                 "ciphertext is not the plaintext"
             );
             assert_eq!(
-                open_symmetric(&key, &blob).unwrap(),
+                open_symmetric(&key, &blob)
+                    .expect("`open_symmetric(&key, &blob)` yields a value in this test's fixture"),
                 plaintext,
                 "a symmetric seal opens to the plaintext"
             );
@@ -373,7 +374,9 @@ mod tests {
             "a wrong key must not open the blob"
         );
         let mut tampered = blob;
-        *tampered.last_mut().unwrap() ^= 0x01;
+        *tampered
+            .last_mut()
+            .expect("`tampered.last_mut()` yields a value in this test's fixture") ^= 0x01;
         assert!(
             open_symmetric(&key(1), &tampered).is_err(),
             "a flipped byte must fail the AEAD tag"
@@ -395,9 +398,11 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (secret, public) = keypair(1);
         let plaintext = r#"{"kind":"status-update","taskId":"7f3e"}"#;
-        let body = seal_to_body(&public, plaintext).unwrap();
+        let body = seal_to_body(&public, plaintext)
+            .expect("`seal_to_body(&public, plaintext)` yields a value in this test's fixture");
         assert_eq!(
-            unseal_from_body(&secret, &body).unwrap(),
+            unseal_from_body(&secret, &body)
+                .expect("`unseal_from_body(&secret, &body)` yields a value in this test's fixture"),
             plaintext,
             "a sealed body opens to the recipient's plaintext"
         );
@@ -418,9 +423,10 @@ mod tests {
                 r#""ct":"79cUk28wvxuqaGBndLf5927gRbiTXuUAaSgPKp2Sho86SQcf1iSKCvXJnj9gvLrpDjSoUarapYeiR"}"#,
             ),
         )
-        .unwrap();
+        .expect("`crate::MessageBody::try_new(..)` yields a value in this test's fixture");
         assert_eq!(
-            unseal_from_body(&secret, &body).unwrap(),
+            unseal_from_body(&secret, &body)
+                .expect("`unseal_from_body(&secret, &body)` yields a value in this test's fixture"),
             r#"{"kind":"status-update","taskId":"7f3e"}"#,
             "a fixed envelope opens to its plaintext"
         );
@@ -431,7 +437,9 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (_recipient, recipient_pub) = keypair(1);
         let (eavesdropper, _) = keypair(2);
-        let body = seal_to_body(&recipient_pub, "secret").unwrap();
+        let body = seal_to_body(&recipient_pub, "secret").expect(
+            "`seal_to_body(&recipient_pub, \"secret\")` yields a value in this test's fixture",
+        );
         assert!(
             unseal_from_body(&eavesdropper, &body).is_err(),
             "a non-recipient must not be able to open the envelope"
@@ -442,15 +450,21 @@ mod tests {
     fn a_tampered_ciphertext_fails() {
         let _guard = ::habilis_network_test_tracing::init();
         let (secret, public) = keypair(3);
-        let body = seal_to_body(&public, "the quick brown fox").unwrap();
+        let body = seal_to_body(&public, "the quick brown fox").expect("`seal_to_body(&public, \"the quick brown fox\")` yields a value in this test's fixture");
         // Flip the last Base58 char of the `ct` field.
-        let mut json: serde_json::Value = serde_json::from_str(body.as_str()).unwrap();
-        let ct = json["ct"].as_str().unwrap().to_owned();
+        let mut json: serde_json::Value = serde_json::from_str(body.as_str())
+            .expect("`serde_json::from_str(body.as_str())` yields a value in this test's fixture");
+        let ct = json["ct"]
+            .as_str()
+            .expect("`json[\"ct\"].as_str()` yields a value in this test's fixture")
+            .to_owned();
         let mut chars: Vec<char> = ct.chars().collect();
-        let last = chars.last_mut().unwrap();
+        let last = chars
+            .last_mut()
+            .expect("`chars.last_mut()` yields a value in this test's fixture");
         *last = if *last == '1' { '2' } else { '1' };
         json["ct"] = serde_json::Value::String(chars.into_iter().collect());
-        let tampered = crate::MessageBody::try_new(&json.to_string()).unwrap();
+        let tampered = crate::MessageBody::try_new(&json.to_string()).expect("`crate::MessageBody::try_new(&json.to_string())` yields a value in this test's fixture");
         assert!(
             unseal_from_body(&secret, &tampered).is_err(),
             "a tampered ciphertext must fail the AEAD tag"
@@ -462,9 +476,12 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (secret, public) = keypair(4);
         for plaintext in ["", &"x".repeat(40_000)] {
-            let body = seal_to_body(&public, plaintext).unwrap();
+            let body = seal_to_body(&public, plaintext)
+                .expect("`seal_to_body(&public, plaintext)` yields a value in this test's fixture");
             assert_eq!(
-                unseal_from_body(&secret, &body).unwrap(),
+                unseal_from_body(&secret, &body).expect(
+                    "`unseal_from_body(&secret, &body)` yields a value in this test's fixture"
+                ),
                 plaintext,
                 "empty and large payloads seal and open"
             );
@@ -475,7 +492,7 @@ mod tests {
     fn a_plaintext_body_does_not_open_as_sealed() {
         let _guard = ::habilis_network_test_tracing::init();
         let (secret, _) = keypair(5);
-        let body = crate::MessageBody::try_new(r#"{"kind":"message"}"#).unwrap();
+        let body = crate::MessageBody::try_new(r#"{"kind":"message"}"#).expect("`crate::MessageBody::try_new(r#\"{\"kind\":\"message\"}\"#)` yields a value in this test's fixture");
         assert!(
             unseal_from_body(&secret, &body).is_err(),
             "an un-sealed body must not be mistaken for an envelope"

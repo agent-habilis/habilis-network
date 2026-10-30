@@ -14,7 +14,8 @@ fn dummy_seed() -> Seed {
 }
 
 fn dummy_name() -> MeshName {
-    MeshName::try_new("test").unwrap()
+    MeshName::try_new("test")
+        .expect("`MeshName::try_new(\"test\")` yields a value in this test's fixture")
 }
 
 fn custom_config() -> MeshConfig {
@@ -23,8 +24,12 @@ fn custom_config() -> MeshConfig {
             mdns: true,
             dht: false,
             relay_lookup: RelayChoice::Custom(vec![
-                "https://a.example".parse().unwrap(),
-                "https://b.example".parse().unwrap(),
+                "https://a.example".parse().expect(
+                    "`\"https://a.example\".parse()` yields a value in this test's fixture",
+                ),
+                "https://b.example".parse().expect(
+                    "`\"https://b.example\".parse()` yields a value in this test's fixture",
+                ),
             ]),
         },
         password: None,
@@ -36,13 +41,15 @@ fn custom_config() -> MeshConfig {
 #[test]
 fn round_trip_loopback() {
     let _guard = ::habilis_network_test_tracing::init();
-    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback()).unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback()).expect("`Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback())` yields a value in this test's fixture");
     let encoded = mesh.to_string();
     assert!(
         encoded.bytes().all(|byte| byte.is_ascii_alphanumeric()),
         "id must be bare ASCII Base58: {encoded}"
     );
-    let decoded: LockedMesh = encoded.parse().unwrap();
+    let decoded: LockedMesh = encoded
+        .parse()
+        .expect("`encoded.parse()` yields a value in this test's fixture");
     assert_eq!(
         decoded.seed(),
         mesh.seed(),
@@ -72,8 +79,11 @@ fn round_trip_public_preset() {
         dummy_name(),
         MeshConfig::public_preset(),
     )
-    .unwrap();
-    let decoded: LockedMesh = mesh.to_string().parse().unwrap();
+    .expect("`Mesh::try_new(..)` yields a value in this test's fixture");
+    let decoded: LockedMesh = mesh
+        .to_string()
+        .parse()
+        .expect("`mesh.to_string().parse()` yields a value in this test's fixture");
     assert_eq!(
         decoded.seed().as_bytes(),
         &[0xABu8; SEED_LEN],
@@ -98,8 +108,11 @@ fn round_trip_public_preset() {
 #[test]
 fn round_trip_custom_relay_ladder() {
     let _guard = ::habilis_network_test_tracing::init();
-    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), custom_config()).unwrap();
-    let decoded: LockedMesh = mesh.to_string().parse().unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), custom_config()).expect("`Mesh::try_new(dummy_seed(), dummy_name(), custom_config())` yields a value in this test's fixture");
+    let decoded: LockedMesh = mesh
+        .to_string()
+        .parse()
+        .expect("`mesh.to_string().parse()` yields a value in this test's fixture");
     assert_eq!(
         decoded.config(),
         &custom_config(),
@@ -110,7 +123,7 @@ fn round_trip_custom_relay_ladder() {
 /// A config whose custom ladder holds `count` distinct relay URLs.
 fn ladder_config(count: usize) -> MeshConfig {
     let ladder: Vec<RelayUrl> = (0..count)
-        .map(|index| format!("https://r{index}.example").parse().unwrap())
+        .map(|index| format!("https://r{index}.example").parse().expect("`format!(\"https://r{index}.example\").parse()` yields a value in this test's fixture"))
         .collect();
     MeshConfig {
         lookups: LookupOpts {
@@ -128,7 +141,9 @@ fn ladder_config(count: usize) -> MeshConfig {
 fn validate_rejects_a_ladder_over_the_wire_ceiling() {
     let _guard = ::habilis_network_test_tracing::init();
     // One past `MAX_RELAY_LADDER`: encodes fine, then no joiner can decode it.
-    let error = ladder_config(17).validate().unwrap_err();
+    let error = ladder_config(17)
+        .validate()
+        .expect_err("`ladder_config(17).validate()` fails in this test's fixture");
     assert!(error.to_string().contains("relay ladder"), "got: {error}");
     ladder_config(16)
         .validate()
@@ -139,7 +154,9 @@ fn validate_rejects_a_ladder_over_the_wire_ceiling() {
 fn validate_rejects_a_ladder_the_count_byte_cannot_hold() {
     let _guard = ::habilis_network_test_tracing::init();
     // Past 255 the count no longer fits a `u8` and the encoder panics.
-    let error = ladder_config(300).validate().unwrap_err();
+    let error = ladder_config(300)
+        .validate()
+        .expect_err("`ladder_config(300).validate()` fails in this test's fixture");
     assert!(error.to_string().contains("relay ladder"), "got: {error}");
 }
 
@@ -152,23 +169,30 @@ fn validate_rejects_a_relay_url_over_the_wire_ceiling() {
             mdns: false,
             dht: false,
             relay_lookup: RelayChoice::Custom(vec![
-                format!("https://{host}.example").parse().unwrap(),
+                format!("https://{host}.example").parse().expect("`format!(\"https://{host}.example\").parse()` yields a value in this test's fixture"),
             ]),
         },
         password: None,
         issuer_pubkey: None,
         transport: TransportPolicy::default(),
     };
-    let error = config.validate().unwrap_err();
+    let error = config
+        .validate()
+        .expect_err("`config.validate()` fails in this test's fixture");
     assert!(error.to_string().contains("relay URL"), "got: {error}");
 }
 
 #[test]
 fn seed_drives_rendezvous_identity() {
     let _guard = ::habilis_network_test_tracing::init();
-    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
-    let locked: LockedMesh = mesh.to_string().parse().unwrap();
-    let decoded = locked.unlock(None).unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).expect("`Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())` yields a value in this test's fixture");
+    let locked: LockedMesh = mesh
+        .to_string()
+        .parse()
+        .expect("`mesh.to_string().parse()` yields a value in this test's fixture");
+    let decoded = locked
+        .unlock(None)
+        .expect("`locked.unlock(None)` yields a value in this test's fixture");
     assert_eq!(
         decoded.rendezvous_id(),
         mesh.rendezvous_id(),
@@ -189,14 +213,14 @@ fn different_seeds_yield_different_ids() {
         dummy_name(),
         MeshConfig::loopback(),
     )
-    .unwrap()
+    .expect("`Mesh::try_new(..)` yields a value in this test's fixture")
     .to_string();
     let two = Mesh::try_new(
         Seed::new([2u8; SEED_LEN]),
         dummy_name(),
         MeshConfig::loopback(),
     )
-    .unwrap()
+    .expect("`Mesh::try_new(..)` yields a value in this test's fixture")
     .to_string();
     assert_ne!(one, two, "two different seeds give two different ids");
 }
@@ -205,10 +229,10 @@ fn different_seeds_yield_different_ids() {
 fn different_config_yields_different_id() {
     let _guard = ::habilis_network_test_tracing::init();
     let one = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback())
-        .unwrap()
+        .expect("`Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback())` yields a value in this test's fixture")
         .to_string();
     let two = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())
-        .unwrap()
+        .expect("`Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())` yields a value in this test's fixture")
         .to_string();
     assert_ne!(one, two, "config is part of the id");
 }
@@ -222,7 +246,7 @@ fn password_verifier_yields_different_id_and_round_trips() {
         issuer_pubkey: None,
         transport: TransportPolicy::default(),
     };
-    let one = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+    let one = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).expect("`Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())` yields a value in this test's fixture");
     // `Mesh::try_new` refuses a passworded config, so the id is built as it sits on
     // the wire: the secret is never in it.
     let two = LockedMesh {
@@ -235,7 +259,10 @@ fn password_verifier_yields_different_id_and_round_trips() {
         two.to_string(),
         "a password verifier gives a different id text"
     );
-    let decoded: LockedMesh = two.to_string().parse().unwrap();
+    let decoded: LockedMesh = two
+        .to_string()
+        .parse()
+        .expect("`two.to_string().parse()` yields a value in this test's fixture");
     assert_eq!(
         decoded.config(),
         &passworded,
@@ -255,9 +282,10 @@ fn constructors_refuse_a_config_that_names_a_secret() {
         ..MeshConfig::public_preset()
     };
     for config in [with_password, with_issuer] {
-        let by_new = Mesh::try_new(dummy_seed(), dummy_name(), config.clone()).unwrap_err();
+        let by_new = Mesh::try_new(dummy_seed(), dummy_name(), config.clone()).expect_err("`Mesh::try_new(dummy_seed(), dummy_name(), config.clone())` fails in this test's fixture");
         assert!(by_new.to_string().contains("set_password"), "got: {by_new}");
-        let by_topic = Mesh::for_topic("topic", config).unwrap_err();
+        let by_topic = Mesh::for_topic("topic", config)
+            .expect_err("`Mesh::for_topic(\"topic\", config)` fails in this test's fixture");
         assert!(
             by_topic.to_string().contains("set_invite"),
             "got: {by_topic}"
@@ -271,7 +299,7 @@ fn set_password_bakes_verifier_and_unlock_verifies_it() {
     let password = Password::new("hunter2".to_owned());
 
     let mut creator =
-        Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+        Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).expect("`Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())` yields a value in this test's fixture");
     let passwordless_topic = creator.topic_id();
     let passwordless_rendezvous = creator.rendezvous_id();
     creator.set_password(password.clone());
@@ -294,12 +322,17 @@ fn set_password_bakes_verifier_and_unlock_verifies_it() {
 
     // A joiner decoding the id unlocks it with the password and lands on
     // identical derivations.
-    let locked: LockedMesh = creator.to_string().parse().unwrap();
+    let locked: LockedMesh = creator
+        .to_string()
+        .parse()
+        .expect("`creator.to_string().parse()` yields a value in this test's fixture");
     assert!(
         locked.requires_password(),
         "the locked mesh requires a password"
     );
-    let joiner = locked.unlock(Some(&password)).unwrap();
+    let joiner = locked
+        .unlock(Some(&password))
+        .expect("`locked.unlock(Some(&password))` yields a value in this test's fixture");
     assert_eq!(
         joiner.topic_id(),
         creator.topic_id(),
@@ -317,10 +350,13 @@ fn set_password_bakes_verifier_and_unlock_verifies_it() {
     );
 
     // Wrong password fails locally, against the verifier.
-    let creator_locked: LockedMesh = creator.to_string().parse().unwrap();
+    let creator_locked: LockedMesh = creator
+        .to_string()
+        .parse()
+        .expect("`creator.to_string().parse()` yields a value in this test's fixture");
     let error = creator_locked
         .unlock(Some(&Password::new("hunter3".to_owned())))
-        .unwrap_err();
+        .expect_err("unlock refuses the wrong password for an invite-only mesh");
     assert_eq!(
         error,
         UnlockError::WrongPassword,
@@ -332,11 +368,11 @@ fn set_password_bakes_verifier_and_unlock_verifies_it() {
 fn unlock_with_a_password_on_a_passwordless_id_is_rejected() {
     let _guard = ::habilis_network_test_tracing::init();
     let locked = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())
-        .unwrap()
+        .expect("`Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())` yields a value in this test's fixture")
         .locked();
     let error = locked
         .unlock(Some(&Password::new("hunter2".to_owned())))
-        .unwrap_err();
+        .expect_err("unlock refuses the wrong password for a password-protected mesh");
     assert_eq!(
         error,
         UnlockError::NoPassword,
@@ -348,9 +384,12 @@ fn unlock_with_a_password_on_a_passwordless_id_is_rejected() {
 fn unlock_without_the_password_on_a_passworded_id_is_rejected() {
     let _guard = ::habilis_network_test_tracing::init();
     let mut creator =
-        Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+        Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).expect("`Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())` yields a value in this test's fixture");
     creator.set_password(Password::new("hunter2".to_owned()));
-    let error = creator.locked().unlock(None).unwrap_err();
+    let error = creator
+        .locked()
+        .unlock(None)
+        .expect_err("`creator.locked().unlock(None)` fails in this test's fixture");
     assert_eq!(
         error,
         UnlockError::PasswordRequired,
@@ -362,9 +401,12 @@ fn unlock_without_the_password_on_a_passworded_id_is_rejected() {
 fn unlock_refuses_an_invite_only_id() {
     let _guard = ::habilis_network_test_tracing::init();
     let mut creator =
-        Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+        Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).expect("`Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())` yields a value in this test's fixture");
     creator.set_invite();
-    let error = creator.locked().unlock(None).unwrap_err();
+    let error = creator
+        .locked()
+        .unlock(None)
+        .expect_err("`creator.locked().unlock(None)` fails in this test's fixture");
     assert_eq!(
         error,
         UnlockError::InviteOnly,
@@ -375,8 +417,11 @@ fn unlock_refuses_an_invite_only_id() {
 #[test]
 fn unlock_without_a_password_on_a_passwordless_id_derives_from_the_wire_seed() {
     let _guard = ::habilis_network_test_tracing::init();
-    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
-    let unlocked = mesh.locked().unlock(None).unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).expect("`Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())` yields a value in this test's fixture");
+    let unlocked = mesh
+        .locked()
+        .unlock(None)
+        .expect("`mesh.locked().unlock(None)` yields a value in this test's fixture");
     assert_eq!(
         unlocked.topic_id(),
         mesh.topic_id(),
@@ -409,7 +454,7 @@ fn golden_passwordless_id_and_topic_are_pinned() {
     // That split is the point: this pair is what proved the de-branding
     // reached the key-derivation transcript (topic moved) without leaking
     // into the id encoding (id held).
-    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).expect("`Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())` yields a value in this test's fixture");
     assert_eq!(
         mesh.to_string(),
         "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqazmpTSgH",
@@ -430,7 +475,7 @@ fn golden_passwordless_id_and_topic_are_pinned() {
 #[test]
 fn golden_passworded_mesh_id_topic_and_rendezvous_are_pinned() {
     let _guard = ::habilis_network_test_tracing::init();
-    let mut mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+    let mut mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).expect("`Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())` yields a value in this test's fixture");
     mesh.set_password(Password::new("hunter2".to_owned()));
     assert_eq!(
         mesh.to_string(),
@@ -484,8 +529,8 @@ fn an_id_of_an_older_default_mesh_keeps_its_id_and_its_topic() {
 #[test]
 fn topic_is_deterministic() {
     let _guard = ::habilis_network_test_tracing::init();
-    let one = Mesh::for_topic("habilis-network", MeshConfig::public_preset()).unwrap();
-    let two = Mesh::for_topic("habilis-network", MeshConfig::public_preset()).unwrap();
+    let one = Mesh::for_topic("habilis-network", MeshConfig::public_preset()).expect("`Mesh::for_topic(\"habilis-network\", MeshConfig::public_preset())` yields a value in this test's fixture");
+    let two = Mesh::for_topic("habilis-network", MeshConfig::public_preset()).expect("`Mesh::for_topic(\"habilis-network\", MeshConfig::public_preset())` yields a value in this test's fixture");
     assert_eq!(
         one.to_string(),
         two.to_string(),
@@ -500,7 +545,7 @@ fn topic_name_is_the_sanitized_string() {
         "https://github.com/example-org/example-project",
         MeshConfig::public_preset(),
     )
-    .unwrap();
+    .expect("`Mesh::for_topic(..)` yields a value in this test's fixture");
     // Scheme stripped, `/`s kept; the 38-char URL exceeds the 32-char cap,
     // so the tail truncates to `…`.
     assert_eq!(
@@ -513,8 +558,8 @@ fn topic_name_is_the_sanitized_string() {
 #[test]
 fn topic_differs_by_string() {
     let _guard = ::habilis_network_test_tracing::init();
-    let one = Mesh::for_topic("alpha", MeshConfig::public_preset()).unwrap();
-    let two = Mesh::for_topic("beta", MeshConfig::public_preset()).unwrap();
+    let one = Mesh::for_topic("alpha", MeshConfig::public_preset()).expect("`Mesh::for_topic(\"alpha\", MeshConfig::public_preset())` yields a value in this test's fixture");
+    let two = Mesh::for_topic("beta", MeshConfig::public_preset()).expect("`Mesh::for_topic(\"beta\", MeshConfig::public_preset())` yields a value in this test's fixture");
     assert_ne!(
         one.to_string(),
         two.to_string(),
@@ -525,7 +570,7 @@ fn topic_differs_by_string() {
 #[test]
 fn topic_round_trips_through_from_str() {
     let _guard = ::habilis_network_test_tracing::init();
-    let mesh = Mesh::for_topic("habilis-network", MeshConfig::public_preset()).unwrap();
+    let mesh = Mesh::for_topic("habilis-network", MeshConfig::public_preset()).expect("`Mesh::for_topic(\"habilis-network\", MeshConfig::public_preset())` yields a value in this test's fixture");
     let decoded: LockedMesh = mesh.to_string().parse().expect("decode failed");
     assert_eq!(
         decoded.seed(),
@@ -551,7 +596,7 @@ fn a_prefixed_id_is_rejected() {
     // brand to strip — it is corruption, and the checksum says so. Covers
     // both a stale glyph paste and the ASCII brands other tools use.
     let encoded = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback())
-        .unwrap()
+        .expect("`Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback())` yields a value in this test's fixture")
         .to_string();
     for prefix in ["💬", "💬://", "sw1", "xyz", "ahs"] {
         let bad = format!("{prefix}{encoded}");
@@ -564,7 +609,7 @@ fn a_prefixed_id_is_rejected() {
 fn invalid_checksum_rejected() {
     let _guard = ::habilis_network_test_tracing::init();
     let encoded = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback())
-        .unwrap()
+        .expect("`Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback())` yields a value in this test's fixture")
         .to_string();
     let mut bad = encoded;
     let last_index = bad.len() - 1;
@@ -604,7 +649,7 @@ fn a_mesh_id_carries_the_transport_policy_for_every_list() {
     for list in lists {
         let config = MeshConfig::resolve(&[Lookup::Relay], None, list).expect("a valid list");
         let id = Mesh::try_new(dummy_seed(), dummy_name(), config.clone())
-            .unwrap()
+            .expect("`Mesh::try_new(dummy_seed(), dummy_name(), config.clone())` yields a value in this test's fixture")
             .to_string();
         let decoded: LockedMesh = id.parse().expect("the id decodes");
         assert_eq!(decoded.config(), &config, "{list:?}");
@@ -618,7 +663,7 @@ fn a_mesh_id_carries_the_transport_policy_for_every_list() {
     // the same list without `gossip` is not the default.
     let policy = |list: &[Transport]| {
         MeshConfig::resolve(&[Lookup::Relay], None, list)
-            .unwrap()
+            .expect("`MeshConfig::resolve(&[Lookup::Relay], None, list)` yields a value in this test's fixture")
             .transport
     };
     assert_eq!(
@@ -636,7 +681,7 @@ fn a_mesh_id_carries_the_transport_policy_for_every_list() {
 #[test]
 fn a_version_1_mesh_id_is_rejected_with_upgrade() {
     let _guard = ::habilis_network_test_tracing::init();
-    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback()).unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback()).expect("`Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback())` yields a value in this test's fixture");
     let mut bytes = mesh.encode_bytes();
     bytes[0] = 1; // the format before the transport policy had its own byte
     let error = LockedMesh::decode_bytes(&bytes).expect_err("a version 1 id is refused");
@@ -649,7 +694,7 @@ fn a_version_1_mesh_id_is_rejected_with_upgrade() {
 #[test]
 fn unknown_version_rejected() {
     let _guard = ::habilis_network_test_tracing::init();
-    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback()).unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback()).expect("`Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::loopback())` yields a value in this test's fixture");
     let mut bytes = mesh.encode_bytes();
     bytes[0] = 3; // an unknown version byte
     assert!(
@@ -661,8 +706,9 @@ fn unknown_version_rejected() {
 #[test]
 fn mesh_id_round_trips_unicode_name() {
     let _guard = ::habilis_network_test_tracing::init();
-    let name = MeshName::try_new("café-日本-🎉").unwrap();
-    let mesh = Mesh::try_new(dummy_seed(), name.clone(), MeshConfig::loopback()).unwrap();
+    let name = MeshName::try_new("café-日本-🎉")
+        .expect("`MeshName::try_new(\"café-日本-🎉\")` yields a value in this test's fixture");
+    let mesh = Mesh::try_new(dummy_seed(), name.clone(), MeshConfig::loopback()).expect("`Mesh::try_new(dummy_seed(), name.clone(), MeshConfig::loopback())` yields a value in this test's fixture");
     let decoded: LockedMesh = mesh.to_string().parse().expect("decode failed");
     assert_eq!(
         decoded.name(),
@@ -676,9 +722,10 @@ fn mesh_id_round_trips_max_byte_name() {
     let _guard = ::habilis_network_test_tracing::init();
     // 32 four-byte scalars = 128 bytes = the most the 1-byte name
     // length field can carry; exercises the encode/decode upper edge.
-    let name = MeshName::try_new(&"🎉".repeat(32)).unwrap();
+    let name = MeshName::try_new(&"🎉".repeat(32))
+        .expect("`MeshName::try_new(&\"🎉\".repeat(32))` yields a value in this test's fixture");
     assert_eq!(name.as_bytes().len(), 128, "the largest name is 128 bytes");
-    let mesh = Mesh::try_new(dummy_seed(), name.clone(), MeshConfig::public_preset()).unwrap();
+    let mesh = Mesh::try_new(dummy_seed(), name.clone(), MeshConfig::public_preset()).expect("`Mesh::try_new(dummy_seed(), name.clone(), MeshConfig::public_preset())` yields a value in this test's fixture");
     let decoded: LockedMesh = mesh.to_string().parse().expect("decode failed");
     assert_eq!(
         decoded.name(),
@@ -704,7 +751,10 @@ mod prop {
     }
 
     fn arb_name() -> impl Strategy<Value = MeshName> {
-        "[a-z][a-z0-9_-]{0,31}".prop_map(|raw| MeshName::try_new(&raw).unwrap())
+        "[a-z][a-z0-9_-]{0,31}".prop_map(|raw| {
+            MeshName::try_new(&raw)
+                .expect("`MeshName::try_new(&raw)` yields a value in this test's fixture")
+        })
     }
 
     fn arb_config() -> impl Strategy<Value = MeshConfig> {
@@ -742,7 +792,7 @@ mod prop {
         #[test]
         fn prop_bare_base58(seed in arb_seed(), name in arb_name()) {
             let _guard = ::habilis_network_test_tracing::init();
-            let id = Mesh::try_new(Seed::new(seed), name, MeshConfig::loopback()).unwrap().to_string();
+            let id = Mesh::try_new(Seed::new(seed), name, MeshConfig::loopback()).expect("`Mesh::try_new(Seed::new(seed), name, MeshConfig::loopback())` yields a value in this test's fixture").to_string();
             prop_assert!(!id.contains("://"));
             prop_assert!(id.is_ascii());
             prop_assert!(!id.is_empty());
@@ -767,8 +817,8 @@ mod prop {
         ) {
             let _guard = ::habilis_network_test_tracing::init();
             prop_assume!(seed_a != seed_b);
-            let one = Mesh::try_new(Seed::new(seed_a), name.clone(), MeshConfig::loopback()).unwrap().to_string();
-            let two = Mesh::try_new(Seed::new(seed_b), name, MeshConfig::loopback()).unwrap().to_string();
+            let one = Mesh::try_new(Seed::new(seed_a), name.clone(), MeshConfig::loopback()).expect("`Mesh::try_new(Seed::new(seed_a), name.clone(), MeshConfig::loopback())` yields a value in this test's fixture").to_string();
+            let two = Mesh::try_new(Seed::new(seed_b), name, MeshConfig::loopback()).expect("`Mesh::try_new(Seed::new(seed_b), name, MeshConfig::loopback())` yields a value in this test's fixture").to_string();
             prop_assert_ne!(one, two);
                 }
     }

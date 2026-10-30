@@ -139,25 +139,38 @@ mod body_tests {
     #[test]
     fn accepts_ascii() {
         let _guard = ::habilis_network_test_tracing::init();
-        MessageBody::try_new("hello world").unwrap();
-        MessageBody::try_new("").unwrap();
-        MessageBody::try_new("special chars: !@#$%^&*()").unwrap();
+        MessageBody::try_new("hello world").expect(
+            "`MessageBody::try_new(\"hello world\")` yields a value in this test's fixture",
+        );
+        MessageBody::try_new("")
+            .expect("`MessageBody::try_new(\"\")` yields a value in this test's fixture");
+        MessageBody::try_new("special chars: !@#$%^&*()").expect("`MessageBody::try_new(\"special chars: !@#$%^&*()\")` yields a value in this test's fixture");
     }
 
     #[test]
     fn accepts_unicode() {
         let _guard = ::habilis_network_test_tracing::init();
-        MessageBody::try_new("héllo").unwrap();
-        MessageBody::try_new("emoji 🎉").unwrap();
-        MessageBody::try_new("日本語のメッセージ").unwrap();
+        MessageBody::try_new("héllo")
+            .expect("`MessageBody::try_new(\"héllo\")` yields a value in this test's fixture");
+        MessageBody::try_new("emoji 🎉")
+            .expect("`MessageBody::try_new(\"emoji 🎉\")` yields a value in this test's fixture");
+        MessageBody::try_new("日本語のメッセージ").expect(
+            "`MessageBody::try_new(\"日本語のメッセージ\")` yields a value in this test's fixture",
+        );
     }
 
     #[test]
     fn accepts_newline_and_tab() {
         let _guard = ::habilis_network_test_tracing::init();
-        MessageBody::try_new("line one\nline two").unwrap();
-        MessageBody::try_new("col1\tcol2").unwrap();
-        MessageBody::try_new("crlf\r\nline").unwrap();
+        MessageBody::try_new("line one\nline two").expect(
+            "`MessageBody::try_new(\"line one\\nline two\")` yields a value in this test's fixture",
+        );
+        MessageBody::try_new("col1\tcol2").expect(
+            "`MessageBody::try_new(\"col1\\tcol2\")` yields a value in this test's fixture",
+        );
+        MessageBody::try_new("crlf\r\nline").expect(
+            "`MessageBody::try_new(\"crlf\\r\\nline\")` yields a value in this test's fixture",
+        );
     }
 
     #[test]
@@ -177,12 +190,14 @@ mod body_tests {
     fn serde_transparent_round_trip() {
         let _guard = ::habilis_network_test_tracing::init();
         let body = MessageBody::from("hello");
-        let json = serde_json::to_string(&body).unwrap();
+        let json = serde_json::to_string(&body)
+            .expect("`serde_json::to_string(&body)` yields a value in this test's fixture");
         assert_eq!(
             json, "\"hello\"",
             "a message body serializes as a plain json string"
         );
-        let parsed: MessageBody = serde_json::from_str(&json).unwrap();
+        let parsed: MessageBody = serde_json::from_str(&json)
+            .expect("`serde_json::from_str(&json)` yields a value in this test's fixture");
         assert_eq!(parsed, body, "a message body survives a json round trip");
     }
 

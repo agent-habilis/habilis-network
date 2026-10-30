@@ -287,12 +287,14 @@ mod tests {
     fn serde_transparent_round_trip() {
         let _guard = ::habilis_network_test_tracing::init();
         let nickname = Nickname::from("swift-cedar");
-        let json = serde_json::to_string(&nickname).unwrap();
+        let json = serde_json::to_string(&nickname)
+            .expect("`serde_json::to_string(&nickname)` yields a value in this test's fixture");
         assert_eq!(
             json, "\"swift-cedar\"",
             "a nickname serializes as a plain json string"
         );
-        let parsed: Nickname = serde_json::from_str(&json).unwrap();
+        let parsed: Nickname = serde_json::from_str(&json)
+            .expect("`serde_json::from_str(&json)` yields a value in this test's fixture");
         assert_eq!(parsed, nickname, "a nickname survives a json round trip");
     }
 

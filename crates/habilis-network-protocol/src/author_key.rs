@@ -138,7 +138,8 @@ mod tests {
     #[test]
     fn hex_is_the_display_text_as_bytes() {
         let _guard = ::habilis_network_test_tracing::init();
-        let key = AuthorKey::decode_hex(HEX).unwrap();
+        let key = AuthorKey::decode_hex(HEX)
+            .expect("`AuthorKey::decode_hex(HEX)` yields a value in this test's fixture");
         assert_eq!(
             key.hex().as_slice(),
             HEX.as_bytes(),
@@ -154,7 +155,8 @@ mod tests {
     #[test]
     fn matches_hex_agrees_with_display() {
         let _guard = ::habilis_network_test_tracing::init();
-        let key = AuthorKey::decode_hex(HEX).unwrap();
+        let key = AuthorKey::decode_hex(HEX)
+            .expect("`AuthorKey::decode_hex(HEX)` yields a value in this test's fixture");
         assert!(key.matches_hex(HEX), "matches_hex accepts the display text");
         assert!(
             !key.matches_hex(&HEX.to_uppercase()),

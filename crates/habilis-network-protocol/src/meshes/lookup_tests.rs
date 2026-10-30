@@ -20,7 +20,9 @@ fn bare_resolves_to_default_directory() {
         "a bare selection resolves to the default directory"
     );
     assert_eq!(
-        sel.directory().unwrap().as_str(),
+        sel.directory()
+            .expect("`sel.directory()` yields a value in this test's fixture")
+            .as_str(),
         DEFAULT_DIRECTORY,
         "the default directory is named as the default"
     );
@@ -29,9 +31,14 @@ fn bare_resolves_to_default_directory() {
 #[test]
 fn named_resolves_to_that_directory() {
     let _guard = ::habilis_network_test_tracing::init();
-    let sel = DirectorySelection::Named(MeshName::try_new("gamedev").unwrap());
+    let sel = DirectorySelection::Named(
+        MeshName::try_new("gamedev")
+            .expect("`MeshName::try_new(\"gamedev\")` yields a value in this test's fixture"),
+    );
     assert_eq!(
-        sel.directory().unwrap().as_str(),
+        sel.directory()
+            .expect("`sel.directory()` yields a value in this test's fixture")
+            .as_str(),
         "gamedev",
         "a named selection resolves to that directory"
     );
@@ -41,8 +48,8 @@ fn named_resolves_to_that_directory() {
 fn advertise_requires_reachable_mesh() {
     let _guard = ::habilis_network_test_tracing::init();
     // Loopback-only + advertising is rejected.
-    let error =
-        validate_advertise(&DirectorySelection::Default, &LookupOpts::loopback()).unwrap_err();
+    let error = validate_advertise(&DirectorySelection::Default, &LookupOpts::loopback())
+        .expect_err("`validate_advertise(..)` fails in this test's fixture");
     assert!(error.to_string().contains("reachable"), "got: {error}");
     // Reachable + advertising, and loopback + not advertising, are fine.
     assert!(

@@ -338,7 +338,8 @@ mod tests {
         let identity = Identity::generate();
         let hex = encode_pubkey(&identity.public());
         assert_eq!(hex.len(), 64, "a public key hex is 64 characters");
-        let key = AuthorKey::decode_hex(&hex).unwrap();
+        let key = AuthorKey::decode_hex(&hex)
+            .expect("`AuthorKey::decode_hex(&hex)` yields a value in this test's fixture");
         assert_eq!(
             key.public_key(),
             Some(identity.public()),
@@ -354,7 +355,12 @@ mod tests {
         let hex = encode_hex(&signature.to_bytes());
         assert_eq!(hex.len(), 128, "a signature hex is 128 characters");
         assert!(
-            verify(&identity.public(), b"x", &decode_sig(&hex).unwrap()),
+            verify(
+                &identity.public(),
+                b"x",
+                &decode_sig(&hex)
+                    .expect("`decode_sig(&hex)` yields a value in this test's fixture")
+            ),
             "the signature survives a hex round trip"
         );
     }

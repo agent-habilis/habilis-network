@@ -271,7 +271,8 @@ mod shard_tests {
         let group = ShardGroup::parse_uuid(GROUP).expect("valid group");
         let group = group.as_str();
         let shard: Shard =
-            serde_json::from_str(&format!(r#"{{"group":"{group}","idx":1,"total":3}}"#)).unwrap();
+            serde_json::from_str(&format!(r#"{{"group":"{group}","idx":1,"total":3}}"#))
+                .expect("`serde_json::from_str(..)` yields a value in this test's fixture");
         assert_eq!(shard.index, 1, "a valid shard keeps its index");
         assert_eq!(shard.total, 3, "a valid shard keeps its total");
     }
