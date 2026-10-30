@@ -13,6 +13,7 @@ mod reach;
 mod rival_flag;
 mod roster_entry;
 mod roster_snapshot;
+mod standing;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 mod test_drop;
 
@@ -39,6 +40,7 @@ pub use reach::Reach;
 pub(crate) use rival_flag::RivalFlag;
 pub use roster_entry::RosterEntry;
 pub use roster_snapshot::RosterSnapshot;
+pub(crate) use standing::Standing;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub use test_drop::TestDrop;
 /// How long after it let go of the rendezvous a node wants it again. Every node waits the same
@@ -68,6 +70,7 @@ mod tests {
         DirectCounts, DirectState, Duration, EndpointId, EventLoopState, PingRound, Reach,
         RivalFlag,
     };
+    use crate::daemon::state::Standing;
     use crate::protocol::{
         AppFrameParams, AuthorKey, ContentHash, MeshId, Message, MessageBody, MessageId, UnixSecs,
     };
@@ -1610,7 +1613,7 @@ mod tests {
         use crate::transport::Lane;
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.meshed = true;
+        state.standing.insert(Standing::Meshed);
         // Known endpoint while meshed → unicast (the send path would dial it).
         state.peers.insert(nick("dialable"));
         state
@@ -1644,7 +1647,7 @@ mod tests {
         // Unmeshed: the known endpoint is reached via the multihop transport (iroh
         // picks a direct path when meshed, else the multihop one), so the column
         // reads `multihop` rather than a direct `unicast`.
-        state.meshed = false;
+        state.standing.remove(&Standing::Meshed);
         assert_eq!(
             lane(&state, "dialable"),
             Lane::Multihop,
@@ -2050,7 +2053,7 @@ mod tests {
         let (bob, roster) = (endpoint_id(1), 3);
         let after = tuning::silent_partition_after();
         let mut state = fresh_state();
-        state.meshed = true;
+        state.standing.insert(Standing::Meshed);
 
         state.link(bob);
         let far = Instant::now() + after + Duration::from_secs(1);
@@ -2069,9 +2072,9 @@ mod tests {
             !state.silent_partition_due(0, far),
             "there is nobody to be apart from"
         );
-        state.meshed = false;
+        state.standing.remove(&Standing::Meshed);
         assert!(!state.silent_partition_due(roster, far), "never meshed");
-        state.meshed = true;
+        state.standing.insert(Standing::Meshed);
 
         // An unlink of a peer that was not linked leaves the clock where it was.
         state.unlink(endpoint_id(2));
@@ -2120,7 +2123,7 @@ mod tests {
         let (bob, roster) = (endpoint_id(1), 3);
         let after = tuning::silent_partition_after();
         let mut state = fresh_state();
-        state.meshed = true;
+        state.standing.insert(Standing::Meshed);
         state.link(bob);
         state.unlink(bob);
         let began = Instant::now();
@@ -2454,7 +2457,7 @@ mod tests {
             !state.starvation_due(past_threshold, STARVE),
             "never announced => never starved"
         );
-        state.announced = true;
+        state.standing.insert(Standing::Announced);
         assert!(
             !state.starvation_due(past_threshold, STARVE),
             "no known peers => alone, not starved"
@@ -2480,7 +2483,7 @@ mod tests {
     fn starvation_recovery_backs_off_then_resets_on_inbound() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.announced = true;
+        state.standing.insert(Standing::Announced);
         state.known_endpoints.insert(endpoint_id(1));
         let first = Instant::now() + STARVE + Duration::from_secs(1);
         assert!(
@@ -2529,7 +2532,7 @@ mod tests {
     fn starvation_backoff_caps_at_eight_threshold() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.announced = true;
+        state.standing.insert(Standing::Announced);
         state.known_endpoints.insert(endpoint_id(1));
         let mut last_recovery = Instant::now() + STARVE + Duration::from_secs(1);
         // Trip well past the cap (`recovery_trips.min(3)` => 8x ceiling).
@@ -2561,21 +2564,33 @@ mod tests {
             !state.note_inbound(now),
             "pre-mesh inbound never flips meshed"
         );
-        assert!(!state.meshed, "meshed stays off while nothing is degraded");
-        state.meshed = true;
+        assert!(
+            !state.standing.contains(&Standing::Meshed),
+            "meshed stays off while nothing is degraded"
+        );
+        state.standing.insert(Standing::Meshed);
         assert!(!state.note_inbound(now), "healthy meshed: no edge");
         assert!(
-            state.meshed,
+            state.standing.contains(&Standing::Meshed),
             "a degraded node is meshed again by an inbound message"
         );
         state.note_degraded();
-        assert!(!state.meshed, "the degraded state drops meshed again");
+        assert!(
+            !state.standing.contains(&Standing::Meshed),
+            "the degraded state drops meshed again"
+        );
         assert!(
             state.note_inbound(now),
             "degraded node heals on first inbound (caller flushes)"
         );
-        assert!(state.meshed, "an inbound message restores meshed");
-        assert!(!state.degraded, "an inbound message clears degraded");
+        assert!(
+            state.standing.contains(&Standing::Meshed),
+            "an inbound message restores meshed"
+        );
+        assert!(
+            !state.standing.contains(&Standing::Degraded),
+            "an inbound message clears degraded"
+        );
     }
 
     /// The second probe of a round is due at the middle of the window, and only once.

@@ -4,7 +4,7 @@ use super::ParkedLinkStates;
 use super::TestDrop;
 use super::{
     DirectCounts, DirectState, IdleCounters, MeshSecrets, PingRound, Reach, RivalFlag, RosterEntry,
-    RosterSnapshot, StateInit,
+    RosterSnapshot, Standing, StateInit,
 };
 use crate::daemon::cohost_arm;
 use crate::daemon::doc::MeshDoc;
@@ -13,7 +13,7 @@ use crate::daemon::reassembly::{self, ReassemblyStore, ShardCache, ShardIngest};
 use crate::daemon::setup::LiveCount;
 
 use crate::transport::UdpTransport;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -278,9 +278,8 @@ pub struct EventLoopState {
     /// stamped before this are never *surfaced* (printed / `poll` /
     /// `fetch` / library API): the operator/agent view starts at join.
     pub(crate) joined_at: UnixSecs,
-    /// Goes false when the receiver stream terminally ends; IPC
-    /// keeps working for `msg` / `poll` after that.
-    pub(crate) gossip_open: bool,
+    /// The steps this member has reached on its way into the mesh.
+    pub(crate) standing: BTreeSet<Standing>,
     /// Whether the gossip overlay currently links us to the co-hosted
     /// rendezvous (its `NeighborUp`/`NeighborDown` arms drive it). Gates
     /// the healer's connect-probe: probing the rendezvous while a live
@@ -367,18 +366,6 @@ pub struct EventLoopState {
     /// here, not from the endpoint address, which is empty whenever the relay
     /// link is down.
     pub(crate) local_udp_transport: UdpTransport,
-    /// Set once we've broadcast our arrival (`joined` + `PeerInfo`).
-    /// The announce is deferred to the first `NeighborUp` so it isn't
-    /// lost into an unconnected overlay; subsequent neighbors only get
-    /// a (log-invisible) `PeerInfo` re-send.
-    pub(crate) announced: bool,
-    /// Set once we have a link to a *real peer* (a non-
-    /// rendezvous `NeighborUp`). `announced` flips on any neighbor —
-    /// including the rendezvous relay — which is too early to deliver
-    /// user content (the relay path may not be converged). Outbound
-    /// user messages are buffered until `meshed`, then flushed, so the
-    /// first message after a join can't be a lost one-shot.
-    pub(crate) meshed: bool,
     /// The unicast (point-to-point) connection pool: dials + reuses a QUIC
     /// connection to each addressable peer so a directed message goes
     /// p2p instead of flooding the gossip mesh. Interior-mutable (Arc), so the
@@ -504,11 +491,6 @@ pub struct EventLoopState {
     pub(crate) pending_outbound: BoundedQueue<(Verified, WireFrame)>,
     #[cfg(feature = "host")]
     pub(crate) state_file: Option<StateFile>,
-    /// Whether the event loop is serving IPC yet. Starts `false` (the
-    /// pre-loop state-file write reports "identity up, not yet serving");
-    /// flipped `true` once the loop is draining, so a state-file reader
-    /// (a readiness gate) can gate on a write that means the daemon will answer.
-    pub(crate) ready: bool,
     /// When advertising (`create --advertise`), the directory's
     /// re-broadcast task reads the live peer count from here.
     /// Mirrors `peer_count` (`peers.len() + 1`), refreshed
@@ -587,12 +569,6 @@ pub struct EventLoopState {
     /// Consecutive starvation recoveries without any inbound in between
     /// (drives the backoff; reset by `note_inbound`).
     pub(crate) recovery_trips: u32,
-    /// `meshed` was cleared by a fault path (starvation recovery / hard
-    /// resume edge) rather than never having been set. Gates
-    /// `note_inbound`'s meshed-restore so a fresh joiner's pre-mesh
-    /// inbound never flips `meshed` early; only a degraded node heals
-    /// on traffic. See [`Self::note_degraded`].
-    pub(crate) degraded: bool,
     /// Latch for the warn-only resident-memory leak signal: set once this
     /// process's resident memory first crosses `tuning::resident_memory_warn_mb`,
     /// so the `warn` fires exactly once per process rather than every prune
@@ -703,7 +679,7 @@ impl EventLoopState {
             surfaced: HashSet::new(),
             last_sent_at: now,
             joined_at: UnixSecs::now(),
-            gossip_open: true,
+            standing: BTreeSet::from([Standing::GossipOpen]),
             rendezvous_linked: false,
             rendezvous_released: false,
             rendezvous_return_due: None,
@@ -721,8 +697,6 @@ impl EventLoopState {
             probe_backoff: ProbeBackoff::default(),
             rendezvous_graft_needs_session: false,
             local_udp_transport: UdpTransport::Present,
-            announced: false,
-            meshed: false,
             unicast_pool: transport::UnicastPool::disconnected(),
             #[cfg(feature = "multihop")]
             multihop: None,
@@ -761,7 +735,6 @@ impl EventLoopState {
             pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
             #[cfg(feature = "host")]
             state_file,
-            ready: false,
             live_count: None,
             message_log: MessageLog::new(MESSAGE_LOG_SIZE),
             reassembled_groups: BoundedFifoSet::new(MESSAGE_LOG_SIZE),
@@ -784,7 +757,6 @@ impl EventLoopState {
             last_inbound_at: now,
             last_recovery_at: None,
             recovery_trips: 0,
-            degraded: false,
             resident_memory_warned: false,
             ping_round: None,
             mesh_password,
@@ -802,7 +774,7 @@ impl EventLoopState {
         let count = self.peers.len() + 1;
         #[cfg(feature = "host")]
         if let Some(sf) = self.state_file.as_ref() {
-            sf.write(count, self.ready);
+            sf.write(count, self.standing.contains(&Standing::Ready));
         }
         if let Some(live) = self.live_count.as_ref() {
             live.store(count, Ordering::Relaxed);
@@ -1143,7 +1115,7 @@ impl EventLoopState {
     /// [`silent_partition_after`](crate::util::tuning::silent_partition_after). A shorter gap is
     /// a heal on its way, or a link closed on purpose.
     pub(crate) fn silent_partition_due(&self, roster_len: usize, now: Instant) -> bool {
-        self.meshed
+        self.standing.contains(&Standing::Meshed)
             && roster_len > 0
             && self.linked_endpoints.is_empty()
             && self.zero_links_since.is_some_and(|since| {
@@ -1526,7 +1498,8 @@ impl EventLoopState {
     /// A degraded node is excluded: its overlay is suspected dead, and the
     /// relay link alone is no proof it recovered.
     pub(crate) fn overlay_reachable(&self) -> bool {
-        self.meshed || (self.rendezvous_linked && !self.degraded)
+        self.standing.contains(&Standing::Meshed)
+            || (self.rendezvous_linked && !self.standing.contains(&Standing::Degraded))
     }
 
     /// Mark the mesh degraded: a fault path (starvation recovery, hard
@@ -1534,8 +1507,8 @@ impl EventLoopState {
     /// `pending_outbound` instead of broadcasting into a dead overlay.
     /// `note_inbound` undoes it on the first proof of live traffic.
     pub(crate) fn note_degraded(&mut self) {
-        self.meshed = false;
-        self.degraded = true;
+        self.standing.remove(&Standing::Meshed);
+        self.standing.insert(Standing::Degraded);
     }
 
     /// Record a verified inbound gossip message: refresh the starvation
@@ -1552,9 +1525,9 @@ impl EventLoopState {
         self.last_inbound_at = now;
         self.recovery_trips = 0;
         self.last_recovery_at = None;
-        if self.degraded {
-            self.degraded = false;
-            self.meshed = true;
+        if self.standing.contains(&Standing::Degraded) {
+            self.standing.remove(&Standing::Degraded);
+            self.standing.insert(Standing::Meshed);
             // A node that held no link has had no unlink to start the gap that the census counts.
             // A gap that already runs keeps its start.
             if self.linked_endpoints.is_empty() {
@@ -1574,7 +1547,7 @@ impl EventLoopState {
     /// Deliberately NOT gated on `meshed`: recovery clears `meshed`, so
     /// that gate would disarm the watchdog after a single attempt.
     pub(crate) fn starvation_due(&self, now: Instant, threshold: Duration) -> bool {
-        if !self.announced || self.known_endpoints.is_empty() {
+        if !self.standing.contains(&Standing::Announced) || self.known_endpoints.is_empty() {
             return false;
         }
         if now.duration_since(self.last_inbound_at) <= threshold {
@@ -1738,13 +1711,13 @@ impl EventLoopState {
     /// Whether this member has meshed (has at least one gossip neighbour).
     #[must_use]
     pub fn is_meshed(&self) -> bool {
-        self.meshed
+        self.standing.contains(&Standing::Meshed)
     }
 
     /// Whether the gossip topic is currently open for broadcast.
     #[must_use]
     pub fn is_gossip_open(&self) -> bool {
-        self.gossip_open
+        self.standing.contains(&Standing::GossipOpen)
     }
 
     /// The multi-hop transport handle, when the mesh policy registered one.
@@ -1930,7 +1903,7 @@ impl EventLoopState {
     /// Feature-gated: no production caller may forge this.
     #[cfg(feature = "adversarial")]
     pub fn sever_gossip(&mut self) {
-        self.gossip_open = false;
+        self.standing.remove(&Standing::GossipOpen);
     }
 
     /// Tests only: drop the next inbound frame that `what` names, once, before the app reads it.

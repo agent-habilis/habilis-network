@@ -1,5 +1,6 @@
 //! The cross-plane send decision: deliver a message on the plane its addressing chooses.
 
+use crate::daemon::state::Standing;
 use anyhow::{Context, Result};
 use iroh::EndpointId;
 use tokio::sync::oneshot;
@@ -216,7 +217,8 @@ pub(crate) fn lane_for(nick: &Nickname, state: &EventLoopState) -> Lane {
 /// Whether `nick` is a known peer in our live gossip mesh — the signal that a
 /// *direct* unicast path is expected rather than a multihop one.
 fn directly_meshed(nick: &Nickname, state: &EventLoopState) -> bool {
-    state.meshed && super::route::directed_endpoint(nick, state).is_some()
+    state.standing.contains(&Standing::Meshed)
+        && super::route::directed_endpoint(nick, state).is_some()
 }
 
 /// Warm pooled connection first (steady state, no dial — an optimistic

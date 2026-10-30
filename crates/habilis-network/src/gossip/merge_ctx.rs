@@ -5,6 +5,7 @@
 //! carries the generic transport primitives the app rides. Inbound dispatch
 //! lives in [`super::recv`].
 
+use crate::daemon::state::Standing;
 use std::fmt;
 
 use crate::transport::MeshSender;
@@ -100,7 +101,7 @@ pub async fn send_app(
         .serialize()
         .map_err(|error| transport::SendError::Internal(error.into()))?;
     messages::log_out(&frame);
-    if state.meshed {
+    if state.standing.contains(&Standing::Meshed) {
         // Directed vs. broadcast is decided inside `deliver` from the frame's
         // `to` — the same routing the application's send path rides. A frame
         // held off a relay-only peer is parked, not failed: the proven direct
@@ -632,6 +633,7 @@ fn offer_for_parked(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame:
 
 #[cfg(test)]
 mod tests {
+    use crate::daemon::state::Standing;
     use crate::transport::UdpTransport;
 
     use super::{mark_parked, peer_info_json};
@@ -689,7 +691,7 @@ mod tests {
     fn an_unmeshed_directed_frame_to_a_lane_peer_marks_the_peer_wanted() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.meshed = false;
+        state.standing.remove(&Standing::Meshed);
         state.local_udp_transport = UdpTransport::Present;
         let bob = endpoint_id(1);
         state.peer_endpoints.insert(
@@ -721,7 +723,7 @@ mod tests {
     fn an_unmeshed_broadcast_asks_for_no_session() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.meshed = false;
+        state.standing.remove(&Standing::Meshed);
         let bob = endpoint_id(1);
         state
             .peer_endpoints

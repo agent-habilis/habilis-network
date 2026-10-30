@@ -24,6 +24,7 @@ pub use send_error::SendError;
 #[cfg(test)]
 #[cfg(test)]
 mod tests {
+    use crate::daemon::state::Standing;
     use std::sync::Arc;
 
     use crate::testing::{endpoint_id, fresh_state, nick};
@@ -63,7 +64,7 @@ mod tests {
     /// once linked on a lookup-only mesh, so a directed frame is sendable.
     fn state_knowing_bob() -> (EventLoopState, EndpointId) {
         let mut state = fresh_state();
-        state.meshed = true;
+        state.standing.insert(Standing::Meshed);
         let bob = endpoint_id(1);
         state
             .peer_endpoints
@@ -98,7 +99,7 @@ mod tests {
     /// it is held, and holding it is what asks for its session.
     fn state_knowing_a_lane_bob() -> (EventLoopState, EndpointId) {
         let mut state = fresh_state();
-        state.meshed = true;
+        state.standing.insert(Standing::Meshed);
         state.local_udp_transport = UdpTransport::Present;
         let bob = endpoint_id(1);
         state.peer_endpoints.insert(
@@ -288,7 +289,7 @@ mod tests {
     /// pool wired to `endpoint`.
     fn state_with_pool(endpoint: &iroh::Endpoint, bob_addr: iroh::EndpointAddr) -> EventLoopState {
         let mut state = fresh_state();
-        state.meshed = true;
+        state.standing.insert(Standing::Meshed);
         state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
         state.direct.insert(bob_addr.id, DirectState::Direct);
         lookup::add_peer_addr(&lookup::address_book(endpoint), bob_addr.clone());
@@ -569,7 +570,7 @@ mod tests {
     fn known_peer_while_unmeshed_still_takes_unicast() {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
-        state.meshed = false;
+        state.standing.remove(&Standing::Meshed);
         assert_eq!(
             route(&directed_msg(), &state),
             Route::Unicast(bob),
@@ -597,7 +598,7 @@ mod tests {
     fn directed_message_with_unknown_endpoint_is_undeliverable() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.meshed = true; // meshed, but we hold no endpoint for bob
+        state.standing.insert(Standing::Meshed); // meshed, but we hold no endpoint for bob
         assert_eq!(
             route(&directed_msg(), &state),
             Route::Undeliverable,
@@ -609,7 +610,7 @@ mod tests {
     fn rendezvous_addressee_is_never_a_directed_target() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.meshed = true;
+        state.standing.insert(Standing::Meshed);
         let rendezvous = endpoint_id(9);
         state.rendezvous_id = Some(rendezvous);
         // bob's advertised endpoint *is* the rendezvous pseudo-node.
@@ -683,7 +684,7 @@ mod tests {
     fn lane_is_multihop_for_a_known_but_unmeshed_peer() {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, _) = state_knowing_bob();
-        state.meshed = false;
+        state.standing.remove(&Standing::Meshed);
         assert_eq!(
             lane_for(&nick("bob"), &state),
             Lane::Multihop,

@@ -92,7 +92,7 @@ pub(crate) async fn tick_heal(rendezvous_id: EndpointId, sender: &MeshSender) {
 /// ([`HEAL_HARD_PROBE`]) so a cold relay re-home after a freeze
 /// completes (the steady-state 5s cap routinely aborts it). The caller
 /// (`run_heal`) logs the edge and pairs this with clearing
-/// `state.meshed` and re-asserting the rendezvous hint.
+/// `state.standing.contains(&Standing::Meshed)` and re-asserting the rendezvous hint.
 pub(crate) async fn tick_heal_hard(
     endpoint: &Endpoint,
     rendezvous_id: EndpointId,

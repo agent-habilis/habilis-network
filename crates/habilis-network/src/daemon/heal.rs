@@ -4,6 +4,7 @@
 //! Split out of `event_loop` for the same reason as `cohost_arm` — this is
 //! recovery, not the loop, and it reads better without the tick arms around it.
 
+use crate::daemon::state::Standing;
 use std::mem;
 mod gossip_link;
 mod resubscribe;
@@ -183,7 +184,7 @@ pub(super) async fn resubscribe_tick(
                 handle.attach_gossip(new_sender.clone());
             }
             link.sender.replace_gossip(new_sender);
-            state.gossip_open = true;
+            state.standing.insert(Standing::GossipOpen);
             // The dead subscription's link view is void; the fresh one
             // emits its own NeighborUps (and re-arms the probe gate).
             state.rendezvous_linked = false;

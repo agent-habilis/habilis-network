@@ -3,6 +3,7 @@
 //! heartbeat. The `Alive`/sweep heartbeat ticks live in
 //! `lifecycle::heartbeat`; the gossip healer in `gossip::heal`.
 
+use crate::daemon::state::Standing;
 use std::time::Duration;
 
 use iroh::Endpoint;
@@ -101,7 +102,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
             target: "habilis_network::lifecycle",
             roster_len,
             link_len,
-            meshed = state.meshed,
+            meshed = state.standing.contains(&Standing::Meshed),
             "neighbor census: silent partition (meshed but zero peer links)"
         );
         return;
@@ -122,11 +123,12 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
     // `RUST_LOG` surgery — and the arms being counted fire up to 150×/min,
     // which is far too often to afford a line each. Deltas, not totals: a
     // reader needs no arithmetic, and a rotated log cannot corrupt the series.
+    let meshed = state.standing.contains(&Standing::Meshed);
     tracing::info!(
         target: "habilis_network::lifecycle",
         roster_len,
         link_len,
-        meshed = state.meshed,
+        meshed,
         relay_transport = state.relay_transport.relay_allowed(),
         links_direct = links.direct,
         links_relay_only = links.relay_only,
@@ -184,7 +186,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         target: "habilis_network::lifecycle",
         roster_len,
         link_len,
-        meshed = state.meshed,
+        meshed,
         direct,
         relay,
         other,

@@ -6,6 +6,7 @@
 //! layer never touches the peer roster directly — it calls into
 //! `lifecycle::observe` and dispatches by kind.
 
+use crate::daemon::state::Standing;
 use std::ops::ControlFlow;
 
 use bytes::Bytes;
@@ -52,8 +53,8 @@ async fn mesh_on_first_link(
     app: &mut dyn NodeApp,
     context: &HandlerCtx<'_>,
 ) {
-    state.meshed = true;
-    state.degraded = false;
+    state.standing.insert(Standing::Meshed);
+    state.standing.remove(&Standing::Degraded);
     flush_pending(state, context, "first real-peer link up").await;
     // Our first digests may have gone out over the rendezvous
     // alone, and their answers re-send frames every hop there
@@ -81,7 +82,7 @@ async fn mesh_on_first_link(
 /// `Received` → `ingest`; `NeighborUp` →
 /// announce / `PeerInfo` re-send; `NeighborDown` → prune the link and
 /// arm reclaim; `Lagged` / errors logged; terminal `None` flips
-/// `state.gossip_open` to `false`.
+/// `state.standing.contains(&Standing::GossipOpen)` to `false`.
 pub(crate) async fn handle_gossip_event(
     event: Option<Result<Event, ApiError>>,
     state: &mut EventLoopState,
@@ -112,7 +113,7 @@ pub(crate) async fn handle_gossip_event(
             // re-flood our address to the whole mesh on every up-transition
             // (the residual amplifier behind the soak's `neighbor up` storm).
             let now = Instant::now();
-            if state.announced {
+            if state.standing.contains(&Standing::Announced) {
                 if state.neighbor_up_refloods_peerinfo(now) {
                     broadcast_peer_info(state, context).await;
                     state.last_sent_at = now;
@@ -122,7 +123,7 @@ pub(crate) async fn handle_gossip_event(
                 }
             } else {
                 announce_arrival(state, context).await;
-                state.announced = true;
+                state.standing.insert(Standing::Announced);
                 state.last_sent_at = now;
                 tracing::info!(target: "habilis_network::gossip", "announced arrival on first gossip link");
             }
@@ -168,13 +169,14 @@ pub(crate) async fn handle_gossip_event(
                 // A frame parked across a gap in the links waits for the next link:
                 // `meshed` stays set through the gap, so the first-link edge below
                 // does not come again, and a `PeerInfo` may not either.
-                if state.meshed && !state.pending_outbound.is_empty() {
+                if state.standing.contains(&Standing::Meshed) && !state.pending_outbound.is_empty()
+                {
                     flush_pending(state, context, "link up").await;
                 }
                 // First link to a *real* peer: now (and only now) can
                 // user content actually be delivered. Flush anything
                 // buffered while we were unmeshed, in order.
-                if !state.meshed {
+                if !state.standing.contains(&Standing::Meshed) {
                     mesh_on_first_link(state, app, context).await;
                 }
                 // The vector names the address of our underlay, and a neighbor that holds it
@@ -244,7 +246,7 @@ pub(crate) async fn handle_gossip_event(
             // down). Logging both at the same level buried the one that
             // means the node is finished under the one that means it is
             // reconnecting.
-            state.gossip_open = false;
+            state.standing.remove(&Standing::GossipOpen);
             context.sink.emit(NodeEvent::Error(
                 "gossip stream ended; resubscribing".to_owned(),
             ));
@@ -1601,7 +1603,7 @@ async fn handle_peer_info(
     // A buffered directed frame addressed to this author may just have become
     // deliverable — its endpoint binding and dial address are now registered.
     // Only while meshed: the pre-mesh backlog waits for the meshed edge.
-    if state.meshed && !state.pending_outbound.is_empty() {
+    if state.standing.contains(&Standing::Meshed) && !state.pending_outbound.is_empty() {
         flush_pending(state, context, "peer info arrival").await;
     }
     let now = Instant::now();
@@ -2222,6 +2224,7 @@ mod evicted_orphan_tests {
 
 #[cfg(test)]
 mod first_contact_tests {
+    use crate::daemon::state::Standing;
     use crate::transport::UdpTransport;
     use iroh::endpoint::presets;
     use iroh_gossip::api::Event;
@@ -2348,7 +2351,7 @@ mod first_contact_tests {
                 );
                 lookup::add_peer_addr(&lookup::address_book(&node.endpoint), bob_addr.clone());
                 let mut state = fresh_state();
-                state.meshed = true;
+                state.standing.insert(Standing::Meshed);
                 state.unicast_pool = transport::UnicastPool::new(node.endpoint.clone(), false);
                 state.direct.insert(bob, DirectState::Direct);
                 state.peer_endpoints.insert(nick("bob"), bob_addr);
@@ -2409,7 +2412,10 @@ mod first_contact_tests {
             let mut state = fresh_state();
             feed(Event::NeighborUp(endpoint_id(1)), &mut state, &context).await;
             feed(Event::NeighborDown(endpoint_id(1)), &mut state, &context).await;
-            assert!(state.meshed, "the gap does not clear meshed");
+            assert!(
+                state.standing.contains(&Standing::Meshed),
+                "the gap does not clear meshed"
+            );
             let frame = Message::new_joined(&node.mesh, &node.author).sign(&Identity::generate());
             let bytes = frame.serialize().expect("serialize");
             assert!(
@@ -2574,7 +2580,10 @@ mod first_contact_tests {
                 state.peer_endpoints.insert(nick("bob"), bob.addr());
                 feed(Event::NeighborUp(bob.id()), &mut state, &context).await;
                 feed(Event::NeighborDown(bob.id()), &mut state, &context).await;
-                assert!(state.meshed, "the gap does not clear meshed");
+                assert!(
+                    state.standing.contains(&Standing::Meshed),
+                    "the gap does not clear meshed"
+                );
                 let frame =
                     Message::new_pong(&node.mesh, &node.author, nick("bob"), &MessageId::random())
                         .sign(&Identity::generate());
@@ -3467,6 +3476,7 @@ mod link_state_tests {
 /// that, routes keep running through a peer that left until its vector ages out.
 #[cfg(all(test, feature = "host"))]
 mod left_tests {
+    use crate::daemon::state::Standing;
     use iroh::EndpointAddr;
     use iroh_gossip::net::Gossip;
 
@@ -3657,7 +3667,10 @@ mod left_tests {
 
             let mut state = fresh_state();
             state.multihop = Some(handle.clone());
-            assert!(!state.meshed, "the node is not meshed");
+            assert!(
+                !state.standing.contains(&Standing::Meshed),
+                "the node is not meshed"
+            );
 
             let gossip = Gossip::builder().spawn(endpoint.clone());
             let topic = gossip
@@ -3702,6 +3715,7 @@ mod left_tests {
 
 #[cfg(all(test, feature = "host"))]
 mod requeue_tests {
+    use crate::daemon::state::Standing;
 
     use crate::testing::{LaneNode, nick};
 
@@ -3719,7 +3733,7 @@ mod requeue_tests {
                 let node = LaneNode::start().await;
                 let context = node.context();
                 let mut state = node.state();
-                state.meshed = true;
+                state.standing.insert(Standing::Meshed);
                 let address = state
                     .peer_endpoints
                     .remove(&nick("bob"))

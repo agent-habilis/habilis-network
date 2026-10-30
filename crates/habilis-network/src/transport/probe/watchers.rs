@@ -7,6 +7,7 @@ use super::path_change::{NO_PATH_GRACE, PathChange};
 use super::path_kind::PathKind;
 use super::step::StepInput;
 use super::{kinds, pair_to_climb, step};
+use crate::daemon::state::Standing;
 
 use crate::transport::UdpTransport;
 use std::collections::HashMap;
@@ -132,7 +133,9 @@ pub(crate) fn ensure_watchers(
 /// [`graft_proven`], but UDP can come back before any round attaches.
 pub(crate) fn mark_proven(state: &mut EventLoopState, peer: EndpointId) -> bool {
     let was = state.direct.insert(peer, DirectState::Direct);
-    was != Some(DirectState::Direct) && state.meshed && !state.pending_outbound.is_empty()
+    was != Some(DirectState::Direct)
+        && state.standing.contains(&Standing::Meshed)
+        && !state.pending_outbound.is_empty()
 }
 
 /// Once per alive tick, nudge every watched peer riding `WebRTC`. A nudge is

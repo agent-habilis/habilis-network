@@ -8,6 +8,7 @@
 //! the daemon-internal plumbing (`config`/`ctx`/`ipc`/`state`/`timers`/
 //! `setup`) are siblings under `super`.
 
+use crate::daemon::state::Standing;
 #[cfg(feature = "multihop")]
 use crate::protocol;
 #[cfg(feature = "host")]
@@ -558,7 +559,7 @@ fn announce_ready(
     name: &MeshName,
     author: &Nickname,
 ) {
-    state.ready = true;
+    state.standing.insert(Standing::Ready);
     state.write_peer_count();
     sink.emit(NodeEvent::Ready {
         mesh: mesh.clone(),
@@ -669,7 +670,7 @@ async fn advertise_links(
             return;
         }
     }
-    if !state.meshed || state.multihop.is_none() {
+    if !state.standing.contains(&Standing::Meshed) || state.multihop.is_none() {
         return;
     }
     let handle = state.multihop.as_ref().expect("checked above");
@@ -1006,7 +1007,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                     app.handle_http(request, &mut state, &context).await;
                 }
             },
-            event = receiver.next(), if state.gossip_open => {
+            event = receiver.next(), if state.standing.contains(&Standing::GossipOpen) => {
                 state.idle.external += 1;
                 let context = parts.handler_ctx(&sender);
                 gossip::handle_gossip_event(event, &mut state, &mut app, &context).await;
@@ -1120,7 +1121,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
             _ = intervals.heal.tick() => {
                 state.idle.heal += 1;
                 let (mono_gap, wall_gap) = timers::note_tick_gap("heal", &mut anchors.heal, &mut anchors.heal_wall, heal_interval());
-                if state.gossip_open {
+                if state.standing.contains(&Standing::GossipOpen) {
                     let context = parts.handler_ctx(&sender);
                     run_heal(TickGap { mono: mono_gap, wall: wall_gap }, &mut state, &context, &rendezvous_params).await;
                     maybe_cohost(&mut state, &context, &CohostArm { policy: cohost, params: &rendezvous_params, started }, &mut rendezvous, &mut rival_probe).await;
@@ -1210,8 +1211,8 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 maybe_cohost(&mut state, &context, &arm, &mut rendezvous, &mut rival_probe).await;
                 // Outside the reclaim window and before the grace, no walk acts on the reading:
                 // a joiner that is not meshed yet applies it itself.
-                if !state.meshed
-                    && !may_cohost(cohost, state.meshed, started)
+                if !state.standing.contains(&Standing::Meshed)
+                    && !may_cohost(cohost, state.standing.contains(&Standing::Meshed), started)
                     && !rendezvous_params.bind_ports.is_empty()
                 {
                     beacon::read_ladder(
@@ -1627,6 +1628,7 @@ mod tests {
 
 #[cfg(all(test, feature = "host"))]
 mod route_wake_tests {
+    use crate::daemon::state::Standing;
     use habilis_network_iroh_multihop_transport::{HandleConfig, MultihopHandle, underlay_secret};
     use iroh::endpoint::presets;
     use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
@@ -1660,7 +1662,7 @@ mod route_wake_tests {
         let mut state = node.state();
         let me = MultihopHandle::new(secret, underlay, config).expect("a handle");
         state.multihop = Some(me.clone());
-        state.meshed = true;
+        state.standing.insert(Standing::Meshed);
         state
             .linked_endpoints
             .insert(SecretKey::generate().public());

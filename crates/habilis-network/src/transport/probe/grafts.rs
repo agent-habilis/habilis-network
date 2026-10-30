@@ -3,6 +3,7 @@
 use super::direct_outcome::DirectOutcome;
 use super::graft_request::{GraftRequest, GraftTarget};
 use super::{graft_request, lanes, regraft};
+use crate::daemon::state::Standing;
 
 use iroh::EndpointId;
 
@@ -155,7 +156,7 @@ pub(crate) async fn graft_proven(
             tracing::warn!(target: transport::LOG_TARGET, %peer, %error, "graft request failed");
         }
     }
-    if state.meshed && !state.pending_outbound.is_empty() {
+    if state.standing.contains(&Standing::Meshed) && !state.pending_outbound.is_empty() {
         gossip::flush_pending(state, context, "direct path proven").await;
     }
 }

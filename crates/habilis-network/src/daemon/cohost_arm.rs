@@ -6,6 +6,7 @@
 //! mind while reading that file — nine functions spread across four claim
 //! sites, interleaved with the tick arms they have nothing to do with.
 
+use crate::daemon::state::Standing;
 use std::time::Duration;
 
 use iroh::{Endpoint, EndpointId};
@@ -164,7 +165,11 @@ pub(super) async fn maybe_cohost(
             return;
         }
     }
-    if may_cohost(arm.policy, state.meshed, arm.started) {
+    if may_cohost(
+        arm.policy,
+        state.standing.contains(&Standing::Meshed),
+        arm.started,
+    ) {
         // A member that keeps finding the rival probes less often; the reclaim window is not held back.
         let would_probe = arm.params.bind_ports.is_empty() && probes_before_claim(arm.policy);
         if would_probe && probe.is_none() && !state.probe_backoff.due(Instant::now()) {
@@ -634,6 +639,7 @@ mod tests {
         MAX_SHED_DEFERRALS, claims_at_startup, defer_shed, next_recheck_delay, probes_before_claim,
         regrafts_rendezvous, rival_recheck_applies,
     };
+    use crate::daemon::state::Standing;
     use std::time::Duration;
 
     use crate::beacon::claim;
@@ -1000,7 +1006,7 @@ mod tests {
             };
 
             let mut state = fresh_state();
-            state.meshed = true;
+            state.standing.insert(Standing::Meshed);
             assert!(
                 state.reclaim_until.is_none(),
                 "no window is open before the tick"
@@ -1107,7 +1113,7 @@ mod tests {
         };
 
         let mut state = fresh_state();
-        state.meshed = true;
+        state.standing.insert(Standing::Meshed);
         configure(&mut state);
         let (reports, mut arrivals) = mpsc::unbounded_channel();
         state.rungs = beacon::RungWatch::new(reports);
@@ -1299,7 +1305,7 @@ mod tests {
             };
 
             let mut state = fresh_state();
-            state.meshed = true;
+            state.standing.insert(Standing::Meshed);
             let (reports, mut arrivals) = mpsc::unbounded_channel();
             state.rungs = beacon::RungWatch::new(reports);
             let mut rendezvous = None;
@@ -1426,7 +1432,7 @@ mod tests {
             }
             other_endpoint.close().await;
             let mut state = testing::fresh_state();
-            state.meshed = true;
+            state.standing.insert(Standing::Meshed);
             let (reports, arrivals) = mpsc::unbounded_channel();
             state.rungs = beacon::RungWatch::new(reports);
             Self {
@@ -1827,7 +1833,7 @@ mod tests {
             };
 
             let mut state = fresh_state();
-            state.meshed = true;
+            state.standing.insert(Standing::Meshed);
             state.rendezvous_id = Some(params.id);
             let hub = lookup::build_webrtc_handle(endpoint.id());
             let held_round = state

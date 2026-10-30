@@ -19,6 +19,7 @@
 //! or meta answer is the exception: it goes point-to-point to the linked
 //! neighbor that asked, see [`handle_state_digest`].
 
+use crate::daemon::state::Standing;
 use crate::transport;
 use std::iter;
 mod answered;
@@ -150,7 +151,7 @@ pub(crate) async fn broadcast_digest(
 ) {
     // No real peer has ever linked — a digest would broadcast into the
     // void (mirrors `tick_heal`/`tick_alive` no-peer guards).
-    if !state.meshed {
+    if !state.standing.contains(&Standing::Meshed) {
         return;
     }
     let Some(windows) = digest_windows(state) else {
@@ -701,6 +702,7 @@ fn missing_frames(channel: Channel, digest: &Verified, state: &EventLoopState) -
 
 #[cfg(test)]
 mod budget_tests {
+    use crate::daemon::state::Standing;
     use std::time::Duration;
 
     use super::{FastRounds, Plane, ServeBudget};
@@ -847,7 +849,7 @@ mod budget_tests {
             let (gossip_sender, _receiver) = topic.split();
             let sender = transport::MeshSender::new(gossip_sender);
             let mut state = testing::fresh_state();
-            state.meshed = true;
+            state.standing.insert(Standing::Meshed);
             state
                 .fast_rounds
                 .note_asked(author_of("holder"), Channel::State, 1, 0, Instant::now());
@@ -893,7 +895,7 @@ mod budget_tests {
             let (gossip_sender, _receiver) = topic.split();
             let sender = transport::MeshSender::new(gossip_sender);
             let mut state = testing::fresh_state();
-            state.meshed = true;
+            state.standing.insert(Standing::Meshed);
             state
                 .fast_rounds
                 .note_change(Channel::State, Instant::now());
@@ -929,7 +931,7 @@ mod budget_tests {
 
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = testing::fresh_state();
-        state.meshed = true;
+        state.standing.insert(Standing::Meshed);
         let (mesh, author) = (MeshId::from("test"), nick("alice"));
         let seed = *state.identity.public().as_bytes();
         let state_doc = state.doc(Channel::State);
@@ -1088,6 +1090,7 @@ mod budget_tests {
 
 #[cfg(test)]
 mod tests {
+    use crate::daemon::state::Standing;
     use std::collections::HashSet;
 
     use super::{
@@ -1263,7 +1266,7 @@ mod tests {
     /// never to a real peer.
     fn rendezvous_only() -> EventLoopState {
         let mut state = fresh_state();
-        state.meshed = false;
+        state.standing.remove(&Standing::Meshed);
         state.rendezvous_linked = true;
         state
     }
@@ -1387,7 +1390,7 @@ mod tests {
             author: &author,
         };
         let mut state = fresh_state();
-        state.meshed = false;
+        state.standing.remove(&Standing::Meshed);
         state.rendezvous_linked = false;
         assert!(
             state_digest(&state, origin, Channel::Meta).is_none(),
@@ -1407,8 +1410,8 @@ mod tests {
         );
 
         state.rendezvous_linked = false;
-        state.meshed = true;
-        state.degraded = false;
+        state.standing.insert(Standing::Meshed);
+        state.standing.remove(&Standing::Degraded);
         assert!(
             state_digest(&state, origin, Channel::State).is_some(),
             "meshed, as before"

@@ -3,6 +3,7 @@
 use super::lane_needs;
 use super::udp_transport::UdpTransport;
 use crate::daemon::handler_ctx::HandlerCtx;
+use crate::daemon::state::Standing;
 
 use iroh::{EndpointAddr, EndpointId};
 
@@ -109,7 +110,7 @@ pub(crate) async fn detach_sessions_under_udp(
         .collect();
     for (peer, needs_lane) in holders {
         if detach_session_under_udp(state, peer, needs_lane)
-            && state.meshed
+            && state.standing.contains(&Standing::Meshed)
             && !state.pending_outbound.is_empty()
         {
             gossip::flush_pending(state, context, "direct path back").await;

@@ -1,6 +1,8 @@
 //! The membership driver: what a `msg` frame means on the way in, and what a
 //! consumer's request means on the way out.
 
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use crate::daemon::state::Standing;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -1026,7 +1028,7 @@ impl MembershipApp {
                 false
             }
             Linking::SeverGossip { reply } => {
-                state.gossip_open = false;
+                state.standing.remove(&Standing::GossipOpen);
                 let _ = reply.send(());
                 false
             }
