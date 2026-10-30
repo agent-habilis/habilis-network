@@ -28,7 +28,7 @@ use tokio::sync::{Notify, Notify as tokio_Notify};
 ///
 /// # Examples
 ///
-/// A signal admission decides which peers may open a WebRTC session through the signal. The doc test compiles it but does not run it.
+/// A signal admission decides which peers may open a `WebRTC` session through the signal. The doc test compiles it but does not run it.
 ///
 /// ```no_run
 /// use habilis_network::net::direct::SignalAdmission;

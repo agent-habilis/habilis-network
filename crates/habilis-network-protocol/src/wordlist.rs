@@ -121,7 +121,7 @@ pub(super) fn random_pair() -> String {
     format!("{first}-{second}")
 }
 
-/// Holds the TypeScript transcription of [`WORDS`] to this one.
+/// Holds the `TypeScript` transcription of [`WORDS`] to this one.
 ///
 /// `packages/habilis-network-api` has a copy because neither of its backends can reach
 /// [`random_pair`]: the C ABI exports no nickname generator, and adding one is a
@@ -134,7 +134,7 @@ mod js_copy {
 
     const SOURCE: &str = include_str!("../../../packages/habilis-network-api/src/wordlist.ts");
 
-    /// The words in the TypeScript array, bounded by the array's own delimiters
+    /// The words in the `TypeScript` array, bounded by the array's own delimiters
     /// rather than scanned for quotes — the prose above it contains
     /// apostrophes, which a quote scanner would read as entries.
     fn transcribed() -> Vec<&'static str> {

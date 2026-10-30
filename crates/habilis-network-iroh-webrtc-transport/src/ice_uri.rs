@@ -39,7 +39,7 @@
 ///
 /// The throw comes from the *constructor*, so one bad URI costs the whole peer
 /// connection rather than that one server — which is how a bad entry leaves a
-/// browser with no WebRTC at all, quietly falling back to the relay. A `stun:`
+/// browser with no `WebRTC` at all, quietly falling back to the relay. A `stun:`
 /// query is meaningless anyway (RFC 7064 defines none), so it is stripped
 /// rather than dropped: that recovers the server the caller meant.
 #[must_use]

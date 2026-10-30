@@ -1,4 +1,4 @@
-//! The resident memory that one WebRTC session costs the process that holds it.
+//! The resident memory that one `WebRTC` session costs the process that holds it.
 //!
 //! An underlay session and an application session are the same object: a session made by
 //! `offer_with` and `answer_with`, and attached to a `WebRtcTransport`. This example measures

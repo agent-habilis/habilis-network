@@ -1,10 +1,10 @@
 //! The stream hash: everything a consumer needs to reach one stream, as a bare
-//! Base58Check token.
+//! `Base58Check` token.
 //!
 //! It is a bearer ticket, not a digest. Whoever holds it can take the stream's
 //! one consumer slot, so hand it only to the reader you mean.
 //!
-//! Wire: Base58Check(`VERSION ‖ KIND ‖ flags ‖ id(16) ‖ secret(32) ‖ lookups ‖
+//! Wire: `Base58Check`(`VERSION ‖ KIND ‖ flags ‖ id(16) ‖ secret(32) ‖ lookups ‖
 //! address-json`). `lookups` is self-delimiting, so the address takes the
 //! remainder. The `KIND` byte keeps a blob ticket, an invite or a mesh id from
 //! decoding as a stream hash.

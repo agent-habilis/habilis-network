@@ -1,4 +1,4 @@
-//! The blob ticket — a bare Base58Check token carrying everything a consumer
+//! The blob ticket — a bare `Base58Check` token carrying everything a consumer
 //! needs to fetch one content-addressed blob from its producer: the bearer
 //! secret, the content hash + size, the mesh's discovery config, and the
 //! producer's blob-endpoint address. Payload layout: `secret(32) ‖ flags(1) ‖
@@ -6,7 +6,7 @@
 //! self-delimiting, so the address occupies the remainder). Bit 0 of the flags
 //! byte marks a password-protected ticket.
 //!
-//! Wire: bare Base58Check(`version ‖ kind ‖ payload`) with a `SHA256d`
+//! Wire: bare `Base58Check`(`version ‖ kind ‖ payload`) with a `SHA256d`
 //! checksum. The `kind` byte marks this as a *blob* ticket so a wrong-kind
 //! token (invite / bridge) fails cleanly on decode.
 

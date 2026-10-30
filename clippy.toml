@@ -20,24 +20,8 @@ allowed-idents-below-min-chars = []
 cognitive-complexity-threshold = 20
 too-many-lines-threshold = 120
 
-# Domain terms that must not trip clippy::doc_markdown (extends the default
-# allow-list rather than replacing it).
-doc-valid-idents = [
-    "iroh",
-    "QUIC",
-    "WebRTC",
-    "HyParView",
-    "Plumtree",
-    "Base58Check",
-    "Ed25519",
-    "TopicId",
-    "EndpointId",
-    "JSON-RPC",
-    # The two host languages `packages/` targets. They are prose, not items, and
-    # backticking them would claim they name something in the code.
-    "JavaScript",
-    "TypeScript",
-]
+# Domain terms that must not trip clippy::doc_markdown. Empty: a name in prose is backticked.
+doc-valid-idents = []
 
 # Calls that panic in a browser, where there is no Tokio runtime and `std::time` has no clock. The
 # lint is off in the workspace (see `Cargo.toml`); every wasm32 clippy row passes

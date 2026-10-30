@@ -1,4 +1,4 @@
-//! The policy of when a WebRTC session is wanted, kept, or detached.
+//! The policy of when a `WebRTC` session is wanted, kept, or detached.
 
 use super::lane_needs;
 use super::udp_transport::UdpTransport;
@@ -19,7 +19,7 @@ use crate::gossip;
 ///
 /// # Examples
 ///
-/// It says whether a pair of peers needs a WebRTC lane, because neither side reaches the other over UDP. The doc test compiles it but does not run it.
+/// It says whether a pair of peers needs a `WebRTC` lane, because neither side reaches the other over UDP. The doc test compiles it but does not run it.
 ///
 /// ```no_run
 /// use habilis_network::iroh::EndpointAddr;

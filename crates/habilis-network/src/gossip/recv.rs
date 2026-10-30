@@ -262,7 +262,7 @@ pub(crate) async fn handle_gossip_event(
 /// loss: there is nothing to detach, to offer again, or to re-graft, and the
 /// rule that released it also says when to come back.
 ///
-/// A `NeighborDown` that the beacon's own HyParView caused (it drops a random
+/// A `NeighborDown` that the beacon's own `HyParView` caused (it drops a random
 /// member when its view is full) reads as a loss here and arms a reclaim on a
 /// node with links enough. That costs one probe, and is left as it is.
 fn rendezvous_neighbor_down(
@@ -315,7 +315,7 @@ fn rendezvous_neighbor_down(
 ///   endpoint never had a rendezvous link to lose — so nothing armed, and
 ///   failover waited out the 15s heal cadence.
 ///
-/// The narrow gate this replaces existed to keep a plain HyParView shuffle (a
+/// The narrow gate this replaces existed to keep a plain `HyParView` shuffle (a
 /// peer flapping while others remain) from making initial multi-node
 /// convergence pay a needless ~6s bind storm on every non-beacon node. That
 /// storm needed a *claim*, and a claim needs a probe that says the rendezvous

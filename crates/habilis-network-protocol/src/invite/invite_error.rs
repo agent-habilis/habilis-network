@@ -12,7 +12,7 @@ type BoxedError = Box<dyn Error + Send + Sync>;
 ///
 /// # Examples
 ///
-/// A token that is not Base58Check returns this error.
+/// A token that is not `Base58Check` returns this error.
 ///
 /// ```
 /// use habilis_network_protocol::invite::{InviteError, InviteTicket};
@@ -24,7 +24,7 @@ type BoxedError = Box<dyn Error + Send + Sync>;
 #[non_exhaustive]
 #[must_use]
 pub enum InviteError {
-    /// The token is not a Base58Check text.
+    /// The token is not a `Base58Check` text.
     Base58(Base58Error),
     /// The ticket names a version this build does not read.
     UnsupportedVersion(String),

@@ -55,7 +55,7 @@ impl ProtocolHandler for DirectOnlyGossip {
     /// side has. The offerer never holds one, because its own graft is the
     /// dial the pair needs. Held, it would be a second connection for the same
     /// pair: iroh-gossip dedups a pair by closing the connection each side
-    /// dialed, and the HyParView reply already sent on the closed one is
+    /// dialed, and the `HyParView` reply already sent on the closed one is
     /// lost, which leaves the pair half-linked until a heal re-grafts it.
     /// This connection is typically the far side's `ForwardJoin` dial, sent
     /// through the rendezvous before any session exists.

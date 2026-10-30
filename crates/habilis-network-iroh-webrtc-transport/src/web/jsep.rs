@@ -506,7 +506,7 @@ pub(super) async fn wait_channel_open(
 /// a single candidate was gathered, so `require_candidates` rejected the answer
 /// ~55 ms in, and the 60 s `ondatachannel` guard lost its race on the first
 /// tick and reported "timed out waiting for ondatachannel". A Node peer could
-/// therefore never complete a WebRTC handshake, in either role.
+/// therefore never complete a `WebRTC` handshake, in either role.
 ///
 /// Resolving immediately is kept only for a global with no `setTimeout` at all,
 /// where hanging really would be worse.

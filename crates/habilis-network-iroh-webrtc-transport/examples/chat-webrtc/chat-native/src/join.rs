@@ -1,12 +1,12 @@
-//! `chat-native join` — a terminal peer, optionally over WebRTC.
+//! `chat-native join` — a terminal peer, optionally over `WebRTC`.
 //!
 //! Two modes, and the contrast between them is half the demo:
 //!
 //! - **default** — dial the room over iroh's own transports. This is what a
-//!   native peer should normally do, and what the WebRTC path is measured
+//!   native peer should normally do, and what the `WebRTC` path is measured
 //!   against.
 //! - **`--webrtc`** — do exactly what a browser tab does: swap JSEP over the
-//!   relay, then dial the room on an address that names only the WebRTC
+//!   relay, then dial the room on an address that names only the `WebRTC`
 //!   transport. It exists so the transport can be exercised end to end with no
 //!   browser in the loop.
 

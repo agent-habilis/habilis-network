@@ -24,7 +24,7 @@ use n0_future::time;
 ///
 /// # Examples
 ///
-/// It dials a peer over the signal to open a WebRTC session with it. The doc test compiles it but does not run it.
+/// It dials a peer over the signal to open a `WebRTC` session with it. The doc test compiles it but does not run it.
 ///
 /// ```no_run
 /// use habilis_network::iroh::{Endpoint, EndpointAddr};

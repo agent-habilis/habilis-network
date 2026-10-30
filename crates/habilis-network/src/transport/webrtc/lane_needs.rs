@@ -1,4 +1,4 @@
-//! Which peer pairs need a WebRTC lane.
+//! Which peer pairs need a `WebRTC` lane.
 
 use super::udp_transport::UdpTransport;
 

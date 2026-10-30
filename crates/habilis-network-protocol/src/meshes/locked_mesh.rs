@@ -153,7 +153,7 @@ impl LockedMesh {
         self.config.to_bytes()
     }
 
-    /// The id's canonical text (Base58Check), the same as `Display`.
+    /// The id's canonical text (`Base58Check`), the same as `Display`.
     #[must_use]
     pub fn encode(&self) -> String {
         base58check::encode(&super::mesh::encode_id(

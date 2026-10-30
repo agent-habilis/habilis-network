@@ -1,4 +1,4 @@
-//! Negotiating a WebRTC session through the rendezvous.
+//! Negotiating a `WebRTC` session through the rendezvous.
 
 use super::offer::Offer;
 use super::{lane_needs, offer};

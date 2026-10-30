@@ -23,7 +23,7 @@ pub(crate) const COOLDOWN_REFUSED: &str = "unicast dial on cooldown after a rece
 /// path before the send is refused. Shorter than the accept side's
 /// `PROBE_DEADLINE`: this wait blocks the event loop exactly like the dial
 /// itself, so it gets a dial-sized budget, not an accept-sized one — and a
-/// punch or a WebRTC path-open lands in single-digit seconds when it lands
+/// punch or a `WebRTC` path-open lands in single-digit seconds when it lands
 /// at all.
 pub(super) const PATH_SELECT_TIMEOUT: Duration = Duration::from_secs(5);
 

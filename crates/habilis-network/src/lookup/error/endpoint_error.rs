@@ -3,7 +3,7 @@ use std::fmt;
 use iroh::EndpointId;
 
 use std::error;
-/// Why an endpoint cannot be built, or a WebRTC signal cannot be exchanged.
+/// Why an endpoint cannot be built, or a `WebRTC` signal cannot be exchanged.
 ///
 /// [`EndpointError::CapRefused`] and [`EndpointError::NotANeighbor`] are the refusals a
 /// caller acts on: the peer is at its direct-peer cap, or it is not yet a neighbor of

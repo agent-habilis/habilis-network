@@ -301,7 +301,7 @@ impl BrowserHubTransport {
     /// over — the number that says where traffic really went.
     ///
     /// The counters are cumulative; a rate is the caller's job, from two
-    /// samples. WebRTC exposes no instantaneous throughput for a data channel
+    /// samples. `WebRTC` exposes no instantaneous throughput for a data channel
     /// (`availableOutgoingBitrate` is media-bandwidth-estimation driven and is
     /// absent here), so differencing is the only route.
     ///

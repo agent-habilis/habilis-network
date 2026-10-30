@@ -65,7 +65,7 @@ impl fmt::Debug for StreamHash {
 }
 
 impl StreamHash {
-    /// Encode as a bare Base58Check token.
+    /// Encode as a bare `Base58Check` token.
     ///
     /// # Panics
     /// Never: an `EndpointAddr` always serializes to JSON.
@@ -102,11 +102,11 @@ impl StreamHash {
         header
     }
 
-    /// Decode a bare Base58Check token.
+    /// Decode a bare `Base58Check` token.
     ///
     /// # Errors
     /// # Errors
-    /// [`HashError::Field`] when the Base58Check text or a field does not decode,
+    /// [`HashError::Field`] when the `Base58Check` text or a field does not decode,
     /// [`HashError::UnknownVersion`] or [`HashError::UnknownFlags`] for a version or
     /// flags this build does not know, [`HashError::WrongKind`] for another kind of
     /// token, and [`HashError::Truncated`] when the payload ends early.

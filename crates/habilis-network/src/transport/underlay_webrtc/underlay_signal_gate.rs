@@ -1,4 +1,4 @@
-//! The signal gate of the WebRTC underlay: which signals it admits.
+//! The signal gate of the `WebRTC` underlay: which signals it admits.
 
 use super::allowed::Allowed;
 use crate::transport::{LOG_TARGET, WebRtcSignalAcceptor};

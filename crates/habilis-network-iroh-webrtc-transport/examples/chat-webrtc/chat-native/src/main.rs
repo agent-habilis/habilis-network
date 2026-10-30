@@ -64,7 +64,7 @@ enum Command {
         /// Reach the room over a `WebRTC` data channel, exactly as a tab does.
         ///
         /// Off by default: a native peer should prefer iroh's own transports,
-        /// which are faster. This is here so the WebRTC path can be exercised
+        /// which are faster. This is here so the `WebRTC` path can be exercised
         /// end to end without a browser.
         #[arg(long)]
         webrtc: bool,

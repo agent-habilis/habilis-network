@@ -1,9 +1,9 @@
 //! The native cells: iroh endpoints in this process, on loopback.
 //!
 //! Three shapes. Plain iroh on UDP is the ceiling. The engine-shaped endpoint
-//! registers the WebRTC transport beside UDP and lets the path selector pick,
+//! registers the `WebRTC` transport beside `UDP` and lets the path selector pick,
 //! which is what two native habilis-network peers do — and it picks UDP, so that cell
-//! is a check that registering the transport costs nothing, not a WebRTC
+//! is a check that registering the transport costs nothing, not a `WebRTC`
 //! number. The webrtc-only pair is str0m at both ends and the only native cell
 //! that goes through the data channel at all.
 
@@ -299,7 +299,7 @@ pub(crate) async fn habilis_network_native_native_webrtc(args: &Args) -> Outcome
     Box::pin(run).await.into()
 }
 
-/// The engine's wiring for a native peer: UDP on loopback, the WebRTC
+/// The engine's wiring for a native peer: `UDP` on loopback, the `WebRTC`
 /// transport registered beside it, the selector that prefers direct IP.
 async fn engine_shaped() -> Result<Endpoint, String> {
     let key = SecretKey::generate();

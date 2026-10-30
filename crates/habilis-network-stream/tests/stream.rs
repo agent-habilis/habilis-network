@@ -439,7 +439,7 @@ fn a_relay_transport_stream_admits_a_consumer_with_no_direct_path() {
 }
 
 /// The consumer has no IP path and the relay may not carry the bytes, so the
-/// only way they arrive is the WebRTC data channel.
+/// only way they arrive is the `WebRTC` data channel.
 #[test]
 fn a_webrtc_only_consumer_reads_over_the_data_channel() {
     let guard = habilis_network_test_tracing::init();
@@ -472,7 +472,7 @@ fn a_webrtc_only_consumer_reads_over_the_data_channel() {
 }
 
 /// The producer has no IP path, the relay may not carry the bytes, and the
-/// consumer has WebRTC off: no lane can exist, so the open fails at once
+/// consumer has `WebRTC` off: no lane can exist, so the open fails at once
 /// rather than after the direct-path probe.
 #[test]
 fn a_consumer_with_no_lane_to_a_webrtc_only_producer_fails_fast() {
@@ -494,8 +494,8 @@ fn a_consumer_with_no_lane_to_a_webrtc_only_producer_fails_fast() {
     });
 }
 
-/// A WebRTC session that attaches makes its answerer dial the offerer on the nudge ALPN, to move
-/// the connections of the pair onto the session. A stream node with WebRTC must serve that ALPN,
+/// A `WebRTC` session that attaches makes its answerer dial the offerer on the nudge ALPN, to move
+/// the connections of the pair onto the session. A stream node with `WebRTC` must serve that ALPN,
 /// or the dial fails with a TLS alert 120 and the node logs a warning for it.
 #[test]
 fn a_stream_node_with_webrtc_serves_the_nudge_of_a_peer() {

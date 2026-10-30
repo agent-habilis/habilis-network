@@ -1,4 +1,4 @@
-//! Base58Check: the encoding every bare identifier and ticket in this
+//! `Base58Check`: the encoding every bare identifier and ticket in this
 //! workspace shares — a mesh id, an invite ticket, a blob ticket.
 //!
 //! Payload, then a 4-byte SHA-256d checksum over it, then Base58. Decoding
@@ -17,7 +17,7 @@ use sha2::Sha256;
 
 use std::error;
 /// The double-SHA-256 checksum, truncated to its first 4 bytes.
-/// Why a Base58Check text does not decode. `what` names the text, for example
+/// Why a `Base58Check` text does not decode. `what` names the text, for example
 /// `mesh identifier`.
 ///
 /// # Examples

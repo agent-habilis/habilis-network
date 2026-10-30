@@ -7,7 +7,7 @@
 //! data channel that introduction produces carries everything after.
 //!
 //! That is the whole reason this example has no signaling server to deploy. A
-//! conventional WebRTC demo needs a `WebSocket` broker with its own address, its
+//! conventional `WebRTC` demo needs a `WebSocket` broker with its own address, its
 //! own TLS and its own uptime; iroh already runs an authenticated,
 //! NAT-traversing rendezvous, and an ALPN on it is enough.
 //!

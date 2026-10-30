@@ -57,7 +57,7 @@ impl HabilisNetworkOpts {
 /// Adding or reordering a field breaks a linked C consumer silently — it keeps
 /// passing the old layout — so a failure here is the signal to bump
 /// `OPTS_BYTES` in that file, its offset constants, and the CHANGELOG entry
-/// together. 64-bit little-endian, the same scope the TypeScript claims.
+/// together. 64-bit little-endian, the same scope the `TypeScript` claims.
 const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 

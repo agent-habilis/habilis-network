@@ -1,4 +1,4 @@
-//! The error of an endpoint: building one, and dialling a peer's WebRTC signal.
+//! The error of an endpoint: building one, and dialling a peer's `WebRTC` signal.
 
 mod endpoint_error;
 

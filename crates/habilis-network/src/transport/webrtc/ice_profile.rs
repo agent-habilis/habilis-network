@@ -1,4 +1,4 @@
-//! The ICE profile a WebRTC session is built with.
+//! The ICE profile a `WebRTC` session is built with.
 
 /// How far ICE may reach when gathering candidates.
 ///
@@ -14,7 +14,7 @@
 ///
 /// # Examples
 ///
-/// An ICE profile says how a WebRTC session finds its candidate addresses. The doc test compiles it but does not run it.
+/// An ICE profile says how a `WebRTC` session finds its candidate addresses. The doc test compiles it but does not run it.
 ///
 /// ```no_run
 /// use habilis_network::net::direct::IceProfile;

@@ -1,4 +1,4 @@
-//! Negotiating one WebRTC session with a peer.
+//! Negotiating one `WebRTC` session with a peer.
 
 use super::offer::Offer;
 use super::{nudge_acceptor, offer, retry, session_policy};

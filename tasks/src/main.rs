@@ -6,7 +6,7 @@
 //! [`gate::STEPS`] as data, so a contributor can run the gate instead of
 //! transcribing YAML, and can narrow it to one crate with `-p`.
 //!
-//! The second is `e2e`, which is a runner for a different reason: the WebRTC
+//! The second is `e2e`, which is a runner for a different reason: the `WebRTC`
 //! crate's browser tests need a preamble that is four things long, and every one
 //! of them fails in a way that does not name its cause. Homebrew clang or
 //! `ring`'s C core silently does not link; `--release` or the wasm is too big to
@@ -89,13 +89,13 @@ enum Task {
     Ffi,
     /// Build habilis-network-wasm and emit its JS glue into packages/habilis-network-wasm/wasm.
     BuildWasm,
-    /// Drive the WebRTC browser tests against real browsers.
+    /// Drive the `WebRTC` browser tests against real browsers.
     ///
     /// The default `matrix` suite sweeps browser × build profile × main-thread
     /// pressure and prints one summary table; `--suite loopback` runs the fast
     /// four-test regression suite against a single browser instead.
     E2e(e2e::Args),
-    /// Measure bulk throughput over the transports: habilis-network over WebRTC
+    /// Measure bulk throughput over the transports: habilis-network over `WebRTC`
     /// (browser↔browser, browser↔native, native↔native) against plain iroh
     /// and a bare data channel.
     Benchmark(bench::Args),

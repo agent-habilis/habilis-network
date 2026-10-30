@@ -173,7 +173,7 @@ impl TransportPolicy {
         self.set(Transport::Udp, udp)
     }
 
-    /// Set the WebRTC transport.
+    /// Set the `WebRTC` transport.
     #[must_use]
     pub fn webrtc(
         self,

@@ -101,7 +101,7 @@ mod tests {
         );
     }
 
-    /// Base58Check's checksum is the point: a ticket loses a character to a
+    /// `Base58Check`'s checksum is the point: a ticket loses a character to a
     /// line wrap or a bad paste far more often than it is corrupted in transit,
     /// and the failure should name itself rather than surface as "no such
     /// endpoint" after a 20-second dial.

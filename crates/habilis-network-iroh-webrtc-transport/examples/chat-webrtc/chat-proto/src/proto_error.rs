@@ -14,7 +14,7 @@ pub enum ProtoError {
     FrameTooLarge { bytes: usize, max: usize },
     /// A frame body does not serialize, or does not parse as the message it should be.
     Json(serde_json::Error),
-    /// A ticket is not Base58Check, is truncated, or holds an id or a relay URL that does not parse.
+    /// A ticket is not `Base58Check`, is truncated, or holds an id or a relay URL that does not parse.
     Ticket(&'static str),
     /// A ticket carries another version of the payload.
     TicketVersion { found: u8, expected: u8 },

@@ -166,7 +166,7 @@ pub(crate) fn check_injected_against_mesh(
 ///
 /// # Examples
 ///
-/// It builds the WebRTC transport of a peer with the given lookups and options. The doc test compiles it but does not run it.
+/// It builds the `WebRTC` transport of a peer with the given lookups and options. The doc test compiles it but does not run it.
 ///
 /// ```no_run
 /// use habilis_network::net::TransportOpts;

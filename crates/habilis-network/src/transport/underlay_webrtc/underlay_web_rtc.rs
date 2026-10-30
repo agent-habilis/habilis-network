@@ -1,4 +1,4 @@
-//! The WebRTC underlay of a multihop node.
+//! The `WebRTC` underlay of a multihop node.
 
 use super::allowed::Allowed;
 use crate::transport::SignalAdmission;

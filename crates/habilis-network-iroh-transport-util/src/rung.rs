@@ -72,7 +72,7 @@ pub fn best_of<'a>(
 pub enum Rung {
     /// A direct IP path.
     Ip,
-    /// A WebRTC data channel.
+    /// A `WebRTC` data channel.
     WebRtc,
     /// A path that hops through other members.
     Multihop,

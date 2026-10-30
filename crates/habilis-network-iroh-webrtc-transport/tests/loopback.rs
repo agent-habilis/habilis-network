@@ -1,4 +1,4 @@
-//! Two endpoints that carry a WebRTC session over loopback.
+//! Two endpoints that carry a `WebRTC` session over loopback.
 
 use std::time::{Duration, Instant};
 

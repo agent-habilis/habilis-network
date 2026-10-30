@@ -1,4 +1,4 @@
-//! The signal acceptor of the WebRTC plane: answers an inbound offer.
+//! The signal acceptor of the `WebRTC` plane: answers an inbound offer.
 
 use super::ice_profile::IceProfile;
 use super::nudge_acceptor;
@@ -134,7 +134,7 @@ pub(crate) fn with_refusal(
 ///
 /// # Examples
 ///
-/// A WebRTC signal acceptor takes the signals that open a WebRTC session from a peer. The doc test compiles it but does not run it.
+/// A `WebRTC` signal acceptor takes the signals that open a `WebRTC` session from a peer. The doc test compiles it but does not run it.
 ///
 /// ```no_run
 /// use habilis_network::net::direct::WebRtcSignalAcceptor;
@@ -161,7 +161,7 @@ pub struct WebRtcSignalAcceptor {
 }
 
 impl WebRtcSignalAcceptor {
-    /// An acceptor that answers WebRTC offers. It shares `admission` with the dialing side, so the ceiling is one number per node.
+    /// An acceptor that answers `WebRTC` offers. It shares `admission` with the dialing side, so the ceiling is one number per node.
     #[must_use]
     pub fn new(
         handle: WebRtcHandle,

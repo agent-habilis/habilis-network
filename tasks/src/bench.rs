@@ -1,13 +1,13 @@
 //! `cargo task benchmark` — bulk throughput over the transports.
 //!
 //! One question: is the iroh↔WebRTC integration the bottleneck? So the cells
-//! are habilis-network over WebRTC in every pairing that exists — browser↔browser,
+//! are habilis-network over `WebRTC` in every pairing that exists — browser↔browser,
 //! browser↔native, native↔native — read against two ceilings: plain iroh on
 //! UDP, and a bare data channel with no QUIC in it at all.
 //!
 //! Every cell moves the same bulk protocol (`habilis_network_iroh_webrtc_transport::
 //! bench`) over one QUIC bi-stream, times it on the receiving side only, and
-//! asserts which path carried it — a cell that claims WebRTC and quietly ran
+//! asserts which path carried it — a cell that claims `WebRTC` and quietly ran
 //! on UDP is a wrong number, not a fast one. The JSEP round is timed
 //! separately and kept out of the throughput window.
 
@@ -76,14 +76,14 @@ pub(crate) enum Cell {
     HabilisNetworkChromeNative,
     /// A Safari Technology Preview client, a str0m server in this process.
     HabilisNetworkSafariNative,
-    /// A Safari Technology Preview client, a Chrome server: the two WebRTC
+    /// A Safari Technology Preview client, a Chrome server: the two `WebRTC`
     /// stacks against each other.
     HabilisNetworkSafariChrome,
-    /// Two native endpoints wired as the engine wires them: the WebRTC
+    /// Two native endpoints wired as the engine wires them: the `WebRTC`
     /// transport registered, direct UDP available and preferred. Expected on
     /// `ip`, so it reads as the engine-shaped twin of the iroh baseline.
     HabilisNetworkNativeNative,
-    /// Two native endpoints with WebRTC as their only transport — str0m at
+    /// Two native endpoints with `WebRTC` as their only transport — str0m at
     /// both ends, the one cell that isolates the native double encryption.
     HabilisNetworkNativeNativeWebRtc,
     /// Plain iroh on loopback UDP, no custom transport: the native ceiling.

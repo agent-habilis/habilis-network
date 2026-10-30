@@ -2,7 +2,7 @@
 //!
 //! Two in-process native peers, A and B, and one real browser tab, T, all on one local plain-HTTP
 //! relay and one mesh whose transports are `udp,webrtc,multihop` (relay as a lookup only, so the
-//! relay carries no payload). A and B have an IP link. T has no IP, so T to A is a WebRTC session.
+//! relay carries no payload). A and B have an IP link. T has no IP, so T to A is a `WebRTC` session.
 //! T to B must have no direct path at all: B refuses T's session in both roles
 //! (`Blocking::DenyPeer`), so the only way from T to B is the multihop route through A.
 //!
@@ -81,7 +81,7 @@ async fn forwarded_cells(alpha: &Native) -> Result<u64, CellFailure> {
         .map_err(|error| CellFailure(format!("A's forwarded-cell count is unreadable: {error}")))
 }
 
-/// The WebRTC sessions on A's multihop underlay. The tab has no IP, so A reaches it only over one.
+/// The `WebRTC` sessions on A's multihop underlay. The tab has no IP, so A reaches it only over one.
 async fn underlay_sessions(alpha: &Native) -> String {
     alpha
         .request(|reply| {

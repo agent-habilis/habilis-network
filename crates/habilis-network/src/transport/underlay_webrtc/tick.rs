@@ -1,4 +1,4 @@
-//! The tick of the WebRTC underlay: one pass that dials, keeps and reports underlays.
+//! The tick of the `WebRTC` underlay: one pass that dials, keeps and reports underlays.
 
 use super::plan;
 use super::plan::Plan;

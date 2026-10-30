@@ -57,7 +57,7 @@ pub struct StreamNode {
     pub(super) transports: TransportOpts,
     ice: IceProfile,
     /// The address book of the endpoint: the producers this node has opened, and
-    /// the peers of its WebRTC sessions.
+    /// the peers of its `WebRTC` sessions.
     producers: MemoryLookup,
 }
 

@@ -293,7 +293,7 @@ async fn build_member_endpoint(
 /// Off a host (a browser): the multihop transport is built when the mesh policy has it and the
 /// node has a direct path (`build.multihop`), with the link cost of a browser, so that routes
 /// avoid it as a hop; otherwise the endpoint is the plain peer one. The underlay has no IP
-/// sockets, and rides WebRTC and the relay.
+/// sockets, and rides `WebRTC` and the relay.
 #[cfg(not(feature = "host"))]
 async fn build_member_endpoint(
     build: &SetupBuild<'_>,
@@ -1452,7 +1452,7 @@ mod tests {
     }
 
     /// A handle made from a key other than the one the endpoint binds is refused
-    /// by `bind`, both for the WebRTC transport and for the multihop handle.
+    /// by `bind`, both for the `WebRTC` transport and for the multihop handle.
     #[tokio::test]
     async fn an_injected_handle_on_another_key_is_refused_at_bind() {
         let secret = iroh::SecretKey::from_bytes(&[91; 32]);

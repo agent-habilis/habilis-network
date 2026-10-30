@@ -79,7 +79,7 @@ impl InjectedEndpoint {
     /// direct connections, as in [`SetupParams::max_direct`](super::SetupParams::max_direct).
     ///
     /// # Errors
-    /// `transports` has no WebRTC handle, or it already has an admission table
+    /// `transports` has no `WebRTC` handle, or it already has an admission table
     /// (this method makes the one). A handle was made from a key other than the one
     /// that `secret` derives, or the endpoint does not bind.
     pub async fn bind(

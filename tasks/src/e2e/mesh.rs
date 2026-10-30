@@ -5,7 +5,7 @@
 //! (`packages/habilis-network-wasm/harness`), driven cell by cell:
 //!
 //! - **policy** — the mesh's `relay_transport`, on or off;
-//! - **native transports** — everything / WebRTC only / relay only, to force
+//! - **native transports** — everything / `WebRTC` only / relay only, to force
 //!   the punch, the data channel, and the refusal in turn;
 //! - **join mode** — both derive from a topic, the browser joins the id the
 //!   native side minted, or the browser opens the topic first.
@@ -43,7 +43,7 @@ use tokio::time::{Instant, Instant as tokio_Instant};
 
 pub(super) use bun_server::BunServer;
 pub(super) use native::Native;
-/// A linked pair has to survive the beacon claim (~8 s), a WebRTC
+/// A linked pair has to survive the beacon claim (~8 s), a `WebRTC`
 /// negotiation or a hole punch, and one alive-tick retry.
 pub(super) const LINK_TIMEOUT: Duration = Duration::from_mins(4);
 pub(super) const PAYLOAD_TIMEOUT: Duration = Duration::from_secs(20);

@@ -27,7 +27,7 @@ pub struct Ticket {
 const TICKET_VERSION: u8 = 1;
 
 impl Ticket {
-    /// `version(1) ‖ id(32) ‖ relay_len(u16 LE) ‖ relay(utf8)`, Base58Check.
+    /// `version(1) ‖ id(32) ‖ relay_len(u16 LE) ‖ relay(utf8)`, `Base58Check`.
     ///
     /// Base58 so the string survives a double-click, a URL fragment and a copy
     /// out of a terminal: no `+`, `/`, `=` or characters that look alike.
@@ -48,7 +48,7 @@ impl Ticket {
     }
 
     /// # Errors
-    /// The string is not Base58Check, carries another version, is truncated, or
+    /// The string is not `Base58Check`, carries another version, is truncated, or
     /// holds an id or relay URL that does not parse.
     pub fn decode(encoded: &str) -> Result<Self, ProtoError> {
         let decoded = bs58::decode(encoded.trim()).with_check(None);

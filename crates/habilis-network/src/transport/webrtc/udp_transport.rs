@@ -1,4 +1,4 @@
-//! The UDP transport a WebRTC session runs on.
+//! The UDP transport a `WebRTC` session runs on.
 
 /// Whether this node has a UDP transport, as its own state knows it.
 ///

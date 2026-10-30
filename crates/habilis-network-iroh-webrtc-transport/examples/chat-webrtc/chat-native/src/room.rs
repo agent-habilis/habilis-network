@@ -1,6 +1,6 @@
 //! The room: a roster and a fan-out, with no notion of how anyone is connected.
 //!
-//! Nothing here mentions iroh, WebRTC or a stream. That is deliberate — the
+//! Nothing here mentions iroh, `WebRTC` or a stream. That is deliberate — the
 //! host's own terminal is a member on exactly the same terms as a browser tab,
 //! so "the native peer" in the demo is not a special case bolted on beside the
 //! real ones. It joins, it says things, it leaves.

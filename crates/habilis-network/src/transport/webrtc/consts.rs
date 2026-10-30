@@ -1,4 +1,4 @@
-//! The ALPNs, the deadlines and the direct-peer cap of the WebRTC plane.
+//! The ALPNs, the deadlines and the direct-peer cap of the `WebRTC` plane.
 
 use std::time;
 /// ALPN for the JSEP exchange. Wire-load-bearing in the same way
@@ -50,7 +50,7 @@ pub(crate) const SIGNAL_ROUND_DEADLINE: time::Duration = time::Duration::from_se
 /// sessions and the unicast connections together. A node sets its own with
 /// `SetupParams::max_direct`; `0` takes this value.
 ///
-/// It is deliberately not the same knob as HyParView's `active_view_capacity` (G): that one
+/// It is deliberately not the same knob as `HyParView`'s `active_view_capacity` (G): that one
 /// sizes the gossip overlay and is fixed when the mesh is built. Each direct connection costs
 /// memory and, in a browser, up to a full ICE gathering budget — so the ceiling is real, not
 /// notional. A newcomer past C evicts the least valuable peer, see

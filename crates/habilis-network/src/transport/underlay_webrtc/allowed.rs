@@ -1,4 +1,4 @@
-//! The members a WebRTC underlay is allowed to reach.
+//! The members a `WebRTC` underlay is allowed to reach.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
