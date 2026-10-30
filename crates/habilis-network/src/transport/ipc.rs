@@ -52,7 +52,8 @@ mod tests {
     fn json_ok_is_valid_json() {
         let _guard = ::habilis_network_test_tracing::init();
         let json = json_reply::json_ok("abc-123");
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("the json the ipc reply writes parses");
         assert_eq!(
             parsed["ok"], true,
             "a json ok reply is an object with ok true"
@@ -64,7 +65,8 @@ mod tests {
     fn json_error_is_valid_json() {
         let _guard = ::habilis_network_test_tracing::init();
         let json = json_reply::json_error("something broke");
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("the json the ipc reply writes parses");
         assert_eq!(
             parsed["ok"], false,
             "a json error reply is an object with ok false"
@@ -79,7 +81,8 @@ mod tests {
     fn json_ok_escapes_special_chars() {
         let _guard = ::habilis_network_test_tracing::init();
         let json = json_reply::json_ok(r#"id"with"quotes"#);
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("the json the ipc reply writes parses");
         assert_eq!(
             parsed["id"], r#"id"with"quotes"#,
             "an id with quotes is escaped in a json ok reply"
@@ -90,7 +93,8 @@ mod tests {
     fn json_error_escapes_special_chars() {
         let _guard = ::habilis_network_test_tracing::init();
         let json = json_reply::json_error(r#"error: "bad input""#);
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("the json the ipc reply writes parses");
         assert_eq!(
             parsed["error"], r#"error: "bad input""#,
             "an error with quotes is escaped in a json error reply"
@@ -136,7 +140,9 @@ mod tests {
 
         use crate::proptest_support;
         fn arb_ascii_body() -> impl Strategy<Value = String> {
-            arb_vec(0x20u8..0x7Eu8, 0..200).prop_map(|bytes| String::from_utf8(bytes).unwrap())
+            arb_vec(0x20u8..0x7Eu8, 0..200).prop_map(|bytes| {
+                String::from_utf8(bytes).expect("printable ascii bytes are valid utf-8")
+            })
         }
 
         fn arb_mesh() -> impl Strategy<Value = MeshId> {
@@ -151,7 +157,7 @@ mod tests {
             fn prop_json_ok_always_valid(id in arb_ascii_body()) {
                 let _guard = ::habilis_network_test_tracing::init();
                 let json = json_reply::json_ok(&id);
-                let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                let parsed: serde_json::Value = serde_json::from_str(&json).expect("the json the ipc reply writes parses");
                 prop_assert!(parsed["ok"] == true);
                 prop_assert_eq!(&parsed["id"], &id as &str);
                         }
@@ -160,7 +166,7 @@ mod tests {
             fn prop_json_error_always_valid(message in arb_ascii_body()) {
                 let _guard = ::habilis_network_test_tracing::init();
                 let json = json_reply::json_error(&message);
-                let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                let parsed: serde_json::Value = serde_json::from_str(&json).expect("the json the ipc reply writes parses");
                 prop_assert!(parsed["ok"] == false);
                 prop_assert_eq!(&parsed["error"], &message as &str);
                         }
@@ -171,7 +177,7 @@ mod tests {
             fn prop_json_ok_injection_safe(id in r#"["\\/\n\r\t]{1,50}"#) {
                 let _guard = ::habilis_network_test_tracing::init();
                 let json = json_reply::json_ok(&id);
-                let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                let parsed: serde_json::Value = serde_json::from_str(&json).expect("the json the ipc reply writes parses");
                 prop_assert_eq!(&parsed["id"], &id as &str);
                         }
 
@@ -179,7 +185,7 @@ mod tests {
             fn prop_json_error_injection_safe(message in r#"["\\/\n\r\t]{1,50}"#) {
                 let _guard = ::habilis_network_test_tracing::init();
                 let json = json_reply::json_error(&message);
-                let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                let parsed: serde_json::Value = serde_json::from_str(&json).expect("the json the ipc reply writes parses");
                 prop_assert_eq!(&parsed["error"], &message as &str);
                         }
 
@@ -250,8 +256,9 @@ mod tests {
             };
             let response = client::send(&test_base(), &command, &nickname)
                 .await
-                .unwrap();
-            let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+                .expect("the client reaches the local ipc listener");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&response).expect("the ipc reply is json");
             assert_eq!(
                 parsed["ok"], true,
                 "a message sent over ipc gets an ok reply"
@@ -261,7 +268,7 @@ mod tests {
                 "the ipc reply carries the echoed message"
             );
 
-            handler.await.unwrap();
+            handler.await.expect("the ipc handler task finishes");
             listener_handle.abort();
         });
     }
@@ -321,14 +328,19 @@ mod tests {
 
             // Park a silent connection.
             let path = listener::socket_path(&test_base(), &mesh, &nickname);
-            let name = path.clone().to_fs_name::<GenericFilePath>().unwrap();
-            let mut idle = Stream::connect(name).await.unwrap();
+            let name = path
+                .clone()
+                .to_fs_name::<GenericFilePath>()
+                .expect("the socket path is a valid file name");
+            let mut idle = Stream::connect(name)
+                .await
+                .expect("the idle connection reaches the listener");
 
             // A healthy command still round-trips while the idle one is parked.
             let command = TestCommand::Ping { mesh: mesh.clone() };
             let response = client::send(&test_base(), &command, &nickname)
                 .await
-                .unwrap();
+                .expect("the healthy command reaches the listener");
             assert!(response.contains("healthy"), "listener stalled: {response}");
 
             // The parked connection is closed (EOF) at the deadline, with margin.
