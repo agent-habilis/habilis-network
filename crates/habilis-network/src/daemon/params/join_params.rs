@@ -66,21 +66,13 @@ impl JoinParams {
                 // ~100ms of Argon2id, accepted synchronously: this runs once
                 // per join, before the daemon exists. `unlock` decides whether a
                 // password is needed; only its typed reason is mapped here.
-                #[expect(
-                    clippy::wildcard_enum_match_arm,
-                    reason = "foreign non_exhaustive enum: the compiler needs a wildcard arm; the named variants are listed before it"
-                )]
-                let unlocked =
-                    locked
-                        .unlock(self.password.as_ref())
-                        .map_err(|error| match error {
-                            UnlockError::PasswordRequired => SetupError::PasswordRequired,
-                            error @ (UnlockError::InviteOnly
-                            | UnlockError::NoPassword
-                            | UnlockError::WrongPassword) => SetupError::Unlock(error),
-                            other => SetupError::Unlock(other),
-                        })?;
-                unlocked
+                locked.unlock(self.password.as_ref()).map_err(|error| {
+                    if let UnlockError::PasswordRequired = error {
+                        SetupError::PasswordRequired
+                    } else {
+                        SetupError::Unlock(error)
+                    }
+                })?
             }
             // Redeem the invite: verify the creator's signature + expiry and
             // unwrap the join root. An invite-only mesh carries no id-level
