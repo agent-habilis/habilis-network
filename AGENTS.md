@@ -342,7 +342,7 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 ### Wire format
 
 - Make a newtype serialize as the value it wraps, with `#[serde(transparent)]` or by hand, so the bytes do not change.
-- Treat a wire change as a named decision. Name it in the commit message and in `CHANGELOG.md`.
+- Treat a wire change as a named decision. Name it in the commit message.
 - Pin each wire form with a golden test. When a golden changes, keep the old literal in a second test that asserts the parse error.
 
 ### Where a bare primitive stays

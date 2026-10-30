@@ -60,7 +60,7 @@ async function main(argv: string[]): Promise<void> {
   };
   const o: RenameOptions = { crate: get("--crate"), from: get("--from"), to: get("--to") };
   const files = spawnSync("git", ["ls-files"], { encoding: "utf8" }).stdout.split("\n").filter(Boolean);
-  const targets = files.filter((f) => /\.(rs|md)$/.test(f) && f !== "CHANGELOG.md");
+  const targets = files.filter((f) => /\.(rs|md)$/.test(f));
   let changed = 0;
   for (const file of targets) {
     const before = await Bun.file(file).text();

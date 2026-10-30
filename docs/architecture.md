@@ -60,7 +60,6 @@ All instances meet on one mesh.
 ### 1.3 Provenance and naming
 
 The workspace is a hard fork of `agent-habilis/agent-gossip` at commit `f81b0529`.
-`FORKED.md` records the fork contract.
 The wire byte-domains still say `habilis-mesh` to keep wire compatibility with the upstream network.
 The engine word for a network is **mesh**.
 The user-facing word in the CLI is **gossip**, and that word never reaches the wire.
@@ -717,7 +716,6 @@ In this repository:
 
 - `README.md` — workspace overview, build and test commands.
 - `crates/habilis-network/README.md` — the subsystem table, the seam traits, and the tracing-target rules.
-- `FORKED.md` — fork provenance and the pin contract.
 - `crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/README.md` — the browser-to-terminal chat and its two-endpoint workaround.
 - `AGENTS.md` — the concept glossary, the layer invariants, the logging pins, and the rules for newtypes.
 - Per-crate READMEs under `crates/*/README.md`.
