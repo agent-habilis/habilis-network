@@ -24,6 +24,17 @@ pub enum UdpTransport {
 
 impl From<bool> for UdpTransport {
     fn from(present: bool) -> Self {
+        Self::from_bool(present)
+    }
+}
+
+impl UdpTransport {
+    /// Make the UDP transport from a flag.
+    #[must_use]
+    pub fn from_bool(
+        // `true` means the peer is present (`Present`); `false` means it is absent (`Absent`).
+        present: bool,
+    ) -> Self {
         if present { Self::Present } else { Self::Absent }
     }
 }

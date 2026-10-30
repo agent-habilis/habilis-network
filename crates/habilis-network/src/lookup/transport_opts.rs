@@ -18,11 +18,20 @@ impl GossipPath {
     pub fn is_on(self) -> bool {
         matches!(self, Self::On)
     }
+
+    /// Make the gossip path from a flag.
+    #[must_use]
+    pub fn from_bool(
+        // `true` makes gossip carry data (`On`); `false` keeps it off (`Off`).
+        on: bool,
+    ) -> Self {
+        if on { Self::On } else { Self::Off }
+    }
 }
 
 impl From<bool> for GossipPath {
     fn from(on: bool) -> Self {
-        if on { Self::On } else { Self::Off }
+        Self::from_bool(on)
     }
 }
 

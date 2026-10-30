@@ -22,7 +22,7 @@ pub struct BlobDigest([u8; HASH_LEN]);
 
 impl From<[u8; HASH_LEN]> for BlobDigest {
     fn from(bytes: [u8; HASH_LEN]) -> Self {
-        Self(bytes)
+        Self::from_bytes(bytes)
     }
 }
 
@@ -31,6 +31,12 @@ impl BlobDigest {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; HASH_LEN] {
         &self.0
+    }
+
+    /// Make a blob digest from its bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; HASH_LEN]) -> Self {
+        Self(bytes)
     }
 }
 

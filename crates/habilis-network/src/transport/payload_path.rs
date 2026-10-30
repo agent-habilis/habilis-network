@@ -195,15 +195,24 @@ impl PayloadPath {
     pub fn relay_allowed(self) -> bool {
         matches!(self, Self::RelayAllowed)
     }
-}
 
-impl From<bool> for PayloadPath {
-    fn from(relay_allowed: bool) -> Self {
+    /// Make the payload path from a flag.
+    #[must_use]
+    pub fn from_bool(
+        // `true` lets payloads use the relay (`RelayAllowed`); `false` keeps them on direct paths (`DirectOnly`).
+        relay_allowed: bool,
+    ) -> Self {
         if relay_allowed {
             Self::RelayAllowed
         } else {
             Self::DirectOnly
         }
+    }
+}
+
+impl From<bool> for PayloadPath {
+    fn from(relay_allowed: bool) -> Self {
+        Self::from_bool(relay_allowed)
     }
 }
 
