@@ -78,3 +78,18 @@ describe("renameInText, a file that imports the module by name", () => {
     );
   });
 });
+
+describe("renameInText, a use group under a path", () => {
+  test("renames the module in a group under the crate's protocol path", () => {
+    expect(renameInText("use crate::protocol::{message, peer_addr_error};", "crates/habilis-network/src/gossip/recv.rs", { crate: "habilis-network-protocol", from: "message", to: "messages" })).toBe(
+      "use crate::protocol::{messages, peer_addr_error};",
+    );
+  });
+
+  test("renames bare paths in a file whose group imports the module", () => {
+    const text = "use crate::protocol::{messages, crypto};\nfn f() { message::sole_addressee(); }";
+    expect(renameInText(text, "crates/habilis-network/src/gossip/recv.rs", { crate: "habilis-network-protocol", from: "message", to: "messages" })).toBe(
+      "use crate::protocol::{messages, crypto};\nfn f() { messages::sole_addressee(); }",
+    );
+  });
+});

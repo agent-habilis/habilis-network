@@ -40,11 +40,11 @@ export function renameInText(text: string, file: string, o: RenameOptions): stri
     }
   }
   // A use group of the crate's own items, in any file: `pub use habilis_network_protocol::{identity, mesh}`.
-  out = out.replace(new RegExp(`(use (?:crate|super|self|${ident})::\\{)([^}]*)\\}`, "g"), (_m, head: string, items: string) =>
+  out = out.replace(new RegExp(`(use (?:[\\w]+::)*?(?:protocol|${ident}|crate|super|self)::\\{)([^}]*)\\}`, "g"), (_m, head: string, items: string) =>
     `${head}${items.replace(new RegExp(`(?<![\\w:])${from}(?=[,\\s}]|$)`, "g"), to)}}`,
   );
   // A file that imports the module by name (`use ...::meshes;`) names it bare in its body: `mesh::X`.
-  if (new RegExp(`^\\s*(pub(?:\\(crate\\))? )?use [^;]*::${to};`, "m").test(out)) {
+  if (new RegExp(`^\\s*(pub(?:\\(crate\\))? )?use [^;]*(?<![\\w])${to}(?![\\w])[^;]*;`, "m").test(out)) {
     out = out.replace(new RegExp(`(?<![\\w:])${from}::`, "g"), `${to}::`);
   }
   // Paths written as files, in docs and the glossary.
