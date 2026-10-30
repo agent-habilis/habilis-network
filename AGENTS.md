@@ -367,6 +367,131 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `GraftTarget` | `habilis-network/src/transport/probe.rs` | The peer of a graft and the rendezvous it is told apart from. |
 | `RivalFlag` | `habilis-network/src/daemon/state.rs` | What a `PeerInfo` says about the rendezvous: `proven` says that the sender proved its endpoint, and `held` says that it carries the beacon flag. |
 
+### Copy, Clone and Default exceptions (R12, R13, R15, R16, R22)
+
+A type that the guide asks to derive a trait, and that cannot derive it, is listed here with the field that stops it. Each row is checked by the compiler: a derive that compiles is not an exception.
+
+| Rule | Type | File | Reason |
+| --- | --- | --- | --- |
+| R15 | `Cell` (struct) | `habilis-network-iroh-multihop-transport/src/cell.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Route` (struct) | `habilis-network-iroh-multihop-transport/src/route.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Tombstone` (struct) | `habilis-network-iroh-multihop-transport/src/topology.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Held` (struct) | `habilis-network-iroh-multihop-transport/src/topology.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `State` (enum) | `habilis-network-logging/src/log_sink.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `StreamNode` (struct) | `habilis-network-stream/src/node/stream_node.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Link` (struct) | `habilis-network-stream/src/produce/registry.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Entry` (struct) | `habilis-network-stream/src/produce/registry.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Slot` (struct) | `habilis-network-test-tracing/src/guard.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `StreamNode` (struct) | `habilis-network-wasm/src/stream_node.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Slot` (struct) | `habilis-network/src/transport/admission/slot.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Hold` (struct) | `habilis-network/src/transport/webrtc.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Offer` (struct) | `habilis-network/src/transport/webrtc/backend_native/offer.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `undefined` (13) | `candidates` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R13 | `BenchError` | `habilis-network-iroh-webrtc-transport/src/bench_error.rs` | holds error sources that are not Copy, such as `endpoint::BindError` | |
+| R13 | `LobbyError` | `habilis-network-netplay/src/mesh/lobby.rs` | holds a `Nickname`, which owns a `String` | |
+| R13 | `TestRelayError` | `habilis-network/src/lookup/test_relay/test_relay_error.rs` | holds error sources that are not Copy, such as `server::SpawnError` | |
+| R16 | `ChunkError` | `habilis-network-chunks/src/chunk_error.rs` | holds a field type that is not Clone |
+| R16 | `DiskOrigin` | `habilis-network-chunks/src/fs/disk_origin.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `DiskStore` | `habilis-network-chunks/src/fs/disk_store.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `InMemoryStore` | `habilis-network-chunks/src/in_memory_store.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `ProtocolSet` | `habilis-network-iroh-transport-util/src/protocol_set.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `InviteError` | `habilis-network-protocol/src/invite/invite_error.rs` | holds a field type that is not Clone |
+| R16 | `ConfigError` | `habilis-network-protocol/src/meshes/config_error.rs` | holds a field type that is not Clone |
+| R16 | `MessageError` | `habilis-network-protocol/src/messages/message_error.rs` | holds a field type that is not Clone |
+| R16 | `PeerAddrError` | `habilis-network-protocol/src/peer_addr_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `ShardCache` | `habilis-network-protocol/src/reassembly/shard_cache.rs` | holds a field type that is not Clone |
+| R16 | `SealError` | `habilis-network-protocol/src/seal_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `Counters` | `habilis-network-iroh-gossip-transport/src/counters.rs` | holds a field type that is not Clone |
+| R16 | `DocError` | `habilis-network-doc/src/doc_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `MeshDoc` | `habilis-network-doc/src/mesh_doc.rs` | holds a `Box<` field, which is not Clone |
+| R16 | `Shared` | `habilis-network-iroh-gossip-transport/src/shared.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `MultihopTransport` | `habilis-network-iroh-multihop-transport/src/multihop_transport.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `Topology` | `habilis-network-iroh-multihop-transport/src/topology.rs` | holds a field type that is not Clone |
+| R16 | `Forwarder` | `habilis-network-iroh-multihop-transport/src/underlay/forwarder.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `Registry` | `habilis-network-iroh-webrtc-transport/src/registry.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `SignalError` | `habilis-network-iroh-webrtc-transport/src/signal_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `BenchError` | `habilis-network-iroh-webrtc-transport/src/bench_error.rs` | holds a `Connection` field, which is not Clone |
+| R16 | `JsepError` | `habilis-network-iroh-webrtc-transport/src/native/jsep_error.rs` | holds a field type that is not Clone |
+| R16 | `NegotiatedSession` | `habilis-network-iroh-webrtc-transport/src/native/negotiated_session.rs` | holds a `UdpSocket` field, which is not Clone |
+| R16 | `Negotiating` | `habilis-network-iroh-webrtc-transport/src/native/negotiating.rs` | holds a `UdpSocket` field, which is not Clone |
+| R16 | `PendingOffer` | `habilis-network-iroh-webrtc-transport/src/native/pending_offer.rs` | holds a field type that is not Clone |
+| R16 | `SessionHandle` | `habilis-network-iroh-webrtc-transport/src/native/session_handle.rs` | holds a `Arc<` field, which is not Clone |
+| R16 | `WebRtcEndpoint` | `habilis-network-iroh-webrtc-transport/src/native/web_rtc_endpoint.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `WebRtcTransport` | `habilis-network-iroh-webrtc-transport/src/native/web_rtc_transport.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `PendingAnswer` | `habilis-network-iroh-webrtc-transport/src/web/pending_answer.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `BrowserHubTransport` | `habilis-network-iroh-webrtc-transport/src/web/transport/browser_hub_transport.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `BrowserSessionGuard` | `habilis-network-iroh-webrtc-transport/src/web/transport/browser_session_guard.rs` | holds a `Endpoint` field, which is not Clone |
+| R16 | `SessionCounters` | `habilis-network-iroh-webrtc-transport/src/web/transport/session_counters.rs` | holds a field type that is not Clone |
+| R16 | `PendingAnswer` | `habilis-network-iroh-webrtc-transport/src/native/pending_answer.rs` | holds a field type that is not Clone |
+| R16 | `LanEvent` | `habilis-network/src/lookup/lan_event.rs` | holds a `Endpoint` field, which is not Clone |
+| R16 | `Membership` | `habilis-network/src/membership/join_options.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `Messaging` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `MessagingTest` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `Inspect` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `InspectTest` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `InspectHost` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `Linking` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `Ticks` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `Routing` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `Blocking` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `Beacons` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `LinkHold` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `Rendezvous` | `habilis-network/src/beacon/rendezvous.rs` | holds a `JoinHandle` field, which is not Clone |
+| R16 | `RivalProbe` | `habilis-network/src/beacon/rival_probe.rs` | holds a `JoinHandle` field, which is not Clone |
+| R16 | `RungWatch` | `habilis-network/src/beacon/rung_watch.rs` | holds a `JoinHandle` field, which is not Clone |
+| R16 | `BlobError` | `habilis-network/src/blob/error/blob_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `IpcRequest` | `habilis-network/src/daemon/app/ipc_request.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `DriverMode` | `habilis-network/src/daemon/config/driver_mode.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `Endpoints` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `Node` | `habilis-network/src/daemon/node.rs` | holds a `JoinHandle` field, which is not Clone |
+| R16 | `SetupParams` | `habilis-network/src/daemon/setup/setup_params.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `SetupError` | `habilis-network/src/daemon/setup_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `EventLoopState` | `habilis-network/src/daemon/state/event_loop_state.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `PingRound` | `habilis-network/src/daemon/state/ping_round.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `StateFile` | `habilis-network/src/daemon/state_file.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `StateFileError` | `habilis-network/src/daemon/state_file.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `EventLoopError` | `habilis-network/src/daemon/event_loop/event_loop_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `GossipLink` | `habilis-network/src/daemon/heal/gossip_link.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `Resubscribe` | `habilis-network/src/daemon/heal/resubscribe.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `MeshReceiver` | `habilis-network/src/gossip/split/mesh_receiver.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `EndpointError` | `habilis-network/src/lookup/error/endpoint_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `StoppableTask` | `habilis-network/src/lookup/relay/stoppable_task.rs` | holds a `JoinHandle` field, which is not Clone |
+| R16 | `TestRelayError` | `habilis-network/src/lookup/test_relay/test_relay_error.rs` | holds a field type that is not Clone |
+| R16 | `IpcError` | `habilis-network/src/transport/ipc/ipc_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `PoolInner` | `habilis-network/src/transport/pool/unicast_pool.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `Answer` | `habilis-network/src/transport/webrtc/backend_native/answer.rs` | holds a field type that is not Clone |
+| R16 | `Offer` | `habilis-network/src/transport/webrtc/backend_native/offer.rs` | holds a field type that is not Clone |
+| R16 | `Delivered` | `habilis-network/src/transport/send/delivered.rs` | holds a field type that is not Clone |
+| R16 | `SendError` | `habilis-network/src/transport/send/send_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `CountingSink` | `habilis-network/src/gossip/event.rs` | holds a field type that is not Clone |
+| R16 | `Request` | `habilis-network/src/membership/membership_app.rs` | holds a field type that is not Clone |
+| R16 | `EventLoopConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `Endpoint` field, which is not Clone |
+| R16 | `RendezvousConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `RuntimeConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `StateInit` | `habilis-network/src/daemon/state/state_init.rs` | holds a `File` field, which is not Clone |
+| R16 | `HashError` | `habilis-network-stream/src/error/hash_error.rs` | holds a field type that is not Clone |
+| R16 | `StreamError` | `habilis-network-stream/src/error/stream_error.rs` | holds a `Stream` field, which is not Clone |
+| R16 | `Producer` | `habilis-network-stream/src/produce/producer.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `Link` | `habilis-network-stream/src/produce/registry.rs` | holds a `Connection` field, which is not Clone |
+| R16 | `Entry` | `habilis-network-stream/src/produce/registry.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `Registry` | `habilis-network-stream/src/produce/registry.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `Reader` | `habilis-network-stream/src/read/reader.rs` | holds a `Connection` field, which is not Clone |
+| R16 | `Mailboxes` | `habilis-network-netplay/src/mesh/mailboxes.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `Mesh` | `habilis-network-ffi/src/mesh.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `Writer` | `habilis-network-ffi/src/streams.rs` | holds a `Arc<` field, which is not Clone |
+| R16 | `ReadEnd` | `habilis-network-ffi/src/streams.rs` | holds a `Arc<` field, which is not Clone |
+| R16 | `Producer` | `habilis-network-wasm/src/stream_node.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `Reader` | `habilis-network-wasm/src/stream_node.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `MeshPeer` | `habilis-network-wasm/src/mesh_peer.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `HabilisNetworkMesh` | `habilis-network-ffi/src/ffi/habilis_network_mesh.rs` | holds a field type that is not Clone |
+| R16 | `HabilisNetworkProducer` | `habilis-network-ffi/src/ffi/habilis_network_producer.rs` | holds a field type that is not Clone |
+| R16 | `HabilisNetworkReader` | `habilis-network-ffi/src/ffi/habilis_network_reader.rs` | holds a field type that is not Clone |
+| R22 | `EventLoopConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `MeshSpec`, a `RendezvousConfig` and a `RuntimeConfig`, which hold channels, trait objects and task handles with no default |
+| R22 | `RendezvousConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a watch receiver and a `StoppableTask`, which have no default |
+| R22 | `RuntimeConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `dyn NodeSink` and a `SelfWriteGate`, which have no default |
+| R12 | `CtxParts`, `RuntimeConfig`, `Victims` | `habilis-network/src/daemon/event_loop/ctx_parts.rs`, `.../config/event_loop_config.rs`, `habilis-network/src/transport/admission/victims.rs` | hold a `dyn` trait object, so Debug prints the name only (`finish_non_exhaustive`) |
+R1 (trait impls early) is review only. For this repository, 'early' means: a library crate (`habilis-network-protocol`, `habilis-network-util`, the transport crates, `habilis-network-chunks`, `habilis-network-stream`) adds the standard impls (Debug, Clone, Copy where it applies, PartialEq, Default for an options type) when the type is written. An application crate (the CLIs, the examples, `habilis-network-tasks`) adds an impl only when a caller in the crate needs it.
+
 ## Typestate
 
 A typestate is a type per state of a value, where each operation exists only on the type of the state it is legal in. A transition consumes the value and returns the value of the next state, so the compiler rejects an operation in the wrong order. Use it where the order is a rule of the code, not a fact of the network.
