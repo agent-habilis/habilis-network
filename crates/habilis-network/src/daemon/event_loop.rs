@@ -149,7 +149,7 @@ async fn run_checked<Driver: NodeDriver>(
     let external_req_rx = session_rx;
     let started = Instant::now();
     let leave_label = leave_label(&mesh);
-    let mut state = initial_state(
+    let mut state: EventLoopState = initial_state(
         mesh.identity,
         MeshSecrets {
             password: mesh.mesh_password.take(),
@@ -185,7 +185,7 @@ async fn run_checked<Driver: NodeDriver>(
     .await;
     let (sender, receiver) = join_gossip(&mut state, endpoints.topic);
 
-    let ipc_rx = control_socket::<Driver::Ipc>(
+    let ipc_rx: Option<mpsc::Receiver<IpcMessage<Driver::Ipc>>> = control_socket(
         ipc_listener_disabled,
         runtime.runtime_base.as_deref(),
         &mesh.mesh,
@@ -306,6 +306,7 @@ fn control_socket<Ipc: de::DeserializeOwned + Send + 'static>(
     runtime_base: Option<&path::Path>,
     mesh_id: &MeshId,
     author: &Nickname,
+    // The IPC task keeps a handle to the sink after this call returns.
     sink: &Arc<dyn NodeSink>,
 ) -> Option<mpsc::Receiver<IpcMessage<Ipc>>> {
     spawn_ipc_rx(disabled, runtime_base, mesh_id, author, sink)
@@ -319,6 +320,7 @@ fn control_socket<Ipc>(
     _runtime_base: Option<&path::Path>,
     _mesh_id: &MeshId,
     _author: &Nickname,
+    // Same shape as the host variant, which shares this sink with the IPC task.
     _sink: &Arc<dyn NodeSink>,
 ) -> Option<mpsc::Receiver<IpcMessage<Ipc>>> {
     None
@@ -400,6 +402,7 @@ type StateFileSeed = Option<path::PathBuf>;
 /// The event loop's state, with the mesh's identity and secrets moved in. The state file goes
 /// with it, so the first write the loop makes lands in the right place.
 fn initial_state(
+    // The loop holds the identity across `&mut state`, so it keeps a shared handle.
     identity: Arc<identity::Identity>,
     secrets: MeshSecrets,
     mint_mesh: Option<Mesh>,
