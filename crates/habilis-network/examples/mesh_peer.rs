@@ -41,6 +41,7 @@ use std::{env, io};
 use tokio::{signal, time};
 /// The do-nothing application. A peer that only carries presence still forms a
 /// mesh — payload handling is a separate concern from membership.
+#[derive(Debug, Clone, Copy)]
 struct Probe;
 
 #[habilis_network::async_trait]

@@ -58,7 +58,7 @@ fn median(values: &[u64]) -> u64 {
 }
 
 /// A least-squares line through `(x, y)` points.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 struct Fit {
     slope: f64,
     intercept: f64,
@@ -112,7 +112,7 @@ fn std_dev(values: &[f64]) -> Option<f64> {
 }
 
 /// A line on the pipe between the two processes.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 enum Msg {
     /// The measured process answers: the peer is to make an offer.
