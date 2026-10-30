@@ -169,9 +169,9 @@ impl ReassemblyStore {
         if !group.is_complete() {
             return ShardIngest::Buffered;
         }
-        let group_id = key.1.clone();
+        let group_id = &key.1;
         let complete = self.evict(&key).expect("just-completed group is stored");
-        match synthesize_logical(complete, &group_id) {
+        match synthesize_logical(complete, group_id) {
             Some(logical) => ShardIngest::Complete(Box::new(logical)),
             None => ShardIngest::Dropped,
         }
