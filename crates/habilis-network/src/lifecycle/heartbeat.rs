@@ -81,11 +81,11 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
                 // returned peer undeliverable for directed frames until its
                 // gossip link happens to bounce.
                 state.quiet_since.insert(nick.clone(), seen);
+                tracing::debug!(nickname = %nick, age_secs = age, "peer evicted (silence timeout)");
                 sink.emit(NodeEvent::PeerTimeout {
-                    nickname: nick.clone(),
+                    nickname: nick,
                     last_seen_secs_ago: age,
                 });
-                tracing::debug!(nickname = %nick, age_secs = age, "peer evicted (silence timeout)");
             } else {
                 state.forget_peer_endpoint(nick.as_str());
                 tracing::trace!(
