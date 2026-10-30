@@ -38,7 +38,7 @@ pub struct State {
 }
 
 /// The game under test.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Game;
 

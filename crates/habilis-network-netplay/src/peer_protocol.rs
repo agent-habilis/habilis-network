@@ -88,6 +88,7 @@ pub(crate) enum PeerEvent {
 }
 
 /// One remote peer's connection.
+#[derive(Clone)]
 pub(crate) struct PeerProtocol<T: Config> {
     pub(crate) address: T::Address,
     /// Which player handle this peer drives.

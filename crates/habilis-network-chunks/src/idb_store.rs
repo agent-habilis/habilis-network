@@ -172,7 +172,7 @@ fn version_of(db: &IdbDatabase) -> u32 {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IdbStore {
     db: IdbDatabase,
     /// Live set for the current reclamation pass, in memory only. A pass that

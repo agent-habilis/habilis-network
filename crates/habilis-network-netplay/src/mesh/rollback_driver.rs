@@ -48,6 +48,7 @@ pub const LOBBY_TAG: &str = "rb_lobby";
 ///
 /// let (_driver, _pending) = RollbackDriver::<Game>::new();
 /// ```
+#[derive(Clone)]
 pub struct RollbackDriver<T: Config> {
     // the driver shares the mailboxes with the transports it hands out
     mailboxes: Arc<Mailboxes<T>>,

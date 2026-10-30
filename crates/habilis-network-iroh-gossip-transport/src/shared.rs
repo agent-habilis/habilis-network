@@ -24,7 +24,7 @@ pub(crate) fn locked<T>(mutex: &Mutex<T>) -> sync::MutexGuard<'_, T> {
 }
 
 /// A packet from another member, on its way to iroh.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Packet {
     pub(crate) remote: CustomAddr,
     pub(crate) bytes: Vec<u8>,

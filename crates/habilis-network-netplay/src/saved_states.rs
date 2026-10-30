@@ -10,6 +10,7 @@ use crate::frame::Frame;
 use crate::request::StateCell;
 
 use std::fmt;
+#[derive(Clone)]
 pub(crate) struct SavedStates<S> {
     cells: Vec<StateCell<S>>,
     head: usize,

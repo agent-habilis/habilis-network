@@ -19,7 +19,7 @@ const PROVENANCE: &str = "iroh-gossip-transport";
 /// lookup answers a dial of a peer once, and only while a sink is attached: a path
 /// that cannot carry a packet is not offered. Which pairs *keep* the path is the
 /// engine's rule (`GossipHandle::allow`), not this lookup's.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct GossipLookup {
     // the lookup reads the same state the handle writes
     pub(crate) shared: Arc<Shared>,

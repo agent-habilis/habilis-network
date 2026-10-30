@@ -64,6 +64,7 @@ use std::{fmt, mem};
 /// let session = P2PSession::new(vec![1, 2], PlayerHandle::new(0), Silent, 8, 0, 42).expect("a session");
 /// assert!(session.state() == SessionState::Synchronizing);
 /// ```
+#[derive(Clone)]
 pub struct P2PSession<T: Config, Link: Transport<T>> {
     sync: Sync<T>,
     peers: Vec<PeerProtocol<T>>,

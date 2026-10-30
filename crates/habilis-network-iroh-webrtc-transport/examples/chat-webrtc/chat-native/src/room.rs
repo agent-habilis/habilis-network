@@ -163,7 +163,7 @@ fn unique_nick(requested: &str, members: &HashMap<MemberId, String>) -> String {
 }
 
 /// A member's presence in the room. Leaving is what dropping this does.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Membership {
     pub id: MemberId,
     /// What the room actually called them — not necessarily what they asked for.

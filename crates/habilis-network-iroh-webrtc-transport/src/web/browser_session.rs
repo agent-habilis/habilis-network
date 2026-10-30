@@ -15,6 +15,7 @@ use std::fmt;
 /// # }
 /// ```
 #[non_exhaustive]
+#[derive(Clone)]
 pub struct BrowserSession {
     /// The endpoint id of the peer.
     pub remote: EndpointId,

@@ -7,7 +7,7 @@ use crate::util::clock::Instant;
 use super::SignalAdmission;
 
 /// Marks a connection busy for as long as it lives.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[must_use = "dropping the guard ends the busy mark"]
 pub(crate) struct BusyGuard {
     pub(crate) admission: SignalAdmission,

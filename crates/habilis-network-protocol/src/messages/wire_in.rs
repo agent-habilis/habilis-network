@@ -11,7 +11,7 @@ use crate::{AuthorKey, ContentHash, identity};
 use serde::de::Error;
 /// A [`Message`] as the wire has it, read: every field a string or a plain value, so that one
 /// place ([`Message::try_from`]) decides what a well-formed message is.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub(super) struct WireIn {
     #[serde(rename = "v")]
     pub(super) version: String,

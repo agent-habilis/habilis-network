@@ -63,6 +63,7 @@ use std::fmt;
 /// session.advance_frame().expect("no desync");
 /// assert_eq!(session.current_frame(), Frame::new(1));
 /// ```
+#[derive(Clone)]
 pub struct SyncTestSession<T: Config> {
     sync: Sync<T>,
     num_players: usize,

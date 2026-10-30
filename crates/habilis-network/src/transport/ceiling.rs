@@ -49,7 +49,7 @@ pub(crate) const EVICTED_JITTER: f64 = 0.2;
 
 /// The peers that evicted us, each until when proactive dials to it wait. A send is never
 /// held by this: a node that has something to say dials at once.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct EvictionBackoff {
     until: HashMap<EndpointId, Instant>,
 }
@@ -94,7 +94,7 @@ struct Candidate {
 }
 
 /// What an admission did to the ceiling.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub(crate) struct Admission {
     /// The peers to evict now: close their connections and detach their sessions.
     pub(crate) evict: Vec<EndpointId>,
@@ -104,7 +104,7 @@ pub(crate) struct Admission {
 }
 
 /// The ledger of the direct connections of a node, and the ceiling `C`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Ceiling {
     cap: usize,
     /// Whether an admission above the cap evicts the least recently used peer. The cache of the

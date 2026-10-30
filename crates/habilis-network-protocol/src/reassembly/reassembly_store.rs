@@ -41,7 +41,7 @@ const LOG_TARGET: &str = "habilis_network::gossip";
 /// `slots` is a `BTreeMap`, never a `total`-sized allocation — a crafted
 /// `total` must cost the sender shards, not us memory. `header` is the idx-0
 /// shard, the envelope template `synthesize_logical` builds the view from.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct PartialGroup {
     total: u32,
     /// Kind pinned at the first shard; a later shard of a different kind is a
@@ -92,7 +92,7 @@ type GroupKey = (AuthorKey, ShardGroup);
 /// let mut store = ReassemblyStore::default();
 /// assert_eq!(store.sweep_stale(Instant::now()), 0);
 /// ```
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ReassemblyStore {
     pub(super) groups: HashMap<GroupKey, PartialGroup>,
     pub(super) author_bytes: HashMap<AuthorKey, usize>,

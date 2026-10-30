@@ -7,7 +7,7 @@ use crate::protocol::meshes::LookupOpts;
 use crate::transport;
 /// Everything [`ensure`] needs to (re)build the rendezvous endpoint.
 /// Cheap to clone-hold for the event loop's lifetime.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct RendezvousParams {
     pub(crate) topic_id: TopicId,
     /// `rendezvous_secret(seed)` — the shared identity every co-host binds.

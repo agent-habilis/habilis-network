@@ -2,6 +2,7 @@ use crate::streams::Streams;
 use std::fmt;
 
 /// The opaque handle behind `habilis_network_streams *`.
+#[derive(Clone)]
 pub struct HabilisNetworkStreams {
     pub(super) streams: Streams,
 }

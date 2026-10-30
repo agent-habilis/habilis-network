@@ -50,6 +50,7 @@ use std::fmt;
 /// .map_err(anyhow::Error::from)
 /// # }
 /// ```
+#[derive(Clone)]
 pub struct InjectedEndpoint {
     pub(super) endpoint: Endpoint,
     pub(super) webrtc: habilis_network_iroh_webrtc_transport::WebRtcHandle,

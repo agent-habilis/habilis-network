@@ -7,7 +7,7 @@ use crate::util::clock::Instant;
 
 use crate::transport;
 /// How a graft asks for a link.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum GraftRequest {
     /// Always accepted: a peer with a full view drops a neighbor to make room.
     Join,

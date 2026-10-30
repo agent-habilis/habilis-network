@@ -20,7 +20,7 @@ use crate::util::tuning;
 /// the first short wait finds it, while a member whose sessions are all busy
 /// gossip links does not, and the wait grows to a size that makes the cost of a
 /// refused round small.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct RefusalBackoff {
     pub(crate) by_peer: HashMap<EndpointId, Backoff>,
     /// The peers that turned an offer away as not a neighbor, and when it was last: the first

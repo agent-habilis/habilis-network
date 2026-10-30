@@ -28,7 +28,7 @@ const MIN_ADVANTAGE_TO_CORRECT: i64 = 2;
 const MAX_SKIP: u32 = 8;
 
 /// Rolling measurement of how far ahead of its peers this peer is running.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct TimeSync {
     /// Our frame minus the last frame we have input for, sampled per frame.
     local: [i32; WINDOW],

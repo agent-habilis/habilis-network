@@ -36,6 +36,7 @@ use std::fmt;
 /// let transport = pending.connect(outbox);
 /// assert!(transport.known_peers().next().is_none());
 /// ```
+#[derive(Clone)]
 pub struct PendingTransport<T: Config> {
     // the pending transport shares the mailboxes with the driver
     mailboxes: Arc<Mailboxes<T>>,

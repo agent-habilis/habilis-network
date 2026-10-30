@@ -38,6 +38,7 @@ impl<I: Default> Default for Slot<I> {
 }
 
 /// One player's input history, with prediction for the frames not yet known.
+#[derive(Clone)]
 pub(crate) struct InputQueue<T: Config> {
     /// Frame-indexed ring. A slot is live iff its frame is within
     /// `[tail_frame, last_added_frame]`.

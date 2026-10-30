@@ -53,7 +53,7 @@ pub(crate) fn verifies(
 /// endpoint that keeps its key across runs lets an old `PeerInfo` be replayed
 /// to put back the old signer, and that peer is answered on gossip until its
 /// next `PeerInfo`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ProvenEndpoints {
     by_signer: HashMap<AuthorKey, EndpointId>,
     order: VecDeque<AuthorKey>,

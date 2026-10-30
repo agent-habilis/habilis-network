@@ -349,7 +349,7 @@ struct Presence {
 /// assert_eq!(lobby.present().count(), 1);
 /// assert!(lobby.started().is_none());
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Lobby {
     my_pubkey: AuthorKey,
     my_nick: Nickname,

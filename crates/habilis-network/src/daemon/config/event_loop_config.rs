@@ -59,7 +59,7 @@ pub struct EventLoopConfig {
 }
 
 /// The mesh the loop runs: its id and name, this member, and the secrets that protect it.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct MeshSpec {
     pub(crate) mesh: MeshId,
     /// Decoded mesh name (from the mesh id). Carried so the
@@ -95,7 +95,7 @@ pub(crate) struct MeshSpec {
 
 /// The transports the loop hands to its state: the `WebRTC` legs, the UDP and relay payload
 /// paths, and the address book that the peers are registered in.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct TransportSet {
     /// This peer's `WebRTC` transport handle. Portable: it is the browser's
     /// only direct path onto the mesh, and an extra candidate path for a native

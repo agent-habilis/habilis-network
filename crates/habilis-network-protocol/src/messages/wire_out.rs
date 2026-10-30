@@ -9,7 +9,7 @@ use crate::nickname_error::Nickname;
 use crate::{ContentHash, identity};
 
 /// A [`Message`] as the wire has it, written. The field order is the order of the JSON text.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub(super) struct WireOut<'message> {
     #[serde(rename = "v")]
     version: &'message str,
@@ -38,6 +38,7 @@ pub(super) struct WireOut<'message> {
 }
 
 /// Bytes written as lowercase hex, straight into the serializer.
+#[derive(Clone)]
 pub(super) struct HexOut<'bytes>(pub(super) &'bytes [u8]);
 
 impl Serialize for HexOut<'_> {
@@ -54,6 +55,7 @@ impl Serialize for HexOut<'_> {
 
 /// The wire form of a message. The serde impl lives on this private wrapper, not on [`Message`], so a
 /// message that a caller holds through a `Deref` (an [`Authored`] view) has no public `Serialize`.
+#[derive(Clone)]
 pub(super) struct Wire<'message>(pub(super) &'message Message);
 
 impl Serialize for Wire<'_> {

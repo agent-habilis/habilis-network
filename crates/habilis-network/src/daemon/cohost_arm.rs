@@ -119,7 +119,7 @@ pub(super) fn may_cohost(cohost: CoHostPolicy, meshed: bool, started: Instant) -
 /// governs this session, the rendezvous params to (re)claim under, and
 /// (for the unmeshed-joiner grace `maybe_cohost` alone reads) when the
 /// event loop started.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct CohostArm<'params> {
     pub(super) policy: CoHostPolicy,
     pub(super) params: &'params beacon::RendezvousParams,

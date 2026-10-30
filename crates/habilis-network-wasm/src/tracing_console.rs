@@ -28,6 +28,7 @@ mod console_writer {
 
     use tracing_subscriber::fmt;
     use web_sys::console;
+    #[derive(Clone)]
     pub(crate) struct MakeConsoleWriter;
 
     impl<'a> fmt::MakeWriter<'a> for MakeConsoleWriter {
@@ -40,6 +41,7 @@ mod console_writer {
 
     /// Buffers one event's bytes; the flush on drop is what reaches the
     /// console, because `fmt` writes an event in several small writes.
+    #[derive(Clone)]
     pub(crate) struct ConsoleWriter(Vec<u8>);
 
     impl io::Write for ConsoleWriter {

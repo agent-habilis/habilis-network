@@ -11,7 +11,7 @@ use crate::util::clock::Instant;
 pub(crate) const REDIAL_WINDOW: Duration = Duration::from_mins(5);
 
 /// The closes and re-dials of one kind of direct connection.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct Track {
     present: HashSet<EndpointId>,
     closed_at: HashMap<EndpointId, Instant>,

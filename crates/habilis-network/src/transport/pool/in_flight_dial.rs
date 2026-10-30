@@ -9,7 +9,7 @@ use super::unicast_pool::{DialOutcome, UnicastPool};
 /// with its runtime must not leave the peer marked in flight, which would make every later cold send
 /// to it wait for a dial that is gone. A dial that ends without an outcome publishes one, so that
 /// its waiters wake with an error.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct InFlightDial {
     pub(in crate::transport::pool) pool: UnicastPool,
     pub(in crate::transport::pool) eid: EndpointId,

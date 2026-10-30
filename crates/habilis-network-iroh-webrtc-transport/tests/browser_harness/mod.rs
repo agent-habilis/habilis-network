@@ -72,7 +72,7 @@ pub(crate) use habilis_network_iroh_webrtc_transport::bench::{
 };
 
 /// A negotiated browser↔browser pair, both ends live in this tab.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Pair {
     client: Endpoint,
     server_addr: EndpointAddr,

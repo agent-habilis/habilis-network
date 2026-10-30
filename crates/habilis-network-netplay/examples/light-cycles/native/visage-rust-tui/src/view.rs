@@ -116,6 +116,7 @@ impl Default for BoxProps {
 /// [`View::component`] for where it comes from and why a bare closure
 /// can't serve this role in Rust the way a component's function
 /// reference does in JS.
+#[derive(Clone)]
 pub struct ComponentView {
     pub(crate) type_key: usize,
     pub(crate) build: Box<dyn FnOnce() -> ComponentBox>,
@@ -126,7 +127,7 @@ pub struct ComponentView {
 /// once when it's actually mounted) — nothing in this crate needs to
 /// clone a whole `View`; `patch()` takes one by reference and clones only
 /// `Text`/`Box`'s own inner fields (`Rc<str>`, `BoxProps`) where needed.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum View {
     Text(Rc<str>),
     Box(BoxProps, Vec<View>),

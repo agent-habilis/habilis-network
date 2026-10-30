@@ -12,6 +12,7 @@ use crate::transport::MeshSender;
 /// holds one of these and builds the ctx per-arm (`parts.handler_ctx(&sender)`):
 /// a loop-lifetime ctx would borrow `sender` forever, and the
 /// resubscribe path must be able to replace it.
+#[derive(Clone)]
 pub(in crate::daemon) struct CtxParts<'node> {
     pub(in crate::daemon) endpoint: &'node Endpoint,
     pub(in crate::daemon) mesh: &'node MeshId,

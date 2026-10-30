@@ -6,7 +6,7 @@ use crate::host::Host;
 use crate::tui::node::{Arena, NodeId, Tag, TuiNode};
 use crate::view::BoxProps;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TuiHost {
     pub arena: Arena,
 }

@@ -4,7 +4,7 @@ use crate::protocol::messages::WireFrame;
 use iroh::EndpointId;
 
 /// One message that is ready to go, with the plane its addressing chose.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum Resend {
     Broadcast(WireFrame),
     Unicast(EndpointId, WireFrame),

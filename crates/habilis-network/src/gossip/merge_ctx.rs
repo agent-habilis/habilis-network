@@ -243,6 +243,7 @@ pub(crate) async fn send_second_probe(state: &mut EventLoopState, context: &Hand
 /// # }
 /// ```
 #[non_exhaustive]
+#[derive(Clone)]
 pub struct MergeCtx<'mesh> {
     /// The id of the mesh that the write belongs to.
     pub mesh: &'mesh MeshId,
@@ -309,7 +310,7 @@ impl<'context> From<&HandlerCtx<'context>> for MergeCtx<'context> {
 /// let _channel = params.channel;
 /// # }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct StateMergeParams<'mesh> {
     /// The context of the write.

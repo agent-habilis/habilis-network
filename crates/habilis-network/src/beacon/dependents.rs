@@ -11,7 +11,7 @@ pub(crate) fn foreign_sessions(live: &[EndpointId], own: &[EndpointId]) -> Vec<E
 
 /// Who hangs off a beacon's data channel: the sessions on its answerer, the endpoints that
 /// are ours, and the number of rounds still negotiating a session.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct Dependents {
     pub(crate) live: Vec<EndpointId>,
     pub(crate) own: Vec<EndpointId>,

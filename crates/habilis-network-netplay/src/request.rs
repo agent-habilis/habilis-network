@@ -160,6 +160,7 @@ impl<S: Clone> StateCell<S> {
 /// assert_eq!(session.current_frame(), Frame::new(1));
 /// ```
 #[non_exhaustive]
+#[derive(Clone)]
 pub enum Request<T: Config> {
     /// Save the current state into `cell`, tagged with `frame`.
     ///

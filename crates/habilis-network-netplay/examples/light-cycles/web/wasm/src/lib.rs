@@ -122,6 +122,7 @@ struct HudDto {
 /// navigation/reload is the only lifecycle this client needs, same as
 /// `chat-web`'s).
 #[wasm_bindgen]
+#[derive(Clone)]
 pub struct LightCyclesPeer {
     // Never read directly — held only so the node's background task isn't
     // dropped.

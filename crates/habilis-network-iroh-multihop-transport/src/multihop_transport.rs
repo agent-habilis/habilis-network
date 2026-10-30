@@ -23,7 +23,7 @@ use crate::route::{Route, RouteHop};
 use crate::underlay::{Delivered, Forwarder};
 
 /// State shared by the transport, its endpoint, and its senders.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Shared {
     /// Our own hop — app-layer id plus underlay dial address — stamped as the
     /// `source` of every cell we originate so destinations can reply.

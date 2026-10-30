@@ -12,6 +12,7 @@ use super::session_registry::SessionRegistry;
 use crate::{WEBRTC_TRANSPORT_ID, parse_custom_addr};
 
 use std::fmt;
+#[derive(Clone)]
 pub(crate) struct WebRtcSender {
     // the sender shares the session registry with the endpoint
     registry: Arc<SessionRegistry>,

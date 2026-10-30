@@ -16,13 +16,13 @@ use crate::util::tuning::{
 /// that fails costs one serve, and the asker's next ask is answered. The
 /// heads alone cannot be the gate: the holder does not check them, so a
 /// digest with made-up heads would be new every time.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct ServeBudget {
     /// The asker's key: every digest is verified, so it always has one.
     pub(super) windows: HashMap<(AuthorKey, Channel, Plane), Served>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct Served {
     pub(super) since: Instant,
     pub(super) answers: usize,

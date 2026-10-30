@@ -25,6 +25,7 @@ use std::fmt;
 /// drop(server);
 /// # }
 /// ```
+#[derive(Clone)]
 pub struct BlobServer {
     pub(super) endpoint: Endpoint,
     // the server and the accept loop share the store

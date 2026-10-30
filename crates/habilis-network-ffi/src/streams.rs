@@ -12,6 +12,7 @@ use habilis_network_stream::{Producer, Reader, StreamHash, StreamNode, StreamOpt
 use n0_future::time;
 use tokio::runtime::{Builder, Runtime, Runtime as tokio_Runtime};
 /// A stream node, driven synchronously from a foreign caller's thread.
+#[derive(Clone)]
 pub(crate) struct Streams {
     /// `None` after [`Streams::close`].
     node: Option<StreamNode>,

@@ -196,7 +196,7 @@ fn root_of(leaves: &[ChunkHash], size: u64) -> Root {
 /// let map: ChunkMap = builder.finish();
 /// assert_eq!(map.len(), 2);
 /// ```
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 #[must_use]
 pub struct ChunkMapBuilder {
     leaves: Vec<ChunkHash>,

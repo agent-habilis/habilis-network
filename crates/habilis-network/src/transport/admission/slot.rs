@@ -5,7 +5,7 @@ use iroh::endpoint::WeakConnectionHandle;
 use super::Round;
 
 /// Everything held under one peer.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Slot {
     /// The signalling round that holds the negotiation slot.
     pub(crate) round: Option<Round>,

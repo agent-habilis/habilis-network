@@ -21,6 +21,7 @@ use std::fmt;
 /// session and its attach all fit in it.
 pub(crate) const RUNG_CLOSE_MEMORY: Duration = Duration::from_secs(15);
 
+#[derive(Clone)]
 pub(crate) struct Inner {
     pub(crate) slots: HashMap<EndpointId, Slot>,
     /// Peers that refused us at their cap, each with its wait.

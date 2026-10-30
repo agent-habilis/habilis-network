@@ -90,7 +90,7 @@ enum Event {
 
 /// A joined tab.
 #[wasm_bindgen]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ChatPeer {
     /// Typed lines, drained by a writer task. A channel rather than a
     /// `RefCell<SendStream>` because writing is async and `say` is not: a

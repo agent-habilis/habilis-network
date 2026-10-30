@@ -44,7 +44,7 @@ const PRESENCE_EVERY_TICKS: u32 = 10;
 const REMATCH_GRACE_TICKS: u32 = 60;
 
 /// The type-level bundle the session is generic over.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LightCycles;
 
 impl Config for LightCycles {
@@ -92,7 +92,7 @@ pub struct Snapshot {
 /// engine's event loop — [`MeshTransport`] is the seam, and it does the
 /// locking internally — so unlike the version this replaces there is no
 /// `Arc<Mutex<_>>` around the game state at all.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Game {
     transport: MeshTransport<LightCycles>,
     room: String,

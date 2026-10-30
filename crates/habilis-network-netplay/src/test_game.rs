@@ -26,6 +26,7 @@ pub(crate) struct TestState {
 }
 
 /// A deterministic toy game: the state is a sum of every input ever applied.
+#[derive(Clone)]
 pub(crate) struct TestGame;
 
 impl Config for TestGame {
@@ -36,7 +37,7 @@ impl Config for TestGame {
 
 /// Drives a [`TestState`] through the requests a session hands back, exactly
 /// as a real consumer would.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct TestRunner {
     pub(crate) state: TestState,
     /// Every frame advanced, in order — so a test can assert *what* was

@@ -11,7 +11,7 @@ use super::Sessions;
 
 use crate::transport;
 /// What an eviction ends: the connections, closed with the `EVICTED` code, and the sessions.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct Victims {
     pub(crate) conns: Vec<Connection>,
     // trait object: the sessions are shared with the table that hands them out

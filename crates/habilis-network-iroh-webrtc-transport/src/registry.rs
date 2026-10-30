@@ -170,7 +170,7 @@ impl<T> Registry<T> {
 }
 
 /// A claimed but unfilled slot. Dropping it releases the claim.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[must_use = "dropping a reservation releases the peer's slot"]
 pub(crate) struct Reservation<T> {
     // the guard keeps the registry alive while the slot is held
@@ -231,7 +231,7 @@ impl<T> Drop for Reservation<T> {
 /// channel is carrying traffic and the registry now owns the session outright;
 /// dropping says it never got there, and the payload's own `Drop` — closing the
 /// channel and the peer connection — runs on the way out.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[must_use = "an uncommitted session guard tears the session down when dropped"]
 pub(crate) struct SessionGuard<T> {
     // the guard keeps the registry alive while the slot is held

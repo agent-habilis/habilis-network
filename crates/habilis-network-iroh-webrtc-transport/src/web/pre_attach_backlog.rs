@@ -9,6 +9,7 @@ use std::mem;
 /// When full, new datagrams are refused rather than old ones evicted: the
 /// QUIC Initial and handshake flights arrive first, and losing those costs
 /// the connection where losing a later datagram costs a retransmit.
+#[derive(Clone)]
 pub(crate) struct PreAttachBacklog {
     datagrams: Vec<Vec<u8>>,
     dropped: usize,

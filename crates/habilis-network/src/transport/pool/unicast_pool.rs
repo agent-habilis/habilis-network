@@ -60,7 +60,7 @@ pub(in crate::transport::pool) enum Hold {
 }
 
 /// A pooled connection and when a send last used it.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(in crate::transport::pool) struct Pooled {
     pub(in crate::transport::pool) connection: Connection,
     /// On the clock the tokio runtime keeps, so a test can pause it.

@@ -12,7 +12,7 @@ use super::resend::Resend;
 
 /// The loop's end of the queue. A full queue refuses the resend: it is dropped
 /// and counted, and the next digest asks for it again.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ResendOutbox {
     queue: mpsc::Sender<Resend>,
     // the count is shared with the outbox handles that report drops

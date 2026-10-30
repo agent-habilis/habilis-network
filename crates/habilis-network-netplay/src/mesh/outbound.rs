@@ -18,7 +18,7 @@ use habilis_network::protocol::AuthorKey;
 /// let packet = Outbound::Lobby { payload: "present".to_owned() };
 /// assert!(matches!(packet, Outbound::Lobby { .. }));
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Outbound {
     /// A rollback packet for one peer, addressed by public key.

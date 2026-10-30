@@ -7,7 +7,7 @@ use crate::blob::ContentId;
 
 /// One spooled blob: the metadata the fetch path needs, plus the spool path to
 /// stream from. No bytes are held.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct BlobEntry {
     pub path: PathBuf,
     pub size: u64,

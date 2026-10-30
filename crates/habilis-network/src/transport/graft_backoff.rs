@@ -43,7 +43,7 @@ struct Entry {
     step: Duration,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct GraftBackoff {
     by_peer: HashMap<EndpointId, Entry>,
 }

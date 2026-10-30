@@ -34,6 +34,7 @@ use crate::rollback_error::RollbackError;
 use crate::saved_states::SavedStates;
 
 use std::fmt;
+#[derive(Clone)]
 pub(crate) struct Sync<T: Config> {
     input_queues: Vec<InputQueue<T>>,
     saved_states: SavedStates<T::State>,

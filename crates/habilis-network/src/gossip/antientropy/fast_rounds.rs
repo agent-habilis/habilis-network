@@ -9,7 +9,7 @@ use crate::util::tuning::{
 
 /// The running fast round of one channel: the peer we ask, when we last
 /// asked, and our heads and change count at that ask.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct Round {
     pub(super) peer: AuthorKey,
     pub(super) at: Instant,
@@ -33,7 +33,7 @@ pub(super) struct Waiting {
 /// budget. One round runs per channel, with one peer: every linked holder is
 /// ahead of a backfilling node, and a round with each would multiply the
 /// frames that reach its unicast inbox.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct FastRounds {
     /// The running round per channel.
     pub(super) rounds: HashMap<Channel, Round>,

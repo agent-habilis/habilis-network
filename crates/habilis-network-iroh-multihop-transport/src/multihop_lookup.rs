@@ -32,7 +32,7 @@ const PROVENANCE: &str = "iroh-multihop";
 /// to the next rung. A new route comes only from a new lookup, which iroh runs
 /// when something dials the remote and no non-relay path is selected, and which
 /// answers only if the topology has a route at that moment.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct MultihopLookup {
     chooser: RouteChooser,
 }
@@ -44,7 +44,7 @@ impl MultihopLookup {
 }
 
 /// A route that [`RouteChooser::choose`] picked.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Chosen {
     pub(crate) route: Route,
     /// Whether the shortest route was left for another, because the gate refuses

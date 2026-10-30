@@ -20,6 +20,7 @@ type Slot = Rc<RefCell<Option<Rc<habilis_network_stream::StreamNode>>>>;
 
 /// One endpoint that creates and opens streams. It never joins a mesh.
 #[wasm_bindgen]
+#[derive(Clone)]
 pub struct StreamNode {
     node: Slot,
 }

@@ -15,7 +15,7 @@ use iroh::EndpointId;
 pub(super) const REFUSAL_RETRY: Duration = Duration::from_secs(1);
 
 /// What one tick does with the sessions of the underlay.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub(crate) struct Plan {
     /// Underlay ids to offer a session to.
     pub(crate) dial: Vec<EndpointId>,

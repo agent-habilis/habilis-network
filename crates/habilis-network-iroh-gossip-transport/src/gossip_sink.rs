@@ -32,7 +32,7 @@ const QUEUE: usize = 256;
 /// GossipSink::spawn(sender).is_alive()
 /// # }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GossipSink {
     queue: mpsc::Sender<Bytes>,
     // the sink's task and the handle both read the liveness flag

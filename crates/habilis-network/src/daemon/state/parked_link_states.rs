@@ -8,7 +8,7 @@ use crate::protocol::Nickname;
 /// comes up. A vector that is dropped there is waited for until the next tick, 15 s on, and the
 /// session that it makes possible comes too late for the route that it carries.
 #[cfg(feature = "multihop")]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ParkedLinkStates {
     by_author: HashMap<Nickname, habilis_network_iroh_multihop_transport::LinkVector>,
     cap: usize,

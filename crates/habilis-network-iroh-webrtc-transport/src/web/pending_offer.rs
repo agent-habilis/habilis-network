@@ -22,6 +22,7 @@ use std::fmt;
 /// drop(pending);
 /// # }
 /// ```
+#[derive(Clone)]
 pub struct PendingOffer {
     pub(super) peer_connection: OpenPeerConnection,
     pub(super) data_channel: RtcDataChannel,

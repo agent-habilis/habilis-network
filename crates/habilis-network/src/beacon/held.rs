@@ -106,6 +106,7 @@ pub(crate) async fn read_ladder(
 }
 
 /// What [`build_rendezvous_endpoint`] ended with.
+#[derive(Clone)]
 pub(crate) enum Walk {
     /// A rung was free (or, public, the endpoint was built): the beacon can stand up on it.
     Bound(Endpoint, RendezvousLane),

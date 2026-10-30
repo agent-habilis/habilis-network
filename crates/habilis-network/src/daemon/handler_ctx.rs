@@ -24,6 +24,7 @@ use std::fmt;
 /// let _ = ctx;
 /// # }
 /// ```
+#[derive(Clone)]
 pub struct HandlerCtx<'node> {
     /// The sender of the topic.
     pub sender: &'node MeshSender,

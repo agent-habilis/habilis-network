@@ -20,7 +20,7 @@ pub(super) const RETRY_FIRST: Duration = Duration::from_mins(1);
 pub(super) const RETRY_STEADY: Duration = Duration::from_mins(5);
 
 /// A member that was asked: the record it had, when it was asked last, and how often again.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct Asked {
     address: EndpointAddr,
     pub(super) at: Instant,
@@ -40,7 +40,7 @@ impl Asked {
 }
 
 /// What this node already asked of the members it heard on the LAN.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct LanGrafts {
     /// The record each member had when we asked it. The same record is asked again only after
     /// its wait, and only while the member is not a neighbor; a changed one is asked at once: the
