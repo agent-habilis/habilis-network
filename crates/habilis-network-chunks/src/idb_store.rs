@@ -78,12 +78,12 @@ fn watch(request: &IdbRequest) -> impl Future<Output = Result<JsValue, ChunkErro
     let mut keep: Handlers = None;
     let promise = js_sys::Promise::new(&mut |resolve, reject| {
         let ok_request = request.clone();
-        let ok = Closure::<dyn FnMut()>::new(move || {
+        let ok: Closure<dyn FnMut()> = Closure::new(move || {
             let value = ok_request.result().unwrap_or(JsValue::UNDEFINED);
             let _ = resolve.call1(&JsValue::NULL, &value);
         });
         let bad_request = request.clone();
-        let bad = Closure::<dyn FnMut()>::new(move || {
+        let bad: Closure<dyn FnMut()> = Closure::new(move || {
             let failure = bad_request.error().ok().flatten();
             let error = failure.map_or_else(|| JsValue::from_str("request failed"), JsValue::from);
             let _ = reject.call1(&JsValue::NULL, &error);
@@ -113,10 +113,10 @@ async fn done(request: &IdbRequest) -> Result<JsValue, ChunkError> {
 async fn committed(transaction: &IdbTransaction) -> Result<(), ChunkError> {
     let mut keep: Handlers = None;
     let promise = js_sys::Promise::new(&mut |resolve, reject| {
-        let ok = Closure::<dyn FnMut()>::new(move || {
+        let ok: Closure<dyn FnMut()> = Closure::new(move || {
             let _ = resolve.call1(&JsValue::NULL, &JsValue::UNDEFINED);
         });
-        let bad = Closure::<dyn FnMut()>::new(move || {
+        let bad: Closure<dyn FnMut()> = Closure::new(move || {
             let _ = reject.call1(&JsValue::NULL, &JsValue::from_str("transaction aborted"));
         });
         transaction.set_oncomplete(Some(ok.as_ref().unchecked_ref()));
@@ -199,11 +199,12 @@ impl IdbStore {
         // The schema is created inside `onupgradeneeded`, which fires before
         // `onsuccess`. Registering it after the open request would be too late.
         let upgrade_target = request.clone();
-        let upgrade = Closure::<dyn FnMut()>::new(move || {
+        let upgrade: Closure<dyn FnMut()> = Closure::new(move || {
             let Ok(value) = upgrade_target.result() else {
                 return;
             };
-            let Ok(db) = value.dyn_into::<IdbDatabase>() else {
+            let database: Result<IdbDatabase, JsValue> = value.dyn_into();
+            let Ok(db) = database else {
                 return;
             };
             for store in [META, CHUNKS] {
@@ -248,11 +249,12 @@ impl IdbStore {
             .open_with_u32(name, version)
             .map_err(|error| js_err(&format!("reopening database {name}"), &error))?;
         let upgrade_target = request.clone();
-        let upgrade = Closure::<dyn FnMut()>::new(move || {
+        let upgrade: Closure<dyn FnMut()> = Closure::new(move || {
             let Ok(value) = upgrade_target.result() else {
                 return;
             };
-            let Ok(db) = value.dyn_into::<IdbDatabase>() else {
+            let database: Result<IdbDatabase, JsValue> = value.dyn_into();
+            let Ok(db) = database else {
                 return;
             };
             for store in [META, CHUNKS] {
@@ -305,9 +307,11 @@ impl IdbStore {
             .dyn_into()
             .map_err(|value| js_err("indexedDB was not a factory", &value))?;
 
-        let listing = jssys_Reflect::get(&factory, &"databases".into())
-            .map_err(|error| js_err("reaching indexedDB.databases", &error))?;
-        let Ok(listing) = listing.dyn_into::<js_sys::Function>() else {
+        let listing: Result<js_sys::Function, JsValue> =
+            jssys_Reflect::get(&factory, &"databases".into())
+                .map_err(|error| js_err("reaching indexedDB.databases", &error))?
+                .dyn_into();
+        let Ok(listing) = listing else {
             // No `databases()` at all. Refusing is the safe answer: creating one
             // to look inside is exactly the damage this method exists to avoid,
             // and the cost of being wrong is re-fetching rather than corruption.
