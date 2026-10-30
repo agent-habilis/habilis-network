@@ -23,7 +23,7 @@ pub struct StreamId([u8; ID_LEN]);
 
 impl From<[u8; ID_LEN]> for StreamId {
     fn from(bytes: [u8; ID_LEN]) -> Self {
-        Self(bytes)
+        Self::from_bytes(bytes)
     }
 }
 
@@ -32,6 +32,12 @@ impl StreamId {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; ID_LEN] {
         &self.0
+    }
+
+    /// Make a stream id from its bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; ID_LEN]) -> Self {
+        Self(bytes)
     }
 }
 

@@ -27,7 +27,7 @@ pub struct StreamSecret(pub(super) Zeroizing<[u8; SECRET_LEN]>);
 /// caller still holds: keep it in a [`Zeroizing`] when it is a secret.
 impl From<[u8; SECRET_LEN]> for StreamSecret {
     fn from(bytes: [u8; SECRET_LEN]) -> Self {
-        Self(Zeroizing::new(bytes))
+        Self::from_bytes(bytes)
     }
 }
 
@@ -37,7 +37,7 @@ impl From<[u8; SECRET_LEN]> for StreamSecret {
 /// a random draw). The `[u8; SECRET_LEN]` conversion stays for raw input at an edge.
 impl From<Zeroizing<[u8; SECRET_LEN]>> for StreamSecret {
     fn from(bytes: Zeroizing<[u8; SECRET_LEN]>) -> Self {
-        Self(bytes)
+        Self::from_zeroizing(bytes)
     }
 }
 
@@ -46,6 +46,18 @@ impl StreamSecret {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; SECRET_LEN] {
         &self.0
+    }
+
+    /// Make a stream secret from its bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; SECRET_LEN]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    /// Make a stream secret from bytes already held in zeroizing memory.
+    #[must_use]
+    pub fn from_zeroizing(bytes: Zeroizing<[u8; SECRET_LEN]>) -> Self {
+        Self(bytes)
     }
 }
 
