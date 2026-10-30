@@ -1,3 +1,5 @@
+use num_traits::ToPrimitive;
+
 use crate::ChunkError;
 
 /// Which chunks of a map something holds.
@@ -108,16 +110,13 @@ impl Coverage {
     ///
     /// `1.0` for an empty map, matching [`Self::is_complete`].
     #[must_use]
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a progress fraction for a UI; a file would need 2^52 chunks \
-                  (256 EiB) before the mantissa mattered"
-    )]
     pub fn fraction(&self) -> f64 {
         if self.len == 0 {
             return 1.0;
         }
-        self.count() as f64 / self.len as f64
+        // A `usize` always converts to an `f64`; the fallback is unreachable.
+        let held = self.count().to_f64().unwrap_or(f64::NAN);
+        held / self.len.to_f64().unwrap_or(f64::NAN)
     }
 
     /// Indices this does not hold.

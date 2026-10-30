@@ -1790,6 +1790,7 @@ dependencies = [
  "blake3",
  "habilis-network-test-tracing",
  "js-sys",
+ "num-traits",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
