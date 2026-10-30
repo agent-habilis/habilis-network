@@ -1460,9 +1460,9 @@ mod tests {
         let first = endpoint_id(0);
         state.known_endpoints.insert(first);
         for index in 0..KNOWN_ENDPOINTS_CAP {
-            state
-                .known_endpoints
-                .insert(endpoint_id(u8::try_from(index + 1).unwrap()));
+            state.known_endpoints.insert(endpoint_id(
+                u8::try_from(index + 1).expect("the cap is 64, so the index fits a u8"),
+            ));
         }
         assert!(
             state.known_endpoints.len() <= KNOWN_ENDPOINTS_CAP,
@@ -2451,7 +2451,10 @@ mod tests {
             state.note_relink(endpoint_id(seed), when);
         }
         assert!(
-            state.relink.len() <= usize::try_from(RELINK_COOLDOWN.as_secs()).unwrap() + 1,
+            state.relink.len()
+                <= usize::try_from(RELINK_COOLDOWN.as_secs())
+                    .expect("a cooldown in whole seconds fits a usize")
+                    + 1,
             "expired cooldown entries are pruned (map stays bounded)"
         );
     }
