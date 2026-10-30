@@ -83,7 +83,7 @@ impl LightCyclesPeer {
         .map_err(js_error::to_js_error)?;
 
         // `handle_signals: false` — nothing to catch in a browser.
-        let (driver, pending) = RollbackDriver::<LightCycles>::new();
+        let (driver, pending): (RollbackDriver<LightCycles>, _) = RollbackDriver::new();
         let node: Node<RollbackDriver<LightCycles>> =
             Node::spawn(config, driver, None, SignalHandling::Leave);
         let game = Game::new(pending.connect(node.sender()), author);
