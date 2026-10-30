@@ -1516,7 +1516,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
 
     let anchors = TickAnchors::now();
 
-    // Owned Arc clone so the per-arm ctx can borrow it without colliding with `&mut state`.
+    // The loop and each per-arm context hold this clone, so they borrow the identity while `state` is mutably borrowed.
     let identity = Arc::clone(&state.identity);
     // Our own author key, computed once for the per-message self-echo compare.
     let our_pubkey = identity.author_key();
