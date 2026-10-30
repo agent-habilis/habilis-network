@@ -1,5 +1,31 @@
 use crate::protocol::mesh::TransportPolicy;
 
+/// Whether gossip is one of the paths of an instance: a two-way choice, kept as an enum so that
+/// [`TransportOpts`] holds no more than three bools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum GossipPath {
+    /// Gossip carries no data.
+    #[default]
+    Off,
+    /// Gossip carries data.
+    On,
+}
+
+impl GossipPath {
+    /// Whether gossip carries data.
+    #[must_use]
+    pub fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
+
+impl From<bool> for GossipPath {
+    fn from(on: bool) -> Self {
+        if on { Self::On } else { Self::Off }
+    }
+}
+
 /// Which transports this *instance* may carry data on.
 ///
 /// Deliberately **not** part of the mesh id. [`LookupOpts`](crate::protocol::mesh::LookupOpts) is mixed into
@@ -24,10 +50,6 @@ use crate::protocol::mesh::TransportPolicy;
 /// # }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "one independent on/off per path this node may carry data on"
-)]
 #[non_exhaustive]
 pub struct TransportOpts {
     /// QUIC on direct and hole-punched UDP paths, plus the address lookups
@@ -49,7 +71,7 @@ pub struct TransportOpts {
     /// Gossip as a path: the mesh's own topic carries the QUIC packets of a pair that has no
     /// other path. Off by default, and set only by [`Self::within`]: it is a choice of the
     /// mesh, which every member makes the same way, and not a limit of this node.
-    pub gossip: bool,
+    pub gossip: GossipPath,
 }
 
 impl TransportOpts {
@@ -93,7 +115,7 @@ impl TransportOpts {
         // true enables the gossip transport
         gossip: bool,
     ) -> Self {
-        self.gossip = gossip;
+        self.gossip = GossipPath::from(gossip);
         self
     }
 }
@@ -104,7 +126,7 @@ impl Default for TransportOpts {
             udp: true,
             relay: true,
             webrtc: true,
-            gossip: false,
+            gossip: GossipPath::Off,
         }
     }
 }
@@ -144,7 +166,7 @@ impl TransportOpts {
             udp: false,
             relay: true,
             webrtc: true,
-            gossip: false,
+            gossip: GossipPath::Off,
         }
     }
 }
@@ -159,7 +181,9 @@ impl TransportOpts {
             udp: self.udp && policy.udp && !cfg!(target_arch = "wasm32"),
             webrtc: self.webrtc && policy.webrtc,
             // Set, not narrowed: the mesh decides, and it needs a direct path to ride.
-            gossip: policy.gossip && (policy.udp || policy.webrtc) && !cfg!(target_arch = "wasm32"),
+            gossip: GossipPath::from(
+                policy.gossip && (policy.udp || policy.webrtc) && !cfg!(target_arch = "wasm32"),
+            ),
             ..self
         }
     }

@@ -244,7 +244,7 @@ fn build_gossip_handle(
     local: iroh::EndpointId,
     admission: Option<&transport::SignalAdmission>,
 ) -> Option<habilis_network_iroh_gossip_transport::GossipHandle> {
-    options.gossip.then(|| {
+    options.gossip.is_on().then(|| {
         let handle = habilis_network_iroh_gossip_transport::GossipHandle::new(local);
         handle.set_budget(Some(
             habilis_network_iroh_gossip_transport::DEFAULT_BUDGET_BYTES_PER_SEC,

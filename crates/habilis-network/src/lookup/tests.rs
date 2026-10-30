@@ -582,8 +582,11 @@ fn the_mesh_policy_decides_gossip_for_the_opts() {
             .udp(udp)
             .webrtc(webrtc)
     };
-    let within = |mesh: TransportPolicy| TransportOpts::default().within(&mesh).gossip;
-    assert!(!TransportOpts::default().gossip, "off until the mesh asks");
+    let within = |mesh: TransportPolicy| TransportOpts::default().within(&mesh).gossip.is_on();
+    assert!(
+        !TransportOpts::default().gossip.is_on(),
+        "off until the mesh asks"
+    );
     assert!(
         within(policy(true, true, true)),
         "the mesh policy decides gossip when it is within reach"
@@ -611,7 +614,7 @@ fn only_the_member_endpoint_has_the_gossip_handle() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
         let build = |gossip: bool| async move {
             let options = TransportOpts {
-                gossip,
+                gossip: gossip.into(),
                 ..TransportOpts::default()
             };
             let table = transport::SignalAdmission::new(8);
@@ -673,7 +676,7 @@ fn the_member_of_a_udp_and_gossip_list_keeps_ip_above_gossip() {
         }
         let options = TransportOpts {
             webrtc: false,
-            gossip: true,
+            gossip: true.into(),
             ..TransportOpts::default()
         };
         let hub = hub::Hub::new();
