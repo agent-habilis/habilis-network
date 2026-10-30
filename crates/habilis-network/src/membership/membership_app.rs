@@ -194,7 +194,7 @@ pub struct Inbound {
 /// A request asks the membership for something, and the reply comes back on a channel. The doc test compiles it but does not run it.
 ///
 /// ```no_run
-/// use habilis_network::membership::{Membership, Request, Messaging, MessagingTest, Inspect, InspectTest, InspectHost, Linking, Ticks, Routing, Blocking, Beacons, LinkHold};
+/// use habilis_network::membership::{Inspect, Membership, Request};
 ///
 /// # async fn demo(member: &Membership) {
 /// let peers = member.request(|reply| Request::Inspect(Inspect::Peers { reply })).await.unwrap_or_default();
