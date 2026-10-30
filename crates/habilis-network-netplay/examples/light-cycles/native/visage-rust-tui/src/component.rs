@@ -205,7 +205,10 @@ mod tests {
         let count = Signal::new(0);
         let mut instance = Instance::new(Shown(count.clone()));
 
-        let View::Text(first) = instance.mount().unwrap() else {
+        let View::Text(first) = instance
+            .mount()
+            .expect("the test component mounts without a failing step")
+        else {
             panic!("expected text");
         };
         assert_eq!(
@@ -214,7 +217,10 @@ mod tests {
         );
 
         count.set(5);
-        let View::Text(second) = instance.render().unwrap() else {
+        let View::Text(second) = instance
+            .render()
+            .expect("the test component renders without a failing step")
+        else {
             panic!("expected text");
         };
         assert_eq!(
@@ -266,7 +272,10 @@ mod tests {
             phase: ParkedPhase::Setup,
         });
 
-        let View::Text(first) = instance.mount().unwrap() else {
+        let View::Text(first) = instance
+            .mount()
+            .expect("the test component mounts without a failing step")
+        else {
             panic!("expected text");
         };
         assert_eq!(
@@ -280,7 +289,10 @@ mod tests {
         );
 
         count.set(1);
-        let View::Text(second) = instance.render().unwrap() else {
+        let View::Text(second) = instance
+            .render()
+            .expect("the test component renders without a failing step")
+        else {
             panic!("expected text");
         };
         assert_eq!(

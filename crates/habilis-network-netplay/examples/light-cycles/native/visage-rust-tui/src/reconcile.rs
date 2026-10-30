@@ -351,7 +351,11 @@ mod tests {
         let mut host = TuiHost::new();
         let root = host.create_root();
         let mounted = mount(&mut host, root, None, View::text("hi"));
-        let text_node = host.arena.children(root).next().unwrap();
+        let text_node = host
+            .arena
+            .children(root)
+            .next()
+            .expect("the mounted root has a text child");
 
         let mounted = patch(
             &mut host,
@@ -359,7 +363,11 @@ mod tests {
             mounted,
             View::boxed(BoxProps::default(), vec![]),
         );
-        let box_node = host.arena.children(root).next().unwrap();
+        let box_node = host
+            .arena
+            .children(root)
+            .next()
+            .expect("the mounted root has a box child");
 
         assert_ne!(
             text_node, box_node,
