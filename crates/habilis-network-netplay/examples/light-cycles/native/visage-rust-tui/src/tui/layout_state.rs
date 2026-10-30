@@ -8,7 +8,7 @@ use crate::tui::node_id::NodeId;
 /// `measure` recurses the whole subtree from both a parent's own measure
 /// call and its arrange call: `2^depth` cost. See the port report on
 /// `visage-tui/src/layout/index.ts:60-66`.
-#[derive(Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct LayoutState {
     pub(crate) epoch: i64,
 }
