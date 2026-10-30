@@ -59,6 +59,7 @@ async fn ask(address: EndpointAddr, state: &mut EventLoopState, context: &Handle
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "host")]
     use crate::daemon::state::RendezvousFlag;
     use std::time::Duration;
 
