@@ -24,6 +24,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::future::{self, Future};
 use std::iter::Enumerate;
 use std::slice;
 
@@ -650,9 +651,9 @@ impl ChunkStore for IdbStore {
         self.write(META, BINDS_KEY, text.as_bytes()).await
     }
 
-    async fn start_marking(&self) -> Result<(), ChunkError> {
+    fn start_marking(&self) -> impl Future<Output = Result<(), ChunkError>> {
         *self.marks.borrow_mut() = Some(HashSet::new());
-        Ok(())
+        future::ready(Ok(()))
     }
 
     async fn mark(&self, root: Root) -> Result<(), ChunkError> {
