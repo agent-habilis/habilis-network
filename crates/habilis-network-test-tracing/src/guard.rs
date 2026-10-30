@@ -433,7 +433,10 @@ impl Slot {
                 )),
             }
         }
-        for want in expected.iter().filter(|want| !want.seen && !want.optional) {
+        for want in expected.iter() {
+            if want.seen || want.optional {
+                continue;
+            }
             problems.push(format!(
                 "  expected WARN {} containing {:?}, and it was not logged",
                 want.target, want.text
