@@ -13,7 +13,7 @@
 //!
 //! impl Component for Count {
 //!     fn step(&mut self) -> Option<Step> {
-//!         Some(Step::View(View::text(format!("count is {}", self.0.get()))))
+//!         Some(Step::View(View::text(&format!("count is {}", self.0.get()))))
 //!     }
 //! }
 //!

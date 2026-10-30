@@ -145,8 +145,8 @@ impl fmt::Debug for ComponentView {
 
 impl View {
     #[must_use]
-    pub fn text(value: impl Into<Rc<str>>) -> Self {
-        View::Text(value.into())
+    pub fn text(value: &str) -> Self {
+        View::Text(Rc::from(value))
     }
 
     #[must_use]

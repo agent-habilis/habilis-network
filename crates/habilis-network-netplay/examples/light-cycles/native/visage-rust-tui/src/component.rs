@@ -12,7 +12,7 @@
 //!
 //! impl Component for Count {
 //!     fn step(&mut self) -> Option<Step> {
-//!         Some(Step::View(View::text(format!("count is {}", self.0.get()))))
+//!         Some(Step::View(View::text(&format!("count is {}", self.0.get()))))
 //!     }
 //! }
 //! ```
@@ -195,7 +195,10 @@ mod tests {
 
     impl Component for Shown {
         fn step(&mut self) -> Option<Step> {
-            Some(Step::View(View::text(format!("count is {}", self.0.get()))))
+            Some(Step::View(View::text(&format!(
+                "count is {}",
+                self.0.get()
+            ))))
         }
     }
 
@@ -248,7 +251,7 @@ mod tests {
                     self.phase = ParkedPhase::Parked;
                     let count = self.count.clone();
                     Some(Step::Thunk(rc::Rc::new(move || {
-                        View::text(format!("count is {}", count.get()))
+                        View::text(&format!("count is {}", count.get()))
                     })))
                 }
                 ParkedPhase::Parked => {

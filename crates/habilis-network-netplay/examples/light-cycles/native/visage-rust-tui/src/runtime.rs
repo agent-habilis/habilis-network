@@ -121,7 +121,7 @@ mod tests {
             let n = self.0.get();
             Some(Step::View(View::boxed(
                 BoxProps::default(),
-                vec![View::text(format!("count is {n}"))],
+                vec![View::text(&format!("count is {n}"))],
             )))
         }
     }
@@ -237,7 +237,7 @@ mod tests {
 
     impl Component for Child {
         fn step(&mut self) -> Option<Step> {
-            Some(Step::View(View::text(format!(
+            Some(Step::View(View::text(&format!(
                 "child sees {}",
                 self.0.get()
             ))))

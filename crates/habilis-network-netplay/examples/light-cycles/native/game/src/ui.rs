@@ -125,7 +125,7 @@ fn players(s: &Snapshot) -> View {
                     fg: color_for(i),
                     ..BoxProps::default()
                 },
-                vec![View::text(label)],
+                vec![View::text(&label)],
             )
         })
         .collect();
@@ -194,7 +194,7 @@ fn status(s: &Snapshot) -> View {
             fg: color,
             ..BoxProps::default()
         },
-        vec![View::text(status_line(s))],
+        vec![View::text(&status_line(s))],
     )
 }
 
@@ -213,7 +213,7 @@ fn arena(s: &Snapshot) -> View {
                 ..BoxProps::default()
             },
             vec![
-                View::text(attract_headline(s)),
+                View::text(&attract_headline(s)),
                 View::boxed(
                     BoxProps {
                         fg: dim(),
@@ -275,9 +275,9 @@ fn controls(s: &Snapshot) -> View {
             ..BoxProps::default()
         },
         vec![
-            View::text("↑↓←→ OR WASD".to_owned()),
-            View::text(format!("MATCH {}", s.match_number)),
-            View::text(room_label(&s.room)),
+            View::text("↑↓←→ OR WASD"),
+            View::text(&format!("MATCH {}", s.match_number)),
+            View::text(&room_label(&s.room)),
         ],
     )
 }
@@ -340,7 +340,7 @@ fn flush_run(owner: Option<u8>, run: &mut String, spans: &mut Vec<View>) {
     if run.is_empty() {
         return;
     }
-    let text = View::text(mem::take(run));
+    let text = View::text(&mem::take(run));
     spans.push(match owner {
         Some(o) if o > 0 => View::boxed(
             BoxProps {
