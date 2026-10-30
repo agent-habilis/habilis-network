@@ -1,10 +1,15 @@
 use crate::streams::ReadEnd;
+use std::fmt;
 
 /// The opaque handle behind `habilis_network_reader *`.
-#[expect(
-    missing_debug_implementations,
-    reason = "wraps ReadEnd, which holds a tokio Runtime and so has no Debug impl"
-)]
 pub struct HabilisNetworkReader {
     pub(super) reader: ReadEnd,
+}
+
+impl fmt::Debug for HabilisNetworkReader {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HabilisNetworkReader")
+            .finish_non_exhaustive()
+    }
 }
