@@ -321,6 +321,9 @@ pub struct StateMergeParams<'mesh> {
     pub merge: serde_json::Value,
     /// Whether the write is reported to the operator as a `state` or `meta` event. Default `true`.
     pub surface: bool,
+    /// Whether the merged frame also goes to each peer over the unicast plane. Default
+    /// [`Farewell::GossipOnly`].
+    pub farewell: Farewell,
 }
 
 impl<'mesh> StateMergeParams<'mesh> {
@@ -332,6 +335,7 @@ impl<'mesh> StateMergeParams<'mesh> {
             channel,
             merge,
             surface: true,
+            farewell: Farewell::GossipOnly,
         }
     }
 
@@ -344,6 +348,30 @@ impl<'mesh> StateMergeParams<'mesh> {
     ) -> Self {
         Self { surface, ..self }
     }
+
+    /// Whether the merged frame also goes to each peer over the unicast plane.
+    #[must_use]
+    pub fn farewell(
+        self,
+        // the frame is also sent to each peer by unicast, so it survives a linkless overlay
+        farewell: Farewell,
+    ) -> Self {
+        Self { farewell, ..self }
+    }
+}
+
+/// Whether a merged frame also goes to each peer over the unicast plane.
+///
+/// A frame that announces a departure must not die with the leaver. Gossip alone can lose it in
+/// a silently linkless overlay, and anti-entropy cannot heal a frame that no live replica holds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Farewell {
+    /// The frame goes over gossip only.
+    #[default]
+    GossipOnly,
+    /// The frame also goes to each rostered peer by unicast.
+    UnicastMirror,
 }
 
 /// The single shared-state write helper, shared by the IPC `state_merge` command
@@ -396,6 +424,7 @@ pub async fn broadcast_state_merge(
         channel,
         merge,
         surface,
+        farewell,
     } = params;
 
     // 1. Build the change on a fork (no live mutation yet); a no-op merge is a
@@ -447,6 +476,12 @@ pub async fn broadcast_state_merge(
             )));
         }
     };
+
+    // A departure is mirrored before gossip takes the frame: once gossip has it, the frame is
+    // no longer ours to copy, and a leaver can exit before the overlay carries it.
+    if farewell == Farewell::UnicastMirror {
+        unicast_farewell(state, &bytes);
+    }
 
     // 4. Surface our own change, and gossip it (or buffer while no gossip path
     //    exists — the change is safe in the local doc for heads-based
@@ -649,6 +684,93 @@ mod tests {
     #[cfg(feature = "host")]
     use crate::testing;
     use crate::util::clock;
+    /// A departure written with a farewell reaches each peer by unicast at once. The overlay is
+    /// not meshed, so gossip carries nothing: only the unicast mirror can deliver the frame, and
+    /// no anti-entropy round is needed.
+    #[test]
+    fn a_farewell_merge_reaches_each_peer_by_unicast() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use std::time::Duration;
+
+                use iroh::endpoint::presets;
+                use iroh::protocol::Router;
+                use iroh_gossip::{net, proto};
+                use tokio::sync::mpsc;
+                use tokio::time;
+
+                use crate::gossip::event::SilentSink;
+                use crate::gossip::{Farewell, MergeCtx, StateMergeParams, broadcast_state_merge};
+                use crate::lookup;
+                use crate::protocol::Channel;
+                use crate::transport::{
+                    MeshSender, PayloadPath, UNICAST_ALPN, UnicastAcceptor, UnicastPool,
+                };
+
+                let (tx, mut frames) = mpsc::channel(8);
+                let server = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let router = Router::builder(server.clone())
+                    .accept(
+                        UNICAST_ALPN,
+                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                    )
+                    .spawn();
+
+                let node = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let gossip = net::Gossip::builder().spawn(node.clone());
+                let topic = gossip
+                    .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = MeshSender::new(gossip_sender);
+
+                let mut state = fresh_state();
+                state.unicast_pool = UnicastPool::new(node.clone(), false);
+                lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
+                state.peer_endpoints.insert(nick("bob"), server.addr());
+                state.peers.insert(nick("bob"));
+
+                let mesh = MeshId::from("test");
+                let author = nick("alice");
+                let context = MergeCtx {
+                    mesh: &mesh,
+                    author: &author,
+                    sender: &sender,
+                    sink: &SilentSink,
+                };
+                let params = StateMergeParams::new(
+                    context,
+                    Channel::Meta,
+                    serde_json::json!({"peers": {"alice": null}}),
+                )
+                .surface(false)
+                .farewell(Farewell::UnicastMirror);
+                broadcast_state_merge(&mut state, params)
+                    .await
+                    .expect("the farewell is accepted");
+
+                let delivered = time::timeout(Duration::from_secs(5), frames.recv()).await;
+                assert!(
+                    matches!(delivered, Ok(Some(ref bytes)) if !bytes.is_empty()),
+                    "a farewell reaches the peer by unicast, without waiting for anti-entropy"
+                );
+                router.shutdown().await.expect("shutdown");
+                node.close().await;
+            },
+        );
+    }
+
     #[test]
     fn our_peer_info_says_so_while_we_hold_the_rendezvous() {
         let _guard = ::habilis_network_test_tracing::init();

@@ -40,8 +40,8 @@ const _: () = assert!(
 
 pub(crate) use json_body::json_body;
 pub use merge_ctx::{
-    MergeCtx, StateMergeParams, app_frame, broadcast_msg, broadcast_state_merge, send_app,
-    start_ping_round, unicast_farewell,
+    Farewell, MergeCtx, StateMergeParams, app_frame, broadcast_msg, broadcast_state_merge,
+    send_app, start_ping_round, unicast_farewell,
 };
 pub(crate) use merge_ctx::{broadcast_peer_info, send_second_probe};
 pub(crate) use path_summary::PathSummary;
