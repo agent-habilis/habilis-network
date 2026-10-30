@@ -505,7 +505,7 @@ async fn coverage_survives_being_described_and_rebuilt() {
     );
 }
 
-/// A write runs on its first poll, not at its call: IndexedDB needs each request
+/// A write runs on its first poll, not at its call: `IndexedDB` needs each request
 /// issued while the caller holds the thread, so a `put` nobody awaits never lands.
 /// The native store writes at the call instead (`a_call_does_its_work_when_it_is_made`).
 #[wasm_bindgen_test]
