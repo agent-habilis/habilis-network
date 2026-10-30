@@ -6,7 +6,7 @@
 //! mind while reading that file — nine functions spread across four claim
 //! sites, interleaved with the tick arms they have nothing to do with.
 
-use crate::daemon::state::Standing;
+use crate::daemon::state::{BeaconNote, Standing};
 use std::time::Duration;
 
 use iroh::{Endpoint, EndpointId};
@@ -533,7 +533,7 @@ pub(super) fn schedule_rival_recheck(
 ) {
     state.cancel_rendezvous_round();
     state.rival_recheck_deferrals = 0;
-    state.yield_to_lower = false;
+    state.beacon_notes.remove(&BeaconNote::YieldToLower);
     if !rival_recheck_applies(policy, params.bind_ports.is_empty()) {
         return;
     }
@@ -571,7 +571,9 @@ pub(super) fn shed_rival_beacon_if_due(
     let dependents = rendezvous
         .as_ref()
         .map_or_else(beacon::Dependents::default, |held| held.dependents(peer));
-    if !state.yield_to_lower && defer_shed(dependents.count(), state.rival_recheck_deferrals) {
+    if !state.beacon_notes.contains(&BeaconNote::YieldToLower)
+        && defer_shed(dependents.count(), state.rival_recheck_deferrals)
+    {
         state.rival_recheck_deferrals = state.rival_recheck_deferrals.saturating_add(1);
         state.next_rival_recheck = Some(Instant::now() + tuning::rival_recheck());
         let live_ids = dependents.live_ids();
@@ -593,10 +595,10 @@ pub(super) fn shed_rival_beacon_if_due(
     tracing::info!(
         target: "habilis_network::gossip",
         node = %peer.fmt_short(),
-        yield_to_lower = state.yield_to_lower,
+        yield_to_lower = state.beacon_notes.contains(&BeaconNote::YieldToLower),
         "beacon rival re-check: releasing the rendezvous to re-probe for a same-id co-host"
     );
-    state.yield_to_lower = false;
+    state.beacon_notes.remove(&BeaconNote::YieldToLower);
     // `shed`, not a plain drop: the graceful endpoint close turns the
     // peer's link to its own dead beacon into an immediate
     // `NeighborDown` instead of a zombie that only dies at the QUIC idle
@@ -639,7 +641,7 @@ mod tests {
         MAX_SHED_DEFERRALS, claims_at_startup, defer_shed, next_recheck_delay, probes_before_claim,
         regrafts_rendezvous, rival_recheck_applies,
     };
-    use crate::daemon::state::Standing;
+    use crate::daemon::state::{BeaconNote, Standing};
     use std::time::Duration;
 
     use crate::beacon::claim;
@@ -826,7 +828,7 @@ mod tests {
             };
             let mut state = testing::fresh_state();
             state.next_rival_recheck = Some(clock::Instant::now());
-            state.yield_to_lower = true;
+            state.beacon_notes.insert(BeaconNote::YieldToLower);
             let (mut rendezvous, _round) =
                 beacon_with_a_negotiating_tab(&params, loopback_endpoint().await);
 
@@ -840,7 +842,10 @@ mod tests {
                 "a due shed does not wait when a lower holder was seen"
             );
             assert!(rendezvous.is_none(), "the beacon was released");
-            assert!(!state.yield_to_lower, "the release uses the request up");
+            assert!(
+                !state.beacon_notes.contains(&BeaconNote::YieldToLower),
+                "the release uses the request up"
+            );
         });
     }
 
@@ -851,7 +856,7 @@ mod tests {
             let params = public_params();
             let endpoint = loopback_endpoint().await;
             let mut state = testing::fresh_state();
-            state.yield_to_lower = true;
+            state.beacon_notes.insert(BeaconNote::YieldToLower);
 
             super::schedule_rival_recheck(
                 &mut state,
@@ -860,7 +865,10 @@ mod tests {
                 &endpoint,
             );
 
-            assert!(!state.yield_to_lower, "a new claim forgets a yield request");
+            assert!(
+                !state.beacon_notes.contains(&BeaconNote::YieldToLower),
+                "a new claim forgets a yield request"
+            );
         });
     }
 

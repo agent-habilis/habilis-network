@@ -8,7 +8,7 @@
 //! the daemon-internal plumbing (`config`/`ctx`/`ipc`/`state`/`timers`/
 //! `setup`) are siblings under `super`.
 
-use crate::daemon::state::Standing;
+use crate::daemon::state::{BeaconNote, Standing};
 #[cfg(feature = "multihop")]
 use crate::protocol;
 #[cfg(feature = "host")]
@@ -961,8 +961,12 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         }
         // Said in our `PeerInfo` from here, for the same reason: no claim or shed path has to
         // remember to send it again.
-        if state.hosts_rendezvous != state.beacon_flag_flooded {
-            state.beacon_flag_flooded = state.hosts_rendezvous;
+        if state.hosts_rendezvous != state.beacon_notes.contains(&BeaconNote::FlagFlooded) {
+            if state.hosts_rendezvous {
+                state.beacon_notes.insert(BeaconNote::FlagFlooded);
+            } else {
+                state.beacon_notes.remove(&BeaconNote::FlagFlooded);
+            }
             let context = parts.handler_ctx(&sender);
             gossip::broadcast_peer_info(&mut state, &context).await;
         }

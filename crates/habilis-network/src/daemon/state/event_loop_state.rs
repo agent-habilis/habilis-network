@@ -3,8 +3,8 @@ use super::ParkedLinkStates;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use super::TestDrop;
 use super::{
-    DirectCounts, DirectState, IdleCounters, MeshSecrets, PingRound, Reach, RivalFlag, RosterEntry,
-    RosterSnapshot, Standing, StateInit,
+    BeaconNote, DirectCounts, DirectState, IdleCounters, MeshSecrets, PingRound, Reach, RivalFlag,
+    RosterEntry, RosterSnapshot, Standing, StateInit,
 };
 use crate::daemon::cohost_arm;
 use crate::daemon::doc::MeshDoc;
@@ -317,13 +317,8 @@ pub struct EventLoopState {
     /// mesh would split into islands (the 18-node test shows it). So this
     /// node never releases the link.
     pub(crate) hosts_rendezvous: bool,
-    /// A holder with a lower member id said, in its `PeerInfo`, that it holds the rendezvous
-    /// too. The next due re-check then sheds at once, whatever depends on this beacon: the
-    /// rival's flag already settled who keeps it. Cleared by the shed and by a fresh claim.
-    pub(crate) yield_to_lower: bool,
-    /// What the last `PeerInfo` we flooded said about `hosts_rendezvous`, so the flag is sent
-    /// again when it changes.
-    pub(crate) beacon_flag_flooded: bool,
+    /// The notes this member keeps about its own beacon claim.
+    pub(crate) beacon_notes: BTreeSet<BeaconNote>,
     /// The members that said in their `PeerInfo` that they hold the rendezvous, by the signing
     /// key and the endpoint that key proved. A `PeerInfo` of the same signer without the flag,
     /// or the roster removal of the member, takes it out again. While it is not empty and we do
@@ -686,8 +681,7 @@ impl EventLoopState {
             rendezvous_comeback_until: None,
             rendezvous_dwell_until: None,
             hosts_rendezvous: false,
-            yield_to_lower: false,
-            beacon_flag_flooded: false,
+            beacon_notes: BTreeSet::new(),
             rival_holders: HashMap::new(),
             rendezvous_release_links: tuning::RENDEZVOUS_RELEASE_LINKS,
             rendezvous_session_stale: false,
@@ -1165,7 +1159,7 @@ impl EventLoopState {
             return;
         }
         if (beacon::Contest { own, rival: sender }).own_yields() {
-            self.yield_to_lower = true;
+            self.beacon_notes.insert(BeaconNote::YieldToLower);
             self.next_rival_recheck = Some(now);
         } else if newly {
             // Once per holder, so that a holder that sends its flag again and again cannot keep

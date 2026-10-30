@@ -5,6 +5,7 @@ mod mesh_secrets;
 mod ping_round;
 mod state_init;
 
+mod beacon_note;
 mod direct_counts;
 mod direct_state;
 #[cfg(feature = "multihop")]
@@ -32,6 +33,7 @@ pub(crate) use mesh_secrets::MeshSecrets;
 pub(crate) use ping_round::PingRound;
 pub(crate) use state_init::StateInit;
 
+pub(crate) use beacon_note::BeaconNote;
 pub(crate) use direct_counts::DirectCounts;
 pub(crate) use direct_state::DirectState;
 #[cfg(feature = "multihop")]
@@ -70,7 +72,7 @@ mod tests {
         DirectCounts, DirectState, Duration, EndpointId, EventLoopState, PingRound, Reach,
         RivalFlag,
     };
-    use crate::daemon::state::Standing;
+    use crate::daemon::state::{BeaconNote, Standing};
     use crate::protocol::{
         AppFrameParams, AuthorKey, ContentHash, MeshId, Message, MessageBody, MessageId, UnixSecs,
     };
@@ -118,7 +120,7 @@ mod tests {
         );
 
         assert!(
-            state.yield_to_lower,
+            state.beacon_notes.contains(&BeaconNote::YieldToLower),
             "a lower holder's flag makes us yield at once"
         );
         assert_eq!(
@@ -152,7 +154,7 @@ mod tests {
         );
 
         assert!(
-            !state.yield_to_lower,
+            !state.beacon_notes.contains(&BeaconNote::YieldToLower),
             "a higher holder's flag does not make us yield"
         );
         let next = state
@@ -327,7 +329,7 @@ mod tests {
 
         for state in [no_flag, unproven, ourselves] {
             assert!(
-                !state.yield_to_lower,
+                !state.beacon_notes.contains(&BeaconNote::YieldToLower),
                 "a flag that does not count does not make us yield"
             );
             assert_eq!(
@@ -365,7 +367,7 @@ mod tests {
             "a flag read while we do not hold the beacon is remembered"
         );
         assert!(
-            !state.yield_to_lower,
+            !state.beacon_notes.contains(&BeaconNote::YieldToLower),
             "a flag read while we do not hold the beacon does not make us yield"
         );
         assert_eq!(
