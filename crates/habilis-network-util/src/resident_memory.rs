@@ -135,13 +135,12 @@ fn current_rss_bytes() -> Option<u64> {
 /// size of a page.
 #[cfg(all(target_os = "linux", feature = "host"))]
 fn current_rss_bytes() -> Option<u64> {
+    use rustix::param;
     use std::fs;
 
     let statm = fs::read_to_string("/proc/self/statm").ok()?;
     let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
-    u64::try_from(rustix::param::page_size())
-        .ok()?
-        .checked_mul(pages)
+    u64::try_from(param::page_size()).ok()?.checked_mul(pages)
 }
 
 /// No reading: another target, or no `host` feature.
