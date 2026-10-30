@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::borrow::Cow;
 
 use habilis_network_protocol::SymmetricKey;
 
@@ -15,7 +16,7 @@ use habilis_network_protocol::seal_error;
 /// The tagged `State`/`Meta` message body.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "k", rename_all = "snake_case")]
-enum StateOp {
+enum StateOp<'a> {
     /// The live wire form: one automerge change, Base58-encoded so the body stays
     /// `MessageBody`-safe (wire key `c`), plus an optional `m` carrying the
     /// RFC 7386 merge the author applied — the human-readable delta the
@@ -26,7 +27,7 @@ enum StateOp {
         #[serde(rename = "c")]
         data: String,
         #[serde(rename = "m", default, skip_serializing_if = "Option::is_none")]
-        merge: Option<Value>,
+        merge: Option<Cow<'a, Value>>,
     },
     /// The pre-automerge RFC 7386 merge shape. Retained only so a body still
     /// composes for the adversarial harness; the automerge engine ignores it (a
@@ -88,7 +89,7 @@ pub fn merge_body(merge: Value) -> Result<MessageBody, DocError> {
 pub fn change_body(change: &[u8], merge: Option<&Value>) -> Result<MessageBody, DocError> {
     let json = serde_json::to_string(&StateOp::Change {
         data: bs58::encode(change).into_string(),
-        merge: merge.cloned(),
+        merge: merge.map(Cow::Borrowed),
     })
     .map_err(DocError::encode)?;
     Ok(MessageBody::try_new(&json)?)
@@ -111,7 +112,7 @@ pub fn change_body(change: &[u8], merge: Option<&Value>) -> Result<MessageBody, 
 /// ```
 #[must_use]
 pub fn parse_change_body(body: &str) -> Option<Vec<u8>> {
-    let op: StateOp = serde_json::from_str(body).ok()?;
+    let op: StateOp<'_> = serde_json::from_str(body).ok()?;
     match op {
         StateOp::Change { data, .. } => bs58::decode(&data).into_vec().ok(),
         StateOp::Merge { .. } | StateOp::Enc { .. } => None,
@@ -171,7 +172,7 @@ pub fn encrypt_body(plain: &MessageBody, key: &SymmetricKey) -> Result<MessageBo
 /// ```
 #[must_use]
 pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
-    let op: Result<StateOp, _> = serde_json::from_str(body);
+    let op: Result<StateOp<'_>, _> = serde_json::from_str(body);
     match op {
         Ok(StateOp::Enc { data }) => {
             let key = key?;
