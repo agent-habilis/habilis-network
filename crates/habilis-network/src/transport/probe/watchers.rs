@@ -282,7 +282,7 @@ pub(crate) async fn on_path_change(
     // all of its connections, so that this path and the sweep never disagree on what to tell
     // the gossip transport.
     state.webrtc_admission.sync_gossip();
-    let Some(handle) = state.webrtc.clone() else {
+    let Some(handle) = &state.webrtc else {
         return;
     };
     let has_session = handle.has_session(&peer);
