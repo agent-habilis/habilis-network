@@ -218,6 +218,7 @@ type UnderlaySlot = Option<()>;
 #[cfg(feature = "host")]
 async fn build_member_endpoint(
     build: &SetupBuild<'_>,
+    injected: Option<InjectedEndpoint>,
 ) -> Result<(
     Endpoint,
     Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
@@ -226,14 +227,16 @@ async fn build_member_endpoint(
     Option<underlay_webrtc::UnderlayWebRtc>,
     Option<lookup::MdnsHandle>,
 )> {
-    if let Some(injected) = build.injected.as_ref() {
+    if let Some(injected) = injected {
         // Shared endpoint: no key to mint, nothing to bind. `InjectedEndpoint::bind`
         // built it, and checked that its handles carry its key. The mesh policy
         // decides multi-hop, as it does for an endpoint the engine builds: a handle
         // on a mesh whose list has no `multihop` (or on a node with no UDP) is
         // dropped, so no vector is advertised or taken in and no route resolves.
-        let multihop = injected.multihop.as_ref().filter(|_| build.multihop);
-        if injected.multihop.is_some() && multihop.is_none() {
+        let mdns = injected.mdns_handle();
+        let had_multihop = injected.multihop.is_some();
+        let multihop = injected.multihop.filter(|_| build.multihop);
+        if had_multihop && multihop.is_none() {
             tracing::info!(
                 target: "habilis_network::lookup",
                 "the mesh policy has no multihop for this node: the injected multihop handle is not used"
@@ -241,7 +244,7 @@ async fn build_member_endpoint(
         }
         lookup::check_injected_against_mesh(
             &injected.endpoint,
-            multihop.is_some_and(
+            multihop.as_ref().is_some_and(
                 habilis_network_iroh_multihop_transport::MultihopHandle::relay_payload,
             ),
             build.lookups,
@@ -249,16 +252,13 @@ async fn build_member_endpoint(
         )?;
         // The caller built the underlay of its handle itself, so there is no
         // `WebRTC` leg on it.
-        let held_endpoint = injected.endpoint.clone();
-        let held_webrtc = injected.webrtc.clone();
-        let held_admission = injected.admission.clone();
         return Ok((
-            held_endpoint,
-            multihop.cloned(),
-            held_webrtc,
-            held_admission,
+            injected.endpoint,
+            multihop,
+            injected.webrtc,
+            injected.admission,
             None,
-            injected.mdns_handle(),
+            mdns,
         ));
     }
     // Made before the endpoint, because the endpoint reports its connections
@@ -297,6 +297,7 @@ async fn build_member_endpoint(
 #[cfg(not(feature = "host"))]
 async fn build_member_endpoint(
     build: &SetupBuild<'_>,
+    injected: Option<InjectedEndpoint>,
 ) -> Result<(
     Endpoint,
     MultihopSlot,
@@ -305,7 +306,7 @@ async fn build_member_endpoint(
     UnderlaySlot,
     Option<lookup::MdnsHandle>,
 )> {
-    if let Some(injected) = build.injected.as_ref() {
+    if let Some(injected) = injected {
         // A browser has no multi-hop underlay, so a multihop handle that the caller
         // passed is ignored here, and the endpoint is used as it is.
         lookup::check_injected_against_mesh(
@@ -315,10 +316,10 @@ async fn build_member_endpoint(
             build.relay_transport.relay_allowed(),
         )?;
         return Ok((
-            injected.endpoint.clone(),
+            injected.endpoint,
             None,
-            injected.webrtc.clone(),
-            injected.admission.clone(),
+            injected.webrtc,
+            injected.admission,
             None,
             injected.mdns,
         ));
@@ -485,7 +486,6 @@ struct SetupBuild<'build> {
     )]
     multihop: bool,
     transports: lookup::TransportOpts,
-    injected: Option<InjectedEndpoint>,
     /// The caller's co-host override, read before the policy is final: what a joiner registers
     /// for the rendezvous depends on whether it will walk the ladder.
     cohost: Option<CoHostPolicy>,
@@ -679,7 +679,6 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         multihop: mesh_config.transport.allows(Transport::Multihop)
             && (transports.udp || transports.webrtc),
         transports,
-        injected,
         protocols: sync::Mutex::new(protocols),
         rung_tx: &rung_tx,
         relay_transport,
@@ -707,7 +706,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         address_book,
         webrtc_ice,
         topic_string,
-    } = assemble(kind, &build).await?;
+    } = assemble(kind, &build, injected).await?;
 
     // Read out of `build` before anything below moves what it borrows
     // (`author`, `sink`, `rung_tx`).
@@ -771,7 +770,11 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     })
 }
 
-async fn assemble(kind: SetupKind, build: &SetupBuild<'_>) -> Result<Assembled> {
+async fn assemble(
+    kind: SetupKind,
+    build: &SetupBuild<'_>,
+    injected: Option<InjectedEndpoint>,
+) -> Result<Assembled> {
     Ok(match kind {
         SetupKind::Create {
             name,
@@ -789,11 +792,12 @@ async fn assemble(kind: SetupKind, build: &SetupBuild<'_>) -> Result<Assembled> 
                     password,
                     invite_only,
                 },
+                injected,
             )
             .await?
         }
         kind @ (SetupKind::Join { .. } | SetupKind::Topic { .. }) => {
-            setup_join(build, kind).await?
+            setup_join(build, kind, injected).await?
         }
     })
 }
@@ -857,7 +861,11 @@ struct CreateSetup {
 /// rendezvous immediately ([`CoHostPolicy::Eager`]): it has no bootstrap
 /// dial to self-collide with, and an otherwise empty mesh needs a beacon
 /// from t=0.
-async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Assembled> {
+async fn setup_create(
+    build: &SetupBuild<'_>,
+    create: CreateSetup,
+    injected: Option<InjectedEndpoint>,
+) -> Result<Assembled> {
     let CreateSetup {
         name,
         config,
@@ -879,7 +887,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         )
     )]
     let (endpoint, multihop, webrtc, admission, underlay_webrtc, mdns) =
-        build_member_endpoint(build).await?;
+        build_member_endpoint(build, injected).await?;
 
     let mut mesh = Mesh::try_new(Seed::new(seed), name.clone(), config)?;
     // Invite-only: mint the invite root + issuer keypair and bake the issuer
@@ -989,7 +997,11 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
 /// background connect, so a joiner is never invisible while bootstrapping and
 /// `ready` never waits for a peer. It does wait for the IPC socket — see
 /// `run`.
-async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled> {
+async fn setup_join(
+    build: &SetupBuild<'_>,
+    kind: SetupKind,
+    injected: Option<InjectedEndpoint>,
+) -> Result<Assembled> {
     let sink = build.sink;
     let author = build.author;
 
@@ -1017,7 +1029,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         )
     )]
     let (endpoint, multihop, webrtc, admission, underlay_webrtc, mdns) =
-        build_member_endpoint(build).await?;
+        build_member_endpoint(build, injected).await?;
 
     let lan_contacts = lookup::lan_contacts(&endpoint, mdns, &topic_id).await?;
     let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
