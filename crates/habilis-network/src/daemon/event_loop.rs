@@ -534,12 +534,9 @@ async fn antientropy_arm(
 /// to broadcast. A no-op stub rather than a `cfg` at the `select!` arm, so the loop
 /// body reads the same with and without the feature.
 #[cfg(not(feature = "multihop"))]
-#[expect(
-    clippy::unused_async,
-    reason = "the `multihop` body awaits; the signatures must match so the select! arm reads the same with and without the feature"
-)]
-async fn linkstate_arm(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+fn linkstate_arm(state: &mut EventLoopState, context: &HandlerCtx<'_>) -> impl Future<Output = ()> {
     let _ = (state, context);
+    future::ready(())
 }
 
 /// The edges that our link-vector advertises: one per gossip neighbour, and one per member
