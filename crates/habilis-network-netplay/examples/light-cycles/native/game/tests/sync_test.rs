@@ -16,10 +16,12 @@
 
 use habilis_network_netplay::{PlayerHandle, Request, RollbackError, SyncTestSession};
 
-use light_cycles_native::app::LightCycles;
-use light_cycles_native::grid::{Dir, Input};
-use light_cycles_native::round::RoundDescriptor;
-use light_cycles_native::sim::{self, World};
+use light_cycles_native::dir::Dir;
+use light_cycles_native::input::Input;
+use light_cycles_native::light_cycles::LightCycles;
+use light_cycles_native::round_descriptor::RoundDescriptor;
+use light_cycles_native::sim;
+use light_cycles_native::world::World;
 
 /// Drives the simulation from the session's requests, exactly as the real
 /// client does.

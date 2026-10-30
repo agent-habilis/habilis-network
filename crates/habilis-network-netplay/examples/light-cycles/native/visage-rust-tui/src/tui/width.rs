@@ -8,10 +8,12 @@
 //! byte-identical to `visage-tui`'s tables, but correct for the common
 //! cases (CJK, most emoji) a game HUD would ever show.
 
+use crate::tui::truncate::Truncate;
+use crate::tui::wrap::Wrap;
+use std::mem;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use std::mem;
 /// Splits `text` into extended grapheme clusters (UAX #29) — a ZWJ emoji
 /// family, a flag, a base+combining-mark sequence, each one unit.
 pub fn graphemes(text: &str) -> impl Iterator<Item = &str> {
@@ -29,14 +31,6 @@ pub fn char_width(cluster: &str) -> usize {
 #[must_use]
 pub fn string_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Truncate {
-    Start,
-    Middle,
-    End,
-    None,
 }
 
 /// Shortens `text` to fit `cells`, replacing the cut with `…`. A wide
@@ -72,7 +66,7 @@ pub fn truncate(text: &str, cells: usize, mode: Truncate) -> String {
 
 /// Accumulates clusters from the front (`from_front`) or back, stopping —
 /// not splitting — as soon as one more cluster would exceed `cells`.
-fn take(parts: &[&str], cells: usize, from_front: bool) -> String {
+pub(crate) fn take(parts: &[&str], cells: usize, from_front: bool) -> String {
     let mut used = 0;
     let mut out: Vec<&str> = Vec::new();
     let ordered: Vec<&&str> = if from_front {
@@ -92,13 +86,6 @@ fn take(parts: &[&str], cells: usize, from_front: bool) -> String {
         out.reverse();
     }
     out.concat()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Wrap {
-    None,
-    Char,
-    Word,
 }
 
 /// Wraps `text` to `cells`. `\n` is always a hard break in every mode;
@@ -124,7 +111,7 @@ pub fn wrap_text(text: &str, cells: usize, mode: Wrap) -> impl Iterator<Item = S
     out.into_iter()
 }
 
-fn break_anywhere(line: &str, cells: usize) -> Vec<String> {
+pub(crate) fn break_anywhere(line: &str, cells: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     let mut used = 0;
@@ -141,7 +128,7 @@ fn break_anywhere(line: &str, cells: usize) -> Vec<String> {
     out
 }
 
-fn break_at_words(line: &str, cells: usize) -> Vec<String> {
+pub(crate) fn break_at_words(line: &str, cells: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     let mut used = 0;

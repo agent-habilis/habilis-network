@@ -12,94 +12,44 @@
 //! rather than re-estimated from liveness on every tick. Two peers can no
 //! longer briefly disagree about who is playing and lay out different
 //! arenas.
-//!
-//! This crate's own copy of `native/game`'s, deliberately kept in step
-//! with it: the two clients share no code, but they do share a match, so
-//! the tuning constants below and the order of operations in
-//! [`Game::tick`] have to agree.
 
-use std::collections::BTreeMap;
-
+use crate::dir::Dir;
+use crate::input::Input;
+use crate::light_cycles::LightCycles;
+use crate::outcome::Outcome;
+use crate::round_descriptor::RoundDescriptor;
+use crate::sim;
+use crate::snapshot::Snapshot;
+use crate::world::World;
 use habilis_network::protocol::{AuthorKey, Nickname};
-use serde::Serialize;
-
 use habilis_network_netplay::{
-    Config, Event, Lobby, MeshTransport, P2PSession, Request, SessionState, StartedMatch, Tick,
+    Event, Lobby, MeshTransport, P2PSession, Request, SessionId, SessionState, StartedMatch, Tick,
     TickSpan,
 };
+use std::collections::BTreeMap;
 
-use crate::grid::{Dir, Input};
-use crate::round::RoundDescriptor;
-use crate::sim::{self, Outcome, World};
-
-use std::mem;
 /// How far ahead of a confirmed input the simulation may speculate before
 /// it stalls instead. Eight ticks is 400ms at 20 Hz — comfortably more
 /// than a loopback or same-continent round trip, and a stall is far less
 /// unpleasant here than in a fighting game because a light-cycle's motion
 /// is constant.
 const MAX_PREDICTION_FRAMES: usize = 8;
+
 /// Ticks between a keypress and its effect. Buys two frames of network
 /// slack for free, at 100ms of input lag — under the ~200ms a player
 /// notices, and it means most frames need no rollback at all.
 const INPUT_DELAY_FRAMES: usize = 2;
+
 /// How often presence is announced while waiting, in render ticks.
 /// 10 ticks is 500ms, the same cadence the old hand-rolled heartbeat ran
 /// at, and this replaces it.
 const PRESENCE_EVERY_TICKS: u32 = 10;
+
 /// How long a finished match is left on screen before a rematch is
 /// proposed — 3s at 20 Hz.
 const REMATCH_GRACE_TICKS: u32 = 60;
 
-/// The type-level bundle the session is generic over.
-#[derive(Debug)]
-pub struct LightCycles;
-
-impl Config for LightCycles {
-    type Input = Input;
-    type State = World;
-    /// The peer's signed public key. Never the nickname — the protocol
-    /// treats those as cosmetic and explicitly non-unique.
-    type Address = AuthorKey;
-}
-
 type Session = P2PSession<LightCycles, MeshTransport<LightCycles>>;
-
-/// A lobby change since the last [`Game::drain_events`] call — the JS
-/// side has no HUD loop of its own to notice this directly, unlike
-/// `native/game`'s TUI, which redraws the whole roster every frame.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum GameEvent {
-    Joined { pubkey: String, nick: String },
-    Left { pubkey: String, nick: String },
-}
-
-/// What the JS side reads each frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Snapshot {
-    /// Which match this is, counting from 1; `0` before the first.
-    pub match_number: u64,
-    pub world: World,
-    /// Same order as `world.cycles` — index `i` is that cycle's player.
-    pub roster: Vec<(String, String)>, // (pubkey, nick)
-    pub my_pubkey: String,
-    /// How many peers are in the lobby, us included.
-    pub present: usize,
-    /// No match in progress: waiting for someone to play against.
-    pub waiting: bool,
-    /// A peer reported a state checksum that disagrees with ours. Should
-    /// never happen; if it does, the two are no longer playing the same
-    /// game and the display is not to be trusted.
-    pub desynced: bool,
-    /// Why the lobby cannot start a match, when that is not something
-    /// waiting will fix — a duplicate nickname, say. `None` while healthy.
-    pub blocked: Option<String>,
-    /// The session exists but is still aligning frame numbers with its
-    /// peers. Distinct from both "waiting" and "playing": the arena is up
-    /// but frozen, which without a word on screen reads as a hang.
-    pub syncing: bool,
-}
 
 /// The whole client: a lobby, at most one live match, and the world it
 /// simulates.
@@ -111,6 +61,7 @@ pub struct Snapshot {
 #[derive(Debug)]
 pub struct Game {
     transport: MeshTransport<LightCycles>,
+    room: String,
     lobby: Option<Lobby>,
     session: Option<Session>,
     descriptor: Option<RoundDescriptor>,
@@ -121,6 +72,10 @@ pub struct Game {
     /// iterate — see the determinism contract.
     nicks: BTreeMap<AuthorKey, Nickname>,
     match_number: u64,
+    /// The session id the live session was built against. The epoch alone
+    /// cannot say: the lobby's tie-break can settle on another match at the
+    /// same epoch, and then this is what disagrees with `Lobby::started`.
+    playing_session_id: Option<SessionId>,
     /// The direction the player is steering toward. Sticky: it is held
     /// state, not an event, which is what makes the session's "predict by
     /// repeating the last input" guess the right one.
@@ -131,16 +86,14 @@ pub struct Game {
     desynced: bool,
     /// The last reason the lobby refused to start, if it still stands.
     blocked: Option<String>,
-    /// Who was in the lobby when [`Game::drain_events`] last ran.
-    known: BTreeMap<AuthorKey, Nickname>,
-    pending_events: Vec<GameEvent>,
 }
 
 impl Game {
     #[must_use]
-    pub fn new(transport: MeshTransport<LightCycles>, my_nick: Nickname) -> Self {
+    pub fn new(transport: MeshTransport<LightCycles>, room: String, my_nick: Nickname) -> Self {
         Self {
             transport,
+            room,
             lobby: None,
             session: None,
             descriptor: None,
@@ -148,19 +101,13 @@ impl Game {
             my_nick,
             nicks: BTreeMap::new(),
             match_number: 0,
+            playing_session_id: None,
             steer: None,
             ticks: 0,
             decided_since: None,
             desynced: false,
             blocked: None,
-            known: BTreeMap::new(),
-            pending_events: Vec::new(),
         }
-    }
-
-    /// Lobby joins and departures since the last call.
-    pub fn drain_events(&mut self) -> impl Iterator<Item = GameEvent> {
-        mem::take(&mut self.pending_events).into_iter()
     }
 
     /// Record where the player wants to go. Legality is not checked here:
@@ -204,6 +151,7 @@ impl Game {
             .is_some_and(|session| session.state() != SessionState::Running);
         Snapshot {
             match_number: self.match_number,
+            room: self.room.clone(),
             world: self.world.clone(),
             roster,
             my_pubkey,
@@ -252,25 +200,9 @@ impl Game {
         // would otherwise show "players ready" for a match that can never
         // start.
         self.blocked = lobby.blocker().map(|reason| reason.to_string());
-        let present: BTreeMap<AuthorKey, Nickname> = lobby.present().collect();
-        for (pubkey, nick) in &present {
-            if !self.known.contains_key(pubkey) {
-                self.pending_events.push(GameEvent::Joined {
-                    pubkey: pubkey.to_string(),
-                    nick: nick.to_string(),
-                });
-            }
-            self.nicks.insert(*pubkey, nick.clone());
+        for (pubkey, nick) in lobby.present() {
+            self.nicks.insert(pubkey, nick);
         }
-        for (pubkey, nick) in &self.known {
-            if !present.contains_key(pubkey) {
-                self.pending_events.push(GameEvent::Left {
-                    pubkey: pubkey.to_string(),
-                    nick: nick.to_string(),
-                });
-            }
-        }
-        self.known = present;
         if self.ticks.is_multiple_of(PRESENCE_EVERY_TICKS) {
             self.transport.broadcast_lobby(&lobby.presence());
             // The match, not just our presence: `Start` crosses the same
@@ -289,6 +221,23 @@ impl Game {
             return;
         };
         if agreed.epoch.get() <= self.match_number {
+            // The lobby's tie-break can swap the agreed match at the *same*
+            // epoch, and this declines to follow it: the session is already
+            // built against the old id. Logged because the result is a pair
+            // that never synchronizes while both sides look healthy.
+            if self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.state() != SessionState::Running)
+                && self.playing_session_id != Some(agreed.session_id)
+            {
+                tracing::debug!(
+                    epoch = agreed.epoch.get(),
+                    agreed = agreed.session_id.get(),
+                    playing = self.playing_session_id.map(SessionId::get),
+                    "the lobby moved to another match at this epoch; keeping the built one"
+                );
+            }
             return;
         }
         let agreed = agreed.clone();
@@ -320,6 +269,7 @@ impl Game {
         self.descriptor = Some(descriptor);
         self.session = Some(session);
         self.match_number = agreed.epoch.get();
+        self.playing_session_id = Some(agreed.session_id);
         self.decided_since = None;
         self.desynced = false;
         self.steer = None;
@@ -336,9 +286,16 @@ impl Game {
         let Some(lobby) = self.lobby.as_mut() else {
             return;
         };
-        // A failure here is nobody to play against yet, or two players
-        // sharing a nickname so one of them would be unreachable. Either
-        // way the next tick tries again.
+        // Kept, not discarded. `NotEnoughPlayers` is transient and
+        // `ready_for_a_new_match` already ruled it out; the one this can
+        // really return is `DuplicateNickname`, which is *permanent* —
+        // the check is a pure function of a roster that never shrinks, so
+        // retrying it every tick forever changes nothing. Swallowing it
+        // left the screen reading "GET READY" for a match that could
+        // never start, which is the worst possible direction to be wrong
+        // in.
+        // The reason, if there is one, was already recorded by
+        // `pump_lobby`'s `blocker()` call — this only has to stop.
         let Ok(start) = lobby.propose() else {
             return;
         };

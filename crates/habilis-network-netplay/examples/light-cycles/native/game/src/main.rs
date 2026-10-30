@@ -25,13 +25,16 @@ use habilis_network::runtime::{
 
 use habilis_network_netplay::RollbackDriver;
 
-use light_cycles_native::app::{Game, LightCycles, Snapshot};
-use light_cycles_native::grid::{Dir, GRID_H, GRID_W, TICK_MS};
+use light_cycles_native::dir::Dir;
+use light_cycles_native::game::Game;
+use light_cycles_native::grid::{GRID_H, GRID_W, TICK_MS};
+use light_cycles_native::light_cycles::LightCycles;
+use light_cycles_native::snapshot::Snapshot;
 use light_cycles_native::ui;
 
-use visage_rust_tui::reactive::Signal;
 use visage_rust_tui::runtime::{Runtime, render_frame};
-use visage_rust_tui::tui::layout::LayoutState;
+use visage_rust_tui::signal::Signal;
+use visage_rust_tui::tui::layout_state::LayoutState;
 
 use std::fs;
 use tokio::{signal, time};

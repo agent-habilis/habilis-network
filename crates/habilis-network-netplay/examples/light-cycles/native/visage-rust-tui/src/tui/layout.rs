@@ -5,38 +5,22 @@
 //! upstream, no `align-self`, one `flex` number for both grow and shrink,
 //! no reflow beyond what a fresh `layout()` call recomputes.
 
-use crate::tui::node::{Arena, NodeId, Tag, TuiNode};
-use crate::tui::width::{Wrap, string_width, wrap_text};
+use crate::tui::arena::Arena;
+
+use crate::tui::node_id::NodeId;
+
+use crate::tui::tag::Tag;
+
+use crate::tui::tui_node::TuiNode;
+use crate::tui::width::{string_width, wrap_text};
+use crate::tui::wrap::Wrap;
 use crate::view::{Align, Border, Direction, Justify};
 
-/// Bumped once per [`LayoutState::layout`] call. The measure cache is keyed
-/// on `(epoch, avail_w, avail_h)` so a node measured once per frame at a
-/// given available size is never re-measured for it — without this,
-/// `measure` recurses the whole subtree from both a parent's own measure
-/// call and its arrange call: `2^depth` cost. See the port report on
-/// `visage-tui/src/layout/index.ts:60-66`.
-#[derive(Debug, Default)]
-pub struct LayoutState {
-    epoch: i64,
-}
-
-impl LayoutState {
-    #[must_use]
-    pub fn new() -> Self {
-        Self { epoch: 0 }
-    }
-
-    pub fn layout(&mut self, arena: &mut Arena, root: NodeId, width: i32, height: i32) {
-        self.epoch += 1;
-        arrange(arena, self.epoch, root, 0, 0, width, height);
-    }
-}
-
-fn frame_of(node: &TuiNode) -> i32 {
+pub(crate) fn frame_of(node: &TuiNode) -> i32 {
     i32::from(node.border != Border::None)
 }
 
-fn is_text(tag: Tag) -> bool {
+pub(crate) fn is_text(tag: Tag) -> bool {
     matches!(tag, Tag::Text)
 }
 
@@ -44,15 +28,15 @@ fn is_text(tag: Tag) -> bool {
 /// cells; `basis` is unused today but named to match the upstream
 /// signature, so a future percentage feature has exactly one place to
 /// change.
-fn resolve_dim(value: i32, _basis: i32) -> i32 {
+pub(crate) fn resolve_dim(value: i32, _basis: i32) -> i32 {
     if value < 0 { -1 } else { value }
 }
 
-fn text_of(node: &TuiNode) -> String {
+pub(crate) fn text_of(node: &TuiNode) -> String {
     node.text.clone().unwrap_or_default()
 }
 
-fn measure(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h: i32) {
+pub(crate) fn measure(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h: i32) {
     {
         let node = arena.get(id);
         if node.m_epoch == epoch && node.m_avail_w == avail_w && node.m_avail_h == avail_h {
@@ -79,7 +63,7 @@ fn measure(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h: i32
     }
 }
 
-fn measure_text(arena: &mut Arena, id: NodeId, avail_w: i32, avail_h: i32) {
+pub(crate) fn measure_text(arena: &mut Arena, id: NodeId, avail_w: i32, avail_h: i32) {
     let (own_w, own_h, wrap, text) = {
         let node = arena.get(id);
         (
@@ -107,7 +91,7 @@ fn measure_text(arena: &mut Arena, id: NodeId, avail_w: i32, avail_h: i32) {
     node.mh = if own_h >= 0 { own_h } else { line_count };
 }
 
-fn measure_box(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h: i32) {
+pub(crate) fn measure_box(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h: i32) {
     let (own_w, own_h, frame, pad_h, pad_v, direction, gap, children) = {
         let node = arena.get(id);
         let frame = frame_of(node);
@@ -162,7 +146,7 @@ fn measure_box(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h:
     };
 }
 
-fn arrange(
+pub(crate) fn arrange(
     arena: &mut Arena,
     epoch: i64,
     id: NodeId,
@@ -197,7 +181,7 @@ fn arrange(
         if needs_wrap {
             let lines: Vec<String> =
                 wrap_text(&text, usize::try_from(width.max(0)).unwrap_or(0), wrap).collect();
-            arena.get_mut(id).lines = Some(lines);
+            arena.node_mut(id).lines = Some(lines);
         }
         return;
     }
@@ -216,7 +200,7 @@ fn arrange(
     );
 }
 
-fn arrange_children(
+pub(crate) fn arrange_children(
     arena: &mut Arena,
     epoch: i64,
     node_id: NodeId,
@@ -324,9 +308,13 @@ fn arrange_children(
         }
 
         if row {
-            arrange(arena, epoch, kid, position, cross_pos, main_size, cross_size);
+            arrange(
+                arena, epoch, kid, position, cross_pos, main_size, cross_size,
+            );
         } else {
-            arrange(arena, epoch, kid, cross_pos, position, cross_size, main_size);
+            arrange(
+                arena, epoch, kid, cross_pos, position, cross_size, main_size,
+            );
         }
         position += main_size + spacing;
     }
@@ -338,7 +326,7 @@ fn arrange_children(
 /// remainder is then handed out one cell at a time to the *earliest* flex
 /// children — arbitrary, but stable, which is what stops a layout's
 /// flexed columns jittering between frames with the same inputs.
-fn distribute_flex(
+pub(crate) fn distribute_flex(
     arena: &Arena,
     kids: &[NodeId],
     main: &mut [i32],
@@ -376,8 +364,9 @@ fn distribute_flex(
 
 #[cfg(test)]
 mod tests {
-    use super::LayoutState;
-    use crate::tui::node::{Arena, Tag};
+    use crate::tui::arena::Arena;
+    use crate::tui::layout_state::LayoutState;
+    use crate::tui::tag::Tag;
     use crate::view::{Direction, Justify};
 
     use crate::view;

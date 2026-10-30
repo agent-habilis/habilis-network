@@ -3,7 +3,10 @@
 //! interesting work (layout, paint, diff) lives in the sibling modules.
 
 use crate::host::Host;
-use crate::tui::node::{Arena, NodeId, Tag, TuiNode};
+use crate::tui::arena::Arena;
+use crate::tui::node_id::NodeId;
+use crate::tui::tag::Tag;
+use crate::tui::tui_node::TuiNode;
 use crate::view::BoxProps;
 
 #[derive(Debug)]
@@ -32,7 +35,7 @@ impl Default for TuiHost {
     }
 }
 
-fn apply_box_props(node: &mut TuiNode, props: &BoxProps) {
+pub(crate) fn apply_box_props(node: &mut TuiNode, props: &BoxProps) {
     node.direction = props.direction;
     node.width = props.width.map_or(-1, i32::from);
     node.height = props.height.map_or(-1, i32::from);

@@ -32,7 +32,11 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use crate::reactive::{self, SignalId, SubscriberId};
+use crate::reactive;
+
+use crate::signal_id::SignalId;
+
+use crate::subscriber_id::SubscriberId;
 use crate::view::View;
 
 use std::{fmt, mem};
@@ -187,7 +191,7 @@ impl fmt::Debug for Instance {
 #[cfg(test)]
 mod tests {
     use super::{Component, Instance, Step};
-    use crate::reactive::Signal;
+    use crate::signal::Signal;
     use crate::view::View;
 
     use std::{cell, rc};

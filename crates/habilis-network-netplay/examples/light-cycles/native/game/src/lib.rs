@@ -7,8 +7,19 @@
 
 #![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
 
-pub mod app;
+pub mod cycle;
+pub mod dir;
+pub mod game;
 pub mod grid;
+pub mod input;
+pub mod light_cycles;
+pub mod outcome;
 pub mod round;
+pub mod round_descriptor;
 pub mod sim;
+pub mod snapshot;
+pub mod spawn;
+pub mod split_mix64;
 pub mod ui;
+pub mod ui_component;
+pub mod world;

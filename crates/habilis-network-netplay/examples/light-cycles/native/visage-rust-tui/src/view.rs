@@ -166,8 +166,11 @@ impl View {
     /// into an already-mounted child flows through a shared [`Signal`]
     /// captured by both sides, the same as any other reactive read.
     ///
-    /// [`Signal`]: crate::reactive::Signal
-    pub fn component<Props: 'static>(component_fn: fn(Props) -> ComponentBox, props: Props) -> Self {
+    /// [`Signal`]: crate::signal::Signal
+    pub fn component<Props: 'static>(
+        component_fn: fn(Props) -> ComponentBox,
+        props: Props,
+    ) -> Self {
         View::Component(ComponentView {
             type_key: component_fn as usize,
             build: Box::new(move || component_fn(props)),

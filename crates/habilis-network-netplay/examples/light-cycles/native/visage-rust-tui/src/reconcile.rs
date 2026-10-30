@@ -19,70 +19,18 @@
 //! A reordered list therefore remounts rather than moves — correct, not
 //! optimal, fine for a grid + HUD whose structure is mostly static.
 
+use crate::component::{Component, Instance};
+use crate::component_mount::ComponentMount;
+use crate::host::Host;
+use crate::mounted::Mounted;
+use crate::subscriber_id::SubscriberId;
+use crate::view::{ComponentView, View};
 use std::collections::HashSet;
 use std::hash::BuildHasher;
-use std::rc::Rc;
-
-use crate::component::{Component, Instance};
-use crate::host::Host;
-use crate::reactive::SubscriberId;
-use crate::view::{BoxProps, ComponentView, View};
-
-use std::fmt;
-/// One mounted component: its own running [`Instance`], and the subtree
-/// its own last render produced. Components introduce no host node of
-/// their own — `child` is what actually occupies this position in the
-/// tree, exactly as `visage-dom`'s `comp` fiber is transparent and
-/// `domOf` walks straight through to its child.
-pub struct ComponentMount<Handle> {
-    id: SubscriberId,
-    type_key: usize,
-    instance: Instance,
-    child: Box<Mounted<Handle>>,
-}
-
-// Hand-written rather than derived: deriving would require `Handle: Debug`, a
-// bound this type otherwise has no reason to carry (a `Host::Node` like
-// `NodeId` happens to implement it, but nothing here should depend on
-// that).
-impl<Handle> fmt::Debug for ComponentMount<Handle> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ComponentMount")
-            .field("id", &self.id)
-            .finish_non_exhaustive()
-    }
-}
-
-/// The host-tree shadow of a [`View`], remembered so the next render knows
-/// what shape (and, for `Component`, *which* instance) produced each
-/// node — the minimum a non-keyed reconciler needs to decide "patch in
-/// place" vs "replace".
-pub enum Mounted<Handle> {
-    Text(Handle, Rc<str>),
-    Box(Handle, BoxProps, Vec<Mounted<Handle>>),
-    Hole(Handle),
-    Component(ComponentMount<Handle>),
-}
-
-// Hand-written for the same reason as `ComponentMount`'s: no need to
-// require `Handle: Debug` just for a trace.
-impl<Handle> fmt::Debug for Mounted<Handle> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Mounted::Text(_, text) => f.debug_tuple("Text").field(text).finish(),
-            Mounted::Box(_, props, children) => {
-                let count = children.len();
-                f.debug_tuple("Box").field(props).field(&count).finish()
-            }
-            Mounted::Hole(_) => write!(f, "Hole"),
-            Mounted::Component(c) => f.debug_tuple("Component").field(c).finish(),
-        }
-    }
-}
 
 /// The host node a `Mounted` subtree actually starts at — for `Component`,
 /// its child's, recursively, since a component is transparent.
-fn node_of<Handle: Copy>(mounted: &Mounted<Handle>) -> Handle {
+pub(crate) fn node_of<Handle: Copy>(mounted: &Mounted<Handle>) -> Handle {
     match mounted {
         Mounted::Text(n, _) | Mounted::Box(n, _, _) | Mounted::Hole(n) => *n,
         Mounted::Component(c) => node_of(&c.child),
@@ -122,7 +70,7 @@ pub fn mount<Backend: Host>(
 
 /// Constructs and mounts a nested component from an owned [`ComponentView`]
 /// — the one path that actually calls its builder.
-fn mount_component<Backend: Host>(
+pub(crate) fn mount_component<Backend: Host>(
     host: &mut Backend,
     parent: Backend::Node,
     before: Option<Backend::Node>,
@@ -230,7 +178,7 @@ pub fn patch<Backend: Host>(
     }
 }
 
-fn patch_children<Backend: Host>(
+pub(crate) fn patch_children<Backend: Host>(
     host: &mut Backend,
     parent: Backend::Node,
     old_children: Vec<Mounted<Backend::Node>>,
@@ -304,7 +252,7 @@ pub fn patch_dirty<Backend: Host, S: BuildHasher>(
 #[cfg(test)]
 mod tests {
     use super::{Mounted, mount, patch};
-    use crate::tui::host_impl::TuiHost;
+    use crate::tui::tui_host::TuiHost;
     use crate::view::{BoxProps, View};
 
     #[test]
@@ -383,7 +331,11 @@ mod tests {
         let root = host.create_root();
         let view = View::boxed(
             BoxProps::default(),
-            vec![View::text("a".into()), View::text("b".into()), View::text("c".into())],
+            vec![
+                View::text("a".into()),
+                View::text("b".into()),
+                View::text("c".into()),
+            ],
         );
         let mounted = mount(&mut host, root, None, view);
 
@@ -408,7 +360,10 @@ mod tests {
         let view = View::boxed(BoxProps::default(), vec![View::text("a".into())]);
         let mounted = mount(&mut host, root, None, view);
 
-        let view2 = View::boxed(BoxProps::default(), vec![View::text("a".into()), View::text("b".into())]);
+        let view2 = View::boxed(
+            BoxProps::default(),
+            vec![View::text("a".into()), View::text("b".into())],
+        );
         let mounted = patch(&mut host, root, mounted, view2);
 
         let Mounted::Box(box_node, _, _) = &mounted else {

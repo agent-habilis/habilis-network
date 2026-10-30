@@ -6,7 +6,7 @@
 //!
 //! ```ignore
 //! use visage_rust_tui::component::{Component, Instance, Step};
-//! use visage_rust_tui::reactive::Signal;
+//! use visage_rust_tui::signal::Signal;
 //! use visage_rust_tui::view::View;
 //!
 //! struct Count(Signal<i32>);
@@ -35,15 +35,22 @@
 #![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
 
 pub mod component;
+pub mod component_mount;
 pub mod host;
+pub mod mounted;
 pub mod reactive;
 pub mod reconcile;
+pub mod registry;
 pub mod runtime;
+pub mod signal;
+pub mod signal_id;
+pub mod signal_inner;
+pub mod subscriber_id;
 pub mod tui;
 pub mod view;
 
 pub use component::{Component, Instance, Step};
 pub use host::Host;
-pub use reactive::Signal;
 pub use runtime::Runtime;
+pub use signal::Signal;
 pub use view::View;

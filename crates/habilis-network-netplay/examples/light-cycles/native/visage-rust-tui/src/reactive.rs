@@ -12,47 +12,26 @@
 //! loop (see the crate's `visage-tui/src/index.ts` frame-loop note: "drain
 //! the reactive queue, then if anything committed, repaint once").
 
+use crate::registry::Registry;
+use crate::signal_id::SignalId;
+use crate::subscriber_id::SubscriberId;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::hash::BuildHasher;
-use std::rc::Rc;
-
-use std::{fmt, mem};
-/// Identifies a [`Signal`] for dependency bookkeeping. Newtype-over-`u32`
-/// rather than an `Rc`-based identity: `Instance -> deps -> Signal -> subs ->
-/// Instance` is a reference cycle the original relies on JS's GC to collect.
-/// An arena of ids has no cycle to leak.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct SignalId(u32);
-
-/// Identifies a [`Subscriber`] — a component instance, in the real port.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct SubscriberId(u32);
-
-struct Registry {
-    /// Every signal's current subscriber set, by id.
-    subs: RefCell<Vec<HashSet<SubscriberId>>>,
-    /// The tracking window open during a render, if any — `Some` records
-    /// every signal read into it; `None` means untracked (setup code, or a
-    /// read from outside any render at all).
-    current_deps: RefCell<Option<HashSet<SignalId>>>,
-    /// Subscribers waiting for [`flush`], deduplicated by id.
-    queue: RefCell<Vec<SubscriberId>>,
-    queue_set: RefCell<HashSet<SubscriberId>>,
-}
+use std::mem;
 
 thread_local! {
-    static REGISTRY: Registry = Registry {
+    pub(crate) static REGISTRY: Registry = Registry {
         subs: RefCell::new(Vec::new()),
         current_deps: RefCell::new(None),
         queue: RefCell::new(Vec::new()),
         queue_set: RefCell::new(HashSet::new()),
     };
-    static NEXT_SIGNAL_ID: Cell<u32> = const { Cell::new(0) };
-    static NEXT_SUBSCRIBER_ID: Cell<u32> = const { Cell::new(0) };
+    pub(crate) static NEXT_SIGNAL_ID: Cell<u32> = const { Cell::new(0) };
+    pub(crate) static NEXT_SUBSCRIBER_ID: Cell<u32> = const { Cell::new(0) };
 }
 
-fn next_signal_id() -> SignalId {
+pub(crate) fn next_signal_id() -> SignalId {
     NEXT_SIGNAL_ID.with(|next| {
         let id = next.get();
         next.set(id + 1);
@@ -111,114 +90,12 @@ pub fn clear_current_tracking() {
     });
 }
 
-fn record(id: SignalId) {
+pub(crate) fn record(id: SignalId) {
     REGISTRY.with(|r| {
         if let Some(deps) = r.current_deps.borrow_mut().as_mut() {
             deps.insert(id);
         }
     });
-}
-
-struct SignalInner<T> {
-    id: SignalId,
-    value: RefCell<T>,
-}
-
-/// A reactive cell. Reading [`Signal::get`] inside an open tracking window
-/// subscribes that window's owner to this signal; [`Signal::set`] notifies
-/// every current subscriber, unless the new value equals the old one.
-///
-/// `Rc`-backed and cheap to [`Clone`] — cloning shares the same underlying
-/// cell and id (as a JS closure capturing a signal shares the same object),
-/// it does not create an independent signal. This is load-bearing: a
-/// component's setup code typically clones a signal into the closure it
-/// yields, and both that clone and the original must observe the same
-/// writes.
-pub struct Signal<T>(Rc<SignalInner<T>>);
-
-// Hand-written rather than derived: deriving would require `T: Debug` *and*
-// print the value, which needs a borrow this type otherwise never exposes
-// by reference (`get`/`peek` both return owned clones). Printing the id is
-// enough to distinguish signals in a debug trace.
-impl<T> fmt::Debug for Signal<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Signal")
-            .field("id", &self.0.id)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<T> Clone for Signal<T> {
-    fn clone(&self) -> Self {
-        Signal(Rc::clone(&self.0))
-    }
-}
-
-impl<T: PartialEq + Clone> Signal<T> {
-    #[must_use]
-    pub fn new(initial: T) -> Self {
-        let id = next_signal_id();
-        REGISTRY.with(|r| {
-            let mut subs = r.subs.borrow_mut();
-            let index = id.0 as usize;
-            if subs.len() <= index {
-                subs.resize_with(index + 1, HashSet::new);
-            }
-        });
-        Self(Rc::new(SignalInner {
-            id,
-            value: RefCell::new(initial),
-        }))
-    }
-
-    /// Reads the value, recording a dependency if a tracking window is open.
-    #[must_use]
-    pub fn get(&self) -> T {
-        record(self.0.id);
-        self.0.value.borrow().clone()
-    }
-
-    /// Reads the value without recording a dependency — the escape hatch
-    /// for an event handler or a one-off check that must not subscribe.
-    #[must_use]
-    pub fn peek(&self) -> T {
-        self.0.value.borrow().clone()
-    }
-
-    /// Writes a new value. A no-op, dependency-wise, if it equals the
-    /// current one — matches the original's `Object.is` bail, which is what
-    /// stops a `set` to the same value from ever scheduling a render.
-    pub fn set(&self, next: T) {
-        let changed = {
-            let mut value = self.0.value.borrow_mut();
-            if *value == next {
-                false
-            } else {
-                *value = next;
-                true
-            }
-        };
-        if changed {
-            self.notify();
-        }
-    }
-
-    pub fn update(&self, f: impl FnOnce(&T) -> T) {
-        let next = f(&self.0.value.borrow());
-        self.set(next);
-    }
-
-    fn notify(&self) {
-        let subscribers: Vec<SubscriberId> = REGISTRY.with(|r| {
-            let subs = r.subs.borrow();
-            let found = subs.get(self.0.id.0 as usize);
-            let members: Option<Vec<SubscriberId>> = found.map(|set| set.iter().copied().collect());
-            members.unwrap_or_default()
-        });
-        for sub in subscribers {
-            schedule_update(sub);
-        }
-    }
 }
 
 /// Queues `sub` for the next [`take_queue`]. Idempotent within a queue:
@@ -291,9 +168,9 @@ pub fn unsubscribe_all<S: BuildHasher>(sub: SubscriberId, deps: &HashSet<SignalI
 #[cfg(test)]
 mod tests {
     use super::{
-        Signal, close_tracking, next_subscriber_id, open_tracking, resubscribe, schedule_update,
-        take_queue,
+        close_tracking, next_subscriber_id, open_tracking, resubscribe, schedule_update, take_queue,
     };
+    use crate::signal::Signal;
     use std::collections::HashSet;
 
     #[test]

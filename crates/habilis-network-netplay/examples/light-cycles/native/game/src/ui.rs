@@ -17,17 +17,16 @@
 //! configured for that name in their own terminal theme, rather than
 //! forcing a specific RGB value that might clash with it.
 
-use visage_rust_tui::component::{Component, Step};
-use visage_rust_tui::reactive::Signal;
+use crate::grid::{GRID_H, GRID_W};
+use crate::outcome::Outcome;
+use crate::sim;
+use crate::snapshot::Snapshot;
+use crate::ui_component::UiComponent;
+use std::mem;
+use visage_rust_tui::signal::Signal;
 use visage_rust_tui::tui::color::palette;
 use visage_rust_tui::view::{Align, Border, BoxProps, Direction, Justify, Padding, View};
 
-use crate::app::Snapshot;
-use crate::grid::{GRID_H, GRID_W};
-use crate::sim::Outcome;
-
-use crate::sim;
-use std::{fmt, mem};
 /// Named ANSI colors usable as a player color, in assignment order.
 /// `0` (black) and the near-background/foreground indices are skipped —
 /// indistinguishable from "empty" or the terminal's own default text on
@@ -49,8 +48,10 @@ const GRID_STEP: u8 = 8;
 
 /// A claimed cell. Full block, so trails read as solid light.
 const TRAIL: char = '█';
+
 /// An empty cell on a ruled intersection.
 const RULE: char = '·';
+
 const EMPTY: char = ' ';
 
 fn color_for(roster_index: usize) -> i32 {
@@ -74,27 +75,7 @@ pub fn app(snapshot: Signal<Snapshot>) -> UiComponent {
     UiComponent { snapshot }
 }
 
-/// The root component's state: the snapshot it reads on every step.
-pub struct UiComponent {
-    snapshot: Signal<Snapshot>,
-}
-
-impl Component for UiComponent {
-    fn step(&mut self) -> Option<Step> {
-        let current = self.snapshot.get();
-        Some(Step::View(render(&current)))
-    }
-}
-
-impl fmt::Debug for UiComponent {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("UiComponent")
-            .finish_non_exhaustive()
-    }
-}
-
-fn render(s: &Snapshot) -> View {
+pub(crate) fn render(s: &Snapshot) -> View {
     View::boxed(
         BoxProps {
             direction: Direction::Column,

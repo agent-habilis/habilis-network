@@ -1,15 +1,15 @@
 //! Ties [`reactive`], [`component`], [`reconcile`], and a [`Host`]
 //! together into a running app. The root is mounted the same way any
 //! nested [`crate::view::View::component`] is — a
-//! [`reconcile::ComponentMount`] — so [`Runtime::tick`]'s dirty-set walk
+//! [`component_mount::ComponentMount`] — so [`Runtime::tick`]'s dirty-set walk
 //! treats the whole tree uniformly: whichever instance's own signal
 //! changed is the one that re-renders, root or nested, ancestor or leaf.
 
 use crate::component::Component;
 use crate::host::Host;
-use crate::reactive::{self, SubscriberId};
-use crate::reconcile::{self, Mounted};
-use crate::tui;
+use crate::mounted::Mounted;
+use crate::subscriber_id::SubscriberId;
+use crate::{reactive, reconcile, tui};
 use std::collections::HashSet;
 
 use std::{fmt, mem};
@@ -30,7 +30,11 @@ impl<Backend: Host> fmt::Debug for Runtime<Backend> {
 
 impl<Backend: Host> Runtime<Backend> {
     /// Mounts `component` as the root component and does the first render.
-    pub fn new(mut host: Backend, root: Backend::Node, component: impl Component + 'static) -> Self {
+    pub fn new(
+        mut host: Backend,
+        root: Backend::Node,
+        component: impl Component + 'static,
+    ) -> Self {
         let mounted = reconcile::mount_root(&mut host, root, component);
         Self {
             host,
@@ -70,12 +74,12 @@ impl<Backend: Host> Runtime<Backend> {
     }
 }
 
-impl Runtime<tui::host_impl::TuiHost> {
+impl Runtime<tui::tui_host::TuiHost> {
     /// Convenience for the terminal backend: builds a `TuiHost`, creates
     /// its root node, and mounts `component` — the one-liner a real terminal
     /// app calls.
     pub fn terminal(component: impl Component + 'static) -> Self {
-        let mut host = tui::host_impl::TuiHost::new();
+        let mut host = tui::tui_host::TuiHost::new();
         let root = host.create_root();
         Self::new(host, root, component)
     }
@@ -89,15 +93,15 @@ impl Runtime<tui::host_impl::TuiHost> {
 /// — a method taking `&mut self` throughout would over-borrow for no
 /// reason paint actually needs.
 pub fn render_frame(
-    runtime: &mut Runtime<tui::host_impl::TuiHost>,
-    layout_state: &mut tui::layout::LayoutState,
-    previous: Option<&tui::paint::ScreenBuffer>,
+    runtime: &mut Runtime<tui::tui_host::TuiHost>,
+    layout_state: &mut tui::layout_state::LayoutState,
+    previous: Option<&tui::screen_buffer::ScreenBuffer>,
     width: i32,
     height: i32,
-) -> (String, tui::paint::ScreenBuffer) {
+) -> (String, tui::screen_buffer::ScreenBuffer) {
     let root = runtime.root;
     layout_state.layout(&mut runtime.host_mut().arena, root, width, height);
-    let mut buffer = tui::paint::ScreenBuffer::new(width, height);
+    let mut buffer = tui::screen_buffer::ScreenBuffer::new(width, height);
     tui::paint::paint(&mut buffer, &runtime.host().arena, root);
     let bytes = tui::diff::diff(previous, &buffer);
     (bytes, buffer)
@@ -106,13 +110,13 @@ pub fn render_frame(
 #[cfg(test)]
 mod tests {
     use crate::component::{Component, Step};
-    use crate::reactive::Signal;
     use crate::runtime::Runtime;
-    use crate::tui::layout::LayoutState;
+    use crate::signal::Signal;
+    use crate::tui::layout_state::LayoutState;
     use crate::view::{BoxProps, View};
 
     use crate::component;
-    use crate::tui::paint;
+    use crate::tui::screen_buffer;
     use std::{cell, rc};
     struct Counter(Signal<i32>);
 
@@ -248,7 +252,7 @@ mod tests {
         Box::new(Child(count))
     }
 
-    fn row_text(buffer: &paint::ScreenBuffer) -> String {
+    fn row_text(buffer: &screen_buffer::ScreenBuffer) -> String {
         buffer
             .chars
             .iter()

@@ -13,7 +13,7 @@
 //! escape sequence, not one per cell.
 
 use crate::tui::color::{DEFAULT_COLOR, push_attrs, push_bg, push_fg};
-use crate::tui::paint::ScreenBuffer;
+use crate::tui::screen_buffer::ScreenBuffer;
 
 const ESC: &str = "\u{1b}[";
 const CLEAR_LINE: &str = "\u{1b}[0K";
@@ -65,7 +65,12 @@ pub fn diff(previous: Option<&ScreenBuffer>, next: &ScreenBuffer) -> String {
         let mut left = 0i32;
         let mut right = width - 1;
         while left <= right
-            && unchanged(previous, next, base + usize::try_from(left).unwrap_or(0), full)
+            && unchanged(
+                previous,
+                next,
+                base + usize::try_from(left).unwrap_or(0),
+                full,
+            )
         {
             left += 1;
         }
@@ -73,7 +78,12 @@ pub fn diff(previous: Option<&ScreenBuffer>, next: &ScreenBuffer) -> String {
             continue; // whole row unchanged: emit nothing
         }
         while right > left
-            && unchanged(previous, next, base + usize::try_from(right).unwrap_or(0), full)
+            && unchanged(
+                previous,
+                next,
+                base + usize::try_from(right).unwrap_or(0),
+                full,
+            )
         {
             right -= 1;
         }
@@ -188,7 +198,7 @@ fn style(out: &mut String, pen: &mut Pen, fg: i32, bg: i32, attrs: u8) {
 mod tests {
     use super::{CLEAR_LINE, RESET, diff};
     use crate::tui::color;
-    use crate::tui::paint::ScreenBuffer;
+    use crate::tui::screen_buffer::ScreenBuffer;
 
     fn set(buffer: &mut ScreenBuffer, x: i32, y: i32, s: &str) {
         let i =

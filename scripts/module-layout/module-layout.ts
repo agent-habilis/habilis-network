@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 const SCOPE = /\.rs$/;
-const SKIP = /\/(tests|benches|examples)\/|\/build\.rs$/;
+const SKIP = /\/build\.rs$/;
 const ROOT_FILE = /(^|\/)(mod|lib|main)\.rs$/;
 const CHILD_MOD = /^\s*(pub(\([a-z]+\))? )?mod \w+;/m;
 const PUB_TYPE = /^pub(?:\([a-z]+\))? (?:struct|enum|trait|union|type) (\w+)/gm;

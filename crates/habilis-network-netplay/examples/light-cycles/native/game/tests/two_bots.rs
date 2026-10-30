@@ -18,9 +18,12 @@ use habilis_network::runtime::{
 };
 use habilis_network_netplay::RollbackDriver;
 
-use light_cycles_native::app::{Game, LightCycles};
-use light_cycles_native::grid::{Dir, TICK_MS};
-use light_cycles_native::sim::{Outcome, World};
+use light_cycles_native::dir::Dir;
+use light_cycles_native::game::Game;
+use light_cycles_native::grid::TICK_MS;
+use light_cycles_native::light_cycles::LightCycles;
+use light_cycles_native::outcome::Outcome;
+use light_cycles_native::world::World;
 
 use std::{process, thread};
 use tokio::time::{self, Instant};
