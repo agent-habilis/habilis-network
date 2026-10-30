@@ -29,6 +29,10 @@ pub(crate) use lane_node::LaneNode;
 pub(crate) use log_capture::LogCapture;
 /// The key of the test author `name`: its bytes, zero-padded to 32. Two names keep the order
 /// that their bytes have, and a test reads the name back in a failure message.
+///
+/// # Panics
+///
+/// Panics when `name` is longer than 32 bytes.
 pub(crate) fn author_of(name: &str) -> AuthorKey {
     let mut bytes = [0u8; 32];
     bytes[..name.len()].copy_from_slice(name.as_bytes());
