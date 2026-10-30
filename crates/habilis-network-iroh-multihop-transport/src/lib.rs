@@ -404,10 +404,7 @@ impl MultihopHandle {
     ///
     /// # Panics
     /// If the routing-table lock is poisoned by a panic in another thread.
-    #[expect(
-        clippy::must_use_candidate,
-        reason = "the returned 'changed' flag is advisory; ignoring it is valid"
-    )]
+    #[must_use]
     pub fn feed_topology(&self, vector: LinkVector) -> bool {
         self.inner
             .topology
@@ -480,10 +477,7 @@ impl MultihopHandle {
     ///
     /// # Panics
     /// If the routing-table lock is poisoned by a panic in another thread.
-    #[expect(
-        clippy::must_use_candidate,
-        reason = "the returned 'removed' flag is advisory; ignoring it is valid"
-    )]
+    #[must_use]
     pub fn remove_origin(&self, origin: AppId) -> bool {
         self.inner
             .topology
@@ -632,10 +626,7 @@ impl MultihopHandle {
     ///
     /// # Panics
     /// If the routing-table lock is poisoned by a panic in another thread.
-    #[expect(
-        clippy::must_use_candidate,
-        reason = "the returned count is advisory; ignoring it is valid"
-    )]
+    #[must_use]
     pub fn expire_stale(&self) -> usize {
         self.inner
             .topology
@@ -1018,7 +1009,7 @@ mod tests {
         let [short, long_a, long_b, dst] = nodes.each_ref().map(|node| AppId::new(node.public()));
         let advertise = |node: &SecretKey, links: Vec<(AppId, u32)>| {
             let underlay = iroh::EndpointAddr::new(underlay_secret(node).public());
-            handle.feed_topology(crate::LinkVector::signed(
+            let _ = handle.feed_topology(crate::LinkVector::signed(
                 node,
                 topology::wall_clock_ms(),
                 underlay,
@@ -1095,7 +1086,7 @@ mod tests {
                 SecretKey::from_bytes(&[73; 32]),
             );
             let advertise = |node: &SecretKey, links: Vec<(AppId, u32)>| {
-                handle.feed_topology(crate::LinkVector::signed(
+                let _ = handle.feed_topology(crate::LinkVector::signed(
                     node,
                     topology::wall_clock_ms(),
                     iroh::EndpointAddr::new(underlay_secret(node).public()),
@@ -1142,7 +1133,7 @@ mod tests {
         let [a1, a2, tab, dst] = nodes.each_ref().map(|node| AppId::new(node.public()));
         let advertise = |node: &SecretKey, links: Vec<(AppId, u32)>| {
             let underlay = iroh::EndpointAddr::new(underlay_secret(node).public());
-            handle.feed_topology(crate::LinkVector::signed(
+            let _ = handle.feed_topology(crate::LinkVector::signed(
                 node,
                 topology::wall_clock_ms(),
                 underlay,
@@ -1299,7 +1290,7 @@ mod tests {
                     (carol, vec![(app(alice), 1), (app(bob), 1)]),
                     (bob, vec![(app(carol), 1)]),
                 ] {
-                    handle.feed_topology(crate::LinkVector::signed(
+                    let _ = handle.feed_topology(crate::LinkVector::signed(
                         node,
                         topology::wall_clock_ms(),
                         with_relay(node),
@@ -1441,8 +1432,8 @@ mod tests {
 
             // Each end holds the vector of the other: a route names a hop by ids, and the
             // forwarder dials the address that the hop signed.
-            first.feed_topology(second.link_vector(Vec::new()));
-            second.feed_topology(first.link_vector(Vec::new()));
+            let _ = first.feed_topology(second.link_vector(Vec::new()));
+            let _ = second.feed_topology(first.link_vector(Vec::new()));
 
             // Traffic each way: the gate refuses it, since only the relay is open.
             let hop = |handle: &MultihopHandle, id| RouteHop {

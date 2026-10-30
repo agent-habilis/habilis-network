@@ -150,7 +150,7 @@ fn gossip_all(nodes: &[(&MultihopHandle, Vec<(EndpointId, u32)>)]) {
         .collect();
     for (handle, _) in nodes {
         for vector in &vectors {
-            handle.feed_topology(vector.clone());
+            let _ = handle.feed_topology(vector.clone());
         }
     }
 }

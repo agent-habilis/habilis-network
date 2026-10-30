@@ -128,10 +128,10 @@ async fn direct(args: &Args, open: &mut Open) -> Result<Measured, String> {
     let run = async {
         let alice = node(open, secret(1)).await?;
         let bob = node(open, secret(2)).await?;
-        alice
+        let _ = alice
             .handle
             .feed_topology(alice.handle.link_vector(vec![(AppId::new(bob.id), COST)]));
-        alice
+        let _ = alice
             .handle
             .feed_topology(bob.handle.link_vector(vec![(AppId::new(alice.id), COST)]));
         open.routers.push(
@@ -170,7 +170,7 @@ async fn third(args: &Args, open: &mut Open) -> Result<Measured, String> {
         ];
         for handle in [&alice.handle, &third, &bob.handle] {
             for vector in &vectors {
-                handle.feed_topology(vector.clone());
+                let _ = handle.feed_topology(vector.clone());
             }
         }
         open.routers.push(

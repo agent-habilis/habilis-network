@@ -56,7 +56,7 @@ pub(crate) async fn handle_presence(
             // that said goodbye until its vector ages out.
             #[cfg(feature = "multihop")]
             if let Some(handle) = state.multihop.as_ref() {
-                handle.remove_origin(habilis_network_iroh_multihop_transport::AppId::new(
+                let _ = handle.remove_origin(habilis_network_iroh_multihop_transport::AppId::new(
                     endpoint_id.id,
                 ));
             }

@@ -576,7 +576,7 @@ async fn advertise_links(
     // stopped advertising must not keep its edges in the graph, and a node that is
     // not meshed yet keeps hearing vectors it will route over once it is.
     if let Some(handle) = state.multihop.as_ref() {
-        handle.expire_stale();
+        let _ = handle.expire_stale();
     }
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     {
