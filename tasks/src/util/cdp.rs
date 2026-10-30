@@ -252,12 +252,9 @@ fn time_of_day(params: &serde_json::Value) -> String {
         .or_else(|| params.pointer("/entry/timestamp"))
         .and_then(serde_json::Value::as_f64)
         .unwrap_or_default();
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "an epoch-millisecond stamp is positive and far inside u64"
-    )]
-    let millis = millis as u64;
+    let millis = Duration::try_from_secs_f64(millis / 1000.0).map_or(0, |span| {
+        u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
+    });
     let seconds = millis / 1000 % 86_400;
     format!(
         "{:02}:{:02}:{:02}.{:03}Z",
