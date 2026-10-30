@@ -183,7 +183,7 @@ fn a_mesh_of_ten_links_every_member_to_every_other() {
         assert!(
             result.is_ok(),
             "every member must hold 9 links; (roster, linked) per member: {:?}",
-            result.unwrap_err()
+            result.expect_err("the message prints only when is_ok failed")
         );
 
         for member in members {
@@ -207,7 +207,7 @@ fn a_mesh_of_g_plus_one_links_every_member_to_every_other_the_beacon_holder_too(
             result.is_ok(),
             "every member must hold {VIEW_CAP} links, the holder of the beacon too; \
              (roster, linked) per member: {:?}",
-            result.unwrap_err()
+            result.expect_err("the message prints only when is_ok failed")
         );
 
         for member in members {
