@@ -14,7 +14,7 @@ use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
 /// A joined tab.
 #[wasm_bindgen]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ChatPeer {
     /// Typed lines, drained by a writer task. A channel rather than a
     /// `RefCell<SendStream>` because writing is async and `say` is not: a
