@@ -303,8 +303,12 @@ mod tests {
                 !watch_quits(owner, Duration::from_millis(300)).await,
                 "an owner watch stays while the owner lives"
             );
-            child.kill().unwrap();
-            child.wait().unwrap();
+            child
+                .kill()
+                .expect("the spawned owner process can be killed");
+            child
+                .wait()
+                .expect("the killed owner process can be reaped");
         });
     }
 
@@ -313,8 +317,12 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let mut child = spawn_owner();
             let owner = Owner::try_new(child.id()).expect("live owner accepted");
-            child.kill().unwrap();
-            child.wait().unwrap();
+            child
+                .kill()
+                .expect("the spawned owner process can be killed");
+            child
+                .wait()
+                .expect("the killed owner process can be reaped");
             assert!(
                 watch_quits(owner, Duration::from_secs(2)).await,
                 "an owner watch quits when the owner exits"
@@ -327,12 +335,16 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let mut child = spawn_owner();
             let owner = Owner::try_new(child.id()).expect("live owner accepted");
-            child.kill().unwrap();
+            child
+                .kill()
+                .expect("the spawned owner process can be killed");
             assert!(
                 watch_quits(owner, Duration::from_secs(2)).await,
                 "an owner watch quits for an unreaped zombie owner"
             );
-            child.wait().unwrap();
+            child
+                .wait()
+                .expect("the killed owner process can be reaped");
         });
     }
 
@@ -351,8 +363,12 @@ mod tests {
                 watch_quits(reissued, Duration::from_secs(2)).await,
                 "an owner watch quits when the pid is reissued"
             );
-            child.kill().unwrap();
-            child.wait().unwrap();
+            child
+                .kill()
+                .expect("the spawned owner process can be killed");
+            child
+                .wait()
+                .expect("the killed owner process can be reaped");
         });
     }
 
@@ -371,7 +387,9 @@ mod tests {
                 .to_string();
             assert!(!error.contains('\n'), "one error line: {error}");
         }
-        child.kill().unwrap();
+        child
+            .kill()
+            .expect("the spawned owner process can be killed");
         // SIGKILL lands asynchronously, so poll until the unreaped child is a
         // zombie; it stays one until the `wait` below.
         let deadline = std_Instant::now() + Duration::from_secs(2);
@@ -379,7 +397,9 @@ mod tests {
             assert!(Instant::now() < deadline, "a zombie is refused");
             thread::sleep(TICK);
         }
-        child.wait().unwrap();
+        child
+            .wait()
+            .expect("the killed owner process can be reaped");
         assert!(validate_owner_pid(pid).is_err(), "a dead pid is refused");
     }
 
@@ -393,8 +413,12 @@ mod tests {
         assert!(!init.contains("agent"), "engine vocabulary only: {init}");
         let mut child = spawn_owner();
         let pid = child.id();
-        child.kill().unwrap();
-        child.wait().unwrap();
+        child
+            .kill()
+            .expect("the spawned owner process can be killed");
+        child
+            .wait()
+            .expect("the killed owner process can be reaped");
         assert!(
             Owner::try_new(pid).is_err(),
             "a dead pid is refused as an owner"
