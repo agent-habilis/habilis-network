@@ -149,7 +149,7 @@ async fn run_checked<Driver: NodeDriver>(
     let external_req_rx = session_rx;
     let started = Instant::now();
     let leave_label = leave_label(&mesh);
-    let mut state = new_state(
+    let mut state = initial_state(
         &mut mesh,
         &transports,
         runtime.per_peer_gate.take(),
@@ -239,7 +239,7 @@ async fn run_checked<Driver: NodeDriver>(
     if ipc_listener_disabled || ipc_rx.is_some() {
         announce_ready(
             &mut state,
-            &runtime.sink,
+            runtime.sink.as_ref(),
             &mesh.mesh,
             &mesh.name,
             &mesh.author,
@@ -324,7 +324,7 @@ fn host_state_file<Driver: NodeDriver>(
     runtime: &RuntimeConfig,
     exit_on_quit: bool,
 ) -> Option<StateFile> {
-    let state_file = runtime
+    let state_file: Option<StateFile> = runtime
         .state_file
         .clone()
         .or_else(|| {
@@ -365,7 +365,7 @@ type StateFileSeed = Option<path::PathBuf>;
 
 /// The event loop's state, with the mesh's identity and secrets moved in. The state file goes
 /// with it, so the first write the loop makes lands in the right place.
-fn new_state(
+fn initial_state(
     mesh: &mut MeshSpec,
     transports: &TransportSet,
     per_peer_gate: Option<SelfWriteGate>,
@@ -374,7 +374,7 @@ fn new_state(
 ) -> EventLoopState {
     #[cfg(not(feature = "host"))]
     drop(state_file);
-    let mut state = EventLoopState::new(
+    let mut state: EventLoopState = EventLoopState::new(
         state::StateInit {
             #[cfg(feature = "host")]
             state_file,
@@ -553,7 +553,7 @@ fn join_gossip(
 /// IPC socket.
 fn announce_ready(
     state: &mut EventLoopState,
-    sink: &Arc<dyn NodeSink>,
+    sink: &dyn NodeSink,
     mesh: &MeshId,
     name: &MeshName,
     author: &Nickname,

@@ -718,6 +718,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             topic_string,
             mint_mesh,
             author,
+            // The mesh spec and the loop state both hold the signing identity, so it is shared.
             identity: sync::Arc::new(identity::Identity::generate()),
             mesh_password,
             mesh_key,
