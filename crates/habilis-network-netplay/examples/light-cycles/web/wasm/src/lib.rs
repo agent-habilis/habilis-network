@@ -153,6 +153,7 @@ impl LightCyclesPeer {
     pub async fn join(
         room_code: String,
         nick: String,
+        // `true` lets game traffic fall back to the relay; `false` keeps it on direct paths.
         relay_transport: bool,
     ) -> Result<LightCyclesPeer, JsValue> {
         console_error_panic_hook::set_once();

@@ -27,7 +27,12 @@ const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often to re-read the census. Only printed when it changes.
 const CENSUS_INTERVAL: Duration = Duration::from_secs(1);
 
-pub async fn run(nick: &str, relay: Option<RelayUrl>, host_ice: bool) -> Result<()> {
+pub async fn run(
+    nick: &str,
+    relay: Option<RelayUrl>,
+    // `true` gathers host candidates only; `false` uses the default ICE set.
+    host_ice: bool,
+) -> Result<()> {
     let key = SecretKey::generate();
     let id = key.public();
 

@@ -31,7 +31,14 @@ const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
 /// terminal loop.
 const INBOX_CAPACITY: usize = 64;
 
-pub async fn run(ticket: &str, nick: &str, webrtc: bool, host_ice: bool) -> Result<()> {
+pub async fn run(
+    ticket: &str,
+    nick: &str,
+    // `true` joins as a browser tab does, over WebRTC (JSEP); `false` uses the iroh path.
+    webrtc: bool,
+    // `true` gathers host candidates only; `false` uses the default ICE set.
+    host_ice: bool,
+) -> Result<()> {
     let ticket = Ticket::decode(ticket).context("decode the ticket")?;
     let relay_mode = match ticket.relay.clone() {
         Some(url) => RelayMode::custom([url]),
