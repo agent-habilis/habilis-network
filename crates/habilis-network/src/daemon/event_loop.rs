@@ -1615,7 +1615,7 @@ mod route_wake_tests {
                     let secret = SecretKey::generate();
                     let underlay = loopback_underlay(&secret).await;
                     assert_eq!(
-                        own_links_after_a_tick(underlay, &secret, config).await,
+                        Box::pin(own_links_after_a_tick(underlay, &secret, config)).await,
                         vec![expected],
                         "{config:?}"
                     );
@@ -1648,9 +1648,13 @@ mod route_wake_tests {
                     .expect("bind an underlay with no address yet");
                 assert!(underlay.addr().addrs.is_empty(), "the premise: no address");
                 assert!(
-                    own_links_after_a_tick(underlay, &secret, HandleConfig::default())
-                        .await
-                        .is_empty(),
+                    Box::pin(own_links_after_a_tick(
+                        underlay,
+                        &secret,
+                        HandleConfig::default()
+                    ))
+                    .await
+                    .is_empty(),
                     "no link of ours is advertised"
                 );
             },
