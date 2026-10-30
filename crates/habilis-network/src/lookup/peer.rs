@@ -219,7 +219,7 @@ pub(crate) async fn build_peer_webrtc_with(
             #[cfg(feature = "multihop")]
             multihop: None,
             webrtc: Some(handle.clone()),
-            gossip: gossip.clone(),
+            gossip,
             admission: admission.cloned(),
             underlay: false,
             options,
@@ -431,7 +431,7 @@ pub(crate) async fn build_peer_multihop_with(
         super::TransportHandles {
             multihop: Some(handle.clone()),
             webrtc: Some(webrtc.clone()),
-            gossip: gossip.clone(),
+            gossip,
             admission: admission.cloned(),
             underlay: false,
             options,
