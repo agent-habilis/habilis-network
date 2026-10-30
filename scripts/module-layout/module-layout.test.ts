@@ -99,6 +99,6 @@ test("no allow lookup: a counted mismatch still fails", () => {
   expectExit({ [leaf]: "pub struct Other;" }, 1, `${leaf}|1|renaming pending`);
 });
 
-test("tests are not scanned", () => {
-  expectExit({ "crates/x/tests/frame_cache.rs": "pub struct Other;" }, 0);
+test("tests are scanned: a leaf in tests/ with a mismatched type is a hit", () => {
+  expectExit({ "crates/x/tests/frame_cache.rs": "pub struct Other;" }, 1);
 });
