@@ -82,7 +82,7 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 /// Wrap raw digest bytes.
 impl From<[u8; 32]> for ChunkHash {
     fn from(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+        Self::from_bytes(bytes)
     }
 }
 
@@ -110,6 +110,12 @@ impl ChunkHash {
     pub fn to_hex(&self) -> String {
         digest_to_hex(&self.0)
     }
+
+    /// Make a chunk hash from its 32 bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
 }
 
 impl fmt::Display for ChunkHash {
@@ -121,7 +127,7 @@ impl fmt::Display for ChunkHash {
 /// Wrap raw digest bytes.
 impl From<[u8; 32]> for Root {
     fn from(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+        Self::from_bytes(bytes)
     }
 }
 
@@ -148,6 +154,12 @@ impl Root {
     #[must_use]
     pub fn to_hex(&self) -> String {
         digest_to_hex(&self.0)
+    }
+
+    /// Make a root from its 32 bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 }
 
