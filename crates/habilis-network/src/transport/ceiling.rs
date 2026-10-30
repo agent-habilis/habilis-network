@@ -415,13 +415,21 @@ mod tests {
     fn full(cap: usize, start: Instant) -> Ceiling {
         let mut ceiling = Ceiling::new(cap);
         for index in 0..cap {
-            let peer = testing::endpoint_id(u8::try_from(index).unwrap());
+            let peer = testing::endpoint_id(
+                u8::try_from(index).expect("the test caps are at most 10, so the index fits a u8"),
+            );
             assert!(
                 ceiling.register_quic(peer, start).evict.is_empty(),
                 "a full ceiling evicts nobody for the first quic peer"
             );
             // The lower the index, the older the last use.
-            ceiling.touch(peer, at(start, 10 + u64::try_from(index).unwrap()));
+            ceiling.touch(
+                peer,
+                at(
+                    start,
+                    10 + u64::try_from(index).expect("an index fits a u64"),
+                ),
+            );
         }
         ceiling
     }
@@ -579,7 +587,9 @@ mod tests {
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);
-            let peer = testing::endpoint_id(u8::try_from(state >> 56).unwrap());
+            let peer = testing::endpoint_id(
+                u8::try_from(state >> 56).expect("a u64 shifted right by 56 fits a u8"),
+            );
             let now = at(start, step * 3);
             let admission = ceiling.register_quic(peer, now);
             apply(&mut ceiling, &admission);
