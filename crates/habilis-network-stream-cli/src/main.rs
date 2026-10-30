@@ -118,7 +118,7 @@ async fn stop_signal() -> i32 {
         }
     };
     #[cfg(not(unix))]
-    let others = future::pending::<i32>();
+    let others: future::Pending<i32> = future::pending();
     tokio::select! {
         code = interrupt => code,
         code = others => code,
