@@ -5,7 +5,7 @@ use std::io::{Read as _, SeekFrom};
 use std::iter::Enumerate;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::{fs, slice};
+use std::{fs, future, slice};
 
 use super::disk_store::store;
 use crate::ChunkError;
@@ -193,8 +193,8 @@ impl DiskOrigin {
     }
 }
 
-impl ChunkSource for DiskOrigin {
-    async fn get(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>, ChunkError> {
+impl DiskOrigin {
+    fn get_now(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>, ChunkError> {
         use std::io::Seek as _;
         let located = {
             let locations = self
@@ -237,15 +237,11 @@ impl ChunkSource for DiskOrigin {
         Ok(Some(bytes))
     }
 
-    async fn has(&self, hash: ChunkHash) -> Result<bool, ChunkError> {
-        Ok(self.get(hash).await?.is_some())
-    }
-
-    async fn map(&self, root: Root) -> Result<Option<ChunkMap>, ChunkError> {
+    fn map_now(&self, root: Root) -> Result<Option<ChunkMap>, ChunkError> {
         Ok(self.borrowed(root)?.map(|borrowed| borrowed.map))
     }
 
-    async fn coverage(&self, root: Root) -> Result<Coverage, ChunkError> {
+    fn coverage_now(&self, root: Root) -> Result<Coverage, ChunkError> {
         let Some(borrowed) = self.borrowed(root)? else {
             return Ok(Coverage::empty(0));
         };
@@ -259,7 +255,7 @@ impl ChunkSource for DiskOrigin {
         }
     }
 
-    async fn bind(&self, file: &FileId) -> Result<Option<Root>, ChunkError> {
+    fn bind_now(&self, file: &FileId) -> Result<Option<Root>, ChunkError> {
         let binds = self
             .binds
             .lock()
@@ -271,6 +267,28 @@ impl ChunkSource for DiskOrigin {
             return Ok(None);
         }
         Ok(Some(*root))
+    }
+}
+
+impl ChunkSource for DiskOrigin {
+    fn get(&self, hash: ChunkHash) -> impl Future<Output = Result<Option<Vec<u8>>, ChunkError>> {
+        future::ready(self.get_now(hash))
+    }
+
+    async fn has(&self, hash: ChunkHash) -> Result<bool, ChunkError> {
+        Ok(self.get(hash).await?.is_some())
+    }
+
+    fn map(&self, root: Root) -> impl Future<Output = Result<Option<ChunkMap>, ChunkError>> {
+        future::ready(self.map_now(root))
+    }
+
+    fn coverage(&self, root: Root) -> impl Future<Output = Result<Coverage, ChunkError>> {
+        future::ready(self.coverage_now(root))
+    }
+
+    fn bind(&self, file: &FileId) -> impl Future<Output = Result<Option<Root>, ChunkError>> {
+        future::ready(self.bind_now(file))
     }
 }
 

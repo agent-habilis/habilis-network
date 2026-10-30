@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::iter::Enumerate;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::{fs, slice};
+use std::{fs, future, slice};
 
 use crate::ChunkError;
 
@@ -236,8 +236,8 @@ fn decode_map(bytes: &[u8]) -> Result<ChunkMap, ChunkError> {
     ChunkMap::build_tree(leaves, size)
 }
 
-impl ChunkSource for DiskStore {
-    async fn get(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>, ChunkError> {
+impl DiskStore {
+    fn get_now(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>, ChunkError> {
         match fs::read(self.chunk_path(hash)) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
@@ -245,16 +245,104 @@ impl ChunkSource for DiskStore {
         }
     }
 
-    async fn has(&self, hash: ChunkHash) -> Result<bool, ChunkError> {
-        Ok(self.chunk_path(hash).is_file())
+    fn has_now(&self, hash: ChunkHash) -> bool {
+        self.chunk_path(hash).is_file()
     }
 
-    async fn map(&self, root: Root) -> Result<Option<ChunkMap>, ChunkError> {
+    fn map_now(&self, root: Root) -> Result<Option<ChunkMap>, ChunkError> {
         match fs::read(self.map_path(root)) {
             Ok(bytes) => Ok(Some(decode_map(&bytes)?)),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error).map_err(store(|| "reading a chunk map")),
         }
+    }
+
+    fn bind_now(&self, file: &FileId) -> Result<Option<Root>, ChunkError> {
+        let binds = self
+            .binds
+            .lock()
+            .map_err(|_| ChunkError::Poisoned("bind"))?;
+        let Some((size, mtime, root)) = binds.get(&file.key) else {
+            return Ok(None);
+        };
+        if *size != file.size || *mtime != file.mtime {
+            return Ok(None);
+        }
+        Ok(Some(*root))
+    }
+
+    fn put_now(&self, hash: ChunkHash, bytes: &[u8]) -> Result<(), ChunkError> {
+        let actual = chunk_hash(bytes);
+        if actual != hash {
+            return Err(ChunkError::Malformed(format!(
+                "these bytes address {actual}, not {hash}"
+            )));
+        }
+        write_atomic(&self.chunk_path(hash), bytes)
+    }
+
+    fn put_map_now(&self, map: &ChunkMap) -> Result<(), ChunkError> {
+        write_atomic(&self.map_path(map.root()), &encode_map(map))
+    }
+
+    fn set_bind_now(&self, file: &FileId, root: Root) -> Result<(), ChunkError> {
+        let snapshot = {
+            let mut binds = self
+                .binds
+                .lock()
+                .map_err(|_| ChunkError::Poisoned("bind"))?;
+            binds.insert(file.key.clone(), (file.size, file.mtime, root));
+            binds.clone()
+        };
+        self.flush_binds(&snapshot)
+    }
+
+    fn start_marking_now(&self) -> Result<(), ChunkError> {
+        *self
+            .marks
+            .lock()
+            .map_err(|_| ChunkError::Poisoned("mark"))? = Some(HashSet::new());
+        Ok(())
+    }
+
+    fn sweep_now(&self) -> Result<u64, ChunkError> {
+        let mut marks = self
+            .marks
+            .lock()
+            .map_err(|_| ChunkError::Poisoned("mark"))?;
+        let live = marks.take().unwrap_or_default();
+        let mut dropped = 0u64;
+        for hash in self.stored_chunks() {
+            if live.contains(&hash) {
+                continue;
+            }
+            if fs::remove_file(self.chunk_path(hash)).is_ok() {
+                dropped += 1;
+            }
+        }
+        Ok(dropped)
+    }
+
+    fn clear_now(&self, hashes: &[ChunkHash]) {
+        for hash in hashes {
+            // Absent is fine: eviction races a sweep, and both removing the same
+            // chunk is ordinary rather than an error.
+            let _ = fs::remove_file(self.chunk_path(*hash));
+        }
+    }
+}
+
+impl ChunkSource for DiskStore {
+    fn get(&self, hash: ChunkHash) -> impl Future<Output = Result<Option<Vec<u8>>, ChunkError>> {
+        future::ready(self.get_now(hash))
+    }
+
+    fn has(&self, hash: ChunkHash) -> impl Future<Output = Result<bool, ChunkError>> {
+        future::ready(Ok(self.has_now(hash)))
+    }
+
+    fn map(&self, root: Root) -> impl Future<Output = Result<Option<ChunkMap>, ChunkError>> {
+        future::ready(self.map_now(root))
     }
 
     async fn coverage(&self, root: Root) -> Result<Coverage, ChunkError> {
@@ -274,54 +362,26 @@ impl ChunkSource for DiskStore {
         Ok(coverage)
     }
 
-    async fn bind(&self, file: &FileId) -> Result<Option<Root>, ChunkError> {
-        let binds = self
-            .binds
-            .lock()
-            .map_err(|_| ChunkError::Poisoned("bind"))?;
-        let Some((size, mtime, root)) = binds.get(&file.key) else {
-            return Ok(None);
-        };
-        if *size != file.size || *mtime != file.mtime {
-            return Ok(None);
-        }
-        Ok(Some(*root))
+    fn bind(&self, file: &FileId) -> impl Future<Output = Result<Option<Root>, ChunkError>> {
+        future::ready(self.bind_now(file))
     }
 }
 
 impl ChunkStore for DiskStore {
-    async fn put(&self, hash: ChunkHash, bytes: &[u8]) -> Result<(), ChunkError> {
-        let actual = chunk_hash(bytes);
-        if actual != hash {
-            return Err(ChunkError::Malformed(format!(
-                "these bytes address {actual}, not {hash}"
-            )));
-        }
-        write_atomic(&self.chunk_path(hash), bytes)
+    fn put(&self, hash: ChunkHash, bytes: &[u8]) -> impl Future<Output = Result<(), ChunkError>> {
+        future::ready(self.put_now(hash, bytes))
     }
 
-    async fn put_map(&self, map: &ChunkMap) -> Result<(), ChunkError> {
-        write_atomic(&self.map_path(map.root()), &encode_map(map))
+    fn put_map(&self, map: &ChunkMap) -> impl Future<Output = Result<(), ChunkError>> {
+        future::ready(self.put_map_now(map))
     }
 
-    async fn set_bind(&self, file: &FileId, root: Root) -> Result<(), ChunkError> {
-        let snapshot = {
-            let mut binds = self
-                .binds
-                .lock()
-                .map_err(|_| ChunkError::Poisoned("bind"))?;
-            binds.insert(file.key.clone(), (file.size, file.mtime, root));
-            binds.clone()
-        };
-        self.flush_binds(&snapshot)
+    fn set_bind(&self, file: &FileId, root: Root) -> impl Future<Output = Result<(), ChunkError>> {
+        future::ready(self.set_bind_now(file, root))
     }
 
-    async fn start_marking(&self) -> Result<(), ChunkError> {
-        *self
-            .marks
-            .lock()
-            .map_err(|_| ChunkError::Poisoned("mark"))? = Some(HashSet::new());
-        Ok(())
+    fn start_marking(&self) -> impl Future<Output = Result<(), ChunkError>> {
+        future::ready(self.start_marking_now())
     }
 
     async fn mark(&self, root: Root) -> Result<(), ChunkError> {
@@ -343,30 +403,12 @@ impl ChunkStore for DiskStore {
         Ok(())
     }
 
-    async fn sweep(&self) -> Result<u64, ChunkError> {
-        let mut marks = self
-            .marks
-            .lock()
-            .map_err(|_| ChunkError::Poisoned("mark"))?;
-        let live = marks.take().unwrap_or_default();
-        let mut dropped = 0u64;
-        for hash in self.stored_chunks() {
-            if live.contains(&hash) {
-                continue;
-            }
-            if fs::remove_file(self.chunk_path(hash)).is_ok() {
-                dropped += 1;
-            }
-        }
-        Ok(dropped)
+    fn sweep(&self) -> impl Future<Output = Result<u64, ChunkError>> {
+        future::ready(self.sweep_now())
     }
 
-    async fn clear(&self, hashes: &[ChunkHash]) -> Result<(), ChunkError> {
-        for hash in hashes {
-            // Absent is fine: eviction races a sweep, and both removing the same
-            // chunk is ordinary rather than an error.
-            let _ = fs::remove_file(self.chunk_path(*hash));
-        }
-        Ok(())
+    fn clear(&self, hashes: &[ChunkHash]) -> impl Future<Output = Result<(), ChunkError>> {
+        self.clear_now(hashes);
+        future::ready(Ok(()))
     }
 }

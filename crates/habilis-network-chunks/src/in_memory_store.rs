@@ -14,8 +14,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::iter::Enumerate;
-use std::slice;
 use std::sync::Mutex;
+use std::{future, slice};
 
 use crate::ChunkError;
 
@@ -69,8 +69,8 @@ impl InMemoryStore {
     }
 }
 
-impl ChunkSource for InMemoryStore {
-    async fn get(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>, ChunkError> {
+impl InMemoryStore {
+    fn get_now(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>, ChunkError> {
         Ok(self
             .chunks
             .lock()
@@ -79,7 +79,7 @@ impl ChunkSource for InMemoryStore {
             .cloned())
     }
 
-    async fn has(&self, hash: ChunkHash) -> Result<bool, ChunkError> {
+    fn has_now(&self, hash: ChunkHash) -> Result<bool, ChunkError> {
         Ok(self
             .chunks
             .lock()
@@ -87,7 +87,7 @@ impl ChunkSource for InMemoryStore {
             .contains_key(&hash))
     }
 
-    async fn map(&self, root: Root) -> Result<Option<ChunkMap>, ChunkError> {
+    fn map_now(&self, root: Root) -> Result<Option<ChunkMap>, ChunkError> {
         Ok(self
             .maps
             .lock()
@@ -96,7 +96,7 @@ impl ChunkSource for InMemoryStore {
             .cloned())
     }
 
-    async fn coverage(&self, root: Root) -> Result<Coverage, ChunkError> {
+    fn coverage_now(&self, root: Root) -> Result<Coverage, ChunkError> {
         let map = {
             let maps = self.maps.lock().map_err(|_| ChunkError::Poisoned("map"))?;
             maps.get(&root).cloned()
@@ -120,7 +120,7 @@ impl ChunkSource for InMemoryStore {
         Ok(coverage)
     }
 
-    async fn bind(&self, file: &FileId) -> Result<Option<Root>, ChunkError> {
+    fn bind_now(&self, file: &FileId) -> Result<Option<Root>, ChunkError> {
         let binds = self
             .binds
             .lock()
@@ -136,10 +136,8 @@ impl ChunkSource for InMemoryStore {
         }
         Ok(Some(*root))
     }
-}
 
-impl ChunkStore for InMemoryStore {
-    async fn put(&self, hash: ChunkHash, bytes: &[u8]) -> Result<(), ChunkError> {
+    fn put_now(&self, hash: ChunkHash, bytes: &[u8]) -> Result<(), ChunkError> {
         // Verify before storing, always. A peer that sends bytes addressing
         // something else costs its own bandwidth and nothing of ours; storing
         // first and checking later would let it cost our disk too.
@@ -156,13 +154,13 @@ impl ChunkStore for InMemoryStore {
         Ok(())
     }
 
-    async fn put_map(&self, map: &ChunkMap) -> Result<(), ChunkError> {
+    fn put_map_now(&self, map: &ChunkMap) -> Result<(), ChunkError> {
         let mut maps = self.maps.lock().map_err(|_| ChunkError::Poisoned("map"))?;
         maps.insert(map.root(), map.clone());
         Ok(())
     }
 
-    async fn set_bind(&self, file: &FileId, root: Root) -> Result<(), ChunkError> {
+    fn set_bind_now(&self, file: &FileId, root: Root) -> Result<(), ChunkError> {
         self.binds
             .lock()
             .map_err(|_| ChunkError::Poisoned("bind"))?
@@ -170,7 +168,7 @@ impl ChunkStore for InMemoryStore {
         Ok(())
     }
 
-    async fn start_marking(&self) -> Result<(), ChunkError> {
+    fn start_marking_now(&self) -> Result<(), ChunkError> {
         *self
             .marks
             .lock()
@@ -178,7 +176,7 @@ impl ChunkStore for InMemoryStore {
         Ok(())
     }
 
-    async fn mark(&self, root: Root) -> Result<(), ChunkError> {
+    fn mark_now(&self, root: Root) -> Result<(), ChunkError> {
         let leaves = {
             let maps = self.maps.lock().map_err(|_| ChunkError::Poisoned("map"))?;
             maps.get(&root).map(|map| map.leaves().to_vec())
@@ -189,7 +187,7 @@ impl ChunkStore for InMemoryStore {
         let leaves = leaves.ok_or_else(|| {
             ChunkError::Malformed(
                 "cannot mark a root with no stored chunk map — derive the live set \
-             from persisted maps, never from an in-memory held-set"
+                 from persisted maps, never from an in-memory held-set"
                     .to_owned(),
             )
         })?;
@@ -201,7 +199,7 @@ impl ChunkStore for InMemoryStore {
         Ok(())
     }
 
-    async fn sweep(&self) -> Result<u64, ChunkError> {
+    fn sweep_now(&self) -> Result<u64, ChunkError> {
         let mut marks = self
             .marks
             .lock()
@@ -216,7 +214,7 @@ impl ChunkStore for InMemoryStore {
         Ok(u64::try_from(before - chunks.len()).unwrap_or(u64::MAX))
     }
 
-    async fn clear(&self, hashes: &[ChunkHash]) -> Result<(), ChunkError> {
+    fn clear_now(&self, hashes: &[ChunkHash]) -> Result<(), ChunkError> {
         let mut chunks = self
             .chunks
             .lock()
@@ -225,5 +223,57 @@ impl ChunkStore for InMemoryStore {
             chunks.remove(hash);
         }
         Ok(())
+    }
+}
+
+impl ChunkSource for InMemoryStore {
+    fn get(&self, hash: ChunkHash) -> impl Future<Output = Result<Option<Vec<u8>>, ChunkError>> {
+        future::ready(self.get_now(hash))
+    }
+
+    fn has(&self, hash: ChunkHash) -> impl Future<Output = Result<bool, ChunkError>> {
+        future::ready(self.has_now(hash))
+    }
+
+    fn map(&self, root: Root) -> impl Future<Output = Result<Option<ChunkMap>, ChunkError>> {
+        future::ready(self.map_now(root))
+    }
+
+    fn coverage(&self, root: Root) -> impl Future<Output = Result<Coverage, ChunkError>> {
+        future::ready(self.coverage_now(root))
+    }
+
+    fn bind(&self, file: &FileId) -> impl Future<Output = Result<Option<Root>, ChunkError>> {
+        future::ready(self.bind_now(file))
+    }
+}
+
+impl ChunkStore for InMemoryStore {
+    fn put(&self, hash: ChunkHash, bytes: &[u8]) -> impl Future<Output = Result<(), ChunkError>> {
+        future::ready(self.put_now(hash, bytes))
+    }
+
+    fn put_map(&self, map: &ChunkMap) -> impl Future<Output = Result<(), ChunkError>> {
+        future::ready(self.put_map_now(map))
+    }
+
+    fn set_bind(&self, file: &FileId, root: Root) -> impl Future<Output = Result<(), ChunkError>> {
+        future::ready(self.set_bind_now(file, root))
+    }
+
+    fn start_marking(&self) -> impl Future<Output = Result<(), ChunkError>> {
+        future::ready(self.start_marking_now())
+    }
+
+    fn mark(&self, root: Root) -> impl Future<Output = Result<(), ChunkError>> {
+        future::ready(self.mark_now(root))
+    }
+
+    fn sweep(&self) -> impl Future<Output = Result<u64, ChunkError>> {
+        future::ready(self.sweep_now())
+    }
+
+    fn clear(&self, hashes: &[ChunkHash]) -> impl Future<Output = Result<(), ChunkError>> {
+        future::ready(self.clear_now(hashes))
     }
 }
