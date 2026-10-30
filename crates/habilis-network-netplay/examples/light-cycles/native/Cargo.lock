@@ -1611,6 +1611,7 @@ dependencies = [
  "n0-future",
  "n0-watcher",
  "noq-udp",
+ "num-traits",
  "tokio",
  "tracing",
 ]
