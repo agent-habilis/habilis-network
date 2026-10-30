@@ -272,6 +272,15 @@ mod tests {
     }
 
     #[test]
+    fn pid_zero_is_no_process() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            !is_alive(0),
+            "pid 0 names our process group, which is no process"
+        );
+    }
+
+    #[test]
     fn parent_of_self_is_our_ppid() {
         let _guard = ::habilis_network_test_tracing::init();
         let ppid = getppid().map(|pid| pid.as_raw_nonzero().get());
