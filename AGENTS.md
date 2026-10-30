@@ -230,7 +230,7 @@ Issue #29 records each decision. The record of the `Arc`/`Rc` (B1) and clone (B3
 - `clippy::absolute_paths`: gated. It is `warn` in `[workspace.lints]`, and CI runs clippy with `-D warnings`. It takes the guide's default: a path names at most two segments, so a type is imported and a function is called as `module::fn`. `clippy.toml` sets no override. `scripts/absolute-paths/` rewrites the hits to import the parent module.
 - `non_exhaustive_omitted_patterns`: gated by the `Omitted patterns` CI step. It is an unstable rustc lint. The project toolchain is a nightly. The `Omitted patterns` step in `.github/workflows/ci.yml` runs it with `-Zcrate-attr=feature(non_exhaustive_omitted_patterns_lint)` and `-D non_exhaustive_omitted_patterns`. The step checks three things: the workspace, `habilis-network-bench-wasm` on wasm32, and the `idb_browser`, `origin` and `conformance` tests of `habilis-network-chunks` on wasm32. A crate root gated by `target_arch` drops the crate attribute, so the wasm32 crates are checked on their own. Their test and bench bodies sit in modules for that reason. The step does not check the `wasm_runtime` test on wasm32, because `mio` does not build for wasm32.
 - `exhaustive_enums` and `exhaustive_structs`: gated. Both are `warn` in `[workspace.lints]`. The owner decided to mark public types `#[non_exhaustive]`. All public enums are marked. A public struct is marked too, except one that keeps a private field (`AppClass`). A struct that other crates build gets `new` with all fields (up to four, no two adjacent of one type), or `new` with the required fields and a `with_` method for each optional field that a call site sets. Never set a field after `Default`, because `field_reassign_with_default` refuses it.
-- A `match` on a foreign `#[non_exhaustive]` enum names every variant and keeps a wildcard arm last. Gated: `wildcard_enum_match_arm` is `warn` in `[workspace.lints]`. The compiler needs that arm and `wildcard_enum_match_arm` refuses it, so the arm carries `#[expect(clippy::wildcard_enum_match_arm, reason = "...")]` on the narrowest scope. Use `expect`, never `allow`: a stale `expect` is a warning.
+- A `match` on a foreign `#[non_exhaustive]` enum needs a wildcard arm, and `wildcard_enum_match_arm` (gated, `warn` in `[workspace.lints]`) refuses it. Use `if let` when only one variant matters, as `join_params.rs` and `tasks/src/bench/native.rs` do: it has no arm to refuse. A `match` that must name the rest carries `#[expect(clippy::wildcard_enum_match_arm, reason = "...")]` on the narrowest scope, and gets a row in the table below. Use `expect`, never `allow`: a stale `expect` is a warning.
 - Errors in public signatures (gated by `anyhow_pub`): a library crate returns a typed error from each public function. The gate is `anyhow_pub` in `scripts/style-check/style-check.ts` (see What each gate refuses). The bench harness returns `BenchError`, and the test relay helper returns `TestRelayError`. Binaries, CLIs and `bin/` targets are outside the rule and keep `anyhow`.
 - `Arc`: the reviewer judges each use, and no gate checks it. Use `Arc` to share across tasks or threads, or for a trait object, and write the reason when it is not clear.
 - `From<&str>` that can panic: a type that validates its input has `try_new` returning a `Result`, and no `From<&str>`. `AppTag` and `CorrId` follow this, and a `compile_fail` doc test pins it.
@@ -259,7 +259,7 @@ Issue #29 records each decision. The record of the `Arc`/`Rc` (B1) and clone (B3
 
 ### Remaining `#[expect]` attributes
 
-Thirteen `#[expect(...)]` attributes stay: nine that suppress an FFI or foreign-enum lint, and four that suppress `clippy::unused_async_trait_impl` on an impl of an iroh trait. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here.
+Nine `#[expect(...)]` attributes stay: eight that suppress `unsafe_code` (the C ABI of the ffi crate, and libc calls that have no safe wrapper), and one that suppresses `deprecated`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
 
 | File | Lint | Reason |
 | --- | --- | --- |
@@ -269,13 +269,9 @@ Thirteen `#[expect(...)]` attributes stay: nine that suppress an FFI or foreign-
 | `habilis-network-util/src/resident_memory.rs` (task info) | `unsafe_code` | `libc` `task_info` FFI: no safe wrapper for the task's resident size |
 | `habilis-network-util/src/resident_memory.rs` (mach call) | `deprecated` | `libc` points to the `mach2` crate for the mach calls; one read does not warrant a dependency |
 | `habilis-network-util/src/resident_memory.rs` (getrusage) | `unsafe_code` | `libc` `getrusage` FFI: no safe wrapper for `RUSAGE_SELF` maxrss |
-| `habilis-network-util/src/resident_memory.rs` (mmap) | `unsafe_code` | `libc` `mmap` and `munmap`: the pages must go back at once |
-| `habilis-network/src/daemon/params/join_params.rs` | `clippy::wildcard_enum_match_arm` | foreign `non_exhaustive` enum: the compiler needs a wildcard arm, and the named variants come before it |
-| `tasks/src/bench/native.rs` | `clippy::wildcard_enum_match_arm` | `TransportAddr` is `non_exhaustive`: a rung this runner does not name is `other` |
-| `habilis-network/src/transport/admission/connection_hook.rs` | `clippy::unused_async_trait_impl` | iroh's `EndpointHooks::after_handshake` is an async trait method; this impl decides without awaiting |
-| `habilis-network/src/transport/webrtc/nudge_acceptor.rs` | `clippy::unused_async_trait_impl` | iroh's `ProtocolHandler::accept` is an async trait method; this accept does its work without awaiting |
-| `habilis-network/src/transport/webrtc/web_rtc_signal_acceptor.rs` | `clippy::unused_async_trait_impl` | iroh's `ProtocolHandler::accept` is an async trait method; this accept does its work without awaiting |
-| `habilis-network/src/transport/direct_only_gossip.rs` (`WatchAndDrop`) | `clippy::unused_async_trait_impl` | iroh's `ProtocolHandler::accept` is an async trait method; this accept does its work without awaiting |
+| `habilis-network-util/src/resident_memory.rs` (mmap) | `unsafe_code` | `libc` `mmap` and `munmap`: the pages must go back at once, which a heap allocation does not do on macOS |
+| `habilis-network-ffi/src/ffi.rs` (crate) | `unsafe_code` | this module is the C ABI: raw pointers from the foreign caller, and a boxed handle it owns |
+| `habilis-network-ffi/tests/ffi_smoke.rs` (crate) | `unsafe_code` | the surface under test is `unsafe extern "C"`; calling it is the test |
 
 ### Rules of the guide that do not apply
 
