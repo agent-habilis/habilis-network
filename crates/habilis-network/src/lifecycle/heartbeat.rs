@@ -136,7 +136,7 @@ mod tests {
         let mut state = fresh_state();
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("swift-cedar"), expired_at);
         state.peers.insert(nick("swift-cedar"));
         // Arrival was surfaced => departure must be too.
@@ -174,7 +174,7 @@ mod tests {
         assert!(!state.rendezvous_wanted(), "enough links: it let go");
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("lost-heron"), expired_at);
         state.peers.insert(nick("lost-heron"));
         state.surfaced.insert(nick("lost-heron"));
@@ -195,7 +195,7 @@ mod tests {
         state.rendezvous_flags.insert(RendezvousFlag::Linked);
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("lost-heron"), expired_at);
         state.peers.insert(nick("lost-heron"));
         state.surfaced.insert(nick("lost-heron"));
@@ -228,7 +228,7 @@ mod tests {
         );
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("lost-heron"), expired_at);
         state.peers.insert(nick("lost-heron"));
         state.surfaced.insert(nick("lost-heron"));
@@ -254,7 +254,7 @@ mod tests {
         state.linked_endpoints.insert(testing::endpoint_id(1));
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("ghost-oak"), expired_at);
         state.peers.insert(nick("ghost-oak"));
 
@@ -274,7 +274,7 @@ mod tests {
         let mut state = fresh_state();
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("calm-otter"), expired_at);
         state.peers.insert(nick("calm-otter"));
         state.surfaced.insert(nick("calm-otter"));
@@ -303,7 +303,7 @@ mod tests {
         let mut state = fresh_state();
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("swift-cedar"), expired_at);
         state.peers.insert(nick("swift-cedar"));
         state.surfaced.insert(nick("swift-cedar"));
@@ -350,7 +350,7 @@ mod tests {
         let mut state = fresh_state();
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("ghost-elm"), expired_at);
         state.peers.insert(nick("ghost-elm"));
         // Never in `surfaced`: known only via pre-join backlog.
@@ -417,7 +417,7 @@ mod tests {
         let mut state = fresh_state();
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("stale-nick"), expired_at);
         state.peers.insert(nick("stale-nick"));
         state.last_seen.insert(nick("fresh-nick"), Instant::now());
