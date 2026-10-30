@@ -22,7 +22,7 @@ use habilis_network_iroh_webrtc_transport::iroh::{
 use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport, custom_addr};
 use tokio::sync::mpsc;
 
-use crate::{ice_config, path, signal, terminal, wire};
+use crate::{ice_config, path, signal_acceptor, terminal, wire};
 
 use tokio::{sync, time};
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -81,7 +81,7 @@ pub async fn run(
         println!("* negotiating a data channel over the relay…");
         // Boxed for the same reason the answering side is: the str0m state this
         // future carries is large enough that clippy asks for the heap.
-        Box::pin(signal::dial(
+        Box::pin(signal_acceptor::dial(
             &signalling,
             room_addr,
             id,

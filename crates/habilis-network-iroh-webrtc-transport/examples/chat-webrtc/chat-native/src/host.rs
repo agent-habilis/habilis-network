@@ -12,8 +12,8 @@ use habilis_network_iroh_webrtc_transport::iroh_base::RelayUrl;
 use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
 
 use crate::room::Room;
-use crate::serve::ChatAcceptor;
-use crate::signal::SignalAcceptor;
+use crate::chat_acceptor::ChatAcceptor;
+use crate::signal_acceptor::SignalAcceptor;
 use crate::terminal;
 
 use tokio::time;

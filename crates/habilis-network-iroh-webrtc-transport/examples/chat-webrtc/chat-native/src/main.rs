@@ -16,8 +16,8 @@ mod host;
 mod join;
 mod path;
 mod room;
-mod serve;
-mod signal;
+mod chat_acceptor;
+mod signal_acceptor;
 mod terminal;
 mod wire;
 
