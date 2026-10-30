@@ -178,10 +178,7 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
 /// depart(member.node).await.expect("depart");
 /// # }
 /// ```
-#[expect(
-    missing_debug_implementations,
-    reason = "Node's Debug is manual and says nothing a caller wants; the identity a reader would look for is on `node` already"
-)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct Membership {
     /// The running node that this membership drives.

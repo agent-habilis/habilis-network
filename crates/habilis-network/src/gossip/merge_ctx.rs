@@ -5,6 +5,8 @@
 //! carries the generic transport primitives the app rides. Inbound dispatch
 //! lives in [`super::recv`].
 
+use std::fmt;
+
 use crate::transport::MeshSender;
 
 use crate::daemon::handler_ctx::HandlerCtx;
@@ -239,10 +241,6 @@ pub(crate) async fn send_second_probe(state: &mut EventLoopState, context: &Hand
 /// let _author = ctx.author;
 /// # }
 /// ```
-#[expect(
-    missing_debug_implementations,
-    reason = "sink is a &'a dyn NodeSink trait object with no Debug impl"
-)]
 #[non_exhaustive]
 pub struct MergeCtx<'mesh> {
     /// The id of the mesh that the write belongs to.
@@ -253,6 +251,17 @@ pub struct MergeCtx<'mesh> {
     pub sender: &'mesh MeshSender,
     /// The sink that reports the write.
     pub sink: &'mesh dyn NodeSink,
+}
+
+// Hand-written: `sink` is a `dyn NodeSink`, which has no `Debug` to print.
+impl fmt::Debug for MergeCtx<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MergeCtx")
+            .field("mesh", &self.mesh)
+            .field("author", &self.author)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'mesh> MergeCtx<'mesh> {
@@ -299,10 +308,7 @@ impl<'context> From<&HandlerCtx<'context>> for MergeCtx<'context> {
 /// let _channel = params.channel;
 /// # }
 /// ```
-#[expect(
-    missing_debug_implementations,
-    reason = "the ctx holds a &dyn NodeSink, which has no Debug impl"
-)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct StateMergeParams<'mesh> {
     /// The context of the write.
