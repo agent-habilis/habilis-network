@@ -16,7 +16,7 @@ use habilis_network_protocol::seal_error;
 /// The tagged `State`/`Meta` message body.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "k", rename_all = "snake_case")]
-enum StateOp<'a> {
+enum StateOp<'merge> {
     /// The live wire form: one automerge change, Base58-encoded so the body stays
     /// `MessageBody`-safe (wire key `c`), plus an optional `m` carrying the
     /// RFC 7386 merge the author applied — the human-readable delta the
@@ -27,7 +27,7 @@ enum StateOp<'a> {
         #[serde(rename = "c")]
         data: String,
         #[serde(rename = "m", default, skip_serializing_if = "Option::is_none")]
-        merge: Option<Cow<'a, Value>>,
+        merge: Option<Cow<'merge, Value>>,
     },
     /// The pre-automerge RFC 7386 merge shape. Retained only so a body still
     /// composes for the adversarial harness; the automerge engine ignores it (a
