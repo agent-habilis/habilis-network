@@ -26,3 +26,11 @@
 - The session registry, the counters and the hub are shared between the transport, the endpoint, the sender, the handle and each session task. Each `Arc::clone` is a second owner.
 - Trait objects that iroh takes by `Arc`: the path selector, the custom sender, the crypto provider.
 - The `Rc` backlog and the JSEP callbacks: the backlog is shared between the early handler and the pending answer.
+
+## B1 second pass (2026-10-30)
+
+Every `Arc` site was read again with its enclosing function.
+
+- Removed: 0.
+- The candidate checked was the session registry's `Reservation` and `SessionGuard`, which hold an `Arc` of the registry. The native `attach` only drops its guard, so a borrow would work there. The browser `attach` returns its guard to the caller as `BrowserSessionGuard`, which must own the registry. Both paths share the generic guard type, so one borrowed variant would need a second type. That is a larger change than this clone warrants, so the `Arc` stays.
+- Kept: the registry, counters, the hub and the handle copies shared between the endpoint, the sender and each session task; the `FnMut` closure copies in the browser hub, which need an owned handle per call; the trait objects the endpoint takes by `Arc` (path selector, custom sender, crypto provider); and the copies returned out of registry locks.
