@@ -14,7 +14,6 @@
 
 #![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
 
-use anyhow::{Context as _, Result, bail, ensure};
 use habilis_network_iroh_webrtc_transport::iroh_base::{EndpointId, RelayUrl};
 use serde::{Deserialize, Serialize};
 
@@ -88,12 +87,68 @@ pub enum ServerMsg {
     },
 }
 
+/// What a chat message, frame or ticket can get wrong. The chat binaries show it to the user.
+#[derive(Debug)]
+pub enum ProtoError {
+    /// A nick or a message is empty once trimmed.
+    Empty { what: &'static str },
+    /// A nick or a message is longer than its cap, in characters.
+    TooLong {
+        what: &'static str,
+        chars: usize,
+        max: usize,
+    },
+    /// A frame body is larger than the cap.
+    FrameTooLarge { bytes: usize, max: usize },
+    /// A frame body does not serialize, or does not parse as the message it should be.
+    Json(serde_json::Error),
+    /// A ticket is not Base58Check, is truncated, or holds an id or a relay URL that does not parse.
+    Ticket(&'static str),
+    /// A ticket carries another version of the payload.
+    TicketVersion { found: u8, expected: u8 },
+}
+
+impl std::fmt::Display for ProtoError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty { what } => write!(formatter, "{what} is empty"),
+            Self::TooLong { what, chars, max } => {
+                write!(formatter, "{what} is {chars} chars, max is {max}")
+            }
+            Self::FrameTooLarge { bytes, max } => {
+                write!(formatter, "frame is {bytes} bytes, max is {max}")
+            }
+            Self::Json(error) => write!(formatter, "frame body: {error}"),
+            Self::Ticket(reason) => write!(formatter, "ticket {reason}"),
+            Self::TicketVersion { found, expected } => {
+                write!(
+                    formatter,
+                    "ticket is version {found}, this build speaks {expected}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProtoError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Json(error) => Some(error),
+            Self::Empty { .. }
+            | Self::TooLong { .. }
+            | Self::FrameTooLarge { .. }
+            | Self::Ticket(_)
+            | Self::TicketVersion { .. } => None,
+        }
+    }
+}
+
 impl ClientMsg {
     /// Reject what the room would have to reject anyway, at the edge.
     ///
     /// # Errors
     /// The nick or text is empty, or longer than the cap.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<(), ProtoError> {
         match self {
             Self::Join { nick } => check_len("nick", nick, MAX_NICK_CHARS),
             Self::Say { text } => check_len("message", text, MAX_TEXT_CHARS),
@@ -101,16 +156,21 @@ impl ClientMsg {
     }
 }
 
-fn check_len(what: &str, value: &str, max_chars: usize) -> Result<()> {
+fn check_len(what: &'static str, value: &str, max_chars: usize) -> Result<(), ProtoError> {
     let trimmed = value.trim();
-    ensure!(!trimmed.is_empty(), "{what} is empty");
+    if trimmed.is_empty() {
+        return Err(ProtoError::Empty { what });
+    }
     // `chars`, not `len`: a cap in bytes would reject a shorter message in a
     // non-Latin script than in English, which is a bug rather than a policy.
     let chars = trimmed.chars().count();
-    ensure!(
-        chars <= max_chars,
-        "{what} is {chars} chars, max is {max_chars}"
-    );
+    if chars > max_chars {
+        return Err(ProtoError::TooLong {
+            what,
+            chars,
+            max: max_chars,
+        });
+    }
     Ok(())
 }
 
@@ -132,14 +192,18 @@ pub const FRAME_HEADER_LEN: usize = 4;
 ///
 /// # Errors
 /// The message does not serialize, or its body exceeds [`MAX_FRAME_BYTES`].
-pub fn encode_frame<T: Serialize>(message: &T) -> Result<Vec<u8>> {
-    let body = serde_json::to_vec(message).context("serialize frame")?;
-    ensure!(
-        body.len() <= MAX_FRAME_BYTES,
-        "frame is {} bytes, max is {MAX_FRAME_BYTES}",
-        body.len()
-    );
-    let len = u32::try_from(body.len()).context("frame length does not fit a u32")?;
+pub fn encode_frame<T: Serialize>(message: &T) -> Result<Vec<u8>, ProtoError> {
+    let body = serde_json::to_vec(message).map_err(ProtoError::Json)?;
+    if body.len() > MAX_FRAME_BYTES {
+        return Err(ProtoError::FrameTooLarge {
+            bytes: body.len(),
+            max: MAX_FRAME_BYTES,
+        });
+    }
+    let len = u32::try_from(body.len()).map_err(|_| ProtoError::FrameTooLarge {
+        bytes: body.len(),
+        max: MAX_FRAME_BYTES,
+    })?;
     let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + body.len());
     frame.extend_from_slice(&len.to_le_bytes());
     frame.extend_from_slice(&body);
@@ -154,12 +218,14 @@ pub fn encode_frame<T: Serialize>(message: &T) -> Result<Vec<u8>> {
 ///
 /// # Errors
 /// The length exceeds [`MAX_FRAME_BYTES`].
-pub fn decode_frame_len(header: [u8; FRAME_HEADER_LEN]) -> Result<usize> {
+pub fn decode_frame_len(header: [u8; FRAME_HEADER_LEN]) -> Result<usize, ProtoError> {
     let len = u32::from_le_bytes(header) as usize;
-    ensure!(
-        len <= MAX_FRAME_BYTES,
-        "peer announced a {len}-byte frame, max is {MAX_FRAME_BYTES}"
-    );
+    if len > MAX_FRAME_BYTES {
+        return Err(ProtoError::FrameTooLarge {
+            bytes: len,
+            max: MAX_FRAME_BYTES,
+        });
+    }
     Ok(len)
 }
 
@@ -167,8 +233,8 @@ pub fn decode_frame_len(header: [u8; FRAME_HEADER_LEN]) -> Result<usize> {
 ///
 /// # Errors
 /// The body is not the expected message.
-pub fn decode_body<T: de::DeserializeOwned>(body: &[u8]) -> Result<T> {
-    serde_json::from_slice(body).context("decode frame body")
+pub fn decode_body<T: de::DeserializeOwned>(body: &[u8]) -> Result<T, ProtoError> {
+    serde_json::from_slice(body).map_err(ProtoError::Json)
 }
 
 // ── ticket ───────────────────────────────────────────────────────────────────
@@ -218,37 +284,50 @@ impl Ticket {
     /// # Errors
     /// The string is not Base58Check, carries another version, is truncated, or
     /// holds an id or relay URL that does not parse.
-    pub fn decode(encoded: &str) -> Result<Self> {
+    pub fn decode(encoded: &str) -> Result<Self, ProtoError> {
         let decoded = bs58::decode(encoded.trim()).with_check(None);
         let payload = decoded
             .into_vec()
-            .context("ticket is not valid Base58Check")?;
+            .map_err(|_| ProtoError::Ticket("is not valid Base58Check"))?;
 
-        let (&version, rest) = payload.split_first().context("ticket is empty")?;
+        let (&version, rest) = payload
+            .split_first()
+            .ok_or(ProtoError::Ticket("is empty"))?;
         if version != TICKET_VERSION {
-            bail!("ticket is version {version}, this build speaks {TICKET_VERSION}");
+            return Err(ProtoError::TicketVersion {
+                found: version,
+                expected: TICKET_VERSION,
+            });
         }
 
-        ensure!(rest.len() >= 34, "ticket is truncated");
+        if rest.len() < 34 {
+            return Err(ProtoError::Ticket("is truncated"));
+        }
         let (id_bytes, rest) = rest.split_at(32);
-        let id: [u8; 32] = id_bytes.try_into().context("ticket holds a malformed id")?;
-        let id = EndpointId::from_bytes(&id).context("ticket holds an invalid endpoint id")?;
+        let id: [u8; 32] = id_bytes
+            .try_into()
+            .map_err(|_| ProtoError::Ticket("holds a malformed id"))?;
+        let id = EndpointId::from_bytes(&id)
+            .map_err(|_| ProtoError::Ticket("holds an invalid endpoint id"))?;
 
         let (len_bytes, relay_bytes) = rest.split_at(2);
         let len_bytes: [u8; 2] = len_bytes
             .try_into()
-            .context("ticket holds a malformed length")?;
+            .map_err(|_| ProtoError::Ticket("holds a malformed length"))?;
         let relay_len = u16::from_le_bytes(len_bytes) as usize;
-        ensure!(
-            relay_bytes.len() == relay_len,
-            "ticket says {relay_len} relay bytes but carries {}",
-            relay_bytes.len()
-        );
+        if relay_bytes.len() != relay_len {
+            return Err(ProtoError::Ticket(
+                "says a relay length that the bytes do not match",
+            ));
+        }
         let relay = if relay_len == 0 {
             None
         } else {
-            let text = str::from_utf8(relay_bytes).context("relay URL is not utf8")?;
-            let relay: RelayUrl = text.parse().context("ticket holds an invalid relay URL")?;
+            let text = str::from_utf8(relay_bytes)
+                .map_err(|_| ProtoError::Ticket("holds a relay URL that is not utf8"))?;
+            let relay: RelayUrl = text
+                .parse()
+                .map_err(|_| ProtoError::Ticket("holds an invalid relay URL"))?;
             Some(relay)
         };
 

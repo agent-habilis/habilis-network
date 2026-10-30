@@ -44,5 +44,5 @@ pub async fn read_msg<T: DeserializeOwned>(recv: &mut RecvStream) -> Result<T> {
     recv.read_exact(&mut body)
         .await
         .context("read frame body")?;
-    decode_body(&body)
+    Ok(decode_body(&body)?)
 }

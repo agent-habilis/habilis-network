@@ -738,7 +738,7 @@ const RULES: Rule[] = [
   {
     name: "anyhow_pub",
     scan: countAnyhowPub,
-    skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/[^/]+\/src\/)/,
+    skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/)|\/chat-native\//,
     glob: "crates/**/*.rs",
     why: "A public signature returns a typed error, not anyhow. A binary, a CLI and a private helper may keep anyhow.",
   },
