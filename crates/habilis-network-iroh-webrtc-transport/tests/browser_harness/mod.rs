@@ -61,7 +61,7 @@ pub(crate) use habilis_network_iroh_webrtc_transport::bench::{
 };
 pub(crate) use pair::Pair;
 
-/// A browser peer: WebRTC is its only data path, and no relay, so a run that
+/// A browser peer: `WebRTC` is its only data path, and no relay, so a run that
 /// claims to be browser↔browser can be shown to be one.
 /// `JsValue` is not an `Error`, so it cannot cross `?` on its own.
 pub(crate) fn js_error(error: &wasm_bindgen::JsValue) -> anyhow::Error {
