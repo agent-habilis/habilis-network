@@ -63,10 +63,10 @@ impl Hub {
             inner.sent.push(frame.clone());
             inner.members.clone()
         };
-        for member in members
-            .iter()
-            .filter(|member| member.app_id() != from.app_id())
-        {
+        for member in &members {
+            if member.app_id() == from.app_id() {
+                continue;
+            }
             // A member that is not the destination drops the frame: that is the flood.
             let _ = member.deliver(frame);
         }

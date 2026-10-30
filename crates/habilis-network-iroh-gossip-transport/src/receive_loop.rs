@@ -77,7 +77,7 @@ mod tests {
     use iroh::endpoint::transports;
     use iroh::{endpoint, protocol};
     use iroh_gossip::api;
-    use std::{net, sync};
+    use std::{array, net, sync};
     use tokio::{io, time};
     fn secret(seed: u8) -> SecretKey {
         SecretKey::from_bytes(&[seed; 32])
@@ -221,13 +221,10 @@ mod tests {
                     return;
                 }
                 let topic = TopicId::from_bytes([9u8; 32]);
-                let lookups = [
-                    MemoryLookup::new(),
-                    MemoryLookup::new(),
-                    MemoryLookup::new(),
-                ];
+                let lookups: [MemoryLookup; 3] = array::from_fn(|_| MemoryLookup::new());
                 let mut nodes = Vec::new();
-                for (index, lookup) in lookups.iter().enumerate() {
+                let indexed: Vec<(usize, &MemoryLookup)> = lookups.iter().enumerate().collect();
+                for (index, lookup) in indexed {
                     let key = secret(10 + u8::try_from(index).expect("small"));
                     let handle = GossipHandle::new(key.public());
                     // A has IPv6 loopback only, C has IPv4 only, and B has both: A and C have
