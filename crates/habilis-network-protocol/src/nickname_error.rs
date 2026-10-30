@@ -303,35 +303,30 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         // The validating Deserialize rejects what `new` rejects, so a crafted
         // wire nickname can't bypass the charset/length rules.
+        let with_hash: Result<Nickname, _> = serde_json::from_str("\"a#b\"");
+        assert!(with_hash.is_err(), "a hash in a json nickname is refused"); // reserved
+        let with_less_than: Result<Nickname, _> = serde_json::from_str("\"a<b\"");
         assert!(
-            serde_json::from_str::<Nickname>("\"a#b\"").is_err(),
-            "a hash in a json nickname is refused"
-        ); // reserved
-        assert!(
-            serde_json::from_str::<Nickname>("\"a<b\"").is_err(),
+            with_less_than.is_err(),
             "a less-than sign in a json nickname is refused"
         ); // reserved
+        let with_bell: Result<Nickname, _> = serde_json::from_str("\"a\\u0007b\"");
+        assert!(with_bell.is_err(), "a bell in a json nickname is refused"); // bell
+        let with_rlo: Result<Nickname, _> = serde_json::from_str("\"a\\u202Eb\"");
         assert!(
-            serde_json::from_str::<Nickname>("\"a\\u0007b\"").is_err(),
-            "a bell in a json nickname is refused"
-        ); // bell
-        assert!(
-            serde_json::from_str::<Nickname>("\"a\\u202Eb\"").is_err(),
+            with_rlo.is_err(),
             "a right-to-left override in a json nickname is refused"
         ); // RLO bidi
-        assert!(
-            serde_json::from_str::<Nickname>("\"\"").is_err(),
-            "an empty json nickname is refused"
-        ); // empty
+        let empty: Result<Nickname, _> = serde_json::from_str("\"\"");
+        assert!(empty.is_err(), "an empty json nickname is refused"); // empty
         let overlong = format!("\"{}\"", "a".repeat(33));
+        let overlong_nickname: Result<Nickname, _> = serde_json::from_str(&overlong);
         assert!(
-            serde_json::from_str::<Nickname>(&overlong).is_err(),
+            overlong_nickname.is_err(),
             "an overlong json nickname is refused"
         );
         // A valid nickname still round-trips.
-        assert!(
-            serde_json::from_str::<Nickname>("\"swift-cedar\"").is_ok(),
-            "a plain json nickname is accepted"
-        );
+        let plain: Result<Nickname, _> = serde_json::from_str("\"swift-cedar\"");
+        assert!(plain.is_ok(), "a plain json nickname is accepted");
     }
 }

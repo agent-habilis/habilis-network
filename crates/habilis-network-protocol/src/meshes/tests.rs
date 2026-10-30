@@ -758,9 +758,10 @@ fn mesh_id_round_trips_max_byte_name() {
 mod prop {
     use super::LockedMesh;
     use proptest::array::{uniform16, uniform32};
-    use proptest::prelude::any;
     use proptest::strategy::Strategy;
-    use proptest::{prop_assert, prop_assert_eq, prop_assert_ne, prop_assume, proptest};
+    use proptest::{
+        bool as arb_bool, prop_assert, prop_assert_eq, prop_assert_ne, prop_assume, proptest,
+    };
 
     use super::{Mesh, MeshConfig, MeshName, SEED_LEN};
     use crate::crypto::Seed;
@@ -778,7 +779,7 @@ mod prop {
     }
 
     fn arb_config() -> impl Strategy<Value = MeshConfig> {
-        (any::<bool>(), option::of(uniform16(0u8..))).prop_map(build_config)
+        (arb_bool::ANY, option::of(uniform16(0u8..))).prop_map(build_config)
     }
 
     fn build_config((public, verifier): (bool, Option<[u8; 16]>)) -> MeshConfig {

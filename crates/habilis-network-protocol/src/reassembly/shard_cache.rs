@@ -38,13 +38,13 @@ impl ShardCache {
     /// Cache one just-sent group's frames (indexed by shard `idx`), evicting
     /// the oldest groups past the byte budget. The newest group always stays.
     pub fn insert(&mut self, group: ShardGroup, frames: Vec<WireFrame>) {
-        self.bytes += frames.iter().map(WireFrame::len).sum::<usize>();
+        let added: usize = frames.iter().map(WireFrame::len).sum();
+        self.bytes += added;
         self.groups.push_back(CachedGroup { group, frames });
         while self.groups.len() > 1 && self.bytes > SHARD_CACHE_BUDGET_BYTES {
             if let Some(evicted) = self.groups.pop_front() {
-                self.bytes = self
-                    .bytes
-                    .saturating_sub(evicted.frames.iter().map(WireFrame::len).sum::<usize>());
+                let freed: usize = evicted.frames.iter().map(WireFrame::len).sum();
+                self.bytes = self.bytes.saturating_sub(freed);
             }
         }
     }

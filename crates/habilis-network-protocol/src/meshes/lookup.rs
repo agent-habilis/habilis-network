@@ -1977,10 +1977,8 @@ mod choice_tests {
             vec![Transport::Udp, Transport::Relay],
             "the transport list deserializes from its json names"
         );
-        assert!(
-            serde_json::from_str::<Vec<Lookup>>(r#"["public"]"#).is_err(),
-            "an unknown json lookup name is refused"
-        );
+        let unknown: Result<Vec<Lookup>, _> = serde_json::from_str(r#"["public"]"#);
+        assert!(unknown.is_err(), "an unknown json lookup name is refused");
     }
 
     #[test]

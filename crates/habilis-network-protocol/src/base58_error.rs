@@ -168,10 +168,11 @@ mod tests {
     fn round_trips_an_empty_payload() {
         let _guard = ::habilis_network_test_tracing::init();
         let encoded = encode(b"");
+        let empty: Vec<u8> = Vec::new();
         assert_eq!(
             decode(&encoded, "test value")
                 .expect("the encoded value was just produced by encode, so it decodes"),
-            Vec::<u8>::new(),
+            empty,
             "an empty payload round trips through base58"
         );
     }
@@ -232,23 +233,22 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let bytes = [1u8, 2, 3, 4, 5];
         let mut position = 0;
+        let first: Option<[u8; 2]> = take_array(&bytes, &mut position);
         assert_eq!(
-            take_array::<2>(&bytes, &mut position),
+            first,
             Some([1, 2]),
             "take_array returns the first two bytes and moves the cursor"
         );
         assert_eq!(position, 2, "the cursor is at two after the first take");
+        let second: Option<[u8; 3]> = take_array(&bytes, &mut position);
         assert_eq!(
-            take_array::<3>(&bytes, &mut position),
+            second,
             Some([3, 4, 5]),
             "take_array returns the next three bytes"
         );
         assert_eq!(position, 5, "the cursor is at five after the second take");
-        assert_eq!(
-            take_array::<1>(&bytes, &mut position),
-            None,
-            "a take past the end returns none"
-        );
+        let past_end: Option<[u8; 1]> = take_array(&bytes, &mut position);
+        assert_eq!(past_end, None, "a take past the end returns none");
     }
 
     #[test]
@@ -256,10 +256,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let bytes = [1u8, 2, 3];
         let mut position = usize::MAX;
-        assert_eq!(
-            take_array::<4>(&bytes, &mut position),
-            None,
-            "a huge cursor does not overflow the take"
-        );
+        let taken: Option<[u8; 4]> = take_array(&bytes, &mut position);
+        assert_eq!(taken, None, "a huge cursor does not overflow the take");
     }
 }

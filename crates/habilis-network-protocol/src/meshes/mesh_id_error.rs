@@ -255,8 +255,8 @@ mod mesh_id_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let invalid =
             serde_json::to_string("AbCdEf1234567").expect("a short string is a valid JSON string");
-        let error = serde_json::from_str::<MeshId>(&invalid)
-            .expect_err("the invalid JSON in this test is refused by MeshId");
+        let parsed: Result<MeshId, _> = serde_json::from_str(&invalid);
+        let error = parsed.expect_err("the invalid JSON in this test is refused by MeshId");
         assert!(
             error.to_string().contains("invalid gossip hash"),
             "a json mesh id with an invalid hash names the hash"

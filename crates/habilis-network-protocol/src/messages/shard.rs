@@ -205,8 +205,9 @@ mod shard_tests {
     #[test]
     fn group_deserialize_rejects_non_uuid() {
         let _guard = ::habilis_network_test_tracing::init();
+        let not_uuid: Result<ShardGroup, _> = serde_json::from_str("\"not-a-uuid\"");
         assert!(
-            serde_json::from_str::<ShardGroup>("\"not-a-uuid\"").is_err(),
+            not_uuid.is_err(),
             "a non-uuid shard group is refused on deserialize"
         );
         assert!(
@@ -221,32 +222,30 @@ mod shard_tests {
         let group = ShardGroup::parse_uuid(GROUP).expect("valid group");
         let group = group.as_str();
         // total < 2 (a single shard is never multipart).
+        let single: Result<Shard, _> =
+            serde_json::from_str(&format!(r#"{{"group":"{group}","idx":0,"total":1}}"#));
         assert!(
-            serde_json::from_str::<Shard>(&format!(r#"{{"group":"{group}","idx":0,"total":1}}"#))
-                .is_err(),
+            single.is_err(),
             "a shard with an out-of-range total is refused"
         );
         // A large-but-sane total is fine (the store is byte-budgeted)...
+        let large: Result<Shard, _> =
+            serde_json::from_str(&format!(r#"{{"group":"{group}","idx":0,"total":9999}}"#));
         assert!(
-            serde_json::from_str::<Shard>(&format!(
-                r#"{{"group":"{group}","idx":0,"total":9999}}"#
-            ))
-            .is_ok(),
+            large.is_ok(),
             "a shard with an out-of-range index is refused"
         );
         // ...but an absurd header past the tripwire is rejected.
-        assert!(
-            serde_json::from_str::<Shard>(&format!(
-                r#"{{"group":"{group}","idx":0,"total":{}}}"#,
-                u64::from(super::MAX_SHARD_TOTAL) + 1
-            ))
-            .is_err(),
-            "a shard with a zero total is refused"
-        );
+        let absurd: Result<Shard, _> = serde_json::from_str(&format!(
+            r#"{{"group":"{group}","idx":0,"total":{}}}"#,
+            u64::from(super::MAX_SHARD_TOTAL) + 1
+        ));
+        assert!(absurd.is_err(), "a shard with a zero total is refused");
         // idx must be inside total.
+        let index_at_total: Result<Shard, _> =
+            serde_json::from_str(&format!(r#"{{"group":"{group}","idx":3,"total":3}}"#));
         assert!(
-            serde_json::from_str::<Shard>(&format!(r#"{{"group":"{group}","idx":3,"total":3}}"#))
-                .is_err(),
+            index_at_total.is_err(),
             "a shard whose index is not below its total is refused"
         );
     }

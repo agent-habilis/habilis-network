@@ -200,22 +200,23 @@ mod body_tests {
         let _guard = ::habilis_network_test_tracing::init();
         // The validating Deserialize rejects a body a crafted wire message
         // could otherwise smuggle past `new` (e.g. a NUL or an ANSI escape).
+        let with_nul: Result<MessageBody, _> = serde_json::from_str("\"evil\\u0000body\"");
         assert!(
-            serde_json::from_str::<MessageBody>("\"evil\\u0000body\"").is_err(),
+            with_nul.is_err(),
             "a json body with a nul escape is refused"
         );
+        let with_escape: Result<MessageBody, _> = serde_json::from_str("\"esc\\u001b[31m\"");
         assert!(
-            serde_json::from_str::<MessageBody>("\"esc\\u001b[31m\"").is_err(),
+            with_escape.is_err(),
             "a json body with an escape sequence is refused"
         );
         // Newline/tab and ordinary text still round-trip.
+        let with_line_feed: Result<MessageBody, _> = serde_json::from_str("\"line\\nfeed\"");
         assert!(
-            serde_json::from_str::<MessageBody>("\"line\\nfeed\"").is_ok(),
+            with_line_feed.is_ok(),
             "a json body with a line feed is accepted"
         );
-        assert!(
-            serde_json::from_str::<MessageBody>("\"\"").is_ok(),
-            "an empty json body is accepted"
-        );
+        let empty: Result<MessageBody, _> = serde_json::from_str("\"\"");
+        assert!(empty.is_ok(), "an empty json body is accepted");
     }
 }

@@ -211,17 +211,11 @@ mod id_tests {
         let _guard = ::habilis_network_test_tracing::init();
         // The derived transparent Deserialize would accept any string and let
         // `as_uuid_bytes` panic later; the validating impl rejects it here.
-        assert!(
-            serde_json::from_str::<MessageId>("\"not-a-uuid\"").is_err(),
-            "a non-uuid json id is refused"
-        );
-        assert!(
-            serde_json::from_str::<MessageId>("\"550e8400\"").is_err(),
-            "a short json id is refused"
-        );
-        assert!(
-            serde_json::from_str::<MessageId>("\"\"").is_err(),
-            "an empty json id is refused"
-        );
+        let not_uuid: Result<MessageId, _> = serde_json::from_str("\"not-a-uuid\"");
+        assert!(not_uuid.is_err(), "a non-uuid json id is refused");
+        let short: Result<MessageId, _> = serde_json::from_str("\"550e8400\"");
+        assert!(short.is_err(), "a short json id is refused");
+        let empty: Result<MessageId, _> = serde_json::from_str("\"\"");
+        assert!(empty.is_err(), "an empty json id is refused");
     }
 }

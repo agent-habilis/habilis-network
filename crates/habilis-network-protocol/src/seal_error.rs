@@ -239,9 +239,10 @@ pub fn unseal_from_body(
     if envelope.version != ENVELOPE_VERSION {
         return Err(SealError::UnsupportedVersion(envelope.version));
     }
-    let epk =
-        decode_array::<32>(&envelope.epk).map_err(SealError::with_step("bad ephemeral key"))?;
-    let nonce = decode_array::<12>(&envelope.nonce).map_err(SealError::with_step("bad nonce"))?;
+    let epk: [u8; 32] =
+        decode_array(&envelope.epk).map_err(SealError::with_step("bad ephemeral key"))?;
+    let nonce: [u8; 12] =
+        decode_array(&envelope.nonce).map_err(SealError::with_step("bad nonce"))?;
     let ct = bs58::decode(&envelope.ct)
         .into_vec()
         .map_err(SealError::with_step("bad ciphertext"))?;

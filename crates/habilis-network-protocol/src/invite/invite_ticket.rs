@@ -211,21 +211,19 @@ impl InviteTicket {
         }
         let payload = &framed[2..];
         let mut position = 0;
-        let expiry = UnixSecs::from(
-            take_array::<8>(payload, &mut position)
-                .ok_or(InviteError::Truncated("missing expiry"))?,
-        );
+        let expiry_bytes: [u8; 8] =
+            take_array(payload, &mut position).ok_or(InviteError::Truncated("missing expiry"))?;
+        let expiry = UnixSecs::from(expiry_bytes);
         let flags = *payload
             .get(position)
             .ok_or(InviteError::Truncated("missing flags"))?;
         position += 1;
         let password = flags & PASSWORD_BIT != 0;
-        let signature = take_array::<64>(payload, &mut position)
+        let signature: [u8; 64] = take_array(payload, &mut position)
             .ok_or(InviteError::Truncated("missing signature"))?;
-        let hash_len = usize::from(u16::from_le_bytes(
-            take_array::<2>(payload, &mut position)
-                .ok_or(InviteError::Truncated("missing hash length"))?,
-        ));
+        let hash_len_bytes: [u8; 2] = take_array(payload, &mut position)
+            .ok_or(InviteError::Truncated("missing hash length"))?;
+        let hash_len = usize::from(u16::from_le_bytes(hash_len_bytes));
         let hash_end = position
             .checked_add(hash_len)
             .ok_or(InviteError::Truncated("hash length overflow"))?;

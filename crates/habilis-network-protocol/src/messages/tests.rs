@@ -802,7 +802,6 @@ mod snapshots {
 
 mod prop {
     use proptest::collection::vec as arb_vec;
-    use proptest::prelude::any;
     use proptest::strategy::Strategy;
     use proptest::{prop_assert, prop_assert_eq, proptest};
 
@@ -842,7 +841,7 @@ mod prop {
                 }
 
         #[test]
-        fn prop_presence_round_trip(is_join in any::<bool>()) {
+        fn prop_presence_round_trip(is_join: bool) {
             let _guard = ::habilis_network_test_tracing::init();
             let test_nick = Nickname::from("test-nick");
             let message = if is_join {

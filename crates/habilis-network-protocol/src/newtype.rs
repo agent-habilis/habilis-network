@@ -40,33 +40,25 @@ mod tests {
     #[test]
     fn deserialization_still_rejects_what_new_rejects() {
         let _guard = ::habilis_network_test_tracing::init();
+        let nickname: Result<Nickname, _> = serde_json::from_str("\"has space\"");
+        assert!(nickname.is_err(), "a json nickname with a space is refused");
+        let message_id: Result<MessageId, _> = serde_json::from_str("\"not-a-uuid\"");
         assert!(
-            serde_json::from_str::<Nickname>("\"has space\"").is_err(),
-            "a json nickname with a space is refused"
-        );
-        assert!(
-            serde_json::from_str::<MessageId>("\"not-a-uuid\"").is_err(),
+            message_id.is_err(),
             "a json message id that is not a uuid is refused"
         );
+        let body: Result<MessageBody, _> = serde_json::from_str("\"\\u0007\"");
+        assert!(body.is_err(), "a json message body with a bell is refused");
+        let app_tag: Result<AppTag, _> = serde_json::from_str("\"has space\"");
+        assert!(app_tag.is_err(), "a json app tag with a space is refused");
+        let corr_id: Result<CorrId, _> = serde_json::from_str("\"\"");
+        assert!(corr_id.is_err(), "an empty json correlation id is refused");
+        let shard_group: Result<ShardGroup, _> = serde_json::from_str("\"not-a-uuid\"");
         assert!(
-            serde_json::from_str::<MessageBody>("\"\\u0007\"").is_err(),
-            "a json message body with a bell is refused"
-        );
-        assert!(
-            serde_json::from_str::<AppTag>("\"has space\"").is_err(),
-            "a json app tag with a space is refused"
-        );
-        assert!(
-            serde_json::from_str::<CorrId>("\"\"").is_err(),
-            "an empty json correlation id is refused"
-        );
-        assert!(
-            serde_json::from_str::<ShardGroup>("\"not-a-uuid\"").is_err(),
+            shard_group.is_err(),
             "a json shard group that is not a uuid is refused"
         );
-        assert!(
-            serde_json::from_str::<MeshId>("\"!!\"").is_err(),
-            "a json mesh id of punctuation is refused"
-        );
+        let mesh_id: Result<MeshId, _> = serde_json::from_str("\"!!\"");
+        assert!(mesh_id.is_err(), "a json mesh id of punctuation is refused");
     }
 }
