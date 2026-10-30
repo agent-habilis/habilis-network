@@ -79,6 +79,13 @@ pub(super) const MAX_RELAY_LADDER: usize = 16;
 /// Wire ceiling on a single relay URL's byte length.
 pub(super) const MAX_RELAY_URL_BYTES: usize = 512;
 
+impl Default for LookupOpts {
+    /// Loopback: nothing reaches off the machine until a caller asks for it.
+    fn default() -> Self {
+        Self::loopback()
+    }
+}
+
 impl LookupOpts {
     /// Every lookup off, with the relay choice given. Turn one on with its `with_` method.
     #[must_use]
@@ -362,7 +369,7 @@ const ISSUER_PUBKEY_LEN: usize = 32;
 /// let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
 /// assert!(config.lookups.is_loopback());
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct MeshConfig {
     /// The lookups that find the mesh.

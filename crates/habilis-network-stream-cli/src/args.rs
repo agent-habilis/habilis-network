@@ -5,7 +5,7 @@ use habilis_network::protocol::{Lookup, Transport};
 use habilis_network_stream::StreamOpts;
 
 /// Stream stdin to one reader, or a stream's bytes to stdout.
-#[derive(Debug, Parser)]
+#[derive(Debug, Parser, Clone, Default)]
 #[command(name = "habilis-network-stream", version)]
 pub(crate) struct Args {
     /// A stream hash to read to stdout. Without one, stdin is streamed and the
