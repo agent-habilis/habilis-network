@@ -18,6 +18,10 @@ pub struct ConnectionHook {
 }
 
 impl EndpointHooks for ConnectionHook {
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "iroh's EndpointHooks::after_handshake is an async trait method; this impl decides without awaiting"
+    )]
     async fn after_handshake<'a>(&'a self, connection: &'a Connection) -> AfterHandshakeOutcome {
         self.admission.note_connection(connection);
         // A gossip connection on the gossip rung would carry the gossip that its frames need:

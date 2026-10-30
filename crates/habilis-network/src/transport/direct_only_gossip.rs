@@ -215,6 +215,10 @@ mod watcher_tests {
                 #[derive(Debug, Clone)]
                 struct WatchAndDrop;
                 impl ProtocolHandler for WatchAndDrop {
+                    #[expect(
+                        clippy::unused_async_trait_impl,
+                        reason = "iroh's ProtocolHandler::accept is an async trait method; this accept does its work without awaiting"
+                    )]
                     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
                         super::watch_relay_policy(&connection, None);
                         Ok(())

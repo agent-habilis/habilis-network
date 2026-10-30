@@ -40,6 +40,10 @@ impl NudgeAcceptor {
 }
 
 impl ProtocolHandler for NudgeAcceptor {
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "iroh's ProtocolHandler::accept is an async trait method; this accept does its work without awaiting"
+    )]
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         connection.close(0u32.into(), b"nudge");
         Ok(())

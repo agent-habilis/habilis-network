@@ -191,6 +191,10 @@ impl WebRtcSignalAcceptor {
 }
 
 impl ProtocolHandler for WebRtcSignalAcceptor {
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "iroh's ProtocolHandler::accept is an async trait method; this accept does its work without awaiting"
+    )]
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         // The remote's identity comes from the *connection*, never from the
         // envelope. Over an authenticated carrier the TLS-proven id is the real

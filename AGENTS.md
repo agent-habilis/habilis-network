@@ -259,7 +259,7 @@ Issue #29 records each decision.
 
 ### Remaining `#[expect]` attributes
 
-Nine `#[expect(...)]` attributes stay. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here.
+Thirteen `#[expect(...)]` attributes stay: nine that suppress an FFI or foreign-enum lint, and four that suppress `clippy::unused_async_trait_impl` on an impl of an iroh trait. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here.
 
 | File | Lint | Reason |
 | --- | --- | --- |
@@ -272,6 +272,10 @@ Nine `#[expect(...)]` attributes stay. Each one names the lint it suppresses and
 | `habilis-network-util/src/resident_memory.rs` (mmap) | `unsafe_code` | `libc` `mmap` and `munmap`: the pages must go back at once |
 | `habilis-network/src/daemon/params/join_params.rs` | `clippy::wildcard_enum_match_arm` | foreign `non_exhaustive` enum: the compiler needs a wildcard arm, and the named variants come before it |
 | `tasks/src/bench/native.rs` | `clippy::wildcard_enum_match_arm` | `TransportAddr` is `non_exhaustive`: a rung this runner does not name is `other` |
+| `habilis-network/src/transport/admission/connection_hook.rs` | `clippy::unused_async_trait_impl` | iroh's `EndpointHooks::after_handshake` is an async trait method; this impl decides without awaiting |
+| `habilis-network/src/transport/webrtc/nudge_acceptor.rs` | `clippy::unused_async_trait_impl` | iroh's `ProtocolHandler::accept` is an async trait method; this accept does its work without awaiting |
+| `habilis-network/src/transport/webrtc/web_rtc_signal_acceptor.rs` | `clippy::unused_async_trait_impl` | iroh's `ProtocolHandler::accept` is an async trait method; this accept does its work without awaiting |
+| `habilis-network/src/transport/direct_only_gossip.rs` (`WatchAndDrop`) | `clippy::unused_async_trait_impl` | iroh's `ProtocolHandler::accept` is an async trait method; this accept does its work without awaiting |
 
 ### Rules of the guide that do not apply
 
