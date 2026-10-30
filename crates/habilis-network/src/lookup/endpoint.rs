@@ -24,7 +24,7 @@ use iroh::endpoint;
 #[must_use]
 pub(crate) fn install_transports(
     mut builder: endpoint::Builder,
-    transports: &super::TransportHandles,
+    transports: super::TransportHandles,
 ) -> endpoint::Builder {
     // Register the multi-hop custom transport (plus its address lookup + backup
     // path selector) so a `connect` to a peer with no direct path rides the
@@ -33,7 +33,7 @@ pub(crate) fn install_transports(
     #[cfg(feature = "multihop")]
     let mut selector_set = false;
     #[cfg(feature = "multihop")]
-    if let Some(handle) = transports.multihop.clone() {
+    if let Some(handle) = transports.multihop {
         builder = builder.preset(handle);
         selector_set = true;
     }
@@ -43,7 +43,7 @@ pub(crate) fn install_transports(
     // rather than replacing them. Two native peers are better served by iroh's
     // own hole-punching; this is the browser's only path, and a fallback for
     // NATs that defeat hole-punching but not ICE.
-    if let Some(handle) = transports.webrtc.clone() {
+    if let Some(handle) = transports.webrtc {
         if transports.options.webrtc {
             builder = builder.add_custom_transport(handle.transport());
             // MUST come after `builder.preset(handle)` for multihop above: there
@@ -65,7 +65,7 @@ pub(crate) fn install_transports(
     // Gossip is the lowest custom rung, and the member endpoint only. The selector of the
     // multihop or the `WebRTC` transport already ranks it; with neither, iroh's default
     // would put gossip above IP, so the ladder of the gossip handle is the selector.
-    if let Some(handle) = transports.gossip.clone() {
+    if let Some(handle) = transports.gossip {
         builder = builder
             .add_custom_transport(handle.custom_transport())
             .address_lookup(handle.address_lookup());
@@ -73,7 +73,7 @@ pub(crate) fn install_transports(
             builder = builder.path_selector(handle.path_selector());
         }
     }
-    if let Some(admission) = &transports.admission {
+    if let Some(admission) = transports.admission {
         builder = builder.hooks(admission.connection_hook());
     }
     builder

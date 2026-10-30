@@ -152,7 +152,9 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     }
 
     let options = transports.options;
-    builder = super::install_transports(builder, &transports);
+    #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+    let has_webrtc = transports.webrtc.is_some();
+    builder = super::install_transports(builder, transports);
     // Tests only: the underlay is an endpoint of its own, and a test that takes
     // paths away from a pair (`habilis_network_iroh_webrtc_transport::block_ip_to`)
     // needs a selector on it that reads the same tables. An underlay with a
@@ -160,7 +162,7 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     // which reads them. This one is for an underlay without a handle, which would
     // otherwise run iroh's default selector: it gets `MultihopLadder`.
     #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
-    if let Some(id) = underlay_id.filter(|_| underlay && transports.webrtc.is_none()) {
+    if let Some(id) = underlay_id.filter(|_| underlay && !has_webrtc) {
         builder = builder.path_selector(
             habilis_network_iroh_multihop_transport::underlay_path_selector(
                 habilis_network_iroh_multihop_transport::UnderlayId::new(id),
