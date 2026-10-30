@@ -226,6 +226,7 @@ unsafe_op_in_unsafe_fn = "deny"
 exhaustive_enums = "warn"
 exhaustive_structs = "warn"
 pedantic = { level = "warn", priority = -1 }
+derive_partial_eq_without_eq = "warn"
 # `clippy.toml` lists the Tokio calls that panic in a browser. The lint stays off here: on a native
 # target `n0_future` re-exports those functions, so a native run would flag the replacements. Every
 # wasm32 clippy row (the gate and `ci.yml`) passes `-D clippy::disallowed_methods`.
