@@ -227,9 +227,10 @@ exhaustive_enums = "warn"
 exhaustive_structs = "warn"
 pedantic = { level = "warn", priority = -1 }
 derive_partial_eq_without_eq = "warn"
-# `clippy.toml` lists the Tokio calls that panic in a browser. The lint stays off here: on a native
-# target `n0_future` re-exports those functions, so a native run would flag the replacements. Every
-# wasm32 clippy row (the gate and `ci.yml`) passes `-D clippy::disallowed_methods`.
+# `clippy.toml` lists the Tokio and std clock calls that panic in a browser, so the ban is a wasm rule.
+# On a native target `n0_future` resolves to the same Tokio functions, so a native run flags every
+# timer and spawn: 56 correct calls. The lint stays off here, and the wasm32 clippy rows (the gate and
+# `ci.yml`) deny it with `-D clippy::disallowed_methods`.
 disallowed_methods = "allow"
 # Prevents holding a sync `std::sync::Mutex` (or RwLock) guard across an
 # `.await` point — a recipe for deadlocks.

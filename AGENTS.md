@@ -255,6 +255,7 @@ Issue #29 records each decision.
 - Traits (R7, gated by `pub-trait.ts`): it accepts a `pub trait` that a crate file uses as a generic bound, a dyn object, an impl bound or a supertrait. Any other `pub trait` is refused.
 - When to add an impl (R1): judgment only, because no gate can know which impls a future caller needs. Proxies tried: the derive lints of R2 and R4, `missing_debug_implementations`, `missing_copy_implementations`, and the Clone, Copy, Eq, Ord and Hash gates of the other branches. Red probe, 2026-10-28: a scratch crate with a hand `Default` and a `from_str(&str)` fires `derivable_impls` and `should_implement_trait` under `-D warnings`.
 - Cost of a macro (M2): the cost of a macro is read in review. No mechanical proxy: the cost of a macro is a reading of its use, which no gate measures. The proc macro sits on the test path only.
+- `clippy::disallowed_methods` on a native target: off in `Cargo.toml`, because the ban list is a wasm rule. `n0_future` resolves to tokio on native, so a native run would flag 56 correct timer and spawn calls. The wasm32 clippy rows deny it with `-D clippy::disallowed_methods`, and the crate roots of the wasm crates carry the deny.
 
 ### Remaining `#[expect]` attributes
 
