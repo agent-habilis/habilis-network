@@ -288,7 +288,7 @@ pub async fn join<S: NodeSink + 'static>(
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     if NEW_MEMBERS_ARE_BLIND.load(Ordering::SeqCst) {
         // Before the loop is spawned, so that the startup walk is blind too.
-        beacon::set_blind_rung_probes(config.endpoint.id(), true);
+        beacon::set_blind_rung_probes(config.endpoints.endpoint.id(), true);
     }
 
     // `SignalHandling::Leave` — this is a library inside somebody else's

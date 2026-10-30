@@ -12,3 +12,7 @@ mod endpoint_owner;
 pub(crate) use endpoint_owner::EndpointOwner;
 mod event_loop_config;
 pub use event_loop_config::EventLoopConfig;
+
+pub(crate) use event_loop_config::{
+    Endpoints, MeshSpec, RendezvousConfig, RuntimeConfig, TransportSet,
+};

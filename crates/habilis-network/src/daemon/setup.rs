@@ -29,7 +29,9 @@ use lookup::{
 use crate::beacon::RendezvousParams;
 use crate::lifecycle;
 
-use super::config::EndpointOwner;
+use super::config::{
+    EndpointOwner, Endpoints, MeshSpec, RendezvousConfig, RuntimeConfig, TransportSet,
+};
 use super::{CoHostPolicy, DriverMode, EventLoopConfig};
 
 use crate::gossip::split;
@@ -611,6 +613,19 @@ pub async fn setup_mesh(
         .map_err(SetupError::internal)
 }
 
+/// The mesh config the setup runs with. Create mints it from the caller's choices; join decodes
+/// it from the id, so one source of truth either way.
+fn validated_mesh_config(kind: &SetupKind) -> Result<&MeshConfig> {
+    let mesh_config = match kind {
+        SetupKind::Create { config, .. } => config,
+        SetupKind::Join { mesh, .. } | SetupKind::Topic { mesh, .. } => mesh.config(),
+    };
+    // Decode already validated a joined id; a minted config has had no check
+    // yet, and an invalid one would produce an id every joiner rejects.
+    mesh_config.validate()?;
+    Ok(mesh_config)
+}
+
 async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig> {
     let SetupParams {
         author,
@@ -635,25 +650,11 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     // The localhost binding is owned + bound by the caller; the engine only needs
     // the resolved port for the `ready` event. `Some(0)` (ephemeral) is resolved
     // caller-side and passed back in here as the real port.
-    // Create mints the config from the caller's choices; join decodes it
-    // from the id — one source of truth either way.
-    let mesh_config = match &kind {
-        SetupKind::Create { config, .. } => config,
-        SetupKind::Join { mesh, .. } | SetupKind::Topic { mesh, .. } => mesh.config(),
-    };
-    // Decode already validated a joined id; a minted config has had no check
-    // yet, and an invalid one would produce an id every joiner rejects.
-    mesh_config.validate()?;
+    let mesh_config = validated_mesh_config(&kind)?;
     let lookups = mesh_config.lookups.clone();
     let relay_transport =
         transport::PayloadPath::from(mesh_config.transport.allows(Transport::Relay));
     let transports = member_transports(&lookups, transports, &mesh_config.transport)?;
-    // The mesh policy's `multihop`, on a node that has a direct path for its underlay to
-    // forward over: UDP, or a WebRTC data channel when IP is cleared. With neither there is
-    // no direct path, and no handle.
-    let multihop =
-        mesh_config.transport.allows(Transport::Multihop) && (transports.udp || transports.webrtc);
-
     // The off-loop rung channel: the backgrounded startup probe and the
     // beacon's liveness self-monitor publish a chosen rung here; the
     // event loop applies it (re-register + re-home) without ever running
@@ -664,10 +665,6 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
 
     let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport);
 
-    // This member's per-author signing identity. Hoisted above the match so it is
-    // available to both attach paths.
-    let identity = sync::Arc::new(identity::Identity::generate());
-
     let build = SetupBuild {
         author: &author,
         sink: sink.as_ref(),
@@ -675,7 +672,11 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         max_direct,
         lookups: &lookups,
         unicast_acceptor: &unicast_acceptor,
-        multihop,
+        // The mesh policy's `multihop`, on a node that has a direct path for its underlay to
+        // forward over: UDP, or a WebRTC data channel when IP is cleared. With neither there is
+        // no direct path, and no handle.
+        multihop: mesh_config.transport.allows(Transport::Multihop)
+            && (transports.udp || transports.webrtc),
         transports,
         injected,
         protocols: sync::Mutex::new(protocols),
@@ -710,53 +711,61 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     // Read out of `build` before anything below moves what it borrows
     // (`author`, `sink`, `rung_tx`).
 
-    // Off the critical path: nothing below blocks `ready`, which `run` emits
-    // once the IPC socket accepts. Confirm/correct the optimistic rung 0 in the
-    // background (covers a joiner, which has no beacon self-monitor of its own).
-    let rung_probe = spawn_startup_rung_confirmation(ladder, rung_tx);
-
     Ok(EventLoopConfig {
-        per_peer_gate,
-        topic,
-        gossip,
-        author,
-        identity,
-        mesh: mesh_id,
-        name: mesh_name,
-        topic_string,
-        mesh_password,
-        mesh_key,
-        sink,
-        mint_mesh,
-        endpoint,
-        endpoint_owner,
-        router,
-        max_peers,
-        rendezvous_params: rdv,
-        rung_rx,
-        rung_probe,
-        cohost: cohost_override.unwrap_or(cohost),
-        runtime_base,
-        state_file,
-        #[cfg(feature = "multihop")]
-        multihop: multihop_handle,
-        #[cfg(feature = "multihop")]
-        underlay_webrtc,
-        lan_contacts,
-        webrtc,
-        webrtc_enabled: transports.webrtc,
-        local_udp_transport: UdpTransport::from(transports.udp),
-        webrtc_admission,
-        address_book,
-        webrtc_ice,
-        unicast_rx,
-        live_count,
-        relay_transport,
-        // Default to the CLI driver; the in-process sessions
-        // overwrite `cfg.driver` before handing it to `daemon::run`.
-        driver: DriverMode::Cli,
-        #[cfg(feature = "host")]
-        owner: None,
+        mesh: MeshSpec {
+            mesh: mesh_id,
+            name: mesh_name,
+            topic_string,
+            mint_mesh,
+            author,
+            identity: sync::Arc::new(identity::Identity::generate()),
+            mesh_password,
+            mesh_key,
+        },
+        transports: TransportSet {
+            webrtc,
+            webrtc_enabled: transports.webrtc,
+            webrtc_admission,
+            webrtc_ice,
+            address_book,
+            local_udp_transport: UdpTransport::from(transports.udp),
+            relay_transport,
+            #[cfg(feature = "multihop")]
+            multihop: multihop_handle,
+            #[cfg(feature = "multihop")]
+            underlay_webrtc,
+        },
+        endpoints: Endpoints {
+            topic,
+            gossip,
+            endpoint,
+            endpoint_owner,
+            router,
+            unicast_rx,
+            lan_contacts,
+        },
+        rendezvous: RendezvousConfig {
+            rendezvous_params: rdv,
+            rung_rx,
+            // Off the critical path: nothing below blocks `ready`, which `run` emits
+            // once the IPC socket accepts. Confirm/correct the optimistic rung 0 in the
+            // background (covers a joiner, which has no beacon self-monitor of its own).
+            rung_probe: spawn_startup_rung_confirmation(ladder, rung_tx),
+            cohost: cohost_override.unwrap_or(cohost),
+        },
+        runtime: RuntimeConfig {
+            sink,
+            max_peers,
+            runtime_base,
+            state_file,
+            per_peer_gate,
+            live_count,
+            // Default to the CLI driver; the in-process sessions
+            // overwrite `cfg.runtime.driver` before handing it to `daemon::run`.
+            driver: DriverMode::Cli,
+            #[cfg(feature = "host")]
+            owner: None,
+        },
     })
 }
 
@@ -1214,9 +1223,14 @@ mod tests {
                 )
                 .await
                 .expect("a loopback mesh sets up");
-                assert_eq!(config.multihop.is_some(), expected, "{list:?}");
-                config.router.shutdown().await.expect("the router stops");
-                if let Some(handle) = config.multihop.as_ref() {
+                assert_eq!(config.transports.multihop.is_some(), expected, "{list:?}");
+                config
+                    .endpoints
+                    .router
+                    .shutdown()
+                    .await
+                    .expect("the router stops");
+                if let Some(handle) = config.transports.multihop.as_ref() {
                     handle.close().await;
                 }
             }
@@ -1265,8 +1279,12 @@ mod tests {
                 )
                 .await
                 .expect("a mesh sets up");
-                assert_eq!(config.multihop.is_some(), expected, "{transports:?}");
-                if let Some(handle) = config.multihop.as_ref() {
+                assert_eq!(
+                    config.transports.multihop.is_some(),
+                    expected,
+                    "{transports:?}"
+                );
+                if let Some(handle) = config.transports.multihop.as_ref() {
                     assert_eq!(handle.link_cost(), 10, "{transports:?}");
                 }
                 // Leave closes what setup bound, the endpoint, the underlay and the leg.
@@ -1300,6 +1318,7 @@ mod tests {
             .await
             .expect("a mesh sets up");
             let leg = config
+                .transports
                 .underlay_webrtc
                 .as_ref()
                 .expect("the underlay has a WebRTC leg");
@@ -1336,10 +1355,19 @@ mod tests {
                 )
                 .await
                 .expect("a loopback mesh sets up");
-                assert_eq!(config.max_peers, want_g, "G for {max_peers}");
-                assert_eq!(config.webrtc_admission.cap(), want_c, "C for {max_direct}");
-                config.router.shutdown().await.expect("the router stops");
-                if let Some(handle) = config.multihop.as_ref() {
+                assert_eq!(config.runtime.max_peers, want_g, "G for {max_peers}");
+                assert_eq!(
+                    config.transports.webrtc_admission.cap(),
+                    want_c,
+                    "C for {max_direct}"
+                );
+                config
+                    .endpoints
+                    .router
+                    .shutdown()
+                    .await
+                    .expect("the router stops");
+                if let Some(handle) = config.transports.multihop.as_ref() {
                     handle.close().await;
                 }
             }
@@ -1561,10 +1589,15 @@ mod tests {
                 .await
                 .expect("a loopback mesh sets up");
             assert!(
-                config.multihop.is_none(),
+                config.transports.multihop.is_none(),
                 "no multihop on a udp,webrtc mesh"
             );
-            config.router.shutdown().await.expect("the router stops");
+            config
+                .endpoints
+                .router
+                .shutdown()
+                .await
+                .expect("the router stops");
             if let Some(handle) = first_handle {
                 handle.close().await;
             }
@@ -1573,13 +1606,17 @@ mod tests {
             let default_list = setup_with(Vec::new(), injected(PayloadPath::DirectOnly).await)
                 .await
                 .expect("a loopback mesh sets up");
-            assert!(default_list.multihop.is_some(), "the default list has it");
+            assert!(
+                default_list.transports.multihop.is_some(),
+                "the default list has it"
+            );
             default_list
+                .endpoints
                 .router
                 .shutdown()
                 .await
                 .expect("the router stops");
-            if let Some(handle) = default_list.multihop.as_ref() {
+            if let Some(handle) = default_list.transports.multihop.as_ref() {
                 handle.close().await;
             }
         });
@@ -1635,8 +1672,8 @@ mod tests {
         iroh::Endpoint,
         Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
     ) {
-        let endpoint = config.endpoint.clone();
-        let underlay = config.multihop.clone();
+        let endpoint = config.endpoints.endpoint.clone();
+        let underlay = config.transports.multihop.clone();
         let (inbound_tx, _inbound_rx) = mpsc::channel(1);
         let node = node::Node::spawn(
             config,
@@ -1719,6 +1756,7 @@ mod browser_tests {
             .expect("a mesh sets up");
             assert_eq!(
                 config
+                    .transports
                     .multihop
                     .as_ref()
                     .expect("a multihop handle")
@@ -1728,7 +1766,7 @@ mod browser_tests {
             );
             // The router closes the endpoint that it serves on. The handle closes the underlay, the
             // WebRTC leg of the underlay has an endpoint of its own, and so has the startup rung probe.
-            if let Some(probe) = config.rung_probe.take() {
+            if let Some(probe) = config.rendezvous.rung_probe.take() {
                 probe.stop_and_wait().await;
             }
             config.router.shutdown().await.expect("the router stops");

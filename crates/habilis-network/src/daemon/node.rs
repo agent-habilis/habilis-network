@@ -117,16 +117,17 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
     ) -> Self {
         let (req_tx, req_rx) = mpsc::channel::<Driver::Session>(SESSION_REQUEST_CAP);
         let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
-        config.driver = DriverMode::InProcess {
+        config.runtime.driver = DriverMode::InProcess {
             msg_tx: push,
             quit_rx,
             handle_signals,
         };
-        let mesh_id = config.mesh.clone();
-        let name = config.name.clone();
-        let nickname = config.author.clone();
+        let mesh_id = config.mesh.mesh.clone();
+        let name = config.mesh.name.clone();
+        let nickname = config.mesh.author.clone();
         #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
         let bound_ports: Vec<u16> = config
+            .endpoints
             .endpoint
             .bound_sockets()
             .iter()
@@ -137,7 +138,7 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
             feature = "host",
             not(target_arch = "wasm32")
         ))]
-        let multihop = config.multihop.as_ref();
+        let multihop = config.transports.multihop.as_ref();
         #[cfg(all(
             feature = "iroh-test-utils",
             feature = "host",
@@ -148,7 +149,7 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
             (handle.underlay_id().get(), ports)
         });
         #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-        let crash_handles = (config.webrtc_handle(), config.endpoint.clone());
+        let crash_handles = (config.webrtc_handle(), config.endpoints.endpoint.clone());
         let task = task::spawn(daemon::run(config, app, Some(req_rx), None));
         Self {
             mesh_id,

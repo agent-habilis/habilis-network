@@ -63,7 +63,10 @@ use super::cohost_arm::{
     offer_to_the_new_holder, probes_before_claim, release_rendezvous, schedule_rival_recheck,
     shed_rival_beacon_if_due, verdict_after_known_holders,
 };
-use super::config::{CoHostPolicy, DriverMode, EventLoopConfig};
+use super::config::{
+    CoHostPolicy, DriverMode, Endpoints, EventLoopConfig, MeshSpec, RendezvousConfig,
+    RuntimeConfig, TransportSet,
+};
 use super::handler_ctx::HandlerCtx;
 use super::heal::{GossipLink, ResubscribeEnv, apply_rung_change, resubscribe_tick, run_heal};
 use super::node::SignalHandling;
@@ -131,45 +134,60 @@ async fn run_checked<Driver: NodeDriver>(
     http_rx: Option<mpsc::Receiver<Driver::Http>>,
 ) -> Result<()> {
     let EventLoopConfig {
-        topic,
-        gossip,
-        author,
-        identity,
-        mesh: mesh_str,
-        name: mesh_name,
-        topic_string,
-        mesh_password,
-        mesh_key,
-        sink,
-        mint_mesh,
-        endpoint,
-        endpoint_owner,
-        router,
-        max_peers,
-        rendezvous_params,
-        rung_rx,
-        rung_probe,
-        cohost,
-        runtime_base,
-        state_file,
-        #[cfg(feature = "multihop")]
-        multihop,
-        #[cfg(feature = "multihop")]
-        underlay_webrtc,
-        lan_contacts,
-        webrtc,
-        webrtc_enabled,
-        local_udp_transport,
-        webrtc_admission,
-        address_book,
-        webrtc_ice,
-        unicast_rx,
-        live_count,
-        relay_transport,
-        driver,
-        per_peer_gate,
-        #[cfg(feature = "host")]
-        owner,
+        mesh:
+            MeshSpec {
+                mesh: mesh_str,
+                name: mesh_name,
+                topic_string,
+                mesh_password,
+                mesh_key,
+                mint_mesh,
+                author,
+                identity,
+            },
+        transports:
+            TransportSet {
+                webrtc,
+                webrtc_enabled,
+                webrtc_admission,
+                webrtc_ice,
+                address_book,
+                local_udp_transport,
+                relay_transport,
+                #[cfg(feature = "multihop")]
+                multihop,
+                #[cfg(feature = "multihop")]
+                underlay_webrtc,
+            },
+        endpoints:
+            Endpoints {
+                topic,
+                gossip,
+                endpoint,
+                endpoint_owner,
+                router,
+                unicast_rx,
+                lan_contacts,
+            },
+        rendezvous:
+            RendezvousConfig {
+                rendezvous_params,
+                rung_rx,
+                rung_probe,
+                cohost,
+            },
+        runtime:
+            RuntimeConfig {
+                sink,
+                max_peers,
+                runtime_base,
+                state_file,
+                per_peer_gate,
+                live_count,
+                driver,
+                #[cfg(feature = "host")]
+                owner,
+            },
     } = config;
 
     // Every driver-derived fact in one place. Only the CLI exits the
