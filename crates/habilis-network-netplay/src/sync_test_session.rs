@@ -29,6 +29,8 @@
 //! script on both targets and compare the final checksum.
 
 use std::collections::BTreeMap;
+use std::iter::Enumerate;
+use std::vec;
 
 use crate::config::Config;
 use crate::frame::Frame;
@@ -143,7 +145,8 @@ impl<T: Config> SyncTestSession<T> {
         // so this function has no panicking path at all.
         let frame = self.sync.current_frame();
         let supplied: Vec<T::Input> = self.pending.iter_mut().filter_map(Option::take).collect();
-        for (player, input) in supplied.into_iter().enumerate() {
+        let indexed_supplied: Enumerate<vec::IntoIter<T::Input>> = supplied.into_iter().enumerate();
+        for (player, input) in indexed_supplied {
             self.sync
                 .add_remote_input(PlayerHandle::new(player), frame, input)?;
         }

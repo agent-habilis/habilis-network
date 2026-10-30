@@ -15,7 +15,8 @@ use crate::player_handle::PlayerHandle;
 use crate::time_sync::{TimeSync, frame_advantage};
 use crate::transport::{Body, InputPacket, Message};
 
-use std::fmt;
+use std::iter::Enumerate;
+use std::{fmt, slice};
 /// Handshake round-trips before a peer is considered reachable. More than
 /// one because a single reply only proves the path worked once.
 const SYNC_ROUNDTRIPS: u32 = 5;
@@ -454,7 +455,9 @@ impl<T: Config> PeerProtocol<T> {
                     );
                     return (inputs, events);
                 }
-                for (offset, input) in packet.inputs.iter().enumerate() {
+                let indexed_inputs: Enumerate<slice::Iter<'_, T::Input>> =
+                    packet.inputs.iter().enumerate();
+                for (offset, input) in indexed_inputs {
                     let frame = packet.start_frame + i32::try_from(offset).unwrap_or(i32::MAX);
                     // Only what we have not already filed — resends are the
                     // norm, not an anomaly.
