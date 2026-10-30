@@ -197,31 +197,6 @@ pub(crate) async fn drive_until_channel_ready(
                         opened = Some(id);
                     }
                 },
-                Output::Event(
-                    Event::Connected
-                    | Event::IceConnectionStateChange(_)
-                    | Event::MediaAdded(_)
-                    | Event::MediaData(_)
-                    | Event::MediaChanged(_)
-                    | Event::ChannelData(_)
-                    | Event::ChannelClose(_)
-                    | Event::ChannelBufferedAmountLow(_)
-                    | Event::PeerStats(_)
-                    | Event::MediaIngressStats(_)
-                    | Event::MediaEgressStats(_)
-                    | Event::EgressBitrateEstimate(_)
-                    | Event::KeyframeRequest(_)
-                    | Event::StreamPaused(_)
-                    | Event::SenderFeedback(_)
-                    | Event::RtpPacket(_)
-                    | Event::AppSpecificFeedback(_)
-                    | Event::Closed
-                    | Event::RawPacket(_),
-                ) => {}
-                #[expect(
-                    clippy::match_same_arms,
-                    reason = "str0m's Event is non_exhaustive, so rustc needs this wildcard after the arm that names every variant"
-                )]
                 Output::Event(_) => {}
             }
         }
@@ -442,32 +417,6 @@ async fn pump_outputs(
             Output::Event(Event::IceConnectionStateChange(IceConnectionState::Disconnected)) => {
                 return Err(SessionEnd::Closed("ICE disconnected"));
             }
-            Output::Event(
-                Event::Connected
-                | Event::IceConnectionStateChange(_)
-                | Event::MediaAdded(_)
-                | Event::MediaData(_)
-                | Event::MediaChanged(_)
-                | Event::ChannelOpen(_, _)
-                | Event::ChannelData(_)
-                | Event::ChannelClose(_)
-                | Event::ChannelBufferedAmountLow(_)
-                | Event::PeerStats(_)
-                | Event::MediaIngressStats(_)
-                | Event::MediaEgressStats(_)
-                | Event::EgressBitrateEstimate(_)
-                | Event::KeyframeRequest(_)
-                | Event::StreamPaused(_)
-                | Event::SenderFeedback(_)
-                | Event::RtpPacket(_)
-                | Event::AppSpecificFeedback(_)
-                | Event::Closed
-                | Event::RawPacket(_),
-            ) => {}
-            #[expect(
-                clippy::match_same_arms,
-                reason = "str0m's Event is non_exhaustive, so rustc needs this wildcard after the arm that names every variant"
-            )]
             Output::Event(_) => {}
         }
     }
