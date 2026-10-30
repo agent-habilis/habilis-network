@@ -126,7 +126,8 @@ mod tests {
     /// A cell's wire shape, built from a raw hop vector so a test can mint the
     /// hostile routes `Route::try_new` would refuse.
     fn forged_bytes(hops: Vec<RouteHop>, position: u16) -> Vec<u8> {
-        postcard::to_allocvec(&(hops, position, hop(200), Vec::<u8>::new())).expect("serializes")
+        let packet: Vec<u8> = Vec::new();
+        postcard::to_allocvec(&(hops, position, hop(200), packet)).expect("serializes")
     }
 
     #[test]
@@ -135,8 +136,9 @@ mod tests {
         // The linchpin of the design: `Cell.path` is a `Route`, so a hostile
         // route is refused by the codec and never reaches the forwarder.
         let bytes = forged_bytes(vec![hop(1), hop(2), hop(1)], 0);
+        let decoded: Result<Cell, postcard::Error> = postcard::from_bytes(&bytes);
         assert!(
-            postcard::from_bytes::<Cell>(&bytes).is_err(),
+            decoded.is_err(),
             "a cyclic route does not deserialize into a cell"
         );
     }
@@ -147,8 +149,9 @@ mod tests {
         let hops: Vec<RouteHop> = (0..=MAX_ROUTE_HOPS)
             .map(|seed| hop(u8::try_from(seed).expect("seed fits")))
             .collect();
+        let decoded: Result<Cell, postcard::Error> = postcard::from_bytes(&forged_bytes(hops, 0));
         assert!(
-            postcard::from_bytes::<Cell>(&forged_bytes(hops, 0)).is_err(),
+            decoded.is_err(),
             "an oversized route does not deserialize into a cell"
         );
     }
@@ -157,10 +160,8 @@ mod tests {
     fn a_legal_route_still_deserializes_into_a_cell() {
         let _guard = ::habilis_network_test_tracing::init();
         let bytes = forged_bytes(vec![hop(1), hop(2)], 0);
-        assert!(
-            postcard::from_bytes::<Cell>(&bytes).is_ok(),
-            "a legal route deserializes into a cell"
-        );
+        let decoded: Result<Cell, postcard::Error> = postcard::from_bytes(&bytes);
+        assert!(decoded.is_ok(), "a legal route deserializes into a cell");
     }
 
     #[test]

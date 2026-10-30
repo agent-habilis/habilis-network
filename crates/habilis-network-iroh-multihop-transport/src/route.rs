@@ -169,7 +169,7 @@ impl<'de> Deserialize<'de> for Route {
     where
         DeserializerT: Deserializer<'de>,
     {
-        let hops = Vec::<RouteHop>::deserialize(deserializer)?;
+        let hops: Vec<RouteHop> = Vec::deserialize(deserializer)?;
         Self::try_new(hops).ok_or_else(|| Error::custom("empty multihop route"))
     }
 }
@@ -250,8 +250,9 @@ mod tests {
     #[test]
     fn empty_route_does_not_decode() {
         let _guard = ::habilis_network_test_tracing::init();
-        let bytes = postcard::to_allocvec(&Vec::<RouteHop>::new())
-            .expect("postcard encodes a route of plain hops");
+        let no_hops: Vec<RouteHop> = Vec::new();
+        let bytes =
+            postcard::to_allocvec(&no_hops).expect("postcard encodes a route of plain hops");
         let address = iroh_base::CustomAddr::from_parts(crate::MULTIHOP_TRANSPORT_ID, &bytes);
         assert!(
             Route::decode(&address).is_none(),

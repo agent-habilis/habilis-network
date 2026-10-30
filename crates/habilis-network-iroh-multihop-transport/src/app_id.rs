@@ -115,17 +115,14 @@ mod tests {
             raw,
             "an underlay id has the bytes of the endpoint id it wraps"
         );
+        let app: AppId =
+            postcard::from_bytes(&raw).expect("the bytes were just serialised from this id");
+        assert_eq!(app.get(), id, "an app id deserializes from those bytes");
+        let underlay: UnderlayId =
+            postcard::from_bytes(&raw).expect("the bytes were just serialised from this id");
         assert_eq!(
-            postcard::from_bytes::<AppId>(&raw)
-                .expect("the bytes were just serialised from this id")
-                .get(),
+            underlay.get(),
             id,
-            "an app id deserializes from those bytes"
-        );
-        assert_eq!(
-            postcard::from_bytes::<UnderlayId>(&raw)
-                .expect("the bytes were just serialised from this id")
-                .get(),
             id,
             "an underlay id deserializes from those bytes"
         );
