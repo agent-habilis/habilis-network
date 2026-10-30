@@ -23,7 +23,7 @@ fn an_event_after_the_guard_dropped_fails_the_next_test() {
         }))
         .expect_err("the guard must panic")
     });
-    let text = err.downcast_ref::<String>().expect("panic text");
+    let text: &String = err.downcast_ref().expect("panic text");
     assert!(
         text.contains("logged after test late_first ended"),
         "{text}"

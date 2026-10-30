@@ -17,7 +17,10 @@ fn a_second_live_guard_on_one_thread_panics() {
                 let _second = habilis_network_test_tracing::init();
             }));
             let failure = outcome.err();
-            let message = failure.and_then(|err| err.downcast_ref::<String>().cloned());
+            let message = failure.and_then(|err| {
+                let text: Option<&String> = err.downcast_ref();
+                text.cloned()
+            });
             let _: Result<(), _> = done.send(message);
         })
         .expect("spawn");

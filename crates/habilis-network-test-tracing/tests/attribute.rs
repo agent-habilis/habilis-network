@@ -52,7 +52,8 @@ fn an_event_of_the_runtime_drop_fails_a_multi_thread_test() {
         async {
             tokio::spawn(async {
                 let _logs = LogsOnDrop;
-                future::pending::<()>().await;
+                let forever: future::Pending<()> = future::pending();
+                forever.await;
             });
             time::sleep(Duration::from_millis(50)).await;
         },

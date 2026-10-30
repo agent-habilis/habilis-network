@@ -45,7 +45,7 @@ fn the_writer_gets_the_events_and_the_guard_fails_on_an_error() {
                 tracing::error!("round failed");
             }))
             .expect_err("the guard must panic");
-            let text = err.downcast_ref::<String>().expect("panic text");
+            let text: &String = err.downcast_ref().expect("panic text");
             assert!(
                 text.contains("unexpected ERROR writer: round failed"),
                 "{text}"

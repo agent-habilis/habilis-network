@@ -32,7 +32,10 @@ fn an_event_of_a_worker_thread_names_every_live_sync_test() {
                     emitted.wait();
                 }))
                 .err()
-                .and_then(|err| err.downcast_ref::<String>().cloned())
+                .and_then(|err| {
+                    let text: Option<&String> = err.downcast_ref();
+                    text.cloned()
+                })
             })
         })
         .collect();

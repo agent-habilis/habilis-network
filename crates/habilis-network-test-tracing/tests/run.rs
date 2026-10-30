@@ -19,7 +19,8 @@ impl Drop for LogsOnDrop {
 
 fn panic_text(body: impl FnOnce() + Send) -> String {
     let err = catch_panic(AssertUnwindSafe(body)).expect_err("the guard must panic");
-    err.downcast_ref::<String>().cloned().expect("panic text")
+    let text: Option<&String> = err.downcast_ref();
+    text.cloned().expect("panic text")
 }
 
 #[test]
@@ -37,7 +38,8 @@ fn an_event_of_the_runtime_drop_fails_a_current_thread_test() {
         run(init(), async {
             tokio::spawn(async {
                 let _logs = LogsOnDrop;
-                future::pending::<()>().await;
+                let forever: future::Pending<()> = future::pending();
+                forever.await;
             });
             task::yield_now().await;
         });
@@ -52,7 +54,8 @@ fn an_event_of_the_runtime_drop_fails_a_multi_thread_test() {
         run_multi_thread(init(), 2, async {
             tokio::spawn(async {
                 let _logs = LogsOnDrop;
-                future::pending::<()>().await;
+                let forever: future::Pending<()> = future::pending();
+                forever.await;
             });
             time::sleep(Duration::from_millis(50)).await;
         });

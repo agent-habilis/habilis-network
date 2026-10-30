@@ -34,7 +34,7 @@ fn a_warn_that_the_filter_hides_still_fails() {
             );
         }))
         .expect_err("the guard must panic");
-        let text = err.downcast_ref::<String>().expect("panic text");
+        let text: &String = err.downcast_ref().expect("panic text");
         assert!(
             text.contains("unexpected WARN elsewhere: link lost"),
             "{text}"

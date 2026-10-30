@@ -20,7 +20,7 @@ fn a_warn_from_a_spawned_task_fails() {
         });
     }))
     .expect_err("the guard must panic");
-    let text = err.downcast_ref::<String>().expect("panic text");
+    let text: &String = err.downcast_ref().expect("panic text");
     assert!(text.contains("unexpected WARN"), "{text}");
     assert!(text.contains("relay actor errored"), "{text}");
     assert!(text.contains("tokio-rt-worker"), "{text}");

@@ -6,7 +6,8 @@ use std::panic::AssertUnwindSafe;
 
 fn panic_text(body: impl FnOnce() + Send) -> Option<String> {
     let err = habilis_network_test_tracing::catch_panic(AssertUnwindSafe(body)).err()?;
-    err.downcast_ref::<String>().cloned()
+    let text: Option<&String> = err.downcast_ref();
+    text.cloned()
 }
 
 #[test]
