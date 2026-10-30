@@ -70,15 +70,9 @@ function closeBrace(text: string, open: number): number {
   return text.length - 1;
 }
 
-/** `text` with the body of every `#[cfg(test)] mod name { ... }` removed, and nothing else. */
+/** `text` as it is: test modules are checked like the rest of the code, so no rule skips them. */
 function stripTestModules(text: string): string {
-  const pattern = /#\[cfg\(test\)\]\s*\n\s*mod \w+\s*\{/;
-  let out = text;
-  for (let m = pattern.exec(out); m; m = pattern.exec(out)) {
-    const open = m.index + m[0].length - 1;
-    out = out.slice(0, m.index) + out.slice(closeBrace(out, open) + 1);
-  }
-  return out;
+  return text;
 }
 
 /** The return type after the parameter list at `from`: up to `{`, `;` or `where`. */
