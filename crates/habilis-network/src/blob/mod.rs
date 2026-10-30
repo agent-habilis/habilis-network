@@ -406,12 +406,12 @@ mod tests {
                     PayloadPath::RelayAllowed,
                 )
                 .await
-                .unwrap();
+                .expect("the loopback blob server starts");
                 let src = temp_file(b"secret bytes");
                 let ticket = server
                     .register(&src, ContentId::new("blob-test-content"))
                     .await
-                    .unwrap();
+                    .expect("the password-protected blob registers");
                 assert!(ticket.password, "the ticket must be password-protected");
 
                 // Missing password and a wrong password are both refused.
@@ -458,12 +458,18 @@ mod tests {
                     PayloadPath::RelayAllowed,
                 )
                 .await
-                .unwrap();
+                .expect("the loopback blob server starts");
                 let src = temp_file(b"shared bytes");
                 let group_a = ContentId::new("blob-test-group-a");
                 let group_b = ContentId::new("blob-test-group-b");
-                server.register(&src, group_a.clone()).await.unwrap();
-                let ticket_b = server.register(&src, group_b.clone()).await.unwrap();
+                server
+                    .register(&src, group_a.clone())
+                    .await
+                    .expect("the first group registers the file");
+                let ticket_b = server
+                    .register(&src, group_b.clone())
+                    .await
+                    .expect("the second group registers the same file");
 
                 server.evict_content(&group_a).await;
                 let mut out = Vec::new();
@@ -500,12 +506,12 @@ mod tests {
                     PayloadPath::RelayAllowed,
                 )
                 .await
-                .unwrap();
+                .expect("the loopback blob server starts");
                 let src = temp_file(b"secret payload");
                 let mut ticket = server
                     .register(&src, ContentId::new("blob-test-content"))
                     .await
-                    .unwrap();
+                    .expect("the secret blob registers");
                 ticket.secret = crypto::TicketSecret::from([0u8; super::SECRET_LEN]);
                 let mut out = Vec::new();
                 assert!(
@@ -531,12 +537,12 @@ mod tests {
                     PayloadPath::RelayAllowed,
                 )
                 .await
-                .unwrap();
+                .expect("the loopback blob server starts");
                 let src = temp_file(b"real content");
                 let mut ticket = server
                     .register(&src, ContentId::new("blob-test-content"))
                     .await
-                    .unwrap();
+                    .expect("the blob registers");
                 ticket.sha256 = super::BlobDigest::from([0xabu8; super::HASH_LEN]);
                 let mut out = Vec::new();
                 assert!(
@@ -562,12 +568,12 @@ mod tests {
                     PayloadPath::RelayAllowed,
                 )
                 .await
-                .unwrap();
+                .expect("the loopback blob server starts");
                 let src = temp_file(b"exactly this many bytes");
                 let mut ticket = server
                     .register(&src, ContentId::new("blob-test-content"))
                     .await
-                    .unwrap();
+                    .expect("the blob registers");
                 ticket.size += 1; // producer will offer the true size, which won't match
                 let mut out = Vec::new();
                 assert!(
