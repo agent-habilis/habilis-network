@@ -274,10 +274,10 @@ mod join_password_tests {
     fn passworded_id() -> String {
         let mut mesh = Mesh::try_new(
             Seed::new([9u8; 32]),
-            MeshName::try_new("pw").unwrap(),
+            MeshName::try_new("pw").expect("a literal mesh name is valid"),
             MeshConfig::loopback(),
         )
-        .unwrap();
+        .expect("the test mesh config is valid");
         mesh.set_password(Password::new("hunter2".to_owned()));
         mesh.to_string()
     }
@@ -285,8 +285,14 @@ mod join_password_tests {
     #[test]
     fn a_passworded_id_without_a_password_is_password_required() {
         let _guard = ::habilis_network_test_tracing::init();
-        let params = JoinParams::new(passworded_id().parse().unwrap(), None, None);
-        let error = params.resolve().unwrap_err();
+        let params = JoinParams::new(
+            passworded_id().parse().expect("the passworded id parses"),
+            None,
+            None,
+        );
+        let error = params
+            .resolve()
+            .expect_err("a passworded id without a password is refused");
         assert!(
             matches!(error, SetupError::PasswordRequired),
             "got: {error}"
