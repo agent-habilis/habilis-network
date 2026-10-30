@@ -406,9 +406,20 @@ async fn on_relay(url: &str, transport: Vec<Transport>) -> StreamNode {
     StreamNode::bind(&options).await.expect("bind a relay node")
 }
 
+/// The relay logs a client that resets while the relay is still accepting its upgrade. These tests
+/// close their two nodes while that upgrade may still run, so the line can come; it is the relay's
+/// own log, not an error of ours, so the guard must not fail on it.
+fn allow_relay_upgrade_reset() {
+    habilis_network_test_tracing::allow_warn(
+        "iroh_relay::server::http_server",
+        "error accepting upgraded connection",
+    );
+}
+
 #[test]
 fn a_relay_transport_stream_admits_a_consumer_with_no_direct_path() {
     let guard = habilis_network_test_tracing::init();
+    allow_relay_upgrade_reset();
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
         let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
         let url = url.to_string();
@@ -443,6 +454,7 @@ fn a_relay_transport_stream_admits_a_consumer_with_no_direct_path() {
 #[test]
 fn a_webrtc_only_consumer_reads_over_the_data_channel() {
     let guard = habilis_network_test_tracing::init();
+    allow_relay_upgrade_reset();
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
         let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
         let url = url.to_string();
@@ -477,6 +489,7 @@ fn a_webrtc_only_consumer_reads_over_the_data_channel() {
 #[test]
 fn a_consumer_with_no_lane_to_a_webrtc_only_producer_fails_fast() {
     let guard = habilis_network_test_tracing::init();
+    allow_relay_upgrade_reset();
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
         let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
         let url = url.to_string();
@@ -520,6 +533,7 @@ fn a_stream_node_with_webrtc_serves_the_nudge_of_a_peer() {
 #[test]
 fn a_webrtc_only_consumer_of_a_producer_without_webrtc_fails_fast() {
     let guard = habilis_network_test_tracing::init();
+    allow_relay_upgrade_reset();
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
         let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
         let url = url.to_string();
@@ -543,6 +557,7 @@ fn a_webrtc_only_consumer_of_a_producer_without_webrtc_fails_fast() {
 #[test]
 fn a_consumer_without_relay_payload_refuses_a_relay_only_pair() {
     let guard = habilis_network_test_tracing::init();
+    allow_relay_upgrade_reset();
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
         let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
         let url = url.to_string();
