@@ -555,7 +555,7 @@ mod tests {
         let path = unique_path("failed");
         // A non-empty directory at the target makes the final rename fail
         // after the temp file is fully written.
-        fs::create_dir_all(path.join("occupied")).unwrap();
+        fs::create_dir_all(path.join("occupied")).expect("the test directory can be created");
         let state_file = StateFile::new(
             path.clone(),
             &MeshId::from("abcd"),
@@ -569,7 +569,7 @@ mod tests {
         let temp = super::tmp_sibling(&path);
         let leftover = temp.exists();
         let _ = fs::remove_file(&temp);
-        fs::remove_dir_all(&path).unwrap();
+        fs::remove_dir_all(&path).expect("the test directory can be removed");
         assert!(
             !leftover,
             "a failed write must not leave {}",
@@ -623,8 +623,9 @@ mod tests {
             &name("cool-team"),
         );
         state_file.write(3, true);
-        let contents = fs::read_to_string(&path).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        let contents = fs::read_to_string(&path).expect("the written state file can be read");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&contents).expect("the state file the test wrote is json");
         assert_eq!(
             parsed["gossip"],
             mesh.as_str(),
@@ -675,7 +676,8 @@ mod tests {
         .topic(Some(raw));
         state_file.write(1, true);
         let parsed: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(&path).expect("the state file can be read"))
+                .expect("the state file the test wrote is json");
         assert_eq!(
             parsed["topic"], raw,
             "the topic is written whole to the file"
@@ -708,7 +710,8 @@ mod tests {
         state_file.write(1, true);
         state_file.write(7, true);
         let parsed: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(&path).expect("the state file can be read"))
+                .expect("the state file the test wrote is json");
         assert_eq!(
             parsed["peer_count"], 7,
             "a second write updates the peer count to seven"
@@ -760,7 +763,7 @@ mod tests {
         ));
         path.push("sessions");
         path.push("x.json");
-        let _ = fs::remove_dir_all(path.parent().unwrap());
+        let _ = fs::remove_dir_all(path.parent().expect("the test path has a parent"));
         let state_file = StateFile::new(
             path.clone(),
             &MeshId::from("test"),
@@ -773,17 +776,19 @@ mod tests {
             "the file is written inside the new directory"
         );
         state_file.remove();
-        let _ = fs::remove_dir_all(path.parent().unwrap());
+        let _ = fs::remove_dir_all(path.parent().expect("the test path has a parent"));
     }
 
     #[test]
     fn replaces_existing_file() {
         let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("replace");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::create_dir_all(path.parent().expect("the test path has a parent"))
+            .expect("the test directory can be created");
         // A pre-existing file with stale/foreign keys is fully replaced —
         // the daemon is the sole writer, so nothing is merged or preserved.
-        fs::write(&path, br#"{"name":"stale","auto_reply":false,"junk":1}"#).unwrap();
+        fs::write(&path, br#"{"name":"stale","auto_reply":false,"junk":1}"#)
+            .expect("the stale state file can be written");
         let mesh = MeshId::from("fresh");
         let state_file = StateFile::new(
             path.clone(),
@@ -793,7 +798,8 @@ mod tests {
         );
         state_file.write(3, true);
         let parsed: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(&path).expect("the state file can be read"))
+                .expect("the state file the test wrote is json");
         assert_eq!(
             parsed["gossip"],
             mesh.as_str(),
@@ -838,18 +844,25 @@ mod tests {
         );
         // Missing file → None (the caller polls and retries).
         assert!(
-            super::read_snapshot(&path).unwrap().is_none(),
+            super::read_snapshot(&path)
+                .expect("the snapshot file reads")
+                .is_none(),
             "a missing file reads as no snapshot"
         );
 
         state_file.write(1, false);
-        let snap = super::read_snapshot(&path).unwrap().expect("present");
+        let snap = super::read_snapshot(&path)
+            .expect("the snapshot file reads")
+            .expect("present");
         assert!(!snap.ready, "wrote ready:false");
         assert!(snap.last_updated > 0, "last_updated populated");
 
         state_file.write(1, true);
         assert!(
-            super::read_snapshot(&path).unwrap().expect("present").ready,
+            super::read_snapshot(&path)
+                .expect("the snapshot file reads")
+                .expect("present")
+                .ready,
             "wrote ready:true"
         );
         state_file.remove();
@@ -926,12 +939,13 @@ mod tests {
     fn read_session_entry_tolerates_a_pre_pid_file() {
         let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("session-entry-old");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::create_dir_all(path.parent().expect("the test path has a parent"))
+            .expect("the test directory can be created");
         fs::write(
             &path,
             r#"{"last_updated":1,"name":"old","nickname":"n-n","peer_count":1,"ready":true,"gossip":"old"}"#,
         )
-        .unwrap();
+        .expect("the test state file can be written");
         let entry = super::read_session_entry(&path).expect("present");
         assert_eq!(
             entry.mesh.as_deref(),
@@ -950,12 +964,13 @@ mod tests {
         // field as an unreapable orphan daemon.
         let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("session-entry-legacy-room");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::create_dir_all(path.parent().expect("the test path has a parent"))
+            .expect("the test directory can be created");
         fs::write(
             &path,
             r#"{"last_updated":1,"name":"old","nickname":"n-n","participant_count":1,"pid":7,"ready":true,"room":"legacy"}"#,
         )
-        .unwrap();
+        .expect("the test state file can be written");
         let entry = super::read_session_entry(&path).expect("present");
         assert_eq!(
             entry.mesh.as_deref(),
@@ -980,8 +995,9 @@ mod tests {
             "a missing session file reads as no entry"
         );
         let malformed = unique_path("session-entry-malformed");
-        fs::create_dir_all(malformed.parent().unwrap()).unwrap();
-        fs::write(&malformed, b"not json").unwrap();
+        fs::create_dir_all(malformed.parent().expect("the test path has a parent"))
+            .expect("the test directory can be created");
+        fs::write(&malformed, b"not json").expect("the malformed state file can be written");
         assert!(
             super::read_session_entry(&malformed).is_none(),
             "a malformed session file reads as no entry"
@@ -1014,21 +1030,24 @@ mod tests {
     fn read_snapshot_errors_on_malformed() {
         let _guard = ::habilis_network_test_tracing::init();
         let path = unique_path("malformed");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::create_dir_all(path.parent().expect("the test path has a parent"))
+            .expect("the test directory can be created");
         // Not JSON.
-        fs::write(&path, b"not json").unwrap();
+        fs::write(&path, b"not json").expect("the malformed state file can be written");
         assert!(
             super::read_snapshot(&path).is_err(),
             "a malformed snapshot reads as an error"
         );
         // JSON object missing the `ready` / `last_updated` fields the gate needs.
-        fs::write(&path, r#"{"gossip":"x","name":"n"}"#).unwrap();
+        fs::write(&path, r#"{"gossip":"x","name":"n"}"#)
+            .expect("the test state file can be written");
         assert!(
             super::read_snapshot(&path).is_err(),
             "a malformed snapshot reads as an error"
         );
         // Has `ready` but still missing `last_updated`.
-        fs::write(&path, r#"{"ready":true,"gossip":"round"}"#).unwrap();
+        fs::write(&path, r#"{"ready":true,"gossip":"round"}"#)
+            .expect("the test state file can be written");
         assert!(
             super::read_snapshot(&path).is_err(),
             "a malformed snapshot reads as an error"
