@@ -65,10 +65,6 @@ pub fn log_out(message: &Message) {
 }
 
 #[expect(
-    clippy::match_same_arms,
-    reason = "the named variants are listed on purpose, so a new variant stays visible"
-)]
-#[expect(
     clippy::wildcard_enum_match_arm,
     reason = "foreign non_exhaustive enum: the compiler needs a wildcard arm; the named variants are listed before it"
 )]
@@ -145,17 +141,8 @@ fn log(direction: &'static str, message: &Message) {
             body = %logged_body(message),
             "state"
         ),
-        // Plumbing. A kind added later falls to the wildcard, which logs no body.
-        MessageKind::Presence {
-            subtype: PresenceSubtype::Alive,
-        }
-        | MessageKind::PeerInfo
-        | MessageKind::Digest
-        | MessageKind::StateDigest
-        | MessageKind::MetaDigest
-        | MessageKind::Ping
-        | MessageKind::Pong { .. }
-        | MessageKind::LinkState => plumbing(),
+        // Plumbing: presence alive, peer info, digests, ping and pong, link state,
+        // and any kind added later. None of them logs a body.
         _ => plumbing(),
     }
 }
