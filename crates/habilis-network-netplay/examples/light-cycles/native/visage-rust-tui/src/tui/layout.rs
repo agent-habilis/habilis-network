@@ -254,8 +254,7 @@ fn arrange_children(
 
     let mut main: Vec<i32> = Vec::with_capacity(kids.len());
     let mut flex_total: u32 = 0;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let mut used = gap * (kids.len() as i32 - 1);
+    let mut used = gap * (i32::try_from(kids.len()).unwrap_or(i32::MAX) - 1);
     for &kid in &kids {
         measure(arena, epoch, kid, cw, ch);
         let n = arena.get(kid);
@@ -274,8 +273,7 @@ fn arrange_children(
     for m in &main {
         slack -= m;
     }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let kids_len = kids.len() as i32;
+    let kids_len = i32::try_from(kids.len()).unwrap_or(i32::MAX);
     slack -= gap * (kids_len - 1);
 
     let mut offset = 0;
@@ -345,7 +343,6 @@ fn distribute_flex(
     leftover: i32,
     flex_total: u32,
 ) {
-    let share = f64::from(leftover) / f64::from(flex_total);
     let mut flexed = Vec::new();
     let mut handed = 0;
     for (i, &kid) in kids.iter().enumerate() {
@@ -354,8 +351,9 @@ fn distribute_flex(
             continue;
         }
         flexed.push(i);
-        #[allow(clippy::cast_possible_truncation)]
-        let cells = (share * f64::from(flex)).trunc() as i32;
+        // A child's flex is at most `flex_total`, so its share never exceeds `leftover`.
+        let cells = i32::try_from(i64::from(leftover) * i64::from(flex) / i64::from(flex_total))
+            .unwrap_or(0);
         main[i] += cells;
         handed += cells;
     }
