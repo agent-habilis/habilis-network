@@ -69,6 +69,7 @@ use std::{error, ffi, fmt, fs, io, process, sync};
 /// # }
 /// ```
 #[derive(Debug)]
+#[must_use]
 pub struct StateFile {
     path: PathBuf,
     /// The consumer's runtime base, for the fail-closed squat check before each

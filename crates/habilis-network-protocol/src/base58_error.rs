@@ -32,6 +32,7 @@ use std::error;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[must_use]
 pub enum Base58Error {
     /// The text is not Base58.
     Alphabet(String),

@@ -13,6 +13,7 @@ use std::{fmt, ops};
 /// The newtype goes on the *field* rather than the outer struct because `Drop`
 /// and destructuring `let Self { .. } = self` cannot coexist.
 #[derive(Clone)]
+#[must_use]
 pub(super) struct OpenPeerConnection {
     inner: RtcPeerConnection,
     armed: bool,

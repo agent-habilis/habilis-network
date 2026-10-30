@@ -1,5 +1,6 @@
 /// What a chat message, frame or ticket can get wrong. The chat binaries show it to the user.
 #[derive(Debug)]
+#[must_use]
 pub enum ProtoError {
     /// A nick or a message is empty once trimmed.
     Empty { what: &'static str },

@@ -17,6 +17,7 @@ use tokio::runtime;
 /// releasing the endpoint + router (and, private, freeing the
 /// deterministic port for the next member to claim).
 #[derive(Debug)]
+#[must_use]
 pub(crate) struct Rendezvous {
     /// The gossip co-host: subscribes, bridges the rendezvous into the
     /// mesh, and re-asserts the peer link each heal tick.

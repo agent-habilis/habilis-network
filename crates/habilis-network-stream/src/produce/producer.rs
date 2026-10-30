@@ -37,6 +37,7 @@ const DRAIN: Duration = Duration::from_secs(5);
 /// # }
 /// ```
 #[derive(Debug)]
+#[must_use]
 pub struct Producer {
     hash: StreamHash,
     // the producer shares the registry with the node

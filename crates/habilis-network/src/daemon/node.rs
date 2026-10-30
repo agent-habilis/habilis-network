@@ -55,6 +55,7 @@ pub enum SignalHandling {
 /// let _nick = node.nickname();
 /// # }
 /// ```
+#[must_use]
 pub struct Node<Driver: NodeDriver> {
     mesh_id: MeshId,
     name: MeshName,
@@ -108,7 +109,6 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
     /// allocation: with a sender wired, the receive path calls
     /// `broadcast::Sender::receiver_count()` — which takes a mutex — on **every**
     /// inbound frame, only to discover nobody is listening.
-    #[must_use]
     pub fn spawn(
         mut config: EventLoopConfig,
         app: Driver,

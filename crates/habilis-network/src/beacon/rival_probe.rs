@@ -27,6 +27,7 @@ use std::future;
 /// through [`RendezvousParams::rung_tx`]. What stays on the loop is only
 /// the bind, which is milliseconds.
 #[derive(Debug)]
+#[must_use]
 pub(crate) struct RivalProbe {
     /// The verdict: `true` ⇒ a beacon already answers, stay a peer.
     /// A dropped sender (the task died) reads as `true` — see
