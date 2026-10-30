@@ -75,7 +75,7 @@ fn round_trip_loopback() {
 fn round_trip_public_preset() {
     let _guard = ::habilis_network_test_tracing::init();
     let mesh = Mesh::try_new(
-        Seed::new([0xABu8; SEED_LEN]),
+        Seed::new([0xabu8; SEED_LEN]),
         dummy_name(),
         MeshConfig::public_preset(),
     )
@@ -86,7 +86,7 @@ fn round_trip_public_preset() {
         .expect("a mesh serializes to text that parses back");
     assert_eq!(
         decoded.seed().as_bytes(),
-        &[0xABu8; SEED_LEN],
+        &[0xabu8; SEED_LEN],
         "the decoded public preset keeps its seed bytes"
     );
     assert_eq!(
@@ -250,7 +250,7 @@ fn password_verifier_yields_different_id_and_round_trips() {
     let _guard = ::habilis_network_test_tracing::init();
     let passworded = MeshConfig {
         lookups: LookupOpts::public_preset(),
-        password: Some([0x5Au8; 16]),
+        password: Some([0x5au8; 16]),
         issuer_pubkey: None,
         transport: TransportPolicy::default(),
     };

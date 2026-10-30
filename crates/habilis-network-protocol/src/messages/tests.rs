@@ -812,7 +812,7 @@ mod prop {
 
     use crate::proptest_support;
     fn arb_ascii_body() -> impl Strategy<Value = String> {
-        arb_vec(0x20u8..0x7Eu8, 0..200)
+        arb_vec(0x20u8..0x7eu8, 0..200)
             .prop_map(|bytes| String::from_utf8(bytes).expect("a serialized message is UTF-8 JSON"))
     }
 

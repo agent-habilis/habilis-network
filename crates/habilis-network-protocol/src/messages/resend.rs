@@ -2,7 +2,7 @@
 
 /// The byte that starts the trailer of a resend. JSON text holds no raw 0x1E: control bytes are
 /// escaped inside a string and are not whitespace outside one.
-const RESEND_TRAILER_MARK: u8 = 0x1E;
+const RESEND_TRAILER_MARK: u8 = 0x1e;
 /// The length of the nonce of a resend, in bytes.
 const RESEND_NONCE_LEN: usize = 8;
 /// The bytes a resend adds to a frame: the mark and the nonce. It stays inside the 256 bytes of

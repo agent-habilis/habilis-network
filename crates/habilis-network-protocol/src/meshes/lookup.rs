@@ -1289,7 +1289,7 @@ mod lookup_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let config = MeshConfig {
             lookups: LookupOpts::public_preset(),
-            password: Some([0xA5u8; 16]),
+            password: Some([0xa5u8; 16]),
             issuer_pubkey: None,
             transport: TransportPolicy::default(),
         };
@@ -1741,7 +1741,7 @@ mod lookup_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let config = MeshConfig {
             lookups: LookupOpts::public_preset(),
-            password: Some([0xA5u8; 16]),
+            password: Some([0xa5u8; 16]),
             issuer_pubkey: None,
             transport: TransportPolicy::default().relay_transport(true),
         };
@@ -1775,7 +1775,7 @@ mod lookup_tests {
         let config = MeshConfig {
             lookups: LookupOpts::public_preset(),
             password: None,
-            issuer_pubkey: Some([0x3Cu8; 32]),
+            issuer_pubkey: Some([0x3cu8; 32]),
             transport: TransportPolicy::default(),
         };
         let decoded = MeshConfig::try_from(config.to_bytes().as_slice())
@@ -1793,8 +1793,8 @@ mod lookup_tests {
         // pubkey) must round-trip.
         let config = MeshConfig {
             lookups: LookupOpts::loopback(),
-            password: Some([0xA5u8; 16]),
-            issuer_pubkey: Some([0x3Cu8; 32]),
+            password: Some([0xa5u8; 16]),
+            issuer_pubkey: Some([0x3cu8; 32]),
             transport: TransportPolicy::default(),
         };
         let decoded = MeshConfig::try_from(config.to_bytes().as_slice())
