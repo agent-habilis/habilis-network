@@ -732,6 +732,7 @@ const RULES: Rule[] = [
   {
     name: "anyhow_pub",
     scan: countAnyhowPub,
+    // A binary (main.rs, bin/, the chat-native CLI) may keep anyhow; the rule is for library signatures.
     skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/)|\/chat-native\//,
     glob: "crates/**/*.rs",
     why: "A public signature returns a typed error, not anyhow. A binary, a CLI and a private helper may keep anyhow.",
@@ -739,7 +740,6 @@ const RULES: Rule[] = [
   {
     name: "dyn_param",
     scan: countDynParams,
-    skip: /(^|\/)(main\.rs|bin\/)|^(?!crates\/[^/]+\/src\/)/,
     glob: "crates/**/*.rs",
     why: "A library fn takes a generic (T: Trait or impl Trait), not a dyn Trait parameter. A handler list that holds trait objects is a ProtocolSet, built by its generic with_protocol.",
   },
@@ -753,7 +753,6 @@ const RULES: Rule[] = [
   {
     name: "pub_vec_param",
     scan: countPubVecParam,
-    skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
     glob: "crates/**/*.rs",
     why: "A public function takes an impl IntoIterator, not a Vec, when it only iterates. A function that keeps the list takes a Vec.",
   },
@@ -767,6 +766,7 @@ const RULES: Rule[] = [
   {
     name: "app_impl_into",
     pattern: /impl Into</,
+    // The rule is for application code (main.rs and bin/ targets). Library helpers take impl Into<T> by design.
     skip: /^(?!(?:.*\/)?(?:main\.rs$|bin\/))/,
     glob: "*.rs",
     why: "Application code does not take impl Into<T>. A binary or a bin/ target takes a concrete type.",
@@ -788,7 +788,6 @@ const RULES: Rule[] = [
   {
     name: "self_convention",
     scan: countSelfConvention,
-    skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
     glob: "crates/**/*.rs",
     why: "A public as_ or to_ method takes a reference, and an into_ method takes self. A by-value as_ or to_ is a Copy type, and it has a counted row.",
   },
