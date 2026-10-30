@@ -480,7 +480,7 @@ jobs:
           curl --fail --silent --show-error --location -o "$dir/driver.zip" "$driver_url"
           unzip -q "$dir/chrome.zip" -d "$dir"
           unzip -q "$dir/driver.zip" -d "$dir"
-          printf '{"goog:chromeOptions":{"binary":"%s"}}' "$dir/chrome-linux64/chrome" > "$dir/webdriver.json"
+          printf '{"goog:chromeOptions":{"binary":"%s","args":["--headless=new","--no-sandbox","--disable-gpu"]}}' "$dir/chrome-linux64/chrome" > "$dir/webdriver.json"
           echo "CHROMEDRIVER=$dir/chromedriver-linux64/chromedriver" >> "$GITHUB_ENV"
           echo "WASM_BINDGEN_TEST_WEBDRIVER_JSON=$dir/webdriver.json" >> "$GITHUB_ENV"
 
