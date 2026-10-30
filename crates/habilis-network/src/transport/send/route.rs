@@ -9,7 +9,7 @@ use iroh::EndpointId;
 
 /// The chosen transport for a message — a **pure** decision so both planes are
 /// unit-testable without touching the network.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum Route {
     /// No sole addressee: gossip is the transport, structurally.
     Broadcast,

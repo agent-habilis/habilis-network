@@ -256,7 +256,7 @@ impl RelayGate {
 /// `forget`, which clears a stuck mark too. A hop that is still on the relay is
 /// then advertised again until its next writer has been refused for the
 /// deadline: one retry each time a writer dies, not a loop.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct HopHealth {
     /// The hop's application id: what a link-vector names.
     app_id: AppId,

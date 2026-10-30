@@ -44,7 +44,7 @@ use iroh_base::EndpointId;
 
 use std::{mem, sync};
 /// One peer's slot: reserved while `value` is `None`, live once it is `Some`.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct Slot<T> {
     generation: u64,
     value: Option<T>,

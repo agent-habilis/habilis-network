@@ -18,7 +18,7 @@ use std::net;
 /// The ladder of one node. `local` is the endpoint this selector serves, so that a
 /// test can take a rung, or an IP port, away from this node alone: the underlay
 /// has an endpoint of its own, with its own id.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct MultihopLadder {
     local: iroh::EndpointId,
 }

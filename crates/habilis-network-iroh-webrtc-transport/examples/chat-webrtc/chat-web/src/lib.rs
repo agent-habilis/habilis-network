@@ -60,7 +60,7 @@ use web_sys::console;
 /// JSON over the wasm boundary rather than `serde-wasm-bindgen`: the shapes are
 /// small, the cost is irrelevant at chat rates, and a plain object is what the
 /// JS side wants to switch on anyway.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, Copy)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Event {
     /// Progress during the join, so a tab is never silently busy for the ten

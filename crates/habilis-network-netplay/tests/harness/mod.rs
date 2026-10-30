@@ -5,7 +5,7 @@ use habilis_network_netplay::{PlayerHandle, Request, SyncTestSession};
 use crate::{Game, Input, State};
 
 /// Applies a session's requests to a `State`, exactly as a consumer would.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Runner {
     pub(crate) state: State,
 }

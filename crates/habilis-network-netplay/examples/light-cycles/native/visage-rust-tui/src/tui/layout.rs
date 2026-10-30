@@ -15,7 +15,7 @@ use crate::view::{Align, Border, Direction, Justify};
 /// `measure` recurses the whole subtree from both a parent's own measure
 /// call and its arrange call: `2^depth` cost. See the port report on
 /// `visage-tui/src/layout/index.ts:60-66`.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct LayoutState {
     epoch: i64,
 }

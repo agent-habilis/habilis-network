@@ -51,14 +51,14 @@ use sim::Outcome;
 /// lets the session's own pacing pull it back into line.
 const MAX_CATCH_UP_TICKS: u32 = 4;
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone, Copy)]
 struct CycleDto {
     x: i16,
     y: i16,
     alive: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone, Copy)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum OutcomeDto {
     InProgress,

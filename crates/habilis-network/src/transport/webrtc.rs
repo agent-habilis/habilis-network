@@ -1175,7 +1175,7 @@ mod tests {
                 use iroh::protocol::{AcceptError, ProtocolHandler};
 
                 /// Keeps every accepted connection open until the dialer closes it.
-                #[derive(Debug, Clone)]
+                #[derive(Debug, Clone, Copy)]
                 struct Hold;
                 impl ProtocolHandler for Hold {
                     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
@@ -1870,7 +1870,7 @@ mod tests {
                 use iroh::endpoint::Connection;
                 use iroh::protocol::{AcceptError, ProtocolHandler};
 
-                #[derive(Debug, Clone)]
+                #[derive(Debug, Clone, Copy)]
                 struct Hold;
                 impl ProtocolHandler for Hold {
                     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
@@ -1983,7 +1983,7 @@ mod tests {
                 use iroh::endpoint::Connection;
                 use iroh::protocol::{AcceptError, ProtocolHandler};
 
-                #[derive(Debug, Clone)]
+                #[derive(Debug, Clone, Copy)]
                 struct Hold;
                 impl ProtocolHandler for Hold {
                     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
@@ -2103,7 +2103,7 @@ mod tests {
                 use iroh::endpoint::Connection;
                 use iroh::protocol::{AcceptError, ProtocolHandler};
 
-                #[derive(Debug, Clone)]
+                #[derive(Debug, Clone, Copy)]
                 struct Hold;
                 impl ProtocolHandler for Hold {
                     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {

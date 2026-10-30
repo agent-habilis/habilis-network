@@ -16,7 +16,7 @@ use iroh::endpoint::transports::{
 
 /// The ladder of one node. `local` is the endpoint this selector serves, so that a test can take
 /// a rung away from this node alone.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct GossipLadder {
     local: iroh::EndpointId,
 }
@@ -72,7 +72,7 @@ mod tests {
 
     const ALPN: &[u8] = b"habilis-network-gossip/test-selector/0";
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Copy)]
     struct Hold;
 
     impl ProtocolHandler for Hold {

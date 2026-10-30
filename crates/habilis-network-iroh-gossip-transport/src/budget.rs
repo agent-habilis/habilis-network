@@ -12,7 +12,7 @@ use num_traits::ToPrimitive;
 pub const DEFAULT_BUDGET_BYTES_PER_SEC: u64 = 1 << 20;
 
 /// A token bucket: `rate` bytes per second, and a burst of one second.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Budget {
     rate: u64,
     tokens: f64,

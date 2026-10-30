@@ -25,7 +25,7 @@ const LOG_TARGET: &str = "habilis_network::gossip";
 const WARN_EVERY: u64 = 16;
 
 /// How many refusals of one kind the doc has seen, and how many of them a WARN has reported.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 struct Refusals {
     seen: u64,
     reported: u64,

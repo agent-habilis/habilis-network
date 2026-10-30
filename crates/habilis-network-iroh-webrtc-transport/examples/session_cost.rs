@@ -58,7 +58,7 @@ fn median(values: &[u64]) -> u64 {
 }
 
 /// A least-squares line through `(x, y)` points.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 struct Fit {
     slope: f64,
     intercept: f64,

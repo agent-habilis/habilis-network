@@ -85,7 +85,7 @@ impl Entry {
 }
 
 /// A peer that an admission may evict, in the order of rule 3.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 struct Candidate {
     /// 0: old enough and idle; 1: old enough; 2: younger than [`MIN_AGE`].
     class: u8,

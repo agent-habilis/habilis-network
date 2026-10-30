@@ -413,7 +413,7 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Copy)]
     struct Echo;
 
     impl ProtocolHandler for Echo {

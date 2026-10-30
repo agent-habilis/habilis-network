@@ -1,5 +1,5 @@
 /// What the splitter does with an item of the topic.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum Route {
     /// A frame of the gossip transport: it goes to the handle and no further.
     Frame,

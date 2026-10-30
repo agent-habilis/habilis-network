@@ -1820,6 +1820,7 @@ fn finalize_ping_round(state: &mut EventLoopState, sink: &dyn NodeSink) {
 /// anchor: on macOS the monotonic clock pauses in lockstep with a
 /// sleeping process, so only the wall gap reveals a suspend (see
 /// `note_tick_gap` / `run_heal`).
+#[derive(Clone, Copy)]
 struct TickAnchors {
     alive: Instant,
     sweep: Instant,

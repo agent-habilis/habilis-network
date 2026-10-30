@@ -856,7 +856,7 @@ mod tests {
             async {
                 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 
-                #[derive(Debug, Clone)]
+                #[derive(Debug, Clone, Copy)]
                 struct Hold;
                 impl ProtocolHandler for Hold {
                     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
@@ -937,7 +937,7 @@ mod tests {
             async {
                 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 
-                #[derive(Debug, Clone)]
+                #[derive(Debug, Clone, Copy)]
                 struct Hold;
                 impl ProtocolHandler for Hold {
                     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {

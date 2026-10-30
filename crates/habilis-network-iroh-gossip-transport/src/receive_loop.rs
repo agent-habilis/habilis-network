@@ -181,7 +181,7 @@ mod tests {
 
     const ECHO_ALPN: &[u8] = b"habilis-network-gossip/test-echo/0";
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Copy)]
     struct Echo;
 
     impl protocol::ProtocolHandler for Echo {

@@ -672,7 +672,7 @@ fn the_member_of_a_udp_and_gossip_list_keeps_ip_above_gossip() {
         use iroh::protocol::{AcceptError, ProtocolHandler};
 
         const ALPN: &[u8] = b"habilis-network/test-udp-gossip-list/0";
-        #[derive(Debug, Clone)]
+        #[derive(Debug, Clone, Copy)]
         struct Hold;
         impl ProtocolHandler for Hold {
             async fn accept(&self, connection: endpoint::Connection) -> Result<(), AcceptError> {

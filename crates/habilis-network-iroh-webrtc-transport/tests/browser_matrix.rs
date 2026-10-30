@@ -213,7 +213,7 @@ fn cells(pressure: u64) -> Vec<Cell> {
 }
 
 /// What one cell did.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum Verdict {
     Ok,
     /// Over budget — see [`MAX_BYTES_IN_FLIGHT`].
@@ -231,6 +231,7 @@ impl Verdict {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Row {
     cell: Cell,
     verdict: Verdict,

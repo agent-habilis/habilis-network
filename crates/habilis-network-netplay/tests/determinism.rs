@@ -28,6 +28,7 @@ impl Config for Game {
 /// Applies requests. `drift` is added to every advance, which makes the
 /// simulation depend on how many times it has run rather than only on its
 /// inputs — exactly the bug `SyncTestSession` exists to find.
+#[derive(Clone, Copy)]
 struct Runner {
     state: State,
     drift: i64,

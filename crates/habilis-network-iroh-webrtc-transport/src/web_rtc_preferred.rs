@@ -43,7 +43,7 @@ use iroh::endpoint::transports;
 /// (`Rung`) and name a custom transport with the same function, `custom_rung` of
 /// `habilis-network-iroh-transport-util`, which is what makes the last-call-wins
 /// wiring safe.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct WebRtcPreferred {
     /// The endpoint this selector serves, so that a test can take paths away
     /// from one node to some others and not from the whole process.

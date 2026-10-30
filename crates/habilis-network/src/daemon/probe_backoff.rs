@@ -26,7 +26,7 @@ const MAX_STEPS: u32 = 3;
 
 /// A reclaim window that opens while the rival is still up resets the wait, and its own probes
 /// find the rival and raise it again: up to 60 s at once, by design.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ProbeBackoff {
     /// Probes in a row that found the rival.
     rivals_in_a_row: u32,
