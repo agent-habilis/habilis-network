@@ -12,11 +12,11 @@
 //! Run `chat-native host`, then follow the two lines it prints.
 
 use std::io;
+mod chat_acceptor;
 mod host;
 mod join;
 mod path;
 mod room;
-mod chat_acceptor;
 mod signal_acceptor;
 mod terminal;
 mod wire;
@@ -32,12 +32,13 @@ use habilis_network_iroh_webrtc_transport::iroh_base::RelayUrl;
     version,
     about = "A chat room over iroh and WebRTC"
 )]
+#[derive(Clone)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum Command {
     /// Open a room, and join it from this terminal.
     Host {

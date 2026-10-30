@@ -495,6 +495,9 @@ A type that the guide asks to derive a trait, and that cannot derive it, is list
 | R16 | `Bot` | `habilis-network-netplay/examples/light-cycles/native/game/tests/pubprobe.rs` | holds a `Node` handle and a `Game`, neither Clone |
 | R16 | `Bot` | `habilis-network-netplay/examples/light-cycles/native/game/tests/two_bots.rs` | holds a `Node` handle and a `Game`, neither Clone |
 | R16 | `LightCyclesPeer` | `habilis-network-netplay/examples/light-cycles/web/wasm/src/light_cycles_peer.rs` | holds a `Node` handle, which is not Clone |
+| R16 | `ProtoError` | `habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-proto/src/proto_error.rs` | holds a `serde_json::Error`, which is not Clone |
+| R16 | `Inner` | `habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/room.rs` | holds a `Mutex`, an `AtomicU64` and a `broadcast::Sender`, none Clone |
+| R16 | `Membership` | `habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/room.rs` | holds a `broadcast::Receiver`, which is not Clone |
 | R22 | `EventLoopConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `MeshSpec`, a `RendezvousConfig` and a `RuntimeConfig`, which hold channels, trait objects and task handles with no default |
 | R22 | `RendezvousConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a watch receiver and a `StoppableTask`, which have no default |
 | R22 | `RuntimeConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `dyn NodeSink` and a `SelfWriteGate`, which have no default |
