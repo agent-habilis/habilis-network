@@ -5,8 +5,8 @@ use super::TestDrop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use super::TestHold;
 use super::{
-    BeaconNote, DirectCounts, DirectState, IdleCounters, MeshSecrets, PingRound, Reach, RivalFlag,
-    RosterEntry, RosterSnapshot, Standing, StateInit,
+    BeaconNote, DirectCounts, DirectState, IdleCounters, Latch, MeshSecrets, PingRound, Reach,
+    RivalFlag, RosterEntry, RosterSnapshot, Standing, StateInit,
 };
 use crate::daemon::cohost_arm;
 use crate::daemon::doc::MeshDoc;
@@ -153,9 +153,8 @@ pub struct EventLoopState {
     /// When we last flooded our `PeerInfo`, whatever triggered it. Stamped by
     /// `broadcast_peer_info`; read by the `joined` and `NeighborUp` re-flood gates.
     pub(crate) peerinfo_flooded_at: Option<Instant>,
-    /// A `NeighborUp` wanted to flood our `PeerInfo` inside the window and was
-    /// held back. The alive tick pays it once the window ends.
-    pub(crate) peerinfo_deferred: bool,
+    /// The latches that this member has set and not yet cleared, see [`Latch`].
+    pub(crate) latches: BTreeSet<Latch>,
     /// The address our last `PeerInfo` carried. `None` until the first flood.
     /// Stamped by `broadcast_peer_info`; read by `address_flood_due`.
     pub(crate) last_flooded_addr: Option<EndpointAddr>,
@@ -548,12 +547,6 @@ pub struct EventLoopState {
     /// Consecutive starvation recoveries without any inbound in between
     /// (drives the backoff; reset by `note_inbound`).
     pub(crate) recovery_trips: u32,
-    /// Latch for the warn-only resident-memory leak signal: set once this
-    /// process's resident memory first crosses `tuning::resident_memory_warn_mb`,
-    /// so the `warn` fires exactly once per process rather than every prune
-    /// tick. Purely observability — never gates behavior (see
-    /// `timers::tick_prune`).
-    pub(crate) resident_memory_warned: bool,
     /// Active ping round, if one is in flight. Armed by the
     /// `Ping` IPC command, filled by inbound `Pong`s, and finalized
     /// into a `ping_report` when its `deadline` elapses. One at a time:
@@ -627,7 +620,7 @@ impl EventLoopState {
             peer_info_proof: None,
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo_flooded_at: None,
-            peerinfo_deferred: false,
+            latches: BTreeSet::new(),
             last_flooded_addr: None,
             below_target_since: None,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -725,7 +718,6 @@ impl EventLoopState {
             last_inbound_at: now,
             last_recovery_at: None,
             recovery_trips: 0,
-            resident_memory_warned: false,
             ping_round: None,
             mesh_password,
             mint_mesh: None,
@@ -983,15 +975,16 @@ impl EventLoopState {
     /// new neighbors a neighbor can wait for our `PeerInfo` up to one window (10 s)
     /// plus one alive tick (30 s), that is 40 s.
     pub(crate) fn defer_peerinfo(&mut self) {
-        self.peerinfo_deferred = true;
+        self.latches.insert(Latch::PeerInfoDeferred);
     }
 
     /// Whether a held-back `PeerInfo` flood is due at `now`: the window since the
     /// last flood has ended. Taking it clears the mark.
     pub(crate) fn take_deferred_peerinfo(&mut self, now: Instant) -> bool {
-        let due = self.peerinfo_deferred && self.neighbor_up_refloods_peerinfo(now);
+        let due = self.latches.contains(&Latch::PeerInfoDeferred)
+            && self.neighbor_up_refloods_peerinfo(now);
         if due {
-            self.peerinfo_deferred = false;
+            self.latches.remove(&Latch::PeerInfoDeferred);
         }
         due
     }

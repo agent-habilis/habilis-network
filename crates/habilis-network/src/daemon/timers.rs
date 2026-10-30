@@ -3,7 +3,7 @@
 //! heartbeat. The `Alive`/sweep heartbeat ticks live in
 //! `lifecycle::heartbeat`; the gossip healer in `gossip::heal`.
 
-use crate::daemon::state::Standing;
+use crate::daemon::state::{Latch, Standing};
 use std::time::Duration;
 
 use iroh::Endpoint;
@@ -45,7 +45,7 @@ fn warn_on_high_resident_memory(
     sink: &dyn NodeSink,
     threshold_mb: u64,
 ) {
-    if threshold_mb == 0 || state.resident_memory_warned {
+    if threshold_mb == 0 || state.latches.contains(&Latch::ResidentMemoryWarned) {
         return;
     }
     let Some(resident_bytes) = resident_memory::peak_resident_memory_bytes() else {
@@ -53,7 +53,7 @@ fn warn_on_high_resident_memory(
     };
     let resident_mb = resident_bytes / (1024 * 1024);
     if resident_mb >= threshold_mb {
-        state.resident_memory_warned = true;
+        state.latches.insert(Latch::ResidentMemoryWarned);
         tracing::warn!(
             target: "habilis_network::lifecycle",
             resident_mb,
@@ -247,6 +247,7 @@ pub(crate) fn note_tick_gap(
 
 #[cfg(test)]
 mod tests {
+    use crate::daemon::state::Latch;
     use crate::testing;
 
     use crate::gossip::event::CountingSink;
@@ -267,7 +268,7 @@ mod tests {
         // Real resident memory is tens of MiB ≫ 1, so this crosses immediately.
         super::warn_on_high_resident_memory(&mut state, &sink, 1);
         assert!(
-            state.resident_memory_warned,
+            state.latches.contains(&Latch::ResidentMemoryWarned),
             "first crossing latches the warn"
         );
         assert_eq!(sink.count(), 1, "an info event is emitted on the crossing");
@@ -284,7 +285,7 @@ mod tests {
         let mut state = testing::fresh_state();
         super::warn_on_high_resident_memory(&mut state, &sink, 0);
         assert!(
-            !state.resident_memory_warned,
+            !state.latches.contains(&Latch::ResidentMemoryWarned),
             "threshold 0 disables the warn"
         );
         assert_eq!(sink.count(), 0, "no event when disabled");

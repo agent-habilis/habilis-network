@@ -5,7 +5,7 @@
 //! carries the generic transport primitives the app rides. Inbound dispatch
 //! lives in [`super::recv`].
 
-use crate::daemon::state::Standing;
+use crate::daemon::state::{Latch, Standing};
 use std::fmt;
 
 use crate::transport::MeshSender;
@@ -547,7 +547,7 @@ pub(crate) fn peer_info_json(
 /// window the `joined` re-flood gate reads.
 pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     state.peerinfo_flooded_at = Some(clock::Instant::now());
-    state.peerinfo_deferred = false;
+    state.latches.remove(&Latch::PeerInfoDeferred);
     let our_addr = context.endpoint.addr();
     state.last_flooded_addr = Some(our_addr.clone());
     let our_ips: Vec<_> = our_addr.ip_addrs().collect();

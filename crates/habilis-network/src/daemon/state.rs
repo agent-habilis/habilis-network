@@ -1,6 +1,7 @@
 mod event_loop_state;
 
 mod idle_counters;
+mod latch;
 mod mesh_secrets;
 mod ping_round;
 mod state_init;
@@ -31,6 +32,7 @@ use crate::util::tuning;
 pub use event_loop_state::EventLoopState;
 
 pub(crate) use idle_counters::IdleCounters;
+pub(crate) use latch::Latch;
 pub(crate) use mesh_secrets::MeshSecrets;
 pub(crate) use ping_round::PingRound;
 pub(crate) use state_init::StateInit;
