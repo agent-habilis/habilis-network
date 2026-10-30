@@ -67,8 +67,9 @@ fn read_json(
     let needed = unsafe { reader(handle, ptr::null_mut(), 0) };
     assert!(needed >= 0, "length query failed: {:?}", last_error());
     let mut buffer = vec![0_u8; usize::try_from(needed).expect("a sane length") + 1];
+    let destination: *mut c_char = buffer.as_mut_ptr().cast();
     // SAFETY: the buffer is writable for exactly the capacity being passed.
-    let written = unsafe { reader(handle, buffer.as_mut_ptr().cast::<c_char>(), buffer.len()) };
+    let written = unsafe { reader(handle, destination, buffer.len()) };
     assert_eq!(written, needed, "the second call must agree on the length");
     buffer.truncate(usize::try_from(written).expect("a sane length"));
     String::from_utf8(buffer).expect("the document is UTF-8")
@@ -260,10 +261,9 @@ fn a_handle_serves_identity_state_and_roster() {
 
     // An undersized buffer must report the length it needs and write nothing.
     let mut too_small = [0_u8; 4];
+    let too_small_destination: *mut c_char = too_small.as_mut_ptr().cast();
     // SAFETY: live handle, and the buffer really is 4 bytes.
-    let needed = unsafe {
-        habilis_network_mesh_state_json(handle, too_small.as_mut_ptr().cast::<c_char>(), 4)
-    };
+    let needed = unsafe { habilis_network_mesh_state_json(handle, too_small_destination, 4) };
     assert!(
         needed > 4,
         "the state document should not fit in 4 bytes (got {needed})"
@@ -276,15 +276,10 @@ fn a_handle_serves_identity_state_and_roster() {
     // Nobody else is here, so a receive can only time out.
     let mut message = empty_msg();
     let mut buffer = vec![0_u8; 64];
+    let destination: *mut c_char = buffer.as_mut_ptr().cast();
     // SAFETY: live handle, buffer writable for the capacity passed, `out` writable.
     let got = unsafe {
-        habilis_network_msg_recv(
-            handle,
-            buffer.as_mut_ptr().cast::<c_char>(),
-            buffer.len(),
-            200,
-            &raw mut message,
-        )
+        habilis_network_msg_recv(handle, destination, buffer.len(), 200, &raw mut message)
     };
     assert_eq!(got, 0, "expected a timeout, got {got}: {:?}", last_error());
 
@@ -381,19 +376,14 @@ fn empty_msg() -> HabilisNetworkMsg {
 fn recv(handle: *mut HabilisNetworkMesh, cap: usize) -> (c_long, HabilisNetworkMsg, String) {
     let mut message = empty_msg();
     let mut buffer = vec![0_u8; cap];
+    let destination: *mut c_char = buffer.as_mut_ptr().cast();
     // SAFETY: live handle, buffer writable for `cap` bytes, `out` writable.
-    let got = unsafe {
-        habilis_network_msg_recv(
-            handle,
-            buffer.as_mut_ptr().cast::<c_char>(),
-            cap,
-            20_000,
-            &raw mut message,
-        )
-    };
+    let got =
+        unsafe { habilis_network_msg_recv(handle, destination, cap, 20_000, &raw mut message) };
     let text: String = if got == 1 {
+        let source: *const c_char = buffer.as_ptr().cast();
         // SAFETY: a result of 1 means `buf` holds a NUL-terminated text.
-        unsafe { CStr::from_ptr(buffer.as_ptr().cast::<c_char>()) }
+        unsafe { CStr::from_ptr(source) }
             .to_string_lossy()
             .into_owned()
     } else {

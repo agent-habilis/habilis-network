@@ -185,10 +185,11 @@ unsafe fn copy_out(text: &str, buffer: *mut c_char, cap: usize) -> c_long {
     let bytes = text.as_bytes();
     let needed = bytes.len();
     if !buffer.is_null() && needed < cap {
+        let destination: *mut u8 = buffer.cast();
         // SAFETY: `needed + 1 <= cap` bytes are writable per the contract above,
         // and the source is a distinct Rust-owned allocation.
         unsafe {
-            ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.cast::<u8>(), needed);
+            ptr::copy_nonoverlapping(bytes.as_ptr(), destination, needed);
             buffer.add(needed).write(0);
         }
     }
@@ -202,10 +203,11 @@ unsafe fn copy_out(text: &str, buffer: *mut c_char, cap: usize) -> c_long {
 fn write_nick(field: &mut [c_char; NICK_CAP], nick: &str) {
     let bytes = nick.as_bytes();
     let take = bytes.len().min(NICK_CAP - 1);
+    let destination: *mut u8 = field.as_mut_ptr().cast();
     // SAFETY: `take < NICK_CAP` elements are written into an array of that size,
     // from a distinct Rust-owned allocation.
     unsafe {
-        ptr::copy_nonoverlapping(bytes.as_ptr(), field.as_mut_ptr().cast::<u8>(), take);
+        ptr::copy_nonoverlapping(bytes.as_ptr(), destination, take);
     }
     field[take] = 0;
 }
@@ -418,10 +420,11 @@ pub unsafe extern "C" fn habilis_network_msg_recv(
             directed: _directed,
             ..
         } = message;
+        let destination: *mut u8 = buffer.cast();
         // SAFETY: `text.len() + 1 <= cap` bytes are writable per the contract
         // above, and the source is a distinct Rust-owned allocation.
         unsafe {
-            ptr::copy_nonoverlapping(text.as_ptr(), buffer.cast::<u8>(), text.len());
+            ptr::copy_nonoverlapping(text.as_ptr(), destination, text.len());
             buffer.add(text.len()).write(0);
             out.write(meta);
         }
