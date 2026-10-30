@@ -152,14 +152,14 @@ impl Coverage {
     /// [`ChunkError::Malformed`] when the bitmap is too short for the count it claims to cover.
     pub fn decode_bits(bits: &[u8], len: usize) -> Result<Self, ChunkError> {
         let needed = len.div_ceil(8);
-        if bits.len() < needed {
+        let Some(kept) = bits.get(..needed) else {
             return Err(ChunkError::Malformed(format!(
                 "a coverage of {len} chunks needs {needed} bytes, got {}",
                 bits.len()
             )));
-        }
+        };
         Ok(Self {
-            bits: bits[..needed].to_vec(),
+            bits: kept.to_vec(),
             len,
         })
     }
