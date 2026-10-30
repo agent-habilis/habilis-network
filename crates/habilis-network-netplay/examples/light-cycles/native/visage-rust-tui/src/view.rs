@@ -70,7 +70,7 @@ impl Padding {
 /// A `box` node's props. `width`/`height` of `None` means "auto" (sized
 /// from content, per `visage-tui`'s `-1` sentinel); `Some(n)` is an
 /// absolute cell count — no percentage sizing in v1.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoxProps {
     pub direction: Direction,
     pub width: Option<u16>,
