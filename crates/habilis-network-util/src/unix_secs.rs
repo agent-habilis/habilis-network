@@ -24,14 +24,14 @@ pub struct UnixSecs(i64);
 /// A point `secs` seconds after the epoch.
 impl From<i64> for UnixSecs {
     fn from(secs: i64) -> Self {
-        Self(secs)
+        Self::from_secs(secs)
     }
 }
 
 /// The point whose count is the 8 little-endian bytes `bytes`.
 impl From<[u8; 8]> for UnixSecs {
     fn from(bytes: [u8; 8]) -> Self {
-        Self(i64::from_le_bytes(bytes))
+        Self::from_bytes(bytes)
     }
 }
 
@@ -78,6 +78,18 @@ impl UnixSecs {
     #[must_use]
     pub fn to_le_bytes(self) -> [u8; 8] {
         self.0.to_le_bytes()
+    }
+
+    /// Make a time from whole seconds since the epoch.
+    #[must_use]
+    pub fn from_secs(secs: i64) -> Self {
+        Self(secs)
+    }
+
+    /// Make a time from its eight big-endian bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 8]) -> Self {
+        Self(i64::from_le_bytes(bytes))
     }
 }
 
