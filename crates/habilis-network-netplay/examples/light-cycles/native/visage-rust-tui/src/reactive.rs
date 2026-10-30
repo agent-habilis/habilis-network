@@ -86,11 +86,8 @@ pub fn open_tracking<S: BuildHasher>(deps: HashSet<SignalId, S>) -> Option<HashS
 /// if this was the outermost window), and returns what was recorded.
 #[must_use]
 pub fn close_tracking<S: BuildHasher>(prev: Option<HashSet<SignalId, S>>) -> HashSet<SignalId> {
-    REGISTRY.with(|r| {
-        r.current_deps
-            .replace(prev.map(|deps| deps.into_iter().collect()))
-            .unwrap_or_default()
-    })
+    let prev: Option<HashSet<SignalId>> = prev.map(|deps| deps.into_iter().collect());
+    REGISTRY.with(|r| r.current_deps.replace(prev).unwrap_or_default())
 }
 
 /// Runs `f` with tracking suspended — reads inside it are not recorded as
