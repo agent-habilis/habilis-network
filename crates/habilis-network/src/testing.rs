@@ -23,7 +23,9 @@ use crate::util::clock::Instant;
 
 use iroh::address_lookup::memory;
 
+#[cfg(feature = "host")]
 pub(crate) use lane_node::LaneNode;
+#[cfg(feature = "multihop")]
 pub(crate) use log_capture::LogCapture;
 /// The key of the test author `name`: its bytes, zero-padded to 32. Two names keep the order
 /// that their bytes have, and a test reads the name back in a failure message.

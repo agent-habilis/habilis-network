@@ -22,10 +22,12 @@ use crate::transport::PayloadPath;
 use crate::util::tuning;
 use iroh::address_lookup::memory;
 use n0_future::{task, task as n0future_task, time as n0future_time};
-use std::time::{Duration, Duration as std_Duration};
+use std::time::Duration as std_Duration;
 use std::{future, net};
 use tokio::sync::mpsc;
-use tokio::{task as tokio_task, time, time as tokio_time};
+#[cfg(feature = "host")]
+use tokio::time;
+use tokio::{task as tokio_task, time as tokio_time};
 /// Two ports of a ladder: the first is taken by `held` (a socket that says nothing, or another
 /// mesh's beacon), the second is free.
 fn ladder_of_two() -> (net::UdpSocket, Vec<u16>) {
@@ -1804,7 +1806,7 @@ fn a_rung_watch_that_asks_and_then_finishes_leaves_no_open_endpoint() {
         let mut rungs = super::RungWatch::new(reports);
         rungs.ask(&params, SecretKey::generate().public(), port, false);
         // Let the probe bind its endpoint and start its dial on the silent rung.
-        time::sleep(Duration::from_millis(200)).await;
+        time::sleep(std_Duration::from_millis(200)).await;
         rungs.finish().await;
     });
     drop(silent);

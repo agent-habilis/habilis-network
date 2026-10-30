@@ -1,24 +1,36 @@
+#[cfg(feature = "host")]
 use crate::transport::UdpTransport;
 
+#[cfg(feature = "host")]
 use iroh::{EndpointId, SecretKey};
 
+#[cfg(feature = "host")]
 use crate::daemon::state::EventLoopState;
+#[cfg(feature = "host")]
 use crate::protocol::identity::Identity;
+#[cfg(feature = "host")]
 use crate::protocol::{AuthorKey, Nickname};
 
 #[cfg(feature = "host")]
+#[cfg(feature = "host")]
 use crate::daemon::handler_ctx;
 #[cfg(feature = "host")]
+#[cfg(feature = "host")]
 use crate::gossip::event;
+#[cfg(feature = "host")]
 #[cfg(feature = "host")]
 use crate::protocol::messages;
 
 #[cfg(feature = "host")]
+#[cfg(feature = "host")]
 use crate::protocol;
+#[cfg(feature = "host")]
 #[cfg(feature = "host")]
 use crate::transport;
 #[cfg(feature = "host")]
+#[cfg(feature = "host")]
 use iroh_gossip::net;
+#[cfg(feature = "host")]
 #[cfg(feature = "host")]
 use iroh_gossip::proto;
 /// A real endpoint with a `WebRTC` handle, a gossip sender and everything a [`HandlerCtx`] borrows,

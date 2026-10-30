@@ -1,9 +1,13 @@
+#[cfg(feature = "multihop")]
 use std::sync::Arc;
 
 #[cfg(feature = "multihop")]
+#[cfg(feature = "multihop")]
 use std::io;
 #[cfg(feature = "multihop")]
+#[cfg(feature = "multihop")]
 use std::sync;
+#[cfg(feature = "multihop")]
 #[cfg(feature = "multihop")]
 use tracing::subscriber;
 /// The logs that a test captured from its own thread, see [`LogCapture::start`].

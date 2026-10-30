@@ -1,6 +1,10 @@
 use super::{TransportOpts, build_peer_endpoint};
-use crate::protocol::meshes::{LookupOpts, RelayChoice, TransportPolicy};
+#[cfg(feature = "host")]
+use crate::protocol::meshes::RelayChoice;
+use crate::protocol::meshes::{LookupOpts, TransportPolicy};
+#[cfg(feature = "host")]
 use crate::transport::PayloadPath;
+#[cfg(feature = "host")]
 use std::collections::HashSet;
 
 #[cfg(feature = "host")]
@@ -30,7 +34,9 @@ use std::net;
 use std::time::Duration as std_Duration;
 #[cfg(all(feature = "host", feature = "mdns"))]
 use tokio::sync::mpsc;
+#[cfg(feature = "host")]
 use tokio::time as tokio_time;
+#[cfg(feature = "host")]
 use tokio::time::Instant as tokio_Instant;
 /// R1: the tag of a mesh is the same for one topic, differs between topics (the topic id
 /// folds in the password: two rooms of one name with two passwords are two topics) and fits the
