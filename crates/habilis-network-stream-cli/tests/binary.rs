@@ -19,7 +19,7 @@ const BUDGET: Duration = Duration::from_mins(1);
 
 /// Bytes that are not text, so a lossy decode anywhere would show.
 fn payload(len: usize) -> Vec<u8> {
-    let mut state: u32 = 0x9E37_79B9;
+    let mut state: u32 = 0x9e37_79b9;
     (0..len)
         .map(|_| {
             state ^= state << 13;
