@@ -113,7 +113,7 @@ fn players(s: &Snapshot) -> View {
     // Something has to occupy the row or it collapses and the screen jumps
     // when the first match starts.
     if children.is_empty() {
-        children.push(View::text(" ".into()));
+        children.push(View::text(" "));
     }
     View::boxed(
         BoxProps {
@@ -203,14 +203,11 @@ fn arena(s: &Snapshot) -> View {
                     // Pointless advice when the lobby is blocked — sharing
                     // the code again fixes nothing, and the status line
                     // above is already carrying the actual reason.
-                    vec![View::text(
-                        if s.blocked.is_some() {
-                            ""
-                        } else {
-                            "SHARE THE ROOM CODE BELOW"
-                        }
-                        .into(),
-                    )],
+                    vec![View::text(if s.blocked.is_some() {
+                        ""
+                    } else {
+                        "SHARE THE ROOM CODE BELOW"
+                    })],
                 ),
             ],
         )]

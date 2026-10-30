@@ -260,7 +260,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
-        let mounted = mount(&mut host, root, None, View::text("hi".into()));
+        let mounted = mount(&mut host, root, None, View::text("hi"));
         assert_eq!(
             host.arena.children(root).count(),
             1,
@@ -274,10 +274,10 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
-        let mounted = mount(&mut host, root, None, View::text("first".into()));
+        let mounted = mount(&mut host, root, None, View::text("first"));
         let before_ids: Vec<_> = host.arena.children(root).collect();
 
-        let mounted = patch(&mut host, root, mounted, View::text("second".into()));
+        let mounted = patch(&mut host, root, mounted, View::text("second"));
         let after_ids: Vec<_> = host.arena.children(root).collect();
 
         assert_eq!(
@@ -331,15 +331,11 @@ mod tests {
         let root = host.create_root();
         let view = View::boxed(
             BoxProps::default(),
-            vec![
-                View::text("a".into()),
-                View::text("b".into()),
-                View::text("c".into()),
-            ],
+            vec![View::text("a"), View::text("b"), View::text("c")],
         );
         let mounted = mount(&mut host, root, None, view);
 
-        let view2 = View::boxed(BoxProps::default(), vec![View::text("a".into())]);
+        let view2 = View::boxed(BoxProps::default(), vec![View::text("a")]);
         let mounted = patch(&mut host, root, mounted, view2);
 
         let Mounted::Box(box_node, _, _) = &mounted else {
@@ -357,13 +353,10 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
-        let view = View::boxed(BoxProps::default(), vec![View::text("a".into())]);
+        let view = View::boxed(BoxProps::default(), vec![View::text("a")]);
         let mounted = mount(&mut host, root, None, view);
 
-        let view2 = View::boxed(
-            BoxProps::default(),
-            vec![View::text("a".into()), View::text("b".into())],
-        );
+        let view2 = View::boxed(BoxProps::default(), vec![View::text("a"), View::text("b")]);
         let mounted = patch(&mut host, root, mounted, view2);
 
         let Mounted::Box(box_node, _, _) = &mounted else {
@@ -389,7 +382,7 @@ mod tests {
 
         impl Component for Child {
             fn step(&mut self) -> Option<Step> {
-                Some(Step::View(View::text("child".into())))
+                Some(Step::View(View::text("child")))
             }
         }
 
