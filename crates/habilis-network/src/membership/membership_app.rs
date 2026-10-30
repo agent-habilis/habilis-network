@@ -1019,7 +1019,7 @@ impl MembershipApp {
             }
             Linking::ForgetUnicast { peer, reply } => {
                 let id = known_peer(state, &peer).map(|address| address.id);
-                let pool = state.unicast_pool.clone();
+                let pool = &state.unicast_pool;
                 let outcome = match id {
                     Ok(id) => Ok(pool.drop_connection(id).await),
                     Err(unknown) => Err(unknown),
