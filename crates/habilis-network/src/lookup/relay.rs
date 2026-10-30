@@ -514,7 +514,9 @@ mod tests {
             relay_ladder(&RelayChoice::Disabled).next().is_none(),
             "a disabled choice has an empty ladder"
         );
-        let url: RelayUrl = "https://a.example./".parse().unwrap();
+        let url: RelayUrl = "https://a.example./"
+            .parse()
+            .expect("a literal https URL parses");
         let custom = vec![url];
         let ladder: Vec<_> = relay_ladder(&RelayChoice::Custom(custom.clone())).collect();
         assert_eq!(
@@ -554,7 +556,9 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             // RFC-5737 TEST-NET-1, never routable ⇒ the relay handshake can
             // never connect ⇒ `select_bootstrap_rung` finds no reachable rung.
-            let bogus: RelayUrl = "https://192.0.2.1./".parse().unwrap();
+            let bogus: RelayUrl = "https://192.0.2.1./"
+                .parse()
+                .expect("a literal https URL parses");
             let selected = select_bootstrap_rung(&[bogus], std_Duration::from_secs(2), None).await;
             assert!(
                 selected.is_none(),
@@ -616,7 +620,7 @@ mod tests {
     }
 
     fn short_host(url: &RelayUrl) -> String {
-        let host = url.host_str().unwrap();
+        let host = url.host_str().expect("the test URLs carry a host");
         host.trim_end_matches('.')
             .trim_end_matches(".example")
             .to_string()
@@ -733,7 +737,9 @@ mod tests {
     // owns that state); here we cover only the pure change-detection.
 
     fn rung(host: &str) -> RelayUrl {
-        format!("https://{host}.example./").parse().unwrap()
+        format!("https://{host}.example./")
+            .parse()
+            .expect("a test host forms a valid https URL")
     }
 
     #[test]
