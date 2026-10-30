@@ -8,7 +8,7 @@ use super::WindowRange;
 /// already advertised, the resend budget left for this round, and **who** is
 /// asking — the last because entitlement is per-peer, not global (see
 /// [`resendable_to`]).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct MissingQuery<'query> {
     pub range: WindowRange,
     pub have: &'query HashSet<DedupKey>,

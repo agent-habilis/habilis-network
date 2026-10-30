@@ -26,6 +26,7 @@ use std::future;
 /// channel the loop selects on, exactly as the relay-rung walk does
 /// through [`RendezvousParams::rung_tx`]. What stays on the loop is only
 /// the bind, which is milliseconds.
+#[derive(Debug)]
 pub(crate) struct RivalProbe {
     /// The verdict: `true` ⇒ a beacon already answers, stay a peer.
     /// A dropped sender (the task died) reads as `true` — see

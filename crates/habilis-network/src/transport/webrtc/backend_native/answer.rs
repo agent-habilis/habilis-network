@@ -6,6 +6,7 @@ use crate::transport::webrtc::consts::JSEP_DEADLINE;
 
 /// An answer whose envelope is ready to send, with the negotiation still to
 /// be driven. Split so the caller can put the SDP on the wire first.
+#[derive(Debug)]
 pub(crate) struct Answer {
     pub(super) pending: PendingAnswer,
     pub(super) envelope: SignalEnvelope,

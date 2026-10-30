@@ -18,6 +18,7 @@ use tokio::runtime;
 /// and the driver answers that by closing the data channel, which is how the
 /// far side learns of the detach. [`CLOSE_GRACE`] lets that close go out; a
 /// driver still running after it is aborted.
+#[derive(Debug)]
 struct AbortOnDrop(JoinHandle<()>);
 
 const CLOSE_GRACE: Duration = Duration::from_secs(1);
@@ -37,6 +38,7 @@ impl Drop for AbortOnDrop {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct SessionHandle {
     pub(crate) out_tx: mpsc::Sender<Bytes>,
     // the session drop counter, shared with the registry

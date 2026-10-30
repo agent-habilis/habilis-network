@@ -14,6 +14,7 @@ use crate::util::clock::Instant;
 /// already computed for it, passed to [`handle_presence`]. Constructed by
 /// [`crate::gossip::recv::ingest`], across the `gossip`/`lifecycle` module
 /// boundary — hence `pub(crate)` rather than module-private.
+#[derive(Debug)]
 pub(crate) struct PresenceEvent<'message> {
     pub(crate) message: &'message Verified,
     pub(crate) subtype: PresenceSubtype,

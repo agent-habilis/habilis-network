@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use habilis_network_iroh_webrtc_transport::{BrowserPendingOffer, SignalEnvelope, WebRtcHandle};
 use iroh::EndpointId;
 
+#[derive(Debug)]
 pub(crate) struct Offer {
     pub(super) pending: BrowserPendingOffer,
     pub(super) envelope: SignalEnvelope,

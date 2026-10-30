@@ -11,6 +11,7 @@ use n0_future::{task, time};
 /// endpoint of its own, and an abort mid-walk drops that endpoint open.
 /// Dropped without [`Self::stop_and_wait`], the task still stops and closes
 /// its endpoint on its own, as long as the runtime lives.
+#[derive(Debug)]
 pub(crate) struct StoppableTask {
     task: JoinHandle<()>,
     /// Dropped to tell the task to stop.

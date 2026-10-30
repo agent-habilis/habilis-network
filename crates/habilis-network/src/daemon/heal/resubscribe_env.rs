@@ -6,6 +6,7 @@ use iroh_gossip::net;
 /// re-subscribe through, the rendezvous params to bootstrap from, the shared
 /// ctx-building parts (for its `sink` and to rebuild a [`HandlerCtx`] once the
 /// sender is swapped).
+#[derive(Debug)]
 pub(in crate::daemon) struct ResubscribeEnv<'node> {
     pub(in crate::daemon) gossip: &'node net::Gossip,
     pub(in crate::daemon) params: &'node beacon::RendezvousParams,

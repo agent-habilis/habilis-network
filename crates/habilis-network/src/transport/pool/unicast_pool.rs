@@ -60,6 +60,7 @@ pub(in crate::transport::pool) enum Hold {
 }
 
 /// A pooled connection and when a send last used it.
+#[derive(Debug)]
 pub(in crate::transport::pool) struct Pooled {
     pub(in crate::transport::pool) connection: Connection,
     /// On the clock the tokio runtime keeps, so a test can pause it.
@@ -67,6 +68,7 @@ pub(in crate::transport::pool) struct Pooled {
     pub(in crate::transport::pool) hold: Hold,
 }
 
+#[derive(Debug)]
 pub(in crate::transport::pool) struct PoolInner {
     /// `None` for a detached pool (unit-test states / pre-wiring default): every
     /// operation is inert, so a directed send simply errors instead of dialing.

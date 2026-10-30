@@ -5,6 +5,7 @@ use iroh::EndpointId;
 use crate::transport::webrtc::consts::JSEP_DEADLINE;
 
 /// An offer awaiting its answer, plus the envelope to put on the wire.
+#[derive(Debug)]
 pub(crate) struct Offer {
     pub(super) pending: PendingOffer,
     pub(super) envelope: SignalEnvelope,

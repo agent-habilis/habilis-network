@@ -13,6 +13,7 @@ use crate::util::clock::Instant;
 /// past our join horizon (surfaceable) and how it changed the roster.
 /// Returned to the gossip router, which needs both for the inbound-push
 /// gate and the presence/msg dispatch.
+#[derive(Debug)]
 pub(crate) struct Observed {
     pub surfaceable: bool,
     pub update: membership_update::MembershipUpdate,

@@ -1,4 +1,5 @@
 use iroh::{Endpoint, EndpointId};
+use std::fmt;
 use tokio::sync::broadcast;
 
 use crate::daemon::handler_ctx::HandlerCtx;
@@ -21,6 +22,12 @@ pub(in crate::daemon) struct CtxParts<'node> {
     pub(in crate::daemon) rendezvous_id: EndpointId,
     pub(in crate::daemon) external_msg_tx: Option<&'node broadcast::Sender<Authored>>,
     pub(in crate::daemon) sink: &'node dyn NodeSink,
+}
+
+impl fmt::Debug for CtxParts<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("CtxParts").finish_non_exhaustive()
+    }
 }
 
 impl<'node> CtxParts<'node> {

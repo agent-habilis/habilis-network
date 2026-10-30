@@ -5,6 +5,7 @@ use crate::protocol::MeshName;
 /// whether this quit should hard-exit the process — the plain values
 /// [`announce_departure`] needs beyond the loop state and the shared
 /// handler context.
+#[derive(Debug)]
 pub(in crate::daemon) struct QuitParams<'name> {
     pub(in crate::daemon) name: &'name MeshName,
     pub(in crate::daemon) leave_label: &'name str,

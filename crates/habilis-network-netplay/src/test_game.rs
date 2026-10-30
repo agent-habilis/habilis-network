@@ -36,6 +36,7 @@ impl Config for TestGame {
 
 /// Drives a [`TestState`] through the requests a session hands back, exactly
 /// as a real consumer would.
+#[derive(Debug)]
 pub(crate) struct TestRunner {
     pub(crate) state: TestState,
     /// Every frame advanced, in order — so a test can assert *what* was

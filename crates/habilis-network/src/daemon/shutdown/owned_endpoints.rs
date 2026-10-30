@@ -4,6 +4,7 @@ use iroh::protocol;
 /// What the loop closes as it ends: the router with its endpoint, and the multi-hop
 /// underlay, when the engine bound them. An injected endpoint is the caller's and stays
 /// open, though the router is still held to the end so its accept loop outlives the loop.
+#[derive(Debug)]
 pub(in crate::daemon) struct OwnedEndpoints {
     pub(in crate::daemon) router: protocol::Router,
     pub(in crate::daemon) owner: EndpointOwner,

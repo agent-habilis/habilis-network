@@ -11,6 +11,7 @@ use crate::{doc, transport};
 /// Everything [`EventLoopState::new`] needs beyond the clock, grouped for the
 /// same reason [`MeshSecrets`] is: the argument budget. `now` stays separate
 /// because tests pin it to a deterministic instant.
+#[derive(Debug)]
 pub(crate) struct StateInit {
     #[cfg(feature = "host")]
     pub(crate) state_file: Option<StateFile>,

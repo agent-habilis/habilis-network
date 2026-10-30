@@ -8,6 +8,7 @@ use super::Bound;
 /// the ids it lists are **every** message the sender holds in the range. A
 /// receiver can then re-send only real gaps, and advertising a sub-window of a
 /// large log never makes peers perpetually re-send what the sender already has.
+#[derive(Debug)]
 pub(crate) struct DigestWindow {
     pub lo: Bound,
     pub hi: Bound,

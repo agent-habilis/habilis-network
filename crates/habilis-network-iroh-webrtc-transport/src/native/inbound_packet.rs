@@ -3,6 +3,7 @@
 use bytes::Bytes;
 use iroh::EndpointId;
 
+#[derive(Debug)]
 pub(crate) struct InboundPacket {
     pub(crate) from: EndpointId,
     pub(crate) payload: Bytes,

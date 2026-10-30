@@ -39,6 +39,7 @@ use iroh_gossip::proto;
 ///
 /// [`HandlerCtx`]: crate::daemon::handler_ctx::HandlerCtx
 #[cfg(feature = "host")]
+#[derive(Debug)]
 pub(crate) struct LaneNode {
     pub(crate) endpoint: iroh::Endpoint,
     pub(crate) handle: habilis_network_iroh_webrtc_transport::WebRtcHandle,

@@ -19,6 +19,7 @@ pub(super) struct Link {
 
 /// One open stream. `waiting` is taken by the first consumer that presents the
 /// secret; afterwards the stream is spent.
+#[derive(Debug)]
 pub(super) struct Entry {
     pub(super) secret: StreamSecret,
     pub(super) waiting: Option<oneshot::Sender<Link>>,

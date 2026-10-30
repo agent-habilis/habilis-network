@@ -11,6 +11,7 @@ use crate::blob::{BlobDigest, ContentId};
 
 /// One store per peer (per daemon). Holds the blobs this peer offloaded — its
 /// outbound inputs and produced outputs — content-addressed, never replicated.
+#[derive(Debug)]
 pub(crate) struct BlobStore {
     pub(super) spool_dir: PathBuf,
     pub(super) map: HashMap<BlobDigest, BlobEntry>,

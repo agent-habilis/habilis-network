@@ -59,6 +59,7 @@ pub struct EventLoopConfig {
 }
 
 /// The mesh the loop runs: its id and name, this member, and the secrets that protect it.
+#[derive(Debug)]
 pub(crate) struct MeshSpec {
     pub(crate) mesh: MeshId,
     /// Decoded mesh name (from the mesh id). Carried so the
@@ -94,6 +95,7 @@ pub(crate) struct MeshSpec {
 
 /// The transports the loop hands to its state: the `WebRTC` legs, the UDP and relay payload
 /// paths, and the address book that the peers are registered in.
+#[derive(Debug)]
 pub(crate) struct TransportSet {
     /// This peer's `WebRTC` transport handle. Portable: it is the browser's
     /// only direct path onto the mesh, and an extra candidate path for a native
@@ -136,6 +138,7 @@ pub(crate) struct TransportSet {
 }
 
 /// The endpoint the loop runs on, the gossip topic on it, and the accept loop that serves it.
+#[derive(Debug)]
 pub(crate) struct Endpoints {
     pub(crate) topic: GossipTopic,
     /// The gossip frontend the topic was subscribed on. Held by the
@@ -164,6 +167,7 @@ pub(crate) struct Endpoints {
 
 /// The rendezvous the loop serves: its bootstrap inputs, the relay rung it walks to, and whether
 /// this member may host it.
+#[derive(Debug)]
 pub(crate) struct RendezvousConfig {
     /// Inputs for (re)building the co-hosted rendezvous endpoint.
     /// `rendezvous_params.id` doubles as the bootstrap-cache heal
@@ -219,6 +223,14 @@ pub(crate) struct RuntimeConfig {
     /// [`set_owner_pid`](EventLoopConfig::set_owner_pid). `None` keeps the parent watch.
     #[cfg(feature = "host")]
     pub(crate) owner: Option<Owner>,
+}
+
+impl fmt::Debug for RuntimeConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeConfig")
+            .finish_non_exhaustive()
+    }
 }
 
 impl EventLoopConfig {

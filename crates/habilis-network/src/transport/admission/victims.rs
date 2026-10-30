@@ -1,6 +1,7 @@
 //! The peers that are picked to be evicted.
 
 use crate::transport::webrtc;
+use std::fmt;
 use std::sync::Arc;
 
 use iroh::EndpointId;
@@ -15,6 +16,12 @@ pub(crate) struct Victims {
     pub(crate) conns: Vec<Connection>,
     // trait object: the sessions are shared with the table that hands them out
     pub(crate) sessions: Vec<(EndpointId, Arc<dyn Sessions>)>,
+}
+
+impl fmt::Debug for Victims {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Victims").finish_non_exhaustive()
+    }
 }
 
 impl Victims {

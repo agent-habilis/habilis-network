@@ -10,6 +10,7 @@ use crate::protocol::{MessageKind, Nickname, PresenceSubtype, UnixSecs, Verified
 /// Summary of how a newly received message changes our view of the
 /// sender's membership. Computed from the message kind + current state
 /// as a pure function; applied afterwards by the caller.
+#[derive(Debug)]
 pub(crate) struct MembershipUpdate {
     /// The sender was in `quiet` (evicted as silent) and this
     /// message proves they're back. Triggers `peer_return` output and
