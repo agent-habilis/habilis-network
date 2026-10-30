@@ -369,12 +369,8 @@ fn gossip_path(connection: &Connection) -> Option<(u64, u64, u64)> {
 }
 
 /// A count as a float. Counts of frames and bytes in a minute are far below 2^52.
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "a count in one run is below 2^52"
-)]
 fn float(count: u64) -> f64 {
-    count as f64
+    f64::from(u32::try_from(count).unwrap_or(u32::MAX))
 }
 
 /// Per-second rates of one member over `secs`.

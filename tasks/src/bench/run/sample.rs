@@ -9,9 +9,8 @@ pub(crate) struct Sample {
 impl Sample {
     /// Decimal megabits per second, the network convention.
     pub(super) fn mbit_per_s(&self) -> f64 {
-        // Lossless below 2^53 bytes, which is 8 PiB past the 64 MiB ceiling.
-        #[expect(clippy::cast_precision_loss, reason = "bounded by MAX_TRANSFER_BYTES")]
-        let bits = (self.bytes * 8) as f64;
+        // Saturates above u32::MAX bits, which is 512 MiB of data; the 64 MiB ceiling never reaches it.
+        let bits = f64::from(u32::try_from(self.bytes * 8).unwrap_or(u32::MAX));
         (bits / 1_000_000.0) / (self.elapsed_ms / 1000.0)
     }
 }
