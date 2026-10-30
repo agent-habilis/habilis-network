@@ -317,8 +317,7 @@ mod topic_tests {
     use crate::meshes::MeshName;
 
     fn name(text: &str) -> MeshName {
-        MeshName::try_new(text)
-            .expect("`MeshName::try_new(text)` yields a value in this test's fixture")
+        MeshName::try_new(text).expect("the literal name in this test is a valid mesh name")
     }
 
     const CFG_A: &[u8] = &[60, 0, 0]; // rate 60, lookups loopback

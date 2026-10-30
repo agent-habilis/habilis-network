@@ -179,10 +179,10 @@ mod mesh_id_tests {
         use super::super::{Mesh, MeshConfig, MeshName};
         Mesh::try_new(
             crypto::Seed::new([1u8; 32]),
-            MeshName::try_new("test").expect("`MeshName::try_new(\"test\")` yields a value in this test's fixture"),
+            MeshName::try_new("test").expect("the literal \"test\" is a valid mesh name"),
             MeshConfig::loopback(),
         )
-        .expect("`Mesh::try_new( crypto::Seed::new([1u8; 32]), MeshName::try_new(\"test\").expect(\"`MeshName::try_new(\\\"test\\\")` yields a value in this test's fixture\"), MeshConfig::loopback(), )` yields a value in this test's fixture")
+        .expect("the fixture seed, name and config form a valid mesh")
         .to_string()
     }
 
@@ -190,7 +190,7 @@ mod mesh_id_tests {
     fn accepts_well_formed_id() {
         let _guard = ::habilis_network_test_tracing::init();
         MeshId::try_new(&valid_id())
-            .expect("`MeshId::try_new(&valid_id())` yields a value in this test's fixture");
+            .expect("the id was just built by valid_id, so it is a valid MeshId");
     }
 
     #[test]
@@ -224,17 +224,16 @@ mod mesh_id_tests {
     fn serde_transparent_round_trip() {
         let _guard = ::habilis_network_test_tracing::init();
         let id_str = valid_id();
-        let id = MeshId::try_new(&id_str)
-            .expect("`MeshId::try_new(&id_str)` yields a value in this test's fixture");
-        let json = serde_json::to_string(&id)
-            .expect("`serde_json::to_string(&id)` yields a value in this test's fixture");
+        let id = MeshId::try_new(&id_str).expect("the id string in this test is a valid MeshId");
+        let json =
+            serde_json::to_string(&id).expect("a MeshId is a string, which serde_json serializes");
         assert_eq!(
             json,
             format!("\"{id_str}\""),
             "a mesh id serializes as a plain json string"
         );
-        let parsed: MeshId = serde_json::from_str(&json)
-            .expect("`serde_json::from_str(&json)` yields a value in this test's fixture");
+        let parsed: MeshId =
+            serde_json::from_str(&json).expect("the JSON string in this test is a valid MeshId");
         assert_eq!(parsed, id, "a mesh id survives a json round trip");
     }
 
@@ -254,11 +253,10 @@ mod mesh_id_tests {
     #[test]
     fn serde_rejects_an_invalid_hash() {
         let _guard = ::habilis_network_test_tracing::init();
-        let invalid = serde_json::to_string("AbCdEf1234567").expect(
-            "`serde_json::to_string(\"AbCdEf1234567\")` yields a value in this test's fixture",
-        );
+        let invalid =
+            serde_json::to_string("AbCdEf1234567").expect("a short string is a valid JSON string");
         let error = serde_json::from_str::<MeshId>(&invalid)
-            .expect_err("`serde_json::from_str::<MeshId>(&invalid)` fails in this test's fixture");
+            .expect_err("the invalid JSON in this test is refused by MeshId");
         assert!(
             error.to_string().contains("invalid gossip hash"),
             "a json mesh id with an invalid hash names the hash"
@@ -269,11 +267,11 @@ mod mesh_id_tests {
     fn every_mesh_id_decodes_as_a_mesh() {
         let _guard = ::habilis_network_test_tracing::init();
         let id = MeshId::try_new(&valid_id())
-            .expect("`MeshId::try_new(&valid_id())` yields a value in this test's fixture");
+            .expect("the id was just built by valid_id, so it is a valid MeshId");
         let _: LockedMesh = id
             .as_str()
             .parse()
-            .expect("`id.as_str().parse()` yields a value in this test's fixture");
+            .expect("the id text was just built from a valid MeshId");
     }
 
     #[test]

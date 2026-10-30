@@ -123,8 +123,7 @@ mod golden_tests {
     fn golden_derivations_keyed_by_a_secret() {
         let _guard = ::habilis_network_test_tracing::init();
         let root = SymmetricKey::from(ROOT);
-        let name = MeshName::try_new("test")
-            .expect("`MeshName::try_new(\"test\")` yields a value in this test's fixture");
+        let name = MeshName::try_new("test").expect("the literal \"test\" is a valid mesh name");
         assert_eq!(
             format!(
                 "{:?}",

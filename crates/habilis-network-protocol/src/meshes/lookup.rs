@@ -1097,17 +1097,19 @@ mod lookup_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let one: RelayLadder = "https://a.example"
             .parse()
-            .expect("`\"https://a.example\".parse()` yields a value in this test's fixture");
+            .expect("the literal is a valid relay URL");
         assert_eq!(one.len(), 1, "a single rung parses to one rung");
         assert!(!one.is_empty(), "a single rung is not an empty ladder");
 
-        let two: RelayLadder = "https://a.example,https://b.example".parse().expect("`\"https://a.example,https://b.example\".parse()` yields a value in this test's fixture");
+        let two: RelayLadder = "https://a.example,https://b.example"
+            .parse()
+            .expect("the literal is a list of valid relay URLs");
         assert_eq!(two.len(), 2, "two rungs parse to two rungs");
         // Display round-trips through FromStr (canonical `a,b` text form).
         let rendered = two.to_string();
         let reparsed: RelayLadder = rendered
             .parse()
-            .expect("`rendered.parse()` yields a value in this test's fixture");
+            .expect("the text was rendered from a valid relay ladder");
         assert_eq!(reparsed, two, "the ladder re-parses to the same rungs");
         assert_eq!(two.as_urls().len(), 2, "the ladder lists its two urls");
     }
@@ -1134,7 +1136,7 @@ mod lookup_tests {
         // (non-loopback) mesh.
         let ladder: RelayLadder = "https://a.example"
             .parse()
-            .expect("`\"https://a.example\".parse()` yields a value in this test's fixture");
+            .expect("the literal is a valid relay URL");
         let options = resolve_lookups(lookups(false, false, RelaySelection::Named(ladder)));
         assert!(
             !options.mdns && !options.dht,
@@ -1186,11 +1188,13 @@ mod lookup_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let rung0: iroh_base::RelayUrl = "https://a.example"
             .parse()
-            .expect("`\"https://a.example\".parse()` yields a value in this test's fixture");
+            .expect("the literal is a valid relay URL");
         let rung1: iroh_base::RelayUrl = "https://b.example"
             .parse()
-            .expect("`\"https://b.example\".parse()` yields a value in this test's fixture");
-        let ladder: RelayLadder = "https://a.example,https://b.example".parse().expect("`\"https://a.example,https://b.example\".parse()` yields a value in this test's fixture");
+            .expect("the literal is a valid relay URL");
+        let ladder: RelayLadder = "https://a.example,https://b.example"
+            .parse()
+            .expect("the literal is a list of valid relay URLs");
         let options = resolve_lookups(lookups(false, false, RelaySelection::Named(ladder)));
         assert_eq!(
             options.relay_lookup,
@@ -1203,7 +1207,8 @@ mod lookup_tests {
     fn config_round_trips_loopback() {
         let _guard = ::habilis_network_test_tracing::init();
         let config = MeshConfig::loopback();
-        let decoded = MeshConfig::try_from(config.to_bytes().as_slice()).expect("`MeshConfig::try_from(config.to_bytes().as_slice())` yields a value in this test's fixture");
+        let decoded = MeshConfig::try_from(config.to_bytes().as_slice())
+            .expect("the config was just encoded by to_bytes, so it decodes");
         assert_eq!(decoded, config, "a loopback config survives a round trip");
     }
 
@@ -1211,7 +1216,8 @@ mod lookup_tests {
     fn config_round_trips_public_preset() {
         let _guard = ::habilis_network_test_tracing::init();
         let config = MeshConfig::public_preset();
-        let decoded = MeshConfig::try_from(config.to_bytes().as_slice()).expect("`MeshConfig::try_from(config.to_bytes().as_slice())` yields a value in this test's fixture");
+        let decoded = MeshConfig::try_from(config.to_bytes().as_slice())
+            .expect("the config was just encoded by to_bytes, so it decodes");
         assert_eq!(
             decoded, config,
             "a public preset config survives a round trip"
@@ -1226,19 +1232,20 @@ mod lookup_tests {
                 mdns: true,
                 dht: false,
                 relay_lookup: RelayChoice::Custom(vec![
-                    "https://a.example".parse().expect(
-                        "`\"https://a.example\".parse()` yields a value in this test's fixture",
-                    ),
-                    "https://b.example".parse().expect(
-                        "`\"https://b.example\".parse()` yields a value in this test's fixture",
-                    ),
+                    "https://a.example"
+                        .parse()
+                        .expect("the literal is a valid relay URL"),
+                    "https://b.example"
+                        .parse()
+                        .expect("the literal is a valid relay URL"),
                 ]),
             },
             password: None,
             issuer_pubkey: None,
             transport: TransportPolicy::default(),
         };
-        let decoded = MeshConfig::try_from(config.to_bytes().as_slice()).expect("`MeshConfig::try_from(config.to_bytes().as_slice())` yields a value in this test's fixture");
+        let decoded = MeshConfig::try_from(config.to_bytes().as_slice())
+            .expect("the config was just encoded by to_bytes, so it decodes");
         assert_eq!(
             decoded, config,
             "a custom relay ladder survives a round trip"
@@ -1278,7 +1285,8 @@ mod lookup_tests {
             issuer_pubkey: None,
             transport: TransportPolicy::default(),
         };
-        let decoded = MeshConfig::try_from(config.to_bytes().as_slice()).expect("`MeshConfig::try_from(config.to_bytes().as_slice())` yields a value in this test's fixture");
+        let decoded = MeshConfig::try_from(config.to_bytes().as_slice())
+            .expect("the config was just encoded by to_bytes, so it decodes");
         assert_eq!(decoded, config, "a password verifier survives a round trip");
     }
 
@@ -1305,8 +1313,9 @@ mod lookup_tests {
         let mut bytes = MeshConfig::public_preset().to_bytes();
         bytes.push(0b10_0000); // an undefined feature bit (1 to 16 are taken)
         bytes.extend_from_slice(&[0u8; 16]);
-        let error = MeshConfig::try_from(&bytes[..])
-            .expect_err("`MeshConfig::try_from(&bytes[..])` fails in this test's fixture");
+        let error = MeshConfig::try_from(&bytes[..]).expect_err(
+            "the bytes in this test carry an unknown transport bit, so decoding is refused",
+        );
         assert!(
             error.to_string().contains("upgrade to a newer build"),
             "got: {error}"
@@ -1330,7 +1339,7 @@ mod lookup_tests {
         );
         assert_eq!(
             MeshConfig::try_from(&bytes[..])
-                .expect("`MeshConfig::try_from(&bytes[..])` yields a value in this test's fixture"),
+                .expect("the bytes in this test are a valid encoded config"),
             config,
             "a relay transport decodes back to the same config"
         );
@@ -1352,7 +1361,7 @@ mod lookup_tests {
         );
         assert!(
             !MeshConfig::try_from(&[0b0111, 0b0111])
-                .expect("`MeshConfig::try_from(&[0b0111, 0b0111])` yields a value in this test's fixture")
+                .expect("the bytes in this test are a valid encoded config")
                 .transport
                 .allows(Transport::Relay),
             "the relay stays lookup-only when the flag is not set"
@@ -1377,18 +1386,14 @@ mod lookup_tests {
             "the public preset encodes the default transport policy"
         );
         let decoded = MeshConfig::try_from(&[0b0111, 0b1_0111])
-            .expect(
-                "`MeshConfig::try_from(&[0b0111, 0b1_0111])` yields a value in this test's fixture",
-            )
+            .expect("the bits in this test name a valid transport set")
             .transport;
         assert_eq!(
             decoded, default,
             "the default transport policy survives a round trip"
         );
         let with_relay = MeshConfig::try_from(&[0b0111, 0b1111])
-            .expect(
-                "`MeshConfig::try_from(&[0b0111, 0b1111])` yields a value in this test's fixture",
-            )
+            .expect("the bits in this test name a valid transport set")
             .transport;
         assert!(
             with_relay.allows(Transport::Udp)
@@ -1420,7 +1425,7 @@ mod lookup_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let policy = |list: &[Transport]| {
             TransportPolicy::try_from(list)
-                .expect("`TransportPolicy::try_from(list)` yields a value in this test's fixture")
+                .expect("the list in this test names only known transports")
         };
         assert_eq!(
             policy(&[]),
@@ -1481,12 +1486,12 @@ mod lookup_tests {
         ];
         let mut seen = Vec::new();
         for list in lists {
-            let config = MeshConfig::resolve(&[Lookup::Relay], None, list).expect("`MeshConfig::resolve(&[Lookup::Relay], None, list)` yields a value in this test's fixture");
+            let config = MeshConfig::resolve(&[Lookup::Relay], None, list)
+                .expect("the lookup and transport list in this test resolve to a valid config");
             let bytes = config.to_bytes();
             assert_eq!(
-                MeshConfig::try_from(&bytes[..]).expect(
-                    "`MeshConfig::try_from(&bytes[..])` yields a value in this test's fixture"
-                ),
+                MeshConfig::try_from(&bytes[..])
+                    .expect("the bytes in this test are a valid encoded config"),
                 config,
                 "{list:?}"
             );
@@ -1499,7 +1504,7 @@ mod lookup_tests {
     fn a_mesh_without_udp_needs_the_relay_lookup() {
         let _guard = ::habilis_network_test_tracing::init();
         let error = MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::WebRtc])
-            .expect_err("`MeshConfig::resolve(..)` fails in this test's fixture")
+            .expect_err("a relay-only lookup with no relay ladder is refused by resolve")
             .to_string();
         assert!(error.contains("relay"), "{error}");
         assert!(
@@ -1552,7 +1557,7 @@ mod lookup_tests {
         );
         assert_eq!(
             MeshConfig::try_from(&bytes[..])
-                .expect("`MeshConfig::try_from(&bytes[..])` yields a value in this test's fixture"),
+                .expect("the bytes in this test are a valid encoded config"),
             default,
             "an older id decodes with gossip off"
         );
@@ -1572,7 +1577,7 @@ mod lookup_tests {
         );
         let older = [0b0111, 0b0111];
         let decoded = MeshConfig::try_from(&older)
-            .expect("`MeshConfig::try_from(&older)` yields a value in this test's fixture");
+            .expect("the older encoding in this test is a valid config");
         assert!(
             !decoded.transport.allows(Transport::Gossip),
             "an older id has gossip off after decoding"
@@ -1590,12 +1595,12 @@ mod lookup_tests {
     fn an_id_with_gossip_and_no_direct_path_is_refused() {
         let _guard = ::habilis_network_test_tracing::init();
         let gossip_only = MeshConfig::try_from(&[0b0111, super::TRANSPORT_GOSSIP])
-            .expect_err("`MeshConfig::try_from(..)` fails in this test's fixture")
+            .expect_err("the transport list with gossip only is refused by try_from")
             .to_string();
         assert!(gossip_only.contains("needs a direct path"), "{gossip_only}");
         let with_multihop =
             MeshConfig::try_from(&[0b0111, super::TRANSPORT_GOSSIP | super::TRANSPORT_MULTIHOP])
-                .expect_err("`MeshConfig::try_from(..)` fails in this test's fixture")
+                .expect_err("the transport list with gossip and multihop is refused by try_from")
                 .to_string();
         assert_eq!(
             with_multihop, MULTIHOP_ALONE,
@@ -1670,7 +1675,7 @@ mod lookup_tests {
     fn an_id_with_multihop_alone_names_that_mistake() {
         let _guard = ::habilis_network_test_tracing::init();
         let alone = MeshConfig::try_from(&[0b0111, super::TRANSPORT_MULTIHOP])
-            .expect_err("`let alone = MeshConfig::try_from(&[0b0111, super::TRANSPORT_MULTIHOP])` fails in this test's fixture")
+            .expect_err("the bits name multihop alone, which is refused")
             .to_string();
         assert_eq!(
             alone, MULTIHOP_ALONE,
@@ -1678,7 +1683,7 @@ mod lookup_tests {
         );
         let with_relay = super::TRANSPORT_MULTIHOP | super::TRANSPORT_RELAY;
         let with_relay_error = MeshConfig::try_from(&[0b0111, with_relay])
-            .expect_err("`let with_relay_error = MeshConfig::try_from(&[0b0111, with_relay])` fails in this test's fixture")
+            .expect_err("the bits name multihop with a relay, which is refused")
             .to_string();
         assert_eq!(
             with_relay_error, MULTIHOP_ALONE,
@@ -1732,7 +1737,8 @@ mod lookup_tests {
             issuer_pubkey: None,
             transport: TransportPolicy::default().relay_transport(true),
         };
-        let decoded = MeshConfig::try_from(config.to_bytes().as_slice()).expect("`MeshConfig::try_from(config.to_bytes().as_slice())` yields a value in this test's fixture");
+        let decoded = MeshConfig::try_from(config.to_bytes().as_slice())
+            .expect("the config was just encoded by to_bytes, so it decodes");
         assert_eq!(
             decoded, config,
             "a relay transport with a password survives a round trip"
@@ -1764,7 +1770,8 @@ mod lookup_tests {
             issuer_pubkey: Some([0x3Cu8; 32]),
             transport: TransportPolicy::default(),
         };
-        let decoded = MeshConfig::try_from(config.to_bytes().as_slice()).expect("`MeshConfig::try_from(config.to_bytes().as_slice())` yields a value in this test's fixture");
+        let decoded = MeshConfig::try_from(config.to_bytes().as_slice())
+            .expect("the config was just encoded by to_bytes, so it decodes");
         assert_eq!(
             decoded, config,
             "an issuer public key survives a round trip"
@@ -1782,7 +1789,8 @@ mod lookup_tests {
             issuer_pubkey: Some([0x3Cu8; 32]),
             transport: TransportPolicy::default(),
         };
-        let decoded = MeshConfig::try_from(config.to_bytes().as_slice()).expect("`MeshConfig::try_from(config.to_bytes().as_slice())` yields a value in this test's fixture");
+        let decoded = MeshConfig::try_from(config.to_bytes().as_slice())
+            .expect("the config was just encoded by to_bytes, so it decodes");
         assert_eq!(
             decoded, config,
             "a password and an invite survive a round trip together"
@@ -1842,7 +1850,7 @@ mod choice_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mdns: Lookup = "mdns"
             .parse()
-            .expect("`\"mdns\".parse()` yields a value in this test's fixture");
+            .expect("the literal \"mdns\" is a known lookup name");
         assert_eq!(
             mdns,
             Lookup::Mdns,
@@ -1850,11 +1858,11 @@ mod choice_tests {
         );
         let dht: Lookup = "dht"
             .parse()
-            .expect("`\"dht\".parse()` yields a value in this test's fixture");
+            .expect("the literal \"dht\" is a known lookup name");
         assert_eq!(dht, Lookup::Dht, "the dht name parses to the dht lookup");
         let relay: Lookup = "relay"
             .parse()
-            .expect("`\"relay\".parse()` yields a value in this test's fixture");
+            .expect("the literal \"relay\" is a known lookup name");
         assert_eq!(
             relay,
             Lookup::Relay,
@@ -1862,7 +1870,7 @@ mod choice_tests {
         );
         let udp: Transport = "udp"
             .parse()
-            .expect("`\"udp\".parse()` yields a value in this test's fixture");
+            .expect("the literal \"udp\" is a known transport name");
         assert_eq!(
             udp,
             Transport::Udp,
@@ -1870,7 +1878,7 @@ mod choice_tests {
         );
         let webrtc: Transport = "webrtc"
             .parse()
-            .expect("`\"webrtc\".parse()` yields a value in this test's fixture");
+            .expect("the literal \"webrtc\" is a known transport name");
         assert_eq!(
             webrtc,
             Transport::WebRtc,
@@ -1878,7 +1886,7 @@ mod choice_tests {
         );
         let relay_transport: Transport = "relay"
             .parse()
-            .expect("`\"relay\".parse()` yields a value in this test's fixture");
+            .expect("the literal \"relay\" is a known lookup name");
         assert_eq!(
             relay_transport,
             Transport::Relay,
@@ -1886,7 +1894,7 @@ mod choice_tests {
         );
         let multihop: Transport = "multihop"
             .parse()
-            .expect("`\"multihop\".parse()` yields a value in this test's fixture");
+            .expect("the literal \"multihop\" is a known transport name");
         assert_eq!(
             multihop,
             Transport::Multihop,
@@ -1894,7 +1902,7 @@ mod choice_tests {
         );
         let gossip: Transport = "gossip"
             .parse()
-            .expect("`\"gossip\".parse()` yields a value in this test's fixture");
+            .expect("the literal \"gossip\" is a known transport name");
         assert_eq!(
             gossip,
             Transport::Gossip,
@@ -1924,7 +1932,7 @@ mod choice_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let udp: Transport = "udp"
             .parse()
-            .expect("`\"udp\".parse()` yields a value in this test's fixture");
+            .expect("the literal \"udp\" is a known transport name");
         assert_eq!(udp.to_string(), "udp", "the direct transport is named udp");
         let p2p: Result<Transport, _> = "p2p".parse();
         assert!(p2p.is_err(), "the name p2p is not a transport");
@@ -1935,7 +1943,7 @@ mod choice_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let misspelt: Result<Lookup, _> = "relai".parse();
         let error = misspelt
-            .expect_err("`misspelt` fails in this test's fixture")
+            .expect_err("the misspelt name is not a known transport, so parsing refuses it")
             .to_string();
         assert!(
             error.contains("relai") && error.contains("mdns, dht, relay"),
@@ -1943,7 +1951,7 @@ mod choice_tests {
         );
         let unknown_transport: Result<Transport, _> = "tcp".parse();
         let transport_error = unknown_transport
-            .expect_err("`unknown_transport` fails in this test's fixture")
+            .expect_err("the unknown transport name is refused by parsing")
             .to_string();
         assert!(
             transport_error.contains("tcp")
@@ -1955,13 +1963,15 @@ mod choice_tests {
     #[test]
     fn the_lists_deserialize_from_json_names() {
         let _guard = ::habilis_network_test_tracing::init();
-        let lookups: Vec<Lookup> = serde_json::from_str(r#"["mdns","relay"]"#).expect("`serde_json::from_str(r#\"[\"mdns\",\"relay\"]\"#)` yields a value in this test's fixture");
+        let lookups: Vec<Lookup> = serde_json::from_str(r#"["mdns","relay"]"#)
+            .expect("the JSON literal is a list of known lookup names");
         assert_eq!(
             lookups,
             vec![Lookup::Mdns, Lookup::Relay],
             "the lookup list deserializes from its json names"
         );
-        let transports: Vec<Transport> = serde_json::from_str(r#"["udp","relay"]"#).expect("`serde_json::from_str(r#\"[\"udp\",\"relay\"]\"#)` yields a value in this test's fixture");
+        let transports: Vec<Transport> = serde_json::from_str(r#"["udp","relay"]"#)
+            .expect("the JSON literal is a list of known transport names");
         assert_eq!(
             transports,
             vec![Transport::Udp, Transport::Relay],
@@ -1976,9 +1986,8 @@ mod choice_tests {
     #[test]
     fn a_lookup_list_becomes_the_set_of_exactly_those() {
         let _guard = ::habilis_network_test_tracing::init();
-        let set = LookupSet::choose(&[Lookup::Mdns], None).expect(
-            "`LookupSet::choose(&[Lookup::Mdns], None)` yields a value in this test's fixture",
-        );
+        let set = LookupSet::choose(&[Lookup::Mdns], None)
+            .expect("a mDNS-only lookup set has a valid choice with no ladder");
         assert!(
             set.mdns && !set.dht,
             "a lookup list sets mdns and leaves dht off"
@@ -2008,9 +2017,8 @@ mod choice_tests {
             "an empty lookup set names no lookup"
         );
         for lookup in [Lookup::Mdns, Lookup::Dht, Lookup::Relay] {
-            let set = LookupSet::choose(&[lookup], None).expect(
-                "`LookupSet::choose(&[lookup], None)` yields a value in this test's fixture",
-            );
+            let set = LookupSet::choose(&[lookup], None)
+                .expect("the lookup set in this test has a valid choice with no ladder");
             assert!(set.any(), "{lookup:?} alone is a lookup");
         }
     }
@@ -2018,16 +2026,18 @@ mod choice_tests {
     #[test]
     fn naming_relay_takes_the_default_ladder_unless_one_is_given() {
         let _guard = ::habilis_network_test_tracing::init();
-        let bare = LookupSet::choose(&[Lookup::Relay], None).expect(
-            "`LookupSet::choose(&[Lookup::Relay], None)` yields a value in this test's fixture",
-        );
+        let bare = LookupSet::choose(&[Lookup::Relay], None)
+            .expect("a relay lookup with no ladder has a valid choice");
         assert_eq!(
             bare.relay_lookup,
             RelaySelection::Default,
             "naming relay takes the default ladder when none is given"
         );
-        let ladder: RelayLadder = "https://a.example,https://b.example".parse().expect("`\"https://a.example,https://b.example\".parse()` yields a value in this test's fixture");
-        let custom = LookupSet::choose(&[Lookup::Relay], Some(ladder.clone())).expect("`LookupSet::choose(&[Lookup::Relay], Some(ladder.clone()))` yields a value in this test's fixture");
+        let ladder: RelayLadder = "https://a.example,https://b.example"
+            .parse()
+            .expect("the literal is a list of valid relay URLs");
+        let custom = LookupSet::choose(&[Lookup::Relay], Some(ladder.clone()))
+            .expect("the relay lookup with this ladder is a valid choice");
         assert_eq!(
             custom.relay_lookup,
             RelaySelection::Named(ladder),
@@ -2040,7 +2050,7 @@ mod choice_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let ladder: RelayLadder = "https://a.example"
             .parse()
-            .expect("`\"https://a.example\".parse()` yields a value in this test's fixture");
+            .expect("the literal is a valid relay URL");
         let error = LookupSet::choose(&[Lookup::Mdns], Some(ladder))
             .expect_err("LookupSet::choose refuses the mDNS lookup when the relay ladder is set")
             .to_string();
@@ -2051,20 +2061,19 @@ mod choice_tests {
     fn an_empty_transport_list_and_udp_alone_keep_the_relay_off_payload() {
         let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
-            TransportPolicy::try_from(&[])
-                .expect("`TransportPolicy::try_from(&[])` yields a value in this test's fixture"),
+            TransportPolicy::try_from(&[]).expect("an empty list is a valid transport policy"),
             TransportPolicy::default(),
             "an empty transport list keeps the relay off the payload path"
         );
         assert!(
             !TransportPolicy::try_from(&[Transport::Udp])
-                .expect("`TransportPolicy::try_from(&[Transport::Udp])` yields a value in this test's fixture")
+                .expect("the udp-only list is a valid transport policy")
                 .allows(Transport::Relay),
             "udp alone keeps the relay off the payload path"
         );
         assert!(
             TransportPolicy::try_from(&[Transport::Udp, Transport::Relay])
-                .expect("`TransportPolicy::try_from(&[Transport::Udp, Transport::Relay])` yields a value in this test's fixture")
+                .expect("the udp and relay list is a valid transport policy")
                 .allows(Transport::Relay),
             "a transport list with relay turns the relay on"
         );
@@ -2084,7 +2093,7 @@ mod choice_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let config =
             MeshConfig::resolve(&[Lookup::Relay], None, &[Transport::Udp, Transport::Relay])
-                .expect("`MeshConfig::resolve(..)` yields a value in this test's fixture");
+                .expect("the lookup and transport list in this test resolve to a valid config");
         assert!(
             config.transport.allows(Transport::Relay),
             "the three choices resolve to a relay transport"
@@ -2100,7 +2109,7 @@ mod choice_tests {
         );
 
         let bare = MeshConfig::resolve(&[], None, &[])
-            .expect("`MeshConfig::resolve(&[], None, &[])` yields a value in this test's fixture");
+            .expect("an empty lookup list with no transports resolves to the default config");
         assert!(bare.lookups.is_loopback(), "the bare config is loopback");
         assert!(
             !bare.transport.allows(Transport::Relay),
@@ -2115,7 +2124,8 @@ mod choice_tests {
     fn relay_can_be_a_lookup_and_nothing_more() {
         let _guard = ::habilis_network_test_tracing::init();
         for transports in [&[][..], &[Transport::Udp][..]] {
-            let config = MeshConfig::resolve(&[Lookup::Relay], None, transports).expect("`MeshConfig::resolve(&[Lookup::Relay], None, transports)` yields a value in this test's fixture");
+            let config = MeshConfig::resolve(&[Lookup::Relay], None, transports)
+                .expect("the lookup and transport list in this test resolve to a valid config");
             assert_eq!(
                 config.lookups.relay_lookup,
                 RelayChoice::Pinned,
@@ -2124,7 +2134,8 @@ mod choice_tests {
             assert!(!config.transport.allows(Transport::Relay), "{transports:?}");
             assert_eq!(
                 config,
-                MeshConfig::try_from(config.to_bytes().as_slice()).expect("`MeshConfig::try_from(config.to_bytes().as_slice())` yields a value in this test's fixture"),
+                MeshConfig::try_from(config.to_bytes().as_slice())
+                    .expect("the config was just encoded by to_bytes, so it decodes"),
                 "the relay-only config survives a round trip"
             );
         }

@@ -28,9 +28,8 @@ fn test_round_trip() {
     );
     let bytes = message
         .serialize()
-        .expect("`message.serialize()` yields a value in this test's fixture");
-    let parsed = Message::parse(&bytes)
-        .expect("`Message::parse(&bytes)` yields a value in this test's fixture");
+        .expect("the fixture message is well formed, so it serializes");
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
     assert_eq!(
         parsed.id, message.id,
         "the parsed id matches the id of the message"
@@ -72,9 +71,8 @@ fn test_alive_round_trip() {
     let message = Message::new_alive(&sid(), &nick("word-word"));
     let bytes = message
         .serialize()
-        .expect("`message.serialize()` yields a value in this test's fixture");
-    let parsed = Message::parse(&bytes)
-        .expect("`Message::parse(&bytes)` yields a value in this test's fixture");
+        .expect("the fixture message is well formed, so it serializes");
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
     assert_eq!(
         parsed.kind,
         MessageKind::Presence {
@@ -95,13 +93,12 @@ fn test_ping_round_trip() {
     let message = Message::new_ping(&sid(), &nick("word-word"));
     let bytes = message
         .serialize()
-        .expect("`message.serialize()` yields a value in this test's fixture");
+        .expect("the fixture message is well formed, so it serializes");
     assert!(
         String::from_utf8_lossy(&bytes).contains("\"type\":\"ping\""),
         "a ping is written with the ping type"
     );
-    let parsed = Message::parse(&bytes)
-        .expect("`Message::parse(&bytes)` yields a value in this test's fixture");
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
     assert_eq!(parsed.kind, MessageKind::Ping, "the parsed kind is a ping");
     assert_eq!(parsed.body.as_str(), "", "a ping has an empty body");
 }
@@ -118,7 +115,13 @@ fn a_link_state_message_is_built_signed_and_round_tripped_on_every_target() {
         message.verify_signature(),
         "a link state message verifies its signature"
     );
-    let parsed: Message = Message::parse(message.serialize().expect("`message.serialize()` yields a value in this test's fixture").as_bytes()).expect("`Message::parse(message.serialize().expect(\"`message.serialize()` yields a value in this test's fixture\").as_bytes())` yields a value in this test's fixture");
+    let parsed: Message = Message::parse(
+        message
+            .serialize()
+            .expect("the fixture message is well formed, so it serializes")
+            .as_bytes(),
+    )
+    .expect("the bytes just serialized from the fixture message parse back");
     assert_eq!(
         parsed.kind,
         MessageKind::LinkState,
@@ -139,9 +142,8 @@ fn test_pong_round_trip() {
     let message = Message::new_pong(&sid(), &nick("word-word"), target.clone(), &probe);
     let bytes = message
         .serialize()
-        .expect("`message.serialize()` yields a value in this test's fixture");
-    let parsed = Message::parse(&bytes)
-        .expect("`Message::parse(&bytes)` yields a value in this test's fixture");
+        .expect("the fixture message is well formed, so it serializes");
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
     assert_eq!(
         parsed.kind,
         MessageKind::Pong { to: target, probe },
@@ -166,7 +168,7 @@ fn test_task_status_round_trip() {
     );
     let bytes = message
         .serialize()
-        .expect("`message.serialize()` yields a value in this test's fixture");
+        .expect("the fixture message is well formed, so it serializes");
     let wire = String::from_utf8_lossy(&bytes);
     assert!(
         wire.contains("\"type\":\"app\""),
@@ -176,8 +178,7 @@ fn test_task_status_round_trip() {
         wire.contains("\"tag\":\"app_status\""),
         "a task status is written with its app status tag"
     );
-    let parsed = Message::parse(&bytes)
-        .expect("`Message::parse(&bytes)` yields a value in this test's fixture");
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
     assert_eq!(
         parsed.kind,
         MessageKind::app_to("app_status", target, None),
@@ -201,13 +202,12 @@ fn test_task_artifact_round_trip() {
     );
     let bytes = message
         .serialize()
-        .expect("`message.serialize()` yields a value in this test's fixture");
+        .expect("the fixture message is well formed, so it serializes");
     assert!(
         String::from_utf8_lossy(&bytes).contains("\"tag\":\"app_artifact\""),
         "a task artifact is written with its app artifact tag"
     );
-    let parsed = Message::parse(&bytes)
-        .expect("`Message::parse(&bytes)` yields a value in this test's fixture");
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
     assert_eq!(
         parsed.kind,
         MessageKind::app_to("app_artifact", target, None),
@@ -231,9 +231,8 @@ fn test_ext_round_trip() {
     message.ext = serde_json::json!({"tags": ["rust", "p2p"], "priority": 1});
     let bytes = message
         .serialize()
-        .expect("`message.serialize()` yields a value in this test's fixture");
-    let parsed = Message::parse(&bytes)
-        .expect("`Message::parse(&bytes)` yields a value in this test's fixture");
+        .expect("the fixture message is well formed, so it serializes");
+    let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
     assert_eq!(
         parsed.ext["tags"][0], "rust",
         "the first extension tag survives a round trip"
@@ -255,8 +254,8 @@ fn test_unknown_ext_fields_ignored() {
     let json = format!(
         r#"{{"v":"12.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi","ext":{{"future_field":"value","another":42}}}}"#
     );
-    let parsed = Message::parse(json.as_bytes())
-        .expect("`Message::parse(json.as_bytes())` yields a value in this test's fixture");
+    let parsed =
+        Message::parse(json.as_bytes()).expect("the JSON literal in this test is a valid message");
     assert_eq!(
         parsed.body.as_str(),
         "hi",
@@ -274,8 +273,8 @@ fn test_missing_ext_defaults_to_empty_object() {
     let json = format!(
         r#"{{"v":"12.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"}}"#
     );
-    let parsed = Message::parse(json.as_bytes())
-        .expect("`Message::parse(json.as_bytes())` yields a value in this test's fixture");
+    let parsed =
+        Message::parse(json.as_bytes()).expect("the JSON literal in this test is a valid message");
     assert_eq!(
         parsed.ext,
         serde_json::json!({}),
@@ -407,11 +406,11 @@ fn build_msg_bytes_message() {
         },
         &identity,
     )
-    .expect("`build_msg_bytes(..)` yields a value in this test's fixture");
+    .expect("the build params in this test are valid, so the build succeeds");
     assert!(!built.id.as_str().is_empty(), "the built message has an id");
     assert!(!bytes.is_empty(), "the built message has bytes");
     let message = Message::parse(bytes.as_bytes())
-        .expect("`Message::parse(bytes.as_bytes())` yields a value in this test's fixture");
+        .expect("the bytes were built from a valid message just above");
     assert_eq!(
         message.body.as_str(),
         "hello",
@@ -525,7 +524,13 @@ mod signing {
         let _guard = ::habilis_network_test_tracing::init();
         let message =
             Message::fixture(MessageKind::app_broadcast("app_msg"), "hi").sign(&identity());
-        let parsed: Message = Message::parse(message.serialize().expect("`message.serialize()` yields a value in this test's fixture").as_bytes()).expect("`Message::parse(message.serialize().expect(\"`message.serialize()` yields a value in this test's fixture\").as_bytes())` yields a value in this test's fixture");
+        let parsed: Message = Message::parse(
+            message
+                .serialize()
+                .expect("the fixture message is well formed, so it serializes")
+                .as_bytes(),
+        )
+        .expect("the bytes just serialized from the fixture message parse back");
         assert!(
             parsed.verify_signature(),
             "the signature survives a wire round trip"
@@ -543,9 +548,8 @@ mod signing {
         // to the v1 wire, so existing snapshots are unaffected.
         let bytes = Message::fixture(MessageKind::app_broadcast("app_msg"), "hi")
             .serialize()
-            .expect("`Message::fixture(..)` yields a value in this test's fixture");
-        let wire = String::from_utf8(bytes)
-            .expect("`String::from_utf8(bytes)` yields a value in this test's fixture");
+            .expect("the fixture arguments are valid, so the fixture message builds");
+        let wire = String::from_utf8(bytes).expect("a serialized message is UTF-8 JSON");
         assert!(!wire.contains("pubkey"), "{wire}");
         assert!(!wire.contains("\"sig\""), "{wire}");
     }
@@ -634,7 +638,13 @@ mod chain {
             signed.parents, parents,
             "the signed message keeps its parents"
         );
-        let parsed: Message = Message::parse(signed.serialize().expect("`signed.serialize()` yields a value in this test's fixture").as_bytes()).expect("`Message::parse(signed.serialize().expect(\"`signed.serialize()` yields a value in this test's fixture\").as_bytes())` yields a value in this test's fixture");
+        let parsed: Message = Message::parse(
+            signed
+                .serialize()
+                .expect("the signed fixture message serializes")
+                .as_bytes(),
+        )
+        .expect("the signed bytes parse back into a message");
         assert_eq!(parsed.parents, parents, "the parents survive a round trip");
         assert!(
             parsed.verify_signature(),
@@ -684,9 +694,8 @@ mod snapshots {
         let message = chat_fixture("What is Rust?");
         let bytes = message
             .serialize()
-            .expect("`message.serialize()` yields a value in this test's fixture");
-        let wire = String::from_utf8(bytes)
-            .expect("`String::from_utf8(bytes)` yields a value in this test's fixture");
+            .expect("the fixture message is well formed, so it serializes");
+        let wire = String::from_utf8(bytes).expect("a serialized message is UTF-8 JSON");
         insta::assert_snapshot!(wire);
     }
 
@@ -706,9 +715,8 @@ mod snapshots {
         );
         let bytes = message
             .serialize()
-            .expect("`message.serialize()` yields a value in this test's fixture");
-        let wire = String::from_utf8(bytes)
-            .expect("`String::from_utf8(bytes)` yields a value in this test's fixture");
+            .expect("the fixture message is well formed, so it serializes");
+        let wire = String::from_utf8(bytes).expect("a serialized message is UTF-8 JSON");
         insta::assert_snapshot!(wire);
     }
 
@@ -723,9 +731,8 @@ mod snapshots {
         );
         let bytes = message
             .serialize()
-            .expect("`message.serialize()` yields a value in this test's fixture");
-        let wire = String::from_utf8(bytes)
-            .expect("`String::from_utf8(bytes)` yields a value in this test's fixture");
+            .expect("the fixture message is well formed, so it serializes");
+        let wire = String::from_utf8(bytes).expect("a serialized message is UTF-8 JSON");
         insta::assert_snapshot!(wire);
     }
 
@@ -738,9 +745,8 @@ mod snapshots {
         let message = Message::fixture(MessageKind::State, r#"{"k":"merge","merge":{"turn":"b"}}"#);
         let bytes = message
             .serialize()
-            .expect("`message.serialize()` yields a value in this test's fixture");
-        let wire = String::from_utf8(bytes)
-            .expect("`String::from_utf8(bytes)` yields a value in this test's fixture");
+            .expect("the fixture message is well formed, so it serializes");
+        let wire = String::from_utf8(bytes).expect("a serialized message is UTF-8 JSON");
         insta::assert_snapshot!(wire);
     }
 
@@ -760,7 +766,12 @@ mod snapshots {
             ),
             r#"{"op":"list","args":{}}"#,
         );
-        let wire = String::from_utf8(message.serialize().expect("`message.serialize()` yields a value in this test's fixture")).expect("`String::from_utf8(message.serialize().expect(\"`message.serialize()` yields a value in this test's fixture\"))` yields a value in this test's fixture");
+        let wire = String::from_utf8(
+            message
+                .serialize()
+                .expect("the fixture message is well formed, so it serializes"),
+        )
+        .expect("a serialized message is UTF-8 JSON");
         insta::assert_snapshot!(wire);
     }
 
@@ -779,7 +790,12 @@ mod snapshots {
             ),
             r#"{"result":{"items":[]}}"#,
         );
-        let wire = String::from_utf8(message.serialize().expect("`message.serialize()` yields a value in this test's fixture")).expect("`String::from_utf8(message.serialize().expect(\"`message.serialize()` yields a value in this test's fixture\"))` yields a value in this test's fixture");
+        let wire = String::from_utf8(
+            message
+                .serialize()
+                .expect("the fixture message is well formed, so it serializes"),
+        )
+        .expect("a serialized message is UTF-8 JSON");
         insta::assert_snapshot!(wire);
     }
 }
@@ -797,16 +813,13 @@ mod prop {
 
     use crate::proptest_support;
     fn arb_ascii_body() -> impl Strategy<Value = String> {
-        arb_vec(0x20u8..0x7Eu8, 0..200).prop_map(|bytes| {
-            String::from_utf8(bytes)
-                .expect("`String::from_utf8(bytes)` yields a value in this test's fixture")
-        })
+        arb_vec(0x20u8..0x7Eu8, 0..200)
+            .prop_map(|bytes| String::from_utf8(bytes).expect("a serialized message is UTF-8 JSON"))
     }
 
     fn arb_nickname() -> impl Strategy<Value = Nickname> {
         "[a-z]{3,8}-[a-z]{3,8}".prop_map(|raw| {
-            Nickname::try_new(&raw)
-                .expect("`Nickname::try_new(&raw)` yields a value in this test's fixture")
+            Nickname::try_new(&raw).expect("the raw fixture nickname is a valid nickname")
         })
     }
 
@@ -818,10 +831,10 @@ mod prop {
             author in arb_nickname(),
         ) {
             let _guard = ::habilis_network_test_tracing::init();
-            let body = MessageBody::try_new(&body).expect("`MessageBody::try_new(&body)` yields a value in this test's fixture");
+            let body = MessageBody::try_new(&body).expect("the fixture body is within the body size limit");
             let message = Message::new_app(&super::sid(), &author, AppFrameParams { tag: AppTag::try_new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
-            let bytes = message.serialize().expect("`message.serialize()` yields a value in this test's fixture");
-            let parsed = Message::parse(&bytes).expect("`Message::parse(&bytes)` yields a value in this test's fixture");
+            let bytes = message.serialize().expect("the fixture message is well formed, so it serializes");
+            let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
             prop_assert_eq!(&parsed.body, &message.body);
             prop_assert_eq!(&parsed.author, &message.author);
             prop_assert_eq!(&parsed.version, VERSION);
@@ -837,8 +850,8 @@ mod prop {
             } else {
                 Message::new_left(&super::sid(), &test_nick)
             };
-            let bytes = message.serialize().expect("`message.serialize()` yields a value in this test's fixture");
-            let parsed = Message::parse(&bytes).expect("`Message::parse(&bytes)` yields a value in this test's fixture");
+            let bytes = message.serialize().expect("the fixture message is well formed, so it serializes");
+            let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
             prop_assert_eq!(parsed.kind, message.kind);
                 }
 
@@ -860,11 +873,11 @@ mod prop {
             author in arb_nickname(),
         ) {
             let _guard = ::habilis_network_test_tracing::init();
-            let body = MessageBody::try_new(&body).expect("`MessageBody::try_new(&body)` yields a value in this test's fixture");
+            let body = MessageBody::try_new(&body).expect("the fixture body is within the body size limit");
             let expected = body.clone();
             let message = Message::new_app(&super::sid(), &author, AppFrameParams { tag: AppTag::try_new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
-            let bytes = message.serialize().expect("`message.serialize()` yields a value in this test's fixture");
-            let parsed = Message::parse(&bytes).expect("`Message::parse(&bytes)` yields a value in this test's fixture");
+            let bytes = message.serialize().expect("the fixture message is well formed, so it serializes");
+            let parsed = Message::parse(&bytes).expect("the bytes just serialized are a valid message");
             prop_assert_eq!(&parsed.body, &expected);
                 }
 
@@ -880,7 +893,7 @@ mod prop {
                     tag: AppTag::try_new("app_msg").expect("a valid app tag"),
                     to: None,
                     corr: None,
-                    body: MessageBody::try_new(&body).expect("`MessageBody::try_new(&body)` yields a value in this test's fixture"),
+                    body: MessageBody::try_new(&body).expect("the fixture body is within the body size limit"),
                 },
             );
             if let Ok(bytes) = message.serialize() {
@@ -907,7 +920,7 @@ fn a_resend_trailer_is_outside_the_frame_and_the_signature() {
     .sign(&identity);
     let frame: Vec<u8> = message
         .serialize()
-        .expect("`message.serialize()` yields a value in this test's fixture")
+        .expect("the fixture message is well formed, so it serializes")
         .as_bytes()
         .to_vec();
 
@@ -922,15 +935,15 @@ fn a_resend_trailer_is_outside_the_frame_and_the_signature() {
         "the resend frame is the frame plus the trailer length"
     );
     let (parsed, nonce) = Message::parse_wire(&first)
-        .expect("`Message::parse_wire(&first)` yields a value in this test's fixture");
+        .expect("the first frame was encoded by the encoder in this test");
     assert_eq!(nonce, Some(7), "the resend nonce is read from the trailer");
     assert_eq!(parsed.id, message.id, "the resend keeps the message id");
     assert!(
         parsed.verify_signature_with(&parsed.canonical_bytes()),
         "the signature does not cover the trailer"
     );
-    let (plain, no_nonce) = Message::parse_wire(&frame)
-        .expect("`Message::parse_wire(&frame)` yields a value in this test's fixture");
+    let (plain, no_nonce) =
+        Message::parse_wire(&frame).expect("the frame was just encoded by this test");
     assert_eq!(no_nonce, None, "a frame with no trailer has no nonce");
     assert_eq!(plain.id, message.id, "the plain frame keeps the message id");
 }
@@ -941,7 +954,7 @@ fn a_reader_without_the_trailer_fails_closed_on_a_resend() {
     let message = Message::new_alive(&sid(), &nick("word-word"));
     let frame = message
         .serialize()
-        .expect("`message.serialize()` yields a value in this test's fixture");
+        .expect("the fixture message is well formed, so it serializes");
     let wire = super::wire_with_resend_nonce(&frame, 1);
     assert!(
         Message::parse(&wire).is_err(),
@@ -955,7 +968,7 @@ fn a_frame_of_the_largest_size_still_parses_with_the_trailer() {
     let message = Message::new_alive(&sid(), &nick("word-word"));
     let mut frame = message
         .serialize()
-        .expect("`message.serialize()` yields a value in this test's fixture");
+        .expect("the fixture message is well formed, so it serializes");
     // JSON whitespace pads the frame up to the cap.
     frame.resize(consts::MAX_MESSAGE_SIZE, b' ');
     let wire = super::wire_with_resend_nonce(&frame, u64::MAX);
@@ -964,8 +977,8 @@ fn a_frame_of_the_largest_size_still_parses_with_the_trailer() {
         consts::MAX_MESSAGE_SIZE + super::RESEND_TRAILER_LEN,
         "the largest frame has the size limit"
     );
-    let (parsed, nonce) = Message::parse_wire(&wire)
-        .expect("`Message::parse_wire(&wire)` yields a value in this test's fixture");
+    let (parsed, nonce) =
+        Message::parse_wire(&wire).expect("the wire bytes were just encoded by this test");
     assert_eq!(nonce, Some(u64::MAX), "the largest frame keeps its nonce");
     assert_eq!(
         parsed.id, message.id,
@@ -1069,15 +1082,14 @@ fn a_signed_message_keeps_its_wire_form() {
     assert_eq!(
         parsed
             .author_key()
-            .expect("`parsed.author_key()` yields a value in this test's fixture")
+            .expect("the parsed message is signed, so it carries an author key")
             .to_string(),
         SIGNED_PUBKEY,
         "the parsed author key matches the signed key"
     );
     assert_eq!(
-        serde_json::to_string(&super::Wire(&parsed)).expect(
-            "`serde_json::to_string(&super::Wire(&parsed))` yields a value in this test's fixture"
-        ),
+        serde_json::to_string(&super::Wire(&parsed))
+            .expect("the parsed signed message has a wire form that serializes"),
         SIGNED_WIRE,
         "the signed message keeps its wire form"
     );
@@ -1113,9 +1125,8 @@ fn a_message_with_no_key_fields_parses_as_unsigned() {
         "an unsigned message does not verify"
     );
     assert_eq!(
-        serde_json::to_string(&super::Wire(&parsed)).expect(
-            "`serde_json::to_string(&super::Wire(&parsed))` yields a value in this test's fixture"
-        ),
+        serde_json::to_string(&super::Wire(&parsed))
+            .expect("the parsed signed message has a wire form that serializes"),
         UNSIGNED_WIRE,
         "the unsigned message keeps its wire form"
     );
@@ -1146,9 +1157,8 @@ fn empty_key_fields_parse_as_unsigned_and_serialize_without_the_keys() {
         "a message with empty key fields does not verify"
     );
     assert_eq!(
-        serde_json::to_string(&super::Wire(&parsed)).expect(
-            "`serde_json::to_string(&super::Wire(&parsed))` yields a value in this test's fixture"
-        ),
+        serde_json::to_string(&super::Wire(&parsed))
+            .expect("the parsed signed message has a wire form that serializes"),
         UNSIGNED_WIRE,
         "empty key fields are left out of the wire form"
     );
@@ -1309,8 +1319,7 @@ mod verified {
         let parsed = Message::parse(SIGNED_WIRE.as_bytes()).expect("the signed literal parses");
         let verified = parsed.verify().expect("the golden signature verifies");
         assert_eq!(
-            serde_json::to_string(&verified)
-                .expect("`serde_json::to_string(&verified)` yields a value in this test's fixture"),
+            serde_json::to_string(&verified).expect("a verified message serializes to JSON"),
             SIGNED_WIRE,
             "a verified message serializes to the same bytes as its message"
         );

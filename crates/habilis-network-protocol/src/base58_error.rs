@@ -158,7 +158,7 @@ mod tests {
         let encoded = encode(payload);
         assert_eq!(
             decode(&encoded, "test value")
-                .expect("`decode(&encoded, \"test value\")` yields a value in this test's fixture"),
+                .expect("the encoded value was just produced by encode, so it decodes"),
             payload,
             "a payload round trips through base58"
         );
@@ -170,7 +170,7 @@ mod tests {
         let encoded = encode(b"");
         assert_eq!(
             decode(&encoded, "test value")
-                .expect("`decode(&encoded, \"test value\")` yields a value in this test's fixture"),
+                .expect("the encoded value was just produced by encode, so it decodes"),
             Vec::<u8>::new(),
             "an empty payload round trips through base58"
         );
@@ -187,7 +187,7 @@ mod tests {
         let tampered: String = chars.into_iter().collect();
 
         let error = decode(&tampered, "test value")
-            .expect_err("`decode(&tampered, \"test value\")` fails in this test's fixture")
+            .expect_err("the tampered text has a character outside the Base58 alphabet, so decoding is refused")
             .to_string();
         assert!(
             error.contains("checksum") || error.contains("too short"),
@@ -200,7 +200,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         // `0`, `O`, `I` and `l` are the four characters Base58 omits.
         let error = decode("0OIl", "test value")
-            .expect_err("`decode(\"0OIl\", \"test value\")` fails in this test's fixture")
+            .expect_err("the literal has the characters 0, O, I and l, which Base58 refuses")
             .to_string();
         assert!(
             error.contains("invalid Base58"),
@@ -213,7 +213,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         // "2" decodes to a single byte, fewer than the 4 a checksum needs.
         let error = decode("2", "test value")
-            .expect_err("`decode(\"2\", \"test value\")` fails in this test's fixture")
+            .expect_err("the literal is a single character that is not a whole Base58 value, so decoding is refused")
             .to_string();
         assert!(error.contains("too short"), "unexpected error: {error}");
     }
@@ -222,7 +222,7 @@ mod tests {
     fn the_error_names_what_failed() {
         let _guard = ::habilis_network_test_tracing::init();
         let error = decode("0OIl", "invite ticket")
-            .expect_err("`decode(\"0OIl\", \"invite ticket\")` fails in this test's fixture")
+            .expect_err("the literal has the characters 0, O, I and l, which Base58 refuses")
             .to_string();
         assert!(error.contains("invite ticket"), "unexpected error: {error}");
     }

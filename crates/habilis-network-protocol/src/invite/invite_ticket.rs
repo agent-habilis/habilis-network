@@ -353,10 +353,10 @@ mod tests {
     fn creator() -> Mesh {
         let mut mesh = Mesh::try_new(
             Seed::new([1u8; 32]),
-            MeshName::try_new("t").expect("`MeshName::try_new(\"t\")` yields a value in this test's fixture"),
+            MeshName::try_new("t").expect("the literal \"t\" is a valid mesh name"),
             MeshConfig::loopback(),
         )
-        .expect("`Mesh::try_new( Seed::new([1u8; 32]), MeshName::try_new(\"t\").expect(\"`MeshName::try_new(\\\"t\\\")` yields a value in this test's fixture\"), MeshConfig::loopback(), )` yields a value in this test's fixture");
+        .expect("the fixture seed, name and config form a valid mesh");
         mesh.set_invite();
         assert!(
             mesh.issuer_secret().is_some(),
@@ -368,7 +368,7 @@ mod tests {
     fn minted(mesh: &Mesh, ttl: Option<Duration>, password: Option<&Password>) -> InviteTicket {
         InviteTicket::decode(
             &mint(mesh, ttl, password)
-                .expect("`mint(mesh, ttl, password)` yields a value in this test's fixture"),
+                .expect("the fixture mesh is invite-only, so minting a ticket succeeds"),
         )
         .expect("decode")
     }
@@ -414,7 +414,8 @@ mod tests {
     #[test]
     fn minted_invite_is_bare_base58() {
         let _guard = ::habilis_network_test_tracing::init();
-        let token = mint(&creator(), Some(Duration::from_hours(1)), None).expect("`mint(&creator(), Some(Duration::from_hours(1)), None)` yields a value in this test's fixture");
+        let token = mint(&creator(), Some(Duration::from_hours(1)), None)
+            .expect("the fixture mesh holds its issuer key, so minting succeeds");
         assert!(token.is_ascii(), "a minted invite is ascii");
         assert!(
             !token.contains("://"),
@@ -428,7 +429,7 @@ mod tests {
         let mesh = creator();
         let redeemed = minted(&mesh, Some(Duration::from_hours(1)), None)
             .redeem(None)
-            .expect("`minted(&mesh, Some(Duration::from_hours(1)), None) .redeem(None)` yields a value in this test's fixture");
+            .expect("the ticket is minted for this mesh and not yet expired, so it redeems");
         assert!(
             redeemed.requires_invite(),
             "a redeemed invite requires an invite"
@@ -506,7 +507,7 @@ mod tests {
         let mesh = creator();
         let redeemed = minted(&mesh, Some(Duration::from_hours(1)), None)
             .redeem(None)
-            .expect("`minted(&mesh, Some(Duration::from_hours(1)), None) .redeem(None)` yields a value in this test's fixture");
+            .expect("the ticket is minted for this mesh and not yet expired, so it redeems");
         // The redeemer has the join root (it derived the topic) but no issuer
         // key, so it can neither mint nor sign a forgery.
         assert!(
@@ -524,10 +525,10 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let plain = Mesh::try_new(
             Seed::new([2u8; 32]),
-            MeshName::try_new("t").expect("`MeshName::try_new(\"t\")` yields a value in this test's fixture"),
+            MeshName::try_new("t").expect("the literal \"t\" is a valid mesh name"),
             MeshConfig::loopback(),
         )
-        .expect("`Mesh::try_new( Seed::new([2u8; 32]), MeshName::try_new(\"t\").expect(\"`MeshName::try_new(\\\"t\\\")` yields a value in this test's fixture\"), MeshConfig::loopback(), )` yields a value in this test's fixture");
+        .expect("the fixture seed, name and config form a valid mesh");
         assert!(
             mint(&plain, Some(Duration::from_hours(1)), None).is_err(),
             "minting refuses a mesh that is not invite-only"
@@ -556,7 +557,7 @@ mod tests {
         let hash = mesh.to_string();
         let root = mesh
             .invite_key()
-            .expect("`mesh.invite_key()` yields a value in this test's fixture")
+            .expect("the fixture mesh is invite-only, so it has an invite key")
             .clone();
         let expiry = UnixSecs::now() + Duration::from_hours(1);
         let attacker = SecretKey::from_bytes(&[9u8; 32]);
@@ -613,12 +614,12 @@ mod tests {
         let hash = mesh.to_string();
         let root = mesh
             .invite_key()
-            .expect("`mesh.invite_key()` yields a value in this test's fixture")
+            .expect("the fixture mesh is invite-only, so it has an invite key")
             .clone();
         let past = UnixSecs::now() - Duration::from_secs(100);
         let issuer = mesh
             .issuer_secret()
-            .expect("`mesh.issuer_secret()` yields a value in this test's fixture")
+            .expect("the fixture mesh is invite-only, so it has an issuer secret")
             .clone();
         let signature = issuer.sign(&signing_bytes(&hash, &root, past)).to_bytes();
         let expired: InviteTicket = InviteTicket {
@@ -630,7 +631,9 @@ mod tests {
         };
         let error = expired
             .redeem(None)
-            .expect_err("`expired.redeem(None)` fails in this test's fixture")
+            .expect_err(
+                "the ticket was minted with an expiry in the past, so redeeming it is refused",
+            )
             .to_string();
         assert!(error.contains("expired"), "got: {error}");
     }
@@ -651,9 +654,9 @@ mod tests {
             ticket.redeem(Some(&pw("wrong"))).is_err(),
             "a wrong password must not unwrap the root (AEAD self-verifies)"
         );
-        let ok = ticket.redeem(Some(&pw("hunter2"))).expect(
-            "`ticket.redeem(Some(&pw(\"hunter2\")))` yields a value in this test's fixture",
-        );
+        let ok = ticket
+            .redeem(Some(&pw("hunter2")))
+            .expect("the password in this test is the one the ticket was minted with");
         assert_eq!(
             ok.topic_id(),
             mesh.topic_id(),
@@ -681,10 +684,10 @@ mod tests {
         // A bare mesh id is not an invite ticket (different framing).
         let plain = Mesh::try_new(
             Seed::new([3u8; 32]),
-            MeshName::try_new("t").expect("`MeshName::try_new(\"t\")` yields a value in this test's fixture"),
+            MeshName::try_new("t").expect("the literal \"t\" is a valid mesh name"),
             MeshConfig::loopback(),
         )
-        .expect("`Mesh::try_new( Seed::new([3u8; 32]), MeshName::try_new(\"t\").expect(\"`MeshName::try_new(\\\"t\\\")` yields a value in this test's fixture\"), MeshConfig::loopback(), )` yields a value in this test's fixture");
+        .expect("the fixture seed, name and config form a valid mesh");
         assert!(
             InviteTicket::decode(&plain.to_string()).is_err(),
             "a mesh id is not an invite"
@@ -694,10 +697,11 @@ mod tests {
     #[test]
     fn rejects_a_bad_checksum() {
         let _guard = ::habilis_network_test_tracing::init();
-        let mut token = mint(&creator(), Some(Duration::from_hours(1)), None).expect("`mint(&creator(), Some(Duration::from_hours(1)), None)` yields a value in this test's fixture");
+        let mut token = mint(&creator(), Some(Duration::from_hours(1)), None)
+            .expect("the fixture mesh holds its issuer key, so minting succeeds");
         let last = token
             .pop()
-            .expect("`token.pop()` yields a value in this test's fixture");
+            .expect("the ticket was just minted, so it has a token to pop");
         token.push(if last == '1' { '2' } else { '1' });
         assert!(
             InviteTicket::decode(&token).is_err(),
@@ -710,7 +714,8 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         // No glyph, no variation selector, no `://`: an invite pastes into a
         // URL or a shell word untouched.
-        let token = mint(&creator(), Some(Duration::from_hours(1)), None).expect("`mint(&creator(), Some(Duration::from_hours(1)), None)` yields a value in this test's fixture");
+        let token = mint(&creator(), Some(Duration::from_hours(1)), None)
+            .expect("the fixture mesh holds its issuer key, so minting succeeds");
         assert!(
             token.bytes().all(|byte| byte.is_ascii_alphanumeric()),
             "invite must be ASCII Base58: {token}"

@@ -8,8 +8,7 @@ use crate::MeshId;
 use crate::meshes::{LookupOpts, MeshName};
 
 fn directory(name: &str) -> MeshName {
-    MeshName::try_new(name)
-        .expect("`MeshName::try_new(name)` yields a value in this test's fixture")
+    MeshName::try_new(name).expect("the name in this test is a valid mesh name")
 }
 
 /// The advertised mesh's id for a directory of the given name.

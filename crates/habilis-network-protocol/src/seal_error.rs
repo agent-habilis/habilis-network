@@ -358,7 +358,7 @@ mod tests {
             );
             assert_eq!(
                 open_symmetric(&key, &blob)
-                    .expect("`open_symmetric(&key, &blob)` yields a value in this test's fixture"),
+                    .expect("the blob was sealed with this key just above, so it opens"),
                 plaintext,
                 "a symmetric seal opens to the plaintext"
             );
@@ -376,7 +376,7 @@ mod tests {
         let mut tampered = blob;
         *tampered
             .last_mut()
-            .expect("`tampered.last_mut()` yields a value in this test's fixture") ^= 0x01;
+            .expect("the sealed blob is not empty, so there is a byte to flip") ^= 0x01;
         assert!(
             open_symmetric(&key(1), &tampered).is_err(),
             "a flipped byte must fail the AEAD tag"
@@ -399,10 +399,10 @@ mod tests {
         let (secret, public) = keypair(1);
         let plaintext = r#"{"kind":"status-update","taskId":"7f3e"}"#;
         let body = seal_to_body(&public, plaintext)
-            .expect("`seal_to_body(&public, plaintext)` yields a value in this test's fixture");
+            .expect("the plaintext in this test is valid input to seal");
         assert_eq!(
             unseal_from_body(&secret, &body)
-                .expect("`unseal_from_body(&secret, &body)` yields a value in this test's fixture"),
+                .expect("the body was sealed to this secret just above, so it unseals"),
             plaintext,
             "a sealed body opens to the recipient's plaintext"
         );
@@ -423,10 +423,10 @@ mod tests {
                 r#""ct":"79cUk28wvxuqaGBndLf5927gRbiTXuUAaSgPKp2Sho86SQcf1iSKCvXJnj9gvLrpDjSoUarapYeiR"}"#,
             ),
         )
-        .expect("`crate::MessageBody::try_new(..)` yields a value in this test's fixture");
+        .expect("the JSON built in this test is a valid message body");
         assert_eq!(
             unseal_from_body(&secret, &body)
-                .expect("`unseal_from_body(&secret, &body)` yields a value in this test's fixture"),
+                .expect("the body was sealed to this secret just above, so it unseals"),
             r#"{"kind":"status-update","taskId":"7f3e"}"#,
             "a fixed envelope opens to its plaintext"
         );
@@ -437,9 +437,8 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (_recipient, recipient_pub) = keypair(1);
         let (eavesdropper, _) = keypair(2);
-        let body = seal_to_body(&recipient_pub, "secret").expect(
-            "`seal_to_body(&recipient_pub, \"secret\")` yields a value in this test's fixture",
-        );
+        let body = seal_to_body(&recipient_pub, "secret")
+            .expect("the secret in this test is a valid recipient key, so sealing succeeds");
         assert!(
             unseal_from_body(&eavesdropper, &body).is_err(),
             "a non-recipient must not be able to open the envelope"
@@ -450,21 +449,23 @@ mod tests {
     fn a_tampered_ciphertext_fails() {
         let _guard = ::habilis_network_test_tracing::init();
         let (secret, public) = keypair(3);
-        let body = seal_to_body(&public, "the quick brown fox").expect("`seal_to_body(&public, \"the quick brown fox\")` yields a value in this test's fixture");
+        let body = seal_to_body(&public, "the quick brown fox")
+            .expect("the literal plaintext is valid input to seal");
         // Flip the last Base58 char of the `ct` field.
-        let mut json: serde_json::Value = serde_json::from_str(body.as_str())
-            .expect("`serde_json::from_str(body.as_str())` yields a value in this test's fixture");
+        let mut json: serde_json::Value =
+            serde_json::from_str(body.as_str()).expect("the body text in this test is valid JSON");
         let ct = json["ct"]
             .as_str()
-            .expect("`json[\"ct\"].as_str()` yields a value in this test's fixture")
+            .expect("the JSON in this test has a string field ct")
             .to_owned();
         let mut chars: Vec<char> = ct.chars().collect();
         let last = chars
             .last_mut()
-            .expect("`chars.last_mut()` yields a value in this test's fixture");
+            .expect("the ciphertext string is not empty, so there is a character to flip");
         *last = if *last == '1' { '2' } else { '1' };
         json["ct"] = serde_json::Value::String(chars.into_iter().collect());
-        let tampered = crate::MessageBody::try_new(&json.to_string()).expect("`crate::MessageBody::try_new(&json.to_string())` yields a value in this test's fixture");
+        let tampered = crate::MessageBody::try_new(&json.to_string())
+            .expect("the JSON built in this test is a valid message body");
         assert!(
             unseal_from_body(&secret, &tampered).is_err(),
             "a tampered ciphertext must fail the AEAD tag"
@@ -477,11 +478,10 @@ mod tests {
         let (secret, public) = keypair(4);
         for plaintext in ["", &"x".repeat(40_000)] {
             let body = seal_to_body(&public, plaintext)
-                .expect("`seal_to_body(&public, plaintext)` yields a value in this test's fixture");
+                .expect("the plaintext in this test is valid input to seal");
             assert_eq!(
-                unseal_from_body(&secret, &body).expect(
-                    "`unseal_from_body(&secret, &body)` yields a value in this test's fixture"
-                ),
+                unseal_from_body(&secret, &body)
+                    .expect("the body was sealed to this secret just above, so it unseals"),
                 plaintext,
                 "empty and large payloads seal and open"
             );
@@ -492,7 +492,8 @@ mod tests {
     fn a_plaintext_body_does_not_open_as_sealed() {
         let _guard = ::habilis_network_test_tracing::init();
         let (secret, _) = keypair(5);
-        let body = crate::MessageBody::try_new(r#"{"kind":"message"}"#).expect("`crate::MessageBody::try_new(r#\"{\"kind\":\"message\"}\"#)` yields a value in this test's fixture");
+        let body = crate::MessageBody::try_new(r#"{"kind":"message"}"#)
+            .expect("the literal JSON in this test is a valid message body");
         assert!(
             unseal_from_body(&secret, &body).is_err(),
             "an un-sealed body must not be mistaken for an envelope"

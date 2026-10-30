@@ -22,7 +22,8 @@ mod tests {
     fn a_non_token_string_is_unrecognized_and_echoes_its_input() {
         let _guard = ::habilis_network_test_tracing::init();
         let parsed: Result<JoinTarget, _> = "  github.com/alice/proj ".parse();
-        let error = parsed.expect_err("`parsed` fails in this test's fixture");
+        let error = parsed
+            .expect_err("the input in this test is not a valid parsed id, so parsing refuses it");
         assert_eq!(
             error,
             JoinTargetError::Unrecognized("github.com/alice/proj".to_owned()),
@@ -38,10 +39,10 @@ mod tests {
         use crate::meshes::{Mesh, MeshConfig, MeshName};
         Mesh::try_new(
             crypto::Seed::new([1u8; 32]),
-            MeshName::try_new("test").expect("`MeshName::try_new(\"test\")` yields a value in this test's fixture"),
+            MeshName::try_new("test").expect("the literal \"test\" is a valid mesh name"),
             MeshConfig::loopback(),
         )
-        .expect("`Mesh::try_new( crypto::Seed::new([1u8; 32]), MeshName::try_new(\"test\").expect(\"`MeshName::try_new(\\\"test\\\")` yields a value in this test's fixture\"), MeshConfig::loopback(), )` yields a value in this test's fixture")
+        .expect("the fixture seed, name and config form a valid mesh")
         .to_string()
     }
 
@@ -49,11 +50,8 @@ mod tests {
     fn resolve_passthrough_for_valid_mesh_id() {
         let _guard = ::habilis_network_test_tracing::init();
         let id = known_mesh_id();
-        let target: JoinTarget = id
-            .parse()
-            .expect("`id.parse()` yields a value in this test's fixture");
-        let mesh =
-            resolve(&target).expect("`resolve(&target)` yields a value in this test's fixture");
+        let target: JoinTarget = id.parse().expect("the id text in this test is a valid id");
+        let mesh = resolve(&target).expect("the target in this test is a valid resolvable id");
         assert_eq!(mesh.to_string(), id, "a valid mesh id resolves to itself");
     }
 
@@ -64,7 +62,8 @@ mod tests {
         let replacement = if mistyped.ends_with('1') { "2" } else { "1" };
         mistyped.replace_range(mistyped.len() - 1.., replacement);
         let parsed: Result<JoinTarget, _> = mistyped.parse();
-        let error = parsed.expect_err("`parsed` fails in this test's fixture");
+        let error = parsed
+            .expect_err("the input in this test is not a valid parsed id, so parsing refuses it");
         assert_eq!(
             error.to_string(),
             "invalid gossip hash",
@@ -87,10 +86,10 @@ mod tests {
         use crate::meshes::{Mesh, MeshConfig, MeshName};
         let mut mesh = Mesh::try_new(
             crypto::Seed::new([5u8; 32]),
-            MeshName::try_new("t").expect("`MeshName::try_new(\"t\")` yields a value in this test's fixture"),
+            MeshName::try_new("t").expect("the literal \"t\" is a valid mesh name"),
             MeshConfig::loopback(),
         )
-        .expect("`Mesh::try_new( crypto::Seed::new([5u8; 32]), MeshName::try_new(\"t\").expect(\"`MeshName::try_new(\\\"t\\\")` yields a value in this test's fixture\"), MeshConfig::loopback(), )` yields a value in this test's fixture");
+        .expect("the fixture seed, name and config form a valid mesh");
         mesh.set_invite();
         mesh
     }
@@ -101,11 +100,9 @@ mod tests {
         // The attack: skip the invite and join with the raw hash. `unlock` must
         // refuse, so no mesh is ever derived without its root.
         let id = invite_only_mesh().to_string();
-        let target: JoinTarget = id
-            .parse()
-            .expect("`id.parse()` yields a value in this test's fixture");
+        let target: JoinTarget = id.parse().expect("the id text in this test is a valid id");
         let error: String = resolve(&target)
-            .expect("`resolve(&target)` yields a value in this test's fixture")
+            .expect("the target in this test is a valid resolvable id")
             .unlock(None)
             .expect_err("unlock refuses a password-protected mesh given no password")
             .to_string();
@@ -120,7 +117,7 @@ mod tests {
             Some(time::Duration::from_hours(1)),
             None,
         )
-        .expect("`invite::mint(..)` yields a value in this test's fixture");
+        .expect("the fixture mesh is invite-only, so minting a ticket succeeds");
         let parsed: Result<JoinTarget, _> = token.parse();
         assert!(
             matches!(parsed, Ok(JoinTarget::Invite(_))),

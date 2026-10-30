@@ -139,38 +139,32 @@ mod body_tests {
     #[test]
     fn accepts_ascii() {
         let _guard = ::habilis_network_test_tracing::init();
-        MessageBody::try_new("hello world").expect(
-            "`MessageBody::try_new(\"hello world\")` yields a value in this test's fixture",
-        );
-        MessageBody::try_new("")
-            .expect("`MessageBody::try_new(\"\")` yields a value in this test's fixture");
-        MessageBody::try_new("special chars: !@#$%^&*()").expect("`MessageBody::try_new(\"special chars: !@#$%^&*()\")` yields a value in this test's fixture");
+        MessageBody::try_new("hello world")
+            .expect("the literal body is ASCII text under the size limit");
+        MessageBody::try_new("").expect("an empty body is a valid body");
+        MessageBody::try_new("special chars: !@#$%^&*()")
+            .expect("the special characters are printable ASCII, which a body accepts");
     }
 
     #[test]
     fn accepts_unicode() {
         let _guard = ::habilis_network_test_tracing::init();
         MessageBody::try_new("héllo")
-            .expect("`MessageBody::try_new(\"héllo\")` yields a value in this test's fixture");
+            .expect("the literal is valid UTF-8 text, which a body accepts");
         MessageBody::try_new("emoji 🎉")
-            .expect("`MessageBody::try_new(\"emoji 🎉\")` yields a value in this test's fixture");
-        MessageBody::try_new("日本語のメッセージ").expect(
-            "`MessageBody::try_new(\"日本語のメッセージ\")` yields a value in this test's fixture",
-        );
+            .expect("the emoji is valid UTF-8 text, which a body accepts");
+        MessageBody::try_new("日本語のメッセージ")
+            .expect("the Japanese literal is valid UTF-8 text, which a body accepts");
     }
 
     #[test]
     fn accepts_newline_and_tab() {
         let _guard = ::habilis_network_test_tracing::init();
-        MessageBody::try_new("line one\nline two").expect(
-            "`MessageBody::try_new(\"line one\\nline two\")` yields a value in this test's fixture",
-        );
-        MessageBody::try_new("col1\tcol2").expect(
-            "`MessageBody::try_new(\"col1\\tcol2\")` yields a value in this test's fixture",
-        );
-        MessageBody::try_new("crlf\r\nline").expect(
-            "`MessageBody::try_new(\"crlf\\r\\nline\")` yields a value in this test's fixture",
-        );
+        MessageBody::try_new("line one\nline two")
+            .expect("a newline is plain text, which a body accepts");
+        MessageBody::try_new("col1\tcol2").expect("a tab is plain text, which a body accepts");
+        MessageBody::try_new("crlf\r\nline")
+            .expect("CR and LF are plain text, which a body accepts");
     }
 
     #[test]
@@ -190,14 +184,14 @@ mod body_tests {
     fn serde_transparent_round_trip() {
         let _guard = ::habilis_network_test_tracing::init();
         let body = MessageBody::from("hello");
-        let json = serde_json::to_string(&body)
-            .expect("`serde_json::to_string(&body)` yields a value in this test's fixture");
+        let json =
+            serde_json::to_string(&body).expect("a body is a string, which serde_json serializes");
         assert_eq!(
             json, "\"hello\"",
             "a message body serializes as a plain json string"
         );
-        let parsed: MessageBody = serde_json::from_str(&json)
-            .expect("`serde_json::from_str(&json)` yields a value in this test's fixture");
+        let parsed: MessageBody =
+            serde_json::from_str(&json).expect("the JSON literal in this test is a valid body");
         assert_eq!(parsed, body, "a message body survives a json round trip");
     }
 

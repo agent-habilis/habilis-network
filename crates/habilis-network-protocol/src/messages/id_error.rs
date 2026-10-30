@@ -145,7 +145,8 @@ mod id_tests {
     #[test]
     fn accepts_uuid_v4() {
         let _guard = ::habilis_network_test_tracing::init();
-        let id = MessageId::try_new("550e8400-e29b-41d4-a716-446655440000").expect("`MessageId::try_new(\"550e8400-e29b-41d4-a716-446655440000\")` yields a value in this test's fixture");
+        let id = MessageId::try_new("550e8400-e29b-41d4-a716-446655440000")
+            .expect("the literal is a well-formed UUID, so a MessageId accepts it");
         assert_eq!(
             id.as_str(),
             "550e8400-e29b-41d4-a716-446655440000",
@@ -179,7 +180,9 @@ mod id_tests {
     #[test]
     fn from_str_works_for_clap() {
         let _guard = ::habilis_network_test_tracing::init();
-        let id: MessageId = "550e8400-e29b-41d4-a716-446655440000".parse().expect("`\"550e8400-e29b-41d4-a716-446655440000\".parse()` yields a value in this test's fixture");
+        let id: MessageId = "550e8400-e29b-41d4-a716-446655440000"
+            .parse()
+            .expect("the literal is a well-formed UUID, so it parses as a MessageId");
         assert_eq!(
             id.as_str(),
             "550e8400-e29b-41d4-a716-446655440000",
@@ -192,14 +195,14 @@ mod id_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let id = MessageId::random();
         let json = serde_json::to_string(&id)
-            .expect("`serde_json::to_string(&id)` yields a value in this test's fixture");
+            .expect("a MessageId is a string, which serde_json serializes");
         assert_eq!(
             json,
             format!("\"{}\"", id.as_str()),
             "a message id serializes as a plain json string"
         );
         let parsed: MessageId = serde_json::from_str(&json)
-            .expect("`serde_json::from_str(&json)` yields a value in this test's fixture");
+            .expect("the JSON string in this test is a well-formed MessageId");
         assert_eq!(parsed, id, "a message id survives a json round trip");
     }
 

@@ -288,13 +288,13 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let nickname = Nickname::from("swift-cedar");
         let json = serde_json::to_string(&nickname)
-            .expect("`serde_json::to_string(&nickname)` yields a value in this test's fixture");
+            .expect("a nickname is a string, which serde_json serializes");
         assert_eq!(
             json, "\"swift-cedar\"",
             "a nickname serializes as a plain json string"
         );
-        let parsed: Nickname = serde_json::from_str(&json)
-            .expect("`serde_json::from_str(&json)` yields a value in this test's fixture");
+        let parsed: Nickname =
+            serde_json::from_str(&json).expect("the JSON string in this test is a valid nickname");
         assert_eq!(parsed, nickname, "a nickname survives a json round trip");
     }
 
