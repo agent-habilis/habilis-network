@@ -382,8 +382,9 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::net::UdpSocket;
 
+    use std::future::{self, Future};
     use std::io::ErrorKind;
-    use std::{cell, future, io, net};
+    use std::{cell, io, net};
     use tokio::{task, time};
     const TXID: [u8; TRANSACTION_ID_LEN] = [9u8; TRANSACTION_ID_LEN];
 
@@ -723,12 +724,29 @@ mod tests {
     }
 
     impl super::ProbeSocket for StormySocket {
-        async fn send_to(&self, buffer: &[u8], target: SocketAddr) -> io::Result<usize> {
-            self.sent.borrow_mut().push((buffer.to_vec(), target));
-            Ok(buffer.len())
+        fn send_to(
+            &self,
+            buffer: &[u8],
+            target: SocketAddr,
+        ) -> impl Future<Output = io::Result<usize>> {
+            future::ready(Ok(self.send(buffer, target)))
         }
 
-        async fn recv_from(&self, buffer: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        fn recv_from(
+            &self,
+            buffer: &mut [u8],
+        ) -> impl Future<Output = io::Result<(usize, SocketAddr)>> {
+            future::ready(self.receive(buffer))
+        }
+    }
+
+    impl StormySocket {
+        fn send(&self, buffer: &[u8], target: SocketAddr) -> usize {
+            self.sent.borrow_mut().push((buffer.to_vec(), target));
+            buffer.len()
+        }
+
+        fn receive(&self, buffer: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
             if self.errors_left.get() > 0 {
                 self.errors_left.set(self.errors_left.get() - 1);
                 return Err(io::Error::from(ErrorKind::ConnectionReset));
