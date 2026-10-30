@@ -4,7 +4,7 @@ use iroh::EndpointAddr;
 
 use crate::protocol::base58check::{self, take_array};
 use crate::protocol::crypto::TicketSecret;
-use crate::protocol::mesh::LookupOpts;
+use crate::protocol::meshes::LookupOpts;
 use crate::protocol::peer_addr_error::{endpoint_addr_from_json, endpoint_addr_to_json};
 use crate::transport::PayloadPath;
 

@@ -3,7 +3,7 @@
 //! (the derivation secret that the bare hash withholds), an expiry (TTL), and
 //! the creator's signature over those fields. Only the creator — who alone
 //! holds the in-memory issuer key — can mint one; any member could package the
-//! root, but not a *valid* (creator-signed) invite. See [`crate::mesh`]
+//! root, but not a *valid* (creator-signed) invite. See [`crate::meshes`]
 //! for the invite-only mesh itself.
 
 mod invite_error;

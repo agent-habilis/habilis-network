@@ -30,7 +30,7 @@ Layer: identity. Keyed by seed.
 
 A mesh is a `Mesh` value: a seed, a name, and a config. The mesh id is its Base58Check text. The config is mixed into the gossip topic, so every member shares it.
 
-Code: `protocol::mesh` (`Mesh`, `MeshId`, `MeshConfig`).
+Code: `protocol::meshes` (`Mesh`, `MeshId`, `MeshConfig`).
 
 ### topic mesh
 

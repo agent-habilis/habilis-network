@@ -1,7 +1,7 @@
 //! The resolution of a join target to its locked mesh.
 
 use super::{JoinTarget, ResolveError};
-use crate::mesh::LockedMesh;
+use crate::meshes::LockedMesh;
 
 /// # Errors
 /// [`ResolveError::InvalidId`] when the mesh id does not decode, or
@@ -12,7 +12,7 @@ use crate::mesh::LockedMesh;
 /// A mesh id resolves to the mesh it names, without a network call.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::MeshId;
+/// use habilis_network_protocol::meshes::MeshId;
 /// use habilis_network_protocol::resolver::{JoinTarget, resolve};
 ///
 /// use habilis_network_protocol::{Mesh, MeshConfig, MeshName, Seed};

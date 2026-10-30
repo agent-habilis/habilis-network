@@ -3476,7 +3476,7 @@ mod left_tests {
     use crate::lifecycle::{PresenceEvent, handle_presence};
     use crate::lookup::{TransportOpts, build_peer_multihop};
     use crate::protocol::identity::Identity;
-    use crate::protocol::mesh::LookupOpts;
+    use crate::protocol::meshes::LookupOpts;
     use crate::protocol::message::Authored;
     use crate::protocol::{MeshId, Message, PresenceSubtype};
     use crate::testing::{endpoint_id, fresh_state, nick};

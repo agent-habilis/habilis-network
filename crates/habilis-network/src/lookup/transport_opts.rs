@@ -1,4 +1,4 @@
-use crate::protocol::mesh::{Transport, TransportPolicy};
+use crate::protocol::meshes::{Transport, TransportPolicy};
 
 /// Whether gossip is one of the paths of an instance: a two-way choice, kept as an enum so that
 /// [`TransportOpts`] holds no more than three bools.
@@ -28,7 +28,7 @@ impl From<bool> for GossipPath {
 
 /// Which transports this *instance* may carry data on.
 ///
-/// Deliberately **not** part of the mesh id. [`LookupOpts`](crate::protocol::mesh::LookupOpts) is mixed into
+/// Deliberately **not** part of the mesh id. [`LookupOpts`](crate::protocol::meshes::LookupOpts) is mixed into
 /// `derive_topic_id` so that every member provably agrees on where to
 /// rendezvous — right for discovery, and exactly wrong for transports: a
 /// browser only ever has relay and `WebRTC`, a native peer also has IP and

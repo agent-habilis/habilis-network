@@ -50,7 +50,7 @@ impl TopicId {
 
 // Hex, matching how iroh-gossip's `TopicId` renders. A derived `Debug` would
 // print a 32-element byte array instead, which is unreadable in a log line and
-// would silently churn the pinned golden in `mesh::mesh_tests`.
+// would silently churn the pinned golden in `meshes::mesh_tests`.
 impl fmt::Debug for TopicId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "TopicId({self})")

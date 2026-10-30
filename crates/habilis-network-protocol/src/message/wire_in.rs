@@ -4,7 +4,7 @@ use habilis_network_util::unix_secs::UnixSecs;
 use serde::Deserialize;
 
 use super::{Message, MessageBody, MessageId, MessageKind, Shard, Signer, default_ext};
-use crate::mesh::MeshId;
+use crate::meshes::MeshId;
 use crate::nickname_error::Nickname;
 use crate::{AuthorKey, ContentHash, identity};
 

@@ -638,7 +638,7 @@ mod tests {
 
     use crate::beacon::claim;
     use crate::daemon::{config, state};
-    use crate::protocol::mesh;
+    use crate::protocol::meshes;
     use crate::transport::PayloadPath;
     use crate::util::{clock, tuning};
     use crate::{beacon, lookup, protocol, testing};
@@ -665,7 +665,7 @@ mod tests {
             id: secret.public(),
             secret,
             bind_ports: Vec::new(),
-            lookups: mesh::LookupOpts::loopback(),
+            lookups: meshes::LookupOpts::loopback(),
             relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: None,
             rung_tx: watch::channel(None).0,
@@ -675,7 +675,7 @@ mod tests {
     /// An endpoint on loopback, closed at the end of the test whatever the test does with it.
     async fn loopback_endpoint() -> iroh::Endpoint {
         let endpoint = lookup::build_endpoint(
-            &mesh::LookupOpts::loopback(),
+            &meshes::LookupOpts::loopback(),
             None,
             None,
             Vec::new(),
@@ -944,7 +944,7 @@ mod tests {
             use crate::gossip::event::SilentSink;
             use crate::protocol::MeshId;
             use crate::protocol::identity::Identity;
-            use crate::protocol::mesh::LookupOpts;
+            use crate::protocol::meshes::LookupOpts;
             use crate::testing::{fresh_state, nick};
             use crate::transport::MeshSender;
             use crate::util::clock::Instant;
@@ -1041,7 +1041,7 @@ mod tests {
         use crate::gossip::event::SilentSink;
         use crate::protocol::MeshId;
         use crate::protocol::identity::Identity;
-        use crate::protocol::mesh::LookupOpts;
+        use crate::protocol::meshes::LookupOpts;
         use crate::testing::{fresh_state, nick};
         use crate::transport::MeshSender;
         use crate::util::clock::Instant;
@@ -1224,7 +1224,7 @@ mod tests {
             use crate::gossip::event::CountingSink;
             use crate::protocol::MeshId;
             use crate::protocol::identity::Identity;
-            use crate::protocol::mesh::LookupOpts;
+            use crate::protocol::meshes::LookupOpts;
             use crate::testing::{fresh_state, nick};
             use crate::transport::MeshSender;
             use crate::util::clock::Instant;
@@ -1370,7 +1370,7 @@ mod tests {
                 id: secret.public(),
                 secret,
                 bind_ports: vec![first_port, second_port],
-                lookups: mesh::LookupOpts::loopback(),
+                lookups: meshes::LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: watch::channel(None).0,
@@ -1383,7 +1383,7 @@ mod tests {
                 id: other_secret.public(),
                 secret: other_secret,
                 bind_ports: vec![first_port],
-                lookups: mesh::LookupOpts::loopback(),
+                lookups: meshes::LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: watch::channel(None).0,
@@ -1771,7 +1771,7 @@ mod tests {
             use crate::gossip::event::SilentSink;
             use crate::protocol::MeshId;
             use crate::protocol::identity::Identity;
-            use crate::protocol::mesh::LookupOpts;
+            use crate::protocol::meshes::LookupOpts;
             use crate::testing::{fresh_state, nick};
             use crate::transport::MeshSender;
             use crate::util::clock::Instant;
@@ -1877,7 +1877,7 @@ mod tests {
             use crate::gossip::event::SilentSink;
             use crate::protocol::MeshId;
             use crate::protocol::identity::Identity;
-            use crate::protocol::mesh::LookupOpts;
+            use crate::protocol::meshes::LookupOpts;
             use crate::testing::{fresh_state, nick};
             use crate::transport::MeshSender;
 

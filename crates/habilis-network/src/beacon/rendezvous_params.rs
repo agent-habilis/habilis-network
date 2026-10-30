@@ -2,7 +2,7 @@ use iroh::{EndpointId, RelayUrl, SecretKey};
 use iroh_gossip::proto::TopicId;
 use tokio::sync::watch;
 
-use crate::protocol::mesh::LookupOpts;
+use crate::protocol::meshes::LookupOpts;
 
 use crate::transport;
 /// Everything [`ensure`] needs to (re)build the rendezvous endpoint.

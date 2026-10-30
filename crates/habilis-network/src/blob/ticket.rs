@@ -36,11 +36,11 @@ mod tests {
     use super::BlobTicket;
     use crate::blob::{BlobDigest, HASH_LEN, SECRET_LEN};
     use crate::protocol::crypto::TicketSecret;
-    use crate::protocol::mesh::LookupOpts;
+    use crate::protocol::meshes::LookupOpts;
     use crate::transport::PayloadPath;
     use iroh::{EndpointAddr, SecretKey};
 
-    use crate::protocol::mesh;
+    use crate::protocol::meshes;
     use crate::{invite, protocol};
     use std::time;
     fn sample_addr(byte: u8) -> EndpointAddr {
@@ -205,10 +205,10 @@ mod tests {
         // A mesh id shares the bare-base58 shape but has a different payload;
         // blob decode must refuse it (wrong kind / structure).
         let _guard = ::habilis_network_test_tracing::init();
-        let mesh = mesh::Mesh::try_new(
+        let mesh = meshes::Mesh::try_new(
             protocol::Seed::new([1u8; 32]),
-            mesh::MeshName::try_new("t").unwrap(),
-            mesh::MeshConfig::loopback(),
+            meshes::MeshName::try_new("t").unwrap(),
+            meshes::MeshConfig::loopback(),
         )
         .unwrap()
         .to_string();
@@ -224,7 +224,7 @@ mod tests {
         // byte keeps them apart. The assertion lives on this side because
         // `habilis-network-protocol` (where invites moved) cannot see `blob`, while this
         // crate depends on it and can see both.
-        use crate::protocol::mesh::{Mesh, MeshConfig, MeshName};
+        use crate::protocol::meshes::{Mesh, MeshConfig, MeshName};
 
         let _guard = ::habilis_network_test_tracing::init();
         let mut creator = Mesh::try_new(

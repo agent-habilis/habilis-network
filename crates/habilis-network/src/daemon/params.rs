@@ -16,9 +16,9 @@ mod topic_params;
 
 use super::setup_error::SetupError;
 
-use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, TransportPolicy};
+use crate::protocol::meshes::{LookupOpts, Mesh, MeshConfig, TransportPolicy};
 
-use crate::protocol::mesh::RelayChoice;
+use crate::protocol::meshes::RelayChoice;
 use crate::util::tuning;
 
 pub use create_params::CreateParams;
@@ -91,7 +91,7 @@ pub fn derive_topic_mesh(string: &str) -> Result<Mesh, SetupError> {
 /// A topic mesh can be derived with the lookups the caller gives.
 ///
 /// ```
-/// use habilis_network::protocol::mesh::LookupOpts;
+/// use habilis_network::protocol::meshes::LookupOpts;
 /// use habilis_network::runtime::derive_topic_mesh_with;
 ///
 /// assert!(derive_topic_mesh_with("chat", LookupOpts::loopback()).is_ok());
@@ -117,7 +117,7 @@ pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh,
 /// A topic mesh can be derived with a whole config the caller gives.
 ///
 /// ```
-/// use habilis_network::protocol::mesh::MeshConfig;
+/// use habilis_network::protocol::meshes::MeshConfig;
 /// use habilis_network::runtime::derive_topic_mesh_config;
 ///
 /// let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback config");
@@ -141,7 +141,7 @@ mod topic_derivation_tests {
         LookupOpts, MeshConfig, TransportPolicy, derive_topic_mesh, derive_topic_mesh_config,
         derive_topic_mesh_with,
     };
-    use crate::protocol::mesh::Transport;
+    use crate::protocol::meshes::Transport;
 
     /// The no-argument form must stay exactly what it always was, because the
     /// `--topic` id it derives is public API for every frontend that calls it.
@@ -268,7 +268,7 @@ mod join_password_tests {
     use super::{JoinParams, SetupError};
     use crate::protocol::Seed;
     use crate::protocol::crypto::Password;
-    use crate::protocol::mesh::{Mesh, MeshConfig, MeshName};
+    use crate::protocol::meshes::{Mesh, MeshConfig, MeshName};
 
     /// A passworded id, as a joiner is handed it.
     fn passworded_id() -> String {

@@ -344,7 +344,7 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Auth
 /// ```ignore
 /// use habilis_network_protocol::identity::Identity;
 /// use habilis_network_protocol::message::{AppTag, BuildMsgParams, ChainCtx, MessageBody, build_msg_bytes};
-/// use habilis_network_protocol::mesh::MeshId;
+/// use habilis_network_protocol::meshes::MeshId;
 /// use habilis_network_protocol::Nickname;
 ///
 /// use habilis_network_protocol::{Mesh, MeshConfig, MeshName, Seed};

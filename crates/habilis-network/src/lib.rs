@@ -66,7 +66,7 @@ pub mod protocol {
         PresenceSubtype, Proof, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Seed,
         Shard, ShardGroup, Signer, SymmetricKey, TicketAuth, TicketSecret, TopicId, Transport,
         TransportPolicy, UnixSecs, UnlockError, Verified, base58check, crypto, ct_eq, directory,
-        encode_pubkey, identity, invite, iroh_base, mesh, message, nickname_error, peer_addr_error,
+        encode_pubkey, identity, invite, iroh_base, meshes, message, nickname_error, peer_addr_error,
         reassembly, resolve_lookups, resolver, seal_error, seal_to_body, sole_addressee,
         validate_advertise,
     };

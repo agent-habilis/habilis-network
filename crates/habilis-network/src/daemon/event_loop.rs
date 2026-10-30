@@ -41,7 +41,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
 use crate::gossip::event::{NodeEvent, NodeSink};
-use crate::protocol::mesh::MeshName;
+use crate::protocol::meshes::MeshName;
 use crate::protocol::message::{Authored, Verified};
 use crate::protocol::{MeshId, Nickname, UnixSecs};
 use crate::transport::{IpcMessage, MeshSender};

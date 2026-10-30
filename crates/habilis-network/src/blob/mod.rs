@@ -50,7 +50,7 @@ pub use ticket::BlobTicket;
 #[cfg(test)]
 mod tests {
     use super::{BlobServer, ContentId, fetch};
-    use crate::protocol::mesh::LookupOpts;
+    use crate::protocol::meshes::LookupOpts;
     use crate::transport::PayloadPath;
     use rand::RngCore;
     use std::fs;

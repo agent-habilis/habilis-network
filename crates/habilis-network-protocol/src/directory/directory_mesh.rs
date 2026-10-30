@@ -1,7 +1,7 @@
 //! The directory mesh and the seed of its derivation.
 
 use crate::crypto::{Seed, derive_secret};
-use crate::mesh::{LookupOpts, Mesh, MeshConfig, MeshName, TransportPolicy};
+use crate::meshes::{LookupOpts, Mesh, MeshConfig, MeshName, TransportPolicy};
 
 /// Domain-separation seed for every directory. The directory name is
 /// the `derive_secret` *label*; this is the *seed*, so a directory's
@@ -35,7 +35,7 @@ const DIRECTORY_BASE_SEED: Seed = Seed::new(*b"habilis-mesh/directory/domain/v1"
 /// ```
 /// use habilis_network_protocol::MeshName;
 /// use habilis_network_protocol::directory::directory_mesh;
-/// use habilis_network_protocol::mesh::{LookupOpts, RelayChoice};
+/// use habilis_network_protocol::meshes::{LookupOpts, RelayChoice};
 ///
 /// let name = MeshName::try_new("directory-chat").expect("a name");
 /// let first = directory_mesh(&name, LookupOpts::new(RelayChoice::Disabled));
@@ -66,7 +66,7 @@ pub fn directory_mesh(directory: &MeshName, lookups: LookupOpts) -> Mesh {
 ///
 /// ```
 /// use habilis_network_protocol::directory::directory_config;
-/// use habilis_network_protocol::mesh::{LookupOpts, RelayChoice};
+/// use habilis_network_protocol::meshes::{LookupOpts, RelayChoice};
 /// use habilis_network_protocol::{Mesh, MeshName, Seed};
 ///
 /// let config = directory_config(LookupOpts::new(RelayChoice::Disabled));

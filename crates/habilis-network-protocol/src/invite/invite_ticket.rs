@@ -17,7 +17,7 @@ use iroh_base::{PublicKey, Signature};
 use super::InviteError;
 use crate::base58check::{self, take_array};
 use crate::crypto::{self, Password, SymmetricKey};
-use crate::mesh::{LockedMesh, Mesh};
+use crate::meshes::{LockedMesh, Mesh};
 use crate::{identity, seal_error};
 use habilis_network_util::unix_secs::UnixSecs;
 use zeroize::Zeroizing;
@@ -326,7 +326,7 @@ mod tests {
 
     use super::{InviteTicket, mint, signing_bytes};
     use crate::crypto::{Password, Seed};
-    use crate::mesh::{Mesh, MeshConfig, MeshName};
+    use crate::meshes::{Mesh, MeshConfig, MeshName};
     use habilis_network_util::unix_secs::UnixSecs;
     use iroh_base::SecretKey;
 

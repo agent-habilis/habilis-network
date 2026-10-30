@@ -21,7 +21,7 @@ use std::time::Duration;
 
 // Mesh ids and tickets carry no sigil and no `://` separator: both are bare
 // Base58Check, told apart by the kind byte inside the payload (see
-// `protocol::mesh`, `blob::ticket`, `invite::ticket`). They used to be branded
+// `protocol::meshes`, `blob::ticket`, `invite::ticket`). They used to be branded
 // with an emoji glyph, which cost a percent-encode in every URL, a non-ASCII
 // component in every runtime path, and a variation-selector workaround in both
 // ticket decoders. Being pure ASCII, an id now drops into a path, a URL, or a

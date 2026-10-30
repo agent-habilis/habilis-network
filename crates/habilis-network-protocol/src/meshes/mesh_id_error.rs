@@ -23,7 +23,7 @@ const MAX_LEN: usize = 512;
 /// The text of a mesh is a mesh id, and the id reads back to the same text.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::MeshId;
+/// use habilis_network_protocol::meshes::MeshId;
 ///
 /// use habilis_network_protocol::{Mesh, MeshConfig, MeshName, Seed};
 ///
@@ -89,7 +89,7 @@ impl Borrow<str> for MeshId {
 /// Text that is not a mesh id returns an error that says why.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::MeshId;
+/// use habilis_network_protocol::meshes::MeshId;
 ///
 /// let error = MeshId::try_new("not a mesh id").unwrap_err();
 /// assert!(!error.to_string().is_empty());

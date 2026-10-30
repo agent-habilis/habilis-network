@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::protocol::crypto;
-use crate::protocol::mesh::LookupOpts;
+use crate::protocol::meshes::LookupOpts;
 use crate::transport::PayloadPath;
 
 use super::{BlobError, BlobServer, BlobTicket, ContentId};
@@ -89,7 +89,7 @@ impl OffloadRequest {
 /// ```no_run
 /// use habilis_network::net::direct::PayloadPath;
 /// use habilis_network::ops::blob::{BlobError, BlobServer, BlobTicket, OffloadRequest, offload};
-/// use habilis_network::protocol::mesh::LookupOpts;
+/// use habilis_network::protocol::meshes::LookupOpts;
 ///
 /// # async fn demo(server: &mut Option<BlobServer>, lookups: &LookupOpts, relay: PayloadPath, request: OffloadRequest) -> Result<BlobTicket, BlobError> {
 /// offload(server, lookups, relay, request).await

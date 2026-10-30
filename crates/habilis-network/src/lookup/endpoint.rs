@@ -4,7 +4,7 @@
 use anyhow::Result;
 use iroh::{Endpoint, SecretKey};
 
-use crate::protocol::mesh::LookupOpts;
+use crate::protocol::meshes::LookupOpts;
 
 use iroh::endpoint;
 /// Install on `builder` every custom transport and hook a mesh node needs: the
@@ -106,7 +106,7 @@ pub(crate) fn quic_limits() -> endpoint::QuicTransportConfig {
 /// ```no_run
 /// use habilis_network::net::{EndpointError, TransportHandles, build_endpoint};
 /// use habilis_network::iroh::Endpoint;
-/// use habilis_network::protocol::mesh::LookupOpts;
+/// use habilis_network::protocol::meshes::LookupOpts;
 ///
 /// # async fn demo(lookups: &LookupOpts, transports: TransportHandles) -> Result<Endpoint, EndpointError> {
 /// build_endpoint(lookups, None, None, Vec::new(), transports).await

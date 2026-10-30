@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::mesh::{MeshId, MeshName};
+    use crate::meshes::{MeshId, MeshName};
     use crate::message::{AppTag, CorrId, MessageBody, MessageId, ShardGroup};
     use crate::nickname_error::Nickname;
 

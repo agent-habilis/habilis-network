@@ -5,7 +5,7 @@ use std::str::FromStr;
 use super::join_target_error::JoinTargetError;
 use crate::MeshId;
 use crate::invite::InviteTicket;
-use crate::mesh::MeshIdError;
+use crate::meshes::MeshIdError;
 
 /// What a join accepts: a bare base58 mesh id, or a creator-minted bare
 /// base58 invite to an invite-only mesh. A shared *string* is not a join

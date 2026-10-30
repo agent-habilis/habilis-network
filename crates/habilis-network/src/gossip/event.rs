@@ -1,4 +1,4 @@
-use crate::protocol::mesh::MeshName;
+use crate::protocol::meshes::MeshName;
 use crate::protocol::message::Authored;
 use crate::protocol::{AuthorKey, Channel, MeshId, Nickname};
 

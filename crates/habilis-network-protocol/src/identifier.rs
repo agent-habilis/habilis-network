@@ -28,7 +28,7 @@ pub(super) const MIN_CHARS: usize = 1;
 /// Maximum identifier length in Unicode scalar values.
 pub(super) const MAX_CHARS: usize = 32;
 
-/// Forbidden in a [`MeshName`](crate::mesh::MeshName): control,
+/// Forbidden in a [`MeshName`](crate::meshes::MeshName): control,
 /// whitespace, bidi-control, and the display-reserved `< > #`. Unlike a
 /// nickname, a mesh name is never embedded in a filesystem path, so the path
 /// separators `/ \` are allowed — a mesh name may be a URL.

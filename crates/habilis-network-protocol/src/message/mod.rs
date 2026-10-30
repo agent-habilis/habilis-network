@@ -25,7 +25,7 @@ mod message_kind;
 pub use message_kind::MessageKind;
 mod channel;
 #[cfg(test)]
-use super::mesh::MeshId;
+use super::meshes::MeshId;
 #[cfg(test)]
 use super::nickname_error::Nickname;
 pub use channel::Channel;

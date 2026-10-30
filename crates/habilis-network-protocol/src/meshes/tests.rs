@@ -4,7 +4,7 @@ use super::{
     UnlockError,
 };
 use crate::crypto::{Password, Seed};
-use crate::mesh::lookup::MAX_RELAY_URL_BYTES;
+use crate::meshes::lookup::MAX_RELAY_URL_BYTES;
 use iroh_base::RelayUrl;
 
 use crate::crypto;

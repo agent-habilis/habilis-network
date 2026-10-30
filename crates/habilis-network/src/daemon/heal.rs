@@ -320,7 +320,7 @@ mod tests {
     #[cfg(feature = "host")]
     use crate::membership;
     #[cfg(feature = "host")]
-    use crate::protocol::mesh;
+    use crate::protocol::meshes;
     #[cfg(feature = "host")]
     use crate::testing;
     #[cfg(feature = "host")]
@@ -376,7 +376,7 @@ mod tests {
                     id: secret.public(),
                     secret,
                     bind_ports: Vec::new(),
-                    lookups: mesh::LookupOpts::loopback(),
+                    lookups: meshes::LookupOpts::loopback(),
                     relay_transport: PayloadPath::DirectOnly,
                     bootstrap_relay: None,
                     rung_tx: watch::channel(None).0,

@@ -16,7 +16,7 @@ use iroh_gossip::api::GossipTopic;
 use tokio::sync::{mpsc, watch};
 
 use crate::gossip::event::NodeSink;
-use crate::protocol::mesh::{Mesh, MeshName};
+use crate::protocol::meshes::{Mesh, MeshName};
 use crate::protocol::{MeshId, Nickname};
 
 use crate::beacon;

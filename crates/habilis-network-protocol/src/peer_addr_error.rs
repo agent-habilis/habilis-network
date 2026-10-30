@@ -3,7 +3,7 @@
 //! A `PeerInfo` message body carries the author's iroh `EndpointAddr`
 //! as JSON so peers can dial each other directly. This is mesh-
 //! formation plumbing, distinct from the mesh-id codec
-//! (`protocol::mesh`) — kept in its own module so the two never get
+//! (`protocol::meshes`) — kept in its own module so the two never get
 //! conflated.
 
 use std::net::SocketAddr;

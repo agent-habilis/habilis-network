@@ -1,4 +1,4 @@
-use crate::protocol::mesh::LookupOpts;
+use crate::protocol::meshes::LookupOpts;
 
 use iroh::Endpoint;
 use iroh::address_lookup::EndpointInfo;

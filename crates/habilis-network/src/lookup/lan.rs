@@ -11,7 +11,7 @@ use iroh::endpoint::PortmapperConfig;
 use iroh::endpoint::presets;
 use iroh::{Endpoint, RelayMode, SecretKey};
 
-use crate::protocol::mesh::{LookupOpts, RelayChoice};
+use crate::protocol::meshes::{LookupOpts, RelayChoice};
 
 use iroh_gossip::proto;
 /// The LAN members of our mesh, as the event loop reads them. `None` where the endpoint has no

@@ -1,7 +1,7 @@
 //! The derivations of a mesh: its topic seed, its labelled secrets, and its topic id.
 
 use super::{Keying, Seed};
-use crate::mesh::MeshName;
+use crate::meshes::MeshName;
 use crate::topic::TopicId;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -314,7 +314,7 @@ mod derive_secret_tests {
 #[cfg(test)]
 mod topic_tests {
     use crate::crypto::{Keying, Seed, derive_topic_id};
-    use crate::mesh::MeshName;
+    use crate::meshes::MeshName;
 
     fn name(text: &str) -> MeshName {
         MeshName::try_new(text).unwrap()

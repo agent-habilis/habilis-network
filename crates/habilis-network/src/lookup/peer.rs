@@ -10,7 +10,7 @@ use crate::util::tuning;
 use anyhow::Result;
 use iroh::{Endpoint, SecretKey};
 
-use crate::protocol::mesh::{LookupOpts, RelayChoice};
+use crate::protocol::meshes::{LookupOpts, RelayChoice};
 #[cfg(feature = "multihop")]
 use crate::transport::PayloadPath;
 
@@ -28,7 +28,7 @@ use crate::transport;
 /// ```no_run
 /// use habilis_network::iroh::Endpoint;
 /// use habilis_network::net::{EndpointError, build_peer_endpoint};
-/// use habilis_network::protocol::mesh::LookupOpts;
+/// use habilis_network::protocol::meshes::LookupOpts;
 ///
 /// # async fn demo(lookups: &LookupOpts) -> Result<Endpoint, EndpointError> {
 /// build_peer_endpoint(lookups).await
@@ -171,7 +171,7 @@ pub(crate) fn check_injected_against_mesh(
 /// ```no_run
 /// use habilis_network::net::TransportOpts;
 /// use habilis_network::net::direct::build_peer_webrtc;
-/// use habilis_network::protocol::mesh::LookupOpts;
+/// use habilis_network::protocol::meshes::LookupOpts;
 ///
 /// # async fn demo(lookups: &LookupOpts, options: TransportOpts) {
 /// let _ = build_peer_webrtc(lookups, options).await;

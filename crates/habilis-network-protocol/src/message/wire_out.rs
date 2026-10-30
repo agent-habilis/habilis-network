@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::fmt;
 
 use super::{Message, MessageBody, MessageId, MessageKind, Shard};
-use crate::mesh::MeshId;
+use crate::meshes::MeshId;
 use crate::nickname_error::Nickname;
 use crate::{ContentHash, identity};
 

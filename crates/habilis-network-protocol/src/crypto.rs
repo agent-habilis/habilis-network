@@ -7,7 +7,7 @@
 //! `habilis-network`'s beacon.
 //!
 //! The mesh id token carries a random 32-byte `seed` (see
-//! [`crate::mesh`]). Every value the mesh needs is derived
+//! [`crate::meshes`]). Every value the mesh needs is derived
 //! from it in memory — no stored address, no file:
 //!
 //! - the gossip topic (`derive_topic_id`),

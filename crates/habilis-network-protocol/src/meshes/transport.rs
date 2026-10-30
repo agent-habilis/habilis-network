@@ -21,7 +21,7 @@ use super::{ChoiceError, ConfigError};
 /// Each transport has the name that the wire and the config use.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::Transport;
+/// use habilis_network_protocol::meshes::Transport;
 ///
 /// assert_eq!(Transport::WebRtc.as_str(), "webrtc");
 /// assert_eq!(Transport::Udp.as_str(), "udp");
@@ -118,7 +118,7 @@ impl fmt::Display for Transport {
 /// A policy turns each transport on or off, and the default keeps the usual ones on.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::{Transport, TransportPolicy};
+/// use habilis_network_protocol::meshes::{Transport, TransportPolicy};
 ///
 /// let policy = TransportPolicy::default().udp(false);
 /// assert!(!policy.allows(Transport::Udp));

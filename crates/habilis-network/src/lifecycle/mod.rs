@@ -63,7 +63,7 @@ mod departed_tests {
     use crate::gossip::event::SilentSink;
     use crate::lookup::{TransportOpts, build_peer_multihop};
     use crate::protocol::identity::Identity;
-    use crate::protocol::mesh::LookupOpts;
+    use crate::protocol::meshes::LookupOpts;
     use crate::protocol::message::Authored;
     use crate::protocol::{MeshId, Message, PresenceSubtype, UnixSecs};
     use crate::testing::{endpoint_id, fresh_state, nick};

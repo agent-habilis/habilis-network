@@ -1,7 +1,7 @@
 //! One listed mesh, as a discoverer sees it.
 
 use crate::MeshId;
-use crate::mesh::MeshName;
+use crate::meshes::MeshName;
 
 use habilis_network_util::clock::Instant;
 use habilis_network_util::unix_secs::UnixSecs;
@@ -16,7 +16,7 @@ use habilis_network_util::unix_secs::UnixSecs;
 /// use std::time::Instant;
 ///
 /// use habilis_network_protocol::directory::Listings;
-/// use habilis_network_protocol::mesh::MeshId;
+/// use habilis_network_protocol::meshes::MeshId;
 ///
 /// use habilis_network_protocol::{Mesh, MeshConfig, MeshName, Seed};
 ///

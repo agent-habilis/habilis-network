@@ -8,7 +8,7 @@
 //!
 //! A mesh created with `--advertise[=<name>]` re-broadcasts its own
 //! mesh id into a **directory**; a consumer's discovery command browses it. A directory
-//! is not a server — it is itself a well-known public [`crate::mesh::Mesh`] derived
+//! is not a server — it is itself a well-known public [`crate::meshes::Mesh`] derived
 //! deterministically from its name, so a publisher and a discoverer that
 //! name the same directory derive the same mesh and mesh over the
 //! ordinary gossip + relay/DHT/mDNS stack. Ads are plain gossip messages

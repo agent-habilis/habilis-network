@@ -2,7 +2,7 @@ use super::Resolved;
 
 use crate::protocol::Nickname;
 use crate::protocol::crypto::Password;
-use crate::protocol::mesh::{
+use crate::protocol::meshes::{
     AdvertiseRequiresReachable, DirectorySelection, MeshConfig, MeshName, validate_advertise,
 };
 
@@ -17,7 +17,7 @@ use crate::daemon::setup::SetupKind;
 ///
 /// ```
 /// use habilis_network::protocol::MeshName;
-/// use habilis_network::protocol::mesh::{DirectorySelection, MeshConfig};
+/// use habilis_network::protocol::meshes::{DirectorySelection, MeshConfig};
 /// use habilis_network::runtime::CreateParams;
 ///
 /// let name = MeshName::try_new("chat").expect("a name");

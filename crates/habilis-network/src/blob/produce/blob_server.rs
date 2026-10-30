@@ -5,7 +5,7 @@ use iroh::Endpoint;
 use tokio::sync::Mutex;
 
 use crate::protocol::crypto::Password;
-use crate::protocol::mesh::LookupOpts;
+use crate::protocol::meshes::LookupOpts;
 use crate::transport::PayloadPath;
 
 use crate::blob::store::BlobStore;

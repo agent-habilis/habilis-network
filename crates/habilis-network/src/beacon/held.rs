@@ -4,7 +4,7 @@ use iroh::address_lookup::memory;
 use iroh::{Endpoint, EndpointAddr};
 
 use crate::lookup::{ProbeAnswer, TransportHandles, build_endpoint, probe_answer};
-use crate::protocol::mesh::LookupOpts;
+use crate::protocol::meshes::LookupOpts;
 use crate::util::clock::Instant;
 
 use super::rung_ladder::{admit_rung, forget_rungs, settle_on_rung};

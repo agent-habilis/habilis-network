@@ -3,7 +3,7 @@ use n0_future::task::JoinHandle;
 use tokio::sync::oneshot;
 
 use crate::lookup::{TransportHandles, build_endpoint, probe_connect};
-use crate::protocol::mesh::LookupOpts;
+use crate::protocol::meshes::LookupOpts;
 use crate::util::tuning::{HEAL_PROBE, RENDEZVOUS_CLOSE, heal_interval};
 
 use super::{RendezvousParams, beacon_lookups, rendezvous_addr};

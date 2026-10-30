@@ -21,7 +21,7 @@ use std::{error, str};
 /// A locked id has no derivation, so calling one does not compile:
 ///
 /// ```compile_fail,E0599
-/// fn derive(locked: habilis_network_protocol::mesh::LockedMesh) {
+/// fn derive(locked: habilis_network_protocol::meshes::LockedMesh) {
 ///     let _ = locked.topic_id();
 /// }
 /// ```
@@ -29,7 +29,7 @@ use std::{error, str};
 /// Unlocking it makes the same call compile:
 ///
 /// ```
-/// fn derive(locked: habilis_network_protocol::mesh::LockedMesh) {
+/// fn derive(locked: habilis_network_protocol::meshes::LockedMesh) {
 ///     let _ = locked.unlock(None).unwrap().topic_id();
 /// }
 /// ```
@@ -48,7 +48,7 @@ pub struct LockedMesh {
 ///
 /// ```
 /// use habilis_network_protocol::Password;
-/// use habilis_network_protocol::mesh::UnlockError;
+/// use habilis_network_protocol::meshes::UnlockError;
 ///
 /// use habilis_network_protocol::{Mesh, MeshConfig, MeshName, Seed};
 ///

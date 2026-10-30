@@ -3,7 +3,7 @@ use crate::daemon::setup_error::SetupError;
 
 use crate::protocol::Nickname;
 use crate::protocol::crypto::Password;
-use crate::protocol::mesh::UnlockError;
+use crate::protocol::meshes::UnlockError;
 use crate::resolver::{self, JoinTarget};
 
 use crate::daemon::setup::SetupKind;
@@ -58,7 +58,7 @@ impl JoinParams {
     /// and none was given (`PasswordRequired`, typed for the frontends);
     /// the password is wrong; or a password was given for a passwordless id.
     ///
-    /// [`Mesh`]: crate::protocol::mesh::Mesh
+    /// [`Mesh`]: crate::protocol::meshes::Mesh
     pub fn resolve(self) -> Result<Resolved, SetupError> {
         let mesh = match &self.target {
             JoinTarget::Mesh(_) => {

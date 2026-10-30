@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::protocol::mesh::MeshName;
+use crate::protocol::meshes::MeshName;
 use crate::protocol::{MeshId, Nickname};
 use crate::util::unix_secs;
 

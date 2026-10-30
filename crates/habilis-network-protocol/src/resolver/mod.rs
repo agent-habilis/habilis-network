@@ -16,7 +16,7 @@ mod tests {
 
     // The consumer builds its own "use the topic command instead" hint off this
     // variant, so the trimmed input has to survive classification verbatim.
-    use crate::{crypto, invite, mesh};
+    use crate::{crypto, invite, meshes};
     use std::time;
     #[test]
     fn a_non_token_string_is_unrecognized_and_echoes_its_input() {
@@ -35,7 +35,7 @@ mod tests {
     }
 
     fn known_mesh_id() -> String {
-        use crate::mesh::{Mesh, MeshConfig, MeshName};
+        use crate::meshes::{Mesh, MeshConfig, MeshName};
         Mesh::try_new(
             crypto::Seed::new([1u8; 32]),
             MeshName::try_new("test").unwrap(),
@@ -80,8 +80,8 @@ mod tests {
         );
     }
 
-    fn invite_only_mesh() -> mesh::Mesh {
-        use crate::mesh::{Mesh, MeshConfig, MeshName};
+    fn invite_only_mesh() -> meshes::Mesh {
+        use crate::meshes::{Mesh, MeshConfig, MeshName};
         let mut mesh = Mesh::try_new(
             crypto::Seed::new([5u8; 32]),
             MeshName::try_new("t").unwrap(),

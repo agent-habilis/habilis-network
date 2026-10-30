@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::mesh::MeshIdError;
+use crate::meshes::MeshIdError;
 
 /// Why a string is not a join target. A *classification*, not a rendered
 /// remedy: the engine has no commands to point at, so a consumer matches the

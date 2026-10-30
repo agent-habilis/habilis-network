@@ -24,7 +24,7 @@ use crate::daemon::message_log::MessageLog;
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
 use crate::protocol::identity::Identity;
-use crate::protocol::mesh::Mesh;
+use crate::protocol::meshes::Mesh;
 use crate::protocol::message::{Authored, Verified, WireFrame};
 use crate::protocol::{
     AuthorKey, ContentHash, DedupKey, Nickname, ShardGroup, SymmetricKey, UnixSecs,

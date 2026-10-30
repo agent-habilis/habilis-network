@@ -27,7 +27,7 @@ pub mod identity;
 /// the engine because `InviteTicket` is part of the join vocabulary a
 /// consumer speaks, and `resolver::JoinTarget` is defined in terms of it.
 pub mod invite;
-pub mod mesh;
+pub mod meshes;
 pub mod message;
 /// Nicknames: display labels for members. A nickname is not an identity.
 pub mod nickname_error;
@@ -59,7 +59,7 @@ pub use crypto::{Password, Seed, SymmetricKey, TicketAuth, TicketSecret, ct_eq};
 pub use dedup_key::DedupKey;
 pub use habilis_network_util::unix_secs::UnixSecs;
 pub use identity::{Identity, encode_pubkey};
-pub use mesh::{
+pub use meshes::{
     AdvertiseRequiresReachable, ChoiceError, ConfigError, DEFAULT_DIRECTORY, DirectorySelection,
     LockedMesh, Lookup, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName,
     NameError, OptFlag, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport,

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::{Ad, ListingChange, Listings, directory_mesh};
 use crate::MeshId;
-use crate::mesh::{LookupOpts, MeshName};
+use crate::meshes::{LookupOpts, MeshName};
 
 fn directory(name: &str) -> MeshName {
     MeshName::try_new(name).unwrap()

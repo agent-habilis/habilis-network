@@ -1,4 +1,4 @@
-use crate::protocol::mesh::{LookupOpts, RelayChoice};
+use crate::protocol::meshes::{LookupOpts, RelayChoice};
 
 use super::RendezvousParams;
 

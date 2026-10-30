@@ -67,7 +67,7 @@ mod golden_tests {
         Keying, Password, Seed, SymmetricKey, derive_topic_id, invite_wrap_key, password_verifier,
         rendezvous_id, rendezvous_ports, stretch_mesh_password,
     };
-    use crate::mesh::MeshName;
+    use crate::meshes::MeshName;
 
     const SEED: [u8; 32] = [7u8; 32];
     const ROOT: [u8; 32] = [5u8; 32];

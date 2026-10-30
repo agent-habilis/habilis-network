@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, watch};
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::lookup;
 use crate::protocol::crypto::Password;
-use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName, Transport};
+use crate::protocol::meshes::{LookupOpts, Mesh, MeshConfig, MeshName, Transport};
 use crate::protocol::{MeshId, Nickname};
 use crate::util::tuning::{RELAY_RUNG_PROBE, SETUP_RUNG_READ};
 use lookup::{
@@ -33,7 +33,7 @@ use super::config::EndpointOwner;
 use super::{CoHostPolicy, DriverMode, EventLoopConfig};
 
 use crate::gossip::split;
-use crate::protocol::mesh::RelayChoice;
+use crate::protocol::meshes::RelayChoice;
 use crate::protocol::{Seed, SymmetricKey, TransportPolicy as crate_TransportPolicy, identity};
 #[cfg(any(feature = "host", feature = "multihop"))]
 use crate::transport::underlay_webrtc;
@@ -433,7 +433,7 @@ fn reaches_relay(lookups: &LookupOpts, transports: lookup::TransportOpts) -> boo
 /// ```no_run
 /// use habilis_network::net::TransportOpts;
 /// use habilis_network::protocol::TransportPolicy;
-/// use habilis_network::protocol::mesh::LookupOpts;
+/// use habilis_network::protocol::meshes::LookupOpts;
 /// use habilis_network::runtime::{SetupError, refuse_in_browser};
 ///
 /// # fn demo(lookups: &LookupOpts, policy: &TransportPolicy, transports: TransportOpts) -> Result<(), SetupError> {
@@ -1114,7 +1114,7 @@ mod tests {
 
     use std::time::Duration;
 
-    use crate::protocol::mesh::{LookupOpts, RelayChoice, Transport, TransportPolicy};
+    use crate::protocol::meshes::{LookupOpts, RelayChoice, Transport, TransportPolicy};
 
     // A browser has no UDP: it reaches a peer only through the relay, and a
     // data channel's handshake crosses the relay too. `validate` accepts
@@ -1122,7 +1122,7 @@ mod tests {
     // over UDP.
     use crate::daemon::node;
     use crate::lookup::test_relay;
-    use crate::protocol::mesh::Lookup;
+    use crate::protocol::meshes::Lookup;
     use crate::util::tuning;
     use tokio::sync::mpsc;
     #[test]
@@ -1691,7 +1691,7 @@ mod tests {
 // binary built without `host` runs it, with no IP on the node, as a browser would.
 #[cfg(all(test, feature = "multihop", not(feature = "host")))]
 mod browser_tests {
-    use crate::protocol::mesh::{Lookup, Transport};
+    use crate::protocol::meshes::{Lookup, Transport};
 
     #[test]
     fn a_browser_member_has_a_multihop_handle_with_the_link_cost_of_a_browser() {

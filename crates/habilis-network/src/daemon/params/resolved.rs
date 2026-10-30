@@ -1,5 +1,5 @@
 use crate::protocol::Nickname;
-use crate::protocol::mesh::MeshName;
+use crate::protocol::meshes::MeshName;
 
 use crate::daemon::setup::SetupKind;
 

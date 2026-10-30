@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::Result;
 use iroh::Watcher;
 
-use crate::protocol::mesh::LookupOpts;
+use crate::protocol::meshes::LookupOpts;
 use crate::util::clock;
 
 pub use network_capability::NetworkCapability;

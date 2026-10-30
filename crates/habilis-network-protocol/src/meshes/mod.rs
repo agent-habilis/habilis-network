@@ -44,10 +44,6 @@ const NAME_MAX_BYTES: usize = super::identifier::MAX_CHARS * 4;
 
 mod choice_error;
 mod locked_mesh;
-#[expect(
-    clippy::module_inception,
-    reason = "the file is named for its type, Mesh, as O9 asks"
-)]
 mod mesh;
 mod mesh_secret;
 

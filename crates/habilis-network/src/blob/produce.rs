@@ -28,7 +28,7 @@ pub(crate) use serve_limits::ServeLimits;
 
 use crate::lookup;
 use crate::protocol::crypto::{Password, TicketAuth, TicketSecret, ct_eq};
-use crate::protocol::mesh::LookupOpts;
+use crate::protocol::meshes::LookupOpts;
 use crate::transport::PayloadPath;
 use crate::util::consts::MAX_BLOB_BYTES;
 

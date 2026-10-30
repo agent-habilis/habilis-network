@@ -1,5 +1,5 @@
 use crate::protocol::crypto::Password;
-use crate::protocol::mesh::{Mesh, MeshConfig, MeshName};
+use crate::protocol::meshes::{Mesh, MeshConfig, MeshName};
 
 /// What kind of mesh we're setting up — either minting a new one
 /// (create) or attaching to an existing one (join).

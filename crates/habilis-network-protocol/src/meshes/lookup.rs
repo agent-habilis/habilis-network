@@ -31,7 +31,7 @@ use std::{error, str};
 /// A relay choice sets how the relay finds peers, and a lookup set can have none of them.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::{LookupOpts, RelayChoice};
+/// use habilis_network_protocol::meshes::{LookupOpts, RelayChoice};
 ///
 /// let opts = LookupOpts::new(RelayChoice::Disabled);
 /// assert!(opts.validate().is_ok());
@@ -57,7 +57,7 @@ pub enum RelayChoice {
 /// A loopback preset is local only, and the public preset is not.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::LookupOpts;
+/// use habilis_network_protocol::meshes::LookupOpts;
 ///
 /// assert!(LookupOpts::loopback().is_loopback());
 /// assert!(!LookupOpts::public_preset().is_loopback());
@@ -357,7 +357,7 @@ const ISSUER_PUBKEY_LEN: usize = 32;
 /// A config with no lookup named resolves to the loopback lookups.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::MeshConfig;
+/// use habilis_network_protocol::meshes::MeshConfig;
 ///
 /// let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
 /// assert!(config.lookups.is_loopback());
@@ -627,7 +627,7 @@ impl TryFrom<&[u8]> for MeshConfig {
 /// A flag that is named or bare is set, and an absent flag is not.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::OptFlag;
+/// use habilis_network_protocol::meshes::OptFlag;
 ///
 /// assert!(OptFlag::Named(3).is_set());
 /// assert!(!OptFlag::<u8>::Unset.is_set());
@@ -662,7 +662,7 @@ impl<T> OptFlag<T> {
 /// An absent relay selection is not set.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::RelaySelection;
+/// use habilis_network_protocol::meshes::RelaySelection;
 ///
 /// let flag: RelaySelection = RelaySelection::Unset;
 /// assert!(!flag.is_set());
@@ -698,7 +698,7 @@ impl FromStr for OptFlag<RelayLadder> {
 ///
 /// ```
 /// use habilis_network_protocol::MeshName;
-/// use habilis_network_protocol::mesh::DirectorySelection;
+/// use habilis_network_protocol::meshes::DirectorySelection;
 ///
 /// let flag = DirectorySelection::from(Some(MeshName::try_new("directory-chat").expect("a name")));
 /// assert!(flag.is_set());
@@ -759,7 +759,7 @@ impl From<Option<MeshName>> for OptFlag<MeshName> {
 /// A mesh that advertises on a loopback lookup set is refused, and this is the error.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::{DirectorySelection, LookupOpts, validate_advertise};
+/// use habilis_network_protocol::meshes::{DirectorySelection, LookupOpts, validate_advertise};
 ///
 /// let error = validate_advertise(&DirectorySelection::Default, &LookupOpts::loopback()).unwrap_err();
 /// assert!(!error.to_string().is_empty());
@@ -786,7 +786,7 @@ impl error::Error for AdvertiseRequiresReachable {}
 /// Advertising is allowed only when the lookups can reach peers from outside the loopback.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::{DirectorySelection, LookupOpts, validate_advertise};
+/// use habilis_network_protocol::meshes::{DirectorySelection, LookupOpts, validate_advertise};
 ///
 /// assert!(validate_advertise(&DirectorySelection::Unset, &LookupOpts::loopback()).is_ok());
 /// assert!(validate_advertise(&DirectorySelection::Default, &LookupOpts::loopback()).is_err());
@@ -810,7 +810,7 @@ pub fn validate_advertise(
 /// Each lookup has a name that parses back to the same lookup.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::Lookup;
+/// use habilis_network_protocol::meshes::Lookup;
 ///
 /// let parsed: Lookup = Lookup::Dht.as_str().parse().expect("a lookup name parses");
 /// assert_eq!(parsed.as_str(), Lookup::Dht.as_str());
@@ -870,7 +870,7 @@ impl fmt::Display for Lookup {
 /// A set with a lookup in it resolves to lookups that are not loopback.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::{Lookup, LookupSet, resolve_lookups};
+/// use habilis_network_protocol::meshes::{Lookup, LookupSet, resolve_lookups};
 ///
 /// let set = LookupSet::choose(&[Lookup::Mdns], None).expect("a lookup set");
 /// assert!(set.any());
@@ -937,7 +937,7 @@ impl LookupSet {
 /// An empty lookup set resolves to the loopback lookups.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::{LookupSet, resolve_lookups};
+/// use habilis_network_protocol::meshes::{LookupSet, resolve_lookups};
 ///
 /// let set = LookupSet::choose(&[], None).expect("an empty lookup set");
 /// assert!(resolve_lookups(set).is_loopback());
@@ -993,7 +993,7 @@ pub(crate) fn parse_relay_ladder(raw: &str) -> Result<Vec<RelayUrl>, String> {
 /// A relay ladder holds the relay URLs that it is given, in order.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::RelayLadder;
+/// use habilis_network_protocol::meshes::RelayLadder;
 ///
 /// let ladder: RelayLadder = "https://relay.example.com".parse().expect("a relay ladder");
 /// assert_eq!(ladder.len(), 1);
@@ -1008,7 +1008,7 @@ pub struct RelayLadder(Vec<RelayUrl>);
 /// Text that is not a relay URL returns an error that says why.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::RelayLadder;
+/// use habilis_network_protocol::meshes::RelayLadder;
 ///
 /// let error = "not a relay".parse::<RelayLadder>().unwrap_err();
 /// assert!(!error.to_string().is_empty());

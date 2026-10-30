@@ -1,6 +1,6 @@
 //! The input parameters of a test message.
 
-use crate::mesh::MeshId;
+use crate::meshes::MeshId;
 use crate::nickname_error::Nickname;
 
 use super::{AppTag, ChainCtx, MessageBody};
@@ -14,7 +14,7 @@ use super::{AppTag, ChainCtx, MessageBody};
 /// ```
 /// use habilis_network_protocol::identity::Identity;
 /// use habilis_network_protocol::message::{AppTag, BuildMsgParams, ChainCtx, MessageBody, build_msg_bytes};
-/// use habilis_network_protocol::mesh::MeshId;
+/// use habilis_network_protocol::meshes::MeshId;
 /// use habilis_network_protocol::Nickname;
 ///
 /// use habilis_network_protocol::{Mesh, MeshConfig, MeshName, Seed};

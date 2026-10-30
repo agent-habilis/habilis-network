@@ -1,5 +1,5 @@
 use super::{TransportOpts, build_peer_endpoint};
-use crate::protocol::mesh::{LookupOpts, RelayChoice, TransportPolicy};
+use crate::protocol::meshes::{LookupOpts, RelayChoice, TransportPolicy};
 use crate::transport::PayloadPath;
 use std::collections::HashSet;
 
@@ -323,7 +323,7 @@ fn the_mesh_policy_turns_off_the_paths_it_leaves_out() {
 // ladder, no lookup wired) and the loopback all-off branch. mDNS
 // multicast / mainline-DHT socket setup is environment-dependent, so
 // it is not exercised here; presence-allowlist resolution is
-// unit-tested in `protocol::mesh`, and the relay ladder logic in
+// unit-tested in `protocol::meshes`, and the relay ladder logic in
 // [`super::relay`].
 
 /// **A receiver that never reads grants the whole window to one stream.** Every endpoint of the

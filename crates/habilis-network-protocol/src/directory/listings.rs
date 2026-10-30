@@ -9,7 +9,7 @@ use habilis_network_util::unix_secs::UnixSecs;
 use super::{Ad, Listing, ListingChange};
 
 use crate::MeshId;
-use crate::mesh::LockedMesh;
+use crate::meshes::LockedMesh;
 
 /// Upper bound on tracked listings. The directory is an open public mesh
 /// (anyone can mint and broadcast valid mesh ids), so the map is
@@ -32,7 +32,7 @@ const MAX_LISTINGS: usize = 256;
 /// use std::time::Instant;
 ///
 /// use habilis_network_protocol::directory::Listings;
-/// use habilis_network_protocol::mesh::MeshId;
+/// use habilis_network_protocol::meshes::MeshId;
 ///
 /// use habilis_network_protocol::{Mesh, MeshConfig, MeshName, Seed};
 ///
@@ -60,7 +60,7 @@ impl Listings {
     }
 
     /// Process one directory message body. A valid [`Ad`] whose id
-    /// decodes to a [`crate::mesh::Mesh`] refreshes the listing's liveness; the
+    /// decodes to a [`crate::meshes::Mesh`] refreshes the listing's liveness; the
     /// returned event is `Found` for a new mesh, `Updated` only when a
     /// visible field (the peer count) changed, and `None` for an
     /// unchanged re-ad or an unparseable body. Suppressing the no-op

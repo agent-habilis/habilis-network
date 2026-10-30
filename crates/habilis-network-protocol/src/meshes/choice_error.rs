@@ -12,7 +12,7 @@ use std::error;
 /// A name that is not one of the choices returns this error.
 ///
 /// ```
-/// use habilis_network_protocol::mesh::Lookup;
+/// use habilis_network_protocol::meshes::Lookup;
 ///
 /// let error = "bogus".parse::<Lookup>().unwrap_err();
 /// assert!(!error.to_string().is_empty());

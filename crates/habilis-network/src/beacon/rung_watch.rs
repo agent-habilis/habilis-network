@@ -5,7 +5,7 @@ use n0_future::task::JoinHandle;
 use tokio::sync::mpsc;
 
 use crate::lookup::{ProbeAnswer, TransportHandles, build_endpoint};
-use crate::protocol::mesh::LookupOpts;
+use crate::protocol::meshes::LookupOpts;
 use crate::util::clock::Instant;
 use crate::util::tuning::{RECLAIM_WINDOW, RENDEZVOUS_CLOSE, RENDEZVOUS_PROBE, heal_interval};
 

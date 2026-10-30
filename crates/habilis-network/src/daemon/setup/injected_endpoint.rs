@@ -3,7 +3,7 @@ use anyhow::Result;
 use crate::daemon::setup_error::SetupError;
 use iroh::Endpoint;
 
-use crate::protocol::mesh::LookupOpts;
+use crate::protocol::meshes::LookupOpts;
 
 use crate::{lookup, transport};
 use std::fmt;
@@ -36,7 +36,7 @@ use std::fmt;
 /// ```no_run
 /// # use habilis_network::net::TransportHandles;
 /// # use habilis_network::runtime::InjectedEndpoint;
-/// # use habilis_network::protocol::mesh::LookupOpts;
+/// # use habilis_network::protocol::meshes::LookupOpts;
 /// # async fn build() -> anyhow::Result<InjectedEndpoint> {
 /// let secret = habilis_network::iroh::SecretKey::from_bytes(&[1; 32]);
 /// InjectedEndpoint::bind(

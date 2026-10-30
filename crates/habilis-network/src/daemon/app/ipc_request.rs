@@ -1,6 +1,6 @@
 use tokio::sync::oneshot;
 
-use crate::protocol::mesh::MeshName;
+use crate::protocol::meshes::MeshName;
 
 /// One parsed IPC command bundled with its answer channel and this
 /// session's mesh name — the value cluster [`NodeDriver::handle_ipc`](super::NodeDriver::handle_ipc) needs

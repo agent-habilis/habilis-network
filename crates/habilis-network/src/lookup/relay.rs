@@ -27,7 +27,7 @@ use tokio::sync::watch;
 pub(crate) use rung_refresh::RungRefresh;
 pub(crate) use stoppable_task::StoppableTask;
 
-use crate::protocol::mesh::RelayChoice;
+use crate::protocol::meshes::RelayChoice;
 use crate::util::tuning::{
     RELAY_LIVENESS_FAILS_TO_EVICT, RELAY_LIVENESS_INTERVAL, RELAY_REPROBE_BACKOFF_MAX,
     RELAY_REPROBE_BACKOFF_MIN, RELAY_RUNG_PROBE,
@@ -97,7 +97,7 @@ static RENDEZVOUS_RELAY_LADDER_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| 
 ///
 /// ```
 /// use habilis_network::net::relay_ladder;
-/// use habilis_network::protocol::mesh::RelayChoice;
+/// use habilis_network::protocol::meshes::RelayChoice;
 ///
 /// assert_eq!(relay_ladder(&RelayChoice::Disabled).count(), 0);
 /// ```
