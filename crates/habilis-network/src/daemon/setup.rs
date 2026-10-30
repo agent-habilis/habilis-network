@@ -610,10 +610,6 @@ pub async fn setup_mesh(
         .map_err(SetupError::internal)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the one-shot assembly of a member: each step is a single call or a literal of the loop config, and splitting it would only scatter sequential setup across helpers"
-)]
 async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig> {
     let SetupParams {
         author,
@@ -706,30 +702,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         address_book,
         webrtc_ice,
         topic_string,
-    } = match kind {
-        SetupKind::Create {
-            name,
-            config,
-            advertise,
-            password,
-            invite_only,
-        } => {
-            setup_create(
-                &build,
-                CreateSetup {
-                    name,
-                    config,
-                    advertise,
-                    password,
-                    invite_only,
-                },
-            )
-            .await?
-        }
-        kind @ (SetupKind::Join { .. } | SetupKind::Topic { .. }) => {
-            setup_join(&build, kind).await?
-        }
-    };
+    } = assemble(kind, &build).await?;
 
     // Read out of `build` before anything below moves what it borrows
     // (`author`, `sink`, `rung_tx`).
@@ -781,6 +754,33 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         driver: DriverMode::Cli,
         #[cfg(feature = "host")]
         owner: None,
+    })
+}
+
+async fn assemble(kind: SetupKind, build: &SetupBuild<'_>) -> Result<Assembled> {
+    Ok(match kind {
+        SetupKind::Create {
+            name,
+            config,
+            advertise,
+            password,
+            invite_only,
+        } => {
+            setup_create(
+                build,
+                CreateSetup {
+                    name,
+                    config,
+                    advertise,
+                    password,
+                    invite_only,
+                },
+            )
+            .await?
+        }
+        kind @ (SetupKind::Join { .. } | SetupKind::Topic { .. }) => {
+            setup_join(build, kind).await?
+        }
     })
 }
 
