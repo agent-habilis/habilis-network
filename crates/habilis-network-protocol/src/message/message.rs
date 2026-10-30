@@ -436,12 +436,8 @@ impl Message {
     ///
     /// # Errors
     ///
-    /// Returns the message itself when [`verify_signature_with`](Self::verify_signature_with) fails.
-    #[expect(
-        clippy::result_large_err,
-        reason = "the error is the message itself, handed back unchanged for the caller to drop or keep"
-    )]
-    pub fn verify(self) -> Result<Verified, Message> {
+    /// Returns the message itself, boxed, when [`verify_signature_with`](Self::verify_signature_with) fails.
+    pub fn verify(self) -> Result<Verified, Box<Message>> {
         self.verify_canonical().map(|(verified, _)| verified)
     }
 
@@ -465,11 +461,7 @@ impl Message {
     /// let canonical = message.canonical_bytes();
     /// let _ = message.verify_with(&canonical);
     /// ```
-    #[expect(
-        clippy::result_large_err,
-        reason = "the error is the message itself, handed back unchanged for the caller to drop or keep"
-    )]
-    pub fn verify_canonical(self) -> Result<(Verified, Vec<u8>), Message> {
+    pub fn verify_canonical(self) -> Result<(Verified, Vec<u8>), Box<Message>> {
         let canonical = self.canonical_bytes();
         match self.verify_with(&canonical) {
             Ok(verified) => Ok((verified, canonical)),
@@ -479,16 +471,12 @@ impl Message {
 
     /// The check behind [`verify_canonical`](Self::verify_canonical), against canonical bytes that
     /// the caller computed. Crate-private: outside the crate the bytes must come from the message.
-    #[expect(
-        clippy::result_large_err,
-        reason = "the error is the message itself, handed back unchanged for the caller to drop or keep"
-    )]
-    pub(crate) fn verify_with(self, canonical: &[u8]) -> Result<Verified, Message> {
+    pub(crate) fn verify_with(self, canonical: &[u8]) -> Result<Verified, Box<Message>> {
         let Some(signed) = self.signer else {
-            return Err(self);
+            return Err(Box::new(self));
         };
         if !self.verify_signature_with(canonical) {
-            return Err(self);
+            return Err(Box::new(self));
         }
         Ok(Verified::new(self, signed.key()))
     }
