@@ -64,10 +64,6 @@ pub fn log_out(message: &Message) {
     log("out", message);
 }
 
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "foreign non_exhaustive enum: the compiler needs a wildcard arm; the named variants are listed before it"
-)]
 fn log(direction: &'static str, message: &Message) {
     let plumbing = || {
         tracing::trace!(
@@ -142,8 +138,20 @@ fn log(direction: &'static str, message: &Message) {
             "state"
         ),
         // Plumbing: presence alive, peer info, digests, ping and pong, link state,
-        // and any kind added later. None of them logs a body.
-        _ => plumbing(),
+        // and any kind added later. None of them logs a body. The named kinds sit in
+        // the same arm as the wildcard, so a new kind stays visible to the omitted
+        // patterns lint and no second arm repeats the body.
+        MessageKind::Presence {
+            subtype: PresenceSubtype::Alive,
+        }
+        | MessageKind::PeerInfo
+        | MessageKind::Digest
+        | MessageKind::StateDigest
+        | MessageKind::MetaDigest
+        | MessageKind::Ping
+        | MessageKind::Pong { .. }
+        | MessageKind::LinkState
+        | _ => plumbing(),
     }
 }
 
