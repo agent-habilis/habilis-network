@@ -87,7 +87,7 @@ impl Fnv1a64 {
     fn write(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             self.0 ^= u64::from(byte);
-            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01B3);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
 
