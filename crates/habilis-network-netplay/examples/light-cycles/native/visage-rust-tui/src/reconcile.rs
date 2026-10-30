@@ -20,6 +20,7 @@
 //! optimal, fine for a grid + HUD whose structure is mostly static.
 
 use std::collections::HashSet;
+use std::hash::BuildHasher;
 use std::rc::Rc;
 
 use crate::component::{Component, Instance};
@@ -261,11 +262,11 @@ fn patch_children<H: Host>(
 /// tick. `dirty` membership is what keeps the *work* (calling `render()`)
 /// proportional to what actually changed, which is the property that
 /// matters.
-pub fn patch_dirty<H: Host>(
+pub fn patch_dirty<H: Host, S: BuildHasher>(
     host: &mut H,
     parent: H::Node,
     mounted: Mounted<H::Node>,
-    dirty: &HashSet<SubscriberId>,
+    dirty: &HashSet<SubscriberId, S>,
 ) -> Mounted<H::Node> {
     match mounted {
         Mounted::Component(mut comp) => {

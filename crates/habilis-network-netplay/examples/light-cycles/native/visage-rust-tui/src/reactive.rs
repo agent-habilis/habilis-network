@@ -14,6 +14,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
+use std::hash::BuildHasher;
 use std::rc::Rc;
 
 use std::{fmt, mem};
@@ -77,15 +78,19 @@ pub fn next_subscriber_id() -> SubscriberId {
 /// resolving a `computed` inside a render) as long as each open is paired
 /// with its own close.
 #[must_use]
-pub fn open_tracking(deps: HashSet<SignalId>) -> Option<HashSet<SignalId>> {
-    REGISTRY.with(|r| r.current_deps.replace(Some(deps)))
+pub fn open_tracking<S: BuildHasher>(deps: HashSet<SignalId, S>) -> Option<HashSet<SignalId>> {
+    REGISTRY.with(|r| r.current_deps.replace(Some(deps.into_iter().collect())))
 }
 
 /// Closes the tracking window, restoring whatever was open before (`None`
 /// if this was the outermost window), and returns what was recorded.
 #[must_use]
-pub fn close_tracking(prev: Option<HashSet<SignalId>>) -> HashSet<SignalId> {
-    REGISTRY.with(|r| r.current_deps.replace(prev).unwrap_or_default())
+pub fn close_tracking<S: BuildHasher>(prev: Option<HashSet<SignalId, S>>) -> HashSet<SignalId> {
+    REGISTRY.with(|r| {
+        r.current_deps
+            .replace(prev.map(|deps| deps.into_iter().collect()))
+            .unwrap_or_default()
+    })
 }
 
 /// Runs `f` with tracking suspended — reads inside it are not recorded as
@@ -249,7 +254,11 @@ pub fn take_queue() -> Vec<SubscriberId> {
 /// Mirrors `resubscribe` — called after each render with the just-recorded
 /// dependency set, so a signal a component stopped reading stops notifying
 /// it.
-pub fn resubscribe(sub: SubscriberId, prev: &HashSet<SignalId>, next: &HashSet<SignalId>) {
+pub fn resubscribe<S: BuildHasher>(
+    sub: SubscriberId,
+    prev: &HashSet<SignalId, S>,
+    next: &HashSet<SignalId, S>,
+) {
     REGISTRY.with(|r| {
         let mut subs = r.subs.borrow_mut();
         for dep in prev {
@@ -270,7 +279,7 @@ pub fn resubscribe(sub: SubscriberId, prev: &HashSet<SignalId>, next: &HashSet<S
 }
 
 /// Drops `sub` from every signal in `deps` — the unmount path.
-pub fn unsubscribe_all(sub: SubscriberId, deps: &HashSet<SignalId>) {
+pub fn unsubscribe_all<S: BuildHasher>(sub: SubscriberId, deps: &HashSet<SignalId, S>) {
     REGISTRY.with(|r| {
         let mut subs = r.subs.borrow_mut();
         for dep in deps {

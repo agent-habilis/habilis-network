@@ -32,12 +32,6 @@
 //! - [`tui`] — the terminal `Host`: node arena, layout, paint, diff.
 //! - [`runtime`] — wires the above together for a single-root app.
 
-// This crate's `HashSet<SignalId>`/`HashSet<SubscriberId>` never take a
-// custom hasher anywhere, so generalizing every dependency-set-taking
-// function over `BuildHasher` (clippy's default suggestion) would be
-// genericity with no real caller.
-#![allow(clippy::implicit_hasher)]
-
 pub mod component;
 pub mod host;
 pub mod reactive;
