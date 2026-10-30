@@ -1175,8 +1175,8 @@ fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
 /// instead of reacting to replayed intermediate states). A received event is
 /// never our own (`is_self = false`). Both channels share this path verbatim.
 #[expect(
-    clippy::match_same_arms,
-    reason = "the named variants are listed on purpose, so a new variant stays visible"
+    clippy::wildcard_enum_match_arm,
+    reason = "Ingested is a foreign non_exhaustive enum: the compiler needs its wildcard arm"
 )]
 fn ingest_channel_event(event: ChannelEvent<'_>, doc: &mut doc::MeshDoc, context: &HandlerCtx<'_>) {
     use crate::doc::Ingested;
@@ -1212,8 +1212,6 @@ fn ingest_channel_event(event: ChannelEvent<'_>, doc: &mut doc::MeshDoc, context
                 "dropping a {} change that forges another peer's agent card",
                 channel.label()
             );
-        }
-        Ingested::Applied { .. } | Ingested::Duplicate | Ingested::Buffered | Ingested::Ignored => {
         }
         _ => {}
     }
@@ -1390,10 +1388,6 @@ fn decrypt_directed<F: ops::Deref<Target = Message>>(
 }
 
 #[expect(
-    clippy::match_same_arms,
-    reason = "the named variants are listed on purpose, so a new variant stays visible"
-)]
-#[expect(
     clippy::wildcard_enum_match_arm,
     reason = "foreign non_exhaustive enum: the compiler needs a wildcard arm; the named variants are listed before it"
 )]
@@ -1401,17 +1395,6 @@ fn addressed_to_us(message: &Message, us: &Nickname) -> bool {
     match &message.kind {
         MessageKind::App { to: Some(to), .. } => to == us,
         // Broadcast app frames (chat) and infra kinds are delivered to everyone.
-        MessageKind::App { to: None, .. }
-        | MessageKind::Presence { .. }
-        | MessageKind::PeerInfo
-        | MessageKind::Digest
-        | MessageKind::StateDigest
-        | MessageKind::MetaDigest
-        | MessageKind::Ping
-        | MessageKind::Pong { .. }
-        | MessageKind::State
-        | MessageKind::Meta
-        | MessageKind::LinkState => true,
         _ => true,
     }
 }

@@ -157,11 +157,6 @@ where
             .await;
             return;
         }
-        Ok(Ok(LineRead::Eof) | Err(_)) => return,
-        #[expect(
-            clippy::match_same_arms,
-            reason = "LineRead is non_exhaustive, so rustc needs this wildcard after the arms that name every variant"
-        )]
         Ok(_) => return,
         Err(_idle) => {
             tracing::debug!("IPC: connection sent nothing within the read deadline; closing");

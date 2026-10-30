@@ -50,10 +50,6 @@ pub(crate) fn compute(
     let returned = !after_goodbye && state.quiet.contains(author.as_str());
     let known = state.peers.contains(author.as_str());
     #[expect(
-        clippy::match_same_arms,
-        reason = "the named variants are listed on purpose, so a new variant stays visible"
-    )]
-    #[expect(
         clippy::wildcard_enum_match_arm,
         reason = "foreign non_exhaustive enum: the compiler needs a wildcard arm; the named variants are listed before it"
     )]
@@ -67,17 +63,6 @@ pub(crate) fn compute(
         }
         | MessageKind::State
         | MessageKind::Meta => false,
-        MessageKind::App { .. }
-        | MessageKind::Presence {
-            subtype: PresenceSubtype::Joined | PresenceSubtype::Alive,
-        }
-        | MessageKind::PeerInfo
-        | MessageKind::Digest
-        | MessageKind::StateDigest
-        | MessageKind::MetaDigest
-        | MessageKind::Ping
-        | MessageKind::Pong { .. }
-        | MessageKind::LinkState => !known,
         _ => !known,
     };
     MembershipUpdate {

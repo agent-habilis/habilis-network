@@ -110,18 +110,6 @@ fn answer_of_connect_error(error: &endpoint::ConnectError) -> ProbeAnswer {
             ..
         } => ProbeAnswer::Foreign,
         ConnectError::Connecting {
-            source:
-                ConnectingError::HandshakeFailure {
-                    source: AuthenticationError::NoAlpn { .. },
-                    ..
-                },
-            ..
-        } => ProbeAnswer::Refused,
-        #[expect(
-            clippy::match_same_arms,
-            reason = "AuthenticationError is non_exhaustive, so this arm keeps the wildcard for the other variants"
-        )]
-        ConnectError::Connecting {
             source: ConnectingError::HandshakeFailure { .. },
             ..
         } => ProbeAnswer::Refused,

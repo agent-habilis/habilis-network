@@ -228,8 +228,8 @@ impl Cell {
 
     /// Whether the transport list lets `rung` carry payload.
     #[expect(
-        clippy::match_same_arms,
-        reason = "the named variants are listed on purpose, so a new variant stays visible"
+        clippy::wildcard_enum_match_arm,
+        reason = "Rung is a foreign non_exhaustive enum: the compiler needs its wildcard arm"
     )]
     fn allows(self, rung: Rung) -> bool {
         let transport = match rung {
@@ -238,7 +238,6 @@ impl Cell {
             Rung::Multihop => Some(Transport::Multihop),
             Rung::Gossip => Some(Transport::Gossip),
             Rung::Relay => Some(Transport::Relay),
-            Rung::Other => None,
             _ => None,
         };
         transport.is_some_and(|transport| self.has(transport))
@@ -248,8 +247,8 @@ impl Cell {
     /// list allows and that the cell leaves available. `None`: no rung may carry
     /// payload, so the pair stays unlinked for it.
     #[expect(
-        clippy::match_same_arms,
-        reason = "the named variants are listed on purpose, so a new variant stays visible"
+        clippy::wildcard_enum_match_arm,
+        reason = "Rung is a foreign non_exhaustive enum: the compiler needs its wildcard arm"
     )]
     fn expected(self) -> Option<Rung> {
         habilis_network_iroh_webrtc_transport::expected_rung(
@@ -259,7 +258,6 @@ impl Cell {
                 Rung::WebRtc => self.blocked < Blocked::IpWebRtc,
                 Rung::Multihop => self.blocked < Blocked::IpWebRtcMultihop,
                 Rung::Gossip => self.blocked < Blocked::IpWebRtcMultihopGossip,
-                Rung::Other => false,
                 Rung::Relay => true,
                 _ => false,
             },
