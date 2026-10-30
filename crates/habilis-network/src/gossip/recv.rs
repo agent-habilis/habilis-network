@@ -1080,7 +1080,7 @@ pub(super) fn push_to_log(state: &mut EventLoopState, message: Verified) {
 
 /// Retain a message **this node just broadcast** in its own anti-entropy log.
 ///
-/// gossip never echoes a node's own publications back to it, so a message we
+/// Gossip never echoes a node's own publications back to it, so a message we
 /// author reaches every peer's [`ingest`] but never our own. Without this our
 /// `message_log` — and so the digest we advertise — omits everything we wrote,
 /// with two consequences:

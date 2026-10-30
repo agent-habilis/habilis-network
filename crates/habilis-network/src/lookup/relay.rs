@@ -42,7 +42,7 @@ use n0_future::time as n0future_time;
 /// dial: a creator-independent bootstrap that needs no address lookup to
 /// reach the rendezvous.
 ///
-/// rung 0 is our own operated relay; rungs 1..4 are iroh `defaults::prod`
+/// Rung 0 is our own operated relay; rungs 1..4 are iroh `defaults::prod`
 /// (NA-east, NA-west, EU, AP) as the resilient fallback. Hardcoded,
 /// **not** `defaults::prod::default_relay_map()`, so members on different
 /// iroh versions still agree on the *same* ladder. Relay infra is

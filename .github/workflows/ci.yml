@@ -90,6 +90,12 @@ jobs:
           bun test scripts/naming/naming.test.ts
           bun scripts/naming/naming.ts
 
+      # A doc paragraph starts each sentence with a capital, a digit or a code span (D5).
+      - name: Doc sentence case
+        run: |
+          bun test scripts/doc-sentence/doc-sentence.test.ts
+          bun scripts/doc-sentence/doc-sentence.ts
+
       # `blob` is off by default (only agent-gossip enables it), so the line
       # above never lints `src/blob/` — ~1,300 lines including its own ALPN
       # server. `--all-features` below only *checks* it.

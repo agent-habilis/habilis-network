@@ -12,7 +12,7 @@
 //!    is reachable if a later input contradicts a guess made now.
 //! 2. [`Sync::synchronize_inputs`] — gather one input per player, real where
 //!    known and predicted where not.
-//! 3. the game advances one frame.
+//! 3. The game advances one frame.
 //! 4. [`Sync::check_simulation`] — if a real input has since contradicted a
 //!    prediction, load the state from the frame it went wrong at and
 //!    re-simulate forward to where we were.

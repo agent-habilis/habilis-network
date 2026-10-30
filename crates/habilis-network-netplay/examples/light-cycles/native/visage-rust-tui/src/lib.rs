@@ -1,4 +1,4 @@
-//! A //! signal reactive core and `visage-tui`'s terminal diffing —
+//! A signal reactive core and `visage-tui`'s terminal diffing —
 //! see the plan's `visage-rust-tui` section for scope and provenance.
 //!
 //! A component is a type that implements [`component::Component`], stepped by
