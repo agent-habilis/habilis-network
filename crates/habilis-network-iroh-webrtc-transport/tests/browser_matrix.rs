@@ -45,7 +45,14 @@ mod browser_harness;
 use std::time::Duration;
 
 use browser_harness::{Direction, Pair};
+use std::cell;
+use std::rc::Rc;
+
+use futures::future;
+use n0_future::time;
+use wasm_bindgen::JsValue;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
+use web_sys::console;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
@@ -273,13 +280,13 @@ impl Row {
 /// never gave the queue back would deadlock the transfer it is meant to
 /// pressure, and prove nothing.
 struct Pressure {
-    stop: std::rc::Rc<std::cell::Cell<bool>>,
+    stop: Rc<cell::Cell<bool>>,
 }
 
 impl Pressure {
     fn apply() -> Self {
-        let stop = std::rc::Rc::new(std::cell::Cell::new(false));
-        let flag = std::rc::Rc::clone(&stop);
+        let stop = Rc::new(cell::Cell::new(false));
+        let flag = Rc::clone(&stop);
         wasm_bindgen_futures::spawn_local(async move {
             while !flag.get() {
                 let until = js_sys::Date::now() + 12.0;
@@ -287,7 +294,7 @@ impl Pressure {
                     // Spin. `Date::now` is the only clock a browser hands us
                     // that does not require a feature we have not enabled.
                 }
-                n0_future::time::sleep(Duration::from_millis(1)).await;
+                time::sleep(Duration::from_millis(1)).await;
             }
         });
         Self { stop }
@@ -339,7 +346,7 @@ async fn run_cell(cell: Cell, pressure: u64) -> (Verdict, Option<f64>, (u64, u64
 
     let mut failures = Vec::new();
     for round in 0..cell.rounds {
-        let outcomes: Vec<_> = futures::future::join_all(
+        let outcomes: Vec<_> = future::join_all(
             pairs
                 .iter()
                 .map(|pair| pair.exchange(cell.direction, cell.size, cell.deadline(pressure))),
@@ -390,7 +397,7 @@ async fn run_cell(cell: Cell, pressure: u64) -> (Verdict, Option<f64>, (u64, u64
 }
 
 fn log(line: &str) {
-    web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(line));
+    console::log_1(&JsValue::from_str(line));
 }
 
 /// Publish the table to the DOM so a CDP driver can wait on it and read it.

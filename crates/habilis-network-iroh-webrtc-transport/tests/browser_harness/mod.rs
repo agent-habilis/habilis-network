@@ -54,14 +54,10 @@
 //! candidates, no NAT — so a pass does not retire a report from two separate
 //! browsers on a real network. That gap is why `browser_matrix.rs` exists.
 
-#![allow(
-    dead_code,
-    reason = "each test target compiles this whole module and uses a subset of it — the regression suite never asks for an upload, the matrix never calls `Pair::request`. Splitting it along the seam of who happens to call what would put the negotiation in one file and the exchange it negotiates for in another."
-)]
-
+use std::sync::Arc;
 use std::time::Duration;
 
-use wasm_bindgen::JsCast;
+use n0_future::{future, time};
 
 use habilis_network_iroh_webrtc_transport::iroh::protocol::Router;
 use habilis_network_iroh_webrtc_transport::iroh::{
@@ -71,29 +67,16 @@ use habilis_network_iroh_webrtc_transport::{
     BrowserHubTransport, IceServers, WebRtcHandle, browser_answer, browser_offer, custom_addr,
 };
 
-#[allow(
-    unused_imports,
-    reason = "each test target takes a different subset of the shared protocol"
-)]
 pub(crate) use habilis_network_iroh_webrtc_transport::bench::{
-    BENCH_ALPN, BULK_BYTES, Bench, Direction, browser_endpoint, exchange, on_webrtc,
+    BENCH_ALPN, Bench, Direction, browser_endpoint, exchange, on_webrtc,
 };
-
-/// How long a transfer may take before we call it stalled. Generous for one
-/// `MiB` over loopback ICE (the drills measured ~2 ms RTT); a stall is
-/// indefinite, so anything in between is not a case we need to distinguish.
-///
-/// The matrix raises this per cell — an 8 `MiB` transfer under a 20× CPU
-/// throttle is slow, not stalled, and a deadline that cannot tell them apart
-/// would report the throttle as the bug.
-pub(crate) const TRANSFER_DEADLINE: Duration = Duration::from_secs(20);
 
 /// A negotiated browser↔browser pair, both ends live in this tab.
 pub(crate) struct Pair {
     client: Endpoint,
     server_addr: EndpointAddr,
     // both ends of the harness share the hub with the test
-    pub(crate) client_hub: std::sync::Arc<BrowserHubTransport>,
+    pub(crate) client_hub: Arc<BrowserHubTransport>,
     pub(crate) server_id: EndpointId,
     router: Router,
 }
@@ -134,7 +117,7 @@ impl Pair {
         let server_transport = server_hub.transport();
         let offer = pending_offer.complete(client_transport.as_ref(), &answer_env);
         let answer = pending_answer.complete(server_transport.as_ref(), id_client);
-        let (client_session, server_session) = n0_future::future::zip(offer, answer).await;
+        let (client_session, server_session) = future::zip(offer, answer).await;
         client_session.map_err(|error| js_error(&error))?;
         server_session.map_err(|error| js_error(&error))?;
 
@@ -151,12 +134,6 @@ impl Pair {
             server_id: id_server,
             router,
         })
-    }
-
-    /// A download of `wanted` bytes — the regression suite's exchange.
-    pub(crate) async fn request(&self, wanted: usize) -> anyhow::Result<()> {
-        self.exchange(Direction::Download, wanted, TRANSFER_DEADLINE)
-            .await
     }
 
     /// One exchange in `direction`, sized `bulk`, bounded by `deadline`.
@@ -190,7 +167,7 @@ impl Pair {
         // too: an upload that wedges in `write_all` is exactly the pump
         // starvation this is hunting.
         let run = exchange(&connection, direction, bulk);
-        let Ok(body) = n0_future::time::timeout(deadline, run).await else {
+        let Ok(body) = time::timeout(deadline, run).await else {
             let counters = self.client_hub.session_counters(&self.server_id);
             let (out_bytes, in_bytes) = self.channel_bytes().await;
             anyhow::bail!(
@@ -243,7 +220,7 @@ impl Pair {
 
         let mut previous = self.channel_bytes().await;
         for _ in 0..SETTLE_ATTEMPTS {
-            n0_future::time::sleep(SETTLE_GAP).await;
+            time::sleep(SETTLE_GAP).await;
             let current = self.channel_bytes().await;
             // Stability is judged on *received* alone. QUIC keeps acknowledging
             // after the last payload byte lands, so the sent counter can still
@@ -259,50 +236,6 @@ impl Pair {
             previous = current;
         }
         (previous.1 > 0.0).then_some(previous)
-    }
-
-    /// Every `transport`, `candidate-pair`, `data-channel` and
-    /// `peer-connection` row `getStats` reports, verbatim.
-    ///
-    /// Only ever printed on a failure: when the byte counters disagree with
-    /// what demonstrably crossed the connection, the question is which row the
-    /// reader picked, and that cannot be answered from the two numbers it
-    /// returned.
-    pub(crate) async fn dump_stats(&self) -> String {
-        let Some(peer_connection) = self.client_hub.peer_connection(&self.server_id) else {
-            return "<no live session>".to_owned();
-        };
-        let Ok(report) = wasm_bindgen_futures::JsFuture::from(peer_connection.get_stats()).await
-        else {
-            return "<getStats failed>".to_owned();
-        };
-        let mut rows = Vec::new();
-        let Some(iter) = js_sys::try_iter(&report).ok().flatten() else {
-            return "<report not iterable>".to_owned();
-        };
-        for entry in iter.flatten() {
-            let Ok(pair) = entry.dyn_into::<js_sys::Array>() else {
-                continue;
-            };
-            let Ok(object) = pair.get(1).dyn_into::<js_sys::Object>() else {
-                continue;
-            };
-            let field =
-                js_sys::Reflect::get(&object, &wasm_bindgen::JsValue::from_str("type")).ok();
-            let kind = field
-                .and_then(|value| value.as_string())
-                .unwrap_or_default();
-            if matches!(
-                kind.as_str(),
-                "transport" | "candidate-pair" | "data-channel" | "peer-connection"
-            ) {
-                rows.push(
-                    js_sys::JSON::stringify(&object)
-                        .map_or_else(|_| "<unstringifiable>".to_owned(), String::from),
-                );
-            }
-        }
-        rows.join("\n")
     }
 
     pub(crate) async fn shutdown(self) {
