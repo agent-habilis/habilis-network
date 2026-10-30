@@ -123,7 +123,6 @@ mod tests {
         assert_eq!(
             underlay.get(),
             id,
-            id,
             "an underlay id deserializes from those bytes"
         );
     }
