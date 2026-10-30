@@ -76,10 +76,6 @@ use crate::{beacon, gossip, protocol, transport};
 /// let _ = state;
 /// # }
 /// ```
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent lifecycle edges (gossip_open/rendezvous_linked/announced/meshed/degraded) plus the one-shot resident_memory_warned latch; each tracks a distinct transition, not a config bundle worth a sub-struct"
-)]
 #[derive(Debug)]
 pub struct EventLoopState {
     /// Transport layer: the **live** gossip neighbor links, written only
@@ -310,35 +306,8 @@ pub struct EventLoopState {
     /// How many links to other members make this node release the rendezvous.
     /// A field, not a constant, so a test can set it.
     pub(crate) rendezvous_release_links: usize,
-    /// Whether the held rendezvous `WebRTC` session has already survived one
-    /// heal tick without producing a link — the arming half of the stale
-    /// detach in `negotiate_rendezvous_session`.
-    pub(crate) rendezvous_session_stale: bool,
-    /// Whether an IP-capable node's rendezvous JSEP offer is armed. IP
-    /// capability normally means the punch inside the bootstrap connection
-    /// reaches the rendezvous — but it says nothing about the *beacon*: a
-    /// browser-held rendezvous has no UDP to punch to. The first linkless
-    /// heal tick sets this instead of offering; the second offers. Cleared
-    /// on the rendezvous `NeighborUp`, so a healthy mesh never offers.
-    pub(crate) rendezvous_offer_fallback: bool,
-    /// Whether this mesh's rendezvous answers JSEP. Only a public beacon does
-    /// (`beacon::build_rendezvous_endpoint`); a private ladder rendezvous has
-    /// no `WebRTC` handle, so an offer to it can never attach, and the offer
-    /// fallback must never arm there.
-    pub(crate) rendezvous_answers_jsep: bool,
-    /// Whether the previous rival probe read the public rendezvous as free.
-    /// A claim needs two: a single free verdict may have landed inside a
-    /// live beacon's rival-re-check release window, and claiming on it is
-    /// what created rival copies that shed each other indefinitely. Both
-    /// must fall in one arbitration, so every reopen or settle of the
-    /// rendezvous identity clears it (`forget_rendezvous_verdict`).
-    pub(crate) rendezvous_probe_read_free: bool,
     /// The wait between two rival probes started on the heal tick; see `ProbeBackoff`.
     pub(crate) probe_backoff: ProbeBackoff,
-    /// Whether grafting the rendezvous must wait for an attached `WebRTC`
-    /// session — true for a webrtc-shaped node on a lookup-only mesh; see
-    /// `transport::webrtc::rendezvous::rendezvous_graftable`.
-    pub(crate) rendezvous_graft_needs_session: bool,
     /// Whether this node runs IP transports (`TransportOpts::ip`, and never
     /// on wasm). The local half of every `WebRTC` lane decision — read from
     /// here, not from the endpoint address, which is empty whenever the relay
@@ -634,19 +603,14 @@ impl EventLoopState {
             last_sent_at: now,
             joined_at: UnixSecs::now(),
             standing: BTreeSet::from([Standing::GossipOpen]),
-            rendezvous_flags: BTreeSet::new(),
+            rendezvous_flags: BTreeSet::from([RendezvousFlag::AnswersJsep]),
             rendezvous_return_due: None,
             rendezvous_comeback_until: None,
             rendezvous_dwell_until: None,
             beacon_notes: BTreeSet::new(),
             rival_holders: HashMap::new(),
             rendezvous_release_links: tuning::RENDEZVOUS_RELEASE_LINKS,
-            rendezvous_session_stale: false,
-            rendezvous_offer_fallback: false,
-            rendezvous_answers_jsep: true,
-            rendezvous_probe_read_free: false,
             probe_backoff: ProbeBackoff::default(),
-            rendezvous_graft_needs_session: false,
             local_udp_transport: UdpTransport::Present,
             unicast_pool: transport::UnicastPool::disconnected(),
             #[cfg(feature = "multihop")]
@@ -1306,7 +1270,7 @@ impl EventLoopState {
     /// rendezvous keeps its id, and the old holder's "at my cap" is not the new
     /// holder's.
     pub(crate) fn forget_rendezvous_verdict(&mut self) {
-        self.rendezvous_probe_read_free = false;
+        self.rendezvous_flags.remove(&RendezvousFlag::ProbeReadFree);
         self.probe_backoff.reset();
         if let Some(rendezvous) = self.rendezvous_id {
             self.webrtc_admission.forget_refusal(rendezvous);

@@ -34,8 +34,12 @@ use iroh::address_lookup;
 /// timer graft there is the same doomed dial.
 pub(crate) fn rendezvous_graftable(state: &state::EventLoopState) -> bool {
     state.rendezvous_wanted()
-        && !state.rendezvous_graft_needs_session
-        && !state.rendezvous_offer_fallback
+        && !state
+            .rendezvous_flags
+            .contains(&RendezvousFlag::GraftNeedsSession)
+        && !state
+            .rendezvous_flags
+            .contains(&RendezvousFlag::OfferFallback)
 }
 
 /// Offer a `WebRTC` session to the **rendezvous** itself.
@@ -81,7 +85,9 @@ pub(crate) fn negotiate_rendezvous_session(
         return;
     };
     if !lane_needs::local_needs_webrtc_lane(state.local_udp_transport)
-        && !state.rendezvous_offer_fallback
+        && !state
+            .rendezvous_flags
+            .contains(&RendezvousFlag::OfferFallback)
     {
         // An IP-capable peer normally reaches the rendezvous by punching
         // inside the bootstrap connection — the data channel would be a
@@ -93,8 +99,11 @@ pub(crate) fn negotiate_rendezvous_session(
         // Never on a mesh whose rendezvous cannot answer: a private beacon is
         // native by construction, and the fallback would hold the grafts with
         // nothing to release it.
-        if state.rendezvous_answers_jsep {
-            state.rendezvous_offer_fallback = true;
+        if state
+            .rendezvous_flags
+            .contains(&RendezvousFlag::AnswersJsep)
+        {
+            state.rendezvous_flags.insert(RendezvousFlag::OfferFallback);
         }
         return;
     }
@@ -113,15 +122,18 @@ pub(crate) fn negotiate_rendezvous_session(
     // session gets one full tick to produce the link; only one that is
     // still linkless on the next tick is torn down and re-negotiated.
     if handle.has_session(&rendezvous) {
-        if !state.rendezvous_session_stale {
-            state.rendezvous_session_stale = true;
+        if !state
+            .rendezvous_flags
+            .contains(&RendezvousFlag::SessionStale)
+        {
+            state.rendezvous_flags.insert(RendezvousFlag::SessionStale);
             return;
         }
         if handle.detach(&rendezvous) {
             tracing::debug!(target: LOG_TARGET, %rendezvous, "detached a stale rendezvous session before re-offering");
         }
     }
-    state.rendezvous_session_stale = false;
+    state.rendezvous_flags.remove(&RendezvousFlag::SessionStale);
     offer_to_rendezvous(state, context, handle, Offer::Rendezvous);
 }
 
@@ -201,5 +213,7 @@ pub(crate) fn offer_rendezvous_off_tick(
 
 pub(crate) fn offers_off_tick(state: &state::EventLoopState) -> bool {
     lane_needs::local_needs_webrtc_lane(state.local_udp_transport)
-        || state.rendezvous_offer_fallback
+        || state
+            .rendezvous_flags
+            .contains(&RendezvousFlag::OfferFallback)
 }

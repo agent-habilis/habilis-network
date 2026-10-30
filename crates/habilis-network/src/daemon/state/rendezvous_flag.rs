@@ -19,4 +19,31 @@ pub(crate) enum RendezvousFlag {
     /// the mesh would split into islands (the 18-node test shows it). So this node never releases
     /// the link.
     HostsRendezvous,
+    /// Whether the held rendezvous `WebRTC` session has already survived one
+    /// heal tick without producing a link — the arming half of the stale
+    /// detach in `negotiate_rendezvous_session`.
+    SessionStale,
+    /// Whether an IP-capable node's rendezvous JSEP offer is armed. IP
+    /// capability normally means the punch inside the bootstrap connection
+    /// reaches the rendezvous — but it says nothing about the *beacon*: a
+    /// browser-held rendezvous has no UDP to punch to. The first linkless
+    /// heal tick sets this instead of offering; the second offers. Cleared
+    /// on the rendezvous `NeighborUp`, so a healthy mesh never offers.
+    OfferFallback,
+    /// Whether this mesh's rendezvous answers JSEP. Only a public beacon does
+    /// (`beacon::build_rendezvous_endpoint`); a private ladder rendezvous has
+    /// no `WebRTC` handle, so an offer to it can never attach, and the offer
+    /// fallback must never arm there.
+    AnswersJsep,
+    /// Whether the previous rival probe read the public rendezvous as free.
+    /// A claim needs two: a single free verdict may have landed inside a
+    /// live beacon's rival-re-check release window, and claiming on it is
+    /// what created rival copies that shed each other indefinitely. Both
+    /// must fall in one arbitration, so every reopen or settle of the
+    /// rendezvous identity clears it (`forget_rendezvous_verdict`).
+    ProbeReadFree,
+    /// Whether grafting the rendezvous must wait for an attached `WebRTC`
+    /// session — true for a webrtc-shaped node on a lookup-only mesh; see
+    /// `transport::webrtc::rendezvous::rendezvous_graftable`.
+    GraftNeedsSession,
 }

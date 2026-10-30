@@ -140,8 +140,8 @@ pub(crate) async fn handle_gossip_event(
                 // lasts its dwell time), and the next `NeighborDown` is a loss
                 // again until we release it anew.
                 state.note_rendezvous_link_up(Instant::now());
-                state.rendezvous_session_stale = false;
-                state.rendezvous_offer_fallback = false;
+                state.rendezvous_flags.remove(&RendezvousFlag::SessionStale);
+                state.rendezvous_flags.remove(&RendezvousFlag::OfferFallback);
                 // This link settles the arbitration: someone holds the port
                 // a pending free verdict read as free.
                 state.forget_rendezvous_verdict();
@@ -3363,7 +3363,7 @@ mod first_contact_tests {
             state.webrtc = Some(lookup::build_webrtc_handle(node.endpoint.id()));
             state.relay_transport = PayloadPath::DirectOnly;
             state.local_udp_transport = UdpTransport::Present;
-            state.rendezvous_answers_jsep = false;
+            state.rendezvous_flags.remove(&RendezvousFlag::AnswersJsep);
 
             webrtc::rendezvous::negotiate_rendezvous_session(&mut state, &context);
 

@@ -2310,11 +2310,11 @@ mod tests {
     fn only_a_rendezvous_change_drops_a_free_verdict() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.rendezvous_probe_read_free = true;
+        state.rendezvous_flags.insert(RendezvousFlag::ProbeReadFree);
 
         state.arm_reclaim(Instant::now());
         assert!(
-            state.rendezvous_probe_read_free,
+            state.rendezvous_flags.contains(&RendezvousFlag::ProbeReadFree),
             "the free-read verdict holds before the rendezvous changes"
         );
         assert!(
@@ -2324,7 +2324,7 @@ mod tests {
 
         state.forget_rendezvous_verdict();
         assert!(
-            !state.rendezvous_probe_read_free,
+            !state.rendezvous_flags.contains(&RendezvousFlag::ProbeReadFree),
             "the rendezvous change drops the free-read verdict"
         );
     }

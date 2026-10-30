@@ -71,6 +71,7 @@ use backend_web::{build_answer, build_offer};
 // *share's* signal ALPN, not this one.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use crate::daemon::state::RendezvousFlag;
     use std::time::Duration;
     #[cfg(feature = "iroh-test-utils")]
     use tokio::time::Instant as tokio_Instant;
@@ -1623,7 +1624,7 @@ mod tests {
             !rendezvous::offers_off_tick(&state),
             "an IP-capable node before its fallback"
         );
-        state.rendezvous_offer_fallback = true;
+        state.rendezvous_flags.insert(RendezvousFlag::OfferFallback);
         assert!(
             rendezvous::offers_off_tick(&state),
             "an IP-capable node after its fallback"
@@ -2963,7 +2964,7 @@ mod tests {
             rendezvous::rendezvous_graftable(&state),
             "an IP-capable node grafts on its timer until it falls back"
         );
-        state.rendezvous_offer_fallback = true;
+        state.rendezvous_flags.insert(RendezvousFlag::OfferFallback);
         assert!(
             !rendezvous::rendezvous_graftable(&state),
             "the rendezvous is not graftable while the fallback holds"

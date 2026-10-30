@@ -432,10 +432,18 @@ fn wire_transports(
     // Before the first write, so the initial advertisement carries a real count.
     state.live_count = live_count;
     state.relay_transport = transports.relay_transport;
-    state.rendezvous_graft_needs_session = webrtc::session_policy::node_graft_needs_session(
+    if webrtc::session_policy::node_graft_needs_session(
         transports.relay_transport.relay_allowed(),
         transports.local_udp_transport,
-    );
+    ) {
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::GraftNeedsSession);
+    } else {
+        state
+            .rendezvous_flags
+            .remove(&RendezvousFlag::GraftNeedsSession);
+    }
     state.local_udp_transport = transports.local_udp_transport;
     // Direct-path probes report here; the loop grafts on the verdict.
     let (direct_tx, direct_rx) = mpsc::unbounded_channel();
@@ -451,7 +459,11 @@ fn wire_transports(
     let (flush_failed_tx, flush_failed_rx) = mpsc::unbounded_channel();
     state.flush_failed = flush_failed_tx;
     state.rendezvous_id = Some(rendezvous_params.id);
-    state.rendezvous_answers_jsep = rendezvous_params.answers_jsep();
+    if rendezvous_params.answers_jsep() {
+        state.rendezvous_flags.insert(RendezvousFlag::AnswersJsep);
+    } else {
+        state.rendezvous_flags.remove(&RendezvousFlag::AnswersJsep);
+    }
     state.write_peer_count();
     (direct_rx, path_rx, flush_failed_rx)
 }
@@ -1198,10 +1210,10 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 // longer than most joins are willing to wait. Two frees in a
                 // row (the next reclaim tick re-probes) squares those odds
                 // away; a genuinely dead beacon costs one extra probe round.
-                if !found_rival && !state.rendezvous_probe_read_free {
-                    state.rendezvous_probe_read_free = true;
+                if !found_rival && !state.rendezvous_flags.contains(&RendezvousFlag::ProbeReadFree) {
+                    state.rendezvous_flags.insert(RendezvousFlag::ProbeReadFree);
                 } else {
-                    state.rendezvous_probe_read_free = false;
+                    state.rendezvous_flags.remove(&RendezvousFlag::ProbeReadFree);
                     let claimed = beacon::claim_after_probe(&rendezvous_params, &endpoint, &state.address_book, &mut rendezvous, found_rival, &mut state.rungs).await;
                     if claimed {
                         // Still from the brisk base: two joiners that start
