@@ -82,7 +82,7 @@ impl Inner {
     /// keeps its session.
     pub(crate) fn take_idle(&mut self, now: Instant, window: Duration) -> Vec<EndpointId> {
         self.sample();
-        let Some(hub) = self.hub.clone() else {
+        let Some(hub) = &self.hub else {
             return Vec::new();
         };
         let mut idle = Vec::new();
@@ -198,8 +198,8 @@ impl Inner {
         for peer in self.ceiling.quic_peers() {
             self.drop_quic_without_connection(peer);
         }
-        let hub = self.hub.clone();
-        if let Some(hub) = &hub {
+        let hub = &self.hub;
+        if let Some(hub) = hub {
             let live = hub.live_peers();
             for peer in self.ceiling.session_peers() {
                 if !live.contains(&peer) {
