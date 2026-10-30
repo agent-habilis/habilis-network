@@ -101,7 +101,7 @@ pub(crate) async fn handle_presence(
             // us forever (see `gossip::recv::retain_own_broadcast`).
             let joined = Message::new_joined(context.mesh, context.author).sign(context.identity);
             gossip::broadcast_msg(context.sender, &joined).await;
-            gossip::retain_own_broadcast(state, &joined);
+            gossip::retain_own_broadcast(state, joined);
             state.last_sent_at = Instant::now();
             // Suppress "has joined" when we already printed "came back"
             // from the quiet check, or when this `joined` predates

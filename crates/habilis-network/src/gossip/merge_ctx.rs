@@ -593,7 +593,7 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &Ha
 pub(super) async fn announce_arrival(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let joined = Message::new_joined(context.mesh, context.author).sign(context.identity);
     broadcast_msg(context.sender, &joined).await;
-    super::recv::retain_own_broadcast(state, &joined);
+    super::recv::retain_own_broadcast(state, joined);
     broadcast_peer_info(state, context).await;
 }
 

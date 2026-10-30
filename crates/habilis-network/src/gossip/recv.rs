@@ -1096,15 +1096,15 @@ pub(super) fn push_to_log(state: &mut EventLoopState, message: Verified) {
 ///
 /// The state/meta channel already retains its own writes for exactly this
 /// reason; see [`super::broadcast_state_merge`].
-pub(crate) fn retain_own_broadcast(state: &mut EventLoopState, message: &Verified) {
+pub(crate) fn retain_own_broadcast(state: &mut EventLoopState, message: Verified) {
     if !is_loggable(&message.kind) {
         return;
     }
     // Ours by construction, so it can never arrive again — but mark it seen so
     // a peer still running the old resend behaviour is deduped at the gate
     // rather than double-pushed here.
-    state.mark_seen(message);
-    push_to_log(state, message.clone());
+    state.mark_seen(&message);
+    push_to_log(state, message);
 }
 
 /// Keep an app broadcast that this node sent, when the app's class says it is loggable. The same
@@ -1931,7 +1931,7 @@ mod retain_own_broadcast_tests {
         let mut state = testing::fresh_state();
         let mine = joined(&state, "me");
         assert_eq!(state.message_log.len(), 0, "log starts empty");
-        super::retain_own_broadcast(&mut state, &mine);
+        super::retain_own_broadcast(&mut state, mine);
         assert_eq!(
             state.message_log.len(),
             1,
@@ -1949,7 +1949,7 @@ mod retain_own_broadcast_tests {
         let peer_info =
             Message::new_peer_info(&MeshId::from("💬test"), &Nickname::from("me"), body)
                 .sign(&state.identity);
-        super::retain_own_broadcast(&mut state, &peer_info);
+        super::retain_own_broadcast(&mut state, peer_info);
         assert_eq!(
             state.message_log.len(),
             0,
@@ -2020,10 +2020,10 @@ mod retain_own_broadcast_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut us = testing::fresh_state();
         let ours = joined(&us, "us");
-        super::retain_own_broadcast(&mut us, &ours);
+        super::retain_own_broadcast(&mut us, ours.clone());
         let mut them = testing::fresh_state();
         let theirs = joined(&them, "them");
-        super::retain_own_broadcast(&mut them, &theirs);
+        super::retain_own_broadcast(&mut them, theirs.clone());
         // Each side ingests the other's presence, as gossip delivers it.
         super::push_to_log(&mut us, theirs);
         super::push_to_log(&mut them, ours);
@@ -3420,7 +3420,7 @@ mod link_state_tests {
             let body = gossip::json_body(&handle.link_vector(Vec::new())).expect("serializes");
             let message = Message::new_link_state(&MeshId::from("test"), &nick("alice-aa"), body)
                 .sign(&protocol::Identity::generate());
-            super::retain_own_broadcast(&mut state, &message);
+            super::retain_own_broadcast(&mut state, message);
             assert_eq!(state.message_log.len(), 0, "nothing retains a link-state");
             handle.close().await;
         });
