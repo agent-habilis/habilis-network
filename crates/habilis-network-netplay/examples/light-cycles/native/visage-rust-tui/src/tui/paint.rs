@@ -312,13 +312,19 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
     }
 }
 
-// See `layout::arrange`'s doc comment on why `x`/`y`/`w`/`h` stay short.
-#[allow(clippy::many_single_char_names)]
-fn fill(buffer: &mut ScreenBuffer, clip: Clip, x: i32, y: i32, w: i32, h: i32, style: Style) {
-    let x0 = clip.x.max(x).max(0);
-    let x1 = clip.right.min(x + w).min(buffer.width);
-    let y0 = clip.y.max(y).max(0);
-    let y1 = clip.bottom.min(y + h).min(buffer.height);
+fn fill(
+    buffer: &mut ScreenBuffer,
+    clip: Clip,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+    style: Style,
+) {
+    let x0 = clip.x.max(left).max(0);
+    let x1 = clip.right.min(left + width).min(buffer.width);
+    let y0 = clip.y.max(top).max(0);
+    let y1 = clip.bottom.min(top + height).min(buffer.height);
     for row in y0..y1 {
         for col in x0..x1 {
             let i = index(buffer, row, col);

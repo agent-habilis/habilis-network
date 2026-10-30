@@ -161,18 +161,21 @@ fn measure_box(arena: &mut Arena, epoch: i64, id: NodeId, avail_w: i32, avail_h:
     };
 }
 
-// `x`/`y`/`w`/`h` are the conventional short names for a rectangle's
-// geometry, matching the ported upstream signature — spelling them out
-// (`width`, `height`, ...) at every call site would make the arithmetic
-// below harder to read, not easier.
-#[allow(clippy::many_single_char_names)]
-fn arrange(arena: &mut Arena, epoch: i64, id: NodeId, x: i32, y: i32, w: i32, h: i32) {
+fn arrange(
+    arena: &mut Arena,
+    epoch: i64,
+    id: NodeId,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+) {
     {
         let node = arena.get_mut(id);
-        node.lx = x;
-        node.ly = y;
-        node.lw = w;
-        node.lh = h;
+        node.lx = left;
+        node.ly = top;
+        node.lw = width;
+        node.lh = height;
     }
     let (tag, visible) = {
         let n = arena.get(id);
@@ -191,7 +194,7 @@ fn arrange(arena: &mut Arena, epoch: i64, id: NodeId, x: i32, y: i32, w: i32, h:
             )
         };
         if needs_wrap {
-            let lines = wrap_text(&text, usize::try_from(w.max(0)).unwrap_or(0), wrap);
+            let lines = wrap_text(&text, usize::try_from(width.max(0)).unwrap_or(0), wrap);
             arena.get_mut(id).lines = Some(lines);
         }
         return;
@@ -204,10 +207,10 @@ fn arrange(arena: &mut Arena, epoch: i64, id: NodeId, x: i32, y: i32, w: i32, h:
         arena,
         epoch,
         id,
-        x + frame + i32::from(pad.left),
-        y + frame + i32::from(pad.top),
-        (w - 2 * frame - i32::from(pad.left) - i32::from(pad.right)).max(0),
-        (h - 2 * frame - i32::from(pad.top) - i32::from(pad.bottom)).max(0),
+        left + frame + i32::from(pad.left),
+        top + frame + i32::from(pad.top),
+        (width - 2 * frame - i32::from(pad.left) - i32::from(pad.right)).max(0),
+        (height - 2 * frame - i32::from(pad.top) - i32::from(pad.bottom)).max(0),
     );
 }
 
