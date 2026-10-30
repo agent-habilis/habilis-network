@@ -228,7 +228,11 @@ mod tests {
     #[test]
     fn enc_body_needs_the_right_key() {
         let _guard = ::habilis_network_test_tracing::init();
-        let enc = encrypt_body(&change_body(&[9, 9], None).unwrap(), &key(1)).unwrap();
+        let enc = encrypt_body(
+            &change_body(&[9, 9], None).expect("a two-byte change is a valid body"),
+            &key(1),
+        )
+        .expect("the body encrypts under a fresh key");
         assert!(
             decrypt_body(enc.as_str(), Some(&key(2))).is_none(),
             "wrong key"

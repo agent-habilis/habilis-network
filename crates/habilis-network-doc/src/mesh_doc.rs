@@ -1714,7 +1714,10 @@ mod tests {
             "the keyed sink holds the change json"
         );
         assert!(
-            with_key.surface_body(&carrier).unwrap().contains("secret"),
+            with_key
+                .surface_body(&carrier)
+                .expect("the keyed sink holds the key that sealed the carrier")
+                .contains("secret"),
             "the keyed sink can surface the body"
         );
 
