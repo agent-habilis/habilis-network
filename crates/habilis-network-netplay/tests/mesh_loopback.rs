@@ -166,7 +166,7 @@ impl Player {
                 2,
                 // Scoped to this match, so a straggler from a previous one
                 // cannot be mistaken for live input.
-                u32::try_from(session_id.get() & 0xFFFF_FFFF).unwrap_or(1),
+                u32::try_from(session_id.get() & 0xffff_ffff).unwrap_or(1),
             )
             .expect("the handle came from our own player list"),
         );

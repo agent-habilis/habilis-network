@@ -602,7 +602,7 @@ fn session_id_for(players: &[AuthorKey], proposer: &AuthorKey, epoch: Epoch) -> 
     let mut eat = |bytes: &[u8]| {
         for byte in bytes {
             hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
     };
     // The hex text of each key, not its raw bytes: the id is a wire value.

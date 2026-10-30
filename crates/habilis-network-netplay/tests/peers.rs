@@ -45,10 +45,10 @@ struct Rng(u64);
 
 impl Rng {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut word = self.0;
-        word = (word ^ (word >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        word = (word ^ (word >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        word = (word ^ (word >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        word = (word ^ (word >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         word ^ (word >> 31)
     }
 
@@ -187,7 +187,7 @@ fn build(count: usize, impairment: Impairment) -> (Rc<cell::RefCell<Network>>, V
                     8,
                     0,
                     // A distinct nonce per peer, as a real session would.
-                    0xA000 + u32::try_from(handle).expect("handle fits"),
+                    0xa000 + u32::try_from(handle).expect("handle fits"),
                 )
                 .expect("handle is in range"),
                 state: State::default(),
