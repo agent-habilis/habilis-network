@@ -12,7 +12,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::{EndpointId, RelayUrl};
-use habilis_network::membership::{self, Inbound, Membership, Request};
+use habilis_network::membership::{
+    self, Blocking, Inbound, Inspect, Membership, Messaging, Request,
+};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -213,7 +215,7 @@ impl Member {
     async fn linked_to(&self, nick: &str) -> bool {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
         let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
@@ -231,7 +233,7 @@ impl Member {
     async fn roster_len(&self) -> usize {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
         let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
@@ -243,10 +245,12 @@ impl Member {
     async fn send(&self, text: &str) {
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::Send {
-                to: None,
-                body,
-                reply,
+            .request(|reply| {
+                Request::Messaging(Messaging::Send {
+                    to: None,
+                    body,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers")
@@ -261,9 +265,11 @@ impl Member {
     /// Take UDP away from this member alone, to the nodes bound on `ports`.
     async fn block_ip_to(&self, ports: Vec<u16>) {
         self.membership
-            .request(|reply| Request::BlockIpTo {
-                remote_ports: ports,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockIpTo {
+                    remote_ports: ports,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
@@ -271,7 +277,7 @@ impl Member {
 
     async fn block_udp(&self, blocked: bool) {
         self.membership
-            .request(|reply| Request::BlockUdp { blocked, reply })
+            .request(|reply| Request::Blocking(Blocking::BlockUdp { blocked, reply }))
             .await
             .expect("the loop answers");
     }
@@ -475,7 +481,7 @@ fn refs(members: &[Member]) -> Vec<&Member> {
     members.iter().collect()
 }
 
-/// The cut between two chosen nodes (`Request::BlockIpTo`): they lose UDP to
+/// The cut between two chosen nodes (`Blocking::BlockIpTo`): they lose UDP to
 /// each other and to no one else. Their link falls back to the relay, which
 /// carries no payload on this mesh, so it is closed after 15 seconds; the heal
 /// brings it back once the cut is lifted. The process-wide block of the test

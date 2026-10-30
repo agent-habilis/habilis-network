@@ -13,7 +13,9 @@
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{
+    self, Blocking, Inspect, InspectTest, Linking, Membership, MessagingTest, Request,
+};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -71,7 +73,7 @@ impl Member {
     async fn knows(&self, nick: &str) -> bool {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
         json.contains(&format!("\"{nick}\""))
@@ -79,20 +81,22 @@ impl Member {
 
     async fn block_ip_to(&self, ports: Vec<u16>) {
         self.membership
-            .request(|reply| Request::BlockIpTo {
-                remote_ports: ports,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockIpTo {
+                    remote_ports: ports,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
     }
 
-    /// A directed send that never takes the warm fast path: see [`Request::SendCold`].
+    /// A directed send that never takes the warm fast path: see [`MessagingTest::SendCold`].
     async fn send_cold(&self, to: &str, text: &str) -> Result<(), String> {
         let to = membership::parse_to(Some(to)).expect("a nickname");
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::SendCold { to, body, reply })
+            .request(|reply| Request::MessagingTest(MessagingTest::SendCold { to, body, reply }))
             .await
             .expect("the loop answers")
     }
@@ -101,9 +105,11 @@ impl Member {
     /// on. `None` while no path is selected.
     async fn selected_rung(&self, peer: &str) -> Option<&'static str> {
         self.membership
-            .request(|reply| Request::SelectedRung {
-                peer: peer.to_owned(),
-                reply,
+            .request(|reply| {
+                Request::InspectTest(InspectTest::SelectedRung {
+                    peer: peer.to_owned(),
+                    reply,
+                })
             })
             .await
             .expect("the loop answers")
@@ -112,9 +118,11 @@ impl Member {
     /// Whether a unicast connection to `peer` was pooled, and is forgotten now.
     async fn forget_unicast(&self, peer: &str) -> bool {
         self.membership
-            .request(|reply| Request::ForgetUnicast {
-                peer: peer.to_owned(),
-                reply,
+            .request(|reply| {
+                Request::Linking(Linking::ForgetUnicast {
+                    peer: peer.to_owned(),
+                    reply,
+                })
             })
             .await
             .expect("the loop answers")
@@ -123,7 +131,7 @@ impl Member {
 
     async fn message_log_len(&self) -> usize {
         self.membership
-            .request(|reply| Request::MessageLogLen { reply })
+            .request(|reply| Request::InspectTest(InspectTest::MessageLogLen { reply }))
             .await
             .expect("the loop answers")
     }

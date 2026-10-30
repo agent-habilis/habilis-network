@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{self, Inspect, Membership, Request};
 use habilis_network::protocol::Lookup;
 
 use habilis_network::net::test_relay;
@@ -41,7 +41,7 @@ async fn open(nick: &str, options: membership::JoinOptions) -> Membership {
 /// The nicknames of the live peers in the roster of a member.
 async fn roster(member: &Membership) -> Vec<String> {
     let json = member
-        .request(|reply| Request::Peers { reply })
+        .request(|reply| Request::Inspect(Inspect::Peers { reply }))
         .await
         .unwrap_or_default();
     let roster = serde_json::from_str::<serde_json::Value>(&json).ok();

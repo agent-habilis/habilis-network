@@ -43,7 +43,9 @@ use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Inbound, Membership, Request};
+use habilis_network::membership::{
+    self, Blocking, Inbound, Inspect, InspectTest, Membership, Messaging, Request,
+};
 use habilis_network::ops::{app_frame, send_app};
 use habilis_network::protocol::{
     AppFrameParams, AppTag, Lookup, LookupOpts, MessageBody, Nickname, Transport,
@@ -104,10 +106,12 @@ impl Member {
     async fn broadcast(&self, text: &str) -> Result<(), String> {
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::Send {
-                to: None,
-                body,
-                reply,
+            .request(|reply| {
+                Request::Messaging(Messaging::Send {
+                    to: None,
+                    body,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers")
@@ -129,9 +133,11 @@ impl Member {
 
     async fn block_ip_to(&self, ports: Vec<u16>) {
         self.membership
-            .request(|reply| Request::BlockIpTo {
-                remote_ports: ports,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockIpTo {
+                    remote_ports: ports,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
@@ -213,14 +219,14 @@ impl Peer for Member {
 
     async fn log_len(&self) -> usize {
         self.membership
-            .request(|reply| Request::MessageLogLen { reply })
+            .request(|reply| Request::InspectTest(InspectTest::MessageLogLen { reply }))
             .await
             .expect("the loop answers")
     }
 
     async fn peer_count(&self) -> usize {
         self.membership
-            .request(|reply| Request::PeerCount { reply })
+            .request(|reply| Request::Inspect(Inspect::PeerCount { reply }))
             .await
             .expect("the loop answers")
     }

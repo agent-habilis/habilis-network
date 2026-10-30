@@ -16,7 +16,9 @@
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Inbound, Membership, Request};
+use habilis_network::membership::{
+    self, Blocking, Inbound, Inspect, Membership, Messaging, Request,
+};
 use habilis_network::protocol::Lookup;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -68,7 +70,7 @@ impl Member {
     async fn roster_len(&self) -> usize {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
         let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
@@ -83,9 +85,11 @@ impl Member {
 
     async fn block_ip_to(&self, ports: Vec<u16>) {
         self.membership
-            .request(|reply| Request::BlockIpTo {
-                remote_ports: ports,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockIpTo {
+                    remote_ports: ports,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
@@ -94,10 +98,12 @@ impl Member {
     async fn broadcast(&self, text: &str) {
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::Send {
-                to: None,
-                body,
-                reply,
+            .request(|reply| {
+                Request::Messaging(Messaging::Send {
+                    to: None,
+                    body,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers")

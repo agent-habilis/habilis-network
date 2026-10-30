@@ -15,7 +15,8 @@
 
 use anyhow::{Context as _, Result, bail};
 use habilis_network::membership::{
-    Inbound, JoinOptions, Membership, Request, depart, join, json_sink, msg_body, parse_to,
+    Inbound, Inspect, JoinOptions, Membership, Messaging, Request, depart, join, json_sink,
+    msg_body, parse_to,
 };
 use tokio::sync::oneshot;
 
@@ -115,7 +116,10 @@ async fn handle_line(membership: &Membership, line: &str, robot: bool) -> Result
         return Ok(false);
     }
     if line == "/peers" {
-        let roster = request(membership, |reply| Request::Peers { reply }).await?;
+        let roster = request(membership, |reply| {
+            Request::Inspect(Inspect::Peers { reply })
+        })
+        .await?;
         println!("{roster}");
         return Ok(true);
     }
@@ -136,7 +140,10 @@ async fn handle_line(membership: &Membership, line: &str, robot: bool) -> Result
             return Ok(true);
         }
     };
-    let sent = request(membership, |reply| Request::Send { to, body, reply }).await?;
+    let sent = request(membership, |reply| {
+        Request::Messaging(Messaging::Send { to, body, reply })
+    })
+    .await?;
     if let Err(refusal) = sent {
         report_error(robot, &format!("send failed: {refusal}"));
     }

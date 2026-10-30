@@ -17,10 +17,25 @@ pub use join_options::blind_new_members;
 pub use join_options::{JoinOptions, Membership, depart, join, resolve_kind};
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub use membership_app::Rung;
+#[cfg(all(
+    feature = "iroh-test-utils",
+    not(target_arch = "wasm32"),
+    feature = "multihop"
+))]
+pub use membership_app::Ticks;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub use membership_app::UnknownPeer;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub use membership_app::{Beacons, Blocking, InspectTest, Linking, MessagingTest};
 pub use membership_app::{
-    DEPARTURE_GRACE, INBOUND_CAP, Inbound, MAX_MSG, MSG_TAG, MembershipApp, Request, msg_body,
-    msg_fits, parse_to,
+    DEPARTURE_GRACE, INBOUND_CAP, Inbound, Inspect, MAX_MSG, MSG_TAG, MembershipApp, Messaging,
+    Request, msg_body, msg_fits, parse_to,
 };
+#[cfg(all(
+    feature = "iroh-test-utils",
+    feature = "host",
+    not(target_arch = "wasm32")
+))]
+pub use membership_app::{InspectHost, LinkHold, Routing};
+
 pub use membership_event::{MembershipEvent, json_sink};

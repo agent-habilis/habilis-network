@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 
 use common::GOSSIP_INSTALLED;
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Inbound, Membership, Request};
+use habilis_network::membership::{
+    self, Blocking, Inbound, Inspect, InspectTest, Membership, Messaging, MessagingTest, Request,
+};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -74,7 +76,7 @@ impl Member {
     async fn roster_len(&self) -> usize {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
         let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
@@ -89,9 +91,11 @@ impl Member {
 
     async fn block_ip_to(&self, ports: Vec<u16>) {
         self.membership
-            .request(|reply| Request::BlockIpTo {
-                remote_ports: ports,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockIpTo {
+                    remote_ports: ports,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
@@ -100,9 +104,11 @@ impl Member {
     /// The rung of the selected path on this member's pooled connection to `peer`.
     async fn rung_to(&self, peer: &str) -> Option<&'static str> {
         self.membership
-            .request(|reply| Request::SelectedRung {
-                peer: peer.to_owned(),
-                reply,
+            .request(|reply| {
+                Request::InspectTest(InspectTest::SelectedRung {
+                    peer: peer.to_owned(),
+                    reply,
+                })
             })
             .await
             .ok()
@@ -114,7 +120,7 @@ impl Member {
         let to = membership::parse_to(Some(to)).expect("a nickname");
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::Send { to, body, reply })
+            .request(|reply| Request::Messaging(Messaging::Send { to, body, reply }))
             .await
             .expect("the loop answers")
     }
@@ -123,7 +129,7 @@ impl Member {
     async fn ping(&self) -> Vec<String> {
         let answers = self
             .membership
-            .request(|reply| Request::Ping { reply })
+            .request(|reply| Request::MessagingTest(MessagingTest::Ping { reply }))
             .await
             .expect("the loop answers");
         let names = answers
@@ -135,21 +141,21 @@ impl Member {
     /// How many gossip connections the recursion rule has closed in this process so far.
     async fn recursion_closes(&self) -> u64 {
         self.membership
-            .request(|reply| Request::GossipRecursionCloses { reply })
+            .request(|reply| Request::InspectTest(InspectTest::GossipRecursionCloses { reply }))
             .await
             .expect("the loop answers")
     }
 
     async fn state_merge(&self, merge: serde_json::Value) -> Result<(), String> {
         self.membership
-            .request(|reply| Request::StateMerge { merge, reply })
+            .request(|reply| Request::Messaging(Messaging::StateMerge { merge, reply }))
             .await
             .expect("the loop answers")
     }
 
     async fn state_json(&self) -> String {
         self.membership
-            .request(|reply| Request::StateJson { reply })
+            .request(|reply| Request::Inspect(Inspect::StateJson { reply }))
             .await
             .expect("the loop answers")
     }

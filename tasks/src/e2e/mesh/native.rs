@@ -61,7 +61,7 @@ impl Native {
     }
 
     pub(in crate::e2e) async fn roster_json(&self) -> String {
-        self.request(|reply| membership::Request::Peers { reply })
+        self.request(|reply| membership::Request::Inspect(membership::Inspect::Peers { reply }))
             .await
             .unwrap_or_default()
     }
@@ -69,17 +69,21 @@ impl Native {
     pub(in crate::e2e) async fn send(&self, to: Option<&str>, text: &str) -> Result<(), String> {
         let to = membership::parse_to(to).map_err(|error| error.to_string())?;
         let body = membership::msg_body(text).map_err(|error| error.to_string())?;
-        self.request(|reply| membership::Request::Send { to, body, reply })
-            .await?
+        self.request(|reply| {
+            membership::Request::Messaging(membership::Messaging::Send { to, body, reply })
+        })
+        .await?
     }
 
     pub(super) async fn state_merge(&self, merge: serde_json::Value) -> Result<(), String> {
-        self.request(|reply| membership::Request::StateMerge { merge, reply })
-            .await?
+        self.request(|reply| {
+            membership::Request::Messaging(membership::Messaging::StateMerge { merge, reply })
+        })
+        .await?
     }
 
     pub(super) async fn state_json(&self) -> String {
-        self.request(|reply| membership::Request::StateJson { reply })
+        self.request(|reply| membership::Request::Inspect(membership::Inspect::StateJson { reply }))
             .await
             .unwrap_or_default()
     }

@@ -6,7 +6,7 @@
 //! the gossip link. The test closes the gossip connection of the pair, waits for the engine's own
 //! neighbor down on both ends, and reads the session count and the log.
 //!
-//! `Request::UnderlayTick` exists because a test cannot steer the alive tick, and the pair grafts
+//! `Ticks::UnderlayTick` exists because a test cannot steer the alive tick, and the pair grafts
 //! again within seconds: the hook runs the same function the alive tick runs, inside the gap.
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
@@ -16,7 +16,9 @@ mod until_known;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::EndpointId;
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{
+    self, Inspect, InspectTest, Linking, Membership, Messaging, Request, Routing, Ticks,
+};
 use habilis_network::protocol::{Lookup, Transport};
 
 use habilis_network::net;
@@ -49,14 +51,14 @@ fn neighbor_down(since: usize, local: &EndpointId, remote: &EndpointId) -> bool 
 
 async fn underlay_sessions(member: &Membership) -> usize {
     member
-        .request(|reply| Request::UnderlaySessions { reply })
+        .request(|reply| Request::Routing(Routing::UnderlaySessions { reply }))
         .await
         .expect("the loop answers")
 }
 
 async fn roster_len(member: &Membership) -> usize {
     let json = member
-        .request(|reply| Request::Peers { reply })
+        .request(|reply| Request::Inspect(Inspect::Peers { reply }))
         .await
         .unwrap_or_default();
     let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
@@ -114,25 +116,27 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
             let to = membership::parse_to(Some("bob")).expect("a nickname");
             let body = membership::msg_body("probe").expect("fits one frame");
             let _ = alice
-                .request(|reply| Request::Send { to, body, reply })
+                .request(|reply| Request::Messaging(Messaging::Send { to, body, reply }))
                 .await;
             time::sleep(Duration::from_secs(1)).await;
         }
 
         let alice_id = alice
-            .request(|reply| Request::EndpointId { reply })
+            .request(|reply| Request::InspectTest(InspectTest::EndpointId { reply }))
             .await
             .expect("the loop answers");
         let bob_id = bob
-            .request(|reply| Request::EndpointId { reply })
+            .request(|reply| Request::InspectTest(InspectTest::EndpointId { reply }))
             .await
             .expect("the loop answers");
 
         // One close of the connection; the engine runs its own `NeighborDown` on both ends.
         let since = log_len();
-        until_known::until_peer_known(&alice, "bob", |reply| Request::CloseLink {
-            peer: "bob".to_owned(),
-            reply,
+        until_known::until_peer_known(&alice, "bob", |reply| {
+            Request::Linking(Linking::CloseLink {
+                peer: "bob".to_owned(),
+                reply,
+            })
         })
         .await;
         // A tick has to run while the link is down, or the test proves nothing: the pair grafts again
@@ -142,7 +146,7 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
         while window.elapsed() < SETTLE {
             for member in [&alice, &bob] {
                 member
-                    .request(|reply| Request::UnderlayTick { reply })
+                    .request(|reply| Request::Ticks(Ticks::UnderlayTick { reply }))
                     .await
                     .expect("the loop answers");
             }

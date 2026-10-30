@@ -4,7 +4,7 @@
 //! relay and one mesh whose transports are `udp,webrtc,multihop` (relay as a lookup only, so the
 //! relay carries no payload). A and B have an IP link. T has no IP, so T to A is a WebRTC session.
 //! T to B must have no direct path at all: B refuses T's session in both roles
-//! (`Request::DenyPeer`), so the only way from T to B is the multihop route through A.
+//! (`Blocking::DenyPeer`), so the only way from T to B is the multihop route through A.
 //!
 //! The cell moves a directed message each way and reads A's `forwarded_cells` after each one: A
 //! carried cells for a pair that it is not part of. It is the proof that the tab takes part in
@@ -74,7 +74,9 @@ fn page_url(base: &str, relay_url: &str, topic: &str) -> String {
 /// A's count of the cells it passed on for other members.
 async fn forwarded_cells(alpha: &Native) -> Result<u64, CellFailure> {
     alpha
-        .request(|reply| membership::Request::ForwardedCells { reply })
+        .request(|reply| {
+            membership::Request::Routing(membership::Routing::ForwardedCells { reply })
+        })
         .await
         .map_err(|error| CellFailure(format!("A's forwarded-cell count is unreadable: {error}")))
 }
@@ -82,7 +84,9 @@ async fn forwarded_cells(alpha: &Native) -> Result<u64, CellFailure> {
 /// The WebRTC sessions on A's multihop underlay. The tab has no IP, so A reaches it only over one.
 async fn underlay_sessions(alpha: &Native) -> String {
     alpha
-        .request(|reply| membership::Request::UnderlaySessions { reply })
+        .request(|reply| {
+            membership::Request::Routing(membership::Routing::UnderlaySessions { reply })
+        })
         .await
         .map_or_else(
             |error| format!("unreadable: {error}"),
@@ -95,9 +99,11 @@ async fn route_to_tab(bravo: &Native) -> bool {
     let deadline = tokio_Instant::now() + ROUTE_TIMEOUT;
     loop {
         let has_route = bravo
-            .request(|reply| membership::Request::HasRoute {
-                peer: "tab".to_owned(),
-                reply,
+            .request(|reply| {
+                membership::Request::InspectHost(membership::InspectHost::HasRoute {
+                    peer: "tab".to_owned(),
+                    reply,
+                })
             })
             .await
             .unwrap_or(false);
@@ -221,10 +227,12 @@ async fn run_cell(
         )));
     }
     bravo
-        .request(|reply| membership::Request::DenyPeer {
-            peer: "tab".to_owned(),
-            denied: true,
-            reply,
+        .request(|reply| {
+            membership::Request::Blocking(membership::Blocking::DenyPeer {
+                peer: "tab".to_owned(),
+                denied: true,
+                reply,
+            })
         })
         .await
         .map_err(|error| fail(format!("B could not deny the tab: {error}")))?

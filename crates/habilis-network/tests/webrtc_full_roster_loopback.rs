@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{self, Inspect, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 
 use habilis_network::net::test_relay;
@@ -46,7 +46,7 @@ async fn open(nick: &str, options: membership::JoinOptions) -> Membership {
 
 async fn roster_len(member: &Membership) -> usize {
     let json = member
-        .request(|reply| Request::Peers { reply })
+        .request(|reply| Request::Inspect(Inspect::Peers { reply }))
         .await
         .unwrap_or_default();
     serde_json::from_str::<serde_json::Value>(&json)

@@ -344,7 +344,7 @@ fn shed_beacon(
     state.arm_reclaim(Instant::now());
 }
 
-/// Tests only: make the beacon stop answering, if a test asked for it (`Request::StallBeacon`).
+/// Tests only: make the beacon stop answering, if a test asked for it (`Beacons::StallBeacon`).
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub(super) fn stall_on_request(
     state: &mut EventLoopState,
@@ -361,7 +361,7 @@ pub(super) fn stall_on_request(
     }
 }
 
-/// Tests only: shed the beacon now, if a test asked for it (`Request::ShedBeacon`), as the check
+/// Tests only: shed the beacon now, if a test asked for it (`Beacons::ShedBeacon`), as the check
 /// of the lower rungs does after its decision.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub(super) fn shed_on_request(

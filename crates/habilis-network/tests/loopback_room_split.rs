@@ -9,7 +9,7 @@
 //! - **B**: the beacon holder leaves after every member released the rendezvous, then two
 //!   joiners arrive by id.
 //! - **C**: the creator leaves at once, two joiners start together, and the rung probe of
-//!   both reads silence (`Request::BlindRungProbes`). One of them binds the first rung. The
+//!   both reads silence (`Beacons::BlindRungProbes`). One of them binds the first rung. The
 //!   other stays a peer of it: silence does not bind a second rung. Two joiners follow, one by
 //!   one.
 //! - **D**: two released holders, with no IP block. Case E's setup gives a room of five old
@@ -17,12 +17,12 @@
 //!   sides released. Then one old member, with three links or more, reads its rung probe as
 //!   "not ours" and binds the next rung: a holder on a higher rung, with two meshes that share
 //!   no link. The engine must merge them by itself.
-//! - **F**: D, and the holder on the higher rung sheds its beacon (`Request::ShedBeacon`)
+//! - **F**: D, and the holder on the higher rung sheds its beacon (`Beacons::ShedBeacon`)
 //!   instead of waiting for the engine to do it. The merge then needs only that a member that
 //!   reads a holder of another mesh goes to it.
 //!
 //! - **E**: the one-by-one path. The creator leaves while five old members, each with three
-//!   links or more, hold their claims back (`Request::HoldClaims`). A joiner starts and takes
+//!   links or more, hold their claims back (`Beacons::HoldClaims`). A joiner starts and takes
 //!   the free rung. The old members then find the rung "ours" on their walk, want no
 //!   rendezvous (they have three links or more), and graft nothing. A later joiner lands on
 //!   the new holder.
@@ -51,7 +51,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, Once};
 use std::time::{Duration, Instant};
 
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{self, Beacons, Inspect, Membership, Request};
 use habilis_network::protocol::LockedMesh;
 use habilis_network::runtime::tuning::{Tuning, init};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -265,7 +265,7 @@ impl Member {
     async fn peers(&self) -> usize {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
         serde_json::from_str::<serde_json::Value>(&json)
@@ -288,21 +288,21 @@ impl Member {
 
     async fn stall_beacon(&self) {
         self.membership
-            .request(|reply| Request::StallBeacon { reply })
+            .request(|reply| Request::Beacons(Beacons::StallBeacon { reply }))
             .await
             .expect("the loop answers");
     }
 
     async fn shed_beacon(&self) {
         self.membership
-            .request(|reply| Request::ShedBeacon { reply })
+            .request(|reply| Request::Beacons(Beacons::ShedBeacon { reply }))
             .await
             .expect("the loop answers");
     }
 
     async fn hold_claims(&self, hold: bool) {
         self.membership
-            .request(|reply| Request::HoldClaims { hold, reply })
+            .request(|reply| Request::Beacons(Beacons::HoldClaims { hold, reply }))
             .await
             .expect("the loop answers");
     }
@@ -320,7 +320,7 @@ impl Member {
 
     async fn set_blind_rung_probes(&self, blind: bool) {
         self.membership
-            .request(|reply| Request::BlindRungProbes { blind, reply })
+            .request(|reply| Request::Beacons(Beacons::BlindRungProbes { blind, reply }))
             .await
             .expect("the loop answers");
     }

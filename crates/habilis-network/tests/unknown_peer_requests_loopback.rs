@@ -7,7 +7,7 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
-use habilis_network::membership::{self, Request, Rung, UnknownPeer};
+use habilis_network::membership::{self, Blocking, Linking, Request, Rung, UnknownPeer};
 use habilis_network::protocol::{Lookup, Transport};
 
 use habilis_network::net::test_relay;
@@ -29,33 +29,41 @@ fn a_cut_a_deny_an_offer_and_a_close_on_a_member_the_node_does_not_know_are_refu
         let nobody = || "nobody".to_owned();
 
         let cut = member
-            .request(|reply| Request::BlockRungTo {
-                rung: Rung::WebRtc,
-                peer: nobody(),
-                blocked: true,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockRungTo {
+                    rung: Rung::WebRtc,
+                    peer: nobody(),
+                    blocked: true,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
         let deny = member
-            .request(|reply| Request::DenyPeer {
-                peer: nobody(),
-                denied: true,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::DenyPeer {
+                    peer: nobody(),
+                    denied: true,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
         let offer = member
-            .request(|reply| Request::OfferSession {
-                peer: nobody(),
-                reply,
+            .request(|reply| {
+                Request::Linking(Linking::OfferSession {
+                    peer: nobody(),
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
         let close = member
-            .request(|reply| Request::CloseLink {
-                peer: nobody(),
-                reply,
+            .request(|reply| {
+                Request::Linking(Linking::CloseLink {
+                    peer: nobody(),
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");

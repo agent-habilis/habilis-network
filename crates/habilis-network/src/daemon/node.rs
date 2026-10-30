@@ -190,7 +190,7 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
 
     /// Tests only: the ports this node's endpoint is bound on. A test that cuts
     /// one group of nodes from another gives each node the other group's ports
-    /// (`Request::BlockIpTo`).
+    /// (`Blocking::BlockIpTo`).
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     #[must_use]
     pub fn bound_ports(&self) -> &[u16] {

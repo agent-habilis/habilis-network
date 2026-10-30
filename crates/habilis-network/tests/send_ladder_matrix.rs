@@ -36,7 +36,10 @@ use std::time::{Duration, Instant};
 
 use common::GOSSIP_INSTALLED;
 use habilis_network::iroh::{EndpointId, RelayUrl};
-use habilis_network::membership::{self, Inbound, Membership, Request, Rung};
+use habilis_network::membership::{
+    self, Blocking, Inbound, Inspect, InspectHost, InspectTest, Membership, Messaging, Request,
+    Routing, Rung,
+};
 use habilis_network::protocol::{Lookup, MeshConfig, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -309,7 +312,7 @@ impl Member {
     async fn roster_len(&self) -> usize {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
         let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
@@ -323,7 +326,7 @@ impl Member {
     async fn linked_to(&self, peer: &str) -> bool {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
         let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
@@ -343,7 +346,7 @@ impl Member {
     async fn lane_to(&self, peer: &str) -> Option<String> {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .expect("the loop answers");
         let roster = serde_json::from_str::<serde_json::Value>(&json).ok()?;
@@ -358,9 +361,11 @@ impl Member {
 
     async fn block_ip_to(&self, ports: Vec<u16>) {
         self.membership
-            .request(|reply| Request::BlockIpTo {
-                remote_ports: ports,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockIpTo {
+                    remote_ports: ports,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
@@ -368,28 +373,32 @@ impl Member {
 
     async fn block_rung(&self, rung: Rung, blocked: bool) {
         self.membership
-            .request(|reply| Request::BlockRung {
-                rung,
-                blocked,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockRung {
+                    rung,
+                    blocked,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
     }
 
     async fn block_rung_to(&self, rung: Rung, peer: &str) {
-        until_known::until_peer_known(&self.membership, peer, |reply| Request::BlockRungTo {
-            rung,
-            peer: peer.to_owned(),
-            blocked: true,
-            reply,
+        until_known::until_peer_known(&self.membership, peer, |reply| {
+            Request::Blocking(Blocking::BlockRungTo {
+                rung,
+                peer: peer.to_owned(),
+                blocked: true,
+                reply,
+            })
         })
         .await;
     }
 
     async fn endpoint_id(&self) -> EndpointId {
         self.membership
-            .request(|reply| Request::EndpointId { reply })
+            .request(|reply| Request::InspectTest(InspectTest::EndpointId { reply }))
             .await
             .expect("the loop answers")
     }
@@ -397,18 +406,20 @@ impl Member {
     /// Whether this member's multihop topology has a route to `peer` now.
     async fn has_route(&self, peer: &str) -> bool {
         self.membership
-            .request(|reply| Request::HasRoute {
-                peer: peer.to_owned(),
-                reply,
+            .request(|reply| {
+                Request::InspectHost(InspectHost::HasRoute {
+                    peer: peer.to_owned(),
+                    reply,
+                })
             })
             .await
             .expect("the loop answers")
     }
 
-    /// The multihop view of this member for the run log: see `Request::RouteDiag`.
+    /// The multihop view of this member for the run log: see `InspectHost::RouteDiag`.
     async fn route_diag(&self) -> String {
         self.membership
-            .request(|reply| Request::RouteDiag { reply })
+            .request(|reply| Request::InspectHost(InspectHost::RouteDiag { reply }))
             .await
             .expect("the loop answers")
     }
@@ -416,7 +427,7 @@ impl Member {
     /// Cells that this member refused to write on a hop that stays on the relay.
     async fn refused_on_relay(&self) -> u64 {
         self.membership
-            .request(|reply| Request::MultihopCounters { reply })
+            .request(|reply| Request::Routing(Routing::MultihopCounters { reply }))
             .await
             .expect("the loop answers")
             .refused_on_relay
@@ -424,7 +435,7 @@ impl Member {
 
     async fn forwarded_cells(&self) -> u64 {
         self.membership
-            .request(|reply| Request::ForwardedCells { reply })
+            .request(|reply| Request::Routing(Routing::ForwardedCells { reply }))
             .await
             .expect("the loop answers")
     }
@@ -432,9 +443,11 @@ impl Member {
     /// The rung of the selected path on this member's pooled connection to `peer`.
     async fn rung_to(&self, peer: &str) -> Option<&'static str> {
         self.membership
-            .request(|reply| Request::SelectedRung {
-                peer: peer.to_owned(),
-                reply,
+            .request(|reply| {
+                Request::InspectTest(InspectTest::SelectedRung {
+                    peer: peer.to_owned(),
+                    reply,
+                })
             })
             .await
             .ok()
@@ -501,7 +514,7 @@ impl Member {
         let to = membership::parse_to(Some(to)).expect("a nickname");
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::Send { to, body, reply })
+            .request(|reply| Request::Messaging(Messaging::Send { to, body, reply }))
             .await
             .expect("the loop answers")
     }

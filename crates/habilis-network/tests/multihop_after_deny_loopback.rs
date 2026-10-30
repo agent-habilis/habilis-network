@@ -2,7 +2,7 @@
 //! third member, on the multihop rung, and a message arrives.
 //!
 //! Three native members on a local relay, with the list `udp,webrtc,multihop`: no relay
-//! carries payload. `bob` and `carol` deny each other (`Request::DenyPeer`, on the
+//! carries payload. `bob` and `carol` deny each other (`Blocking::DenyPeer`, on the
 //! application endpoint and on the underlay, as a tab that has no direct session would
 //! look to a native) and lose IP to each other, so every packet of the pair takes the
 //! route bob -> alice -> carol. The test shows whether a message crosses that route and
@@ -26,7 +26,9 @@ mod until_known;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Inbound, Membership, Request};
+use habilis_network::membership::{
+    self, Blocking, Inbound, Inspect, InspectTest, Membership, Messaging, Request, Routing,
+};
 use habilis_network::protocol::{Lookup, Transport};
 use habilis_network_iroh_multihop_transport::MultihopCounters;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -83,7 +85,7 @@ impl Member {
     async fn roster_len(&self) -> usize {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
         let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
@@ -106,9 +108,11 @@ impl Member {
 
     async fn block_ip_to(&self, ports: Vec<u16>) {
         self.membership
-            .request(|reply| Request::BlockIpTo {
-                remote_ports: ports,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockIpTo {
+                    remote_ports: ports,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
@@ -117,10 +121,12 @@ impl Member {
     /// Refuse every `WebRTC` session with `peer`, on the application endpoint and on the
     /// underlay.
     async fn deny_peer(&self, peer: &str) {
-        until_known::until_peer_known(&self.membership, peer, |reply| Request::DenyPeer {
-            peer: peer.to_owned(),
-            denied: true,
-            reply,
+        until_known::until_peer_known(&self.membership, peer, |reply| {
+            Request::Blocking(Blocking::DenyPeer {
+                peer: peer.to_owned(),
+                denied: true,
+                reply,
+            })
         })
         .await;
     }
@@ -128,9 +134,11 @@ impl Member {
     /// The rung of the selected path on this member's pooled connection to `peer`.
     async fn rung_to(&self, peer: &str) -> Option<&'static str> {
         self.membership
-            .request(|reply| Request::SelectedRung {
-                peer: peer.to_owned(),
-                reply,
+            .request(|reply| {
+                Request::InspectTest(InspectTest::SelectedRung {
+                    peer: peer.to_owned(),
+                    reply,
+                })
             })
             .await
             .ok()
@@ -139,14 +147,14 @@ impl Member {
 
     async fn forwarded_cells(&self) -> u64 {
         self.membership
-            .request(|reply| Request::ForwardedCells { reply })
+            .request(|reply| Request::Routing(Routing::ForwardedCells { reply }))
             .await
             .expect("the loop answers")
     }
 
     async fn counters(&self) -> MultihopCounters {
         self.membership
-            .request(|reply| Request::MultihopCounters { reply })
+            .request(|reply| Request::Routing(Routing::MultihopCounters { reply }))
             .await
             .expect("the loop answers")
     }
@@ -156,7 +164,7 @@ impl Member {
         let to = membership::parse_to(Some(to)).expect("a nickname");
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::Send { to, body, reply })
+            .request(|reply| Request::Messaging(Messaging::Send { to, body, reply }))
             .await
             .expect("the loop answers")
     }

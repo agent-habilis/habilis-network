@@ -16,7 +16,7 @@
 
 use std::time::{Duration, Instant};
 
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{self, Inspect, Membership, Request, Routing};
 use habilis_network::protocol::{Lookup, Transport};
 
 use habilis_network::net::test_relay;
@@ -37,7 +37,7 @@ fn evictions() -> usize {
 
 async fn roster_len(member: &Membership) -> usize {
     let json = member
-        .request(|reply| Request::Peers { reply })
+        .request(|reply| Request::Inspect(Inspect::Peers { reply }))
         .await
         .unwrap_or_default();
     let roster = serde_json::from_str::<serde_json::Value>(&json).ok();
@@ -48,7 +48,7 @@ async fn roster_len(member: &Membership) -> usize {
 
 async fn underlay_sessions(member: &Membership) -> usize {
     member
-        .request(|reply| Request::UnderlaySessions { reply })
+        .request(|reply| Request::Routing(Routing::UnderlaySessions { reply }))
         .await
         .expect("the loop answers")
 }

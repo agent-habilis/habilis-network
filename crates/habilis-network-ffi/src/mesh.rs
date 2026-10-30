@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use habilis_network::embed::SilentSink;
-use habilis_network::membership::{Membership, MembershipApp, Request};
+use habilis_network::membership::{Inspect, Membership, MembershipApp, Messaging, Request};
 use habilis_network::runtime::Node;
 use tokio::sync::{mpsc, oneshot};
 
@@ -99,7 +99,7 @@ impl Mesh {
         let to = membership::parse_to(to)?;
         let body = membership::msg_body(text)?;
         let (reply, answer) = oneshot::channel();
-        self.dispatch(Request::Send { to, body, reply })?;
+        self.dispatch(Request::Messaging(Messaging::Send { to, body, reply }))?;
         self.await_reply(answer)?
             .map_err(|error| anyhow::anyhow!("{error}"))
     }
@@ -139,7 +139,7 @@ impl Mesh {
         let merge: serde_json::Value =
             serde_json::from_str(json).context("parsing the merge document")?;
         let (reply, answer) = oneshot::channel();
-        self.dispatch(Request::StateMerge { merge, reply })?;
+        self.dispatch(Request::Messaging(Messaging::StateMerge { merge, reply }))?;
         self.await_reply(answer)?
             .map_err(|error| anyhow::anyhow!("{error}"))
     }
@@ -150,7 +150,7 @@ impl Mesh {
     /// The event loop has stopped.
     pub(crate) fn state_json(&self) -> Result<String> {
         let (reply, answer) = oneshot::channel();
-        self.dispatch(Request::StateJson { reply })?;
+        self.dispatch(Request::Inspect(Inspect::StateJson { reply }))?;
         self.await_reply(answer)
     }
 
@@ -160,7 +160,7 @@ impl Mesh {
     /// The event loop has stopped.
     pub(crate) fn peers_json(&self) -> Result<String> {
         let (reply, answer) = oneshot::channel();
-        self.dispatch(Request::Peers { reply })?;
+        self.dispatch(Request::Inspect(Inspect::Peers { reply }))?;
         self.await_reply(answer)
     }
 
@@ -172,7 +172,7 @@ impl Mesh {
     /// The event loop has stopped.
     pub(crate) fn peer_count(&self) -> Result<usize> {
         let (reply, answer) = oneshot::channel();
-        self.dispatch(Request::PeerCount { reply })?;
+        self.dispatch(Request::Inspect(Inspect::PeerCount { reply }))?;
         self.await_reply(answer)
     }
 

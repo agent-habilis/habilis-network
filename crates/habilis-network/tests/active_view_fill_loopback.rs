@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{self, Inspect, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 use habilis_network::util::tuning::STARVED;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -92,7 +92,7 @@ impl Member {
     async fn linked_set(&self) -> BTreeSet<String> {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
         let roster: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
@@ -109,7 +109,7 @@ impl Member {
     async fn counts(&self) -> (usize, usize) {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
         let roster: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();

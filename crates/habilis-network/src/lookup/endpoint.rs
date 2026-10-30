@@ -56,7 +56,7 @@ pub(crate) fn install_transports(
         } else if cfg!(feature = "iroh-test-utils") {
             // Tests only: a mesh whose list leaves out `webrtc` still takes the
             // selector, without the transport, so that a test can take IP paths
-            // away from one node to others (`Request::BlockIpTo`). Without it
+            // away from one node to others (`Blocking::BlockIpTo`). Without it
             // such a node uses iroh's own selector, which the hook cannot reach.
             builder = builder.path_selector(handle.path_selector());
             selector_set = true;

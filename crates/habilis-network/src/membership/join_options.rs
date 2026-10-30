@@ -188,7 +188,7 @@ pub struct Membership {
 }
 
 /// Tests only: whether a member that is set up now has its rung probes blind from its first walk.
-/// [`Request::BlindRungProbes`] can only reach a member that is up, after its startup walk ran.
+/// [`Beacons::BlindRungProbes`] can only reach a member that is up, after its startup walk ran.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 static NEW_MEMBERS_ARE_BLIND: atomic::AtomicBool = atomic::AtomicBool::new(false);
 

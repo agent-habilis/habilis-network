@@ -426,11 +426,11 @@ pub struct EventLoopState {
     /// out more. The claim walk and the check of the lower rungs read it and never wait.
     pub(crate) rungs: beacon::RungWatch,
     /// Tests only: the beacon is shed at the top of the next turn of the loop, as a re-check
-    /// shed does (`Request::ShedBeacon`).
+    /// shed does (`Beacons::ShedBeacon`).
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) shed_requested: bool,
     /// Tests only: the beacon stops answering at the top of the next turn of the loop
-    /// (`Request::StallBeacon`).
+    /// (`Beacons::StallBeacon`).
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) stall_requested: bool,
     /// What this node already asked of the members it heard on the LAN.
@@ -1252,7 +1252,7 @@ impl EventLoopState {
         self.probe_backoff.reset();
     }
 
-    /// Whether a test holds this node's claims back (`Request::HoldClaims`).
+    /// Whether a test holds this node's claims back (`Beacons::HoldClaims`).
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) fn claims_are_held(&self) -> bool {
         self.claims_held

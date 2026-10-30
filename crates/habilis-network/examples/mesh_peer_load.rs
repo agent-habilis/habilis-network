@@ -44,7 +44,8 @@ use std::time::{Duration, Instant};
 
 use habilis_network::embed::SilentSink;
 use habilis_network::membership::{
-    INBOUND_CAP, JoinOptions, MembershipApp, Request, msg_body, resolve_kind,
+    Blocking, INBOUND_CAP, Inspect, JoinOptions, MembershipApp, Messaging, Request, Routing,
+    msg_body, resolve_kind,
 };
 use habilis_network::protocol::{Lookup, Nickname, Transport};
 use habilis_network::runtime::{Node, SetupParams, SignalHandling, setup_mesh};
@@ -113,7 +114,10 @@ async fn count(
 /// The nicknames of the roster, and how many of them are gossip neighbors.
 async fn roster(sender: &mpsc::Sender<Request>) -> Option<(Vec<String>, usize)> {
     let (reply, answer) = oneshot::channel();
-    sender.send(Request::Peers { reply }).await.ok()?;
+    sender
+        .send(Request::Inspect(Inspect::Peers { reply }))
+        .await
+        .ok()?;
     let roster: serde_json::Value = serde_json::from_str(&answer.await.ok()?).unwrap_or_default();
     let peers = roster["peers"].as_array().cloned().unwrap_or_default();
     let links: usize = peers
@@ -136,11 +140,11 @@ async fn send_to<'a>(
     for nick in nicks {
         let (reply, _) = oneshot::channel();
         let _ = sender
-            .send(Request::Send {
+            .send(Request::Messaging(Messaging::Send {
                 to: Nickname::try_new(&nick.clone()).ok(),
                 body: msg_body("load")?,
                 reply,
-            })
+            }))
             .await;
     }
     Ok(())
@@ -160,11 +164,11 @@ async fn flood(
         for nick in &targets {
             let (reply, _) = oneshot::channel();
             if sender
-                .send(Request::Send {
+                .send(Request::Messaging(Messaging::Send {
                     to: Nickname::try_new(&nick.clone()).ok(),
                     body: msg_body(&body)?,
                     reply,
-                })
+                }))
                 .await
                 .is_err()
             {
@@ -214,17 +218,21 @@ fn init_logging() {
 async fn block_udp(sender: &mpsc::Sender<Request>) {
     let (reply, _) = oneshot::channel();
     let _ = sender
-        .send(Request::BlockUdp {
+        .send(Request::Blocking(Blocking::BlockUdp {
             blocked: true,
             reply,
-        })
+        }))
         .await;
 }
 
 /// The redial counters of the node, all zero when the node is gone.
 async fn redial_counts(sender: &mpsc::Sender<Request>) -> [u64; 6] {
     let (reply, answer) = oneshot::channel();
-    if sender.send(Request::RedialCounts { reply }).await.is_ok() {
+    if sender
+        .send(Request::Routing(Routing::RedialCounts { reply }))
+        .await
+        .is_ok()
+    {
         answer.await.unwrap_or([0; 6])
     } else {
         [0; 6]
@@ -306,9 +314,14 @@ async fn main() -> anyhow::Result<()> {
             if traffic && traffic_until.is_none_or(|until| elapsed < until) {
                 talk(&sender, &nicks, bursty, elapsed, &mut next_burst).await?;
             }
-            let underlay = count(&sender, |reply| Request::UnderlaySessions { reply }).await;
-            let idle_sessions =
-                count(&sender, |reply| Request::SessionsToNonNeighbors { reply }).await;
+            let underlay = count(&sender, |reply| {
+                Request::Routing(Routing::UnderlaySessions { reply })
+            })
+            .await;
+            let idle_sessions = count(&sender, |reply| {
+                Request::Routing(Routing::SessionsToNonNeighbors { reply })
+            })
+            .await;
             let redials = redial_counts(&sender).await;
             println!(
                 "t {elapsed} phase {} peers {} links {links} sessions {} underlay {underlay} rss_mb {} idle_sessions {idle_sessions} qclose {} qredial {} sclose {} sredial {} pclose {} predial {}{role}",

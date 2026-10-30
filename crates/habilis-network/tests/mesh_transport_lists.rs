@@ -10,7 +10,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Inbound, Membership, Request};
+use habilis_network::membership::{
+    self, Blocking, Inbound, Inspect, InspectTest, Membership, Messaging, Request,
+};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -142,7 +144,7 @@ impl Member {
 
     async fn roster(&self) -> String {
         self.membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default()
     }
@@ -151,7 +153,7 @@ impl Member {
         let to = membership::parse_to(to).expect("a nickname");
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::Send { to, body, reply })
+            .request(|reply| Request::Messaging(Messaging::Send { to, body, reply }))
             .await
             .expect("the loop answers")
             .expect("sent");
@@ -159,7 +161,7 @@ impl Member {
 
     async fn state_merge(&self, merge: serde_json::Value) {
         self.membership
-            .request(|reply| Request::StateMerge { merge, reply })
+            .request(|reply| Request::Messaging(Messaging::StateMerge { merge, reply }))
             .await
             .expect("the loop answers")
             .expect("merged");
@@ -167,21 +169,21 @@ impl Member {
 
     async fn endpoint_id(&self) -> iroh::EndpointId {
         self.membership
-            .request(|reply| Request::EndpointId { reply })
+            .request(|reply| Request::InspectTest(InspectTest::EndpointId { reply }))
             .await
             .expect("the loop answers")
     }
 
     async fn block_udp(&self, blocked: bool) {
         self.membership
-            .request(|reply| Request::BlockUdp { blocked, reply })
+            .request(|reply| Request::Blocking(Blocking::BlockUdp { blocked, reply }))
             .await
             .expect("the loop answers");
     }
 
     async fn state_json(&self) -> String {
         self.membership
-            .request(|reply| Request::StateJson { reply })
+            .request(|reply| Request::Inspect(Inspect::StateJson { reply }))
             .await
             .unwrap_or_default()
     }

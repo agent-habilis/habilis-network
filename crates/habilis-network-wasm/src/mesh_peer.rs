@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use habilis_network::membership;
 use habilis_network::membership::{
-    Inbound, JoinOptions, MAX_MSG, MembershipApp, Request, json_sink,
+    Inbound, Inspect, JoinOptions, MAX_MSG, MembershipApp, Messaging, Request, json_sink,
 };
 use habilis_network::runtime::Node;
 use std::fmt;
@@ -101,7 +101,8 @@ impl MeshPeer {
         let to = membership::parse_to(to.as_deref()).map_err(|error| to_js_error(&error))?;
         let body = membership::msg_body(&text).map_err(|error| to_js_error(&error))?;
         let (reply, answer) = oneshot::channel();
-        self.request(Request::Send { to, body, reply }).await?;
+        self.request(Request::Messaging(Messaging::Send { to, body, reply }))
+            .await?;
         answer
             .await
             .map_err(|_| to_js_error("mesh event loop has stopped"))?
@@ -132,7 +133,8 @@ impl MeshPeer {
     #[wasm_bindgen(js_name = peersJson)]
     pub async fn peers_json(&self) -> Result<String, JsValue> {
         let (reply, answer) = oneshot::channel();
-        self.request(Request::Peers { reply }).await?;
+        self.request(Request::Inspect(Inspect::Peers { reply }))
+            .await?;
         answer
             .await
             .map_err(|_| to_js_error("mesh event loop has stopped"))
@@ -145,7 +147,8 @@ impl MeshPeer {
     #[wasm_bindgen(js_name = peerCount)]
     pub async fn peer_count(&self) -> Result<usize, JsValue> {
         let (reply, answer) = oneshot::channel();
-        self.request(Request::PeerCount { reply }).await?;
+        self.request(Request::Inspect(Inspect::PeerCount { reply }))
+            .await?;
         answer
             .await
             .map_err(|_| to_js_error("mesh event loop has stopped"))
@@ -158,7 +161,8 @@ impl MeshPeer {
     #[wasm_bindgen(js_name = stateJson)]
     pub async fn state_json(&self) -> Result<String, JsValue> {
         let (reply, answer) = oneshot::channel();
-        self.request(Request::StateJson { reply }).await?;
+        self.request(Request::Inspect(Inspect::StateJson { reply }))
+            .await?;
         answer
             .await
             .map_err(|_| to_js_error("mesh event loop has stopped"))
@@ -175,7 +179,8 @@ impl MeshPeer {
         let merge: serde_json::Value = serde_json::from_str(&patch_json)
             .map_err(|error| to_js_error(&format!("invalid merge document: {error}")))?;
         let (reply, answer) = oneshot::channel();
-        self.request(Request::StateMerge { merge, reply }).await?;
+        self.request(Request::Messaging(Messaging::StateMerge { merge, reply }))
+            .await?;
         answer
             .await
             .map_err(|_| to_js_error("mesh event loop has stopped"))?
