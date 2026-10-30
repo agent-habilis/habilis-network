@@ -34,7 +34,7 @@ const BINDING_SUCCESS: u16 = 0x0101;
 const BINDING_ERROR: u16 = 0x0111;
 /// The fixed cookie every RFC 5389 message carries at bytes `4..8`. Also the
 /// XOR mask for the port and (`IPv4`) address in `XOR-MAPPED-ADDRESS`.
-const MAGIC_COOKIE: u32 = 0x2112_A442;
+const MAGIC_COOKIE: u32 = 0x2112_a442;
 /// Attribute type `XOR-MAPPED-ADDRESS`.
 const ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
 /// Attribute type `MAPPED-ADDRESS` — the pre-5389 spelling, unXORed. Accepted
@@ -410,7 +410,7 @@ mod tests {
     fn xor_ipv4_value() -> Vec<u8> {
         let mask = MAGIC_COOKIE.to_be_bytes();
         let address = [203u8, 0, 113, 7];
-        let port = 0xA112u16 ^ u16::try_from(MAGIC_COOKIE >> 16).expect("fits"); // 41234
+        let port = 0xa112u16 ^ u16::try_from(MAGIC_COOKIE >> 16).expect("fits"); // 41234
         let mut value = vec![0, FAMILY_IPV4];
         value.extend_from_slice(&port.to_be_bytes());
         value.extend(address.iter().zip(mask).map(|(byte, mask)| byte ^ mask));
@@ -523,7 +523,7 @@ mod tests {
             "peer traffic is not a plain stun response"
         );
         let mut bad_cookie = success.clone();
-        bad_cookie[4] ^= 0xFF;
+        bad_cookie[4] ^= 0xff;
         assert!(
             !super::is_plain_stun_response(&bad_cookie),
             "a short packet is not a plain stun response"
@@ -541,7 +541,7 @@ mod tests {
         );
         assert!(
             !super::is_plain_stun_response(&[
-                0x16, 0xFE, 0xFD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+                0x16, 0xfe, 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
             ]),
             "a packet with a bad length is not a plain stun response"
         );
@@ -574,7 +574,7 @@ mod tests {
 
         // Right shape, wrong cookie.
         let mut bad_cookie = response(ATTR_XOR_MAPPED_ADDRESS, &xor_ipv4_value(), TXID);
-        bad_cookie[4] ^= 0xFF;
+        bad_cookie[4] ^= 0xff;
         assert!(
             parse_binding_response(&bad_cookie, &TXID).is_err(),
             "cookie"

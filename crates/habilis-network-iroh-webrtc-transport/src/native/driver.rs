@@ -523,7 +523,7 @@ mod tests {
                 .expect("bind sender");
             let noise = tokio::spawn(async move {
                 for _ in 0..5u8 {
-                    let _ = sender.send_to(&[0xFF; 32], local).await;
+                    let _ = sender.send_to(&[0xff; 32], local).await;
                     time::sleep(Duration::from_millis(20)).await;
                 }
             });
