@@ -256,6 +256,22 @@ Issue #29 records each decision.
 - When to add an impl (R1): judgment only, because no gate can know which impls a future caller needs. Proxies tried: the derive lints of R2 and R4, `missing_debug_implementations`, `missing_copy_implementations`, and the Clone, Copy, Eq, Ord and Hash gates of the other branches. Red probe, 2026-10-28: a scratch crate with a hand `Default` and a `from_str(&str)` fires `derivable_impls` and `should_implement_trait` under `-D warnings`.
 - Cost of a macro (M2): the cost of a macro is read in review. No mechanical proxy: the cost of a macro is a reading of its use, which no gate measures. The proc macro sits on the test path only.
 
+### Remaining `#[expect]` attributes
+
+Nine `#[expect(...)]` attributes stay. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here.
+
+| File | Lint | Reason |
+| --- | --- | --- |
+| `habilis-network-stream-cli/src/main.rs` | `unsafe_code` | `libc::sigaction` read: std has no way to query a signal's disposition |
+| `habilis-network-test-tracing/src/guard.rs` | `unsafe_code` | `libc::atexit` and `libc::_exit` are FFI calls |
+| `habilis-network-util/src/process.rs` | `unsafe_code` | `libc::proc_pidinfo` FFI: no safe wrapper exists |
+| `habilis-network-util/src/resident_memory.rs` (task info) | `unsafe_code` | `libc` `task_info` FFI: no safe wrapper for the task's resident size |
+| `habilis-network-util/src/resident_memory.rs` (mach call) | `deprecated` | `libc` points to the `mach2` crate for the mach calls; one read does not warrant a dependency |
+| `habilis-network-util/src/resident_memory.rs` (getrusage) | `unsafe_code` | `libc` `getrusage` FFI: no safe wrapper for `RUSAGE_SELF` maxrss |
+| `habilis-network-util/src/resident_memory.rs` (mmap) | `unsafe_code` | `libc` `mmap` and `munmap`: the pages must go back at once |
+| `habilis-network/src/daemon/params/join_params.rs` | `clippy::wildcard_enum_match_arm` | foreign `non_exhaustive` enum: the compiler needs a wildcard arm, and the named variants come before it |
+| `tasks/src/bench/native.rs` | `clippy::wildcard_enum_match_arm` | `TransportAddr` is `non_exhaustive`: a rung this runner does not name is `other` |
+
 ### Rules of the guide that do not apply
 
 - A rule that the guide tags for Chromium, Android or Fuchsia does not apply. This repository is none of them.
