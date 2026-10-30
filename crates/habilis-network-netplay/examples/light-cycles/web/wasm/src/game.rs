@@ -64,7 +64,7 @@ type Session = P2PSession<LightCycles, MeshTransport<LightCycles>>;
 /// engine's event loop — [`MeshTransport`] is the seam, and it does the
 /// locking internally — so unlike the version this replaces there is no
 /// `Arc<Mutex<_>>` around the game state at all.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Game {
     transport: MeshTransport<LightCycles>,
     lobby: Option<Lobby>,

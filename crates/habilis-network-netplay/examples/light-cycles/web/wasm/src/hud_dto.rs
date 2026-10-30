@@ -2,7 +2,7 @@ use crate::outcome_dto::OutcomeDto;
 use crate::roster_entry_dto::RosterEntryDto;
 use serde::Serialize;
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct HudDto {
     /// Which match this is, counting from 1; `0` before the first.
     pub(crate) match_number: u64,

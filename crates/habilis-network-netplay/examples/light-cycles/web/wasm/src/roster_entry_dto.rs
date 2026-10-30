@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct RosterEntryDto {
     pub(crate) pubkey: String,
     pub(crate) nick: String,

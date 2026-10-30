@@ -3,7 +3,7 @@ use serde::Serialize;
 
 /// A `visage-canvas` scene is built from exactly this every rAF — see the
 /// plan's "Rendering approach".
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct FrameDto {
     pub(crate) grid_w: u8,
     pub(crate) grid_h: u8,

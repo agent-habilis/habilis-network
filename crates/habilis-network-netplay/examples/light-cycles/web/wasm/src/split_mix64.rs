@@ -1,5 +1,6 @@
 /// A tiny, dependency-free splitmix64 — deterministic across platforms,
 /// which `std`'s `HashMap`-oriented `RandomState` is explicitly not.
+#[derive(Clone)]
 pub(crate) struct SplitMix64(u64);
 
 impl SplitMix64 {

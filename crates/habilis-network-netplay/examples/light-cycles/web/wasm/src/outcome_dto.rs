@@ -1,7 +1,7 @@
 use crate::outcome::Outcome;
 use serde::Serialize;
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum OutcomeDto {
     InProgress,
