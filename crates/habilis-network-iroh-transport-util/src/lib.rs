@@ -19,6 +19,8 @@
 //! assert_eq!(segments, [&b"abcd"[..], &b"ef"[..]], "the last segment holds the rest");
 //! ```
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 mod protocol_set;
 mod rung;
 

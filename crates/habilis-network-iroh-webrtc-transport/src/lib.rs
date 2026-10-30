@@ -42,6 +42,8 @@
 //! same iroh relay rather than to a second relay at the ICE layer. Neither
 //! backend has a TURN client, and neither should grow one.
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 mod address;
 mod consts;
 mod drop_policy;

@@ -17,6 +17,8 @@
 //! await window.bench.serve();
 //! ```
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 /// The browser endpoint of the benchmark.
 #[cfg(target_arch = "wasm32")]
 pub mod browser;

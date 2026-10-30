@@ -32,6 +32,8 @@
 //! - [`tui`] — the terminal `Host`: node arena, layout, paint, diff.
 //! - [`runtime`] — wires the above together for a single-root app.
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 pub mod component;
 pub mod host;
 pub mod reactive;

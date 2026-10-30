@@ -42,6 +42,8 @@
 //! pinned to a single Worker thread. Callers that need `Send` get it from their
 //! own backend, not from this trait.
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 /// Bytes per chunk.
 ///
 /// Fixed offsets, deliberately, rather than content-defined chunking. CDC

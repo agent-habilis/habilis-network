@@ -17,6 +17,8 @@
 //! the same game. The accumulator below decouples the two: render as
 //! often as the browser likes, simulate at [`grid::TICK_MS`].
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 use std::fmt;
 mod app;
 mod grid;

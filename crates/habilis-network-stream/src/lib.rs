@@ -10,6 +10,8 @@
 //! A stream is 1-1: its hash admits exactly one consumer, and a second one is
 //! [`Refused::Taken`]. What goes over it is up to the producer.
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 mod error;
 mod hash;
 mod node;

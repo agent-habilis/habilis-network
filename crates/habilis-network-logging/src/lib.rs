@@ -13,6 +13,8 @@
 //! # }
 //! ```
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 #[cfg(feature = "host")]
 mod log_sink;
 pub mod messages;

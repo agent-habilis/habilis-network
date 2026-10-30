@@ -17,6 +17,8 @@
 //! console.log(peer.id(), await peer.peerCount());
 //! ```
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 mod stream_node;
 
 mod mesh_peer;

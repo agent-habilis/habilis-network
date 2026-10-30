@@ -50,6 +50,8 @@
 //! # }
 //! ```
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 use iroh::protocol;
 use tokio::sync::mpsc;
 mod app_id;

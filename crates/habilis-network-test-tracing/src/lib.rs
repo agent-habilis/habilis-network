@@ -29,6 +29,8 @@
 //! tracing::info!("an INFO event does not fail the test");
 //! ```
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 mod guard;
 
 pub use guard::{

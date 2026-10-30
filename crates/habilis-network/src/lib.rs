@@ -6,6 +6,8 @@
 //! (`publish = false`); a consumer crate depends on it and re-exports
 //! the curated public surface.
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 // ── Role-based public facade ──────────────────────────────────────────────
 //
 // The modules below are grouped by what a consumer needs, not by the engine's

@@ -12,6 +12,8 @@
 //! need no QUIC stack, and pulling `iroh` proper in here would put one in the
 //! browser's dependency graph for the sake of two type names.
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 use anyhow::{Context as _, Result, bail, ensure};
 use habilis_network_iroh_webrtc_transport::iroh_base::{EndpointId, RelayUrl};
 use serde::{Deserialize, Serialize};

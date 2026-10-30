@@ -4,6 +4,8 @@
 //! Built in steps. Step 2 is the frame codec. Step 3 is the transport itself,
 //! over a sink that the caller attaches after the endpoint exists.
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 mod address;
 mod budget;
 mod counters;

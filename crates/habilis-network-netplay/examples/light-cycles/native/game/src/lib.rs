@@ -5,6 +5,8 @@
 //! binary-only crate, an integration test would have no way to reach any
 //! of this at all.
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 pub mod app;
 pub mod grid;
 pub mod round;

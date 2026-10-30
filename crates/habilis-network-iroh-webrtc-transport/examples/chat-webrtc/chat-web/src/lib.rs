@@ -27,6 +27,8 @@
 //! registering with one relay server fight over the registration, and ICE never
 //! completes.
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;

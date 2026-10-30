@@ -2,6 +2,8 @@
 //! runtime files live, the clock, the log sink, process introspection, the
 //! build stamp.
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 pub mod bounded_fifo_set;
 pub mod bounded_queue;
 // Gated with its only caller, the engine's IPC listener: line framing over a

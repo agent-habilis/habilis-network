@@ -33,6 +33,8 @@
 //! assert!(doc.to_json().is_object());
 //! ```
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 pub mod wire;
 
 mod doc_error;

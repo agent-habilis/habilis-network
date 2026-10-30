@@ -48,6 +48,8 @@
 //! failure. [`SyncTestSession`] turns that into a unit test: it re-simulates
 //! every frame and compares state checksums. Use it.
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 #[cfg(test)]
 mod test_game;
 

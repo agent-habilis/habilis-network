@@ -24,6 +24,8 @@
 //! }
 //! ```
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 pub mod ffi;
 pub(crate) mod mesh;
 pub(crate) mod streams;

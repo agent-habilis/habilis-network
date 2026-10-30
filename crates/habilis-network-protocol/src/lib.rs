@@ -8,6 +8,8 @@
 //! into the engine's file layout, which then could not be rearranged without
 //! churning every one of them.
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 mod author_key;
 pub mod base58_error;
 pub use base58_error as base58check;
