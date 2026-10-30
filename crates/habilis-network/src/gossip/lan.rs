@@ -59,6 +59,7 @@ async fn ask(address: EndpointAddr, state: &mut EventLoopState, context: &Handle
 
 #[cfg(test)]
 mod tests {
+    use crate::daemon::state::RendezvousFlag;
     use std::time::Duration;
 
     use iroh::{EndpointAddr, SecretKey};
@@ -281,7 +282,9 @@ mod tests {
             let node = LaneNode::start().await;
             let context = node.context();
             let mut state = node.state();
-            state.hosts_rendezvous = true;
+            state
+                .rendezvous_flags
+                .insert(RendezvousFlag::HostsRendezvous);
             let far = Instant::now() + Duration::from_hours(1);
             state.next_rival_recheck = Some(far);
 
@@ -306,7 +309,9 @@ mod tests {
             let node = LaneNode::start().await;
             let context = node.context();
             let mut state = node.state();
-            state.hosts_rendezvous = true;
+            state
+                .rendezvous_flags
+                .insert(RendezvousFlag::HostsRendezvous);
             let far = Instant::now() + Duration::from_hours(1);
             state.next_rival_recheck = Some(far);
             let address = member(1);

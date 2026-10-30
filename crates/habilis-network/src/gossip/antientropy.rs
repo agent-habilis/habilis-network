@@ -1090,7 +1090,7 @@ mod budget_tests {
 
 #[cfg(test)]
 mod tests {
-    use crate::daemon::state::Standing;
+    use crate::daemon::state::{RendezvousFlag, Standing};
     use std::collections::HashSet;
 
     use super::{
@@ -1267,7 +1267,7 @@ mod tests {
     fn rendezvous_only() -> EventLoopState {
         let mut state = fresh_state();
         state.standing.remove(&Standing::Meshed);
-        state.rendezvous_linked = true;
+        state.rendezvous_flags.insert(RendezvousFlag::Linked);
         state
     }
 
@@ -1391,13 +1391,13 @@ mod tests {
         };
         let mut state = fresh_state();
         state.standing.remove(&Standing::Meshed);
-        state.rendezvous_linked = false;
+        state.rendezvous_flags.remove(&RendezvousFlag::Linked);
         assert!(
             state_digest(&state, origin, Channel::Meta).is_none(),
             "no neighbor: nobody to advertise to"
         );
 
-        state.rendezvous_linked = true;
+        state.rendezvous_flags.insert(RendezvousFlag::Linked);
         assert!(
             state_digest(&state, origin, Channel::Meta).is_some(),
             "a rendezvous-only link carries the digest"
@@ -1409,7 +1409,7 @@ mod tests {
             "degraded: the relay link is no proof the overlay is alive"
         );
 
-        state.rendezvous_linked = false;
+        state.rendezvous_flags.remove(&RendezvousFlag::Linked);
         state.standing.insert(Standing::Meshed);
         state.standing.remove(&Standing::Degraded);
         assert!(

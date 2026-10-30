@@ -3,6 +3,7 @@
 use super::offer::Offer;
 use super::{lane_needs, offer};
 use crate::daemon::handler_ctx::HandlerCtx;
+use crate::daemon::state::RendezvousFlag;
 
 use habilis_network_iroh_webrtc_transport::WebRtcHandle;
 use iroh::address_lookup::memory::MemoryLookup;
@@ -63,7 +64,7 @@ pub(crate) fn negotiate_rendezvous_session(
         // session once the link is down. The other is a joiner whose links to
         // members came up before its graft to the rendezvous landed. Either
         // would hold one of the beacon's slots for ever.
-        if !state.rendezvous_linked
+        if !state.rendezvous_flags.contains(&RendezvousFlag::Linked)
             && let Some(handle) = state.webrtc.as_ref()
             && handle.detach(&context.rendezvous_id)
         {
@@ -71,7 +72,9 @@ pub(crate) fn negotiate_rendezvous_session(
         }
         return;
     }
-    if state.relay_transport.relay_allowed() || state.rendezvous_linked {
+    if state.relay_transport.relay_allowed()
+        || state.rendezvous_flags.contains(&RendezvousFlag::Linked)
+    {
         return;
     }
     let Some(handle) = state.webrtc.clone() else {
@@ -135,7 +138,7 @@ pub(crate) fn offer_rendezvous_on_path_loss(
 ) {
     if !state.rendezvous_wanted()
         || state.relay_transport.relay_allowed()
-        || !state.rendezvous_linked
+        || !state.rendezvous_flags.contains(&RendezvousFlag::Linked)
     {
         return;
     }

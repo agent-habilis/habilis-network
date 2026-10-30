@@ -10,7 +10,7 @@
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::daemon::state::TestHold;
-use crate::daemon::state::{BeaconNote, Standing};
+use crate::daemon::state::{BeaconNote, RendezvousFlag, Standing};
 #[cfg(feature = "multihop")]
 use crate::protocol;
 #[cfg(feature = "host")]
@@ -952,7 +952,15 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         // Whether this process hosts the beacon is read here, once per turn,
         // from the one place that owns it, so that no path that claims or sheds
         // the beacon has to remember to say so.
-        state.hosts_rendezvous = rendezvous.is_some();
+        if rendezvous.is_some() {
+            state
+                .rendezvous_flags
+                .insert(RendezvousFlag::HostsRendezvous);
+        } else {
+            state
+                .rendezvous_flags
+                .remove(&RendezvousFlag::HostsRendezvous);
+        }
         // A member that links to our beacon and that we do not know is a sign of another group.
         if let Some(held) = rendezvous.as_mut() {
             for arrived in held.take_arrivals() {
@@ -963,8 +971,15 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         }
         // Said in our `PeerInfo` from here, for the same reason: no claim or shed path has to
         // remember to send it again.
-        if state.hosts_rendezvous != state.beacon_notes.contains(&BeaconNote::FlagFlooded) {
-            if state.hosts_rendezvous {
+        if state
+            .rendezvous_flags
+            .contains(&RendezvousFlag::HostsRendezvous)
+            != state.beacon_notes.contains(&BeaconNote::FlagFlooded)
+        {
+            if state
+                .rendezvous_flags
+                .contains(&RendezvousFlag::HostsRendezvous)
+            {
                 state.beacon_notes.insert(BeaconNote::FlagFlooded);
             } else {
                 state.beacon_notes.remove(&BeaconNote::FlagFlooded);

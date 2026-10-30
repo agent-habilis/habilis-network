@@ -4,7 +4,7 @@
 //! Split out of `event_loop` for the same reason as `cohost_arm` — this is
 //! recovery, not the loop, and it reads better without the tick arms around it.
 
-use crate::daemon::state::Standing;
+use crate::daemon::state::{RendezvousFlag, Standing};
 use std::mem;
 mod gossip_link;
 mod resubscribe;
@@ -92,7 +92,7 @@ pub(super) async fn run_heal(
         // re-arms the regular tick's probe until a fresh NeighborUp. Every link
         // is stale too, so a node that had let go of the rendezvous is owed
         // one return to it.
-        state.rendezvous_linked = false;
+        state.rendezvous_flags.remove(&RendezvousFlag::Linked);
         state.owe_rendezvous_return(Instant::now());
         // A free reading taken before the freeze is stale for the same
         // reason, across the widest gap any of these deadlines can span.
@@ -112,7 +112,7 @@ pub(super) async fn run_heal(
         if webrtc::rendezvous::rendezvous_graftable(state) {
             gossip::heal::tick_heal_hard(context.endpoint, params.id, context.sender).await;
         }
-    } else if state.rendezvous_linked {
+    } else if state.rendezvous_flags.contains(&RendezvousFlag::Linked) {
         // A live rendezvous link has nothing to heal — and healing it
         // anyway is what flapped it once per tick (both heal legs dial
         // `GOSSIP_ALPN`, which the beacon's gossip adopts, superseding
@@ -187,7 +187,7 @@ pub(super) async fn resubscribe_tick(
             state.standing.insert(Standing::GossipOpen);
             // The dead subscription's link view is void; the fresh one
             // emits its own NeighborUps (and re-arms the probe gate).
-            state.rendezvous_linked = false;
+            state.rendezvous_flags.remove(&RendezvousFlag::Linked);
             let context = env.parts.handler_ctx(link.sender);
             gossip::drain_queued(&mut dead_receiver, state, app, &context).await;
             // Nothing in the normal path: the guard for a splitter that ended early.

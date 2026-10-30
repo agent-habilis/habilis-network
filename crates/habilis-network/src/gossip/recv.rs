@@ -6,7 +6,7 @@
 //! layer never touches the peer roster directly — it calls into
 //! `lifecycle::observe` and dispatches by kind.
 
-use crate::daemon::state::Standing;
+use crate::daemon::state::{RendezvousFlag, Standing};
 use std::ops::ControlFlow;
 
 use bytes::Bytes;
@@ -202,9 +202,10 @@ pub(crate) async fn handle_gossip_event(
                 }
             }
             if arms_reclaim(
-                is_rendezvous && !state.rendezvous_released,
+                is_rendezvous && !state.rendezvous_flags.contains(&RendezvousFlag::Released),
                 state.linked_endpoints.len(),
-                !state.rendezvous_linked && state.rendezvous_wanted(),
+                !state.rendezvous_flags.contains(&RendezvousFlag::Linked)
+                    && state.rendezvous_wanted(),
             ) {
                 state.arm_reclaim(Instant::now());
                 tracing::info!(target: "habilis_network::gossip",
@@ -267,11 +268,11 @@ fn rendezvous_neighbor_down(
     context: &HandlerCtx<'_>,
     node_id: iroh::EndpointId,
 ) {
-    state.rendezvous_linked = false;
+    state.rendezvous_flags.remove(&RendezvousFlag::Linked);
     // The holder is gone, so the identity is up for arbitration
     // again and any earlier reading of it is spent.
     state.forget_rendezvous_verdict();
-    if state.rendezvous_released {
+    if state.rendezvous_flags.contains(&RendezvousFlag::Released) {
         return;
     }
     // The holder is gone, so a round that is still dialling it is moot, and its slot would refuse
@@ -2224,7 +2225,7 @@ mod evicted_orphan_tests {
 
 #[cfg(test)]
 mod first_contact_tests {
-    use crate::daemon::state::Standing;
+    use crate::daemon::state::{RendezvousFlag, Standing};
     use crate::transport::UdpTransport;
     use iroh::endpoint::presets;
     use iroh_gossip::api::Event;
@@ -2633,11 +2634,11 @@ mod first_contact_tests {
             )
             .await;
             assert!(
-                state.rendezvous_linked,
+                state.rendezvous_flags.contains(&RendezvousFlag::Linked),
                 "the rendezvous is marked linked after the release"
             );
             assert!(
-                !state.rendezvous_released,
+                !state.rendezvous_flags.contains(&RendezvousFlag::Released),
                 "below the count: still a visitor"
             );
             for seed in 1..=3 {
@@ -2645,11 +2646,11 @@ mod first_contact_tests {
             }
 
             assert!(
-                state.rendezvous_released,
+                state.rendezvous_flags.contains(&RendezvousFlag::Released),
                 "gossip was told to leave, so the release is marked"
             );
             assert!(
-                state.rendezvous_linked,
+                state.rendezvous_flags.contains(&RendezvousFlag::Linked),
                 "gossip ends the link, and the NeighborDown clears this"
             );
             node.endpoint.close().await;
@@ -2676,7 +2677,7 @@ mod first_contact_tests {
             }
             // Released, as `mark_rendezvous_released` marks it when gossip is told
             // to leave the rendezvous.
-            state.rendezvous_released = true;
+            state.rendezvous_flags.insert(RendezvousFlag::Released);
 
             feed(
                 Event::NeighborDown(context.rendezvous_id),
@@ -2686,7 +2687,7 @@ mod first_contact_tests {
             .await;
 
             assert!(
-                !state.rendezvous_linked,
+                !state.rendezvous_flags.contains(&RendezvousFlag::Linked),
                 "the neighbor down after a release leaves the rendezvous unlinked"
             );
             assert!(state.reclaim_until.is_none(), "no loss, no reclaim");
@@ -2788,7 +2789,7 @@ mod first_contact_tests {
             let context = node.context();
             let mut state = fresh_state();
             state.rendezvous_release_links = 1;
-            state.rendezvous_released = true;
+            state.rendezvous_flags.insert(RendezvousFlag::Released);
             state.owe_rendezvous_return(clock::Instant::now());
 
             feed(
@@ -2799,11 +2800,11 @@ mod first_contact_tests {
             .await;
 
             assert!(
-                state.rendezvous_linked,
+                state.rendezvous_flags.contains(&RendezvousFlag::Linked),
                 "the link coming back restores the rendezvous link"
             );
             assert!(
-                !state.rendezvous_released,
+                !state.rendezvous_flags.contains(&RendezvousFlag::Released),
                 "the link coming back clears the released mark"
             );
             assert!(
@@ -3331,7 +3332,7 @@ mod first_contact_tests {
             state.webrtc = Some(lookup::build_webrtc_handle(node.endpoint.id()));
             state.relay_transport = PayloadPath::DirectOnly;
             state.local_udp_transport = UdpTransport::Present;
-            state.rendezvous_linked = true;
+            state.rendezvous_flags.insert(RendezvousFlag::Linked);
 
             handle_gossip_event(
                 Some(Ok(Event::NeighborDown(context.rendezvous_id))),

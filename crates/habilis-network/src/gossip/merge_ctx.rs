@@ -5,7 +5,7 @@
 //! carries the generic transport primitives the app rides. Inbound dispatch
 //! lives in [`super::recv`].
 
-use crate::daemon::state::{Latch, Standing};
+use crate::daemon::state::{Latch, RendezvousFlag, Standing};
 use std::fmt;
 
 use crate::transport::MeshSender;
@@ -568,7 +568,13 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &Ha
             proven_endpoints::sign(context.endpoint.secret_key(), context.mesh, &author_key)
         })
         .clone();
-    let addr_json = peer_info_json(&our_addr, proof, state.hosts_rendezvous);
+    let addr_json = peer_info_json(
+        &our_addr,
+        proof,
+        state
+            .rendezvous_flags
+            .contains(&RendezvousFlag::HostsRendezvous),
+    );
     let addr_data = serde_json::to_string(&addr_json)
         .expect("endpoint_addr_to_json produces a Value that always serializes");
     let addr_body =

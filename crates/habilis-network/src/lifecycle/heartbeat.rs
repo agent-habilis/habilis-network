@@ -2,6 +2,7 @@
 //! that evicts peers we've stopped hearing from. Part of the
 //! lifecycle subsystem (it drives `peer_timeout` / the roster).
 
+use crate::daemon::state::RendezvousFlag;
 use crate::transport::MeshSender;
 
 use crate::daemon::state::EventLoopState;
@@ -67,7 +68,7 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
                 // node that let go of the rendezvous owes it one return. A node
                 // that still holds the link owes nothing: it would be owed
                 // after the next release, and make the node grab it again.
-                if !state.rendezvous_linked {
+                if !state.rendezvous_flags.contains(&RendezvousFlag::Linked) {
                     state.owe_rendezvous_return(now);
                 }
                 state.quiet.insert(nick.clone());
@@ -119,6 +120,7 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
 
 #[cfg(test)]
 mod tests {
+    use crate::daemon::state::RendezvousFlag;
     use crate::testing::{fresh_state, nick};
     use std::collections::HashSet;
 
@@ -190,7 +192,7 @@ mod tests {
         let mut state = fresh_state();
         state.rendezvous_release_links = 1;
         state.linked_endpoints.insert(testing::endpoint_id(1));
-        state.rendezvous_linked = true;
+        state.rendezvous_flags.insert(RendezvousFlag::Linked);
         let expired_at = Instant::now()
             .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
             .unwrap();

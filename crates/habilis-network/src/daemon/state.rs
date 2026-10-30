@@ -12,6 +12,7 @@ mod direct_state;
 #[cfg(feature = "multihop")]
 mod parked_link_states;
 mod reach;
+mod rendezvous_flag;
 mod rival_flag;
 mod roster_entry;
 mod roster_snapshot;
@@ -43,6 +44,7 @@ pub(crate) use direct_state::DirectState;
 #[cfg(feature = "multihop")]
 pub(crate) use parked_link_states::ParkedLinkStates;
 pub use reach::Reach;
+pub(crate) use rendezvous_flag::RendezvousFlag;
 pub(crate) use rival_flag::RivalFlag;
 pub use roster_entry::RosterEntry;
 pub use roster_snapshot::RosterSnapshot;
@@ -78,7 +80,7 @@ mod tests {
         DirectCounts, DirectState, Duration, EndpointId, EventLoopState, PingRound, Reach,
         RivalFlag,
     };
-    use crate::daemon::state::{BeaconNote, Standing};
+    use crate::daemon::state::{BeaconNote, RendezvousFlag, Standing};
     use crate::protocol::{
         AppFrameParams, AuthorKey, ContentHash, MeshId, Message, MessageBody, MessageId, UnixSecs,
     };
@@ -111,7 +113,9 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = lower_and_higher();
         let mut state = fresh_state();
-        state.hosts_rendezvous = true;
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
         let now = Instant::now();
 
         state.note_rival_beacon_flag(
@@ -143,7 +147,9 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = lower_and_higher();
         let mut state = fresh_state();
-        state.hosts_rendezvous = true;
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
         state.rival_recheck_rounds = 2;
         state.rival_recheck_deferrals = 1;
         let now = Instant::now();
@@ -184,7 +190,9 @@ mod tests {
     fn a_sign_of_a_second_group_brings_the_re_check_to_the_brisk_base() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.hosts_rendezvous = true;
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
         state.rival_recheck_rounds = 7;
         let now = Instant::now();
         state.next_rival_recheck = Some(now + Duration::from_hours(1));
@@ -204,7 +212,9 @@ mod tests {
     fn a_second_sign_inside_one_steady_interval_changes_nothing() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.hosts_rendezvous = true;
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
         let now = Instant::now();
         let far = now + Duration::from_hours(1);
         state.next_rival_recheck = Some(far);
@@ -251,7 +261,9 @@ mod tests {
     fn a_sign_arms_no_re_check_where_none_applies() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.hosts_rendezvous = true;
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
         state.next_rival_recheck = None;
 
         state.note_second_group_sign(endpoint_id(1), Instant::now());
@@ -266,7 +278,9 @@ mod tests {
     fn a_sign_does_not_push_out_a_re_check_that_is_due_sooner() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        state.hosts_rendezvous = true;
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
         state.rival_recheck_rounds = 4;
         let now = Instant::now();
         let soon = now + Duration::from_secs(1);
@@ -295,7 +309,9 @@ mod tests {
         let now = Instant::now();
 
         let mut no_flag = fresh_state();
-        no_flag.hosts_rendezvous = true;
+        no_flag
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
         no_flag.note_rival_beacon_flag(
             high,
             signer,
@@ -308,7 +324,9 @@ mod tests {
         );
 
         let mut unproven = fresh_state();
-        unproven.hosts_rendezvous = true;
+        unproven
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
         unproven.note_rival_beacon_flag(
             high,
             signer,
@@ -321,7 +339,9 @@ mod tests {
         );
 
         let mut ourselves = fresh_state();
-        ourselves.hosts_rendezvous = true;
+        ourselves
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
         ourselves.note_rival_beacon_flag(
             high,
             signer,
@@ -444,7 +464,7 @@ mod tests {
         let mut linked = fresh_state();
         linked.rendezvous_release_links = 1;
         linked.linked_endpoints.insert(endpoint_id(1));
-        linked.rendezvous_linked = true;
+        linked.rendezvous_flags.insert(RendezvousFlag::Linked);
         linked.note_holder_outside_mesh(Instant::now());
         assert!(
             linked.rendezvous_comeback_until.is_none(),
@@ -454,7 +474,8 @@ mod tests {
         let mut host = fresh_state();
         host.rendezvous_release_links = 1;
         host.linked_endpoints.insert(endpoint_id(1));
-        host.hosts_rendezvous = true;
+        host.rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
         host.note_holder_outside_mesh(Instant::now());
         assert!(host.rendezvous_comeback_until.is_none(), "it hosts it");
 
@@ -532,7 +553,9 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = lower_and_higher();
         let mut state = fresh_state();
-        state.hosts_rendezvous = true;
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
         let first = Instant::now();
 
         state.note_rival_beacon_flag(
@@ -571,7 +594,9 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = lower_and_higher();
         let mut state = fresh_state();
-        state.hosts_rendezvous = true;
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
         let now = Instant::now();
         let far = now + Duration::from_secs(100_000);
         state.next_rival_recheck = Some(far);
@@ -882,7 +907,7 @@ mod tests {
     fn a_node_below_the_release_count_wants_the_rendezvous() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
-        state.rendezvous_linked = true;
+        state.rendezvous_flags.insert(RendezvousFlag::Linked);
         state.linked_endpoints.insert(endpoint_id(1));
         assert!(
             state.rendezvous_wanted(),
@@ -898,7 +923,7 @@ mod tests {
     fn a_node_at_the_release_count_lets_go_and_stops_wanting_it() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
-        state.rendezvous_linked = true;
+        state.rendezvous_flags.insert(RendezvousFlag::Linked);
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
         assert!(
@@ -906,7 +931,7 @@ mod tests {
             "a node at the release count lets go of the rendezvous"
         );
 
-        state.rendezvous_linked = false;
+        state.rendezvous_flags.remove(&RendezvousFlag::Linked);
         assert!(
             !state.rendezvous_wanted(),
             "enough links: no graft, no offer"
@@ -924,7 +949,7 @@ mod tests {
     fn a_node_that_has_released_is_not_due_again_while_the_link_is_still_up() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
-        state.rendezvous_linked = true;
+        state.rendezvous_flags.insert(RendezvousFlag::Linked);
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
         assert!(
@@ -947,11 +972,11 @@ mod tests {
     fn a_node_that_let_go_wants_the_rendezvous_again_when_its_return_falls_due() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
-        state.rendezvous_linked = true;
+        state.rendezvous_flags.insert(RendezvousFlag::Linked);
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
         state.mark_rendezvous_released(endpoint_id(9));
-        state.rendezvous_linked = false;
+        state.rendezvous_flags.remove(&RendezvousFlag::Linked);
         assert!(
             !state.rendezvous_wanted(),
             "it let go a moment ago: no visit yet"
@@ -1122,8 +1147,10 @@ mod tests {
     fn the_node_that_hosts_the_rendezvous_keeps_its_link() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = two_link_node();
-        state.hosts_rendezvous = true;
-        state.rendezvous_linked = true;
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        state.rendezvous_flags.insert(RendezvousFlag::Linked);
         for seed in 1..=5 {
             state.linked_endpoints.insert(endpoint_id(seed));
         }
@@ -1182,7 +1209,7 @@ mod tests {
         let now = Instant::now();
         state.note_rendezvous_link_up(now);
         assert!(
-            state.rendezvous_linked,
+            state.rendezvous_flags.contains(&RendezvousFlag::Linked),
             "the rendezvous link stays up after the return"
         );
         assert!(
@@ -1609,10 +1636,10 @@ mod tests {
             beacon.expect("beacon in roster").reach
         };
 
-        state.rendezvous_linked = true;
+        state.rendezvous_flags.insert(RendezvousFlag::Linked);
         assert_eq!(reach(&state), Reach::Direct, "linked rendezvous → direct");
 
-        state.rendezvous_linked = false;
+        state.rendezvous_flags.remove(&RendezvousFlag::Linked);
         assert_eq!(reach(&state), Reach::Gossip, "rendezvous down → gossip");
     }
 

@@ -6,7 +6,7 @@ use super::TestDrop;
 use super::TestHold;
 use super::{
     BeaconNote, DirectCounts, DirectState, IdleCounters, Latch, MeshSecrets, PingRound, Reach,
-    RivalFlag, RosterEntry, RosterSnapshot, Standing, StateInit,
+    RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot, Standing, StateInit,
 };
 use crate::daemon::cohost_arm;
 use crate::daemon::doc::MeshDoc;
@@ -281,19 +281,8 @@ pub struct EventLoopState {
     pub(crate) joined_at: UnixSecs,
     /// The steps this member has reached on its way into the mesh.
     pub(crate) standing: BTreeSet<Standing>,
-    /// Whether the gossip overlay currently links us to the co-hosted
-    /// rendezvous (its `NeighborUp`/`NeighborDown` arms drive it). Gates
-    /// the healer's connect-probe: probing the rendezvous while a live
-    /// link exists makes the beacon's gossip *adopt* the probe
-    /// connection and then mark the peer down when the probe handle
-    /// drops — one rendezvous-link flap per heal tick, forever (the
-    /// 2026-05-30 soak's residual flap).
-    pub(crate) rendezvous_linked: bool,
-    /// Whether we let go of the rendezvous link on purpose (see
-    /// [`Self::should_release_rendezvous`]). The `NeighborDown` that follows
-    /// is then no loss, so nothing re-grafts it or arms a reclaim for it.
-    /// Cleared when the link comes back.
-    pub(crate) rendezvous_released: bool,
+    /// The rendezvous facts this node holds, see [`RendezvousFlag`].
+    pub(crate) rendezvous_flags: BTreeSet<RendezvousFlag>,
     /// When a node that let go of the rendezvous on purpose wants it again, although it holds
     /// links enough: one period after the release, plus a share from its id. A mesh that split
     /// into islands, each with links enough, has no other reason to visit the rendezvous, which
@@ -311,13 +300,6 @@ pub struct EventLoopState {
     /// A node that came back to the rendezvous does not let go before this
     /// instant, so that the beacon can introduce it to the other island.
     pub(crate) rendezvous_dwell_until: Option<Instant>,
-    /// This process co-hosts the rendezvous. Its own link to it keeps the
-    /// beacon's gossip view non-empty, which is what lets a joiner be
-    /// introduced to the mesh: if the host let go as well, a joiner arriving
-    /// after the early members had released would find an empty view and the
-    /// mesh would split into islands (the 18-node test shows it). So this
-    /// node never releases the link.
-    pub(crate) hosts_rendezvous: bool,
     /// The notes this member keeps about its own beacon claim.
     pub(crate) beacon_notes: BTreeSet<BeaconNote>,
     /// The members that said in their `PeerInfo` that they hold the rendezvous, by the signing
@@ -652,12 +634,10 @@ impl EventLoopState {
             last_sent_at: now,
             joined_at: UnixSecs::now(),
             standing: BTreeSet::from([Standing::GossipOpen]),
-            rendezvous_linked: false,
-            rendezvous_released: false,
+            rendezvous_flags: BTreeSet::new(),
             rendezvous_return_due: None,
             rendezvous_comeback_until: None,
             rendezvous_dwell_until: None,
-            hosts_rendezvous: false,
             beacon_notes: BTreeSet::new(),
             rival_holders: HashMap::new(),
             rendezvous_release_links: tuning::RENDEZVOUS_RELEASE_LINKS,
@@ -787,9 +767,10 @@ impl EventLoopState {
     /// whose link dropped) reads `Gossip` and flips to `Direct` once its next
     /// advertisement lands.
     fn reach_of(&self, nick: &Nickname) -> Reach {
-        let linked = self.peer_endpoints.get(nick).is_some_and(|endpoint| {
+        let linked: bool = self.peer_endpoints.get(nick).is_some_and(|endpoint| {
             self.linked_endpoints.contains(&endpoint.id)
-                || (self.rendezvous_id == Some(endpoint.id) && self.rendezvous_linked)
+                || (self.rendezvous_id == Some(endpoint.id)
+                    && self.rendezvous_flags.contains(&RendezvousFlag::Linked))
         });
         if linked { Reach::Direct } else { Reach::Gossip }
     }
@@ -1122,7 +1103,10 @@ impl EventLoopState {
             return;
         }
         let newly = self.rival_holders.insert(signer, sender) != Some(sender);
-        if !self.hosts_rendezvous {
+        if !self
+            .rendezvous_flags
+            .contains(&RendezvousFlag::HostsRendezvous)
+        {
             return;
         }
         if (beacon::Contest { own, rival: sender }).own_yields() {
@@ -1154,7 +1138,10 @@ impl EventLoopState {
     /// its long wait. A sign counts once per steady interval: a burst of arrivals must not shed
     /// the beacon again and again.
     pub(crate) fn note_second_group_sign(&mut self, own: EndpointId, now: Instant) {
-        let Some(due) = self.next_rival_recheck.filter(|_| self.hosts_rendezvous) else {
+        let Some(due) = self.next_rival_recheck.filter(|_| {
+            self.rendezvous_flags
+                .contains(&RendezvousFlag::HostsRendezvous)
+        }) else {
             return;
         };
         let spacing = tuning::rival_recheck_meshed();
@@ -1203,7 +1190,8 @@ impl EventLoopState {
     /// others, while a return is owed, and always on the node that hosts it.
     /// Every graft and offer to the rendezvous is gated on this one answer.
     pub(crate) fn rendezvous_wanted(&self) -> bool {
-        self.hosts_rendezvous
+        self.rendezvous_flags
+            .contains(&RendezvousFlag::HostsRendezvous)
             || self
                 .rendezvous_comeback_until
                 .is_some_and(|until| Instant::now() < until)
@@ -1221,7 +1209,10 @@ impl EventLoopState {
     /// Owing makes [`Self::rendezvous_wanted`] true, so the next read owes nothing more: the debt
     /// is paid by the link, or it runs out after its window and the next read owes it once again.
     pub(crate) fn note_holder_outside_mesh(&mut self, now: Instant) {
-        if self.rendezvous_linked || self.rendezvous_wanted() || self.rival_holder_known() {
+        if self.rendezvous_flags.contains(&RendezvousFlag::Linked)
+            || self.rendezvous_wanted()
+            || self.rival_holder_known()
+        {
             return;
         }
         tracing::info!(
@@ -1262,8 +1253,8 @@ impl EventLoopState {
     /// The rendezvous link came up. If a return was owed, it is paid, and the
     /// visit lasts its dwell time at least.
     pub(crate) fn note_rendezvous_link_up(&mut self, now: Instant) {
-        self.rendezvous_linked = true;
-        self.rendezvous_released = false;
+        self.rendezvous_flags.insert(RendezvousFlag::Linked);
+        self.rendezvous_flags.remove(&RendezvousFlag::Released);
         let periodic_visit = self
             .rendezvous_return_due
             .take()
@@ -1280,9 +1271,11 @@ impl EventLoopState {
     /// that came back to a mesh whose links are all up would otherwise wait for
     /// a link event that never comes.
     pub(crate) fn should_release_rendezvous(&self, now: Instant) -> bool {
-        self.rendezvous_linked
-            && !self.rendezvous_released
-            && !self.hosts_rendezvous
+        let flags = &self.rendezvous_flags;
+        let linked_alone = flags.contains(&RendezvousFlag::Linked)
+            && !flags.contains(&RendezvousFlag::Released)
+            && !flags.contains(&RendezvousFlag::HostsRendezvous);
+        linked_alone
             && self.linked_endpoints.len() >= self.rendezvous_release_links
             && self.rendezvous_dwell_until.is_none_or(|until| now >= until)
     }
@@ -1294,7 +1287,7 @@ impl EventLoopState {
     /// it marks the release at once, before the `NeighborDown` that follows is
     /// read, so that one reads as a choice.
     pub(crate) fn mark_rendezvous_released(&mut self, local: EndpointId) {
-        self.rendezvous_released = true;
+        self.rendezvous_flags.insert(RendezvousFlag::Released);
         self.rendezvous_return_due = Some(Instant::now() + super::rendezvous_return_after(local));
         tracing::info!(
             target: "habilis_network::gossip",
@@ -1460,7 +1453,8 @@ impl EventLoopState {
     /// relay link alone is no proof it recovered.
     pub(crate) fn overlay_reachable(&self) -> bool {
         self.standing.contains(&Standing::Meshed)
-            || (self.rendezvous_linked && !self.standing.contains(&Standing::Degraded))
+            || (self.rendezvous_flags.contains(&RendezvousFlag::Linked)
+                && !self.standing.contains(&Standing::Degraded))
     }
 
     /// Mark the mesh degraded: a fault path (starvation recovery, hard

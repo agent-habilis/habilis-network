@@ -8,7 +8,7 @@
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::daemon::state::TestHold;
-use crate::daemon::state::{BeaconNote, Standing};
+use crate::daemon::state::{BeaconNote, RendezvousFlag, Standing};
 use std::time::Duration;
 
 use iroh::{Endpoint, EndpointId};
@@ -189,7 +189,7 @@ pub(super) async fn maybe_cohost(
         } else {
             // A holder is known, so the ladder is not walked. If the link to it is lost, it may
             // have moved to another rung, and the book names the rung that was read last.
-            if !state.rendezvous_linked {
+            if !state.rendezvous_flags.contains(&RendezvousFlag::Linked) {
                 beacon::refresh_holder_rung(
                     arm.params,
                     context.endpoint,
@@ -312,8 +312,10 @@ pub(super) async fn maybe_reclaim(
             beacon::Held::NoRung => note_no_rung_free(state, context, arm.params.bind_ports.len()),
             beacon::Held::Idle => {}
         }
-        if regrafts_rendezvous(state.rendezvous_linked, state.rendezvous_wanted())
-            && webrtc::rendezvous::rendezvous_graftable(state)
+        if regrafts_rendezvous(
+            state.rendezvous_flags.contains(&RendezvousFlag::Linked),
+            state.rendezvous_wanted(),
+        ) && webrtc::rendezvous::rendezvous_graftable(state)
         {
             tracing::info!(
                 target: "habilis_network::gossip",
@@ -344,7 +346,7 @@ fn shed_beacon(
     state.cancel_rendezvous_round();
     state.address_book.remove_endpoint_info(params.id);
     super::setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
-    state.rendezvous_linked = false;
+    state.rendezvous_flags.remove(&RendezvousFlag::Linked);
     state.forget_rendezvous_verdict();
     state.arm_reclaim(Instant::now());
 }
@@ -622,7 +624,7 @@ pub(super) fn shed_rival_beacon_if_due(
     // Don't wait for that `NeighborDown` either — clear the link flag now
     // (mirroring the hard resume edge), or a yielding node's heal ticks
     // idle on "rendezvous linked" instead of grafting the rival's beacon.
-    state.rendezvous_linked = false;
+    state.rendezvous_flags.remove(&RendezvousFlag::Linked);
     // We just released the identity to re-probe it, so the reading that
     // stood before the release answers a question we have re-asked.
     state.forget_rendezvous_verdict();
