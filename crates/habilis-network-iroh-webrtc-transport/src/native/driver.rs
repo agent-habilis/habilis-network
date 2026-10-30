@@ -197,7 +197,28 @@ pub(crate) async fn drive_until_channel_ready(
                         opened = Some(id);
                     }
                 },
-                Output::Event(_) => {}
+                Output::Event(
+                    Event::Connected
+                    | Event::IceConnectionStateChange(_)
+                    | Event::MediaAdded(_)
+                    | Event::MediaData(_)
+                    | Event::MediaChanged(_)
+                    | Event::ChannelData(_)
+                    | Event::ChannelClose(_)
+                    | Event::ChannelBufferedAmountLow(_)
+                    | Event::PeerStats(_)
+                    | Event::MediaIngressStats(_)
+                    | Event::MediaEgressStats(_)
+                    | Event::EgressBitrateEstimate(_)
+                    | Event::KeyframeRequest(_)
+                    | Event::StreamPaused(_)
+                    | Event::SenderFeedback(_)
+                    | Event::RtpPacket(_)
+                    | Event::AppSpecificFeedback(_)
+                    | Event::Closed
+                    | Event::RawPacket(_)
+                    | _,
+                ) => {}
             }
         }
 
@@ -417,7 +438,29 @@ async fn pump_outputs(
             Output::Event(Event::IceConnectionStateChange(IceConnectionState::Disconnected)) => {
                 return Err(SessionEnd::Closed("ICE disconnected"));
             }
-            Output::Event(_) => {}
+            Output::Event(
+                Event::Connected
+                | Event::IceConnectionStateChange(_)
+                | Event::MediaAdded(_)
+                | Event::MediaData(_)
+                | Event::MediaChanged(_)
+                | Event::ChannelOpen(_, _)
+                | Event::ChannelData(_)
+                | Event::ChannelClose(_)
+                | Event::ChannelBufferedAmountLow(_)
+                | Event::PeerStats(_)
+                | Event::MediaIngressStats(_)
+                | Event::MediaEgressStats(_)
+                | Event::EgressBitrateEstimate(_)
+                | Event::KeyframeRequest(_)
+                | Event::StreamPaused(_)
+                | Event::SenderFeedback(_)
+                | Event::RtpPacket(_)
+                | Event::AppSpecificFeedback(_)
+                | Event::Closed
+                | Event::RawPacket(_)
+                | _,
+            ) => {}
         }
     }
 }
