@@ -124,7 +124,7 @@ pub(crate) fn detach_idle_sessions_at(
     state: &mut state::EventLoopState,
     now: clock::Instant,
 ) -> Vec<EndpointId> {
-    let Some(handle) = state.webrtc.clone() else {
+    let Some(handle) = &state.webrtc else {
         return Vec::new();
     };
     let window = tuning::DIRECT_IDLE_BACKSTOP;
