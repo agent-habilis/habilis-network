@@ -19,6 +19,8 @@ use crate::tui::truncate::Truncate;
 use crate::tui::tui_node::TuiNode;
 use crate::tui::width::{char_width, graphemes, string_width, truncate as truncate_text};
 use crate::view::Border;
+use std::iter::Enumerate;
+use std::slice;
 
 /// Order is top-left, top-right, bottom-left, bottom-right, horizontal,
 /// vertical.
@@ -134,7 +136,8 @@ pub(crate) fn paint_node(
 pub(crate) fn paint_text(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: Style) {
     let empty = Vec::new();
     let lines = node.lines.as_ref().unwrap_or(&empty);
-    for (i, raw_line) in lines.iter().enumerate() {
+    let indexed_lines: Enumerate<slice::Iter<'_, String>> = lines.iter().enumerate();
+    for (i, raw_line) in indexed_lines {
         let Ok(row) = i32::try_from(i) else { break };
         if row >= node.lh {
             break; // lines beyond node.lh are dropped, never clipped

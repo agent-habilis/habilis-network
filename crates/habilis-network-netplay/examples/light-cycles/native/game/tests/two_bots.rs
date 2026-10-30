@@ -181,7 +181,10 @@ fn two_bots_play_a_match_and_agree_on_its_outcome() {
 
             // A match that ends before it starts would satisfy every assertion
             // above vacuously, so pin down that one was actually simulated.
-            for seen in first_match.iter().flatten() {
+            for seen in &first_match {
+                let Some(seen) = seen else {
+                    continue;
+                };
                 assert!(
                     seen.tick > 5,
                     "the match decided at tick {} — too early to have been played",

@@ -15,6 +15,8 @@ use crate::tui::tui_node::TuiNode;
 use crate::tui::width::{string_width, wrap_text};
 use crate::tui::wrap::Wrap;
 use crate::view::{Align, Border, Direction, Justify};
+use std::iter::Enumerate;
+use std::slice;
 
 pub(crate) fn frame_of(node: &TuiNode) -> i32 {
     i32::from(node.border != Border::None)
@@ -274,7 +276,8 @@ pub(crate) fn arrange_children(
     }
     let mut position = (if row { cx } else { cy }) + offset;
 
-    for (i, &kid) in kids.iter().enumerate() {
+    let indexed_kids: Enumerate<slice::Iter<'_, NodeId>> = kids.iter().enumerate();
+    for (i, &kid) in indexed_kids {
         let main_size = main[i].max(0);
         if row {
             measure(arena, epoch, kid, main_size, ch);
@@ -335,7 +338,8 @@ pub(crate) fn distribute_flex(
 ) {
     let mut flexed = Vec::new();
     let mut handed = 0;
-    for (i, &kid) in kids.iter().enumerate() {
+    let indexed_kids: Enumerate<slice::Iter<'_, NodeId>> = kids.iter().enumerate();
+    for (i, &kid) in indexed_kids {
         let flex = arena.get(kid).flex;
         if flex == 0 {
             continue;
