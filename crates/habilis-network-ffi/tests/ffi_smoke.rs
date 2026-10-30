@@ -552,8 +552,10 @@ fn four_peers_converge(public: bool) {
 
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut counts = vec![0_i64; handles.len()];
+    let indexed_handles: Vec<(usize, &*mut HabilisNetworkMesh)> =
+        handles.iter().enumerate().collect();
     while Instant::now() < deadline {
-        for (index, &handle) in handles.iter().enumerate() {
+        for &(index, &handle) in &indexed_handles {
             // SAFETY: each handle came from habilis_network_mesh_open and is still open.
             counts[index] = unsafe { habilis_network_mesh_peer_count(handle) };
         }
