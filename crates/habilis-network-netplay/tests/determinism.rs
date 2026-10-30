@@ -81,7 +81,7 @@ impl Runner {
 
 /// Runs `frames` frames, returning the first error the session reports.
 fn run(runner: &mut Runner, frames: i32) -> Result<(), RollbackError> {
-    let mut session = SyncTestSession::<Game>::new(2, 4);
+    let mut session: SyncTestSession<Game> = SyncTestSession::new(2, 4);
     for frame in 0..frames {
         session.add_input(PlayerHandle::new(0), Input(frame % 3))?;
         session.add_input(PlayerHandle::new(1), Input(frame % 5))?;
@@ -119,7 +119,7 @@ fn a_nondeterministic_simulation_is_caught() {
 
 #[test]
 fn a_missing_input_is_reported_rather_than_silently_defaulted() {
-    let mut session = SyncTestSession::<Game>::new(2, 4);
+    let mut session: SyncTestSession<Game> = SyncTestSession::new(2, 4);
     session
         .add_input(PlayerHandle::new(0), Input(1))
         .expect("valid handle");
@@ -135,7 +135,7 @@ fn a_missing_input_is_reported_rather_than_silently_defaulted() {
 
 #[test]
 fn an_out_of_range_handle_is_rejected() {
-    let mut session = SyncTestSession::<Game>::new(2, 4);
+    let mut session: SyncTestSession<Game> = SyncTestSession::new(2, 4);
     assert!(
         matches!(
             session.add_input(PlayerHandle::new(7), Input(1)),

@@ -74,7 +74,7 @@ async fn spawn(topic: &str, nick: &str) -> Player {
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
 
-    let (driver, pending) = RollbackDriver::<Game>::new();
+    let (driver, pending): (RollbackDriver<Game>, _) = RollbackDriver::new();
     let node: Node<RollbackDriver<Game>> = Node::spawn(config, driver, None, SignalHandling::Leave);
     let transport = pending.connect(node.sender());
 

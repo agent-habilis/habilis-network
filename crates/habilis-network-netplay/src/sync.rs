@@ -259,7 +259,7 @@ mod tests {
 
     /// Two players, generous prediction window, no input delay.
     fn session() -> Sync<TestGame> {
-        Sync::<TestGame>::new(2, 8, 0, PlayerHandle::new(0))
+        Sync::new(2, 8, 0, PlayerHandle::new(0))
     }
 
     /// Advance one frame the way a real caller does.
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn the_prediction_limit_stops_the_caller_rather_than_guessing_further() {
         let _guard = ::habilis_network_test_tracing::init();
-        let mut sync = Sync::<TestGame>::new(2, 3, 0, PlayerHandle::new(0));
+        let mut sync: Sync<TestGame> = Sync::new(2, 3, 0, PlayerHandle::new(0));
         let mut runner = TestRunner::new();
 
         // Player 1 never sends anything, so nothing is ever confirmed.
@@ -420,7 +420,7 @@ mod tests {
     #[test]
     fn confirming_frames_reopens_the_prediction_window() {
         let _guard = ::habilis_network_test_tracing::init();
-        let mut sync = Sync::<TestGame>::new(2, 3, 0, PlayerHandle::new(0));
+        let mut sync: Sync<TestGame> = Sync::new(2, 3, 0, PlayerHandle::new(0));
         let mut runner = TestRunner::new();
 
         for _ in 0..3 {

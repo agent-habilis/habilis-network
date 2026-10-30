@@ -232,7 +232,8 @@ mod key_list {
     pub(super) fn deserialize<'de, Decoder: Deserializer<'de>>(
         deserializer: Decoder,
     ) -> Result<Vec<AuthorKey>, Decoder::Error> {
-        Vec::<String>::deserialize(deserializer)?
+        let texts: Vec<String> = Vec::deserialize(deserializer)?;
+        texts
             .iter()
             .map(|text| {
                 AuthorKey::decode_hex(text).ok_or_else(|| {
@@ -475,7 +476,7 @@ impl Lobby {
     /// Unparseable packets are ignored rather than reported: a peer running
     /// a different version is not something this peer can act on.
     pub fn on_message(&mut self, pubkey: &AuthorKey, raw: &str, now: Tick) {
-        let Ok(message) = serde_json::from_str::<LobbyMessage>(raw) else {
+        let Ok(message): Result<LobbyMessage, serde_json::Error> = serde_json::from_str(raw) else {
             return;
         };
         match message {
@@ -707,8 +708,8 @@ mod tests {
     fn the_old_start_literal_with_text_players_is_refused() {
         let _guard = ::habilis_network_test_tracing::init();
         let old = r#"{"Start":{"epoch":2,"session_id":12345,"players":["aaa","bbb"]}}"#;
-        let error =
-            serde_json::from_str::<LobbyMessage>(old).expect_err("players that are not keys");
+        let parsed: Result<LobbyMessage, serde_json::Error> = serde_json::from_str(old);
+        let error = parsed.expect_err("players that are not keys");
         assert!(
             error.to_string().contains("is not a lowercase hex key"),
             "{error}"

@@ -140,7 +140,8 @@ impl<T: Config> NodeApp for RollbackDriver<T> {
 
         match tag {
             ROLLBACK_TAG => {
-                if let Some(message) = decode::<Message<T::Input>>(frame.message.body.as_str())
+                let decoded: Option<Message<T::Input>> = decode(frame.message.body.as_str());
+                if let Some(message) = decoded
                     && let Ok(mut inbound) = self.mailboxes.inbound.lock()
                 {
                     inbound.push_back((pubkey, message));

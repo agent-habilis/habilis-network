@@ -537,17 +537,20 @@ mod tests {
     fn an_old_packet_with_the_minus_one_ack_frame_is_a_parse_error() {
         let _guard = ::habilis_network_test_tracing::init();
         let old = r#"{"magic":2882343476,"body":{"Input":{"start_frame":5,"ack_frame":-1,"inputs":[7]}}}"#;
-        let error = serde_json::from_str::<Message<test_game::TestInput>>(old)
-            .expect_err("a negative frame is refused");
+        let parsed: Result<Message<test_game::TestInput>, serde_json::Error> =
+            serde_json::from_str(old);
+        let error = parsed.expect_err("a negative frame is refused");
         assert!(error.to_string().contains("negative"), "{error}");
     }
 
     #[test]
     fn an_ack_frame_is_on_the_wire_only_when_there_is_one() {
         let _guard = ::habilis_network_test_tracing::init();
-        let packet = |ack_frame| Message::<test_game::TestInput> {
-            magic: 0xabcd_1234,
-            body: Body::InputAck { ack_frame },
+        let packet = |ack_frame| -> Message<test_game::TestInput> {
+            Message {
+                magic: 0xabcd_1234,
+                body: Body::InputAck { ack_frame },
+            }
         };
         let none = serde_json::to_string(&packet(None)).expect("serializes");
         assert_eq!(
@@ -571,7 +574,7 @@ mod tests {
     }
 
     fn syncing_peer() -> PeerProtocol<TestGame> {
-        PeerProtocol::<TestGame>::new("peer".to_owned(), PlayerHandle::new(1), 0xabcd_1234)
+        PeerProtocol::new("peer".to_owned(), PlayerHandle::new(1), 0xabcd_1234)
     }
 
     /// How many sync requests one tick produced.

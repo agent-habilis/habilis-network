@@ -305,7 +305,7 @@ mod tests {
     use crate::test_game::{TestGame, TestInput};
 
     fn queue() -> InputQueue<TestGame> {
-        InputQueue::<TestGame>::new()
+        InputQueue::new()
     }
 
     #[test]

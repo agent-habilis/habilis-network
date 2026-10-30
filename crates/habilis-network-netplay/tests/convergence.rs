@@ -77,7 +77,7 @@ proptest! {
 #[test]
 fn a_long_run_stays_stable() {
     let script: Vec<(i32, i32)> = (0..400).map(|frame| (frame % 7, frame % 11)).collect();
-    let mut session = SyncTestSession::<Game>::new(2, 6);
+    let mut session: SyncTestSession<Game> = SyncTestSession::new(2, 6);
     let mut runner = Runner::new();
     for (left, right) in &script {
         session
@@ -112,7 +112,7 @@ fn a_long_run_stays_stable() {
 /// re-advance each frame being redone.
 #[test]
 fn a_rollback_loads_then_re_saves_and_re_advances() {
-    let mut session = SyncTestSession::<Game>::new(1, 2);
+    let mut session: SyncTestSession<Game> = SyncTestSession::new(1, 2);
     let mut runner = Runner::new();
     let mut seen = Vec::new();
     for frame in 0..6 {
