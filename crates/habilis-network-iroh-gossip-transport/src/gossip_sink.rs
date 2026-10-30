@@ -43,7 +43,8 @@ impl GossipSink {
     /// Start the task that sends on `sender`.
     #[must_use]
     pub fn spawn(sender: GossipSender) -> Self {
-        let (queue, mut frames) = mpsc::channel::<Bytes>(QUEUE);
+        let (queue, mut frames): (mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) =
+            mpsc::channel(QUEUE);
         // the sink's task and the handle both read the liveness flag
         let alive = Arc::new(AtomicBool::new(true));
         let task_alive = Arc::clone(&alive);

@@ -210,7 +210,8 @@ mod tests {
                 .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
                 .spawn();
             let connection = alice.connect(bob.addr(), ALPN).await.expect("connect");
-            let (callback_ran, watch_ended) = oneshot::channel::<()>();
+            let (callback_ran, watch_ended): (oneshot::Sender<()>, oneshot::Receiver<()>) =
+                oneshot::channel();
             // The task owns the callback, and the callback owns `callback_ran`: `watch_ended`
             // fails once the task has ended and dropped it without calling it.
             watch_recursion(&connection, CODE, move || {
