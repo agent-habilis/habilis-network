@@ -117,7 +117,9 @@ impl MessageId {
     /// The value is not a valid UUID.
     pub fn try_new(value: &str) -> Result<Self, IdError> {
         let value: String = value.to_owned();
-        Uuid::parse_str(&value).map_err(|_| IdError(value.clone()))?;
+        if Uuid::parse_str(&value).is_err() {
+            return Err(IdError(value));
+        }
         Ok(Self(value))
     }
 
