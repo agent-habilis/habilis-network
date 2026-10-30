@@ -151,7 +151,10 @@ impl Graph {
             if best.get(&node).is_some_and(|known| *known < cost) {
                 continue;
             }
-            for (next, edge) in self.adj.get(&node).into_iter().flatten() {
+            let Some(edges) = self.adj.get(&node) else {
+                continue;
+            };
+            for (next, edge) in edges {
                 if node == src && refused_first.contains(next) {
                     continue;
                 }
