@@ -157,7 +157,7 @@ where
             .await;
             return;
         }
-        Ok(_) => return,
+        Ok(Ok(LineRead::Eof) | _) => return,
         Err(_idle) => {
             tracing::debug!("IPC: connection sent nothing within the read deadline; closing");
             return;

@@ -49,10 +49,6 @@ pub(crate) fn compute(
     let after_goodbye = !is_left && state.sent_before_goodbye(author, timestamp);
     let returned = !after_goodbye && state.quiet.contains(author.as_str());
     let known = state.peers.contains(author.as_str());
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "foreign non_exhaustive enum: the compiler needs a wildcard arm; the named variants are listed before it"
-    )]
     let unseen = match kind {
         // A `Left` is explicit departure; durable state events never mark a
         // peer present either — anti-entropy backfill replays historical state
@@ -63,7 +59,18 @@ pub(crate) fn compute(
         }
         | MessageKind::State
         | MessageKind::Meta => false,
-        _ => !known,
+        MessageKind::App { .. }
+        | MessageKind::Presence {
+            subtype: PresenceSubtype::Alive | PresenceSubtype::Joined,
+        }
+        | MessageKind::PeerInfo
+        | MessageKind::Digest
+        | MessageKind::Ping
+        | MessageKind::Pong { .. }
+        | MessageKind::StateDigest
+        | MessageKind::MetaDigest
+        | MessageKind::LinkState
+        | _ => !known,
     };
     MembershipUpdate {
         returned,

@@ -227,10 +227,6 @@ impl Cell {
     }
 
     /// Whether the transport list lets `rung` carry payload.
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "Rung is a foreign non_exhaustive enum: the compiler needs its wildcard arm"
-    )]
     fn allows(self, rung: Rung) -> bool {
         let transport = match rung {
             Rung::Ip => Some(Transport::Udp),
@@ -238,7 +234,7 @@ impl Cell {
             Rung::Multihop => Some(Transport::Multihop),
             Rung::Gossip => Some(Transport::Gossip),
             Rung::Relay => Some(Transport::Relay),
-            _ => None,
+            Rung::Other | _ => None,
         };
         transport.is_some_and(|transport| self.has(transport))
     }
@@ -246,10 +242,6 @@ impl Cell {
     /// The rung of the ladder, as a pure function: the highest rung that the
     /// list allows and that the cell leaves available. `None`: no rung may carry
     /// payload, so the pair stays unlinked for it.
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "Rung is a foreign non_exhaustive enum: the compiler needs its wildcard arm"
-    )]
     fn expected(self) -> Option<Rung> {
         habilis_network_iroh_webrtc_transport::expected_rung(
             |rung| self.allows(rung),
@@ -259,7 +251,7 @@ impl Cell {
                 Rung::Multihop => self.blocked < Blocked::IpWebRtcMultihop,
                 Rung::Gossip => self.blocked < Blocked::IpWebRtcMultihopGossip,
                 Rung::Relay => true,
-                _ => false,
+                Rung::Other | _ => false,
             },
         )
     }

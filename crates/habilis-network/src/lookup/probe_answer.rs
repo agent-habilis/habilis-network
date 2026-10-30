@@ -110,7 +110,12 @@ fn answer_of_connect_error(error: &endpoint::ConnectError) -> ProbeAnswer {
             ..
         } => ProbeAnswer::Foreign,
         ConnectError::Connecting {
-            source: ConnectingError::HandshakeFailure { .. },
+            source:
+                ConnectingError::HandshakeFailure {
+                    source: AuthenticationError::NoAlpn { .. },
+                    ..
+                }
+                | ConnectingError::HandshakeFailure { .. },
             ..
         } => ProbeAnswer::Refused,
         ConnectError::Connect { .. }

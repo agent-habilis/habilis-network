@@ -101,15 +101,11 @@ static RENDEZVOUS_RELAY_LADDER_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| 
 ///
 /// assert_eq!(relay_ladder(&RelayChoice::Disabled).count(), 0);
 /// ```
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "RelayChoice is a foreign non_exhaustive enum: the compiler needs its wildcard arm"
-)]
 pub fn relay_ladder(choice: &RelayChoice) -> impl Iterator<Item = RelayUrl> {
     let rungs = match choice {
         RelayChoice::Pinned => RENDEZVOUS_RELAY_LADDER_URLS.clone(),
         RelayChoice::Custom(ladder) => ladder.clone(),
-        _ => Vec::new(),
+        RelayChoice::Disabled | _ => Vec::new(),
     };
     rungs.into_iter()
 }

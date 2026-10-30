@@ -1174,10 +1174,6 @@ fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
 /// and we're past the join horizon (a backfilling joiner updates its doc silently
 /// instead of reacting to replayed intermediate states). A received event is
 /// never our own (`is_self = false`). Both channels share this path verbatim.
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "Ingested is a foreign non_exhaustive enum: the compiler needs its wildcard arm"
-)]
 fn ingest_channel_event(event: ChannelEvent<'_>, doc: &mut doc::MeshDoc, context: &HandlerCtx<'_>) {
     use crate::doc::Ingested;
 
@@ -1213,7 +1209,7 @@ fn ingest_channel_event(event: ChannelEvent<'_>, doc: &mut doc::MeshDoc, context
                 channel.label()
             );
         }
-        _ => {}
+        Ingested::Duplicate | Ingested::Buffered | Ingested::Ignored | _ => {}
     }
 }
 
@@ -1387,15 +1383,22 @@ fn decrypt_directed<F: ops::Deref<Target = Message>>(
     }
 }
 
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "foreign non_exhaustive enum: the compiler needs a wildcard arm; the named variants are listed before it"
-)]
 fn addressed_to_us(message: &Message, us: &Nickname) -> bool {
     match &message.kind {
         MessageKind::App { to: Some(to), .. } => to == us,
         // Broadcast app frames (chat) and infra kinds are delivered to everyone.
-        _ => true,
+        MessageKind::App { to: None, .. }
+        | MessageKind::Presence { .. }
+        | MessageKind::PeerInfo
+        | MessageKind::Digest
+        | MessageKind::Ping
+        | MessageKind::Pong { .. }
+        | MessageKind::State
+        | MessageKind::StateDigest
+        | MessageKind::Meta
+        | MessageKind::MetaDigest
+        | MessageKind::LinkState
+        | _ => true,
     }
 }
 
