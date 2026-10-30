@@ -387,6 +387,10 @@ A type that the guide asks to derive a trait, and that cannot derive it, is list
 | R15 | `Hold` (struct) | `habilis-network/src/transport/webrtc.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
 | R15 | `Offer` (struct) | `habilis-network/src/transport/webrtc/backend_native/offer.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
 | R15 | `undefined` (13) | `candidates` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `SplitMix64` | `habilis-network-netplay/examples/light-cycles/native/game/src/split_mix64.rs` | a PRNG state: a Copy would fork its stream, so it derives Clone only |
+| R15 | `Fnv1a64` | `habilis-network-netplay/examples/light-cycles/native/game/src/round.rs` | a hasher state: a Copy would fork its stream, so it derives Clone only |
+| R15 | `SplitMix64` | `habilis-network-netplay/examples/light-cycles/web/wasm/src/split_mix64.rs` | a PRNG state: a Copy would fork its stream, so it derives Clone only |
+| R15 | `Fnv1a64` | `habilis-network-netplay/examples/light-cycles/web/wasm/src/round.rs` | a hasher state: a Copy would fork its stream, so it derives Clone only |
 | R13 | `BenchError` | `habilis-network-iroh-webrtc-transport/src/bench_error.rs` | holds error sources that are not Copy, such as `endpoint::BindError` | |
 | R13 | `LobbyError` | `habilis-network-netplay/src/mesh/lobby.rs` | holds a `Nickname`, which owns a `String` | |
 | R13 | `TestRelayError` | `habilis-network/src/lookup/test_relay/test_relay_error.rs` | holds error sources that are not Copy, such as `server::SpawnError` | |
