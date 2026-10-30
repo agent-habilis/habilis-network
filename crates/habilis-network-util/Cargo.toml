@@ -55,7 +55,7 @@ rustix = { workspace = true, optional = true }
 
 # Stamps the build's git short hash + dirty flag into `version::VERSION`.
 [build-dependencies]
-vergen-gitcl = "1"
+vergen-gitcl = "9"
 
 [dev-dependencies]
 habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
