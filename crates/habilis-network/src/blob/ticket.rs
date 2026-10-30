@@ -45,7 +45,11 @@ mod tests {
     use std::time;
     fn sample_addr(byte: u8) -> EndpointAddr {
         let id = SecretKey::from_bytes(&[byte; 32]).public();
-        EndpointAddr::new(id).with_ip_addr("127.0.0.1:4242".parse().unwrap())
+        EndpointAddr::new(id).with_ip_addr(
+            "127.0.0.1:4242"
+                .parse()
+                .expect("a literal loopback address parses"),
+        )
     }
 
     fn sample(password: bool) -> BlobTicket {
@@ -163,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_transport_flag_round_trips_and_is_off_by_default() {
+    fn relay_transport_flag_round_trips_and_is_off_by_default() -> anyhow::Result<()> {
         let _guard = ::habilis_network_test_tracing::init();
         let ticket = BlobTicket {
             relay_transport: PayloadPath::DirectOnly,
@@ -181,10 +185,11 @@ mod tests {
             ..sample(false)
         };
         assert_eq!(
-            BlobTicket::decode(&on.encode()).unwrap().relay_transport,
+            BlobTicket::decode(&on.encode())?.relay_transport,
             PayloadPath::RelayAllowed,
             "a ticket with the relay flag on decodes with it on"
         );
+        Ok(())
     }
 
     #[test]
@@ -201,25 +206,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_mesh_token() {
+    fn rejects_a_mesh_token() -> anyhow::Result<()> {
         // A mesh id shares the bare-base58 shape but has a different payload;
         // blob decode must refuse it (wrong kind / structure).
         let _guard = ::habilis_network_test_tracing::init();
         let mesh = meshes::Mesh::try_new(
             protocol::Seed::new([1u8; 32]),
-            meshes::MeshName::try_new("t").unwrap(),
+            meshes::MeshName::try_new("t")?,
             meshes::MeshConfig::loopback(),
-        )
-        .unwrap()
+        )?
         .to_string();
         assert!(
             BlobTicket::decode(&mesh).is_err(),
             "a mesh token is rejected as a blob ticket"
         );
+        Ok(())
     }
 
     #[test]
-    fn an_invite_and_a_blob_ticket_never_cross_parse() {
+    fn an_invite_and_a_blob_ticket_never_cross_parse() -> anyhow::Result<()> {
         // Both are bare Base58Check with the same framing, so only the `kind`
         // byte keeps them apart. The assertion lives on this side because
         // `habilis-network-protocol` (where invites moved) cannot see `blob`, while this
@@ -229,10 +234,9 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mut creator = Mesh::try_new(
             protocol::Seed::new([1u8; 32]),
-            MeshName::try_new("t").unwrap(),
+            MeshName::try_new("t")?,
             MeshConfig::loopback(),
-        )
-        .unwrap();
+        )?;
         creator.set_invite();
         let invite =
             invite::mint(&creator, Some(time::Duration::from_hours(1)), None).expect("mint");
@@ -246,6 +250,7 @@ mod tests {
             BlobTicket::decode(&invite).is_err(),
             "a blob ticket does not parse as an invite"
         );
+        Ok(())
     }
 
     #[test]
@@ -272,7 +277,7 @@ mod tests {
     fn rejects_bad_checksum() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut encoded = sample(false).encode();
-        let last = encoded.pop().unwrap();
+        let last = encoded.pop().expect("an encoded ticket is never empty");
         encoded.push(if last == '1' { '2' } else { '1' });
         assert!(
             BlobTicket::decode(&encoded).is_err(),
