@@ -255,15 +255,18 @@ test("untyped_generic_let: a typed let passes", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(s: &str) -> Result<u8, std::num::ParseIntError> {\n    let n: u8 = s.parse()?;\n    Ok(n)\n}", 0, "");
 });
 
-// The turbofish_collect_parse rule (P2): a collect or parse turbofish needs a row.
-test("turbofish_collect_parse: a collect turbofish with no row fails", () => {
+// The turbofish rule (P2): a turbofish needs a typed variable instead, except size_of and align_of.
+test("turbofish: a collect turbofish fails", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(v: &[u8]) -> Vec<u8> {\n    v.iter().copied().collect::<Vec<u8>>()\n}", 1, "");
 });
-test("turbofish_collect_parse: a typed let passes", () => {
+test("turbofish: a path turbofish fails", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Vec<u8> {\n    Vec::<u8>::new()\n}", 1, "");
+});
+test("turbofish: a typed let passes", () => {
   expectExit("crates/demo/src/lib.rs", "fn f(v: &[u8]) -> Vec<u8> {\n    let out: Vec<u8> = v.iter().copied().collect();\n    out\n}", 0, "");
 });
-test("turbofish_collect_parse: a forced _ passes", () => {
-  expectExit("crates/demo/src/lib.rs", "pub fn f(s: &str) -> Option<u8> {\n    s.parse::<_>().ok()\n}", 0, "");
+test("turbofish: size_of and align_of pass", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f() -> bool {\n    size_of::<u8>() == 1 && align_of::<u16>() == 2\n}", 0, "");
 });
 test("dyn_param: a dyn parameter counts", () => {
   expectExit("crates/demo/src/lib.rs", "pub fn f(sink: &dyn Sink) {}", 1);

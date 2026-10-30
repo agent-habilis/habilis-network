@@ -264,9 +264,11 @@ function countUntypedGenericLets(raw: string): number {
 
 // The turbofish of collect and parse: `.collect::<T>()`, `.parse::<T>()`. A typed `let` names the type
 // on the variable instead, so the reader finds it at the binding (P2). A `_` the compiler forces stays.
+// Every turbofish of code (P2). A turbofish names a type the variable could name, so only the two
+// shapes with no value to infer from are kept: size_of::<T>() and align_of::<T>().
 function countTurbofish(raw: string): number {
   const text = blankStrings(stripComments(raw));
-  return text.match(/\.(?:collect|parse)::<(?!_>)[^;]*?>\(/g)?.length ?? 0;
+  return text.match(/(?<!\b(?:size_of|align_of))::</g)?.length ?? 0;
 }
 
 // The lets with no type whose value is a method chain of five or more calls. The reader must infer
@@ -688,10 +690,10 @@ const RULES: Rule[] = [
     why: "A let that takes its type from parse, into or try_into names the type (P4). The reader sees no type otherwise.",
   },
   {
-    name: "turbofish_collect_parse",
+    name: "turbofish",
     scan: countTurbofish,
     glob: "crates/**/*.rs",
-    why: "Name the type on the variable, not in a turbofish, for collect and parse (P2). A `_` that the compiler forces is allowed.",
+    why: "Name the type on the variable, not in a turbofish (P2). Only size_of and align_of keep one: they have no value to infer the type from.",
   },
   {
     name: "untyped_long_chain_let",
