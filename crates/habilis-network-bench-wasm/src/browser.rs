@@ -16,7 +16,6 @@ use std::fmt::Display;
 use std::mem;
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
-#[derive(Clone, Copy)]
 struct State {
     endpoint: Endpoint,
     hub: WebRtcHandle,

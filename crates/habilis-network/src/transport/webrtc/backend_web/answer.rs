@@ -2,7 +2,7 @@ use anyhow::Result;
 use habilis_network_iroh_webrtc_transport::{BrowserPendingAnswer, SignalEnvelope, WebRtcHandle};
 use iroh::EndpointId;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct Answer {
     pub(super) pending: BrowserPendingAnswer,
     pub(super) envelope: SignalEnvelope,
