@@ -790,7 +790,8 @@ fn write_value(
     match value {
         Value::Array(items) => {
             let list = tx.put_object(obj, key, ObjType::List)?;
-            for (index, item) in items.iter().enumerate() {
+            let indexed: Vec<(usize, &Value)> = items.iter().enumerate().collect();
+            for (index, item) in indexed {
                 append_item(tx, &list, index, item)?;
             }
         }
@@ -813,7 +814,8 @@ fn append_item(
         }
         Value::Array(inner) => {
             let child = tx.insert_object(list, index, ObjType::List)?;
-            for (inner_index, inner_item) in inner.iter().enumerate() {
+            let indexed: Vec<(usize, &Value)> = inner.iter().enumerate().collect();
+            for (inner_index, inner_item) in indexed {
                 append_item(tx, &child, inner_index, inner_item)?;
             }
         }
@@ -1192,7 +1194,7 @@ mod tests {
 
         let mut sink = MeshDoc::new_ungated();
         // Withhold the root, so not one of these can ever apply.
-        for frame in chain.iter().skip(1) {
+        for frame in &chain[1..] {
             sink.ingest(frame);
         }
 
@@ -1328,7 +1330,7 @@ mod tests {
         let flood: Vec<Verified> = (0..DOC_PENDING_AUTHOR_MAX + 32)
             .map(|step| author_as(&mut mallorys, &mallory, &[0xbb; 32], &json!({ "m": step })))
             .collect();
-        for frame in flood.iter().skip(1) {
+        for frame in &flood[1..] {
             sink.ingest(frame);
         }
 
@@ -1627,7 +1629,8 @@ mod tests {
         let heads: Vec<_> = source.heads().collect();
         let mut joiner = MeshDoc::new_ungated();
         // A relayed flood reaches the joiner tail first, so the author's cap refuses the excess.
-        for frame in frames[1..].iter().chain(&frames[..1]) {
+        let tail_first: Vec<&Verified> = frames[1..].iter().chain(&frames[..1]).collect();
+        for frame in tail_first {
             joiner.ingest(frame);
         }
         assert!(
