@@ -1,5 +1,7 @@
 //! The signal acceptor of the `WebRTC` plane: answers an inbound offer.
 
+use std::future::{self, Future};
+
 use super::ice_profile::IceProfile;
 use super::nudge_acceptor;
 use super::signal_deadlines::SignalDeadlines;
@@ -191,11 +193,10 @@ impl WebRtcSignalAcceptor {
 }
 
 impl ProtocolHandler for WebRtcSignalAcceptor {
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "iroh's ProtocolHandler::accept is an async trait method; this accept does its work without awaiting"
-    )]
-    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+    fn accept(
+        &self,
+        connection: Connection,
+    ) -> impl Future<Output = Result<(), AcceptError>> + Send {
         // The remote's identity comes from the *connection*, never from the
         // envelope. Over an authenticated carrier the TLS-proven id is the real
         // one, and trusting `SignalEnvelope::endpoint_id` instead would let any
@@ -247,7 +248,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
                 };
                 connection.close(code.into(), why);
                 tracing::debug!(target: LOG_TARGET, %remote, ?reason, "refused a signal offer");
-                return Ok(());
+                return future::ready(Ok(()));
             }
         };
 
@@ -322,7 +323,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
             }
         });
         self.admission.track(remote, epoch, task.abort_handle());
-        Ok(())
+        future::ready(Ok(()))
     }
 
     /// Cancel every round in flight.

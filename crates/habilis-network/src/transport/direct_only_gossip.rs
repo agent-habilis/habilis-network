@@ -195,6 +195,7 @@ mod watcher_tests {
     #[cfg(feature = "iroh-test-utils")]
     use crate::lookup::test_relay;
     use iroh::endpoint::presets;
+    use std::future::{self, Future};
     #[cfg(feature = "iroh-test-utils")]
     use tokio::sync::mpsc;
     #[cfg(feature = "iroh-test-utils")]
@@ -215,13 +216,12 @@ mod watcher_tests {
                 #[derive(Debug, Clone)]
                 struct WatchAndDrop;
                 impl ProtocolHandler for WatchAndDrop {
-                    #[expect(
-                        clippy::unused_async_trait_impl,
-                        reason = "iroh's ProtocolHandler::accept is an async trait method; this accept does its work without awaiting"
-                    )]
-                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                    fn accept(
+                        &self,
+                        connection: Connection,
+                    ) -> impl Future<Output = Result<(), AcceptError>> + Send {
                         super::watch_relay_policy(&connection, None);
-                        Ok(())
+                        future::ready(Ok(()))
                     }
                 }
                 let bind = || async {

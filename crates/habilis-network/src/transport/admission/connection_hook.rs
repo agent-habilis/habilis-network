@@ -1,4 +1,6 @@
 //! The hook that admits or refuses a connection at the endpoint.
+use std::future::{self, Future};
+
 use crate::transport::{direct_only_gossip, payload_path};
 
 use std::sync::atomic::Ordering;
@@ -18,11 +20,10 @@ pub struct ConnectionHook {
 }
 
 impl EndpointHooks for ConnectionHook {
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "iroh's EndpointHooks::after_handshake is an async trait method; this impl decides without awaiting"
-    )]
-    async fn after_handshake<'a>(&'a self, connection: &'a Connection) -> AfterHandshakeOutcome {
+    fn after_handshake<'a>(
+        &'a self,
+        connection: &'a Connection,
+    ) -> impl Future<Output = AfterHandshakeOutcome> + Send + 'a {
         self.admission.note_connection(connection);
         // A gossip connection on the gossip rung would carry the gossip that its frames need:
         // both ends close it, whatever the mesh policy says, and before the relay watch, which is
@@ -41,6 +42,6 @@ impl EndpointHooks for ConnectionHook {
         {
             direct_only_gossip::watch_relay_policy(connection, self.admission.path_sink());
         }
-        AfterHandshakeOutcome::accept()
+        future::ready(AfterHandshakeOutcome::accept())
     }
 }

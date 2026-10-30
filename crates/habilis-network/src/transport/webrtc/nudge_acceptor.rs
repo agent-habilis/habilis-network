@@ -1,5 +1,7 @@
 //! The nudge: a tickle that asks a peer to offer a session again.
 
+use std::future::{self, Future};
+
 use super::consts::NUDGE_ALPN;
 use crate::transport::pool;
 
@@ -40,13 +42,12 @@ impl NudgeAcceptor {
 }
 
 impl ProtocolHandler for NudgeAcceptor {
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "iroh's ProtocolHandler::accept is an async trait method; this accept does its work without awaiting"
-    )]
-    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+    fn accept(
+        &self,
+        connection: Connection,
+    ) -> impl Future<Output = Result<(), AcceptError>> + Send {
         connection.close(0u32.into(), b"nudge");
-        Ok(())
+        future::ready(Ok(()))
     }
 }
 
