@@ -102,7 +102,7 @@ impl Fnv1a64 {
 
 #[cfg(test)]
 mod tests {
-    use super::RoundDescriptor;
+    use crate::round_descriptor::RoundDescriptor;
 
     #[test]
     fn deriving_twice_with_the_same_inputs_is_byte_identical() {
