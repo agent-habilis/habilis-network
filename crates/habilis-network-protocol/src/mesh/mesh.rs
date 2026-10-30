@@ -181,12 +181,10 @@ impl Mesh {
     /// Create-side: stretch `password`, bake its verifier into the config
     /// (the encoded id must carry it), and switch every derivation onto
     /// the stretched key. ~100ms of Argon2id by design.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "the secret moves in, so the caller keeps no copy of it"
-    )]
     pub fn set_password(&mut self, password: crypto::Password) {
         let key = crypto::stretch_mesh_password(&password, &self.seed);
+        // The password ends here: its bytes are wiped on drop.
+        drop(password);
         self.config.password = Some(crypto::password_verifier(&key));
         self.secret = MeshSecret::Password(key);
     }
