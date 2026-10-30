@@ -2,6 +2,7 @@
 //! classes. A tab can produce a stream as well as read one.
 
 use std::cell::RefCell;
+use std::fmt;
 use std::rc::Rc;
 
 use habilis_network_stream::{StreamHash, StreamOpts};
@@ -18,13 +19,15 @@ use std::error;
 type Slot = Rc<RefCell<Option<Rc<habilis_network_stream::StreamNode>>>>;
 
 /// One endpoint that creates and opens streams. It never joins a mesh.
-#[expect(
-    missing_debug_implementations,
-    reason = "the node's endpoint has nothing a caller would want printed"
-)]
 #[wasm_bindgen]
 pub struct StreamNode {
     node: Slot,
+}
+
+impl fmt::Debug for StreamNode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("StreamNode").finish_non_exhaustive()
+    }
 }
 
 #[wasm_bindgen]
@@ -160,16 +163,21 @@ fn js(error: &(dyn error::Error + 'static)) -> JsValue {
 }
 
 /// One stream's writing end.
-#[expect(
-    missing_debug_implementations,
-    reason = "a producer's link has nothing a caller would want printed"
-)]
 #[wasm_bindgen]
 pub struct Producer {
     hash: String,
     end: Mutex<Option<habilis_network_stream::Producer>>,
     ending: watch::Sender<Ending>,
     _node: Slot,
+}
+
+impl fmt::Debug for Producer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Producer")
+            .field("hash", &self.hash)
+            .finish_non_exhaustive()
+    }
 }
 
 #[wasm_bindgen]
@@ -272,15 +280,17 @@ fn closed() -> JsValue {
 }
 
 /// One stream's reading end.
-#[expect(
-    missing_debug_implementations,
-    reason = "a reader's link has nothing a caller would want printed"
-)]
 #[wasm_bindgen]
 pub struct Reader {
     end: Mutex<Option<habilis_network_stream::Reader>>,
     closing: watch::Sender<bool>,
     _node: Slot,
+}
+
+impl fmt::Debug for Reader {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Reader").finish_non_exhaustive()
+    }
 }
 
 #[wasm_bindgen]

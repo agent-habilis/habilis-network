@@ -9,10 +9,6 @@ use std::fmt;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 /// One mesh membership, held by a tab.
-#[expect(
-    missing_debug_implementations,
-    reason = "Node's Debug is manual and says nothing a caller wants; the identity a reader would look for is in `id`/`nick` already"
-)]
 #[wasm_bindgen]
 pub struct MeshPeer {
     /// `Some` until [`MeshPeer::close`]; `Drop` aborts the loop either way.
@@ -23,6 +19,16 @@ pub struct MeshPeer {
     id: String,
     nick: String,
     name: String,
+}
+
+impl fmt::Debug for MeshPeer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MeshPeer")
+            .field("id", &self.id)
+            .field("nick", &self.nick)
+            .finish_non_exhaustive()
+    }
 }
 
 #[wasm_bindgen]
