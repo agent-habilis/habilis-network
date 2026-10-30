@@ -860,6 +860,41 @@ fn log_daemon_start(author: &Nickname) {
     );
 }
 
+/// The state that the loop's `select!` arms read and write, and the handles they wait on. The
+/// arms borrow its fields one at a time, so each arm can touch the fields it needs.
+struct Loop<'node, Driver: NodeDriver> {
+    parts: CtxParts<'node>,
+    sender: MeshSender,
+    receiver: gossip::split::MeshReceiver<GossipReceiver>,
+    gossip: net::Gossip,
+    mesh_name: MeshName,
+    leave_label: String,
+    state: EventLoopState,
+    app: Driver,
+    ipc_rx: Option<mpsc::Receiver<IpcMessage<Driver::Ipc>>>,
+    intervals: MaintenanceIntervals,
+    rendezvous: Option<beacon::Rendezvous>,
+    rival_probe: Option<beacon::RivalProbe>,
+    rendezvous_params: beacon::RendezvousParams,
+    rung_rx: watch::Receiver<Option<RelayUrl>>,
+    rung_probe: Option<lookup::StoppableTask>,
+    rung_reports: mpsc::UnboundedReceiver<beacon::RungReport>,
+    cohost: CoHostPolicy,
+    started: Instant,
+    external_quit_rx: Option<mpsc::Receiver<()>>,
+    external_req_rx: Option<mpsc::Receiver<Driver::Session>>,
+    quit_rx: mpsc::Receiver<()>,
+    exit_on_quit: bool,
+    http_rx: Option<mpsc::Receiver<Driver::Http>>,
+    unicast_rx: Option<mpsc::Receiver<bytes::Bytes>>,
+    lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
+    direct_rx: mpsc::UnboundedReceiver<probe::DirectOutcome>,
+    path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
+    flush_failed_rx: mpsc::UnboundedReceiver<(Verified, messages::WireFrame)>,
+    anchors: TickAnchors,
+    resubscribe_attempts: u32,
+    owned: OwnedEndpoints,
+}
 #[expect(
     clippy::too_many_lines,
     reason = "the daemon's central select! loop: one arm per event source (ipc, http, gossip, the maintenance ticks, quit); each arm delegates to a helper, but the arm list itself is irreducibly long"
@@ -867,8 +902,8 @@ fn log_daemon_start(author: &Nickname) {
 async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result<()> {
     use n0_future::StreamExt as _;
     let EventLoop {
-        mut sender,
-        mut receiver,
+        sender,
+        receiver,
         gossip,
         endpoint,
         mesh: mesh_str,
@@ -879,27 +914,27 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         max_peers,
         mut state,
         mut app,
-        mut ipc_rx,
-        mut intervals,
-        mut rendezvous,
-        mut rival_probe,
-        mut rendezvous_params,
-        mut rung_rx,
-        mut rung_probe,
-        mut rung_reports,
+        ipc_rx,
+        intervals,
+        rendezvous,
+        rival_probe,
+        rendezvous_params,
+        rung_rx,
+        rung_probe,
+        rung_reports,
         cohost,
         started,
-        mut external_quit_rx,
-        mut external_req_rx,
+        external_quit_rx,
+        external_req_rx,
         external_msg_tx,
-        mut quit_rx,
+        quit_rx,
         exit_on_quit,
-        mut http_rx,
-        mut unicast_rx,
-        mut lan_contacts,
-        mut direct_rx,
-        mut path_rx,
-        mut flush_failed_rx,
+        http_rx,
+        unicast_rx,
+        lan_contacts,
+        direct_rx,
+        path_rx,
+        flush_failed_rx,
         owned,
     } = loop_state;
 
@@ -915,7 +950,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
     // through the app's `drain_surfaced` / poll-deadline hooks — the engine
     // never names the ring's element type.
 
-    let mut anchors = TickAnchors::now();
+    let anchors = TickAnchors::now();
 
     // Owned Arc clone so the per-arm ctx can borrow it without colliding with `&mut state`.
     let identity = Arc::clone(&state.identity);
@@ -941,7 +976,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
     // Consecutive failed resubscribe attempts (reset on success); at
     // `RESUBSCRIBE_MAX_ATTEMPTS` the gossip actor itself is gone and the
     // daemon shuts down rather than pretend to be a live member.
-    let mut resubscribe_attempts: u32 = 0;
+    let resubscribe_attempts: u32 = 0;
 
     {
         let context = parts.handler_ctx(&sender);
@@ -956,173 +991,213 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
 
     // A CLI quit sets it: the process exits once the beacon and the endpoints are released.
     let mut exit_after_release = false;
+    let mut lp = Loop {
+        parts,
+        sender,
+        receiver,
+        gossip,
+        mesh_name,
+        leave_label,
+        state,
+        app,
+        ipc_rx,
+        intervals,
+        rendezvous,
+        rival_probe,
+        rendezvous_params,
+        rung_rx,
+        rung_probe,
+        rung_reports,
+        cohost,
+        started,
+        external_quit_rx,
+        external_req_rx,
+        quit_rx,
+        exit_on_quit,
+        http_rx,
+        unicast_rx,
+        lan_contacts,
+        direct_rx,
+        path_rx,
+        flush_failed_rx,
+        anchors,
+        resubscribe_attempts,
+        owned,
+    };
     loop {
         #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-        super::cohost_arm::shed_on_request(&mut state, &rendezvous_params, &mut rendezvous);
+        super::cohost_arm::shed_on_request(
+            &mut lp.state,
+            &lp.rendezvous_params,
+            &mut lp.rendezvous,
+        );
         #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-        super::cohost_arm::stall_on_request(&mut state, rendezvous.as_ref());
+        super::cohost_arm::stall_on_request(&mut lp.state, lp.rendezvous.as_ref());
         // Whether this process hosts the beacon is read here, once per turn,
         // from the one place that owns it, so that no path that claims or sheds
         // the beacon has to remember to say so.
-        if rendezvous.is_some() {
-            state
+        if lp.rendezvous.is_some() {
+            lp.state
                 .rendezvous_flags
                 .insert(RendezvousFlag::HostsRendezvous);
         } else {
-            state
+            lp.state
                 .rendezvous_flags
                 .remove(&RendezvousFlag::HostsRendezvous);
         }
         // A member that links to our beacon and that we do not know is a sign of another group.
-        if let Some(held) = rendezvous.as_mut() {
+        if let Some(held) = lp.rendezvous.as_mut() {
             for arrived in held.take_arrivals() {
-                if arrived != endpoint.id() && !state.known_endpoints.contains(&arrived) {
-                    state.note_second_group_sign(endpoint.id(), Instant::now());
+                if arrived != endpoint.id() && !lp.state.known_endpoints.contains(&arrived) {
+                    lp.state
+                        .note_second_group_sign(endpoint.id(), Instant::now());
                 }
             }
         }
         // Said in our `PeerInfo` from here, for the same reason: no claim or shed path has to
         // remember to send it again.
-        if state
+        if lp
+            .state
             .rendezvous_flags
             .contains(&RendezvousFlag::HostsRendezvous)
-            != state.beacon_notes.contains(&BeaconNote::FlagFlooded)
+            != lp.state.beacon_notes.contains(&BeaconNote::FlagFlooded)
         {
-            if state
+            if lp
+                .state
                 .rendezvous_flags
                 .contains(&RendezvousFlag::HostsRendezvous)
             {
-                state.beacon_notes.insert(BeaconNote::FlagFlooded);
+                lp.state.beacon_notes.insert(BeaconNote::FlagFlooded);
             } else {
-                state.beacon_notes.remove(&BeaconNote::FlagFlooded);
+                lp.state.beacon_notes.remove(&BeaconNote::FlagFlooded);
             }
-            let context = parts.handler_ctx(&sender);
-            gossip::broadcast_peer_info(&mut state, &context).await;
+            let context = lp.parts.handler_ctx(&lp.sender);
+            gossip::broadcast_peer_info(&mut lp.state, &context).await;
         }
         tokio::select! {
-            () = sleep_until_opt(state.ping_round.as_ref().map(|round| round.deadline)) => {
-                state.idle.external += 1;
-                finalize_ping_round(&mut state, sink.as_ref());
+            () = sleep_until_opt(lp.state.ping_round.as_ref().map(|round| round.deadline)) => {
+                lp.state.idle.external += 1;
+                finalize_ping_round(&mut lp.state, sink.as_ref());
             }
-            () = sleep_until_opt(state.ping_round.as_ref().and_then(|round| round.second_probe_at())) => {
-                state.idle.external += 1;
-                let context = parts.handler_ctx(&sender);
-                gossip::send_second_probe(&mut state, &context).await;
+            () = sleep_until_opt(lp.state.ping_round.as_ref().and_then(|round| round.second_probe_at())) => {
+                lp.state.idle.external += 1;
+                let context = lp.parts.handler_ctx(&lp.sender);
+                gossip::send_second_probe(&mut lp.state, &context).await;
             }
-            () = sleep_until_opt(app.earliest_poll_deadline()) => {
-                state.idle.external += 1;
-                app.poll_deadline_elapsed();
+            () = sleep_until_opt(lp.app.earliest_poll_deadline()) => {
+                lp.state.idle.external += 1;
+                lp.app.poll_deadline_elapsed();
             }
-            () = sleep_until_opt(app.earliest_deadline()) => {
-                state.idle.external += 1;
-                app.expire_deadlines(TokioInstant::now());
+            () = sleep_until_opt(lp.app.earliest_deadline()) => {
+                lp.state.idle.external += 1;
+                lp.app.expire_deadlines(TokioInstant::now());
             }
-            ipc_msg = recv_opt(&mut ipc_rx) => match ipc_msg {
-                None => ipc_rx = None,
+            ipc_msg = recv_opt(&mut lp.ipc_rx) => match ipc_msg {
+                None => lp.ipc_rx = None,
                 Some((command, resp_tx)) => {
-                    state.idle.external += 1;
-                    let context = parts.handler_ctx(&sender);
+                    lp.state.idle.external += 1;
+                    let context = lp.parts.handler_ctx(&lp.sender);
                     let request = super::app::IpcRequest {
                         command,
                         response: resp_tx,
-                        name: &mesh_name,
+                        name: &lp.mesh_name,
                     };
-                    if app.handle_ipc(request, &mut state, &context).await {
-                        state.last_sent_at = Instant::now();
+                    if lp.app.handle_ipc(request, &mut lp.state, &context).await {
+                        lp.state.last_sent_at = Instant::now();
                     }
                 }
             },
-            http_req = recv_opt(&mut http_rx) => match http_req {
-                None => http_rx = None,
+            http_req = recv_opt(&mut lp.http_rx) => match http_req {
+                None => lp.http_rx = None,
                 Some(request) => {
-                    state.idle.external += 1;
-                    let context = parts.handler_ctx(&sender);
-                    app.handle_http(request, &mut state, &context).await;
+                    lp.state.idle.external += 1;
+                    let context = lp.parts.handler_ctx(&lp.sender);
+                    lp.app.handle_http(request, &mut lp.state, &context).await;
                 }
             },
-            event = receiver.next(), if state.standing.contains(&Standing::GossipOpen) => {
-                state.idle.external += 1;
-                let context = parts.handler_ctx(&sender);
-                gossip::handle_gossip_event(event, &mut state, &mut app, &context).await;
+            event = lp.receiver.next(), if lp.state.standing.contains(&Standing::GossipOpen) => {
+                lp.state.idle.external += 1;
+                let context = lp.parts.handler_ctx(&lp.sender);
+                gossip::handle_gossip_event(event, &mut lp.state, &mut lp.app, &context).await;
             }
-            Some(outcome) = direct_rx.recv() => {
-                state.idle.external += 1;
-                let context = parts.handler_ctx(&sender);
-                probe::on_outcome(outcome, &mut state, &context).await;
-                probe::ensure_watchers(&mut state, context.endpoint.id(), context.rendezvous_id);
+            Some(outcome) = lp.direct_rx.recv() => {
+                lp.state.idle.external += 1;
+                let context = lp.parts.handler_ctx(&lp.sender);
+                probe::on_outcome(outcome, &mut lp.state, &context).await;
+                probe::ensure_watchers(&mut lp.state, context.endpoint.id(), context.rendezvous_id);
             }
-            Some((message, bytes)) = flush_failed_rx.recv() => {
-                state.idle.external += 1;
-                let context = parts.handler_ctx(&sender);
-                gossip::requeue_failed(&mut state, &context, message, bytes);
+            Some((message, bytes)) = lp.flush_failed_rx.recv() => {
+                lp.state.idle.external += 1;
+                let context = lp.parts.handler_ctx(&lp.sender);
+                gossip::requeue_failed(&mut lp.state, &context, message, bytes);
             }
             () = slot_freed.notified() => {
-                state.idle.external += 1;
-                let context = parts.handler_ctx(&sender);
-                probe::top_up_lane_offers(&mut state, &context).await;
+                lp.state.idle.external += 1;
+                let context = lp.parts.handler_ctx(&lp.sender);
+                probe::top_up_lane_offers(&mut lp.state, &context).await;
             }
             // A round of the multihop underlay ended, offered or answered: an offer that its
             // answerer turned away, because our link vector had not reached it yet, is made again
             // now, and not at the alive tick. A session that the round attached is an edge of this
             // node: its vector goes out at once, and nothing goes out when the set did not change.
             () = underlay_slot_freed.notified() => {
-                state.idle.external += 1;
+                lp.state.idle.external += 1;
                 #[cfg(feature = "multihop")]
                 {
-                    underlay_webrtc::tick_now(&state);
-                    let context = parts.handler_ctx(&sender);
-                    linkstate_now(&mut state, &context).await;
+                    underlay_webrtc::tick_now(&lp.state);
+                    let context = lp.parts.handler_ctx(&lp.sender);
+                    linkstate_now(&mut lp.state, &context).await;
                 }
             }
             // The gate of the multihop underlay began to refuse a hop, or admitted one that
             // it refused: the best first hop to a pair on the relay can be another now, and
             // waiting for the stuck deadline and a link-state tick would cost 20 s or more.
             () = route_wake.notified() => {
-                state.idle.external += 1;
-                let context = parts.handler_ctx(&sender);
-                route_wake_arm(&mut state, &context);
+                lp.state.idle.external += 1;
+                let context = lp.parts.handler_ctx(&lp.sender);
+                route_wake_arm(&mut lp.state, &context);
             }
-            lan_event = recv_opt(&mut lan_contacts) => match lan_event {
-                None => lan_contacts = None,
+            lan_event = recv_opt(&mut lp.lan_contacts) => match lan_event {
+                None => lp.lan_contacts = None,
                 Some(event) => {
-                    state.idle.external += 1;
-                    let context = parts.handler_ctx(&sender);
-                    gossip::lan::on_lan_event(event, &mut state, &context).await;
+                    lp.state.idle.external += 1;
+                    let context = lp.parts.handler_ctx(&lp.sender);
+                    gossip::lan::on_lan_event(event, &mut lp.state, &context).await;
                 }
             },
             Some(address) = address_changes.next() => {
-                state.idle.external += 1;
-                if state.address_flood_due(&address) {
-                    let context = parts.handler_ctx(&sender);
-                    gossip::broadcast_peer_info(&mut state, &context).await;
-                    state.last_sent_at = Instant::now();
+                lp.state.idle.external += 1;
+                if lp.state.address_flood_due(&address) {
+                    let context = lp.parts.handler_ctx(&lp.sender);
+                    gossip::broadcast_peer_info(&mut lp.state, &context).await;
+                    lp.state.last_sent_at = Instant::now();
                 }
             }
-            Some(change) = path_rx.recv() => {
-                state.idle.external += 1;
-                let context = parts.handler_ctx(&sender);
-                if Some(change.peer) == state.rendezvous_id {
-                    webrtc::rendezvous::offer_rendezvous_on_path_loss(&mut state, &context);
+            Some(change) = lp.path_rx.recv() => {
+                lp.state.idle.external += 1;
+                let context = lp.parts.handler_ctx(&lp.sender);
+                if Some(change.peer) == lp.state.rendezvous_id {
+                    webrtc::rendezvous::offer_rendezvous_on_path_loss(&mut lp.state, &context);
                 } else {
-                    probe::on_path_change(change, &mut state, &context).await;
+                    probe::on_path_change(change, &mut lp.state, &context).await;
                 }
             }
             // Inbound unicast rides the *same* validate + dedup path as gossip (`ingest`).
-            frame = recv_opt(&mut unicast_rx) => match frame {
+            frame = recv_opt(&mut lp.unicast_rx) => match frame {
                 Some(bytes) => {
-                    state.idle.external += 1;
-                    gossip::ingest(bytes, &mut state, &mut app, &parts.handler_ctx(&sender)).await;
+                    lp.state.idle.external += 1;
+                    gossip::ingest(bytes, &mut lp.state, &mut lp.app, &lp.parts.handler_ctx(&lp.sender)).await;
                 }
-                None => unicast_rx = None,
+                None => lp.unicast_rx = None,
             },
-            _ = intervals.prune.tick() => {
-                state.idle.prune += 1;
-                timers::tick_prune(&mut state, sink.as_ref());
+            _ = lp.intervals.prune.tick() => {
+                lp.state.idle.prune += 1;
+                timers::tick_prune(&mut lp.state, sink.as_ref());
             }
-            _ = intervals.alive.tick() => {
-                state.idle.alive += 1;
-                let context = parts.handler_ctx(&sender);
-                alive_arm(&mut anchors, &mut state, &context).await;
+            _ = lp.intervals.alive.tick() => {
+                lp.state.idle.alive += 1;
+                let context = lp.parts.handler_ctx(&lp.sender);
+                alive_arm(&mut lp.anchors, &mut lp.state, &context).await;
                 // Retry WebRTC negotiation for any peer we still have no
                 // session with. Without this a pair gets exactly one attempt
                 // ever: negotiation fires on `PeerInfo`, and once the pair is
@@ -1130,34 +1205,34 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 // lost to a transient (the peer not yet reachable, an ICE
                 // hiccup) is never retried, and the pair stays relay-only for
                 // the life of the link. Observed exactly that, CLI↔browser.
-                webrtc::retry::retry_sessions(&mut state, &context);
+                webrtc::retry::retry_sessions(&mut lp.state, &context);
                 // The same for the sessions of the multihop underlay, which open
                 // only to a neighbor that has no IP path to us.
                 #[cfg(feature = "multihop")]
-                if let Some(underlay) = state.underlay_webrtc.clone() {
-                    underlay_webrtc::tick(&state, &underlay);
+                if let Some(underlay) = lp.state.underlay_webrtc.clone() {
+                    underlay_webrtc::tick(&lp.state, &underlay);
                 }
                 // Same cadence for the direct-path probes a lookup-only relay
                 // holds grafts on: a peer whose punch missed the deadline, or
                 // whose session attached since, gets another look.
-                probe::retry_direct(&mut state, &context, false).await;
-                probe::ensure_watchers(&mut state, context.endpoint.id(), context.rendezvous_id);
-                probe::nudge_webrtc_riders(&mut state, &context);
+                probe::retry_direct(&mut lp.state, &context, false).await;
+                probe::ensure_watchers(&mut lp.state, context.endpoint.id(), context.rendezvous_id);
+                probe::nudge_webrtc_riders(&mut lp.state, &context);
             }
-            _ = intervals.sweep.tick() => {
-                state.idle.sweep += 1;
-                sweep_arm(&mut anchors, &mut state, sink.as_ref());
-                let context = parts.handler_ctx(&sender);
-                probe::prove_routed_pairs(&mut state, &context).await;
-                app.on_tick(&mut state, &context).await;
+            _ = lp.intervals.sweep.tick() => {
+                lp.state.idle.sweep += 1;
+                sweep_arm(&mut lp.anchors, &mut lp.state, sink.as_ref());
+                let context = lp.parts.handler_ctx(&lp.sender);
+                probe::prove_routed_pairs(&mut lp.state, &context).await;
+                lp.app.on_tick(&mut lp.state, &context).await;
             }
-            _ = intervals.heal.tick() => {
-                state.idle.heal += 1;
-                let (mono_gap, wall_gap) = timers::note_tick_gap("heal", &mut anchors.heal, &mut anchors.heal_wall, heal_interval());
-                if state.standing.contains(&Standing::GossipOpen) {
-                    let context = parts.handler_ctx(&sender);
-                    run_heal(TickGap { mono: mono_gap, wall: wall_gap }, &mut state, &context, &rendezvous_params).await;
-                    maybe_cohost(&mut state, &context, &CohostArm { policy: cohost, params: &rendezvous_params, started }, &mut rendezvous, &mut rival_probe).await;
+            _ = lp.intervals.heal.tick() => {
+                lp.state.idle.heal += 1;
+                let (mono_gap, wall_gap) = timers::note_tick_gap("heal", &mut lp.anchors.heal, &mut lp.anchors.heal_wall, heal_interval());
+                if lp.state.standing.contains(&Standing::GossipOpen) {
+                    let context = lp.parts.handler_ctx(&lp.sender);
+                    run_heal(TickGap { mono: mono_gap, wall: wall_gap }, &mut lp.state, &context, &lp.rendezvous_params).await;
+                    maybe_cohost(&mut lp.state, &context, &CohostArm { policy: lp.cohost, params: &lp.rendezvous_params, started: lp.started }, &mut lp.rendezvous, &mut lp.rival_probe).await;
                 } else {
                     // Stream ended: resubscribe instead of healing a dead topic
                     // (see `resubscribe_tick`); the beacon keeps the mesh joinable.
@@ -1165,21 +1240,21 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                     // beacon on the way out for the same reason the normal
                     // one does — see `release_rendezvous`.
                     if let Err(error) = resubscribe_tick(
-                        &ResubscribeEnv { gossip: &gossip, params: &rendezvous_params, parts: &parts },
-                        &mut state,
-                        &mut app,
-                        GossipLink { sender: &mut sender, receiver: &mut receiver, attempts: &mut resubscribe_attempts },
+                        &ResubscribeEnv { gossip: &lp.gossip, params: &lp.rendezvous_params, parts: &lp.parts },
+                        &mut lp.state,
+                        &mut lp.app,
+                        GossipLink { sender: &mut lp.sender, receiver: &mut lp.receiver, attempts: &mut lp.resubscribe_attempts },
                     ).await {
-                        release_rendezvous(&mut rendezvous, &mut rival_probe, &mut rung_probe, &mut state.rungs, owned).await;
+                        release_rendezvous(&mut lp.rendezvous, &mut lp.rival_probe, &mut lp.rung_probe, &mut lp.state.rungs, lp.owned).await;
                         // The CLI exits with code 1 once everything is released.
                         #[cfg(not(feature = "dhat-heap"))]
-                        if exit_on_quit {
+                        if lp.exit_on_quit {
                             process::exit(1);
                         }
                         return Err(error);
                     }
-                    let context = parts.handler_ctx(&sender);
-                    maybe_cohost(&mut state, &context, &CohostArm { policy: cohost, params: &rendezvous_params, started }, &mut rendezvous, &mut rival_probe).await;
+                    let context = lp.parts.handler_ctx(&lp.sender);
+                    maybe_cohost(&mut lp.state, &context, &CohostArm { policy: lp.cohost, params: &lp.rendezvous_params, started: lp.started }, &mut lp.rendezvous, &mut lp.rival_probe).await;
                 }
             }
             // A bootstrap rung chosen off-loop (startup probe / beacon self-monitor); apply it cheaply.
@@ -1188,20 +1263,20 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
             // work driven from off-loop, not by one of our maintenance tickers,
             // and it is silent on a settled daemon — so `external` still reads
             // 0 when idle while `wakeups` stays equal to the column sum.
-            Ok(()) = rung_rx.changed() => {
-                state.idle.external += 1;
-                apply_rung_change(&mut state, &mut rendezvous_params, &mut rendezvous, &rung_rx);
+            Ok(()) = lp.rung_rx.changed() => {
+                lp.state.idle.external += 1;
+                apply_rung_change(&mut lp.state, &mut lp.rendezvous_params, &mut lp.rendezvous, &lp.rung_rx);
             }
             // The off-loop probe-before-claim answered. Its own arm rather
             // than a poll at the next heal tick: the probe already cost up to
             // `HEAL_PROBE`, and making a free rendezvous wait out another
             // 15s interval before anyone binds it would hand back the claim
             // latency this change was meant to leave untouched.
-            found_rival = beacon::probe_verdict(&mut rival_probe) => {
-                state.idle.external += 1;
-                let found_rival = verdict_after_known_holders(found_rival, &state);
+            found_rival = beacon::probe_verdict(&mut lp.rival_probe) => {
+                lp.state.idle.external += 1;
+                let found_rival = verdict_after_known_holders(found_rival, &lp.state);
                 let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
-                state.probe_backoff.note_verdict(found_rival, Instant::now(), spread);
+                lp.state.probe_backoff.note_verdict(found_rival, Instant::now(), spread);
                 // One free verdict is not enough to claim: a live beacon's
                 // rival re-check periodically releases the rendezvous to
                 // re-probe it, and a probe landing inside that window reads
@@ -1210,66 +1285,66 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 // longer than most joins are willing to wait. Two frees in a
                 // row (the next reclaim tick re-probes) squares those odds
                 // away; a genuinely dead beacon costs one extra probe round.
-                if !found_rival && !state.rendezvous_flags.contains(&RendezvousFlag::ProbeReadFree) {
-                    state.rendezvous_flags.insert(RendezvousFlag::ProbeReadFree);
+                if !found_rival && !lp.state.rendezvous_flags.contains(&RendezvousFlag::ProbeReadFree) {
+                    lp.state.rendezvous_flags.insert(RendezvousFlag::ProbeReadFree);
                 } else {
-                    state.rendezvous_flags.remove(&RendezvousFlag::ProbeReadFree);
-                    let claimed = beacon::claim_after_probe(&rendezvous_params, &endpoint, &state.address_book, &mut rendezvous, found_rival, &mut state.rungs).await;
+                    lp.state.rendezvous_flags.remove(&RendezvousFlag::ProbeReadFree);
+                    let claimed = beacon::claim_after_probe(&lp.rendezvous_params, &endpoint, &lp.state.address_book, &mut lp.rendezvous, found_rival, &mut lp.state.rungs).await;
                     if claimed {
                         // Still from the brisk base: two joiners that start
                         // together both read free twice and claim in the same
                         // instant, and the first re-check is what merges that
                         // split.
-                        schedule_rival_recheck(&mut state, cohost, &rendezvous_params, &endpoint);
+                        schedule_rival_recheck(&mut lp.state, lp.cohost, &lp.rendezvous_params, &endpoint);
                         // The new rendezvous never dials us; the reclaim tick re-grafts it.
-                        state.arm_reclaim(Instant::now());
-                        offer_to_the_new_holder(&mut state, &parts.handler_ctx(&sender));
+                        lp.state.arm_reclaim(Instant::now());
+                        offer_to_the_new_holder(&mut lp.state, &lp.parts.handler_ctx(&lp.sender));
                     } else if found_rival {
                         // A rival holds the identity: this arbitration epoch is
                         // settled, so a later claim (the rival died) starts the
                         // re-check backoff from its brisk base again.
-                        state.rival_recheck_rounds = 0;
-                        note_rival_holds(&mut state, &parts.handler_ctx(&sender));
+                        lp.state.rival_recheck_rounds = 0;
+                        note_rival_holds(&mut lp.state, &lp.parts.handler_ctx(&lp.sender));
                     }
                 }
             }
             // A probe task of the private ladder answered. Its own arm, so that the walk that
             // asked for it walks again at once and no tick has to wait.
-            Some(report) = rung_reports.recv() => {
-                state.idle.external += 1;
-                state.rungs.note(report, Instant::now());
-                let context = parts.handler_ctx(&sender);
-                let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
-                maybe_reclaim(&mut state, &context, &arm, &mut rendezvous, &mut rival_probe).await;
-                maybe_cohost(&mut state, &context, &arm, &mut rendezvous, &mut rival_probe).await;
+            Some(report) = lp.rung_reports.recv() => {
+                lp.state.idle.external += 1;
+                lp.state.rungs.note(report, Instant::now());
+                let context = lp.parts.handler_ctx(&lp.sender);
+                let arm = CohostArm { policy: lp.cohost, params: &lp.rendezvous_params, started: lp.started };
+                maybe_reclaim(&mut lp.state, &context, &arm, &mut lp.rendezvous, &mut lp.rival_probe).await;
+                maybe_cohost(&mut lp.state, &context, &arm, &mut lp.rendezvous, &mut lp.rival_probe).await;
                 // Outside the reclaim window and before the grace, no walk acts on the reading:
                 // a joiner that is not meshed yet applies it itself.
-                if !state.standing.contains(&Standing::Meshed)
-                    && !may_cohost(cohost, state.standing.contains(&Standing::Meshed), started)
-                    && !rendezvous_params.bind_ports.is_empty()
+                if !lp.state.standing.contains(&Standing::Meshed)
+                    && !may_cohost(lp.cohost, lp.state.standing.contains(&Standing::Meshed), lp.started)
+                    && !lp.rendezvous_params.bind_ports.is_empty()
                 {
                     beacon::read_ladder(
-                        &rendezvous_params,
+                        &lp.rendezvous_params,
                         context.endpoint,
-                        &state.address_book,
-                        &mut state.rungs,
+                        &lp.state.address_book,
+                        &mut lp.state.rungs,
                     )
                     .await;
                 }
             }
-            () = closed_opt(&mut state.beacon_closing) => {
+            () = closed_opt(&mut lp.state.beacon_closing) => {
                 // The beacon that the re-check shed is closed: the id is free of our own corpse, so
                 // the re-probe starts now. The reclaim tick below stays as the net.
-                state.beacon_closing = None;
-                state.idle.reclaim += 1;
-                let context = parts.handler_ctx(&sender);
-                let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
-                maybe_reclaim(&mut state, &context, &arm, &mut rendezvous, &mut rival_probe).await;
+                lp.state.beacon_closing = None;
+                lp.state.idle.reclaim += 1;
+                let context = lp.parts.handler_ctx(&lp.sender);
+                let arm = CohostArm { policy: lp.cohost, params: &lp.rendezvous_params, started: lp.started };
+                maybe_reclaim(&mut lp.state, &context, &arm, &mut lp.rendezvous, &mut lp.rival_probe).await;
             }
-            _ = intervals.reclaim.tick() => {
-                state.idle.reclaim += 1;
-                let context = parts.handler_ctx(&sender);
-                let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
+            _ = lp.intervals.reclaim.tick() => {
+                lp.state.idle.reclaim += 1;
+                let context = lp.parts.handler_ctx(&lp.sender);
+                let arm = CohostArm { policy: lp.cohost, params: &lp.rendezvous_params, started: lp.started };
                 // The rival re-check shed rides this ticker, NOT the heal tick:
                 // simultaneous joiners' heal tickers align, and a shed deadline
                 // quantized to a shared multi-second boundary re-synchronizes
@@ -1279,62 +1354,62 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
                 // forever). At this cadence the offsets survive; the next tick
                 // (~RECLAIM_INTERVAL later, after the dropped endpoint has
                 // unmapped) runs the re-probe via `maybe_reclaim`.
-                if !shed_rival_beacon_if_due(&mut state, &arm, &mut rendezvous, context.endpoint.id()) {
-                    maybe_reclaim(&mut state, &context, &arm, &mut rendezvous, &mut rival_probe).await;
+                if !shed_rival_beacon_if_due(&mut lp.state, &arm, &mut lp.rendezvous, context.endpoint.id()) {
+                    maybe_reclaim(&mut lp.state, &context, &arm, &mut lp.rendezvous, &mut lp.rival_probe).await;
                 }
-                probe::regraft_due(&mut state, &context).await;
-                probe::refill_isolated(&mut state, &context).await;
-                webrtc::session_policy::detach_sessions_under_udp(&mut state, &context).await;
-                gossip::antientropy::resume_fast_rounds(&mut state, &context).await;
+                probe::regraft_due(&mut lp.state, &context).await;
+                probe::refill_isolated(&mut lp.state, &context).await;
+                webrtc::session_policy::detach_sessions_under_udp(&mut lp.state, &context).await;
+                gossip::antientropy::resume_fast_rounds(&mut lp.state, &context).await;
             }
-            _ = intervals.antientropy.tick() => {
-                state.idle.antientropy += 1;
-                let context = parts.handler_ctx(&sender);
-                antientropy_arm(&mut anchors, &mut state, &context).await;
+            _ = lp.intervals.antientropy.tick() => {
+                lp.state.idle.antientropy += 1;
+                let context = lp.parts.handler_ctx(&lp.sender);
+                antientropy_arm(&mut lp.anchors, &mut lp.state, &context).await;
             }
             // Counted before the census reads them, so the tick that reports an
             // interval is itself in that interval's numbers.
-            _ = intervals.state_refresh.tick() => {
-                state.idle.state_refresh += 1;
-                timers::tick_state_refresh(&mut state, &endpoint).await;
+            _ = lp.intervals.state_refresh.tick() => {
+                lp.state.idle.state_refresh += 1;
+                timers::tick_state_refresh(&mut lp.state, &endpoint).await;
             }
-            _ = intervals.linkstate.tick() => {
-                state.idle.linkstate += 1;
-                let context = parts.handler_ctx(&sender);
-                linkstate_arm(&mut state, &context).await;
+            _ = lp.intervals.linkstate.tick() => {
+                lp.state.idle.linkstate += 1;
+                let context = lp.parts.handler_ctx(&lp.sender);
+                linkstate_arm(&mut lp.state, &context).await;
             }
-            _ = recv_opt(&mut external_quit_rx) => {
+            _ = recv_opt(&mut lp.external_quit_rx) => {
                 // External quit is always in-process (MCP): never hard-exit (`false`).
-                let context = parts.handler_ctx(&sender);
-                announce_departure(&mut state, &mut app, &context, QuitParams { name: &mesh_name, leave_label: &leave_label, exit_on_quit: false }).await;
+                let context = lp.parts.handler_ctx(&lp.sender);
+                announce_departure(&mut lp.state, &mut lp.app, &context, QuitParams { name: &lp.mesh_name, leave_label: &lp.leave_label, exit_on_quit: false }).await;
                 break;
             }
-            request = recv_opt(&mut external_req_rx) => match request {
-                None => external_req_rx = None,
+            request = recv_opt(&mut lp.external_req_rx) => match request {
+                None => lp.external_req_rx = None,
                 Some(request) => {
-                    state.idle.external += 1;
-                    let context = parts.handler_ctx(&sender);
-                    if app.handle_session(request, &mut state, &context).await {
-                        state.last_sent_at = Instant::now();
+                    lp.state.idle.external += 1;
+                    let context = lp.parts.handler_ctx(&lp.sender);
+                    if lp.app.handle_session(request, &mut lp.state, &context).await {
+                        lp.state.last_sent_at = Instant::now();
                     }
                 }
             },
-            _ = quit_rx.recv() => {
-                let context = parts.handler_ctx(&sender);
-                exit_after_release = announce_departure(&mut state, &mut app, &context, QuitParams { name: &mesh_name, leave_label: &leave_label, exit_on_quit }).await;
+            _ = lp.quit_rx.recv() => {
+                let context = lp.parts.handler_ctx(&lp.sender);
+                exit_after_release = announce_departure(&mut lp.state, &mut lp.app, &context, QuitParams { name: &lp.mesh_name, leave_label: &lp.leave_label, exit_on_quit: lp.exit_on_quit }).await;
                 break;
             }
         }
-        state.idle.wakeups += 1;
-        app.drain_surfaced();
+        lp.state.idle.wakeups += 1;
+        lp.app.drain_surfaced();
     }
 
     release_rendezvous(
-        &mut rendezvous,
-        &mut rival_probe,
-        &mut rung_probe,
-        &mut state.rungs,
-        owned,
+        &mut lp.rendezvous,
+        &mut lp.rival_probe,
+        &mut lp.rung_probe,
+        &mut lp.state.rungs,
+        lp.owned,
     )
     .await;
     if exit_after_release {
