@@ -42,7 +42,10 @@ fn producer(relay: &str) -> (Child, mpsc::Receiver<serde_json::Value>) {
     let stderr = child.stderr.take().expect("stderr");
     let (notes, received) = mpsc::channel();
     thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+        for read in BufReader::new(stderr).lines() {
+            let Ok(line) = read else {
+                break;
+            };
             if let Ok(note) = serde_json::from_str(&line)
                 && notes.send(note).is_err()
             {
