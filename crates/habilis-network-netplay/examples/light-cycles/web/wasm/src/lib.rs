@@ -51,14 +51,14 @@ use sim::Outcome;
 /// lets the session's own pacing pull it back into line.
 const MAX_CATCH_UP_TICKS: u32 = 4;
 
-#[derive(Serialize, Clone, Copy)]
+#[derive(Serialize)]
 struct CycleDto {
     x: i16,
     y: i16,
     alive: bool,
 }
 
-#[derive(Serialize, Clone, Copy)]
+#[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum OutcomeDto {
     InProgress,
@@ -122,7 +122,6 @@ struct HudDto {
 /// navigation/reload is the only lifecycle this client needs, same as
 /// `chat-web`'s).
 #[wasm_bindgen]
-#[derive(Clone)]
 pub struct LightCyclesPeer {
     // Never read directly — held only so the node's background task isn't
     // dropped.

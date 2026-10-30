@@ -34,7 +34,6 @@ use std::fmt;
 /// their own — `child` is what actually occupies this position in the
 /// tree, exactly as `visage-dom`'s `comp` fiber is transparent and
 /// `domOf` walks straight through to its child.
-#[derive(Clone)]
 pub struct ComponentMount<N> {
     id: SubscriberId,
     type_key: usize,
@@ -58,7 +57,6 @@ impl<N> fmt::Debug for ComponentMount<N> {
 /// what shape (and, for `Component`, *which* instance) produced each
 /// node — the minimum a non-keyed reconciler needs to decide "patch in
 /// place" vs "replace".
-#[derive(Clone)]
 pub enum Mounted<N> {
     Text(N, Rc<str>),
     Box(N, BoxProps, Vec<Mounted<N>>),

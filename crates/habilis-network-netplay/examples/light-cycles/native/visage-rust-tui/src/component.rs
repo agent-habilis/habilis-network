@@ -40,7 +40,6 @@ use std::{fmt, mem};
 /// 'function'` classification — Rust has no such runtime check on an
 /// arbitrary value, so the two shapes are explicit variants instead of one
 /// dynamically-typed one.
-#[derive(Clone)]
 pub enum Step {
     /// The **loop** shape: a plain view. The component stays in control; the
     /// next step produces the next view.
@@ -83,7 +82,6 @@ pub type ComponentBox = Box<dyn Component>;
 /// One running component instance.
 // `Debug` is hand-written below: `Rc<dyn Fn() -> View>` has no `Debug` to
 // derive from.
-#[derive(Clone)]
 pub struct Instance {
     id: SubscriberId,
     finished: bool,

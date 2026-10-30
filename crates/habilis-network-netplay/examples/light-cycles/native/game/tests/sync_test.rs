@@ -23,7 +23,6 @@ use light_cycles_native::sim::{self, World};
 
 /// Drives the simulation from the session's requests, exactly as the real
 /// client does.
-#[derive(Clone, Copy)]
 struct Runner {
     world: World,
 }

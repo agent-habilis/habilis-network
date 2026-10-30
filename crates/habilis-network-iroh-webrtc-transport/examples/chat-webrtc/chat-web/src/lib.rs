@@ -60,7 +60,7 @@ use web_sys::console;
 /// JSON over the wasm boundary rather than `serde-wasm-bindgen`: the shapes are
 /// small, the cost is irrelevant at chat rates, and a plain object is what the
 /// JS side wants to switch on anyway.
-#[derive(Debug, Serialize, Clone, Copy)]
+#[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Event {
     /// Progress during the join, so a tab is never silently busy for the ten
@@ -90,7 +90,7 @@ enum Event {
 
 /// A joined tab.
 #[wasm_bindgen]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ChatPeer {
     /// Typed lines, drained by a writer task. A channel rather than a
     /// `RefCell<SendStream>` because writing is async and `say` is not: a

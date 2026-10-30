@@ -15,7 +15,6 @@ use std::collections::HashSet;
 use std::{fmt, mem};
 
 /// A running app.
-#[derive(Clone)]
 pub struct Runtime<H: Host> {
     host: H,
     root: H::Node,

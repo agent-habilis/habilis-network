@@ -75,7 +75,6 @@ pub fn app(snapshot: Signal<Snapshot>) -> UiComponent {
 }
 
 /// The root component's state: the snapshot it reads on every step.
-#[derive(Clone)]
 pub struct UiComponent {
     snapshot: Signal<Snapshot>,
 }

@@ -134,7 +134,7 @@ impl TuiNode {
 }
 
 /// Owns every node in a tree by index — see the module doc for why.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct Arena {
     nodes: Vec<TuiNode>,
 }
