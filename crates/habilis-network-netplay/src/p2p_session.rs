@@ -393,12 +393,9 @@ impl<T: Config, Link: Transport<T>> P2PSession<T, Link> {
         };
         self.last_checksum_frame = frame;
 
-        let mut outgoing = Vec::new();
         for peer in &mut self.peers {
-            outgoing.push((peer.address.clone(), peer.checksum_message(frame, checksum)));
-        }
-        for (address, message) in &outgoing {
-            self.transport.send_to(message, address);
+            let message = peer.checksum_message(frame, checksum);
+            self.transport.send_to(&message, &peer.address);
         }
     }
 }
