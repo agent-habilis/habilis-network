@@ -835,7 +835,7 @@ impl MembershipApp {
                     StateMergeParams::new(context.into(), Channel::State, merge),
                 )
                 .await;
-                let outcome = merged.map(|_| ()).map_err(|error| error.to_string());
+                let outcome = merged.map_err(|error| error.to_string());
                 let _ = reply.send(outcome);
                 true
             }

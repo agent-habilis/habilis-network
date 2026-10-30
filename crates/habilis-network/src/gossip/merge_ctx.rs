@@ -363,10 +363,6 @@ impl<'mesh> StateMergeParams<'mesh> {
 /// internal plumbing, not something the agent did, so it must not appear as a
 /// "you changed shared state" event (nor race into a `fetch_messages` long-poll).
 ///
-/// Returns the signed wire bytes that were gossiped (`None` for a no-op
-/// merge), so a shutdown-path caller can mirror them over the unicast plane
-/// ([`unicast_farewell`]).
-///
 /// # Errors
 /// Unrepresentable merge, oversize frame, a rejected foreign-card write, or a
 /// broadcast refusal.
@@ -386,7 +382,7 @@ impl<'mesh> StateMergeParams<'mesh> {
 pub async fn broadcast_state_merge(
     state: &mut EventLoopState,
     params: StateMergeParams<'_>,
-) -> Result<Option<WireFrame>, transport::SendError> {
+) -> Result<(), transport::SendError> {
     use crate::doc::Ingested;
 
     let StateMergeParams {
@@ -413,7 +409,7 @@ pub async fn broadcast_state_merge(
         .build_change(&merge, &actor_seed)
         .map_err(|error| transport::SendError::Internal(error.into()))?;
     let Some(change_bytes) = built else {
-        return Ok(None);
+        return Ok(());
     };
 
     // 2. Compose + sign + size-gate before the change touches the live doc.
@@ -437,7 +433,7 @@ pub async fn broadcast_state_merge(
     let ingested = state.doc_mut(channel).ingest(&signed);
     let after = match ingested {
         Ingested::Applied { doc, .. } => doc,
-        Ingested::Duplicate => return Ok(None),
+        Ingested::Duplicate => return Ok(()),
         Ingested::Rejected => {
             return Err(transport::SendError::internal(anyhow::anyhow!(
                 "write rejected: a member may only write its own /peers/<nick>/card"
@@ -467,16 +463,16 @@ pub async fn broadcast_state_merge(
     }
     if state.overlay_reachable() {
         sender
-            .broadcast(bytes.clone())
+            .broadcast(bytes)
             .await
             .map_err(|error| transport::SendError::internal(anyhow::anyhow!("{error}")))?;
     } else {
         // No gossip path yet: buffer until we mesh. (The change is already in
         // the local doc, so heads anti-entropy still reconciles it if the
         // buffer is full.)
-        state.pending_outbound.push((signed, bytes.clone()));
+        state.pending_outbound.push((signed, bytes));
     }
-    Ok(Some(bytes))
+    Ok(())
 }
 
 /// Mirror a farewell frame over the unicast plane to every rostered peer —

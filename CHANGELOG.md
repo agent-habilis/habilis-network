@@ -169,6 +169,9 @@ published to a registry; pin it with
 
 ### Changed
 
+- **Breaking:** `habilis_network::ops::broadcast_state_merge` returns `Result<(), SendError>`, not
+  `Result<Option<WireFrame>, SendError>`. No caller in the workspace read the signed frame it used
+  to return, so the frame is no longer handed back.
 - **Wire change:** the loopback port ladder of a private mesh now maps into `1024..=32767`, not
   `1024..=65535`. The ephemeral bind of another endpoint (Linux 32768-60999, macOS and Windows
   49152-65535) can no longer land on a rung, which caused the rare "stranger on a rung" warnings
