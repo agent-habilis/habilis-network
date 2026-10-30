@@ -182,17 +182,15 @@ impl ReassemblyStore {
     /// of one shard per idle window must not pin its bytes forever); returns
     /// how many were dropped (the prune tick warns when non-zero).
     pub fn sweep_stale(&mut self, now: Instant) -> usize {
-        let stale: Vec<GroupKey> = self
+        let stale: Vec<(GroupKey, PartialGroup)> = self
             .groups
-            .iter()
-            .filter(|(_, group)| {
+            .extract_if(|_, group| {
                 now.duration_since(group.last_seen) >= REASSEMBLY_STALE
                     || now.duration_since(group.created_at) >= REASSEMBLY_MAX_GROUP_LIFETIME
             })
-            .map(|(key, _)| key.clone())
             .collect();
-        for key in &stale {
-            self.evict(key);
+        for (key, group) in &stale {
+            self.release(key.0, group);
         }
         stale.len()
     }
@@ -301,14 +299,18 @@ impl ReassemblyStore {
     /// Remove a group and release its budget.
     fn evict(&mut self, key: &GroupKey) -> Option<PartialGroup> {
         let group = self.groups.remove(key)?;
+        self.release(key.0, &group);
+        Some(group)
+    }
+
+    fn release(&mut self, author: AuthorKey, group: &PartialGroup) {
         self.total_bytes = self.total_bytes.saturating_sub(group.bytes);
-        if let Some(author) = self.author_bytes.get_mut(&key.0) {
-            *author = author.saturating_sub(group.bytes);
-            if *author == 0 {
-                self.author_bytes.remove(&key.0);
+        if let Some(bytes) = self.author_bytes.get_mut(&author) {
+            *bytes = bytes.saturating_sub(group.bytes);
+            if *bytes == 0 {
+                self.author_bytes.remove(&author);
             }
         }
-        Some(group)
     }
 }
 
