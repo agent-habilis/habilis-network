@@ -133,7 +133,7 @@ impl Instance {
     fn resume_sync(&mut self) -> Option<View> {
         let mut deps = mem::take(&mut self.deps_alt);
         deps.clear();
-        let prev = reactive::open_tracking(deps);
+        let previous = reactive::open_tracking(deps);
 
         let thunk = self.thunk.clone();
         let view = if let Some(thunk) = thunk {
@@ -142,7 +142,7 @@ impl Instance {
             self.component.step().map(|step| self.adopt(step))
         };
 
-        let deps = reactive::close_tracking(prev);
+        let deps = reactive::close_tracking(previous);
         reactive::resubscribe(self.id, &self.deps, &deps);
         self.deps_alt = mem::replace(&mut self.deps, deps);
 

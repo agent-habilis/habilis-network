@@ -109,8 +109,8 @@ impl World {
     }
 
     fn mark(&mut self, x: u8, y: u8, player: usize) {
-        let idx = usize::from(y) * usize::from(GRID_W) + usize::from(x);
-        self.grid[idx] = u8::try_from(player + 1).unwrap_or(u8::MAX);
+        let index = usize::from(y) * usize::from(GRID_W) + usize::from(x);
+        self.grid[index] = u8::try_from(player + 1).unwrap_or(u8::MAX);
     }
 
     /// Out-of-bounds counts as occupied — a wall behaves exactly like a
@@ -119,9 +119,9 @@ impl World {
         if x < 0 || y < 0 || x >= i16::from(GRID_W) || y >= i16::from(GRID_H) {
             return true;
         }
-        let idx =
+        let index =
             usize::try_from(y).unwrap_or(0) * usize::from(GRID_W) + usize::try_from(x).unwrap_or(0);
-        self.grid[idx] != 0
+        self.grid[index] != 0
     }
 }
 

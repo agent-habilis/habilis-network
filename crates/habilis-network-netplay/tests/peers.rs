@@ -83,11 +83,11 @@ struct Network {
 
 impl Network {
     fn deliver(&mut self, from: &str, to: &str, message: Message<Input>) {
-        let mut rng = Rng(self.rng_state);
-        let dropped = rng.chance(self.impairment.drop);
-        let duplicated = rng.chance(self.impairment.duplicate);
-        let delayed = rng.chance(self.impairment.reorder);
-        self.rng_state = rng.0;
+        let mut generator = Rng(self.rng_state);
+        let dropped = generator.chance(self.impairment.drop);
+        let duplicated = generator.chance(self.impairment.duplicate);
+        let delayed = generator.chance(self.impairment.reorder);
+        self.rng_state = generator.0;
 
         if dropped {
             return;
@@ -111,26 +111,26 @@ impl Network {
         }
     }
 
-    fn take(&mut self, addr: &str) -> Vec<(String, Message<Input>)> {
-        self.inboxes.remove(addr).unwrap_or_default()
+    fn take(&mut self, address: &str) -> Vec<(String, Message<Input>)> {
+        self.inboxes.remove(address).unwrap_or_default()
     }
 }
 
 /// One peer's view of the shared network.
 struct Wire {
-    addr: String,
+    address: String,
     net: Rc<cell::RefCell<Network>>,
 }
 
 impl Transport<Game> for Wire {
-    fn send_to(&mut self, message: &Message<Input>, addr: &String) {
+    fn send_to(&mut self, message: &Message<Input>, address: &String) {
         self.net
             .borrow_mut()
-            .deliver(&self.addr, addr, message.clone());
+            .deliver(&self.address, address, message.clone());
     }
 
     fn receive_all(&mut self) -> Vec<(String, Message<Input>)> {
-        self.net.borrow_mut().take(&self.addr)
+        self.net.borrow_mut().take(&self.address)
     }
 }
 
@@ -176,7 +176,7 @@ fn build(count: usize, impairment: Impairment) -> (Rc<cell::RefCell<Network>>, V
     let peers = (0..count)
         .map(|handle| {
             let wire = Wire {
-                addr: addrs[handle].clone(),
+                address: addrs[handle].clone(),
                 net: Rc::clone(&net),
             };
             Peer {

@@ -288,7 +288,7 @@ fn arrange_children(
             Justify::Start | Justify::Between => {}
         }
     }
-    let mut pos = (if row { cx } else { cy }) + offset;
+    let mut position = (if row { cx } else { cy }) + offset;
 
     for (i, &kid) in kids.iter().enumerate() {
         let main_size = main[i].max(0);
@@ -324,11 +324,11 @@ fn arrange_children(
         }
 
         if row {
-            arrange(arena, epoch, kid, pos, cross_pos, main_size, cross_size);
+            arrange(arena, epoch, kid, position, cross_pos, main_size, cross_size);
         } else {
-            arrange(arena, epoch, kid, cross_pos, pos, cross_size, main_size);
+            arrange(arena, epoch, kid, cross_pos, position, cross_size, main_size);
         }
-        pos += main_size + spacing;
+        position += main_size + spacing;
     }
 }
 

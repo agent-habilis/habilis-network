@@ -40,8 +40,8 @@ impl RoundDescriptor {
         roster.sort_unstable();
         roster.dedup();
         let seed = seed_for(session_id, &roster);
-        let mut rng = SplitMix64::new(seed);
-        let spawns = place_spawns(&mut rng, roster.len());
+        let mut generator = SplitMix64::new(seed);
+        let spawns = place_spawns(&mut generator, roster.len());
         Self { roster, spawns }
     }
 }
@@ -60,7 +60,7 @@ fn seed_for(session_id: u64, roster: &[String]) -> u64 {
 /// each other so nobody starts inside another player's very first trail
 /// cell, facing inward (toward the arena's center) so an opening move
 /// never immediately re-enters a wall.
-fn place_spawns(rng: &mut SplitMix64, count: usize) -> Vec<Spawn> {
+fn place_spawns(generator: &mut SplitMix64, count: usize) -> Vec<Spawn> {
     const MARGIN: u8 = 4;
     let usable_w = GRID_W.saturating_sub(2 * MARGIN).max(1);
     let usable_h = GRID_H.saturating_sub(2 * MARGIN).max(1);
@@ -78,8 +78,8 @@ fn place_spawns(rng: &mut SplitMix64, count: usize) -> Vec<Spawn> {
         // every already-placed spawn — cheap rejection sampling rather
         // than a real Poisson-disc pass, plenty for a handful of players.
         for _ in 0..16 {
-            let x = MARGIN + u8::try_from(rng.next_bounded(u64::from(usable_w))).unwrap_or(0);
-            let y = MARGIN + u8::try_from(rng.next_bounded(u64::from(usable_h))).unwrap_or(0);
+            let x = MARGIN + u8::try_from(generator.next_bounded(u64::from(usable_w))).unwrap_or(0);
+            let y = MARGIN + u8::try_from(generator.next_bounded(u64::from(usable_h))).unwrap_or(0);
             let gap =
                 |&(px, py): &(u8, u8)| u32::from(x.abs_diff(px)).max(u32::from(y.abs_diff(py)));
             let min_dist: u32 = placed.iter().map(gap).min().unwrap_or(u32::MAX);

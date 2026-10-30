@@ -70,18 +70,18 @@ const SGR_ON: [(u8, u8); 6] = [
     (STRIKE, 9),
 ];
 
-/// Appends SGR codes turning attribute bits on/off to move from `prev` to
+/// Appends SGR codes turning attribute bits on/off to move from `previous` to
 /// `next`, returning `true` if it emitted SGR `0` (which also resets
 /// colors — the caller must re-emit fg/bg after). Individual "attribute
 /// off" codes are avoided entirely: SGR 21 is "double underline" on some
 /// terminals and "bold off" on others, and 22 clears bold and dim
 /// together, so any bit going off resets everything and re-applies what
 /// should stay on.
-pub fn push_attrs(out: &mut Vec<String>, prev: u8, next: u8) -> bool {
-    if prev == next {
+pub fn push_attrs(out: &mut Vec<String>, previous: u8, next: u8) -> bool {
+    if previous == next {
         return false;
     }
-    if prev & !next != 0 {
+    if previous & !next != 0 {
         out.push("0".to_string());
         for (bit, code) in SGR_ON {
             if next & bit != 0 {
@@ -91,7 +91,7 @@ pub fn push_attrs(out: &mut Vec<String>, prev: u8, next: u8) -> bool {
         return true;
     }
     for (bit, code) in SGR_ON {
-        if next & bit != 0 && prev & bit == 0 {
+        if next & bit != 0 && previous & bit == 0 {
             out.push(code.to_string());
         }
     }

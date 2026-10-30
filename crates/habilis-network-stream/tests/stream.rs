@@ -399,11 +399,11 @@ fn two_streams_on_one_node_stay_apart() {
 async fn on_relay(url: &str, transport: Vec<Transport>) -> StreamNode {
     let base = StreamOpts::default();
     let relay_urls = vec![url.to_owned()];
-    let opts = base
+    let options = base
         .lookup(vec![Lookup::Relay])
         .transport(transport)
         .relay_urls(relay_urls);
-    StreamNode::bind(&opts).await.expect("bind a relay node")
+    StreamNode::bind(&options).await.expect("bind a relay node")
 }
 
 #[test]

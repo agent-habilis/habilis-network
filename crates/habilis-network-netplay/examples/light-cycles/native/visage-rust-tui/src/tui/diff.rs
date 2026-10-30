@@ -45,12 +45,12 @@ fn is_default(pen: Pen) -> bool {
     pen.fg == DEFAULT_COLOR && pen.bg == DEFAULT_COLOR && pen.attrs == 0
 }
 
-/// Diffs `prev` (`None` on the very first frame) against `next`, returning
+/// Diffs `previous` (`None` on the very first frame) against `next`, returning
 /// the ANSI bytes that repaint the terminal from one to the other. Empty
 /// when nothing changed.
 #[must_use]
-pub fn diff(prev: Option<&ScreenBuffer>, next: &ScreenBuffer) -> String {
-    let full = prev.is_none_or(|p| p.width != next.width || p.height != next.height);
+pub fn diff(previous: Option<&ScreenBuffer>, next: &ScreenBuffer) -> String {
+    let full = previous.is_none_or(|p| p.width != next.width || p.height != next.height);
     let mut out = String::new();
     let mut pen = DEFAULT_PEN;
     if full {
@@ -65,7 +65,7 @@ pub fn diff(prev: Option<&ScreenBuffer>, next: &ScreenBuffer) -> String {
         let mut left = 0i32;
         let mut right = width - 1;
         while left <= right
-            && unchanged(prev, next, base + usize::try_from(left).unwrap_or(0), full)
+            && unchanged(previous, next, base + usize::try_from(left).unwrap_or(0), full)
         {
             left += 1;
         }
@@ -73,7 +73,7 @@ pub fn diff(prev: Option<&ScreenBuffer>, next: &ScreenBuffer) -> String {
             continue; // whole row unchanged: emit nothing
         }
         while right > left
-            && unchanged(prev, next, base + usize::try_from(right).unwrap_or(0), full)
+            && unchanged(previous, next, base + usize::try_from(right).unwrap_or(0), full)
         {
             right -= 1;
         }
@@ -133,18 +133,18 @@ pub fn diff(prev: Option<&ScreenBuffer>, next: &ScreenBuffer) -> String {
     out
 }
 
-fn unchanged(prev: Option<&ScreenBuffer>, next: &ScreenBuffer, i: usize, full: bool) -> bool {
-    let Some(prev) = (if full { None } else { prev }) else {
+fn unchanged(previous: Option<&ScreenBuffer>, next: &ScreenBuffer, i: usize, full: bool) -> bool {
+    let Some(previous) = (if full { None } else { previous }) else {
         // On a full repaint the screen has just been erased, so "unchanged"
         // collapses to "is blank in the default colors" — this is what
         // unifies the first frame with every other one instead of giving
         // it its own code path.
         return blank(next, i);
     };
-    prev.chars[i] == next.chars[i]
-        && prev.fg[i] == next.fg[i]
-        && prev.bg[i] == next.bg[i]
-        && prev.attrs[i] == next.attrs[i]
+    previous.chars[i] == next.chars[i]
+        && previous.fg[i] == next.fg[i]
+        && previous.bg[i] == next.bg[i]
+        && previous.attrs[i] == next.attrs[i]
 }
 
 fn blank(buffer: &ScreenBuffer, i: usize) -> bool {

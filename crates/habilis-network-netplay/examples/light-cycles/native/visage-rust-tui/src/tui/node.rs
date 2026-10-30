@@ -41,7 +41,7 @@ pub struct TuiNode {
 
     // Tree — doubly-linked list of children, arena-indexed.
     pub parent: Option<NodeId>,
-    pub prev: Option<NodeId>,
+    pub previous: Option<NodeId>,
     pub next: Option<NodeId>,
     pub first_child: Option<NodeId>,
     pub last_child: Option<NodeId>,
@@ -95,7 +95,7 @@ impl TuiNode {
         Self {
             tag,
             parent: None,
-            prev: None,
+            previous: None,
             next: None,
             first_child: None,
             last_child: None,
@@ -166,11 +166,11 @@ impl Arena {
 
     /// Standard doubly-linked unlink. A no-op on an already-detached node.
     pub fn detach(&mut self, id: NodeId) {
-        let (parent, prev, next) = {
+        let (parent, previous, next) = {
             let node = self.get(id);
-            (node.parent, node.prev, node.next)
+            (node.parent, node.previous, node.next)
         };
-        match prev {
+        match previous {
             Some(p) => self.node_mut(p).next = next,
             None => {
                 if let Some(par) = parent {
@@ -179,10 +179,10 @@ impl Arena {
             }
         }
         match next {
-            Some(n) => self.node_mut(n).prev = prev,
+            Some(n) => self.node_mut(n).previous = previous,
             None => {
                 if let Some(par) = parent {
-                    self.node_mut(par).last_child = prev;
+                    self.node_mut(par).last_child = previous;
                 }
             }
         }
@@ -191,7 +191,7 @@ impl Arena {
         }
         let node = self.node_mut(id);
         node.parent = None;
-        node.prev = None;
+        node.previous = None;
         node.next = None;
     }
 
@@ -208,7 +208,7 @@ impl Arena {
         match before {
             None => {
                 let last = self.get(parent).last_child;
-                self.node_mut(node).prev = last;
+                self.node_mut(node).previous = last;
                 self.node_mut(node).next = None;
                 match last {
                     Some(l) => self.node_mut(l).next = Some(node),
@@ -217,11 +217,11 @@ impl Arena {
                 self.node_mut(parent).last_child = Some(node);
             }
             Some(before_id) => {
-                let prev = self.get(before_id).prev;
-                self.node_mut(node).prev = prev;
+                let previous = self.get(before_id).previous;
+                self.node_mut(node).previous = previous;
                 self.node_mut(node).next = Some(before_id);
-                self.node_mut(before_id).prev = Some(node);
-                match prev {
+                self.node_mut(before_id).previous = Some(node);
+                match previous {
                     Some(p) => self.node_mut(p).next = Some(node),
                     None => self.node_mut(parent).first_child = Some(node),
                 }
@@ -243,7 +243,7 @@ impl Arena {
             let next = self.get(id).next;
             let node = self.node_mut(id);
             node.parent = None;
-            node.prev = None;
+            node.previous = None;
             node.next = None;
             child = next;
         }

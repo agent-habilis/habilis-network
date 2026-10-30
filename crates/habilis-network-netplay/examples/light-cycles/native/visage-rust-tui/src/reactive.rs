@@ -85,17 +85,17 @@ pub fn open_tracking<S: BuildHasher>(deps: HashSet<SignalId, S>) -> Option<HashS
 /// Closes the tracking window, restoring whatever was open before (`None`
 /// if this was the outermost window), and returns what was recorded.
 #[must_use]
-pub fn close_tracking<S: BuildHasher>(prev: Option<HashSet<SignalId, S>>) -> HashSet<SignalId> {
-    let prev: Option<HashSet<SignalId>> = prev.map(|deps| deps.into_iter().collect());
-    REGISTRY.with(|r| r.current_deps.replace(prev).unwrap_or_default())
+pub fn close_tracking<S: BuildHasher>(previous: Option<HashSet<SignalId, S>>) -> HashSet<SignalId> {
+    let previous: Option<HashSet<SignalId>> = previous.map(|deps| deps.into_iter().collect());
+    REGISTRY.with(|r| r.current_deps.replace(previous).unwrap_or_default())
 }
 
 /// Runs `f` with tracking suspended — reads inside it are not recorded as
 /// dependencies of whatever window (if any) is currently open.
 pub fn untrack<T>(f: impl FnOnce() -> T) -> T {
-    let prev = REGISTRY.with(|r| r.current_deps.take());
+    let previous = REGISTRY.with(|r| r.current_deps.take());
     let result = f();
-    REGISTRY.with(|r| *r.current_deps.borrow_mut() = prev);
+    REGISTRY.with(|r| *r.current_deps.borrow_mut() = previous);
     result
 }
 
@@ -247,19 +247,19 @@ pub fn take_queue() -> impl Iterator<Item = SubscriberId> {
         .into_iter()
 }
 
-/// Resubscribes `sub` from `prev`'s dependency set to `next`'s: dropped from
-/// every signal in `prev` but not `next`, added to every signal in `next`.
+/// Resubscribes `sub` from `previous`'s dependency set to `next`'s: dropped from
+/// every signal in `previous` but not `next`, added to every signal in `next`.
 /// Mirrors `resubscribe` — called after each render with the just-recorded
 /// dependency set, so a signal a component stopped reading stops notifying
 /// it.
 pub fn resubscribe<S: BuildHasher>(
     sub: SubscriberId,
-    prev: &HashSet<SignalId, S>,
+    previous: &HashSet<SignalId, S>,
     next: &HashSet<SignalId, S>,
 ) {
     REGISTRY.with(|r| {
         let mut subs = r.subs.borrow_mut();
-        for dep in prev {
+        for dep in previous {
             if !next.contains(dep)
                 && let Some(set) = subs.get_mut(dep.0 as usize)
             {
@@ -300,9 +300,9 @@ mod tests {
     fn reading_a_signal_inside_a_tracking_window_records_it() {
         let _guard = ::habilis_network_test_tracing::init();
         let signal = Signal::new(1);
-        let prev = open_tracking(HashSet::new());
+        let previous = open_tracking(HashSet::new());
         let _ = signal.get();
-        let deps = close_tracking(prev);
+        let deps = close_tracking(previous);
         assert_eq!(
             deps.len(),
             1,
@@ -329,9 +329,9 @@ mod tests {
     fn peek_never_records_a_dependency_even_inside_a_window() {
         let _guard = ::habilis_network_test_tracing::init();
         let signal = Signal::new(1);
-        let prev = open_tracking(HashSet::new());
+        let previous = open_tracking(HashSet::new());
         let _ = signal.peek();
-        let deps = close_tracking(prev);
+        let deps = close_tracking(previous);
         assert!(
             deps.is_empty(),
             "peek records no dependency even inside a window"
@@ -344,9 +344,9 @@ mod tests {
         let signal = Signal::new(1);
         let sub = next_subscriber_id();
 
-        let prev = open_tracking(HashSet::new());
+        let previous = open_tracking(HashSet::new());
         let _ = signal.get();
-        let deps = close_tracking(prev);
+        let deps = close_tracking(previous);
         resubscribe(sub, &HashSet::new(), &deps);
 
         signal.set(2);
@@ -363,9 +363,9 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let signal = Signal::new(1);
         let sub = next_subscriber_id();
-        let prev = open_tracking(HashSet::new());
+        let previous = open_tracking(HashSet::new());
         let _ = signal.get();
-        let deps = close_tracking(prev);
+        let deps = close_tracking(previous);
         resubscribe(sub, &HashSet::new(), &deps);
 
         signal.set(1); // same value — no-op per the `Object.is` bail
@@ -382,17 +382,17 @@ mod tests {
         let b = Signal::new(1);
         let sub = next_subscriber_id();
 
-        let prev = open_tracking(HashSet::new());
+        let previous = open_tracking(HashSet::new());
         let _ = a.get();
         let _ = b.get();
-        let first_deps = close_tracking(prev);
+        let first_deps = close_tracking(previous);
         resubscribe(sub, &HashSet::new(), &first_deps);
 
         // Second render only reads `b` — matches a component whose thunk
         // took a different branch and stopped reading `a`.
-        let prev = open_tracking(HashSet::new());
+        let previous = open_tracking(HashSet::new());
         let _ = b.get();
-        let second_deps = close_tracking(prev);
+        let second_deps = close_tracking(previous);
         resubscribe(sub, &first_deps, &second_deps);
 
         a.set(2); // no longer subscribed

@@ -380,7 +380,7 @@ const ABBREVIATIONS = new Set(["ctx", "addr", "conn", "msg", "buf", "opts", "pre
 function countAbbrevNames(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)))
     .split("\n")
-    .filter((line) => !/^\s*#\[/.test(line))
+    .filter((line) => !/^\s*#!?\[/.test(line))
     .join("\n")
     // The fields of the aead crate's `Payload { msg, aad }` literal are named by that crate.
     .replace(/\bPayload\s*\{[^}]*\}/g, (literal) => literal.replace(/\bmsg\b/g, "_"));
@@ -814,7 +814,7 @@ const RULES: Rule[] = [
   {
     name: "abbrev_name",
     scan: countAbbrevNames,
-    skip: /(^|\/)(examples|tests|benches)\/|^(?!crates\/[^/]+\/src\/)/,
+    skip: /^(?!crates\/)/,
     glob: "crates/**/*.rs",
     why: "An identifier is not a letter-deleted abbreviation: write ctx as context, addr as address, and so on. A name that a crate outside our control fixes has a counted row.",
   },

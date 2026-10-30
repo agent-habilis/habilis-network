@@ -217,14 +217,14 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
     let right = node.lx + node.lw - 1;
     let bottom = node.ly + node.lh - 1;
 
-    let mut buf = [0u8; 4];
+    let mut utf8 = [0u8; 4];
     for x in (left + 1)..right {
         put(
             buffer,
             clip,
             x,
             top,
-            chars[4].encode_utf8(&mut buf),
+            chars[4].encode_utf8(&mut utf8),
             edge,
             1,
         );
@@ -233,7 +233,7 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
             clip,
             x,
             bottom,
-            chars[4].encode_utf8(&mut buf),
+            chars[4].encode_utf8(&mut utf8),
             edge,
             1,
         );
@@ -244,7 +244,7 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
             clip,
             left,
             y,
-            chars[5].encode_utf8(&mut buf),
+            chars[5].encode_utf8(&mut utf8),
             edge,
             1,
         );
@@ -253,7 +253,7 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
             clip,
             right,
             y,
-            chars[5].encode_utf8(&mut buf),
+            chars[5].encode_utf8(&mut utf8),
             edge,
             1,
         );
@@ -263,7 +263,7 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
         clip,
         left,
         top,
-        chars[0].encode_utf8(&mut buf),
+        chars[0].encode_utf8(&mut utf8),
         edge,
         1,
     );
@@ -272,7 +272,7 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
         clip,
         right,
         top,
-        chars[1].encode_utf8(&mut buf),
+        chars[1].encode_utf8(&mut utf8),
         edge,
         1,
     );
@@ -281,7 +281,7 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
         clip,
         left,
         bottom,
-        chars[2].encode_utf8(&mut buf),
+        chars[2].encode_utf8(&mut utf8),
         edge,
         1,
     );
@@ -290,7 +290,7 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
         clip,
         right,
         bottom,
-        chars[3].encode_utf8(&mut buf),
+        chars[3].encode_utf8(&mut utf8),
         edge,
         1,
     );

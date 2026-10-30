@@ -194,13 +194,13 @@ async fn talk(
         return send_to(sender, nicks).await;
     }
     if elapsed >= *next_burst {
-        let mut rng = rand::rng();
-        let wanted = rand::Rng::random_range(&mut rng, 3..=5);
+        let mut generator = rand::rng();
+        let wanted = rand::Rng::random_range(&mut generator, 3..=5);
         let mut targets: Vec<&String> = nicks.iter().collect();
-        targets.shuffle(&mut rng);
+        targets.shuffle(&mut generator);
         targets.truncate(wanted);
         send_to(sender, targets).await?;
-        *next_burst = elapsed + rand::Rng::random_range(&mut rng, 60..=240);
+        *next_burst = elapsed + rand::Rng::random_range(&mut generator, 60..=240);
     }
     Ok(())
 }
