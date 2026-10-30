@@ -1066,11 +1066,11 @@ impl RelayLadder {
 impl fmt::Display for RelayLadder {
     /// The canonical `a,b,c` text form — round-trips through [`FromStr`].
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, url) in self.0.iter().enumerate() {
-            if index > 0 {
-                formatter.write_str(",")?;
-            }
+        let mut separator = "";
+        for url in &self.0 {
+            formatter.write_str(separator)?;
             write!(formatter, "{url}")?;
+            separator = ",";
         }
         Ok(())
     }

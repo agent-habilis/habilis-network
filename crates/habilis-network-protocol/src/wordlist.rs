@@ -154,7 +154,8 @@ mod js_copy {
     fn the_typescript_copy_is_word_for_word_the_same() {
         let _guard = ::habilis_network_test_tracing::init();
         let copy = transcribed();
-        for (index, (mine, theirs)) in WORDS.iter().zip(&copy).enumerate() {
+        let pairs: Vec<(usize, (&&str, &&str))> = WORDS.iter().zip(&copy).enumerate().collect();
+        for (index, (mine, theirs)) in pairs {
             assert_eq!(
                 mine, theirs,
                 "wordlist.ts diverges at index {index}: expected {mine:?}, found {theirs:?}"
