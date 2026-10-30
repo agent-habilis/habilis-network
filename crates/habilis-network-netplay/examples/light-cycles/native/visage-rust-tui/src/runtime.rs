@@ -53,7 +53,7 @@ impl<H: Host> Runtime<H> {
     /// doc. Returns whether anything was queued at all, i.e. whether a
     /// repaint might be needed.
     pub fn tick(&mut self) -> bool {
-        let dirty: HashSet<SubscriberId> = reactive::take_queue().into_iter().collect();
+        let dirty: HashSet<SubscriberId> = reactive::take_queue().collect();
         if dirty.is_empty() {
             return false;
         }

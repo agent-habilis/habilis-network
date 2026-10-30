@@ -159,8 +159,8 @@ impl Game {
     }
 
     /// Lobby joins and departures since the last call.
-    pub fn drain_events(&mut self) -> Vec<GameEvent> {
-        mem::take(&mut self.pending_events)
+    pub fn drain_events(&mut self) -> impl Iterator<Item = GameEvent> {
+        mem::take(&mut self.pending_events).into_iter()
     }
 
     /// Record where the player wants to go. Legality is not checked here:

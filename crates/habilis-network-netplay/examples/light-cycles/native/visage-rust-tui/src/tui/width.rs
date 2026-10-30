@@ -14,9 +14,8 @@ use unicode_width::UnicodeWidthStr;
 use std::mem;
 /// Splits `text` into extended grapheme clusters (UAX #29) — a ZWJ emoji
 /// family, a flag, a base+combining-mark sequence, each one unit.
-#[must_use]
-pub fn graphemes(text: &str) -> Vec<&str> {
-    text.graphemes(true).collect()
+pub fn graphemes(text: &str) -> impl Iterator<Item = &str> {
+    text.graphemes(true)
 }
 
 /// The terminal cell width of one grapheme cluster: 0, 1, or 2.
@@ -55,7 +54,7 @@ pub fn truncate(text: &str, cells: usize, mode: Truncate) -> String {
     if cells == 1 {
         return "…".to_string();
     }
-    let parts = graphemes(text);
+    let parts: Vec<&str> = graphemes(text).collect();
     match mode {
         Truncate::End | Truncate::None => format!("{}…", take(&parts, cells - 1, true)),
         Truncate::Start => format!("…{}", take(&parts, cells - 1, false)),
@@ -104,13 +103,13 @@ pub enum Wrap {
 
 /// Wraps `text` to `cells`. `\n` is always a hard break in every mode;
 /// `mode` only controls implicit breaks within an over-wide line.
-#[must_use]
-pub fn wrap_text(text: &str, cells: usize, mode: Wrap) -> Vec<String> {
+pub fn wrap_text(text: &str, cells: usize, mode: Wrap) -> impl Iterator<Item = String> {
     let hard: Vec<&str> = text.split('\n').collect();
-    if mode == Wrap::None || cells == 0 {
-        return hard.into_iter().map(str::to_string).collect();
-    }
     let mut out = Vec::new();
+    if mode == Wrap::None || cells == 0 {
+        out.extend(hard.into_iter().map(str::to_string));
+        return out.into_iter();
+    }
     for line in hard {
         if string_width(line) <= cells {
             out.push(line.to_string());
@@ -122,7 +121,7 @@ pub fn wrap_text(text: &str, cells: usize, mode: Wrap) -> Vec<String> {
             Wrap::None => unreachable!("handled above"),
         }
     }
-    out
+    out.into_iter()
 }
 
 fn break_anywhere(line: &str, cells: usize) -> Vec<String> {
@@ -185,8 +184,9 @@ mod tests {
     #[test]
     fn ascii_graphemes_are_one_cell_each() {
         let _guard = ::habilis_network_test_tracing::init();
+        let got: Vec<&str> = graphemes("abc").collect();
         assert_eq!(
-            graphemes("abc"),
+            got,
             vec!["a", "b", "c"],
             "ascii graphemes are one cell each"
         );
@@ -241,8 +241,9 @@ mod tests {
     #[test]
     fn word_wrap_breaks_between_words_not_inside_them() {
         let _guard = ::habilis_network_test_tracing::init();
+        let got: Vec<String> = wrap_text("the quick brown fox", 10, Wrap::Word).collect();
         assert_eq!(
-            wrap_text("the quick brown fox", 10, Wrap::Word),
+            got,
             vec!["the quick", "brown fox"],
             "word wrap breaks between words"
         );
@@ -251,18 +252,16 @@ mod tests {
     #[test]
     fn char_wrap_breaks_anywhere() {
         let _guard = ::habilis_network_test_tracing::init();
-        assert_eq!(
-            wrap_text("abcdefgh", 3, Wrap::Char),
-            vec!["abc", "def", "gh"],
-            "char wrap breaks anywhere"
-        );
+        let got: Vec<String> = wrap_text("abcdefgh", 3, Wrap::Char).collect();
+        assert_eq!(got, vec!["abc", "def", "gh"], "char wrap breaks anywhere");
     }
 
     #[test]
     fn no_wrap_returns_hard_lines_untouched() {
         let _guard = ::habilis_network_test_tracing::init();
+        let got: Vec<String> = wrap_text("a very long line indeed", 5, Wrap::None).collect();
         assert_eq!(
-            wrap_text("a very long line indeed", 5, Wrap::None),
+            got,
             vec!["a very long line indeed"],
             "no wrap returns hard lines untouched"
         );
@@ -271,8 +270,9 @@ mod tests {
     #[test]
     fn newlines_are_always_hard_breaks() {
         let _guard = ::habilis_network_test_tracing::init();
+        let got: Vec<String> = wrap_text("first\nsecond", 20, Wrap::Word).collect();
         assert_eq!(
-            wrap_text("first\nsecond", 20, Wrap::Word),
+            got,
             vec!["first", "second"],
             "newlines are always hard breaks"
         );

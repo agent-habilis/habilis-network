@@ -238,12 +238,13 @@ pub fn schedule_update(sub: SubscriberId) {
 /// `Instance -> deps -> Signal -> subs -> Instance` reference cycle the
 /// original relies on GC for). See [`crate::runtime::Runtime::tick`] for
 /// the dispatch half of what was `flush()` in the original.
-#[must_use]
-pub fn take_queue() -> Vec<SubscriberId> {
-    REGISTRY.with(|r| {
-        r.queue_set.borrow_mut().clear();
-        mem::take(&mut *r.queue.borrow_mut())
-    })
+pub fn take_queue() -> impl Iterator<Item = SubscriberId> {
+    REGISTRY
+        .with(|r| {
+            r.queue_set.borrow_mut().clear();
+            mem::take(&mut *r.queue.borrow_mut())
+        })
+        .into_iter()
 }
 
 /// Resubscribes `sub` from `prev`'s dependency set to `next`'s: dropped from
@@ -349,8 +350,9 @@ mod tests {
         resubscribe(sub, &HashSet::new(), &deps);
 
         signal.set(2);
+        let queued: Vec<super::SubscriberId> = take_queue().collect();
         assert_eq!(
-            take_queue(),
+            queued,
             vec![sub],
             "a subscribed signal queues its subscriber on change"
         );
@@ -368,7 +370,7 @@ mod tests {
 
         signal.set(1); // same value — no-op per the `Object.is` bail
         assert!(
-            take_queue().is_empty(),
+            take_queue().next().is_none(),
             "setting an equal value schedules nothing"
         );
     }
@@ -395,13 +397,14 @@ mod tests {
 
         a.set(2); // no longer subscribed
         assert!(
-            take_queue().is_empty(),
+            take_queue().next().is_none(),
             "a smaller dependency set drops the stale subscription without a queue entry"
         );
 
         b.set(2); // still subscribed
+        let queued: Vec<super::SubscriberId> = take_queue().collect();
         assert_eq!(
-            take_queue(),
+            queued,
             vec![sub],
             "the remaining subscription still queues the subscriber"
         );
@@ -413,8 +416,9 @@ mod tests {
         let sub = next_subscriber_id();
         schedule_update(sub);
         schedule_update(sub);
+        let queued: Vec<super::SubscriberId> = take_queue().collect();
         assert_eq!(
-            take_queue(),
+            queued,
             vec![sub],
             "scheduling the same subscriber twice queues it once"
         );

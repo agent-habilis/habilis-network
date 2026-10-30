@@ -90,7 +90,8 @@ fn measure_text(arena: &mut Arena, id: NodeId, avail_w: i32, avail_h: i32) {
         )
     };
     let wrap_width = if own_w >= 0 { own_w } else { avail_w };
-    let lines = wrap_text(&text, usize::try_from(wrap_width.max(0)).unwrap_or(0), wrap);
+    let lines: Vec<String> =
+        wrap_text(&text, usize::try_from(wrap_width.max(0)).unwrap_or(0), wrap).collect();
     let widths = lines
         .iter()
         .map(|l| i32::try_from(string_width(l)).unwrap_or(i32::MAX));
@@ -194,7 +195,8 @@ fn arrange(
             )
         };
         if needs_wrap {
-            let lines = wrap_text(&text, usize::try_from(width.max(0)).unwrap_or(0), wrap);
+            let lines: Vec<String> =
+                wrap_text(&text, usize::try_from(width.max(0)).unwrap_or(0), wrap).collect();
             arena.get_mut(id).lines = Some(lines);
         }
         return;
