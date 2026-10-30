@@ -141,7 +141,9 @@ pub(crate) async fn handle_gossip_event(
                 // again until we release it anew.
                 state.note_rendezvous_link_up(Instant::now());
                 state.rendezvous_flags.remove(&RendezvousFlag::SessionStale);
-                state.rendezvous_flags.remove(&RendezvousFlag::OfferFallback);
+                state
+                    .rendezvous_flags
+                    .remove(&RendezvousFlag::OfferFallback);
                 // This link settles the arbitration: someone holds the port
                 // a pending free verdict read as free.
                 state.forget_rendezvous_verdict();

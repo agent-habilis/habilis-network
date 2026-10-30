@@ -225,7 +225,11 @@ pub(super) async fn try_resubscribe(
     attempts: &mut u32,
 ) -> Resubscribe {
     let mut bootstrap = Vec::new();
-    if !state.rendezvous_flags.contains(&RendezvousFlag::GraftNeedsSession) && state.rendezvous_wanted() {
+    if !state
+        .rendezvous_flags
+        .contains(&RendezvousFlag::GraftNeedsSession)
+        && state.rendezvous_wanted()
+    {
         bootstrap.push(env.params.id);
     }
     bootstrap.extend(state.known_endpoints.iter().copied());

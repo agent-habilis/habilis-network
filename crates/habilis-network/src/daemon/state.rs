@@ -2314,7 +2314,9 @@ mod tests {
 
         state.arm_reclaim(Instant::now());
         assert!(
-            state.rendezvous_flags.contains(&RendezvousFlag::ProbeReadFree),
+            state
+                .rendezvous_flags
+                .contains(&RendezvousFlag::ProbeReadFree),
             "the free-read verdict holds before the rendezvous changes"
         );
         assert!(
@@ -2324,7 +2326,9 @@ mod tests {
 
         state.forget_rendezvous_verdict();
         assert!(
-            !state.rendezvous_flags.contains(&RendezvousFlag::ProbeReadFree),
+            !state
+                .rendezvous_flags
+                .contains(&RendezvousFlag::ProbeReadFree),
             "the rendezvous change drops the free-read verdict"
         );
     }
