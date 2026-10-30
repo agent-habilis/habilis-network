@@ -2,7 +2,7 @@
 //! consumer's request means on the way out.
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-use crate::daemon::state::Standing;
+use crate::daemon::state::{Standing, TestHold};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -1264,17 +1264,21 @@ impl MembershipApp {
     ) -> bool {
         match request {
             Beacons::StallBeacon { reply } => {
-                state.stall_requested = true;
+                state.test_holds.insert(TestHold::Stall);
                 let _ = reply.send(());
                 false
             }
             Beacons::ShedBeacon { reply } => {
-                state.shed_requested = true;
+                state.test_holds.insert(TestHold::Shed);
                 let _ = reply.send(());
                 false
             }
             Beacons::HoldClaims { hold, reply } => {
-                state.claims_held = hold;
+                if hold {
+                    state.test_holds.insert(TestHold::Claims);
+                } else {
+                    state.test_holds.remove(&TestHold::Claims);
+                }
                 let _ = reply.send(());
                 false
             }
@@ -1299,7 +1303,11 @@ impl MembershipApp {
     ) -> bool {
         match request {
             LinkHold::HoldLinkState { hold, reply } => {
-                state.linkstate_held = hold;
+                if hold {
+                    state.test_holds.insert(TestHold::LinkState);
+                } else {
+                    state.test_holds.remove(&TestHold::LinkState);
+                }
                 state.last_advertised = None;
                 if hold && let Some(handle) = state.multihop() {
                     let _ = handle.remove_origin(handle.app_id());

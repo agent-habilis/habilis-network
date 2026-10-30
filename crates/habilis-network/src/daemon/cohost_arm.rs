@@ -6,6 +6,8 @@
 //! mind while reading that file — nine functions spread across four claim
 //! sites, interleaved with the tick arms they have nothing to do with.
 
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use crate::daemon::state::TestHold;
 use crate::daemon::state::{BeaconNote, Standing};
 use std::time::Duration;
 
@@ -22,8 +24,6 @@ use crate::gossip::heal;
 use crate::lookup;
 use crate::transport::webrtc;
 use crate::util::tuning;
-#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-use std::mem;
 /// Close the co-hosted rendezvous endpoint before this loop's stack unwinds.
 ///
 /// The `Rendezvous` is a loop local, and letting it merely *drop* aborts its
@@ -355,7 +355,7 @@ pub(super) fn stall_on_request(
     state: &mut EventLoopState,
     rendezvous: Option<&beacon::Rendezvous>,
 ) {
-    if mem::take(&mut state.stall_requested)
+    if state.test_holds.remove(&TestHold::Stall)
         && let Some(held) = rendezvous
     {
         tracing::info!(
@@ -374,7 +374,7 @@ pub(super) fn shed_on_request(
     params: &beacon::RendezvousParams,
     rendezvous: &mut Option<beacon::Rendezvous>,
 ) {
-    if mem::take(&mut state.shed_requested) {
+    if state.test_holds.remove(&TestHold::Shed) {
         shed_beacon(state, params, rendezvous);
     }
 }

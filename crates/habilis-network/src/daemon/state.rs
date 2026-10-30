@@ -17,6 +17,8 @@ mod roster_snapshot;
 mod standing;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 mod test_drop;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+mod test_hold;
 
 use std::time::Duration;
 
@@ -45,6 +47,8 @@ pub use roster_snapshot::RosterSnapshot;
 pub(crate) use standing::Standing;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub use test_drop::TestDrop;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(crate) use test_hold::TestHold;
 /// How long after it let go of the rendezvous a node wants it again. Every node waits the same
 /// period, plus a share of up to half of it that the id of the node fixes: the pubkey bytes are
 /// uniform, so n members do not come back together.

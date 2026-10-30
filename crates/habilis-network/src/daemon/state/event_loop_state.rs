@@ -2,6 +2,8 @@
 use super::ParkedLinkStates;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use super::TestDrop;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use super::TestHold;
 use super::{
     BeaconNote, DirectCounts, DirectState, IdleCounters, MeshSecrets, PingRound, Reach, RivalFlag,
     RosterEntry, RosterSnapshot, Standing, StateInit,
@@ -391,30 +393,12 @@ pub struct EventLoopState {
     /// first is not held back until the tick. See `event_loop::linkstate_now`.
     #[cfg(feature = "multihop")]
     pub(crate) last_advertised: Option<Vec<(EndpointId, u32)>>,
-    /// Tests only: while set, this node advertises no link-vector, on the tick or on a link
-    /// event. A test sets it to force the order "the path is lost before any route exists".
-    #[cfg(all(
-        feature = "iroh-test-utils",
-        feature = "multihop",
-        not(target_arch = "wasm32")
-    ))]
-    pub(crate) linkstate_held: bool,
-    /// Tests only: this node claims no rendezvous, neither on a heal tick nor in a reclaim window,
-    /// while it is set. A test uses it to force the order "a late joiner claims the free rung
-    /// before any old member does", which a heal tick of a few seconds would otherwise win.
+    /// The holds that a test places on this node, see [`TestHold`].
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-    pub(crate) claims_held: bool,
+    pub(crate) test_holds: BTreeSet<TestHold>,
     /// What this node knows of the busy rungs of a private ladder, and the probe tasks that find
     /// out more. The claim walk and the check of the lower rungs read it and never wait.
     pub(crate) rungs: beacon::RungWatch,
-    /// Tests only: the beacon is shed at the top of the next turn of the loop, as a re-check
-    /// shed does (`Beacons::ShedBeacon`).
-    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-    pub(crate) shed_requested: bool,
-    /// Tests only: the beacon stops answering at the top of the next turn of the loop
-    /// (`Beacons::StallBeacon`).
-    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-    pub(crate) stall_requested: bool,
     /// What this node already asked of the members it heard on the LAN.
     pub(crate) lan_grafts: lan::LanGrafts,
     /// The `WebRTC` transport handle, when one is registered on this peer's
@@ -700,19 +684,9 @@ impl EventLoopState {
             parked_link_states: ParkedLinkStates::default(),
             #[cfg(feature = "multihop")]
             last_advertised: None,
-            #[cfg(all(
-                feature = "iroh-test-utils",
-                feature = "multihop",
-                not(target_arch = "wasm32")
-            ))]
-            linkstate_held: false,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-            claims_held: false,
+            test_holds: BTreeSet::new(),
             rungs: beacon::RungWatch::detached(),
-            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-            shed_requested: false,
-            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-            stall_requested: false,
             lan_grafts: lan::LanGrafts::default(),
             webrtc: None,
             webrtc_admission,
@@ -1221,7 +1195,7 @@ impl EventLoopState {
     /// Whether a test holds this node's claims back (`Beacons::HoldClaims`).
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) fn claims_are_held(&self) -> bool {
-        self.claims_held
+        self.test_holds.contains(&TestHold::Claims)
     }
 
     /// Whether a test holds this node's claims back: never, outside a test build.

@@ -8,6 +8,8 @@
 //! the daemon-internal plumbing (`config`/`ctx`/`ipc`/`state`/`timers`/
 //! `setup`) are siblings under `super`.
 
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use crate::daemon::state::TestHold;
 use crate::daemon::state::{BeaconNote, Standing};
 #[cfg(feature = "multihop")]
 use crate::protocol;
@@ -666,7 +668,7 @@ async fn advertise_links(
     }
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     {
-        if state.linkstate_held {
+        if state.test_holds.contains(&TestHold::LinkState) {
             return;
         }
     }
