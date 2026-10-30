@@ -271,6 +271,17 @@ function countTurbofish(raw: string): number {
   return text.match(/(?<!\b(?:size_of|align_of))::</g)?.length ?? 0;
 }
 
+// A for loop whose iterator is a combinator chain on a collection, such as `v.iter().enumerate()`.
+// The loop header then hides a second step; a named step or a plain `for` reads it (P16).
+function countForChains(raw: string): number {
+  const text = blankStrings(stripComments(raw));
+  let count = 0;
+  for (const m of text.matchAll(/\bfor\b[^{;]*?\bin\b([^{;]*)\{/g)) {
+    if (/\.(?:iter|into_iter|chars|lines|bytes|keys|values|split\w*)\s*\([^()]*\)\s*\.\s*\w+\s*\(/.test(m[1] ?? "")) count++;
+  }
+  return count;
+}
+
 // The lets with no type whose value is a method chain of five or more calls. The reader must infer
 // the type of the result from the whole chain, so the let names it (P5). A typed let is not counted.
 function countUntypedLongChainLets(raw: string): number {
@@ -694,6 +705,12 @@ const RULES: Rule[] = [
     scan: countTurbofish,
     glob: "crates/**/*.rs",
     why: "Name the type on the variable, not in a turbofish (P2). Only size_of and align_of keep one: they have no value to infer the type from.",
+  },
+  {
+    name: "for_chain",
+    scan: countForChains,
+    glob: "crates/**/*.rs",
+    why: "A for loop header holds one collection, not a combinator chain. The chain becomes a named step or a loop body (P16).",
   },
   {
     name: "untyped_long_chain_let",
