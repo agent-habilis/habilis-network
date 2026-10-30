@@ -13,6 +13,8 @@
 //! lock below is taken and released without an await in between.
 
 use std::collections::{HashMap, HashSet};
+use std::iter::Enumerate;
+use std::slice;
 use std::sync::Mutex;
 
 use crate::ChunkError;
@@ -109,7 +111,8 @@ impl ChunkSource for InMemoryStore {
             .lock()
             .map_err(|_| ChunkError::Poisoned("chunk"))?;
         let mut coverage = Coverage::empty(map.len());
-        for (index, leaf) in map.leaves().iter().enumerate() {
+        let indexed_leaves: Enumerate<slice::Iter<'_, ChunkHash>> = map.leaves().iter().enumerate();
+        for (index, leaf) in indexed_leaves {
             if chunks.contains_key(leaf) {
                 coverage.insert(index);
             }

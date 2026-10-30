@@ -1,9 +1,10 @@
 //! [`DiskStore`]: the backend that owns its chunks.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::iter::Enumerate;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::{fs, slice};
 
 use crate::ChunkError;
 
@@ -264,7 +265,8 @@ impl ChunkSource for DiskStore {
         // of what we hold is a second source of truth, and the moment it drifts
         // this peer starts advertising bytes it cannot serve.
         let mut coverage = Coverage::empty(map.len());
-        for (index, leaf) in map.leaves().iter().enumerate() {
+        let indexed_leaves: Enumerate<slice::Iter<'_, ChunkHash>> = map.leaves().iter().enumerate();
+        for (index, leaf) in indexed_leaves {
             if self.chunk_path(*leaf).is_file() {
                 coverage.insert(index);
             }

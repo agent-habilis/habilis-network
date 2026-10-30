@@ -1,6 +1,6 @@
 use habilis_network_chunks::{
     CHUNK_BYTES_USIZE, ChunkHash, ChunkMap, ChunkSource, ChunkStore, Coverage, FileId, IdbStore,
-    chunk_hash,
+    Root, chunk_hash,
 };
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
@@ -207,7 +207,8 @@ async fn coverage_of_answers_many_roots_in_one_pass() {
 
     // And the two routes to the same answer agree, which is the contract the
     // host suite states and only this can check for `IdbStore`.
-    for (root, batch) in roots.iter().zip(&batched) {
+    let paired: Vec<(&Root, &Coverage)> = roots.iter().zip(&batched).collect();
+    for (root, batch) in paired {
         let single = store.coverage(*root).await.expect("coverage");
         assert_eq!(batch.as_bits(), single.as_bits(), "routes disagreed");
         assert_eq!(

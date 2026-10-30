@@ -2,7 +2,7 @@ use std::future::Future;
 
 use habilis_network_chunks::{
     CHUNK_BYTES_USIZE, ChunkHash, ChunkMap, ChunkSource, ChunkStore, Coverage, DiskStore, FileId,
-    InMemoryStore, chunk_hash,
+    InMemoryStore, Root, chunk_hash,
 };
 
 use std::{env, fs, path, process};
@@ -233,7 +233,8 @@ async fn coverage_of_agrees_with_coverage_root_for_root(harness: &impl Harness) 
     let roots = [whole_map.root(), partial_map.root(), untouched_map.root()];
     let batched = store.coverage_of(&roots).await.expect("coverage_of");
     assert_eq!(batched.len(), roots.len(), "one answer per root, in order");
-    for (root, batch) in roots.iter().zip(&batched) {
+    let paired: Vec<(&Root, &Coverage)> = roots.iter().zip(&batched).collect();
+    for (root, batch) in paired {
         let single = store.coverage(*root).await.expect("coverage");
         assert_eq!(
             batch.len(),

@@ -1,10 +1,11 @@
 //! [`DiskOrigin`]: the backend that borrows the user's files where they sit.
 
 use std::collections::HashMap;
-use std::fs;
 use std::io::{Read as _, SeekFrom};
+use std::iter::Enumerate;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::{fs, slice};
 
 use super::disk_store::store;
 use crate::ChunkError;
@@ -116,7 +117,9 @@ impl DiskOrigin {
                 .locations
                 .lock()
                 .map_err(|_| ChunkError::Poisoned("location"))?;
-            for (index, leaf) in map.leaves().iter().enumerate() {
+            let indexed_leaves: Enumerate<slice::Iter<'_, ChunkHash>> =
+                map.leaves().iter().enumerate();
+            for (index, leaf) in indexed_leaves {
                 // First writer wins. Two files sharing a chunk both resolve to
                 // whichever was adopted first, and either answers correctly —
                 // the bytes are the same bytes, which is the whole point.

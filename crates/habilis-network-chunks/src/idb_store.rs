@@ -24,6 +24,8 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::iter::Enumerate;
+use std::slice;
 
 use crate::ChunkError;
 use js_sys::Uint8Array;
@@ -564,7 +566,8 @@ impl ChunkSource for IdbStore {
         };
         let held = self.present(map.leaves()).await?;
         let mut coverage = Coverage::empty(map.len());
-        for (index, present) in held.iter().enumerate() {
+        let indexed_held: Enumerate<slice::Iter<'_, bool>> = held.iter().enumerate();
+        for (index, present) in indexed_held {
             if *present {
                 coverage.insert(index);
             }
@@ -594,7 +597,9 @@ impl ChunkSource for IdbStore {
                 continue;
             };
             let mut coverage = Coverage::empty(map.len());
-            for (index, leaf) in map.leaves().iter().enumerate() {
+            let indexed_leaves: Enumerate<slice::Iter<'_, ChunkHash>> =
+                map.leaves().iter().enumerate();
+            for (index, leaf) in indexed_leaves {
                 if held.contains(leaf) {
                     coverage.insert(index);
                 }
