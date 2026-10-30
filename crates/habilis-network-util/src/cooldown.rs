@@ -177,7 +177,10 @@ mod tests {
             cooldown.note(seed, start + Duration::from_secs(u64::from(seed)));
         }
         assert!(
-            cooldown.len() <= usize::try_from(WINDOW.as_secs()).unwrap() + 1,
+            cooldown.len()
+                <= usize::try_from(WINDOW.as_secs())
+                    .expect("the test window is a few seconds, which fits in usize")
+                    + 1,
             "expired entries pruned: {}",
             cooldown.len()
         );

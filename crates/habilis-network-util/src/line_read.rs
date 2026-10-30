@@ -114,21 +114,23 @@ mod tests {
             let mut reader = io::BufReader::new(&data[..]);
             assert!(
                 matches!(
-                    read_bounded_line(&mut reader, 100).await.unwrap(),
+                    read_bounded_line(&mut reader, 100).await.expect("the in-memory reader does not fail"),
                     LineRead::Line(line) if line == "hello"
                 ),
                 "the first line is read"
             );
             assert!(
                 matches!(
-                    read_bounded_line(&mut reader, 100).await.unwrap(),
+                    read_bounded_line(&mut reader, 100).await.expect("the in-memory reader does not fail"),
                     LineRead::Line(line) if line == "world"
                 ),
                 "the second line is read"
             );
             assert!(
                 matches!(
-                    read_bounded_line(&mut reader, 100).await.unwrap(),
+                    read_bounded_line(&mut reader, 100)
+                        .await
+                        .expect("the in-memory reader does not fail"),
                     LineRead::Eof
                 ),
                 "the stream ends after the last line"
@@ -143,13 +145,15 @@ mod tests {
             let mut reader = io::BufReader::new(&data[..]);
             assert!(
                 matches!(
-                    read_bounded_line(&mut reader, 4).await.unwrap(),
+                    read_bounded_line(&mut reader, 4)
+                        .await
+                        .expect("the in-memory reader does not fail"),
                     LineRead::TooLong
                 ),
                 "an over-long line is dropped and the stream realigns"
             );
             assert!(
-                matches!(read_bounded_line(&mut reader, 100).await.unwrap(), LineRead::Line(line) if line == "ok"),
+                matches!(read_bounded_line(&mut reader, 100).await.expect("the in-memory reader does not fail"), LineRead::Line(line) if line == "ok"),
                 "the next line must be read intact after dropping the oversize one"
             );
         });
@@ -162,7 +166,7 @@ mod tests {
             let mut reader = io::BufReader::new(&data[..]);
             assert!(
                 matches!(
-                    read_bounded_line(&mut reader, 100).await.unwrap(),
+                    read_bounded_line(&mut reader, 100).await.expect("the in-memory reader does not fail"),
                     LineRead::Line(line) if line == "tail"
                 ),
                 "a final line without a newline is delivered"
