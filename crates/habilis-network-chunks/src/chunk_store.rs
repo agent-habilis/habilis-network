@@ -121,6 +121,9 @@ pub trait ChunkSource {
 ///
 /// A store keeps chunks by their hash. The doc test compiles it but does not run it.
 ///
+/// The native stores do their work when the call is made. `IdbStore` (wasm) starts its
+/// `IndexedDB` request on first poll.
+///
 /// ```no_run
 /// use habilis_network_chunks::{ChunkError, ChunkSource, ChunkStore, InMemoryStore, chunk_hash};
 ///
