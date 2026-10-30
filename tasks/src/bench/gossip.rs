@@ -84,6 +84,7 @@ pub(crate) async fn ladder_gossip_backup(args: &Args) -> Outcome {
 #[derive(Debug, Clone)]
 struct Tap {
     inner: Bench,
+    // The router clones this handler into each accept, and the bench reads the slot through its own handle.
     served: Arc<Mutex<Option<Connection>>>,
 }
 

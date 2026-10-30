@@ -22,7 +22,7 @@ mod native;
 
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::TaskOutcome;
@@ -153,9 +153,9 @@ fn cells(quick: bool) -> Vec<Cell> {
 /// Every tracing line the in-process native peer emits, for grep-shaped
 /// assertions (`relay-only path refused`, the census). One global buffer:
 /// the subscriber is process-wide, and cells run serially.
-fn log_buffer() -> &'static Arc<Mutex<String>> {
-    static BUFFER: OnceLock<Arc<Mutex<String>>> = OnceLock::new();
-    BUFFER.get_or_init(|| Arc::new(Mutex::new(String::new())))
+fn log_buffer() -> &'static Mutex<String> {
+    static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
+    BUFFER.get_or_init(|| Mutex::new(String::new()))
 }
 
 struct BufferWriter;
