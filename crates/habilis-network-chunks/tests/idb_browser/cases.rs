@@ -504,3 +504,51 @@ async fn coverage_survives_being_described_and_rebuilt() {
         "the rebuilt coverage holds chunks 0, 2 and 4"
     );
 }
+
+/// A write runs on its first poll, not at its call: IndexedDB needs each request
+/// issued while the caller holds the thread, so a `put` nobody awaits never lands.
+/// The native store writes at the call instead (`a_call_does_its_work_when_it_is_made`).
+#[wasm_bindgen_test]
+async fn a_write_that_nobody_polls_does_not_land() {
+    let store = fresh("unpolled").await;
+    let bytes = body(1024, 27);
+    let map = ChunkMap::build(&bytes);
+    store.put_map(&map).await.expect("put_map");
+    let leaf = map.leaf(0).expect("in range");
+
+    drop(store.put(leaf, &bytes));
+    assert!(
+        !store.has(leaf).await.expect("has"),
+        "a put that is never polled is not stored"
+    );
+
+    store.put(leaf, &bytes).await.expect("put");
+    assert!(
+        store.has(leaf).await.expect("has"),
+        "a put that is awaited is stored"
+    );
+}
+
+/// `start_marking` begins its pass at the call, not at a poll. The sweep after a
+/// dropped `start_marking` keeps nothing from the earlier mark.
+#[wasm_bindgen_test]
+async fn a_new_pass_begins_when_it_is_called() {
+    let store = fresh("newpass").await;
+    let kept_bytes = body(1024, 28);
+    let kept = ChunkMap::build(&kept_bytes);
+    store.put_map(&kept).await.expect("put_map");
+    store
+        .put(kept.leaf(0).expect("one"), &kept_bytes)
+        .await
+        .expect("put");
+
+    store.start_marking().await.expect("start");
+    store.mark(kept.root()).await.expect("mark");
+    drop(store.start_marking());
+
+    assert_eq!(
+        store.sweep().await.expect("sweep"),
+        1,
+        "the pass begun at the call marked nothing, so the chunk is swept"
+    );
+}
