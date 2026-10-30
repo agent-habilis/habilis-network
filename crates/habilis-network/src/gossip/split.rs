@@ -680,12 +680,8 @@ mod real_gossip {
         );
     }
 
-    /// A count as a float: counts of frames in a minute are far below 2^52.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a count in one run is below 2^52"
-    )]
+    /// A count as a float. A count above `u32::MAX` saturates: no run counts that far.
     fn u64_to_f64(count: u64) -> f64 {
-        count as f64
+        f64::from(u32::try_from(count).unwrap_or(u32::MAX))
     }
 }
