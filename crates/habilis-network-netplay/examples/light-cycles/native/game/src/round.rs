@@ -76,6 +76,7 @@ pub(crate) fn place_spawns(generator: &mut SplitMix64, count: usize) -> Vec<Spaw
 
 /// A tiny, dependency-free FNV-1a — only used to turn a match/roster
 /// tuple into a seed, never anything security-sensitive.
+#[derive(Clone)]
 struct Fnv1a64(u64);
 
 impl Fnv1a64 {

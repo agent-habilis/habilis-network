@@ -3,6 +3,7 @@ use crate::subscriber_id::SubscriberId;
 use std::cell::RefCell;
 use std::collections::HashSet;
 
+#[derive(Clone)]
 pub(crate) struct Registry {
     /// Every signal's current subscriber set, by id.
     pub(crate) subs: RefCell<Vec<HashSet<SubscriberId>>>,

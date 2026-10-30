@@ -195,6 +195,7 @@ mod tests {
     use crate::view::View;
 
     use std::{cell, rc};
+    #[derive(Clone)]
     struct Shown(Signal<i32>);
 
     impl Component for Shown {
@@ -236,11 +237,13 @@ mod tests {
         );
     }
 
+    #[derive(Clone)]
     enum ParkedPhase {
         Setup,
         Parked,
     }
 
+    #[derive(Clone)]
     struct Parked {
         count: Signal<i32>,
         resumes: rc::Rc<cell::RefCell<i32>>,

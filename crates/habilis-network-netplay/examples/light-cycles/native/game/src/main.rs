@@ -43,6 +43,7 @@ use tokio::{signal, time};
     name = "light-cycles",
     about = "A real-time multiplayer light-cycles game over habilis-network"
 )]
+#[derive(Clone)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -75,7 +76,7 @@ struct Cli {
     relay_transport: bool,
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 enum Command {
     /// Mint a fresh room code, print it, and join it.
     Create {
@@ -212,6 +213,7 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
 /// restoring both on drop — including on an early `?` return or an
 /// unwinding panic, since nothing else in this crate touches the terminal
 /// mode (`visage-rust-tui` deliberately leaves that to the caller).
+#[derive(Clone)]
 struct RawModeGuard;
 
 impl RawModeGuard {

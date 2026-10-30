@@ -4,7 +4,7 @@ use habilis_network::protocol::AuthorKey;
 use habilis_network_netplay::Config;
 
 /// The type-level bundle the session is generic over.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LightCycles;
 
 impl Config for LightCycles {

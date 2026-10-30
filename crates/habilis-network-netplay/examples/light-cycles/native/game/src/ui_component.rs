@@ -5,6 +5,7 @@ use visage_rust_tui::component::{Component, Step};
 use visage_rust_tui::signal::Signal;
 
 /// The root component's state: the snapshot it reads on every step.
+#[derive(Clone)]
 pub struct UiComponent {
     pub(crate) snapshot: Signal<Snapshot>,
 }

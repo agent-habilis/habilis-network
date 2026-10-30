@@ -9,7 +9,7 @@ use crate::tui::tag::Tag;
 use crate::tui::tui_node::TuiNode;
 use crate::view::BoxProps;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TuiHost {
     pub arena: Arena,
 }

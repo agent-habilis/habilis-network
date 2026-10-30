@@ -384,6 +384,7 @@ mod tests {
         // unreachable panic when a Component sits inside a Box's children.
         use crate::component::{Component, ComponentBox, Step};
 
+        #[derive(Clone)]
         struct Child;
 
         impl Component for Child {

@@ -118,6 +118,7 @@ mod tests {
     use crate::component;
     use crate::tui::screen_buffer;
     use std::{cell, rc};
+    #[derive(Clone)]
     struct Counter(Signal<i32>);
 
     impl Component for Counter {
@@ -175,6 +176,7 @@ mod tests {
         );
     }
 
+    #[derive(Clone)]
     struct Parent {
         renders: rc::Rc<cell::RefCell<i32>>,
         child_count: Signal<i32>,
@@ -237,6 +239,7 @@ mod tests {
         );
     }
 
+    #[derive(Clone)]
     struct Child(Signal<i32>);
 
     impl Component for Child {

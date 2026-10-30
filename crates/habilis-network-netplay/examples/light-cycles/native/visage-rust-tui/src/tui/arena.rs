@@ -4,7 +4,7 @@ use crate::tui::tui_node::TuiNode;
 use std::iter;
 
 /// Owns every node in a tree by index — see the module doc for why.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Arena {
     pub(crate) nodes: Vec<TuiNode>,
 }

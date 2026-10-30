@@ -486,6 +486,14 @@ A type that the guide asks to derive a trait, and that cannot derive it, is list
 | R16 | `HabilisNetworkMesh` | `habilis-network-ffi/src/ffi/habilis_network_mesh.rs` | holds a field type that is not Clone |
 | R16 | `HabilisNetworkProducer` | `habilis-network-ffi/src/ffi/habilis_network_producer.rs` | holds a field type that is not Clone |
 | R16 | `HabilisNetworkReader` | `habilis-network-ffi/src/ffi/habilis_network_reader.rs` | holds a field type that is not Clone |
+| R16 | `Instance` | `habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/component.rs` | holds a `Box` of a `dyn` component and an `Rc<dyn Fn>` thunk |
+| R16 | `Step` | `habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/component.rs` | holds a `View`, which is not Clone (a one-shot builder closure) |
+| R16 | `ComponentView` | `habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/view.rs` | holds a `Box<dyn FnOnce>` builder |
+| R16 | `ComponentMount` | `habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/component_mount.rs` | holds an `Instance`, which is not Clone |
+| R16 | `Mounted` | `habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/mounted.rs` | holds a `ComponentMount`, which is not Clone |
+| R16 | `Runtime` | `habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/runtime.rs` | holds a generic `Backend` that has no Clone bound |
+| R16 | `Bot` | `habilis-network-netplay/examples/light-cycles/native/game/tests/pubprobe.rs` | holds a `Node` handle and a `Game`, neither Clone |
+| R16 | `Bot` | `habilis-network-netplay/examples/light-cycles/native/game/tests/two_bots.rs` | holds a `Node` handle and a `Game`, neither Clone |
 | R22 | `EventLoopConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `MeshSpec`, a `RendezvousConfig` and a `RuntimeConfig`, which hold channels, trait objects and task handles with no default |
 | R22 | `RendezvousConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a watch receiver and a `StoppableTask`, which have no default |
 | R22 | `RuntimeConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `dyn NodeSink` and a `SelfWriteGate`, which have no default |
