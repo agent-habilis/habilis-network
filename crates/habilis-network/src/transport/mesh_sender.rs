@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use iroh::EndpointId;
 use iroh_gossip::api::{ApiError, GossipSender};
 
-use crate::protocol::message::WireFrame;
+use crate::protocol::messages::WireFrame;
 
 /// The mesh's outbound broadcast plane: a thin wrapper over the gossip sender
 /// that survives a topic resubscribe (`gossip::heal`) via `MeshSender::replace_gossip`,
@@ -19,7 +19,7 @@ use crate::protocol::message::WireFrame;
 ///
 /// ```no_run
 /// use habilis_network::ops::MeshSender;
-/// use habilis_network::protocol::message::WireFrame;
+/// use habilis_network::protocol::messages::WireFrame;
 ///
 /// # async fn demo(sender: &MeshSender, frame: WireFrame) {
 /// let _ = sender.broadcast(frame).await;

@@ -15,10 +15,6 @@ pub use chain_ctx::ChainCtx;
 mod build_msg_params;
 #[cfg(any(test, feature = "test-fixtures"))]
 pub use build_msg_params::BuildMsgParams;
-#[expect(
-    clippy::module_inception,
-    reason = "the file is named for its type, Message, as O9 asks"
-)]
 mod message;
 pub use message::Message;
 mod message_kind;

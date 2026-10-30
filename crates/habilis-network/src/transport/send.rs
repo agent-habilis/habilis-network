@@ -33,7 +33,7 @@ mod tests {
 
     use super::{Lane, Route, lane_for, note_held, resolve, route};
     use crate::daemon::state::EventLoopState;
-    use crate::protocol::message::{AppFrameParams, Verified, WireFrame};
+    use crate::protocol::messages::{AppFrameParams, Verified, WireFrame};
     use crate::protocol::{AppTag, CorrId, Identity, MeshId, Message, MessageBody, MessageId};
 
     use crate::daemon::handler_ctx;

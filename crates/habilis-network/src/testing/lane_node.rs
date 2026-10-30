@@ -11,7 +11,7 @@ use crate::daemon::handler_ctx;
 #[cfg(feature = "host")]
 use crate::gossip::event;
 #[cfg(feature = "host")]
-use crate::protocol::message;
+use crate::protocol::messages;
 
 #[cfg(feature = "host")]
 use crate::protocol;
@@ -110,7 +110,7 @@ impl LaneNode {
         state
     }
 
-    pub(crate) fn frame_to_bob(&self) -> message::Verified {
+    pub(crate) fn frame_to_bob(&self) -> messages::Verified {
         protocol::Message::new_pong(
             &self.mesh,
             &self.author,

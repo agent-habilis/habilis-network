@@ -10,7 +10,7 @@ use std::fmt;
 /// An empty tag returns this error.
 ///
 /// ```
-/// use habilis_network_protocol::message::AppTag;
+/// use habilis_network_protocol::messages::AppTag;
 ///
 /// let error = AppTag::try_new("").unwrap_err();
 /// assert!(!error.to_string().is_empty());

@@ -28,7 +28,7 @@ use crate::AuthorKey;
 /// A message that is not signed is not a `Verified`:
 ///
 /// ```compile_fail,E0308
-/// use habilis_network_protocol::message::{Message, Verified};
+/// use habilis_network_protocol::messages::{Message, Verified};
 ///
 /// const UNSIGNED: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
 ///
@@ -41,7 +41,7 @@ use crate::AuthorKey;
 /// A signed one that has been verified is, so the same call compiles:
 ///
 /// ```
-/// use habilis_network_protocol::message::{Message, Verified};
+/// use habilis_network_protocol::messages::{Message, Verified};
 ///
 /// const SIGNED: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca75b3ef10bd592fe6a835e147def33b203c0bfcf26253edb7b7d06a450e383d6fdd3fb0ef153969d16df0e6d4b97f1a7ca434106378d8f772814ad50e","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
 ///
@@ -54,7 +54,7 @@ use crate::AuthorKey;
 /// The body cannot be assigned through a `Verified`:
 ///
 /// ```compile_fail,E0594
-/// use habilis_network_protocol::message::Message;
+/// use habilis_network_protocol::messages::Message;
 ///
 /// const SIGNED: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca75b3ef10bd592fe6a835e147def33b203c0bfcf26253edb7b7d06a450e383d6fdd3fb0ef153969d16df0e6d4b97f1a7ca434106378d8f772814ad50e","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
 ///
@@ -65,7 +65,7 @@ use crate::AuthorKey;
 /// A builder cannot change it after signing:
 ///
 /// ```compile_fail,E0507
-/// use habilis_network_protocol::message::Message;
+/// use habilis_network_protocol::messages::Message;
 ///
 /// const SIGNED: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca75b3ef10bd592fe6a835e147def33b203c0bfcf26253edb7b7d06a450e383d6fdd3fb0ef153969d16df0e6d4b97f1a7ca434106378d8f772814ad50e","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
 ///
@@ -76,7 +76,7 @@ use crate::AuthorKey;
 /// It has no `Deserialize`, so a wire string does not become one:
 ///
 /// ```compile_fail,E0277
-/// use habilis_network_protocol::message::Verified;
+/// use habilis_network_protocol::messages::Verified;
 ///
 /// let _: Verified = serde_json::from_str("{}").unwrap();
 /// ```
@@ -219,7 +219,7 @@ mod sealed {
 /// A signed message is a `Proof`, and so is its authored view:
 ///
 /// ```
-/// use habilis_network_protocol::message::{Proof, Verified};
+/// use habilis_network_protocol::messages::{Proof, Verified};
 ///
 /// fn takes(_: &impl Proof) {}
 ///
@@ -232,7 +232,7 @@ mod sealed {
 /// An outside type cannot implement it:
 ///
 /// ```compile_fail,E0277
-/// use habilis_network_protocol::message::{Authored, Proof};
+/// use habilis_network_protocol::messages::{Authored, Proof};
 /// use habilis_network_protocol::{AuthorKey, Message, MessageBody};
 ///
 /// struct Outside(Message);
@@ -318,7 +318,7 @@ impl Serialize for Verified {
 /// and the `Deref` to it does not give one back:
 ///
 /// ```compile_fail,E0277
-/// use habilis_network_protocol::message::Message;
+/// use habilis_network_protocol::messages::Message;
 ///
 /// const SIGNED: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca75b3ef10bd592fe6a835e147def33b203c0bfcf26253edb7b7d06a450e383d6fdd3fb0ef153969d16df0e6d4b97f1a7ca434106378d8f772814ad50e","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
 ///
@@ -334,7 +334,7 @@ impl Serialize for Verified {
 /// private to the crate:
 ///
 /// ```compile_fail,E0624
-/// use habilis_network_protocol::message::Message;
+/// use habilis_network_protocol::messages::Message;
 ///
 /// const SIGNED: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca75b3ef10bd592fe6a835e147def33b203c0bfcf26253edb7b7d06a450e383d6fdd3fb0ef153969d16df0e6d4b97f1a7ca434106378d8f772814ad50e","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
 ///
@@ -348,7 +348,7 @@ impl Serialize for Verified {
 ///
 ///
 /// ```compile_fail,E0277
-/// use habilis_network_protocol::message::Message;
+/// use habilis_network_protocol::messages::Message;
 ///
 /// const SIGNED: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca75b3ef10bd592fe6a835e147def33b203c0bfcf26253edb7b7d06a450e383d6fdd3fb0ef153969d16df0e6d4b97f1a7ca434106378d8f772814ad50e","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
 ///

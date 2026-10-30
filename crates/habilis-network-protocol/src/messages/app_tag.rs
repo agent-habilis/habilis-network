@@ -16,7 +16,7 @@ use std::fmt;
 /// An application tag is a short slug that routes a frame to its handler.
 ///
 /// ```
-/// use habilis_network_protocol::message::AppTag;
+/// use habilis_network_protocol::messages::AppTag;
 ///
 /// let tag = AppTag::try_new("chat").expect("a valid tag");
 /// assert_eq!(tag.as_str(), "chat");

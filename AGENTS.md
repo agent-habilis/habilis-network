@@ -126,7 +126,7 @@ Layer: protocol. A header on a message.
 
 One slice of a body that is too large for one gossip message. Each shard is a signed message. The receiver puts the shards back together, and only the whole message is surfaced.
 
-Code: `protocol::message::shard`, `protocol::reassembly`.
+Code: `protocol::messages::shard`, `protocol::reassembly`.
 
 ### seal
 

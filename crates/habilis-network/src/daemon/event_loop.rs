@@ -42,7 +42,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use crate::daemon::state_file::StateFile;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::meshes::MeshName;
-use crate::protocol::message::{Authored, Verified};
+use crate::protocol::messages::{Authored, Verified};
 use crate::protocol::{MeshId, Nickname, UnixSecs};
 use crate::transport::{IpcMessage, MeshSender};
 use crate::util::clock::{Instant, millis_saturating};
@@ -77,7 +77,7 @@ pub use event_loop_error::EventLoopError;
 use tick_gap::TickGap;
 
 use crate::daemon::state;
-use crate::protocol::message;
+use crate::protocol::messages;
 #[cfg(feature = "host")]
 use crate::transport::ipc;
 #[cfg(feature = "multihop")]
@@ -736,7 +736,7 @@ struct EventLoop<Driver: NodeDriver> {
     /// like `direct_rx`.
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
     /// Flushed frames whose dial failed (`gossip::requeue_failed`). Never closes, like `direct_rx`.
-    flush_failed_rx: mpsc::UnboundedReceiver<(Verified, message::WireFrame)>,
+    flush_failed_rx: mpsc::UnboundedReceiver<(Verified, messages::WireFrame)>,
     /// Closed with the rendezvous as the loop ends.
     owned: OwnedEndpoints,
 }

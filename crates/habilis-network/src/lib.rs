@@ -66,9 +66,9 @@ pub mod protocol {
         PresenceSubtype, Proof, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Seed,
         Shard, ShardGroup, Signer, SymmetricKey, TicketAuth, TicketSecret, TopicId, Transport,
         TransportPolicy, UnixSecs, UnlockError, Verified, base58check, crypto, ct_eq, directory,
-        encode_pubkey, identity, invite, iroh_base, meshes, message, nickname_error, peer_addr_error,
-        reassembly, resolve_lookups, resolver, seal_error, seal_to_body, sole_addressee,
-        validate_advertise,
+        encode_pubkey, identity, invite, iroh_base, meshes, messages, nickname_error,
+        peer_addr_error, reassembly, resolve_lookups, resolver, seal_error, seal_to_body,
+        sole_addressee, validate_advertise,
     };
     #[cfg(any(test, feature = "test-fixtures"))]
     pub use habilis_network_protocol::{BuildMsgParams, ChainCtx, build_msg_bytes};

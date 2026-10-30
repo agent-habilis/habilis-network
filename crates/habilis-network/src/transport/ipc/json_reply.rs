@@ -1,6 +1,6 @@
 //! The JSON replies the IPC socket sends back.
 
-use crate::protocol::{MessageId, message};
+use crate::protocol::{MessageId, messages};
 /// Richer `ok` response for the `msg` IPC that also echoes back
 /// the authoritative message record. The echo has the same shape
 /// `poll` returns per entry — `serde_json::to_value(msg)` — so
@@ -24,7 +24,7 @@ use crate::protocol::{MessageId, message};
 /// json_ok_msg(id, message)
 /// # }
 /// ```
-pub fn json_ok_msg(id: &MessageId, message: &message::Verified) -> String {
+pub fn json_ok_msg(id: &MessageId, message: &messages::Verified) -> String {
     serde_json::json!({
         "ok": true,
         "id": id,

@@ -25,7 +25,7 @@ use crate::daemon::message_log::MessageLog;
 use crate::daemon::state_file::StateFile;
 use crate::protocol::identity::Identity;
 use crate::protocol::meshes::Mesh;
-use crate::protocol::message::{Authored, Verified, WireFrame};
+use crate::protocol::messages::{Authored, Verified, WireFrame};
 use crate::protocol::{
     AuthorKey, ContentHash, DedupKey, Nickname, ShardGroup, SymmetricKey, UnixSecs,
 };
@@ -40,7 +40,7 @@ use crate::util::tuning::{
 };
 
 use crate::gossip::{antientropy, lan};
-use crate::protocol::{crypto, message};
+use crate::protocol::{crypto, messages};
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::transport::redial;
 #[cfg(feature = "multihop")]
@@ -1465,7 +1465,7 @@ impl EventLoopState {
         let shard = trigger.shard.as_ref()?;
         // A verified shard always has its author key.
         let author = trigger.key();
-        if !message::shard_fits_log(trigger) {
+        if !messages::shard_fits_log(trigger) {
             return None;
         }
         let slots = self

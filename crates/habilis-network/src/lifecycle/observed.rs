@@ -2,7 +2,7 @@ use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::gossip::event::NodeEvent;
 use crate::protocol::identity::Identity;
-use crate::protocol::message::Verified;
+use crate::protocol::messages::Verified;
 use crate::protocol::{MeshId, Message, MessageKind};
 
 use super::membership_update;

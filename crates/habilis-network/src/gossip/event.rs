@@ -1,5 +1,5 @@
 use crate::protocol::meshes::MeshName;
-use crate::protocol::message::Authored;
+use crate::protocol::messages::Authored;
 use crate::protocol::{AuthorKey, Channel, MeshId, Nickname};
 
 use std::sync;

@@ -2,7 +2,7 @@ use super::{AppClass, InboundApp};
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::protocol::Nickname;
-use crate::protocol::message::Authored;
+use crate::protocol::messages::Authored;
 
 /// The seam the engine drives for application-payload handling. The engine
 /// owns [`EventLoopState`] and hands the app the frame plus the loop context

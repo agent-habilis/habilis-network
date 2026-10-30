@@ -9,7 +9,7 @@
 
 #![cfg(feature = "host")]
 
-use habilis_network::protocol::message::Authored;
+use habilis_network::protocol::messages::Authored;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

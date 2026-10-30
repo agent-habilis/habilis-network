@@ -2,7 +2,7 @@
 
 use tokio::sync::{broadcast, mpsc};
 
-use crate::protocol::message::Authored;
+use crate::protocol::messages::Authored;
 
 use crate::daemon::node::SignalHandling;
 

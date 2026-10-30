@@ -15,7 +15,9 @@ use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle::membership_update::MembershipUpdate;
-use crate::protocol::message::{Authored, MessageBody, Proof, Verified, WireFrame};
+use crate::protocol::messages::{
+    Authored, MessageBody, Proof, Verified, WireFrame, shard_fits_log,
+};
 use crate::protocol::{Channel, ContentHash, Message, MessageKind, Nickname, PresenceSubtype};
 use crate::util::clock::Instant;
 use crate::{lifecycle, lookup};
@@ -32,7 +34,7 @@ use crate::net;
 use crate::daemon::event_loop;
 use crate::doc::wire;
 use crate::logging::messages;
-use crate::protocol::{message, peer_addr_error, seal_error};
+use crate::protocol::{peer_addr_error, seal_error};
 #[cfg(feature = "multihop")]
 use crate::transport::underlay_webrtc;
 use crate::transport::{probe, proven_endpoints, webrtc};
@@ -952,7 +954,7 @@ async fn handle_shard(
     // side too (`shard_fits_log`) — and the group heals via shard repair.
     // (RPC shards are plumbing — `retain_and_index` skips them by kind
     // either way.)
-    if message::shard_fits_log(message) {
+    if shard_fits_log(message) {
         retain_and_index(
             message.clone(),
             RetainMeta {
@@ -1904,12 +1906,12 @@ mod retain_own_broadcast_tests {
 
     use crate::daemon::message_log::{MissingQuery, WindowRange};
     use crate::daemon::state::EventLoopState;
-    use crate::protocol::message::Verified;
+    use crate::protocol::messages::Verified;
     use crate::protocol::{DedupKey, MeshId, Message, Nickname};
 
     use crate::gossip::app;
     use crate::protocol;
-    use crate::protocol::message;
+    use crate::protocol::messages::AppFrameParams;
     fn joined(state: &EventLoopState, author: &str) -> Verified {
         Message::new_joined(&MeshId::from("💬test"), &Nickname::from(author)).sign(&state.identity)
     }
@@ -1952,7 +1954,7 @@ mod retain_own_broadcast_tests {
         Message::new_app(
             &MeshId::from("💬test"),
             &Nickname::from("me"),
-            message::AppFrameParams::new(
+            AppFrameParams::new(
                 protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                 to.map(Nickname::from),
                 None,
@@ -2057,7 +2059,7 @@ mod evicted_orphan_tests {
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
     use crate::protocol::identity::Identity;
-    use crate::protocol::message::{Authored, Verified};
+    use crate::protocol::messages::{Authored, Verified};
     use crate::protocol::{Channel, MeshId, Message, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
@@ -2231,7 +2233,7 @@ mod first_contact_tests {
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
     use crate::protocol::identity::Identity;
-    use crate::protocol::message::{Authored, MessageBody, Verified};
+    use crate::protocol::messages::{Authored, MessageBody, Verified};
     use crate::protocol::{Channel, MeshId, Message, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
@@ -2241,7 +2243,7 @@ mod first_contact_tests {
     use crate::gossip;
     use crate::gossip::split;
     use crate::lifecycle::heartbeat;
-    use crate::protocol::message;
+    use crate::protocol::messages::AppFrameParams;
     use crate::transport::{PayloadPath, webrtc};
     use crate::util::{clock, tuning};
     use crate::{lookup, protocol, transport};
@@ -2460,7 +2462,7 @@ mod first_contact_tests {
             let frame = Message::new_app(
                 &node.mesh,
                 &nick("alice"),
-                message::AppFrameParams::new(
+                AppFrameParams::new(
                     protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                     None,
                     None,
@@ -2864,7 +2866,7 @@ mod first_contact_tests {
     #[test]
     fn a_peer_info_binds_its_signer_only_with_the_endpoints_proof() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            use crate::protocol::message::MessageBody;
+            use crate::protocol::messages::MessageBody;
             use crate::protocol::{AuthorKey, identity, peer_addr_error};
             use crate::transport::proven_endpoints;
 
@@ -3069,7 +3071,7 @@ mod first_contact_tests {
 
     /// A `PeerInfo` of the author `bob` that carries `addr`.
     fn peer_info(node: &Node, address: &iroh::EndpointAddr) -> Verified {
-        use crate::protocol::message::MessageBody;
+        use crate::protocol::messages::MessageBody;
         use crate::protocol::peer_addr_error;
 
         let body =
@@ -3110,7 +3112,7 @@ mod first_contact_tests {
     #[test]
     fn a_second_peer_info_right_after_a_deferred_dial_does_not_dial() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            use crate::protocol::message::MessageBody;
+            use crate::protocol::messages::MessageBody;
             use crate::protocol::peer_addr_error;
 
             let node = Node::spawn().await;
@@ -3160,7 +3162,7 @@ mod first_contact_tests {
     #[test]
     fn a_peer_info_leaves_one_slot_free_in_a_mesh_larger_than_g_plus_one() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            use crate::protocol::message::MessageBody;
+            use crate::protocol::messages::MessageBody;
             use crate::protocol::peer_addr_error;
 
             let node = Node::spawn().await;
@@ -3477,7 +3479,7 @@ mod left_tests {
     use crate::lookup::{TransportOpts, build_peer_multihop};
     use crate::protocol::identity::Identity;
     use crate::protocol::meshes::LookupOpts;
-    use crate::protocol::message::Authored;
+    use crate::protocol::messages::Authored;
     use crate::protocol::{MeshId, Message, PresenceSubtype};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;

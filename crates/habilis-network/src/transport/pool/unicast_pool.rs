@@ -28,7 +28,7 @@ use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 use crate::util::tuning::{DIRECT_IDLE_BACKSTOP, PROBE_HOLD};
 
-use crate::protocol::message;
+use crate::protocol::messages;
 
 use n0_future::{task, time};
 use std::sync::{Mutex as std_Mutex, OnceLock, OnceLock as std_OnceLock};
@@ -416,11 +416,11 @@ impl UnicastPool {
     pub(crate) async fn send_batch_in_background(
         &self,
         eid: EndpointId,
-        frames: Vec<message::WireFrame>,
+        frames: Vec<messages::WireFrame>,
     ) -> bool {
         let frames: Vec<Bytes> = frames
             .into_iter()
-            .map(message::WireFrame::into_bytes)
+            .map(messages::WireFrame::into_bytes)
             .collect();
         if let Some(connection) = self.warm(eid).await {
             if !payload_allowed_on(&connection, self.inner.relay_transport) {

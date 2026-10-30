@@ -50,7 +50,7 @@ pub const MAX_MESSAGE_SIZE: usize = 3840;
 /// `Message::parse`. Sized with ~2x headroom over the most shards a
 /// budget-respecting body can need ([`REASSEMBLY_GROUP_MAX_BYTES`] divided by
 /// a worst-case per-shard body budget; pinned by a unit test in
-/// `protocol::message::shard`).
+/// `protocol::messages::shard`).
 pub const MAX_SHARD_TOTAL: u32 = 65_536;
 
 /// Largest shard group whose frames still enter the message log (and thus

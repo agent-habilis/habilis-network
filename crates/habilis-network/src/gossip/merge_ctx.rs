@@ -13,12 +13,12 @@ use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{EventLoopState, PingRound};
 use crate::gossip::app::AppClass;
 use crate::gossip::event::{NodeEvent, NodeSink};
-use crate::protocol::message::{AppFrameParams, Verified, WireFrame};
+use crate::protocol::messages::{AppFrameParams, Verified, WireFrame, sole_addressee};
 use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
 use crate::logging::messages;
-use crate::protocol::{message, peer_addr_error};
+use crate::protocol::peer_addr_error;
 use crate::transport;
 use crate::transport::{proven_endpoints, webrtc};
 use crate::util::{clock, tuning};
@@ -499,7 +499,7 @@ pub async fn broadcast_state_merge(
 /// ```no_run
 /// use habilis_network::embed::EventLoopState;
 /// use habilis_network::ops::unicast_farewell;
-/// use habilis_network::protocol::message::WireFrame;
+/// use habilis_network::protocol::messages::WireFrame;
 ///
 /// # fn demo(state: &EventLoopState, bytes: &WireFrame) {
 /// unicast_farewell(state, bytes);
@@ -619,7 +619,7 @@ pub(crate) fn park_and_offer(
 /// for the next tick of the retry pass, up to 30 s, and a user waits with it. The peer is a lane peer,
 /// or a pair with an IP path that reads as the relay (`note_held` marks both).
 fn offer_for_parked(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: &Verified) {
-    let Some(nick) = message::sole_addressee(&frame.kind) else {
+    let Some(nick) = sole_addressee(&frame.kind) else {
         return;
     };
     let Some(address) = state.peer_endpoints.get(nick).cloned() else {
@@ -639,7 +639,8 @@ mod tests {
     use crate::testing::{endpoint_id, fresh_state, nick};
 
     use crate::protocol;
-    use crate::protocol::{message, peer_addr_error};
+    use crate::protocol::messages::AppFrameParams;
+    use crate::protocol::peer_addr_error;
     #[cfg(feature = "host")]
     use crate::testing;
     use crate::util::clock;
@@ -728,7 +729,7 @@ mod tests {
         let frame = Message::new_app(
             &MeshId::from("test"),
             &nick("alice"),
-            message::AppFrameParams::new(
+            AppFrameParams::new(
                 protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                 None,
                 None,

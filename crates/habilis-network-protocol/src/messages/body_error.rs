@@ -22,7 +22,7 @@ use std::error;
 /// A message body is text that holds no control characters.
 ///
 /// ```
-/// use habilis_network_protocol::message::MessageBody;
+/// use habilis_network_protocol::messages::MessageBody;
 ///
 /// let body = MessageBody::try_new("hello").expect("a valid body");
 /// assert_eq!(body.as_str(), "hello");
@@ -86,7 +86,7 @@ impl From<&str> for MessageBody {
 /// A body with a control character returns this error.
 ///
 /// ```
-/// use habilis_network_protocol::message::MessageBody;
+/// use habilis_network_protocol::messages::MessageBody;
 ///
 /// let error = MessageBody::try_new("bell\u{7}").unwrap_err();
 /// assert!(!error.to_string().is_empty());

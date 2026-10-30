@@ -15,7 +15,7 @@ type BoxedError = Box<dyn Error + Send + Sync>;
 /// A message that is too large for the wire returns this error.
 ///
 /// ```
-/// use habilis_network_protocol::message::MessageError;
+/// use habilis_network_protocol::messages::MessageError;
 ///
 /// let error = MessageError::TooLarge;
 /// assert!(!error.to_string().is_empty());

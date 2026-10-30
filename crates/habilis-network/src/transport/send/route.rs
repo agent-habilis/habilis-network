@@ -4,7 +4,7 @@ use crate::daemon::state::DirectState;
 use crate::protocol::Nickname;
 
 use crate::daemon::state::EventLoopState;
-use crate::protocol::message::{Verified, sole_addressee};
+use crate::protocol::messages::{Verified, sole_addressee};
 use iroh::EndpointId;
 
 /// The chosen transport for a message — a **pure** decision so both planes are

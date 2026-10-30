@@ -3,7 +3,7 @@ use tokio::sync::broadcast;
 
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::gossip::event::NodeSink;
-use crate::protocol::message::Authored;
+use crate::protocol::messages::Authored;
 use crate::protocol::{AuthorKey, MeshId, Nickname, identity};
 use crate::transport::MeshSender;
 

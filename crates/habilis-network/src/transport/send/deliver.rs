@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 use super::route::Route;
 use crate::daemon::state::EventLoopState;
 use crate::protocol::Nickname;
-use crate::protocol::message::{Verified, WireFrame, sole_addressee};
+use crate::protocol::messages::{Verified, WireFrame, sole_addressee};
 use crate::transport::outbox::Resend;
 use crate::transport::pool::{COOLDOWN_REFUSED, UnicastPool, WarmSend};
 use crate::transport::probe::PathKind;
@@ -41,7 +41,7 @@ use n0_future::task;
 /// ```no_run
 /// use habilis_network::embed::EventLoopState;
 /// use habilis_network::ops::{Delivered, MeshSender, deliver};
-/// use habilis_network::protocol::{Verified, message::WireFrame};
+/// use habilis_network::protocol::{Verified, messages::WireFrame};
 /// use habilis_network::runtime::SendError;
 ///
 /// # async fn demo(message: &Verified, bytes: WireFrame, state: &EventLoopState, sender: &MeshSender) -> Result<Delivered, SendError> {
@@ -139,7 +139,7 @@ pub(crate) fn resolve(
 /// ```no_run
 /// use habilis_network::embed::EventLoopState;
 /// use habilis_network::ops::{MeshSender, deliver_in_background};
-/// use habilis_network::protocol::{Verified, message::WireFrame};
+/// use habilis_network::protocol::{Verified, messages::WireFrame};
 ///
 /// # async fn demo(message: &Verified, bytes: WireFrame, state: &EventLoopState, sender: &MeshSender) -> bool {
 /// deliver_in_background(message, bytes, state, sender).await

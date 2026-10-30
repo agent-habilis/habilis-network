@@ -21,7 +21,7 @@
 
 #![cfg(feature = "host")]
 
-use habilis_network::protocol::message::Authored;
+use habilis_network::protocol::messages::Authored;
 use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 use tokio::sync;

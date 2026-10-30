@@ -17,7 +17,7 @@ use serde::de::Error;
 /// A correlation id ties a reply to the request that it answers.
 ///
 /// ```
-/// use habilis_network_protocol::message::CorrId;
+/// use habilis_network_protocol::messages::CorrId;
 ///
 /// let corr = CorrId::try_new("req-1").expect("a valid correlation id");
 /// assert_eq!(corr.as_str(), "req-1");

@@ -6,7 +6,7 @@ use automerge::{
 };
 use serde_json::{Map, Value};
 
-use habilis_network_protocol::message::Verified;
+use habilis_network_protocol::messages::Verified;
 use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname, SymmetricKey};
 use habilis_network_util::consts::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX};
 
@@ -887,7 +887,7 @@ fn put_number(
 mod tests {
     use super::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate};
     use automerge::Change;
-    use habilis_network_protocol::message::Verified;
+    use habilis_network_protocol::messages::Verified;
     use habilis_network_protocol::{
         AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, SymmetricKey,
     };
@@ -933,7 +933,7 @@ mod tests {
     /// that can only ever happen on purpose.
     ///
     /// It last moved when the byte-domains dropped the product name for the
-    /// engine's, which is why `message::VERSION` is `12.0`.
+    /// engine's, which is why `messages::VERSION` is `12.0`.
     #[test]
     fn genesis_bytes_are_pinned() {
         let _guard = ::habilis_network_test_tracing::init();

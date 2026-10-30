@@ -34,7 +34,7 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
-use habilis_network::protocol::message::Authored;
+use habilis_network::protocol::messages::Authored;
 use std::time::{Duration, Instant};
 
 use std::sync::{Arc, Mutex};

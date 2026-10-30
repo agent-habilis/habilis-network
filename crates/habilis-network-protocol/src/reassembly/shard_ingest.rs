@@ -1,6 +1,6 @@
 //! The outcome of ingesting one shard of a multipart body.
 
-use crate::message::Authored;
+use crate::messages::Authored;
 
 /// What became of one ingested shard.
 ///

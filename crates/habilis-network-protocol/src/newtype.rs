@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests {
     use crate::meshes::{MeshId, MeshName};
-    use crate::message::{AppTag, CorrId, MessageBody, MessageId, ShardGroup};
+    use crate::messages::{AppTag, CorrId, MessageBody, MessageId, ShardGroup};
     use crate::nickname_error::Nickname;
 
     /// Assert that a value serializes as the bare JSON string `raw`.

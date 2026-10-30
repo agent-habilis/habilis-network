@@ -12,7 +12,7 @@ use bytes::Bytes;
 /// A frame cannot be built from bytes outside the crate: the field is private.
 ///
 /// ```compile_fail,E0423
-/// use habilis_network_protocol::message::WireFrame;
+/// use habilis_network_protocol::messages::WireFrame;
 ///
 /// let _ = WireFrame(bytes::Bytes::from_static(b"not signed"));
 /// ```
@@ -20,7 +20,7 @@ use bytes::Bytes;
 /// A frame from a signed message is the passing control:
 ///
 /// ```
-/// use habilis_network_protocol::message::{Message, Verified, WireFrame};
+/// use habilis_network_protocol::messages::{Message, Verified, WireFrame};
 ///
 /// const SIGNED: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca75b3ef10bd592fe6a835e147def33b203c0bfcf26253edb7b7d06a450e383d6fdd3fb0ef153969d16df0e6d4b97f1a7ca434106378d8f772814ad50e","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
 ///

@@ -10,7 +10,7 @@ use tokio::sync::{broadcast, mpsc};
 use crate::daemon::app::NodeDriver;
 use crate::daemon::config::{DriverMode, EventLoopConfig};
 use crate::protocol::meshes::MeshName;
-use crate::protocol::message::Authored;
+use crate::protocol::messages::Authored;
 use crate::protocol::{MeshId, Nickname};
 use crate::util::tuning::{NODE_LEAVE, SESSION_REQUEST_CAP};
 

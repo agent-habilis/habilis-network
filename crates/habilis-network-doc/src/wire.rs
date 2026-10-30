@@ -9,7 +9,7 @@ use serde_json::Value;
 use habilis_network_protocol::SymmetricKey;
 
 use crate::DocError;
-use habilis_network_protocol::message::MessageBody;
+use habilis_network_protocol::messages::MessageBody;
 
 use habilis_network_protocol::seal_error;
 /// The tagged `State`/`Meta` message body.

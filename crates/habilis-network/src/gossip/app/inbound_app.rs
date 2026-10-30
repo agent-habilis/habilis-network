@@ -1,4 +1,4 @@
-use crate::protocol::message::Authored;
+use crate::protocol::messages::Authored;
 
 /// An inbound `App` frame plus the surfacing decision already made by the
 /// engine's generic prefix (join-horizon / third-party gating), passed to

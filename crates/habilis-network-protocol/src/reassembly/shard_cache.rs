@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use habilis_network_util::consts::SHARD_CACHE_BUDGET_BYTES;
 
 use crate::ShardGroup;
-use crate::message::WireFrame;
+use crate::messages::WireFrame;
 
 /// The sender-side re-serve source for big (unlogged) outbound groups: their
 /// serialized, signed shard frames, kept so a receiver's `shard/repair`

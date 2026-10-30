@@ -1,12 +1,12 @@
 //! The engine-facing half: mailboxes, framing, and the only `send_app` call.
 
-use habilis_network::protocol::message::Authored;
+use habilis_network::protocol::messages::Authored;
 use std::sync::Arc;
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver,
 };
-use habilis_network::protocol::message::Verified;
+use habilis_network::protocol::messages::Verified;
 use habilis_network::protocol::{AppFrameParams, AppTag, MessageBody, Nickname};
 use serde::{Deserialize, Serialize};
 

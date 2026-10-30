@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::message_log::{DigestWindow, MissingQuery, WindowRange};
 use crate::daemon::state::EventLoopState;
-use crate::protocol::message::{Verified, WireFrame};
+use crate::protocol::messages::{Verified, WireFrame};
 use crate::protocol::{AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, UnixSecs};
 use crate::util::clock::Instant;
 use crate::util::tuning::{
@@ -1097,13 +1097,13 @@ mod tests {
     use crate::daemon::message_log::{DigestWindow, MessageLog, MissingQuery};
     use crate::daemon::state::EventLoopState;
     use crate::doc::Ingested;
-    use crate::protocol::message::Verified;
+    use crate::protocol::messages::Verified;
     use crate::protocol::{
         AuthorKey, Channel, DedupKey, Identity, MeshId, Message, MessageBody, Nickname, UnixSecs,
     };
     use crate::testing::{fresh_state, nick};
 
-    use crate::protocol::message;
+    use crate::protocol::messages;
     use crate::transport::Resend;
     use crate::util::{consts, tuning};
     use crate::{gossip, protocol, transport};
@@ -1430,7 +1430,7 @@ mod tests {
             let mut message = Message::new_app(
                 &MeshId::from("test"),
                 &Nickname::from("author"),
-                message::AppFrameParams::new(
+                messages::AppFrameParams::new(
                     protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                     None,
                     None,
@@ -1584,7 +1584,7 @@ mod tests {
         let mut message = Message::new_app(
             &MeshId::from("test"),
             &Nickname::from("author"),
-            message::AppFrameParams::new(
+            messages::AppFrameParams::new(
                 protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
                 None,
                 None,

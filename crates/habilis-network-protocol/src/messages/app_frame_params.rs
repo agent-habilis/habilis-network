@@ -11,7 +11,7 @@ use crate::nickname_error::Nickname;
 /// A broadcast frame has no recipient and no correlation id.
 ///
 /// ```
-/// use habilis_network_protocol::message::{AppFrameParams, AppTag, MessageBody};
+/// use habilis_network_protocol::messages::{AppFrameParams, AppTag, MessageBody};
 ///
 /// let tag = AppTag::try_new("chat").expect("a valid tag");
 /// let body = MessageBody::try_new("hello").expect("a body");

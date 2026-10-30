@@ -19,7 +19,7 @@ use super::MessageKind;
 /// A frame that is not directed names no recipient.
 ///
 /// ```
-/// use habilis_network_protocol::message::{MessageKind, sole_addressee};
+/// use habilis_network_protocol::messages::{MessageKind, sole_addressee};
 ///
 /// assert!(sole_addressee(&MessageKind::Meta).is_none());
 /// ```

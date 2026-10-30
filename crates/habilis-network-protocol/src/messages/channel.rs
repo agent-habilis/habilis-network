@@ -10,7 +10,7 @@ use super::MessageKind;
 /// The state and the meta channel have different labels.
 ///
 /// ```
-/// use habilis_network_protocol::message::Channel;
+/// use habilis_network_protocol::messages::Channel;
 ///
 /// assert_ne!(Channel::State.label(), Channel::Meta.label());
 /// ```

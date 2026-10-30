@@ -1,6 +1,6 @@
 //! Behavioural knobs. Changing these affects timing, capacity, and
 //! policy but never the on-the-wire format — the size cap belongs in
-//! `protocol::message` (`MAX_MESSAGE_SIZE`).
+//! `protocol::messages` (`MAX_MESSAGE_SIZE`).
 //!
 //! **The split with `crate::consts` is by who may change a value.** A `pub
 //! const` here is fixed at build time; a `pub fn` reads the process [`Tuning`]

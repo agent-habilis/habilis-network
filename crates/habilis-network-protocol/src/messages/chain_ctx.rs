@@ -13,7 +13,7 @@ use crate::ContentHash;
 /// The first message of an author has sequence 0 and no earlier message.
 ///
 /// ```
-/// use habilis_network_protocol::message::ChainCtx;
+/// use habilis_network_protocol::messages::ChainCtx;
 ///
 /// let chain = ChainCtx::genesis();
 /// assert_eq!(chain.seq, 0);

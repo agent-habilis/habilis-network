@@ -7,7 +7,7 @@ mod window_range;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::protocol::message::{Verified, sole_addressee};
+use crate::protocol::messages::{Verified, sole_addressee};
 use crate::protocol::{AuthorKey, DedupKey, MessageKind, Nickname, PresenceSubtype, UnixSecs};
 
 pub(crate) use bound::Bound;

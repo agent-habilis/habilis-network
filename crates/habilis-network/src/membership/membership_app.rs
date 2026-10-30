@@ -11,7 +11,7 @@ use crate::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent,
 };
 use crate::ops::{StateMergeParams, app_frame, broadcast_state_merge, send_app};
-use crate::protocol::message::Authored;
+use crate::protocol::messages::Authored;
 use crate::protocol::{AppFrameParams, AppTag, Channel, MessageBody, MessageKind, Nickname};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 

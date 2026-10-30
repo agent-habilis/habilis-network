@@ -404,7 +404,7 @@ fn golden_passwordless_id_and_topic_are_pinned() {
     // `crypto::DOMAIN`, so it moves whenever that domain is rebranded; it
     // last moved when the domains dropped the product's name for the
     // engine's (`habilis-mesh/…`), which is why
-    // `message::VERSION` is `12.0`.
+    // `messages::VERSION` is `12.0`.
     //
     // That split is the point: this pair is what proved the de-branding
     // reached the key-derivation transcript (topic moved) without leaking

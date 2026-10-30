@@ -4,7 +4,7 @@ use super::{RepairTicket, ShardIngest};
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::message::{Authored, Verified};
+use crate::messages::{Authored, Verified};
 use crate::{AuthorKey, Message, MessageBody, MessageId, MessageKind, Nickname, ShardGroup};
 use habilis_network_util::clock::Instant;
 use habilis_network_util::consts::{
@@ -343,7 +343,7 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Auth
 ///
 /// ```ignore
 /// use habilis_network_protocol::identity::Identity;
-/// use habilis_network_protocol::message::{AppTag, BuildMsgParams, ChainCtx, MessageBody, build_msg_bytes};
+/// use habilis_network_protocol::messages::{AppTag, BuildMsgParams, ChainCtx, MessageBody, build_msg_bytes};
 /// use habilis_network_protocol::meshes::MeshId;
 /// use habilis_network_protocol::Nickname;
 ///

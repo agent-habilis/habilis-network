@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use habilis_network_protocol::message::BodyError;
+use habilis_network_protocol::messages::BodyError;
 
 use std::error;
 /// Why a shared-state change could not be built or wrapped for the wire.

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// A join and a leave are different presence events.
 ///
 /// ```
-/// use habilis_network_protocol::message::PresenceSubtype;
+/// use habilis_network_protocol::messages::PresenceSubtype;
 ///
 /// assert_ne!(PresenceSubtype::Joined, PresenceSubtype::Left);
 /// ```

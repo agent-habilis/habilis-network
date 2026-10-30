@@ -22,7 +22,7 @@ use crate::nickname_error::Nickname;
 /// A frame that is not an application frame has no app tag.
 ///
 /// ```
-/// use habilis_network_protocol::message::MessageKind;
+/// use habilis_network_protocol::messages::MessageKind;
 ///
 /// assert!(MessageKind::State.app_tag().is_none());
 /// assert!(!MessageKind::Meta.is_app("chat"));

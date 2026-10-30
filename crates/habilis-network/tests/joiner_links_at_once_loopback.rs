@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
-use habilis_network::protocol::message::Authored;
+use habilis_network::protocol::messages::Authored;
 use habilis_network::protocol::{
     Mesh, MeshConfig, MeshName, MessageKind, Nickname, PresenceSubtype, Seed,
 };

@@ -76,7 +76,7 @@ mod tests {
     use crate::util::tuning::{KNOWN_ENDPOINTS_CAP, QUIET_CAP, RELINK_COOLDOWN};
     use n0_future::time::Instant as TokioInstant;
 
-    use crate::protocol::message;
+    use crate::protocol::messages;
     use crate::transport::PayloadPath;
     use crate::transport::probe::PathKind;
     use crate::util::tuning;
@@ -1207,7 +1207,7 @@ mod tests {
 
     /// An unsigned chat message carrying `id` — enough to exercise
     /// `mark_seen`, which keys on `dedup_key()` (`SHA-256(pubkey ‖ id)`).
-    fn msg_with_id(id: &MessageId) -> message::Verified {
+    fn msg_with_id(id: &MessageId) -> messages::Verified {
         plain_with_id(id).sign(&protocol::Identity::generate())
     }
 
@@ -1772,9 +1772,9 @@ mod tests {
         let mut state = fresh_state();
         let id = MessageId::random();
         let victim =
-            message::Verified::fixture_unchecked(plain_with_id(&id), AuthorKey::from([0xaa; 32]));
+            messages::Verified::fixture_unchecked(plain_with_id(&id), AuthorKey::from([0xaa; 32]));
         let attacker =
-            message::Verified::fixture_unchecked(plain_with_id(&id), AuthorKey::from([0xbb; 32]));
+            messages::Verified::fixture_unchecked(plain_with_id(&id), AuthorKey::from([0xbb; 32]));
         assert!(!state.mark_seen(&victim), "victim's message is fresh");
         assert!(
             !state.mark_seen(&attacker),

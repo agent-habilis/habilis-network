@@ -10,7 +10,7 @@ use std::fmt;
 /// An empty correlation id returns this error.
 ///
 /// ```
-/// use habilis_network_protocol::message::CorrId;
+/// use habilis_network_protocol::messages::CorrId;
 ///
 /// let error = CorrId::try_new("").unwrap_err();
 /// assert!(!error.to_string().is_empty());

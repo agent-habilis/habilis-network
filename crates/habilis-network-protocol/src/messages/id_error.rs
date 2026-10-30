@@ -25,7 +25,7 @@ use std::error;
 /// A random message id is a UUID, and its text reads back as a valid id.
 ///
 /// ```
-/// use habilis_network_protocol::message::MessageId;
+/// use habilis_network_protocol::messages::MessageId;
 ///
 /// let id = MessageId::random();
 /// assert!(MessageId::try_new(id.as_str()).is_ok());
@@ -95,7 +95,7 @@ impl From<&str> for MessageId {
 /// Text that is not a UUID returns this error.
 ///
 /// ```
-/// use habilis_network_protocol::message::MessageId;
+/// use habilis_network_protocol::messages::MessageId;
 ///
 /// let error = MessageId::try_new("not a uuid").unwrap_err();
 /// assert!(!error.to_string().is_empty());

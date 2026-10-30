@@ -20,7 +20,7 @@
 //! take": a driver with two required methods and three associated types.
 //! Everything else on `NodeDriver` has a default.
 
-use habilis_network::protocol::message::Authored;
+use habilis_network::protocol::messages::Authored;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
