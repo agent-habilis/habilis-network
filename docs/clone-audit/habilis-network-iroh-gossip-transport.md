@@ -21,3 +21,13 @@
 
 - The shared state (`Shared`, the transport, the lookup, the sink's liveness flag, the hub's members) is held by the handle and by the endpoint, the lookup, the sink task, or the hub. Each `Arc::clone` is a second owner.
 - Trait objects returned to iroh or stored as sinks (`path_selector`, `custom_transport`, `create_sender`, `attach_gossip`, `attach`, the hub's memory sink): iroh and the handle take the `Arc<dyn ...>`.
+
+## B1 second pass (2026-10-30)
+
+Every `Arc` site was read again with its enclosing function.
+
+- Removed: 0.
+- Kept:
+  - `Shared`, the transport, the lookup, the sink's liveness flag and the hub's members: each is owned by the handle and by an endpoint, lookup, task or hub that outlives the borrow.
+  - `path_selector`, `custom_transport`, `create_sender`, and the sink passed to `attach`: iroh and the handle take `Arc` (or `Arc<dyn ...>`) by value.
+  - The memory sink in `Hub::join`: `attach` stores it as a shared trait object.
