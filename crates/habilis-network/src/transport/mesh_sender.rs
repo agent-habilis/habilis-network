@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 use iroh::EndpointId;
 use iroh_gossip::api::{ApiError, GossipSender};
 
+use crate::daemon::state::note_wire_out;
 use crate::protocol::messages::WireFrame;
 
 /// The mesh's outbound broadcast plane: a thin wrapper over the gossip sender
@@ -50,7 +51,12 @@ impl MeshSender {
     /// # Errors
     /// The gossip topic has been closed, or the send buffer is full.
     pub async fn broadcast(&self, message: WireFrame) -> Result<(), ApiError> {
-        self.current().broadcast(message.into_bytes()).await
+        let bytes = message.into_bytes();
+        let sent = self.current().broadcast(bytes.clone()).await;
+        if sent.is_ok() {
+            note_wire_out(&bytes);
+        }
+        sent
     }
 
     pub(crate) async fn join_peers(&self, peers: Vec<EndpointId>) -> Result<(), ApiError> {
@@ -72,5 +78,55 @@ impl MeshSender {
     /// Swap the inner gossip sender after a topic resubscribe (`gossip::heal`).
     pub(crate) fn replace_gossip(&mut self, gossip: GossipSender) {
         *self.gossip.write().expect("gossip sender lock") = gossip;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iroh::endpoint::presets;
+    use iroh_gossip::net::Gossip;
+    use iroh_gossip::proto;
+
+    use super::MeshSender;
+    use crate::daemon::state::{app_frame_with_tag, sent_tag_bytes};
+    use crate::protocol::messages::WireFrame;
+
+    /// A broadcast is counted in the sent bytes, once, under the kind and the tag of the frame. The
+    /// tag is the test's own, and the send repeats until it shows, because the tests that end an
+    /// interval run beside this one and can take the count first.
+    #[test]
+    fn a_broadcast_is_counted_in_the_sent_bytes() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(proto::TopicId::from_bytes([6u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            let sender = MeshSender::new(gossip_sender);
+            let bytes = app_frame_with_tag("broadcast_count_probe");
+            let mut counted = 0;
+            for _ in 0..50 {
+                let frame = WireFrame::fixture_raw(bytes::Bytes::from(bytes.clone()));
+                sender
+                    .broadcast(frame)
+                    .await
+                    .expect("a peerless broadcast is accepted");
+                counted = sent_tag_bytes("broadcast_count_probe");
+                if counted >= bytes.len() as u64 {
+                    break;
+                }
+            }
+            assert!(
+                counted >= bytes.len() as u64,
+                "{counted} bytes counted for a frame of {}",
+                bytes.len()
+            );
+            endpoint.close().await;
+        });
     }
 }

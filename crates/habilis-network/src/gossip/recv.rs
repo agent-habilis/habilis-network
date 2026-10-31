@@ -6,7 +6,7 @@
 //! layer never touches the peer roster directly — it calls into
 //! `lifecycle::observe` and dispatches by kind.
 
-use crate::daemon::state::{RendezvousFlag, Standing};
+use crate::daemon::state::{FrameShape, RendezvousFlag, Standing};
 use std::ops::ControlFlow;
 
 use bytes::Bytes;
@@ -519,6 +519,16 @@ fn dropped_by_test_hook(_state: &mut EventLoopState, _message: &Verified) -> boo
     false
 }
 
+/// A frame that the dedup knows before the verify: a repeat. Even a repeat is traffic, so the
+/// starvation watchdog hears it, as it heard it before the dedup.
+async fn drop_repeat(state: &mut EventLoopState, context: &HandlerCtx<'_>, shape: &FrameShape<'_>) {
+    if state.note_inbound(Instant::now()) {
+        flush_pending(state, context, "inbound traffic resumed").await;
+    }
+    state.idle.duplicates += 1;
+    state.idle.wire_in.note_dup(shape);
+}
+
 /// Validate + dispatch one inbound wire message, regardless of transport. Both
 /// the gossip event pump (`handle_gossip_event`) and the unicast inbound arm
 /// (`daemon::event_loop`) funnel here, so signature-verify, the mesh gate, and
@@ -532,6 +542,8 @@ pub(crate) async fn ingest(
     app: &mut dyn NodeApp,
     context: &HandlerCtx<'_>,
 ) {
+    let shape = FrameShape::of(&frame);
+    state.idle.wire_in.note_received(&shape);
     let Ok((message, _resend_nonce)) = Message::parse_wire(&frame) else {
         context
             .sink
@@ -548,10 +560,7 @@ pub(crate) async fn ingest(
         .signer
         .is_some_and(|signer| signer.key() == context.our_pubkey);
     if !claims_our_key && state.is_seen(&message.dedup_key()) {
-        if state.note_inbound(Instant::now()) {
-            flush_pending(state, context, "inbound traffic resumed").await;
-        }
-        state.idle.duplicates += 1;
+        drop_repeat(state, context, &shape).await;
         return;
     }
     // Authenticity gate, **before** the self-echo drop, dedup, and every other step: every inbound
@@ -603,9 +612,11 @@ pub(crate) async fn ingest(
     // here. Only authenticated messages reach this gate.
     if state.mark_seen(&verified) {
         state.idle.duplicates += 1;
+        state.idle.wire_in.note_dup(&shape);
         return;
     }
     state.idle.fresh += 1;
+    state.idle.wire_in.note_fresh(&shape);
     // Identity is the signing key, not the nickname (p2panda-style): the
     // signature above authenticates the *key*; the `author` nickname is a
     // non-unique display label and is deliberately **not** pinned/claimed,
@@ -4119,7 +4130,7 @@ mod dedup_counter_tests {
     use serde_json::json;
 
     use crate::daemon::handler_ctx::HandlerCtx;
-    use crate::daemon::state::{EventLoopState, Standing};
+    use crate::daemon::state::{EventLoopState, Standing, by_class};
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
     use crate::protocol::identity::Identity;
@@ -4243,6 +4254,34 @@ mod dedup_counter_tests {
             json!({ "key": 1 }),
             "only the genuine change is applied"
         );
+    }
+
+    /// The census reads each received frame by kind: its wire bytes and its body bytes, and whether
+    /// it was new, a repeat, or dropped by a later check. The forged copy shares the key of the
+    /// genuine frame, so the early drop reads it as a repeat.
+    #[test]
+    fn the_received_bytes_are_counted_by_kind_and_by_what_became_of_the_frame() {
+        let (frame, forged) = frame_and_forgery();
+        let reader = reader_after(&[&frame, &frame, &frame, &forged], false);
+        let wire = |message: &Verified| message.serialize().expect("serialize").len() as u64;
+        let (genuine, copy) = (wire(&frame), wire(&forged));
+        let json_body = |message: &Verified| {
+            serde_json::to_string(message.body.as_str())
+                .expect("a string encodes")
+                .len() as u64
+                - 2
+        };
+
+        let received = &reader.idle.wire_in;
+        assert_eq!(received.frames, 4, "every frame that reached ingest");
+        assert_eq!(received.wire, 3 * genuine + copy);
+        assert_eq!(received.body, 3 * json_body(&frame) + json_body(&forged));
+        assert_eq!(by_class(&received.fresh), format!("state:{genuine}"));
+        assert_eq!(
+            by_class(&received.dup),
+            format!("state:{}", 2 * genuine + copy)
+        );
+        assert!(received.body < received.wire, "the envelope is the rest");
     }
 
     /// A frame whose body is no change is ignored by the document, and the census counts it.
