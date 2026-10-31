@@ -387,11 +387,15 @@ impl MeshDoc {
     /// Whether this document holds every change in `heads`, Base58-encoded as
     /// [`Self::heads`] gives them: a peer that advertises these heads is not
     /// ahead of us. A head that does not decode counts as not held.
+    ///
+    /// It reads `applied`, not the document: `get_change_by_hash` rebuilds the change from the op
+    /// set, and a digest asks it for each head of each peer. The two hold the same hashes, because
+    /// `apply` and the genesis are the only writes to the document.
     #[must_use]
     pub fn holds_heads(&self, heads: &[String]) -> bool {
-        heads.iter().all(|encoded| {
-            decode_hash(encoded).is_some_and(|hash| self.doc.get_change_by_hash(&hash).is_some())
-        })
+        heads
+            .iter()
+            .all(|encoded| decode_hash(encoded).is_some_and(|hash| self.applied.contains(&hash)))
     }
 
     /// The derived document as JSON — the shape a consumer's `state`/`meta` read returns.
@@ -888,7 +892,7 @@ fn put_number(
 #[cfg(test)]
 mod tests {
     use super::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate};
-    use automerge::Change;
+    use automerge::{Change, ReadDoc};
     use habilis_network_protocol::messages::Verified;
     use habilis_network_protocol::{
         AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, SymmetricKey,
@@ -1558,6 +1562,141 @@ mod tests {
             0,
             "no pending change is kept for the forged key"
         );
+    }
+
+    /// `holds_heads` as it was: it asks the document, which finds a change by hash in its op set.
+    fn holds_heads_by_the_document(doc: &MeshDoc, heads: &[String]) -> bool {
+        heads.iter().all(|encoded| {
+            super::decode_hash(encoded)
+                .is_some_and(|hash| doc.doc.get_change_by_hash(&hash).is_some())
+        })
+    }
+
+    /// The hashes of every head that `doc` has had, after each step in `steps`.
+    fn heads_after(doc: &mut MeshDoc, who: &Nickname, steps: &[Value]) -> Vec<String> {
+        let mut seen: Vec<String> = doc.heads().collect();
+        for merge in steps {
+            author(doc, who, merge);
+            seen.extend(doc.heads());
+        }
+        seen
+    }
+
+    /// **`holds_heads` answers from the `applied` set, and the set is what the document holds.**
+    /// Documents of every shape are asked about every head they and the others ever had, a hash
+    /// of a change that waits as an orphan, one that automerge refused, and hashes that exist
+    /// nowhere. The document and the set must agree on each of them.
+    #[test]
+    fn holds_heads_agrees_with_the_document_on_every_hash_it_is_asked() {
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
+            super::LOG_TARGET,
+            "dropping a channel change automerge refused",
+        );
+        let (alice, bob) = (nick("alice"), nick("bob"));
+        let steps = [json!({"a": 1}), json!({"b": 2}), json!({"a": null})];
+
+        // Two authors who wrote without seeing each other, merged in both orders.
+        let mut alice_doc = MeshDoc::new_ungated();
+        let mut bob_doc = MeshDoc::new_ungated();
+        let mut candidates = heads_after(&mut alice_doc, &alice, &steps);
+        candidates.extend(heads_after(&mut bob_doc, &bob, &steps[..2]));
+        let genesis_heads: Vec<String> = MeshDoc::new_ungated().heads().collect();
+        let frames_of = |doc: &MeshDoc| doc.changes_since(&genesis_heads, 100).collect::<Vec<_>>();
+        let (alice_frames, bob_frames) = (frames_of(&alice_doc), frames_of(&bob_doc));
+        let mut forward = MeshDoc::new_ungated();
+        let mut backward = MeshDoc::new_ungated();
+        for carrier in alice_frames.iter().chain(&bob_frames) {
+            forward.ingest(carrier);
+        }
+        for carrier in bob_frames.iter().chain(&alice_frames) {
+            backward.ingest(carrier);
+        }
+
+        // A gated document, which starts from the genesis change.
+        let mut gated = MeshDoc::new_gated(card_gate());
+        candidates.extend(heads_after(
+            &mut gated,
+            &alice,
+            &[json!({"peers": {"alice": {"card": 1}}})],
+        ));
+
+        // A document that waits on an orphan: the second change of a chain, without the first.
+        let mut source = MeshDoc::new_ungated();
+        let chain = [
+            author(&mut source, &alice, &json!({"x": 1})),
+            author(&mut source, &alice, &json!({"y": 2})),
+        ];
+        candidates.extend(source.heads());
+        let mut waiting = MeshDoc::new_ungated();
+        assert!(matches!(waiting.ingest(&chain[1]), Ingested::Buffered));
+
+        // A document that refused a change: the same actor wrote different content at one seq.
+        let mut first_doc = MeshDoc::new_ungated();
+        let mut second_doc = MeshDoc::new_ungated();
+        let first = author_as(&mut first_doc, &alice, b"shared", &json!({"p": 1}));
+        let second = author_as(&mut second_doc, &alice, b"shared", &json!({"q": 2}));
+        candidates.extend(first_doc.heads());
+        candidates.extend(second_doc.heads());
+        let mut refusing = MeshDoc::new_ungated();
+        refusing.ingest(&first);
+        refusing.ingest(&second);
+
+        // A document built from the frames of another, as a late joiner is.
+        let mut backfilled = MeshDoc::new_ungated();
+        for carrier in forward.changes_since(&genesis_heads, 100) {
+            backfilled.ingest(&carrier);
+        }
+
+        // Hashes that exist nowhere, and text that is no hash.
+        let mut state = 7_u64;
+        for _ in 0..24 {
+            let mut bytes = [0u8; 32];
+            for byte in &mut bytes {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                *byte = state.to_le_bytes()[5];
+            }
+            candidates.push(bs58::encode(bytes).into_string());
+        }
+        candidates.extend([String::new(), "not-a-hash".to_owned(), "1".to_owned()]);
+
+        let documents = [
+            ("fresh", MeshDoc::new_ungated()),
+            ("gated", gated),
+            ("alice", alice_doc),
+            ("bob", bob_doc),
+            ("merged forward", forward),
+            ("merged backward", backward),
+            ("waiting", waiting),
+            ("refusing", refusing),
+            ("backfilled", backfilled),
+        ];
+        for (name, doc) in &documents {
+            let own: Vec<String> = doc.heads().collect();
+            assert!(
+                holds_heads_by_the_document(doc, &own) && doc.holds_heads(&own),
+                "{name}: it holds its own heads"
+            );
+            for candidate in &candidates {
+                for asked in [
+                    vec![candidate.clone()],
+                    [own.clone(), vec![candidate.clone()]].concat(),
+                ] {
+                    assert_eq!(
+                        doc.holds_heads(&asked),
+                        holds_heads_by_the_document(doc, &asked),
+                        "{name}: the answers differ for {asked:?}"
+                    );
+                }
+            }
+            assert_eq!(
+                doc.holds_heads(&[]),
+                holds_heads_by_the_document(doc, &[]),
+                "{name}: no heads at all"
+            );
+        }
     }
 
     #[test]
