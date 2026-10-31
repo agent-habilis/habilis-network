@@ -533,6 +533,7 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, context: &Han
             continue;
         };
         if ask(channel, &key, &author, state, context).await {
+            state.idle.fr_retries += 1;
             tracing::debug!(me = %context.author, peer = %author, ?channel, "retried a fast round with a peer that is ahead");
         }
     }
@@ -574,6 +575,7 @@ async fn ask(
     state
         .fast_rounds
         .note_asked(*key, channel, ours_key, changes, now);
+    state.idle.fr_asks += 1;
     tracing::debug!(me = %context.author, peer = %author, ?channel, heads = ours_key, "asked a peer that is ahead for state directly (fast round)");
     true
 }
@@ -677,6 +679,9 @@ pub(crate) async fn handle_state_digest(
             .state_digest_serves
             .note(serve(Plane::Unicast), heads, now);
     }
+    state.idle.state_answers += 1;
+    state.idle.state_frames_unicast += u64::try_from(answered.unicast).unwrap_or(u64::MAX);
+    state.idle.state_frames_broadcast += u64::try_from(answered.broadcast).unwrap_or(u64::MAX);
     tracing::debug!(
         me = %context.author,
         asker = %message.author,

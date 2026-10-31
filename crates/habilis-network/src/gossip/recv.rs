@@ -1150,9 +1150,12 @@ fn dispatch_channel(
     let ChannelEvent {
         channel, message, ..
     } = event;
-    let changes = state.doc(channel).change_count();
-    ingest_channel_event(event, state.doc_mut(channel), context);
-    if state.doc(channel).change_count() > changes {
+    let count_before = state.doc(channel).change_count();
+    if ingest_channel_event(event, state.doc_mut(channel), context) {
+        state.idle.state_rejected += 1;
+    }
+    let changed = state.doc(channel).change_count() > count_before;
+    if changed {
         state.fast_rounds.note_change(channel, Instant::now());
     }
     for key in state.doc_mut(channel).take_dropped() {
@@ -1178,12 +1181,18 @@ fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
     }
 }
 
+/// Returns whether the document refused or ignored the change.
+///
 /// Ingest a durable channel event (`State`/`Meta`) into its `log`: dedup-insert,
 /// then surface a `StateChanged` for `channel` only when the derived doc changed
 /// and we're past the join horizon (a backfilling joiner updates its doc silently
 /// instead of reacting to replayed intermediate states). A received event is
 /// never our own (`is_self = false`). Both channels share this path verbatim.
-fn ingest_channel_event(event: ChannelEvent<'_>, doc: &mut doc::MeshDoc, context: &HandlerCtx<'_>) {
+fn ingest_channel_event(
+    event: ChannelEvent<'_>,
+    doc: &mut doc::MeshDoc,
+    context: &HandlerCtx<'_>,
+) -> bool {
     use crate::doc::Ingested;
 
     let ChannelEvent {
@@ -1217,9 +1226,12 @@ fn ingest_channel_event(event: ChannelEvent<'_>, doc: &mut doc::MeshDoc, context
                 "dropping a {} change that forges another peer's agent card",
                 channel.label()
             );
+            return true;
         }
-        Ingested::Duplicate | Ingested::Buffered | Ingested::Ignored | _ => {}
+        Ingested::Ignored => return true,
+        Ingested::Duplicate | Ingested::Buffered | _ => {}
     }
+    false
 }
 
 /// A directed leg (a directed `app_msg` or a `Task`) is surfaced **only by

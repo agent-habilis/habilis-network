@@ -175,6 +175,14 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         cpu_sys_ms = millis_saturating(cpu.system),
         idle_duplicates = idle.duplicates,
         idle_fresh = idle.fresh,
+        idle_fr_asks = idle.fr_asks,
+        idle_fr_retries = idle.fr_retries,
+        idle_state_answers = idle.state_answers,
+        idle_state_frames_unicast = idle.state_frames_unicast,
+        idle_state_frames_broadcast = idle.state_frames_broadcast,
+        idle_state_rejected = idle.state_rejected,
+        // A gauge, not a delta: the peers that a fast round still counts as ahead of us.
+        idle_ahead_peers = state.fast_rounds.ahead_count(),
         idle_resent_top = %top_requesters(&idle.resent_by),
         // The 1-minute load average of the host: a reading taken under load is void.
         load_1m = load_average_1m().unwrap_or(0.0),
