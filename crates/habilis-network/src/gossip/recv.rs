@@ -590,6 +590,7 @@ pub(crate) async fn ingest(
         state.idle.duplicates += 1;
         return;
     }
+    state.idle.fresh += 1;
     // Identity is the signing key, not the nickname (p2panda-style): the
     // signature above authenticates the *key*; the `author` nickname is a
     // non-unique display label and is deliberately **not** pinned/claimed,
@@ -4079,6 +4080,103 @@ mod parked_link_state_tests {
                 "a taken vector frees its place"
             );
             theirs.close().await;
+        });
+    }
+}
+
+/// The census counts each frame that reaches the dedup as a first sighting or a repeat.
+#[cfg(test)]
+mod dedup_counter_tests {
+    use iroh::endpoint::presets;
+    use iroh_gossip::net::Gossip;
+    use iroh_gossip::proto;
+    use serde_json::json;
+
+    use crate::daemon::handler_ctx::HandlerCtx;
+    use crate::daemon::state::EventLoopState;
+    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+    use crate::gossip::event::SilentSink;
+    use crate::protocol::identity::Identity;
+    use crate::protocol::messages::Authored;
+    use crate::protocol::{Channel, MeshId, Message};
+    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::transport::MeshSender;
+
+    struct Inert;
+
+    #[async_trait::async_trait]
+    impl NodeApp for Inert {
+        fn classify(&self, _message: &Authored) -> AppClass {
+            AppClass::BEAT.union(AppClass::VALID)
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _context: &HandlerCtx<'_>,
+        ) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn a_frame_delivered_3_times_counts_1_first_sighting_and_2_repeats() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mesh = MeshId::from("test");
+            let writer = fresh_state();
+            let seed = *writer.identity.public().as_bytes();
+            let change = writer
+                .doc(Channel::State)
+                .build_change(&json!({ "key": 1 }), &seed)
+                .expect("a JSON object merges")
+                .expect("a non-empty merge yields a change");
+            let (body, _plain) = writer
+                .doc(Channel::State)
+                .compose_wire_body(&change, None)
+                .expect("compose the wire body");
+            let frame = Message::new_channel_event(&mesh, &nick("writer"), body, Channel::State)
+                .sign(&writer.identity);
+
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(proto::TopicId::from_bytes([5u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            let sender = MeshSender::new(gossip_sender);
+            let identity = Identity::generate();
+            let reader_nick = nick("reader");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &reader_nick,
+                identity: &identity,
+                our_pubkey: identity.author_key(),
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let mut reader = fresh_state();
+            let mut app = Inert;
+            for _ in 0..3 {
+                let bytes = frame.serialize().expect("serialize").into_bytes();
+                super::ingest(bytes, &mut reader, &mut app, &context).await;
+            }
+
+            assert_eq!(
+                reader.idle.fresh, 1,
+                "the first delivery is a first sighting"
+            );
+            assert_eq!(reader.idle.duplicates, 2, "the 2 repeats are duplicates");
+            endpoint.close().await;
         });
     }
 }

@@ -64,6 +64,9 @@ pub(crate) struct IdleCounters {
     pub resend_dropped: u64,
     /// Authenticated frames that the app dedup dropped as already seen.
     pub duplicates: u64,
+    /// Authenticated frames that the app dedup kept as first sightings. With `duplicates`, it
+    /// gives the frames per interval that reached the dedup.
+    pub fresh: u64,
     /// The anti-entropy resends queued, by the author of the digest that asked.
     pub resent_by: HashMap<Nickname, u64>,
     /// The process CPU time at the last census. It is not reset by `take`.
@@ -197,6 +200,7 @@ mod tests {
         let mut counters = IdleCounters {
             reclaim: 3,
             duplicates: 4,
+            fresh: 6,
             ..IdleCounters::default()
         };
         counters.ext.note_gossip(Some(&Ok(Event::Lagged)));
@@ -208,6 +212,7 @@ mod tests {
         let reading = counters.take();
         assert_eq!(reading.loop_arms.reclaim, 3);
         assert_eq!(reading.loop_arms.duplicates, 4);
+        assert_eq!(reading.loop_arms.fresh, 6);
         assert_eq!(reading.loop_arms.ext.lagged, 1);
         assert_eq!(reading.loop_arms.ext.gossip_end, 1);
         assert_eq!(reading.loop_arms.ext.total(), 5);
@@ -216,6 +221,7 @@ mod tests {
         let next = counters.take();
         assert_eq!(next.loop_arms.reclaim, 0, "take resets the arms");
         assert_eq!(next.loop_arms.duplicates, 0, "take resets the duplicates");
+        assert_eq!(next.loop_arms.fresh, 0, "take resets the first sightings");
         assert_eq!(next.loop_arms.ext.total(), 0, "take resets the split");
         assert!(
             next.loop_arms.resent_by.is_empty(),
