@@ -542,7 +542,12 @@ pub(crate) async fn ingest(
     // A frame whose key is already seen is a repeat: the verify would only prove what the first
     // delivery proved. A forged copy that claims a seen key is dropped here, as `mark_seen` would
     // drop it after the verify. The key is read, never recorded, so a forgery cannot poison `seen`.
-    if state.is_seen(&message.dedup_key()) {
+    // A frame that claims our own key takes the old path: the verify, then the self-echo drop. Our
+    // own broadcasts are marked seen when sent, and an echo of one is no sign of a live mesh.
+    let claims_our_key = message
+        .signer
+        .is_some_and(|signer| signer.key() == context.our_pubkey);
+    if !claims_our_key && state.is_seen(&message.dedup_key()) {
         if state.note_inbound(Instant::now()) {
             flush_pending(state, context, "inbound traffic resumed").await;
         }
@@ -4114,7 +4119,7 @@ mod dedup_counter_tests {
     use serde_json::json;
 
     use crate::daemon::handler_ctx::HandlerCtx;
-    use crate::daemon::state::EventLoopState;
+    use crate::daemon::state::{EventLoopState, Standing};
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
     use crate::protocol::identity::Identity;
@@ -4166,7 +4171,18 @@ mod dedup_counter_tests {
     /// A fresh reader that is handed `frames` one by one, in order. `forgery_warns` says that the
     /// verify drops a frame with a warning.
     fn reader_after(frames: &[&Verified], forgery_warns: bool) -> EventLoopState {
+        reader_after_as(&Identity::generate(), |_| {}, frames, forgery_warns)
+    }
+
+    /// [`reader_after`] for a reader that signs with `identity`, after `prepare` ran on its state.
+    fn reader_after_as(
+        identity: &Identity,
+        prepare: impl FnOnce(&mut EventLoopState),
+        frames: &[&Verified],
+        forgery_warns: bool,
+    ) -> EventLoopState {
         let mut reader = fresh_state();
+        prepare(&mut reader);
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             if forgery_warns {
                 ::habilis_network_test_tracing::expect_warn(
@@ -4186,7 +4202,6 @@ mod dedup_counter_tests {
                 .expect("subscribe to a peerless topic");
             let (gossip_sender, _receiver) = topic.split();
             let sender = MeshSender::new(gossip_sender);
-            let identity = Identity::generate();
             let reader_nick = nick("reader");
             let sink = SilentSink;
             let context = HandlerCtx {
@@ -4194,7 +4209,7 @@ mod dedup_counter_tests {
                 endpoint: &endpoint,
                 mesh: &mesh,
                 author: &reader_nick,
-                identity: &identity,
+                identity,
                 our_pubkey: identity.author_key(),
                 max_peers: 16,
                 rendezvous_id: endpoint_id(9),
@@ -4253,6 +4268,62 @@ mod dedup_counter_tests {
             json!({ "key": 1 }),
             "the real change is applied"
         );
+    }
+
+    /// Our own broadcasts are marked seen when sent. An echo of one is dropped by the self-echo
+    /// check, as it was before the early drop: no repeat, no sign of inbound traffic.
+    #[test]
+    fn our_own_frame_echoed_back_is_not_a_repeat_and_is_no_inbound_traffic() {
+        let identity = Identity::generate();
+        let own = own_frame(&identity);
+        let marked = own.clone();
+        let reader = reader_after_as(
+            &identity,
+            |reader| {
+                reader.standing.insert(Standing::Degraded);
+                reader.mark_seen(&marked);
+            },
+            &[&own],
+            false,
+        );
+
+        assert_eq!(reader.idle.duplicates, 0, "an echo of ours is no repeat");
+        assert_eq!(reader.idle.fresh, 0, "and no first sighting");
+        assert!(
+            reader.standing.contains(&Standing::Degraded),
+            "an echo of ours does not tell the watchdog that the mesh is alive"
+        );
+    }
+
+    /// A copy of our frame with a bad signature goes to the verify, which drops it, as before.
+    #[test]
+    fn a_forged_copy_that_claims_our_key_is_dropped_by_the_verify() {
+        let identity = Identity::generate();
+        let own = own_frame(&identity);
+        let mut claim = own.clone().into_message();
+        claim.body = "forged".into();
+        let forged = Verified::fixture_with_signature(claim);
+        // The warning is the proof: the early drop would have made it a silent repeat.
+        let reader = reader_after_as(
+            &identity,
+            |reader| {
+                reader.mark_seen(&own);
+            },
+            &[&forged],
+            true,
+        );
+
+        assert_eq!(reader.idle.duplicates, 0, "the forgery is no repeat");
+    }
+
+    fn own_frame(identity: &Identity) -> Verified {
+        Message::new_channel_event(
+            &MeshId::from("test"),
+            &nick("reader"),
+            "own".into(),
+            Channel::State,
+        )
+        .sign(identity)
     }
 
     /// The forged copy arrives first. The gate only reads, so it does not make the key seen: the
