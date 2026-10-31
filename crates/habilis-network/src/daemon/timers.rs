@@ -174,6 +174,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         cpu_user_ms = millis_saturating(cpu.user),
         cpu_sys_ms = millis_saturating(cpu.system),
         idle_duplicates = idle.duplicates,
+        idle_fresh = idle.fresh,
         idle_resent_top = %top_requesters(&idle.resent_by),
         // The 1-minute load average of the host: a reading taken under load is void.
         load_1m = load_average_1m().unwrap_or(0.0),
