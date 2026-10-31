@@ -20,6 +20,8 @@ use crate::util::tuning::{
 pub(crate) struct ServeBudget {
     /// The asker's key: every digest is verified, so it always has one.
     pub(super) windows: HashMap<(AuthorKey, Channel, Plane), Served>,
+    /// The chat frames that digest answers re-sent to each asker lately.
+    pub(crate) resends: super::ResendMemory,
 }
 
 #[derive(Debug, Clone)]
