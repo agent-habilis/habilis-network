@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use iroh::Endpoint;
 
-use super::state::{EventLoopState, top_requesters};
+use super::state::{EventLoopState, IdleCounters, WireOut, by_class, top_requesters};
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::util::clock::{Instant, millis_saturating};
 use crate::util::process_usage::load_average_1m;
@@ -193,6 +193,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         gossip_recursion_closes_total = payload_path::gossip_recursion_closes(),
         "mesh census"
     );
+    log_wire_census(&idle, &reading.wire_out);
 
     // The per-peer conn classification feeds only the DEBUG census
     // below, and each `conn_path` is a `remote_info` actor round-trip.
@@ -283,6 +284,28 @@ pub(crate) fn note_tick_gap(
         );
     }
     (mono_gap, wall_gap)
+}
+
+/// The wire bytes of the interval by kind of frame, on a line of their own: the census line is at
+/// the limit of one function, and a reader of that line takes the last line that names it.
+/// `idle_bin_*` are frames received (first sightings and repeats), `idle_bout*` frames handed to the
+/// transport. The wire total less the body total is the cost of the envelope.
+fn log_wire_census(idle: &IdleCounters, sent: &WireOut) {
+    tracing::info!(
+        target: "habilis_network::lifecycle",
+        idle_bin_fresh = %by_class(&idle.wire_in.fresh),
+        idle_bin_dup = %by_class(&idle.wire_in.dup),
+        idle_bin_tags = %idle.wire_in.tags.top(),
+        idle_bout = %by_class(&sent.bytes),
+        idle_bout_tags = %sent.tags.top(),
+        idle_wire_in = idle.wire_in.wire,
+        idle_body_in = idle.wire_in.body,
+        idle_frames_in = idle.wire_in.frames,
+        idle_wire_out = sent.wire,
+        idle_body_out = sent.body,
+        idle_frames_out = sent.frames,
+        "wire census"
+    );
 }
 
 #[cfg(test)]

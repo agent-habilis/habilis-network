@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use iroh_gossip::api::{ApiError, Event};
 
+use super::wire_tally::{WireIn, WireOut, take_wire_out};
 use crate::protocol::Nickname;
 use crate::util::process_usage::{CpuTimes, cpu_times};
 
@@ -80,6 +81,8 @@ pub(crate) struct IdleCounters {
     /// State and meta frames that the document refused or ignored: a forged entry, a repeated
     /// `(actor, seq)` with other content, or a body that is no change.
     pub state_rejected: u64,
+    /// The frames received in the interval, by kind and by what became of them.
+    pub wire_in: WireIn,
     /// The anti-entropy resends queued, by the author of the digest that asked.
     pub resent_by: HashMap<Nickname, u64>,
     /// The process CPU time at the last census. It is not reset by `take`.
@@ -154,6 +157,8 @@ pub(crate) struct IdleReading {
     pub loop_arms: IdleCounters,
     pub ppid: u64,
     pub sampler: u64,
+    /// The frames sent in the interval. They are kept off the loop, where the send paths run.
+    pub wire_out: WireOut,
     /// `None` where the platform gives no `getrusage`.
     pub cpu: Option<CpuTimes>,
 }
@@ -171,6 +176,7 @@ impl IdleCounters {
             loop_arms,
             ppid: PPID_WAKES.swap(0, Ordering::Relaxed),
             sampler: SAMPLER_WAKES.swap(0, Ordering::Relaxed),
+            wire_out: take_wire_out(),
             cpu: cpu_now.map(|now| now.since(mark)),
         }
     }
@@ -227,6 +233,7 @@ mod tests {
         counters.ext.unicast += 2;
         counters.ext.deadlines += 1;
         counters.note_resend_for(&nick("ant-bee"));
+        counters.wire_in.frames = 5;
 
         let reading = counters.take();
         assert_eq!(reading.loop_arms.reclaim, 3);
@@ -242,6 +249,7 @@ mod tests {
         assert_eq!(reading.loop_arms.ext.gossip_end, 1);
         assert_eq!(reading.loop_arms.ext.total(), 5);
         assert_eq!(reading.loop_arms.resent_by.len(), 1);
+        assert_eq!(reading.loop_arms.wire_in.frames, 5);
 
         let next = counters.take();
         assert_eq!(next.loop_arms.reclaim, 0, "take resets the arms");
@@ -258,6 +266,10 @@ mod tests {
             "take resets the fast-round and answer counters"
         );
         assert_eq!(next.loop_arms.ext.total(), 0, "take resets the split");
+        assert_eq!(
+            next.loop_arms.wire_in.frames, 0,
+            "take resets the received frames"
+        );
         assert!(
             next.loop_arms.resent_by.is_empty(),
             "take resets the requesters"

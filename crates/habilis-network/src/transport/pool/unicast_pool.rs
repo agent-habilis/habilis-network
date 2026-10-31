@@ -28,6 +28,7 @@ use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 use crate::util::tuning::{DIRECT_IDLE_BACKSTOP, PROBE_HOLD};
 
+use crate::daemon::state::note_wire_out;
 use crate::protocol::messages;
 
 use n0_future::{task, time};
@@ -756,6 +757,7 @@ async fn send_one(connection: &Connection, bytes: &[u8], busy: Option<BusyGuard>
     let mut stream = connection.open_uni().await?;
     stream.write_all(bytes).await?;
     stream.finish()?;
+    note_wire_out(bytes);
     // `finish()` returns while the frame is still in flight. The busy mark moves to a task that waits
     // until the peer has read the stream (at most `BUSY_AFTER_FINISH`), so that the ledger does not
     // evict the connection under a slow reader. The sender does not wait: it would block the event

@@ -6,7 +6,7 @@
 //! layer never touches the peer roster directly — it calls into
 //! `lifecycle::observe` and dispatches by kind.
 
-use crate::daemon::state::{RendezvousFlag, Standing};
+use crate::daemon::state::{FrameShape, RendezvousFlag, Standing};
 use std::ops::ControlFlow;
 
 use bytes::Bytes;
@@ -532,6 +532,8 @@ pub(crate) async fn ingest(
     app: &mut dyn NodeApp,
     context: &HandlerCtx<'_>,
 ) {
+    let shape = FrameShape::of(&frame);
+    state.idle.wire_in.note_received(&shape);
     let Ok((message, _resend_nonce)) = Message::parse_wire(&frame) else {
         context
             .sink
@@ -588,9 +590,11 @@ pub(crate) async fn ingest(
     // here. Only authenticated messages reach this gate.
     if state.mark_seen(&verified) {
         state.idle.duplicates += 1;
+        state.idle.wire_in.note_dup(&shape);
         return;
     }
     state.idle.fresh += 1;
+    state.idle.wire_in.note_fresh(&shape);
     // Identity is the signing key, not the nickname (p2panda-style): the
     // signature above authenticates the *key*; the `author` nickname is a
     // non-unique display label and is deliberately **not** pinned/claimed,
