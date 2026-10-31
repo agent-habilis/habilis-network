@@ -16,6 +16,17 @@
 // - disc_nodes / worst_disc: the same for `send_overflow_disconnects`.
 // - resent / resend_dropped: the sum of the `idle_resent` and `idle_resend_dropped`
 //   deltas of every census line, which is the total over the run.
+// - census_lines: the census lines of all nodes. Divide a total below by it for a mean per node
+//   and interval (10 s).
+// - cpu_user_ms / cpu_sys_ms / wakeups / dup / fresh / fr_asks / fr_retries / answers /
+//   frames_uni / frames_bc / rejected: the sums of the `cpu_user_ms`, `cpu_sys_ms`, `idle_wakeups`,
+//   `idle_duplicates`, `idle_fresh`, `idle_fr_asks`, `idle_fr_retries`, `idle_state_answers`,
+//   `idle_state_frames_unicast`, `idle_state_frames_broadcast` and `idle_state_rejected` deltas of
+//   every census line.
+// - ext_<arm>: the sums of the `idle_ext_<arm>` deltas, the wakes of each arm that is not a timer.
+//   Only the arms that woke.
+// - ahead_max: the largest `idle_ahead_peers` gauge of any census line.
+// - node_load_max: the largest `load_1m` that a node logged.
 // - mem_med / mem_max: peak resident memory of the nodes, in MB.
 // - load1 median and max, from host.log; canary pauses of the host over 0.5 s.
 
@@ -27,6 +38,24 @@ const clean = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
 
 const numbers = (text: string, pattern: RegExp): number[] =>
   [...text.matchAll(new RegExp(pattern.source, "g"))].map((m) => Number(m[1]));
+
+const sum = (values: number[]): number => values.reduce((a, b) => a + b, 0);
+
+// The census fields that are per-interval deltas, summed over a run: the summary name, then the
+// census field.
+const TOTALS: [string, string][] = [
+  ["cpu_user_ms", "cpu_user_ms"],
+  ["cpu_sys_ms", "cpu_sys_ms"],
+  ["wakeups", "idle_wakeups"],
+  ["dup", "idle_duplicates"],
+  ["fresh", "idle_fresh"],
+  ["fr_asks", "idle_fr_asks"],
+  ["fr_retries", "idle_fr_retries"],
+  ["answers", "idle_state_answers"],
+  ["frames_uni", "idle_state_frames_unicast"],
+  ["frames_bc", "idle_state_frames_broadcast"],
+  ["rejected", "idle_state_rejected"],
+];
 
 // Python's str.split("\n") in a line loop: a final newline does not make an extra line.
 const lines = (text: string): string[] => {
@@ -53,6 +82,11 @@ function summarize(run: string): string {
   let down = 0;
   let resent = 0;
   let resendDropped = 0;
+  let censusLines = 0;
+  const totals = new Map<string, number>(TOTALS.map(([name]) => [name, 0]));
+  const ext = new Map<string, number>();
+  const ahead: number[] = [];
+  const nodeLoads: number[] = [];
   for (const file of readdirSync(run).filter((f) => /^n.*\.err$/.test(f))) {
     const text = clean(readFileSync(`${run}/${file}`, "utf8"));
     stalls.push(...numbers(text, /timer stalled[^\n]*?mono_gap_ms=(\d+)/));
@@ -64,6 +98,15 @@ function summarize(run: string): string {
     down += text.split("gossip neighbor down").length - 1;
     resent += numbers(text, /idle_resent=(\d+)/).reduce((a, b) => a + b, 0);
     resendDropped += numbers(text, /idle_resend_dropped=(\d+)/).reduce((a, b) => a + b, 0);
+    censusLines += numbers(text, /idle_wakeups=(\d+)/).length;
+    for (const [name, field] of TOTALS) {
+      totals.set(name, (totals.get(name) ?? 0) + sum(numbers(text, new RegExp(`\\b${field}=(\\d+)`))));
+    }
+    for (const arm of text.matchAll(/\bidle_ext_(\w+?)=(\d+)/g)) {
+      ext.set(arm[1] ?? "", (ext.get(arm[1] ?? "") ?? 0) + Number(arm[2]));
+    }
+    ahead.push(...numbers(text, /\bidle_ahead_peers=(\d+)/));
+    nodeLoads.push(...numbers(text, /\bload_1m=([0-9.]+)/));
   }
 
   const loads: number[] = [];
@@ -85,6 +128,12 @@ function summarize(run: string): string {
   const loadMed = loads.length ? show(median(loads, true)) : "-";
   const loadMax = loads.length ? show({ value: Math.max(...loads), float: true }) : "-";
   const maxOf = (values: number[]) => (values.length ? Math.max(...values) : 0);
+  const totalsText = [...totals].map(([name, value]) => `${name}=${value}`).join(" ");
+  const extText = [...ext]
+    .filter(([, value]) => value > 0)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, value]) => `ext_${name}=${value}`)
+    .join(" ");
 
   return (
     `${path.basename(run).padEnd(12)} full=${roster.filter((x) => x >= n - 1).length}/${n} ` +
@@ -93,6 +142,8 @@ function summarize(run: string): string {
     `| up=${up} down=${down} | drop_nodes=${drops.size} worst_drop=${maxOf([...drops.values()])} ` +
     `| disc_nodes=${discs.size} worst_disc=${maxOf([...discs.values()])} ` +
     `| resent=${resent} resend_dropped=${resendDropped} ` +
+    `| census_lines=${censusLines} ${totalsText} ahead_max=${maxOf(ahead)} ` +
+    `node_load_max=${show({ value: maxOf(nodeLoads), float: true })} | ${extText} ` +
     `| mem_med=${memMed} mem_max=${memMax} ` +
     `| load1 median=${loadMed} max=${loadMax} ` +
     `| canary_pauses=${gaps.length}`
