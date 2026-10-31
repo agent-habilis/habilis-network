@@ -1149,17 +1149,20 @@ fn dispatch_channel(
     let ChannelEvent {
         channel, message, ..
     } = event;
-    let changes = state.doc(channel).change_count();
+    let count_before = state.doc(channel).change_count();
     ingest_channel_event(event, state.doc_mut(channel), context);
-    if state.doc(channel).change_count() > changes {
+    let changed = state.doc(channel).change_count() > count_before;
+    if changed {
         state.fast_rounds.note_change(channel, Instant::now());
     }
     for key in state.doc_mut(channel).take_dropped() {
         state.seen.remove(&key);
     }
-    if channel == Channel::Meta {
+    if channel == Channel::Meta && changed {
         // Post-apply hook: let the app adopt the author's endpoint hint from the
-        // freshly-synced meta doc (the borrow above released `state`).
+        // freshly-synced meta doc (the borrow above released `state`). Only for a
+        // frame that changed the document: the hook reads the whole document, and
+        // a repeat of a frame it holds has nothing new to adopt.
         app.on_meta_applied(&message.author, state, context);
     }
 }
@@ -2226,6 +2229,157 @@ mod evicted_orphan_tests {
             );
             endpoint.close().await;
         });
+    }
+}
+
+#[cfg(test)]
+mod meta_hook_tests {
+    use iroh::endpoint::presets;
+    use iroh_gossip::net::Gossip;
+    use iroh_gossip::proto;
+    use serde_json::json;
+
+    use super::{ChannelEvent, dispatch_channel};
+    use crate::daemon::handler_ctx::HandlerCtx;
+    use crate::daemon::state::EventLoopState;
+    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+    use crate::gossip::event::SilentSink;
+    use crate::protocol::identity::Identity;
+    use crate::protocol::messages::{Authored, Verified};
+    use crate::protocol::{Channel, MeshId, Message, Nickname};
+    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::transport::MeshSender;
+
+    /// An app that counts how often the engine calls its meta hook.
+    #[derive(Default)]
+    struct MetaCounting {
+        calls: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl NodeApp for MetaCounting {
+        fn classify(&self, _message: &Authored) -> AppClass {
+            AppClass::BEAT.union(AppClass::VALID)
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _context: &HandlerCtx<'_>,
+        ) -> bool {
+            false
+        }
+
+        fn on_meta_applied(
+            &mut self,
+            _author: &Nickname,
+            _state: &mut EventLoopState,
+            _context: &HandlerCtx<'_>,
+        ) {
+            self.calls += 1;
+        }
+    }
+
+    /// The next meta change of `writer`, as a signed frame that `writer` has also applied.
+    fn meta_frame(writer: &mut EventLoopState, mesh: &MeshId, value: u64) -> Verified {
+        let author = nick("writer");
+        let seed = *writer.identity.public().as_bytes();
+        let change = writer
+            .doc(Channel::Meta)
+            .build_change(&json!({ "peers": { "writer": { "step": value } } }), &seed)
+            .expect("a JSON object merges")
+            .expect("a non-empty merge yields a change");
+        let (wire, _plain) = writer
+            .doc(Channel::Meta)
+            .compose_wire_body(&change, None)
+            .expect("compose the wire body");
+        let frame =
+            Message::new_channel_event(mesh, &author, wire, Channel::Meta).sign(&writer.identity);
+        writer.doc_mut(Channel::Meta).ingest(&frame);
+        frame
+    }
+
+    /// The meta frames of the test are dispatched to a reader through `dispatch_channel`, the way
+    /// the receive path does once a frame has passed the dedup. Returns how often the meta hook ran.
+    fn hook_calls(frames: &[&Verified]) -> usize {
+        let mut calls = 0;
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mesh = MeshId::from("test");
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(proto::TopicId::from_bytes([4u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            let sender = MeshSender::new(gossip_sender);
+            let identity = Identity::generate();
+            let reader_nick = nick("reader");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &reader_nick,
+                identity: &identity,
+                our_pubkey: identity.author_key(),
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let mut reader = fresh_state();
+            let mut app = MetaCounting::default();
+            for frame in frames {
+                dispatch_channel(
+                    ChannelEvent {
+                        channel: Channel::Meta,
+                        message: frame,
+                        surfaceable: true,
+                    },
+                    &mut reader,
+                    &mut app,
+                    &context,
+                );
+            }
+            calls = app.calls;
+            endpoint.close().await;
+        });
+        calls
+    }
+
+    /// The hook hydrates the whole meta document to read one endpoint, so it must not run for a
+    /// frame that changed nothing: a repeat of a frame the document already holds.
+    #[test]
+    fn a_repeated_meta_frame_does_not_call_the_meta_hook() {
+        let mesh = MeshId::from("test");
+        let mut writer = fresh_state();
+        let frame = meta_frame(&mut writer, &mesh, 1);
+
+        assert_eq!(
+            hook_calls(&[&frame, &frame, &frame]),
+            1,
+            "the hook runs for the frame that changed the document, and for no repeat of it"
+        );
+    }
+
+    /// Control of the test above: frames that change the document still call the hook.
+    #[test]
+    fn a_meta_frame_that_changes_the_document_calls_the_meta_hook() {
+        let mesh = MeshId::from("test");
+        let mut writer = fresh_state();
+        let first = meta_frame(&mut writer, &mesh, 1);
+        let second = meta_frame(&mut writer, &mesh, 2);
+
+        assert_eq!(
+            hook_calls(&[&first, &second]),
+            2,
+            "each frame that changes the document calls the hook"
+        );
     }
 }
 
