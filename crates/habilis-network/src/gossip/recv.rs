@@ -4130,24 +4130,40 @@ mod dedup_counter_tests {
         }
     }
 
-    #[test]
-    fn a_frame_delivered_3_times_counts_1_first_sighting_and_2_repeats() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let mesh = MeshId::from("test");
-            let writer = fresh_state();
-            let seed = *writer.identity.public().as_bytes();
-            let change = writer
-                .doc(Channel::State)
-                .build_change(&json!({ "key": 1 }), &seed)
-                .expect("a JSON object merges")
-                .expect("a non-empty merge yields a change");
-            let (body, _plain) = writer
-                .doc(Channel::State)
-                .compose_wire_body(&change, None)
-                .expect("compose the wire body");
-            let frame = Message::new_channel_event(&mesh, &nick("writer"), body, Channel::State)
-                .sign(&writer.identity);
+    /// A signed state frame, and a copy of it that claims its key and id with an edited body, so
+    /// that the signature does not verify.
+    fn frame_and_forgery() -> (Verified, Verified) {
+        let mesh = MeshId::from("test");
+        let writer = fresh_state();
+        let seed = *writer.identity.public().as_bytes();
+        let change = writer
+            .doc(Channel::State)
+            .build_change(&json!({ "key": 1 }), &seed)
+            .expect("a JSON object merges")
+            .expect("a non-empty merge yields a change");
+        let (body, _plain) = writer
+            .doc(Channel::State)
+            .compose_wire_body(&change, None)
+            .expect("compose the wire body");
+        let frame = Message::new_channel_event(&mesh, &nick("writer"), body, Channel::State)
+            .sign(&writer.identity);
+        let mut forged = frame.clone().into_message();
+        forged.body = "forged".into();
+        (frame, Verified::fixture_with_signature(forged))
+    }
 
+    /// A fresh reader that is handed `frames` one by one, in order. `forgery_warns` says that the
+    /// verify drops a frame with a warning.
+    fn reader_after(frames: &[&Verified], forgery_warns: bool) -> EventLoopState {
+        let mut reader = fresh_state();
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            if forgery_warns {
+                ::habilis_network_test_tracing::expect_warn(
+                    "habilis_network::gossip",
+                    "dropping message with missing/invalid signature",
+                );
+            }
+            let mesh = MeshId::from("test");
             let endpoint = iroh::Endpoint::builder(presets::Minimal)
                 .bind()
                 .await
@@ -4174,33 +4190,51 @@ mod dedup_counter_tests {
                 external_msg_tx: None,
                 sink: &sink,
             };
-            let mut reader = fresh_state();
             let mut app = Inert;
-            for _ in 0..3 {
+            for frame in frames {
                 let bytes = frame.serialize().expect("serialize").into_bytes();
                 super::ingest(bytes, &mut reader, &mut app, &context).await;
             }
-
-            assert_eq!(
-                reader.idle.fresh, 1,
-                "the first delivery is a first sighting"
-            );
-            assert_eq!(reader.idle.duplicates, 2, "the 2 repeats are duplicates");
-
-            // A copy that claims the same key and id but carries a bad signature is a repeat too:
-            // it is dropped before the verify, so it never reaches the invalid-signature path.
-            let mut forged = frame.clone().into_message();
-            forged.body = "forged".into();
-            let bytes = Verified::fixture_with_signature(forged)
-                .serialize()
-                .expect("serialize")
-                .into_bytes();
-            super::ingest(bytes, &mut reader, &mut app, &context).await;
-            assert_eq!(
-                reader.idle.duplicates, 3,
-                "a bad-signature copy of a seen frame is dropped as a repeat, with no verify"
-            );
             endpoint.close().await;
         });
+        reader
+    }
+
+    #[test]
+    fn a_frame_delivered_3_times_counts_1_first_sighting_and_2_repeats() {
+        let (frame, forged) = frame_and_forgery();
+        let reader = reader_after(&[&frame, &frame, &frame, &forged], false);
+
+        assert_eq!(
+            reader.idle.fresh, 1,
+            "the first delivery is a first sighting"
+        );
+        // The 2 repeats, and a bad-signature copy of a seen frame: it is dropped before the
+        // verify, so it never reaches the invalid-signature path.
+        assert_eq!(reader.idle.duplicates, 3, "the repeats are duplicates");
+        assert_eq!(
+            reader.doc(Channel::State).to_json(),
+            json!({ "key": 1 }),
+            "only the genuine change is applied"
+        );
+    }
+
+    /// The forged copy arrives first. The gate only reads, so it does not make the key seen: the
+    /// genuine frame that follows is a first sighting and is applied.
+    #[test]
+    fn a_forged_copy_that_arrives_first_does_not_suppress_the_genuine_frame() {
+        let (frame, forged) = frame_and_forgery();
+        let reader = reader_after(&[&forged, &frame], true);
+
+        assert_eq!(
+            reader.idle.fresh, 1,
+            "the genuine frame is a first sighting"
+        );
+        assert_eq!(reader.idle.duplicates, 0, "the forged copy was no repeat");
+        assert_eq!(
+            reader.doc(Channel::State).to_json(),
+            json!({ "key": 1 }),
+            "the genuine change is applied, and the forged body is not"
+        );
     }
 }
