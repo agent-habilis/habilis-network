@@ -1,0 +1,206 @@
+//! The three `unstable-custom-transports` trait impls that make multihop a real
+//! iroh transport.
+//!
+//! - [`MultihopTransport`] ([`CustomTransport`]) is the factory iroh calls at
+//!   endpoint-bind time; it hands out the one [`MultihopEndpoint`].
+//! - [`MultihopEndpoint`] ([`CustomEndpoint`]) surfaces terminally-delivered
+//!   packets to iroh via `poll_recv` and publishes our own dialable address.
+//! - [`MultihopSender`] ([`CustomSender`]) packs each outbound QUIC packet into a
+//!   cell and hands it to the [`Forwarder`] for its first hop.
+
+use std::io;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+
+use iroh::endpoint::transports::{
+    CustomEndpoint, CustomSender, CustomTransport, RecvInfo, Transmit,
+};
+use iroh_base::CustomAddr;
+use tokio::sync::mpsc;
+
+use crate::cell::Cell;
+use crate::route::{Route, RouteHop};
+use crate::underlay::{Delivered, Forwarder};
+
+/// State shared by the transport, its endpoint, and its senders.
+#[derive(Debug, Clone)]
+pub(crate) struct Shared {
+    /// Our own hop — app-layer id plus underlay dial address — stamped as the
+    /// `source` of every cell we originate so destinations can reply.
+    pub(crate) self_hop: RouteHop,
+    /// Our advertised address: a one-hop route straight to us. A direct
+    /// underlay neighbour can dial it as-is; longer routes are computed by the
+    /// initiator's address lookup.
+    pub(crate) self_addr: CustomAddr,
+    // the forwarder is shared with the handle, which forwards cells for its peers
+    pub(crate) forwarder: Arc<Forwarder>,
+}
+
+/// The [`CustomTransport`] factory. Built once by [`crate::MultihopHandle`]; iroh
+/// calls [`bind`](CustomTransport::bind) during `Endpoint::builder().bind()`.
+#[derive(Debug)]
+pub(crate) struct MultihopTransport {
+    // the state the transport and its handle share
+    shared: Arc<Shared>,
+    /// Taken by the single `bind` call. `None` afterwards.
+    inbound: Mutex<Option<mpsc::Receiver<Delivered>>>,
+}
+
+impl MultihopTransport {
+    /// The hop that this transport stamps as the source of the cells it originates.
+    #[cfg(test)]
+    pub(crate) fn self_hop(&self) -> RouteHop {
+        self.shared.self_hop
+    }
+
+    // the transport and its handle share this state
+    pub(crate) fn new(shared: Arc<Shared>, inbound: mpsc::Receiver<Delivered>) -> Self {
+        Self {
+            shared,
+            inbound: Mutex::new(Some(inbound)),
+        }
+    }
+}
+
+impl CustomTransport for MultihopTransport {
+    fn bind(&self) -> io::Result<Box<dyn CustomEndpoint>> {
+        let inbound = {
+            let mut slot = self.inbound.lock().expect("inbound mutex poisoned");
+            slot.take()
+                .ok_or_else(|| io::Error::other("multihop transport already bound"))
+        }?;
+        let local = n0_watcher::Watchable::new(vec![self.shared.self_addr.clone()]);
+        Ok(Box::new(MultihopEndpoint {
+            shared: Arc::clone(&self.shared),
+            inbound,
+            local,
+        }))
+    }
+}
+
+/// The [`CustomEndpoint`]: iroh's receive/local-address handle for the transport.
+#[derive(Debug)]
+struct MultihopEndpoint {
+    // the state the sender and the transport share
+    shared: Arc<Shared>,
+    inbound: mpsc::Receiver<Delivered>,
+    local: n0_watcher::Watchable<Vec<CustomAddr>>,
+}
+
+impl CustomEndpoint for MultihopEndpoint {
+    fn watch_local_addrs(&self) -> n0_watcher::Direct<Vec<CustomAddr>> {
+        self.local.watch()
+    }
+
+    // trait object: the endpoint calls the sender through this Arc
+    fn create_sender(&self) -> Arc<dyn CustomSender> {
+        // the sender is shared with the endpoint, which calls it from its tasks
+        Arc::new(MultihopSender {
+            shared: Arc::clone(&self.shared),
+        })
+    }
+
+    fn poll_recv(
+        &mut self,
+        cx: &mut Context<'_>,
+        bufs: &mut [io::IoSliceMut<'_>],
+        metas: &mut [noq_udp::RecvMeta],
+        recv_infos: &mut [RecvInfo],
+    ) -> Poll<io::Result<usize>> {
+        let cap: usize = bufs.len().min(metas.len());
+        let cap = cap.min(recv_infos.len());
+        if cap == 0 {
+            return Poll::Ready(Ok(0));
+        }
+        let mut batch = Vec::with_capacity(cap);
+        match self.inbound.poll_recv_many(cx, &mut batch, cap) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(0) => return Poll::Ready(Err(io::Error::other("multihop inbound closed"))),
+            Poll::Ready(_) => {}
+        }
+        tracing::debug!(
+            target: "habilis_network_iroh_multihop_transport::inbox",
+            batch = batch.len(),
+            left = self.inbound.len(),
+            "multihop poll_recv"
+        );
+        let mut count = 0;
+        for delivered in batch {
+            let len = delivered.packet.len();
+            if bufs[count].len() < len {
+                // Packet larger than the buffer iroh handed us: drop it, as a
+                // NIC would a jumbo frame on an MTU-limited path.
+                self.shared.forwarder.note_oversized(len, bufs[count].len());
+                continue;
+            }
+            bufs[count][..len].copy_from_slice(&delivered.packet);
+            recv_infos[count] =
+                RecvInfo::new(delivered.remote, Some(self.shared.self_addr.clone()));
+            metas[count].len = len;
+            metas[count].stride = len;
+            count += 1;
+        }
+        if count > 0 {
+            Poll::Ready(Ok(count))
+        } else {
+            // Everything we dequeued was undeliverable; ask to be polled again.
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
+
+/// The [`CustomSender`]: routes each outbound QUIC packet onto its first hop.
+#[derive(Debug)]
+struct MultihopSender {
+    // the state the transport and its receive task share
+    shared: Arc<Shared>,
+}
+
+impl CustomSender for MultihopSender {
+    /// Decoding, not just tagging: a route iroh cannot actually be sent along is
+    /// a path it should never select in the first place.
+    fn is_valid_send_addr(&self, address: &CustomAddr) -> bool {
+        Route::decode(address).is_some()
+    }
+
+    fn poll_send(
+        &self,
+        _cx: &mut Context<'_>,
+        dst: &CustomAddr,
+        _src: Option<&CustomAddr>,
+        transmit: &Transmit<'_>,
+    ) -> Poll<io::Result<()>> {
+        let Some(route) = Route::decode(dst) else {
+            return Poll::Ready(Err(io::Error::other("undecodable multihop address")));
+        };
+        if revisits_us(&route, &self.shared.self_hop) {
+            // We would be the first node to execute the loop.
+            return Poll::Ready(Err(io::Error::other("multihop route revisits this node")));
+        }
+        let Some(first) = route.hops().first().copied() else {
+            return Poll::Ready(Err(io::Error::other("empty multihop route")));
+        };
+        // A GSO batch is several datagrams concatenated; each is an independent
+        // QUIC packet and rides its own cell.
+        for chunk in habilis_network_iroh_transport_util::datagrams(transmit) {
+            let cell = Cell {
+                path: route.clone(),
+                position: 0,
+                source: self.shared.self_hop,
+                packet: chunk.to_vec(),
+            };
+            self.shared.forwarder.enqueue(&first, cell);
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// Whether `route` runs back through `me`. A route is loop-free by construction,
+/// but nothing stops a *peer* advertising one that happens to include us.
+fn revisits_us(route: &Route, me: &RouteHop) -> bool {
+    route
+        .hops()
+        .iter()
+        .any(|hop| hop.underlay_id == me.underlay_id || hop.app_id == me.app_id)
+}

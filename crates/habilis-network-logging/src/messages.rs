@@ -17,13 +17,14 @@ use std::sync::OnceLock;
 
 use habilis_network_protocol::{Message, MessageKind, PresenceSubtype};
 
+use habilis_network_util::log_config;
 /// Resolved once at first log: did the operator pass `--log-raw`?
-/// The CLI dispatcher installs the [`habilis_network_util::logs::LogConfig`] before
+/// The CLI dispatcher installs the [`habilis_network_util::log_config::LogConfig`] before
 /// any message can flow, so a stale read is structurally impossible.
 static LOG_RAW: OnceLock<bool> = OnceLock::new();
 
 fn log_raw() -> bool {
-    *LOG_RAW.get_or_init(habilis_network_util::logs::log_raw)
+    *LOG_RAW.get_or_init(log_config::log_raw)
 }
 
 /// Redacted stand-in for a message body: byte length + the first 8 hex
@@ -33,9 +34,9 @@ fn log_raw() -> bool {
 /// across multiple members' log files without revealing the raw body. 8
 /// hex chars = 32 bits — wide enough that a per-session collision is
 /// unlikely while staying compact.
-fn redacted_body(msg: &Message) -> String {
-    let len = msg.body.as_str().len();
-    let hash = msg.content_hash().to_string();
+fn redacted_body(message: &Message) -> String {
+    let len = message.body.as_str().len();
+    let hash = message.content_hash().to_string();
     format!("<redacted {len}B {}>", &hash[..8])
 }
 
@@ -45,35 +46,35 @@ fn redacted_body(msg: &Message) -> String {
 /// One helper rather than the choice inlined per arm — the broadcast arm used
 /// to spell the whole `tracing::info!` twice, differing in this one field, so
 /// a field added to one copy and not the other would have gone unnoticed.
-fn logged_body(msg: &Message) -> String {
+fn logged_body(message: &Message) -> String {
     if log_raw() {
-        msg.body.as_str().to_owned()
+        message.body.as_str().to_owned()
     } else {
-        redacted_body(msg)
+        redacted_body(message)
     }
 }
 
 /// Log an inbound (received) mesh message.
-pub fn log_in(msg: &Message) {
-    log("in", msg);
+pub fn log_in(message: &Message) {
+    log("in", message);
 }
 
 /// Log an outbound (sent) mesh message.
-pub fn log_out(msg: &Message) {
-    log("out", msg);
+pub fn log_out(message: &Message) {
+    log("out", message);
 }
 
-fn log(direction: &'static str, msg: &Message) {
+fn log(direction: &'static str, message: &Message) {
     let plumbing = || {
         tracing::trace!(
             target: "habilis_network::messages",
             dir = direction,
-            author = %msg.author,
-            kind = %msg.kind,
+            author = %message.author,
+            kind = %message.kind,
             "plumbing"
         );
     };
-    match &msg.kind {
+    match &message.kind {
         // Keyed on the frame's **shape**, not on any tag name. This used to match
         // the shipped app's tag strings, which meant the engine's redaction log
         // silently stopped working for any other consumer — and would break the
@@ -90,9 +91,9 @@ fn log(direction: &'static str, msg: &Message) {
             (None, _) => tracing::info!(
                 target: "habilis_network::messages",
                 dir = direction,
-                author = %msg.author,
-                ts = msg.timestamp.as_secs(),
-                body = %logged_body(msg),
+                author = %message.author,
+                ts = message.timestamp.as_secs(),
+                body = %logged_body(message),
                 "msg"
             ),
             (Some(_), None) => {
@@ -103,11 +104,11 @@ fn log(direction: &'static str, msg: &Message) {
                 tracing::info!(
                     target: "habilis_network::messages",
                     dir = direction,
-                    author = %msg.author,
-                    ts = msg.timestamp.as_secs(),
+                    author = %message.author,
+                    ts = message.timestamp.as_secs(),
                     to = ?to,
-                    kind = %msg.kind,
-                    body = %logged_body(msg),
+                    kind = %message.kind,
+                    body = %logged_body(message),
                     "directed"
                 );
             }
@@ -120,8 +121,8 @@ fn log(direction: &'static str, msg: &Message) {
         } => tracing::info!(
             target: "habilis_network::messages",
             dir = direction,
-            author = %msg.author,
-            ts = msg.timestamp.as_secs(),
+            author = %message.author,
+            ts = message.timestamp.as_secs(),
             presence = %subtype,
             "presence"
         ),
@@ -130,13 +131,16 @@ fn log(direction: &'static str, msg: &Message) {
         MessageKind::State | MessageKind::Meta => tracing::info!(
             target: "habilis_network::messages",
             dir = direction,
-            author = %msg.author,
-            ts = msg.timestamp.as_secs(),
-            channel = %msg.kind,
-            body = %logged_body(msg),
+            author = %message.author,
+            ts = message.timestamp.as_secs(),
+            channel = %message.kind,
+            body = %logged_body(message),
             "state"
         ),
-        // Plumbing — exhaustive so a new kind forces a decision.
+        // Plumbing: presence alive, peer info, digests, ping and pong, link state,
+        // and any kind added later. None of them logs a body. The named kinds sit in
+        // the same arm as the wildcard, so a new kind stays visible to the omitted
+        // patterns lint and no second arm repeats the body.
         MessageKind::Presence {
             subtype: PresenceSubtype::Alive,
         }
@@ -146,21 +150,21 @@ fn log(direction: &'static str, msg: &Message) {
         | MessageKind::MetaDigest
         | MessageKind::Ping
         | MessageKind::Pong { .. }
-        | MessageKind::LinkState => plumbing(),
+        | MessageKind::LinkState
+        | _ => plumbing(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::redacted_body;
     use habilis_network_protocol::{Message, MessageKind};
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn redacted_body_omits_raw_text() {
+        let _guard = ::habilis_network_test_tracing::init();
         let secret = "totally private chat content";
-        let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), secret);
-        let redacted = redacted_body(&msg);
+        let message = Message::fixture(MessageKind::app_broadcast("app_msg"), secret);
+        let redacted = super::redacted_body(&message);
         assert!(
             !redacted.contains(secret),
             "redacted form must not leak the raw body: {redacted}"
@@ -169,9 +173,10 @@ mod tests {
 
     #[test]
     fn redacted_body_carries_length_and_hash_prefix() {
+        let _guard = ::habilis_network_test_tracing::init();
         let body = "hello world"; // 11 bytes
-        let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), body);
-        let redacted = redacted_body(&msg);
+        let message = Message::fixture(MessageKind::app_broadcast("app_msg"), body);
+        let redacted = super::redacted_body(&message);
 
         assert!(
             redacted.starts_with("<redacted 11B "),
@@ -180,7 +185,7 @@ mod tests {
         assert!(redacted.ends_with('>'), "expected trailing `>`: {redacted}");
 
         // 8 hex chars between the space and the closing `>`.
-        let hex = redacted
+        let hex: &str = redacted
             .strip_prefix("<redacted 11B ")
             .and_then(|rest| rest.strip_suffix('>'))
             .expect("redaction layout");
@@ -193,15 +198,25 @@ mod tests {
 
     #[test]
     fn redacted_body_is_deterministic_for_the_same_message() {
-        let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "same body");
-        assert_eq!(redacted_body(&msg), redacted_body(&msg));
+        let _guard = ::habilis_network_test_tracing::init();
+        let message = Message::fixture(MessageKind::app_broadcast("app_msg"), "same body");
+        assert_eq!(
+            super::redacted_body(&message),
+            super::redacted_body(&message),
+            "a redacted body is the same for the same message"
+        );
     }
 
     #[test]
     fn redacted_body_differs_when_content_changes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let alpha = Message::fixture(MessageKind::app_broadcast("app_msg"), "alpha");
         let beta = Message::fixture(MessageKind::app_broadcast("app_msg"), "beta");
         // Different lengths *and* different hashes ⇒ different strings.
-        assert_ne!(redacted_body(&alpha), redacted_body(&beta));
+        assert_ne!(
+            super::redacted_body(&alpha),
+            super::redacted_body(&beta),
+            "a redacted body differs when the content changes"
+        );
     }
 }

@@ -1,0 +1,146 @@
+//! The listings a discoverer has collected, bounded.
+
+use std::collections::HashMap;
+use std::time::Duration;
+
+use habilis_network_util::clock::Instant;
+use habilis_network_util::unix_secs::UnixSecs;
+
+use super::{Ad, Listing, ListingChange};
+
+use crate::MeshId;
+use crate::meshes::LockedMesh;
+
+/// Upper bound on tracked listings. The directory is an open public mesh
+/// (anyone can mint and broadcast valid mesh ids), so the map is
+/// capped — a new id past the cap evicts the stalest entry — mirroring
+/// the bounded-set discipline the rest of the daemon follows for
+/// adversary-reachable collections.
+const MAX_LISTINGS: usize = 256;
+
+/// The live directory: a set of [`Listing`]s keyed by mesh id, fed by
+/// directory messages and aged out by [`Listings::expire`]. Pure +
+/// deterministic (the caller supplies `now`), so it unit-tests without
+/// a clock or a network. Shared by the CLI `discover` stream and the
+/// in-process directory watcher.
+///
+/// # Examples
+///
+/// A set of listings keeps one entry for each mesh that an ad names.
+///
+/// ```
+/// use std::time::Instant;
+///
+/// use habilis_network_protocol::directory::Listings;
+/// use habilis_network_protocol::meshes::MeshId;
+///
+/// use habilis_network_protocol::{Mesh, MeshConfig, MeshName, Seed};
+///
+/// let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
+/// let mesh = Mesh::try_new(Seed::new([4u8; 32]), MeshName::try_new("chat").expect("a name"), config)
+///     .expect("a mesh");
+///
+/// let text = mesh.to_string();
+/// let mut listings = Listings::new();
+/// listings.note(&format!(r#"{{"id":"{text}","peers":3}}"#), Instant::now());
+/// assert_eq!(listings.snapshot().count(), 1);
+/// let id = MeshId::try_new(&text).expect("a valid id");
+/// assert!(listings.get(&id).is_some());
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct Listings {
+    entries: HashMap<MeshId, Listing>,
+}
+
+impl Listings {
+    /// An empty set of listings.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Process one directory message body. A valid [`Ad`] whose id
+    /// decodes to a [`crate::meshes::Mesh`] refreshes the listing's liveness; the
+    /// returned event is `Found` for a new mesh, `Updated` only when a
+    /// visible field (the peer count) changed, and `None` for an
+    /// unchanged re-ad or an unparseable body. Suppressing the no-op
+    /// `Updated` matters because every advertiser re-ads on a fixed
+    /// interval — surfacing each would spam the JSON stream every tick
+    /// with identical data.
+    pub fn note(&mut self, body: &str, now: Instant) -> Option<ListingChange> {
+        let ad = Ad::parse(body)?;
+        // `ad.id` is a `MeshId` (shallow charset check only); the
+        // structural `LockedMesh` decode below is the real validity gate, so
+        // an id that doesn't decode is dropped here.
+        let mesh: LockedMesh = ad.id.as_str().parse().ok()?;
+        let mesh_id = ad.id;
+
+        if let Some(listing) = self.entries.get_mut(&mesh_id) {
+            listing.last_seen = now;
+            if listing.peers == ad.peers {
+                return None;
+            }
+            listing.peers = ad.peers;
+            return Some(ListingChange::Updated(mesh_id));
+        }
+
+        // New mesh. Bound the map by evicting the stalest entry.
+        let oldest = self
+            .entries
+            .iter()
+            .min_by_key(|(_, listing)| listing.last_seen);
+        let stalest = oldest.map(|(id, _)| id.clone());
+        if self.entries.len() >= MAX_LISTINGS
+            && let Some(stalest) = stalest
+        {
+            self.entries.remove(&stalest);
+        }
+        let public = !mesh.is_loopback();
+        let password = mesh.requires_password();
+        let name = mesh.name().clone();
+        self.entries.insert(
+            mesh_id.clone(),
+            Listing {
+                mesh: mesh_id.clone(),
+                public,
+                password,
+                name,
+                peers: ad.peers,
+                last_seen: now,
+                first_seen_unix: UnixSecs::now(),
+            },
+        );
+        Some(ListingChange::Found(mesh_id))
+    }
+
+    /// Drop every listing whose last ad is older than `ttl`, returning
+    /// the ids removed (so the caller can surface a `Lost` event each).
+    pub fn expire(&mut self, ttl: Duration, now: Instant) -> impl Iterator<Item = MeshId> {
+        let mut expired = Vec::new();
+        self.entries.retain(|id, listing| {
+            let alive = now.duration_since(listing.last_seen) <= ttl;
+            if !alive {
+                expired.push(id.clone());
+            }
+            alive
+        });
+        expired.into_iter()
+    }
+
+    /// The current listings, sorted by mesh name then id — a stable
+    /// order for the picker and for `snapshot()` callers.
+    pub fn snapshot(&self) -> impl Iterator<Item = Listing> {
+        let mut listings: Vec<Listing> = self.entries.values().cloned().collect();
+        listings.sort_by(|left, right| {
+            let by_name = left.name.as_str().cmp(right.name.as_str());
+            by_name.then_with(|| left.mesh.as_str().cmp(right.mesh.as_str()))
+        });
+        listings.into_iter()
+    }
+
+    /// Look up a single listing by id (used to attach data to an event).
+    #[must_use]
+    pub fn get(&self, id: &MeshId) -> Option<&Listing> {
+        self.entries.get(id)
+    }
+}

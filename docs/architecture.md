@@ -60,7 +60,6 @@ All instances meet on one mesh.
 ### 1.3 Provenance and naming
 
 The workspace is a hard fork of `agent-habilis/agent-gossip` at commit `f81b0529`.
-`FORKED.md` records the fork contract.
 The wire byte-domains still say `habilis-mesh` to keep wire compatibility with the upstream network.
 The engine word for a network is **mesh**.
 The user-facing word in the CLI is **gossip**, and that word never reaches the wire.
@@ -491,7 +490,7 @@ Transport *policy* is part of the mesh id, beside the lookups.
 By default the relay is lookup only: it carries the bootstrap dial, JSEP signalling, and the NAT-traversal frames of a new connection, and no payload.
 A payload lane (gossip graft, unicast, blob) sends to a peer only after iroh selected a non-relay path to it, or a WebRTC session is attached.
 A gossip graft waits for that proof (`transport::probe`), so a pair never dials a link through the relay.
-The accept side holds too: every inbound gossip, unicast and blob connection is held, unread, until iroh selects a direct path on it, and closed with a coded reason if none arrives in `PROBE_DEADLINE` (`transport::path::refuse_unless_direct`).
+The accept side holds too: every inbound gossip, unicast and blob connection is held, unread, until iroh selects a direct path on it, and closed with a coded reason if none arrives in `PROBE_DEADLINE` (`transport::payload_path::refuse_unless_direct`).
 The rendezvous link is gated the same way on the beacon, so no gossip frame ever crosses the relay.
 The gate checks the path once, so every gossip connection is watched afterwards, the ones this node accepted and the ones iroh-gossip dials for it (the endpoint hook starts that watch): one whose selected path stays on the relay for `PROBE_DEADLINE`, the wait of the accept gate, is closed with the same coded reason.
 A pair that cannot hole-punch and has no WebRTC session stays unlinked for payload.
@@ -717,7 +716,6 @@ In this repository:
 
 - `README.md` — workspace overview, build and test commands.
 - `crates/habilis-network/README.md` — the subsystem table, the seam traits, and the tracing-target rules.
-- `FORKED.md` — fork provenance and the pin contract.
 - `crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/README.md` — the browser-to-terminal chat and its two-endpoint workaround.
 - `AGENTS.md` — the concept glossary, the layer invariants, the logging pins, and the rules for newtypes.
 - Per-crate READMEs under `crates/*/README.md`.

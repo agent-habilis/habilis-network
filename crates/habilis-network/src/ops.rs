@@ -5,8 +5,8 @@
 //! the hook, so none of it can be called out of band.
 
 pub use crate::gossip::{
-    StateMergeParams, app_frame, broadcast_msg, broadcast_state_merge, send_app, start_ping_round,
-    unicast_farewell,
+    Farewell, MergeCtx, StateMergeParams, app_frame, broadcast_msg, broadcast_state_merge,
+    send_app, start_ping_round, unicast_farewell,
 };
 pub use crate::transport::{Delivered, MeshSender, PendingSend, deliver, deliver_in_background};
 
@@ -27,8 +27,8 @@ pub mod doc {
 #[cfg(feature = "blob")]
 pub mod blob {
     pub use crate::blob::{
-        BlobDigest, BlobServer, BlobTicket, ContentId, HASH_LEN, OffloadRequest, SECRET_LEN, fetch,
-        offload,
+        BlobDigest, BlobError, BlobServer, BlobTicket, ContentId, HASH_LEN, OffloadRequest,
+        SECRET_LEN, fetch, offload,
     };
 }
 

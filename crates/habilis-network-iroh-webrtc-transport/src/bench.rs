@@ -7,11 +7,16 @@
 //! Behind the `bench` feature so a consumer that only wants the transport does
 //! not link a protocol handler it never registers.
 
-use crate::WEBRTC_TRANSPORT_ID;
+use crate::{BenchError, WEBRTC_TRANSPORT_ID};
 use iroh::TransportAddr;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 
+#[cfg(all(feature = "web", not(feature = "native")))]
+use iroh::endpoint::presets;
+use n0_future::time::Instant;
+use std::{io, time};
+/// The ALPN of the bench handler.
 pub const BENCH_ALPN: &[u8] = b"habilis-network-webrtc/test-bench/0";
 
 /// Bytes the plain bulk case asks for. Comfortably past one QUIC congestion
@@ -31,7 +36,18 @@ pub const MAX_TRANSFER_BYTES: usize = 64 << 20;
 /// suite uses. The other two exist because "the send pump drops under load" and
 /// "the receive path drops under load" are different claims, and an exchange
 /// that is bulk in both directions cannot distinguish them.
+///
+/// # Examples
+///
+/// A direction label reads back to the same direction.
+///
+/// ```
+/// use habilis_network_iroh_webrtc_transport::bench::Direction;
+///
+/// assert_eq!(Direction::parse_label(Direction::Both.label()), Some(Direction::Both));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Direction {
     /// Small request, bulk reply — the `OP_READ` shape.
     Download,
@@ -42,6 +58,7 @@ pub enum Direction {
 }
 
 impl Direction {
+    /// The name of this direction in the bench output: `down`, `up` or `both`.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -53,7 +70,7 @@ impl Direction {
 
     /// The inverse of [`Self::label`].
     #[must_use]
-    pub fn from_label(label: &str) -> Option<Self> {
+    pub fn parse_label(label: &str) -> Option<Self> {
         [Self::Download, Self::Upload, Self::Both]
             .into_iter()
             .find(|direction| direction.label() == label)
@@ -105,8 +122,30 @@ fn header(direction: Direction, wanted: u32) -> [u8; HEADER_LEN] {
 /// Serves one exchange per bi-stream, as many streams as the client opens,
 /// until the connection closes. A benchmark reuses one connection so only its
 /// warm-up round pays the handshake and the congestion-window ramp.
-#[derive(Debug, Clone)]
+///
+/// # Examples
+///
+/// It runs a benchmark over live connections, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::bench::Bench;
+///
+/// # fn demo() {
+/// let bench = Bench::new();
+/// let _ = bench;
+/// # }
+/// ```
+#[derive(Debug, Clone, Default, Copy)]
+#[non_exhaustive]
 pub struct Bench;
+
+impl Bench {
+    /// The bench protocol handler.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
 
 impl ProtocolHandler for Bench {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
@@ -121,7 +160,7 @@ impl ProtocolHandler for Bench {
             // The peer names the reply size, so the ceiling `exchange` keeps
             // on its side has to hold here too, or one header asks for 4 GiB.
             if head[0] > MODE_ECHO || wanted > MAX_TRANSFER_BYTES {
-                return Err(AcceptError::from_err(std::io::Error::other(format!(
+                return Err(AcceptError::from_err(io::Error::other(format!(
                     "refused request: mode {}, {wanted} bytes wanted",
                     head[0]
                 ))));
@@ -136,7 +175,7 @@ impl ProtocolHandler for Bench {
                     .await
                     .map_err(AcceptError::from_err)?;
                 if !is_payload(&uploaded) {
-                    return Err(AcceptError::from_err(std::io::Error::other(
+                    return Err(AcceptError::from_err(io::Error::other(
                         "uploaded body did not match the expected pattern",
                     )));
                 }
@@ -161,10 +200,7 @@ const BLOCK: [u8; 251] = {
     let mut block = [0u8; 251];
     let mut index = 0;
     while index < block.len() {
-        #[expect(clippy::cast_possible_truncation, reason = "index < 251")]
-        {
-            block[index] = index as u8;
-        }
+        block[index] = index.to_le_bytes()[0];
         index += 1;
     }
     block
@@ -172,6 +208,17 @@ const BLOCK: [u8; 251] = {
 
 /// A recognisable, position-dependent body, so a truncated or misordered
 /// transfer fails on content rather than only on length.
+///
+/// # Examples
+///
+/// A payload has the length it was asked for, and it is recognised as a payload.
+///
+/// ```
+/// use habilis_network_iroh_webrtc_transport::bench::{is_payload, payload};
+///
+/// assert_eq!(payload(8).len(), 8);
+/// assert!(is_payload(&payload(8)));
+/// ```
 #[must_use]
 pub fn payload(len: usize) -> Vec<u8> {
     let mut body = BLOCK.repeat(len.div_ceil(BLOCK.len()));
@@ -184,6 +231,17 @@ pub fn payload(len: usize) -> Vec<u8> {
 /// The matrix runs 8 `MiB` cells at concurrency 4; materialising an expected
 /// vector per check would double the tab's peak memory for no benefit, and an
 /// OOM-killed tab is not a transport finding.
+///
+/// # Examples
+///
+/// A body made by payload is recognised, and other bytes are not.
+///
+/// ```
+/// use habilis_network_iroh_webrtc_transport::bench::{is_payload, payload};
+///
+/// assert!(is_payload(&payload(8)));
+/// assert!(!is_payload(b"not a payload"));
+/// ```
 #[must_use]
 pub fn is_payload(body: &[u8]) -> bool {
     body.chunks(BLOCK.len())
@@ -194,12 +252,25 @@ pub fn is_payload(body: &[u8]) -> bool {
 ///
 /// A cell that claims to be `WebRTC` asserts this, so a future regression
 /// cannot silently reroute onto IP and call it a pass.
+///
+/// # Examples
+///
+/// It reads the selected path of a live connection, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::bench::on_webrtc;
+/// use iroh::endpoint::Connection;
+///
+/// # fn demo(connection: &Connection) -> bool {
+/// on_webrtc(connection)
+/// # }
+/// ```
 #[must_use]
 pub fn on_webrtc(connection: &Connection) -> bool {
     connection.paths().iter().any(|path| {
         matches!(
             path.remote_addr(),
-            TransportAddr::Custom(addr) if addr.id() == WEBRTC_TRANSPORT_ID
+            TransportAddr::Custom(address) if address.id() == WEBRTC_TRANSPORT_ID
         )
     })
 }
@@ -209,18 +280,33 @@ pub fn on_webrtc(connection: &Connection) -> bool {
 ///
 /// # Errors
 /// The endpoint cannot bind.
+///
+/// # Examples
+///
+/// It binds a browser endpoint on the network, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::WebRtcHandle;
+/// use habilis_network_iroh_webrtc_transport::BenchError;
+/// use habilis_network_iroh_webrtc_transport::bench::browser_endpoint;
+/// use iroh::SecretKey;
+///
+/// # async fn demo(hub: &WebRtcHandle) -> Result<iroh::Endpoint, BenchError> {
+/// browser_endpoint(SecretKey::from_bytes(&[1u8; 32]), hub).await
+/// # }
+/// ```
 #[cfg(all(feature = "web", not(feature = "native")))]
 pub async fn browser_endpoint(
     key: iroh::SecretKey,
     hub: &crate::WebRtcHandle,
-) -> anyhow::Result<iroh::Endpoint> {
-    Ok(iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+) -> Result<iroh::Endpoint, BenchError> {
+    let transport = hub.transport();
+    let selector = hub.path_selector();
+    let configured = iroh::Endpoint::builder(presets::Minimal)
         .secret_key(key)
         .relay_mode(iroh::RelayMode::Disabled)
-        .add_custom_transport(hub.transport())
-        .path_selector(hub.path_selector())
-        .bind()
-        .await?)
+        .add_custom_transport(transport);
+    Ok(configured.path_selector(selector).bind().await?)
 }
 
 /// One exchange in `direction`, sized `bulk`, over an already-open
@@ -235,20 +321,33 @@ pub async fn browser_endpoint(
 /// # Errors
 /// A `bulk` past [`MAX_TRANSFER_BYTES`], a stream or write failure, a short
 /// reply, or a reply whose bytes do not match [`payload`].
+///
+/// # Examples
+///
+/// It exchanges bytes over a live connection, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::BenchError;
+/// use habilis_network_iroh_webrtc_transport::bench::{Direction, exchange};
+/// use iroh::endpoint::Connection;
+///
+/// # async fn demo(connection: &Connection) -> Result<usize, BenchError> {
+/// exchange(connection, Direction::Both, 1024).await
+/// # }
+/// ```
 pub async fn exchange(
     connection: &Connection,
     direction: Direction,
     bulk: usize,
-) -> anyhow::Result<usize> {
+) -> Result<usize, BenchError> {
     // A token reply, small enough that the `Upload` case is unambiguously
     // measuring one direction. Not zero: a reply of nothing would let a
     // completely dead return path pass.
     const TOKEN: usize = 32;
 
-    anyhow::ensure!(
-        bulk <= MAX_TRANSFER_BYTES,
-        "{bulk} bytes is past the {MAX_TRANSFER_BYTES}-byte transfer ceiling"
-    );
+    if bulk > MAX_TRANSFER_BYTES {
+        return Err(BenchError::TooLarge { bulk });
+    }
     let reply = match direction {
         Direction::Download | Direction::Both => bulk,
         Direction::Upload => TOKEN,
@@ -267,12 +366,15 @@ pub async fn exchange(
     send.finish()?;
     let body = recv.read_to_end(reply + 64).await?;
 
-    anyhow::ensure!(
-        body.len() == reply,
-        "short reply: wanted {reply} bytes, got {}",
-        body.len()
-    );
-    anyhow::ensure!(is_payload(&body), "reply body did not match");
+    if body.len() != reply {
+        return Err(BenchError::ShortReply {
+            wanted: reply,
+            got: body.len(),
+        });
+    }
+    if !is_payload(&body) {
+        return Err(BenchError::ReplyMismatch);
+    }
     Ok(direction.bytes_for(bulk))
 }
 
@@ -284,33 +386,48 @@ pub const RTT_PROBE_BYTES: usize = 1024;
 ///
 /// # Errors
 /// A stream or write failure, or a reply that is not the probe.
+///
+/// # Examples
+///
+/// It measures round trips over a live connection, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::BenchError;
+/// use habilis_network_iroh_webrtc_transport::bench::rtt_samples;
+/// use iroh::endpoint::Connection;
+///
+/// # async fn demo(connection: &Connection) -> Result<usize, BenchError> {
+/// Ok(rtt_samples(connection, 1, 3).await?.count())
+/// # }
+/// ```
 pub async fn rtt_samples(
     connection: &Connection,
     warmup: usize,
     rounds: usize,
-) -> anyhow::Result<Vec<std::time::Duration>> {
+) -> Result<impl Iterator<Item = time::Duration>, BenchError> {
     let probe = payload(RTT_PROBE_BYTES);
     let head = header_with_mode(MODE_ECHO, u32::try_from(RTT_PROBE_BYTES)?);
     let mut samples = Vec::with_capacity(rounds);
     for round in 0..warmup + rounds {
-        let started = n0_future::time::Instant::now();
+        let started = Instant::now();
         let (mut send, mut recv) = connection.open_bi().await?;
         send.write_all(&head).await?;
         send.write_all(&probe).await?;
         send.finish()?;
         let echo = recv.read_to_end(RTT_PROBE_BYTES + 64).await?;
         let elapsed = started.elapsed();
-        anyhow::ensure!(echo == probe, "the echo is not the probe");
+        if echo != probe {
+            return Err(BenchError::EchoMismatch);
+        }
         if round >= warmup {
             samples.push(elapsed);
         }
     }
-    Ok(samples)
+    Ok(samples.into_iter())
 }
 
 #[cfg(all(test, feature = "native"))]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::net::SocketAddr;
 
     use iroh::endpoint::presets;
@@ -321,43 +438,49 @@ mod tests {
 
     async fn loopback_endpoint() -> Endpoint {
         let loopback: SocketAddr = "127.0.0.1:0".parse().expect("a literal loopback address");
-        Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Disabled)
+        let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
+        let bound = builder
             .bind_addr(loopback)
-            .expect("a loopback bind address")
-            .bind()
-            .await
-            .expect("bind a loopback endpoint")
+            .expect("a loopback bind address");
+        bound.bind().await.expect("bind a loopback endpoint")
     }
 
     #[test]
-    async fn rtt_samples_returns_one_timed_probe_per_round() {
-        let server = loopback_endpoint().await;
-        let router = Router::builder(server.clone())
-            .accept(BENCH_ALPN, Bench)
-            .spawn();
-        let socket = server
-            .bound_sockets()
-            .into_iter()
-            .find(SocketAddr::is_ipv4)
-            .expect("an IPv4 socket");
-        let client = loopback_endpoint().await;
-        let connection = client
-            .connect(
-                EndpointAddr::from_parts(server.id(), [TransportAddr::Ip(socket)]),
-                BENCH_ALPN,
-            )
-            .await
-            .expect("connect over loopback");
+    fn rtt_samples_returns_one_timed_probe_per_round() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let server = loopback_endpoint().await;
+            let router = Router::builder(server.clone())
+                .accept(BENCH_ALPN, Bench::new())
+                .spawn();
+            let sockets = server.bound_sockets();
+            let socket = sockets
+                .into_iter()
+                .find(SocketAddr::is_ipv4)
+                .expect("an IPv4 socket");
+            let client = loopback_endpoint().await;
+            let connection = client
+                .connect(
+                    EndpointAddr::from_parts(server.id(), [TransportAddr::Ip(socket)]),
+                    BENCH_ALPN,
+                )
+                .await
+                .expect("connect over loopback");
 
-        let samples = rtt_samples(&connection, 3, 20).await.expect("rtt samples");
+            let samples: Vec<_> = rtt_samples(&connection, 3, 20)
+                .await
+                .expect("rtt samples")
+                .collect();
 
-        assert_eq!(samples.len(), 20);
-        assert!(samples.iter().all(|sample| !sample.is_zero()));
-        connection.close(0u32.into(), b"done");
-        // Both endpoints are closed in order: an endpoint that is dropped open makes iroh log an
-        // ERROR, which the guard of the test turns into a failure.
-        client.close().await;
-        router.shutdown().await.expect("the router shuts down");
+            assert_eq!(samples.len(), 20, "one timed probe is returned per round");
+            assert!(
+                samples.iter().all(|sample| !sample.is_zero()),
+                "every probe sample is nonzero"
+            );
+            connection.close(0u32.into(), b"done");
+            // Both endpoints are closed in order: an endpoint that is dropped open makes iroh log an
+            // ERROR, which the guard of the test turns into a failure.
+            client.close().await;
+            router.shutdown().await.expect("the router shuts down");
+        });
     }
 }

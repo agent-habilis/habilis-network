@@ -26,7 +26,7 @@ const MAX_STEPS: u32 = 3;
 
 /// A reclaim window that opens while the rival is still up resets the wait, and its own probes
 /// find the rival and raise it again: up to 60 s at once, by design.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ProbeBackoff {
     /// Probes in a row that found the rival.
     rivals_in_a_row: u32,
@@ -69,7 +69,6 @@ impl ProbeBackoff {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::ProbeBackoff;
@@ -91,22 +90,29 @@ mod tests {
 
     #[test]
     fn a_probe_may_start_before_any_verdict() {
-        assert!(ProbeBackoff::default().due(Instant::now()));
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            ProbeBackoff::default().due(Instant::now()),
+            "a probe may start before any verdict"
+        );
     }
 
     #[test]
     fn each_probe_that_finds_the_rival_doubles_the_wait_up_to_the_longest() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut backoff = ProbeBackoff::default();
         let now = Instant::now();
         let waits: Vec<Duration> = (0..5).map(|_| rival_at(&mut backoff, now, 0.0)).collect();
         assert_eq!(
             waits,
-            vec![secs(15), secs(30), secs(60), secs(120), secs(120)]
+            vec![secs(15), secs(30), secs(60), secs(120), secs(120)],
+            "each probe that finds the rival doubles the wait up to the longest"
         );
     }
 
     #[test]
     fn a_free_reading_lets_the_next_probe_start_at_the_next_tick_and_the_waits_start_over() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut backoff = ProbeBackoff::default();
         let now = Instant::now();
         for _ in 0..3 {
@@ -114,29 +120,47 @@ mod tests {
         }
         backoff.note_verdict(false, now, 0.0);
         assert!(backoff.due(now), "the second free reading is not held back");
-        assert_eq!(rival_at(&mut backoff, now, 0.0), secs(15));
+        assert_eq!(
+            rival_at(&mut backoff, now, 0.0),
+            secs(15),
+            "a free reading lets the next probe start at the next tick"
+        );
     }
 
     #[test]
     fn a_reset_lets_a_probe_start_at_once_and_starts_the_waits_over() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut backoff = ProbeBackoff::default();
         let now = Instant::now();
         for _ in 0..4 {
             rival_at(&mut backoff, now, 0.0);
         }
-        assert!(!backoff.due(now));
+        assert!(!backoff.due(now), "a reset lets a probe start at once");
         backoff.reset();
-        assert!(backoff.due(now));
-        assert_eq!(rival_at(&mut backoff, now, 0.0), secs(15));
+        assert!(backoff.due(now), "a reset makes the probe due");
+        assert_eq!(
+            rival_at(&mut backoff, now, 0.0),
+            secs(15),
+            "a reset starts the waits over at the first step"
+        );
     }
 
     #[test]
     fn the_jitter_stays_within_a_fifth_either_way() {
+        let _guard = ::habilis_network_test_tracing::init();
         let now = Instant::now();
         let mut low = ProbeBackoff::default();
         let mut high = ProbeBackoff::default();
-        assert_eq!(rival_at(&mut low, now, -1.0), secs(12));
-        assert_eq!(rival_at(&mut high, now, 1.0), secs(18));
+        assert_eq!(
+            rival_at(&mut low, now, -1.0),
+            secs(12),
+            "the low jitter stays within a fifth"
+        );
+        assert_eq!(
+            rival_at(&mut high, now, 1.0),
+            secs(18),
+            "the high jitter stays within a fifth"
+        );
         let mut beyond = ProbeBackoff::default();
         assert_eq!(
             rival_at(&mut beyond, now, 7.0),

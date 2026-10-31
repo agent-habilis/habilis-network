@@ -3,15 +3,15 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use habilis_network_test_tracing::{at_end, test};
-
+use std::rc;
+use tokio::task;
 static CLOSED: AtomicBool = AtomicBool::new(false);
 
 struct Endpoint;
 
 impl Endpoint {
     async fn close(&self) {
-        tokio::task::yield_now().await;
+        task::yield_now().await;
         CLOSED.store(true, Ordering::SeqCst);
     }
 }
@@ -25,17 +25,25 @@ impl Drop for Endpoint {
 }
 
 #[test]
-async fn what_a_test_registers_is_closed_before_the_runtime_drops() {
-    let endpoint = std::rc::Rc::new(Endpoint);
-    let closer = std::rc::Rc::clone(&endpoint);
-    at_end(async move { closer.close().await });
-    tokio::spawn(async { tokio::task::yield_now().await });
-    drop(endpoint);
+fn what_a_test_registers_is_closed_before_the_runtime_drops() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let endpoint = rc::Rc::new(Endpoint);
+        let closer = rc::Rc::clone(&endpoint);
+        ::habilis_network_test_tracing::at_end(async move { closer.close().await });
+        tokio::spawn(async { task::yield_now().await });
+        drop(endpoint);
+    });
 }
 
-#[test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_cleanup_runs_even_when_the_registrations_are_many() {
-    for _ in 0..5 {
-        at_end(async { tokio::task::yield_now().await });
-    }
+#[test]
+fn a_cleanup_runs_even_when_the_registrations_are_many() {
+    ::habilis_network_test_tracing::run_multi_thread(
+        ::habilis_network_test_tracing::init(),
+        2,
+        async {
+            for _ in 0..5 {
+                ::habilis_network_test_tracing::at_end(async { task::yield_now().await });
+            }
+        },
+    );
 }

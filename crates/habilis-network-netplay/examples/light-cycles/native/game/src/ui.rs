@@ -17,16 +17,15 @@
 //! configured for that name in their own terminal theme, rather than
 //! forcing a specific RGB value that might clash with it.
 
-use std::pin::Pin;
-
-use visage_rust_tui::component::{ComponentCoroutine, Yield};
-use visage_rust_tui::reactive::Signal;
+use crate::grid::{GRID_H, GRID_W};
+use crate::outcome::Outcome;
+use crate::sim;
+use crate::snapshot::Snapshot;
+use crate::ui_component::UiComponent;
+use std::mem;
+use visage_rust_tui::signal::Signal;
 use visage_rust_tui::tui::color::palette;
 use visage_rust_tui::view::{Align, Border, BoxProps, Direction, Justify, Padding, View};
-
-use crate::app::Snapshot;
-use crate::grid::{GRID_H, GRID_W};
-use crate::sim::Outcome;
 
 /// Named ANSI colors usable as a player color, in assignment order.
 /// `0` (black) and the near-background/foreground indices are skipped —
@@ -49,8 +48,10 @@ const GRID_STEP: u8 = 8;
 
 /// A claimed cell. Full block, so trails read as solid light.
 const TRAIL: char = '█';
+
 /// An empty cell on a ruled intersection.
 const RULE: char = '·';
+
 const EMPTY: char = ' ';
 
 fn color_for(roster_index: usize) -> i32 {
@@ -70,19 +71,11 @@ fn dim() -> i32 {
 /// `View::component`'s nested-instance isolation, which pays off when
 /// *most* of a tree stays still and only a small part changes.
 #[must_use]
-pub fn app(snapshot: Signal<Snapshot>) -> Pin<Box<ComponentCoroutine>> {
-    Box::pin(
-        #[coroutine]
-        move || {
-            loop {
-                let current = snapshot.get();
-                yield Yield::View(render(&current));
-            }
-        },
-    )
+pub fn app(snapshot: Signal<Snapshot>) -> UiComponent {
+    UiComponent { snapshot }
 }
 
-fn render(s: &Snapshot) -> View {
+pub(crate) fn render(s: &Snapshot) -> View {
     View::boxed(
         BoxProps {
             direction: Direction::Column,
@@ -113,7 +106,7 @@ fn players(s: &Snapshot) -> View {
                     fg: color_for(i),
                     ..BoxProps::default()
                 },
-                vec![View::text(label)],
+                vec![View::text(&label)],
             )
         })
         .collect();
@@ -157,14 +150,16 @@ pub fn status_line(s: &Snapshot) -> String {
     if s.syncing {
         return "SYNCING".to_owned();
     }
-    match crate::sim::outcome(&s.world) {
+    match sim::outcome(&s.world) {
         Outcome::InProgress => String::new(),
-        Outcome::Winner(i) => format!(
-            "{} WINS",
-            s.roster
-                .get(i)
-                .map_or("?".to_owned(), |(_, nick)| nick.to_uppercase())
-        ),
+        Outcome::Winner(i) => {
+            format!(
+                "{} WINS",
+                s.roster
+                    .get(i)
+                    .map_or("?".to_owned(), |(_, nick)| nick.to_uppercase())
+            )
+        }
         Outcome::Draw => "DRAW".to_owned(),
     }
 }
@@ -180,7 +175,7 @@ fn status(s: &Snapshot) -> View {
             fg: color,
             ..BoxProps::default()
         },
-        vec![View::text(status_line(s))],
+        vec![View::text(&status_line(s))],
     )
 }
 
@@ -188,7 +183,7 @@ fn status(s: &Snapshot) -> View {
 /// looking at, so it carries the attract message instead — the browser
 /// overlays the same words on the same empty grid.
 fn arena(s: &Snapshot) -> View {
-    let body = if s.waiting {
+    let body: Vec<View> = if s.waiting {
         vec![View::boxed(
             BoxProps {
                 direction: Direction::Column,
@@ -199,7 +194,7 @@ fn arena(s: &Snapshot) -> View {
                 ..BoxProps::default()
             },
             vec![
-                View::text(attract_headline(s)),
+                View::text(&attract_headline(s)),
                 View::boxed(
                     BoxProps {
                         fg: dim(),
@@ -261,9 +256,9 @@ fn controls(s: &Snapshot) -> View {
             ..BoxProps::default()
         },
         vec![
-            View::text("↑↓←→ OR WASD".to_owned()),
-            View::text(format!("MATCH {}", s.match_number)),
-            View::text(room_label(&s.room)),
+            View::text("↑↓←→ OR WASD"),
+            View::text(&format!("MATCH {}", s.match_number)),
+            View::text(&room_label(&s.room)),
         ],
     )
 }
@@ -326,7 +321,7 @@ fn flush_run(owner: Option<u8>, run: &mut String, spans: &mut Vec<View>) {
     if run.is_empty() {
         return;
     }
-    let text = View::text(std::mem::take(run));
+    let text = View::text(&mem::take(run));
     spans.push(match owner {
         Some(o) if o > 0 => View::boxed(
             BoxProps {
@@ -349,8 +344,6 @@ fn flush_run(owner: Option<u8>, run: &mut String, spans: &mut Vec<View>) {
 
 #[cfg(test)]
 mod tests {
-    use super::room_label;
-    use habilis_network_test_tracing::test;
 
     /// Regression: the room code used to be uppercased for display, but
     /// `crypto::topic_seed` hashes the topic byte-for-byte. A player who
@@ -358,7 +351,16 @@ mod tests {
     /// forever. The label may shout; the code may not.
     #[test]
     fn the_room_code_is_shown_exactly_as_given() {
-        assert_eq!(room_label("Gadget-Plover"), "ROOM Gadget-Plover");
-        assert_eq!(room_label("volt-paddle"), "ROOM volt-paddle");
+        let _guard = ::habilis_network_test_tracing::init();
+        assert_eq!(
+            super::room_label("Gadget-Plover"),
+            "ROOM Gadget-Plover",
+            "the room code is shown exactly as given, with its case"
+        );
+        assert_eq!(
+            super::room_label("volt-paddle"),
+            "ROOM volt-paddle",
+            "a lower-case room code is shown as given"
+        );
     }
 }

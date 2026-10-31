@@ -3,167 +3,28 @@
 //! The CLI (`clap`), the in-process driver (public API), and the MCP server
 //! (`serde`) each have their own native input struct, but they all want the
 //! same thing: turn a name + config + nickname (create) or a target +
-//! nickname (join) into a [`SetupKind`] plus the resolved author and the
+//! nickname (join) into a `SetupKind` plus the resolved author and the
 //! directory to advertise into. [`CreateParams`]/[`JoinParams`] are that
 //! common shape; `resolve` is the single place the nickname default, the
 //! advertise validation, and the target resolution live — instead of three
 //! near-identical copies in `cli`, `api`, and `mcp`.
 
-use std::fmt;
+mod create_params;
+mod join_params;
+mod resolved;
+mod topic_params;
 
-use anyhow::{Result, bail};
+use super::setup_error::SetupError;
 
-use crate::protocol::Nickname;
-use crate::protocol::crypto::Password;
-use crate::protocol::mesh::{
-    AdvertiseRequiresReachable, DirectorySelection, LookupOpts, Mesh, MeshConfig, MeshName,
-    TransportPolicy, UnlockError, validate_advertise,
-};
-use crate::resolver::{self, JoinTarget};
+use crate::protocol::meshes::{LookupOpts, Mesh, MeshConfig, TransportPolicy};
 
-use super::setup::SetupKind;
+use crate::protocol::meshes::RelayChoice;
+use crate::util::tuning;
 
-/// The create intent, before resolution. Each frontend builds this from its
-/// own input struct (the lookups are already resolved into `config`).
-#[derive(Debug)]
-pub struct CreateParams {
-    pub name: MeshName,
-    /// `None` ⇒ a random `word-word` nickname is minted in `resolve`.
-    pub nickname: Option<Nickname>,
-    pub config: MeshConfig,
-    pub advertise: DirectorySelection,
-    /// Password to protect the mesh with; the verifier is baked into the
-    /// id at setup (the salt is the seed, minted there).
-    pub password: Option<Password>,
-    /// `--invite-only`: the mesh's issuer keypair + invite root are minted at
-    /// setup and only creator-signed invites can join.
-    pub invite_only: bool,
-}
-
-/// The join intent, before resolution.
-#[derive(Debug)]
-pub struct JoinParams {
-    pub target: JoinTarget,
-    pub nickname: Option<Nickname>,
-    /// Password for a passworded id; verified against the id's verifier in
-    /// `resolve` (before any network).
-    pub password: Option<Password>,
-}
-
-/// A passworded id was joined without a password. Typed so callers can
-/// classify it — the MCP server maps it to `invalid_params` (it never
-/// prompts), the CLI prompts on a TTY before resolving.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PasswordRequired;
-
-impl fmt::Display for PasswordRequired {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("this mesh is password-protected — pass --password")
-    }
-}
-
-impl std::error::Error for PasswordRequired {}
-
-/// The topic intent: a mesh derived deterministically from a shared string,
-/// always public. Name + config are derived, not supplied — the string alone
-/// determines the mesh.
-#[derive(Debug)]
-pub struct TopicParams {
-    pub string: String,
-    /// `None` ⇒ a random `word-word` nickname is minted in `resolve`.
-    pub nickname: Option<Nickname>,
-}
-
-/// A resolved create/join, ready to hand to
-/// [`setup_mesh`](super::setup::setup_mesh). `advertise_directory` is the
-/// directory to re-broadcast into (`create --advertise`), or `None`.
-#[derive(Debug)]
-pub struct Resolved {
-    pub kind: SetupKind,
-    pub author: Nickname,
-    pub advertise_directory: Option<MeshName>,
-}
-
-impl CreateParams {
-    /// Validate the advertise request against the config, default the
-    /// nickname, and build the create [`SetupKind`].
-    ///
-    /// # Errors
-    /// Returns [`AdvertiseRequiresReachable`] if `advertise` is set on a
-    /// loopback-only mesh.
-    pub fn resolve(self) -> Result<Resolved, AdvertiseRequiresReachable> {
-        validate_advertise(&self.advertise, &self.config.lookups)?;
-        let advertise_directory = self.advertise.directory();
-        Ok(Resolved {
-            kind: SetupKind::Create {
-                name: self.name,
-                config: self.config,
-                advertise: advertise_directory.clone(),
-                password: self.password,
-                invite_only: self.invite_only,
-            },
-            author: self.nickname.unwrap_or_else(Nickname::random),
-            advertise_directory,
-        })
-    }
-}
-
-impl JoinParams {
-    /// Resolve the mesh id target into a [`Mesh`], verify the password
-    /// against the id's verifier (locally — a wrong password fails here,
-    /// before any network), and default the nickname. `join` never
-    /// advertises.
-    ///
-    /// # Errors
-    /// The id cannot be decoded into a [`Mesh`]; the id requires a password
-    /// and none was given (`PasswordRequired`, typed for the frontends);
-    /// the password is wrong; or a password was given for a passwordless id.
-    ///
-    /// [`Mesh`]: crate::protocol::mesh::Mesh
-    pub fn resolve(self) -> Result<Resolved> {
-        let mesh = match &self.target {
-            JoinTarget::Mesh(_) => {
-                let locked = resolver::resolve(&self.target)?;
-                // ~100ms of Argon2id, accepted synchronously: this runs once
-                // per join, before the daemon exists. `unlock` decides whether a
-                // password is needed; only its typed reason is mapped here.
-                locked
-                    .unlock(self.password.as_ref())
-                    .map_err(|error| match error {
-                        UnlockError::PasswordRequired => anyhow::Error::from(PasswordRequired),
-                        error @ (UnlockError::InviteOnly
-                        | UnlockError::NoPassword
-                        | UnlockError::WrongPassword) => anyhow::Error::from(error),
-                    })?
-            }
-            // Redeem the invite: verify the creator's signature + expiry and
-            // unwrap the join root. An invite-only mesh carries no id-level
-            // password verifier — the invite's own `password` flag drives the
-            // prompt, and `redeem` unwraps the root with it.
-            JoinTarget::Invite(invite) => {
-                match (&self.password, invite.requires_password()) {
-                    (None, true) => return Err(PasswordRequired.into()),
-                    (Some(_), false) => {
-                        bail!("this invite has no password — drop --password")
-                    }
-                    _ => {}
-                }
-                invite.redeem(self.password.as_ref())?
-            }
-        };
-        Ok(Resolved {
-            kind: SetupKind::Join {
-                mesh,
-                // Retained so the daemon can key blob-ticket protection with the
-                // same password (`None` for a passwordless id/invite).
-                password: self.password,
-            },
-            author: self.nickname.unwrap_or_else(Nickname::random),
-            advertise_directory: None,
-        })
-    }
-}
-
+pub use create_params::CreateParams;
+pub use join_params::JoinParams;
+pub use resolved::Resolved;
+pub use topic_params::TopicParams;
 /// The canonical [`Mesh`] a topic string derives — always the public preset.
 /// The single source of that derivation *and* of the empty/whitespace-string
 /// guard, shared by [`TopicParams::resolve`] and the MCP idempotency check so
@@ -173,7 +34,18 @@ impl JoinParams {
 /// parse-time usage error.)
 /// # Errors
 /// The topic string sanitizes to an empty mesh name.
-pub fn derive_topic_mesh(string: &str) -> Result<Mesh> {
+///
+/// # Examples
+///
+/// The same topic string always derives the same mesh.
+///
+/// ```
+/// use habilis_network::runtime::derive_topic_mesh;
+///
+/// let mesh = derive_topic_mesh("chat").expect("a topic mesh");
+/// assert_eq!(derive_topic_mesh("chat").expect("a topic mesh").to_string(), mesh.to_string());
+/// ```
+pub fn derive_topic_mesh(string: &str) -> Result<Mesh, SetupError> {
     // `--topic-mdns-only` (test-only): keep the mesh *public-shaped* (an
     // ephemeral, address-lookup-discoverable rendezvous — the beacon-claim
     // race under test lives on that path, not the loopback ladder) while
@@ -183,12 +55,8 @@ pub fn derive_topic_mesh(string: &str) -> Result<Mesh> {
     //
     // Deliberately applied here and not in `derive_topic_mesh_with`: a caller
     // that states its own reach must not have it silently rewritten.
-    let lookups = if crate::util::tuning::topic_mdns_only_for_test() {
-        LookupOpts {
-            mdns: true,
-            dht: false,
-            relay_lookup: crate::protocol::mesh::RelayChoice::Disabled,
-        }
+    let lookups = if tuning::topic_mdns_only_for_test() {
+        LookupOpts::new(RelayChoice::Disabled).mdns(true)
     } else {
         LookupOpts::public_preset()
     };
@@ -217,15 +85,21 @@ pub fn derive_topic_mesh(string: &str) -> Result<Mesh> {
 ///
 /// # Errors
 /// The string is empty or whitespace.
-pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh> {
+///
+/// # Examples
+///
+/// A topic mesh can be derived with the lookups the caller gives.
+///
+/// ```
+/// use habilis_network::protocol::meshes::LookupOpts;
+/// use habilis_network::runtime::derive_topic_mesh_with;
+///
+/// assert!(derive_topic_mesh_with("chat", LookupOpts::loopback()).is_ok());
+/// ```
+pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh, SetupError> {
     derive_topic_mesh_config(
         string,
-        MeshConfig {
-            lookups,
-            password: None,
-            issuer_pubkey: None,
-            transport: TransportPolicy::default(),
-        },
+        MeshConfig::new(lookups, None, None, TransportPolicy::default()),
     )
 }
 
@@ -237,56 +111,51 @@ pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh>
 /// # Errors
 /// The string is empty or whitespace, or `config` fails
 /// [`MeshConfig::validate`].
-pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh> {
+///
+/// # Examples
+///
+/// A topic mesh can be derived with a whole config the caller gives.
+///
+/// ```
+/// use habilis_network::protocol::meshes::MeshConfig;
+/// use habilis_network::runtime::derive_topic_mesh_config;
+///
+/// let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback config");
+/// assert!(derive_topic_mesh_config("chat", config).is_ok());
+/// ```
+pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh, SetupError> {
     if string.trim().is_empty() {
-        anyhow::bail!("topic string must not be empty");
+        return Err(SetupError::EmptyTopic);
     }
-    config.validate()?;
-    Mesh::from_topic(
+    config.validate().map_err(SetupError::Config)?;
+    Mesh::for_topic(
         string,
-        MeshConfig {
-            lookups: config.lookups,
-            password: None,
-            issuer_pubkey: None,
-            transport: config.transport,
-        },
+        MeshConfig::new(config.lookups, None, None, config.transport),
     )
-}
-
-impl TopicParams {
-    /// Derive the mesh from the string (always the public preset) and default
-    /// the nickname. A topic never advertises. The empty/whitespace-string
-    /// guard lives in [`derive_topic_mesh`], which every frontend (CLI,
-    /// in-process) funnels through.
-    ///
-    /// # Errors
-    /// Fails if the string is empty or whitespace-only.
-    pub fn resolve(self) -> Result<Resolved> {
-        let mesh = derive_topic_mesh(&self.string)?;
-        Ok(Resolved {
-            kind: SetupKind::Topic {
-                mesh,
-                topic_string: self.string,
-            },
-            author: self.nickname.unwrap_or_else(Nickname::random),
-            advertise_directory: None,
-        })
-    }
+    .map_err(SetupError::Config)
 }
 
 #[cfg(test)]
 mod topic_derivation_tests {
-    use super::*;
-    use habilis_network_test_tracing::test;
+    use super::{
+        LookupOpts, MeshConfig, TransportPolicy, derive_topic_mesh, derive_topic_mesh_config,
+        derive_topic_mesh_with,
+    };
+    use crate::protocol::meshes::Transport;
 
     /// The no-argument form must stay exactly what it always was, because the
     /// `--topic` id it derives is public API for every frontend that calls it.
     #[test]
     fn the_bare_form_is_the_public_preset_form() {
+        let _guard = ::habilis_network_test_tracing::init();
         let bare = derive_topic_mesh("standup").expect("derive");
         let explicit =
             derive_topic_mesh_with("standup", LookupOpts::public_preset()).expect("derive");
-        assert_eq!(bare.to_string(), explicit.to_string());
+        assert_eq!(
+            bare.to_string(),
+            explicit.to_string(),
+            "the bare form and the explicit public form give the same string"
+        );
     }
 
     /// Reach is part of the mesh id, and that is the point: peers on one mesh
@@ -298,6 +167,7 @@ mod topic_derivation_tests {
     /// `public_preset()`, which is byte-identical to the old behaviour.
     #[test]
     fn stating_a_narrower_reach_changes_the_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let public =
             derive_topic_mesh_with("standup", LookupOpts::public_preset()).expect("derive");
         let private = derive_topic_mesh_with("standup", LookupOpts::loopback()).expect("derive");
@@ -313,12 +183,17 @@ mod topic_derivation_tests {
     /// has no transport to reach.
     #[test]
     fn a_loopback_reach_derives_a_loopback_mesh() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = derive_topic_mesh_with("standup", LookupOpts::loopback()).expect("derive");
-        assert!(mesh.is_loopback());
+        assert!(
+            mesh.is_loopback(),
+            "a loopback reach derives a loopback mesh"
+        );
         assert!(
             !derive_topic_mesh_with("standup", LookupOpts::public_preset())
                 .expect("derive")
-                .is_loopback()
+                .is_loopback(),
+            "a loopback reach does not derive a public mesh"
         );
     }
 
@@ -327,79 +202,99 @@ mod topic_derivation_tests {
     /// in.
     #[test]
     fn both_forms_reject_an_empty_string() {
-        assert!(derive_topic_mesh("   ").is_err());
-        assert!(derive_topic_mesh_with("   ", LookupOpts::loopback()).is_err());
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            derive_topic_mesh("   ").is_err(),
+            "an empty topic is refused in the public form"
+        );
+        assert!(
+            derive_topic_mesh_with("   ", LookupOpts::loopback()).is_err(),
+            "an empty topic is refused in the loopback form"
+        );
     }
 
     /// The relay's transport role is part of the id: two meshes that differ
     /// only in it are different meshes, so members provably agree on it.
     #[test]
     fn relay_transport_changes_the_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let lookup_only =
             derive_topic_mesh_with("standup", LookupOpts::public_preset()).expect("derive");
         let relayed = derive_topic_mesh_config(
             "standup",
-            MeshConfig {
-                lookups: LookupOpts::public_preset(),
-                password: None,
-                issuer_pubkey: None,
-                transport: TransportPolicy {
-                    relay_transport: true,
-                    ..TransportPolicy::default()
-                },
-            },
+            MeshConfig::new(
+                LookupOpts::public_preset(),
+                None,
+                None,
+                TransportPolicy::default().relay_transport(true),
+            ),
         )
         .expect("derive");
-        assert_ne!(lookup_only.to_string(), relayed.to_string());
-        assert!(!lookup_only.transport().relay_transport);
-        assert!(relayed.transport().relay_transport);
+        assert_ne!(
+            lookup_only.to_string(),
+            relayed.to_string(),
+            "the relay transport changes the id"
+        );
+        assert!(
+            !lookup_only.transport().allows(Transport::Relay),
+            "the lookup-only mesh has the relay transport off"
+        );
+        assert!(
+            relayed.transport().allows(Transport::Relay),
+            "the relayed mesh has the relay transport on"
+        );
     }
 
     /// A minted config gets the same cross-field check a decoded id gets;
     /// otherwise the creator would run a mesh whose id every joiner rejects.
     #[test]
     fn a_relay_transport_without_a_relay_lookup_is_rejected_on_mint() {
-        let config = MeshConfig {
-            lookups: LookupOpts::loopback(),
-            password: None,
-            issuer_pubkey: None,
-            transport: TransportPolicy {
-                relay_transport: true,
-                ..TransportPolicy::default()
-            },
-        };
-        assert!(derive_topic_mesh_config("standup", config).is_err());
+        let _guard = ::habilis_network_test_tracing::init();
+        let config = MeshConfig::new(
+            LookupOpts::loopback(),
+            None,
+            None,
+            TransportPolicy::default().relay_transport(true),
+        );
+        assert!(
+            derive_topic_mesh_config("standup", config).is_err(),
+            "a relay transport without a relay lookup is rejected on mint"
+        );
     }
 }
 
 #[cfg(test)]
 mod join_password_tests {
-    use super::*;
+    use super::{JoinParams, SetupError};
     use crate::protocol::Seed;
-    use crate::protocol::mesh::{Mesh, MeshConfig, MeshName};
+    use crate::protocol::crypto::Password;
+    use crate::protocol::meshes::{Mesh, MeshConfig, MeshName};
 
     /// A passworded id, as a joiner is handed it.
     fn passworded_id() -> String {
-        let mut mesh = Mesh::new(
-            Seed::from_bytes([9u8; 32]),
-            MeshName::new("pw").unwrap(),
+        let mut mesh = Mesh::try_new(
+            Seed::new([9u8; 32]),
+            MeshName::try_new("pw").expect("a literal mesh name is valid"),
             MeshConfig::loopback(),
         )
-        .unwrap();
-        mesh.set_password(&Password::new("hunter2".to_owned()));
+        .expect("the test mesh config is valid");
+        mesh.set_password(Password::new("hunter2".to_owned()));
         mesh.to_string()
     }
 
     #[test]
     fn a_passworded_id_without_a_password_is_password_required() {
-        let params = JoinParams {
-            target: passworded_id().parse().unwrap(),
-            nickname: None,
-            password: None,
-        };
-        let error = params.resolve().unwrap_err();
+        let _guard = ::habilis_network_test_tracing::init();
+        let params = JoinParams::new(
+            passworded_id().parse().expect("the passworded id parses"),
+            None,
+            None,
+        );
+        let error = params
+            .resolve()
+            .expect_err("a passworded id without a password is refused");
         assert!(
-            error.downcast_ref::<PasswordRequired>().is_some(),
+            matches!(error, SetupError::PasswordRequired),
             "got: {error}"
         );
     }

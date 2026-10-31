@@ -5,12 +5,13 @@ use std::path::Path;
 
 use xshell::{Shell, cmd};
 
-use crate::TaskOutcome;
-use crate::dev;
 use crate::gate::Kind;
 use crate::scope::Scope;
 use crate::util::output;
+use crate::{TaskOutcome, dev};
 
+use crate::e2e::build;
+use std::{env, fs, process};
 const TARGET: &str = "wasm32-unknown-unknown";
 
 /// `cargo task build-wasm` — build habilis-network-wasm and emit its JS glue.
@@ -20,7 +21,7 @@ const TARGET: &str = "wasm32-unknown-unknown";
 /// this drops under `packages/habilis-network-wasm/wasm/`.
 pub(crate) fn build_peer(sh: &Shell) -> TaskOutcome {
     ensure_target(sh)?;
-    crate::e2e::build::build_browser_peer()?;
+    build::build_browser_peer()?;
     output::status("Built", "habilis-network-wasm");
     Ok(())
 }
@@ -47,14 +48,14 @@ const LIST_CRATE: &str = "habilis-network-iroh-gossip-transport";
 /// check into a pass that sees nothing.
 fn check_disallowed_list(sh: &Shell) -> TaskOutcome {
     output::status("Checking", "the disallowed methods of clippy.toml");
-    let probe = std::env::temp_dir().join(format!("clippy-probe-{}", std::process::id()));
-    std::fs::create_dir_all(&probe)?;
-    std::fs::write(
+    let probe = env::temp_dir().join(format!("clippy-probe-{}", process::id()));
+    fs::create_dir_all(&probe)?;
+    fs::write(
         probe.join("clippy.toml"),
         "disallowed-methods = [{ path = \"tokio::time::sleeeep\" }]\n",
     )?;
     let probed = clippy_stderr(sh, Some(&probe));
-    std::fs::remove_dir_all(&probe)?;
+    fs::remove_dir_all(&probe)?;
     if !probed?.contains(UNREACHABLE) {
         return Err(format!(
             "clippy did not warn about a path that names no function: \

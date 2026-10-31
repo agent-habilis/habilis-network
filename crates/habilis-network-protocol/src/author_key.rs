@@ -2,6 +2,8 @@
 
 use iroh_base::PublicKey;
 
+use crate::identity;
+use std::fmt;
 /// The 32 bytes of the Ed25519 key that signed a message, from `Message::author_key`.
 ///
 /// On the wire the key is its 64-character lowercase hex text. The signed bytes of a message
@@ -18,43 +20,43 @@ use iroh_base::PublicKey;
 /// ```compile_fail,E0308
 /// use habilis_network_protocol::AuthorKey;
 ///
-/// let _ = AuthorKey::from_bytes([0u8; 32]) == [0u8; 32];
+/// let _ = AuthorKey::from([0u8; 32]) == [0u8; 32];
 /// ```
 ///
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AuthorKey([u8; 32]);
 
-impl AuthorKey {
-    /// Wrap 32 raw bytes.
-    #[must_use]
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+impl From<[u8; 32]> for AuthorKey {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self::from_bytes(bytes)
     }
+}
 
+impl AuthorKey {
     /// The raw bytes, borrowed.
     #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 32] {
+    pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
     /// The raw bytes, owned.
     #[must_use]
-    pub const fn to_bytes(self) -> [u8; 32] {
+    pub fn to_bytes(self) -> [u8; 32] {
         self.0
     }
 
     /// Read the 64-character lowercase hex form, the only one the wire carries. `None` for any
     /// other length, for an uppercase digit, and for a non-hex character.
     #[must_use]
-    pub fn from_hex(hex: &str) -> Option<Self> {
-        crate::identity::decode_lower_hex_32(hex).map(Self)
+    pub fn decode_hex(hex: &str) -> Option<Self> {
+        identity::decode_lower_hex_32(hex).map(Self)
     }
 
     /// The 64 ASCII bytes of the lowercase hex form, on the stack: what the signed bytes carry
     /// and what the dedup key hashes, written for every inbound message without an allocation.
     #[must_use]
     pub fn hex(&self) -> [u8; 64] {
-        crate::identity::encode_lower_hex_32(&self.0)
+        identity::encode_lower_hex_32(&self.0)
     }
 
     /// Whether `hex` is this key in the form of [`Display`](std::fmt::Display). It does not
@@ -69,81 +71,137 @@ impl AuthorKey {
     pub fn public_key(&self) -> Option<PublicKey> {
         PublicKey::from_bytes(&self.0).ok()
     }
+
+    /// Make an author key from its 32 bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
 }
 
 // Hex, so a log line and an assertion failure stay readable.
-impl std::fmt::Debug for AuthorKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for AuthorKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "AuthorKey({self})")
     }
 }
 
-impl std::fmt::Display for AuthorKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        crate::identity::write_hex(f, &self.0)
+impl fmt::Display for AuthorKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        identity::write_hex(f, &self.0)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::AuthorKey;
-    use habilis_network_test_tracing::test;
 
+    use crate::identity;
     const HEX: &str = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
 
     #[test]
     fn it_round_trips_through_its_hex_text() {
-        let key = AuthorKey::from_hex(HEX).expect("a lowercase 64-char string");
-        assert_eq!(key.to_string(), HEX);
-        assert_eq!(key.as_bytes()[0], 0xea);
-        assert_eq!(key.to_bytes()[31], 0x2c);
-        assert_eq!(format!("{key:?}"), format!("AuthorKey({HEX})"));
+        let _guard = ::habilis_network_test_tracing::init();
+        let key = AuthorKey::decode_hex(HEX).expect("a lowercase 64-char string");
+        assert_eq!(key.to_string(), HEX, "the author key displays its hex text");
+        assert_eq!(
+            key.as_bytes()[0],
+            0xea,
+            "the first byte of the author key is 0xea"
+        );
+        assert_eq!(
+            key.to_bytes()[31],
+            0x2c,
+            "the last byte of the wire key is 0x2c"
+        );
+        assert_eq!(
+            format!("{key:?}"),
+            format!("AuthorKey({HEX})"),
+            "the author key debug prints its hex text"
+        );
     }
 
     #[test]
     fn it_rejects_what_the_wire_rejects() {
-        assert!(AuthorKey::from_hex("").is_none());
-        assert!(AuthorKey::from_hex(&HEX[..62]).is_none(), "short");
-        assert!(AuthorKey::from_hex(&format!("{HEX}00")).is_none(), "long");
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
-            AuthorKey::from_hex(&HEX.to_uppercase()).is_none(),
+            AuthorKey::decode_hex("").is_none(),
+            "an empty hex string is refused as an author key"
+        );
+        assert!(AuthorKey::decode_hex(&HEX[..62]).is_none(), "short");
+        assert!(AuthorKey::decode_hex(&format!("{HEX}00")).is_none(), "long");
+        assert!(
+            AuthorKey::decode_hex(&HEX.to_uppercase()).is_none(),
             "uppercase"
         );
-        assert!(AuthorKey::from_hex(&"zz".repeat(32)).is_none(), "not hex");
-        assert!(AuthorKey::from_hex(&"é".repeat(32)).is_none(), "multibyte");
+        assert!(AuthorKey::decode_hex(&"zz".repeat(32)).is_none(), "not hex");
+        assert!(
+            AuthorKey::decode_hex(&"é".repeat(32)).is_none(),
+            "multibyte"
+        );
     }
 
     #[test]
     fn hex_is_the_display_text_as_bytes() {
-        let key = AuthorKey::from_hex(HEX).unwrap();
-        assert_eq!(key.hex().as_slice(), HEX.as_bytes());
-        assert_eq!(key.hex().as_slice(), key.to_string().as_bytes());
+        let _guard = ::habilis_network_test_tracing::init();
+        let key =
+            AuthorKey::decode_hex(HEX).expect("the fixture hex is a valid author key encoding");
+        assert_eq!(
+            key.hex().as_slice(),
+            HEX.as_bytes(),
+            "the hex bytes are the display text"
+        );
+        assert_eq!(
+            key.hex().as_slice(),
+            key.to_string().as_bytes(),
+            "the hex bytes match the display text"
+        );
     }
 
     #[test]
     fn matches_hex_agrees_with_display() {
-        let key = AuthorKey::from_hex(HEX).unwrap();
-        assert!(key.matches_hex(HEX));
-        assert!(!key.matches_hex(&HEX.to_uppercase()));
-        assert!(!key.matches_hex(&HEX[..62]));
-        assert!(!key.matches_hex(&format!("{}00", &HEX[..62])));
-        assert!(!key.matches_hex(""));
+        let _guard = ::habilis_network_test_tracing::init();
+        let key =
+            AuthorKey::decode_hex(HEX).expect("the fixture hex is a valid author key encoding");
+        assert!(key.matches_hex(HEX), "matches_hex accepts the display text");
+        assert!(
+            !key.matches_hex(&HEX.to_uppercase()),
+            "matches_hex refuses upper-case text"
+        );
+        assert!(
+            !key.matches_hex(&HEX[..62]),
+            "matches_hex refuses a short text"
+        );
+        assert!(
+            !key.matches_hex(&format!("{}00", &HEX[..62])),
+            "matches_hex refuses a text with a changed last byte"
+        );
+        assert!(!key.matches_hex(""), "matches_hex refuses an empty text");
     }
 
     #[test]
     fn it_orders_by_its_bytes() {
-        let low = AuthorKey::from_bytes([1; 32]);
-        let high = AuthorKey::from_bytes([2; 32]);
-        assert!(low < high);
+        let _guard = ::habilis_network_test_tracing::init();
+        let low = AuthorKey::from([1; 32]);
+        let high = AuthorKey::from([2; 32]);
+        assert!(low < high, "author keys order by their bytes");
     }
 
     #[test]
     fn a_string_that_is_not_a_curve_point_is_a_key_but_not_a_public_key() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut bytes = [0u8; 32];
         bytes[0] = 2;
-        assert!(AuthorKey::from_bytes(bytes).public_key().is_none());
-        let identity = crate::identity::Identity::generate();
+        assert!(
+            AuthorKey::from(bytes).public_key().is_none(),
+            "a non-curve string is an author key but not a public key"
+        );
+        let identity = identity::Identity::generate();
         let author = identity.author_key();
-        assert_eq!(author.public_key(), Some(identity.public()));
+        assert_eq!(
+            author.public_key(),
+            Some(identity.public()),
+            "the public key of the identity is its author key"
+        );
     }
 }

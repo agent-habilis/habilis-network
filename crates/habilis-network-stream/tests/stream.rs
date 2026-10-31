@@ -8,9 +8,13 @@ use std::time::{Duration, Instant};
 use habilis_network::net::test_relay;
 use habilis_network::protocol::{Lookup, Transport};
 use habilis_network_stream::{
-    Producer, Reader, Refused, StreamHash, StreamNode, StreamOpts, StreamSecret,
+    Producer, Reader, Refused, StreamError, StreamHash, StreamNode, StreamOpts, StreamSecret,
 };
 
+use habilis_network::iroh;
+use habilis_network::iroh::endpoint::presets;
+use habilis_network::net::direct;
+use tokio::time;
 /// Generous: a relay dial, a JSEP round and a hole punch all fit inside it.
 const BUDGET: Duration = Duration::from_mins(1);
 
@@ -21,7 +25,7 @@ async fn loopback() -> StreamNode {
 }
 
 /// Read to the end, or fail with whatever ended the stream.
-async fn read_all(reader: &mut Reader) -> anyhow::Result<Vec<u8>> {
+async fn read_all(reader: &mut Reader) -> Result<Vec<u8>, StreamError> {
     let mut out = Vec::new();
     while let Some(chunk) = reader.read().await? {
         out.extend_from_slice(&chunk);
@@ -29,8 +33,18 @@ async fn read_all(reader: &mut Reader) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn refusal(error: &anyhow::Error) -> Option<Refused> {
-    error.downcast_ref::<Refused>().copied()
+fn refusal(error: &StreamError) -> Option<Refused> {
+    match error {
+        StreamError::Refused(refused) => Some(*refused),
+        StreamError::Options(_)
+        | StreamError::Bind { .. }
+        | StreamError::Open { .. }
+        | StreamError::NodeClosed
+        | StreamError::Closed
+        | StreamError::ConsumerGone(_)
+        | StreamError::Lost(_)
+        | _ => None,
+    }
 }
 
 /// Write `payload` in `chunk`-sized pieces and close.
@@ -59,14 +73,18 @@ fn ten_megabytes_arrive_complete_and_in_order() {
 
         let mut reader = consumer_node.open(&hash).await.expect("open");
         let started = Instant::now();
-        let got = tokio::time::timeout(BUDGET, read_all(&mut reader))
+        let got = time::timeout(BUDGET, read_all(&mut reader))
             .await
             .expect("within budget")
             .expect("read");
         let elapsed = started.elapsed();
         writer.await.expect("writer");
         println!("10 MB over loopback in {elapsed:?} (gossip pipe baseline: 0.63 s)");
-        assert_eq!(got.len(), sent.len());
+        assert_eq!(
+            got.len(),
+            sent.len(),
+            "ten megabytes arrive complete and in order"
+        );
         assert!(got == sent, "bytes differ");
         producer_node.close().await;
         consumer_node.close().await;
@@ -82,7 +100,10 @@ fn an_empty_stream_reaches_the_end() {
         let hash = producer.hash().clone();
         let closer = tokio::spawn(producer.close());
         let mut reader = consumer_node.open(&hash).await.expect("open");
-        assert!(read_all(&mut reader).await.expect("read").is_empty());
+        assert!(
+            read_all(&mut reader).await.expect("read").is_empty(),
+            "an empty stream reaches the end"
+        );
         closer.await.expect("closer").expect("close");
         producer_node.close().await;
         consumer_node.close().await;
@@ -98,10 +119,14 @@ fn a_read_after_the_end_is_the_end_again() {
         let hash = producer.hash().clone();
         let writer = tokio::spawn(produce(producer, b"once".to_vec(), 64));
         let mut reader = consumer_node.open(&hash).await.expect("open");
-        assert_eq!(read_all(&mut reader).await.expect("read"), b"once");
+        assert_eq!(
+            read_all(&mut reader).await.expect("read"),
+            b"once",
+            "a read after the end is the end again"
+        );
         writer.await.expect("writer");
         // Past the reader's own `DONE` close, which the first end triggered.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
         assert!(
             reader.read().await.expect("a read after the end").is_none(),
             "the end of stream must repeat"
@@ -150,7 +175,11 @@ fn two_racing_consumers_admit_exactly_one() {
             (Ok(Some(bytes)), Err(error)) | (Err(error), Ok(Some(bytes))) => (bytes, error),
             other => panic!("exactly one consumer must win: {other:?}"),
         };
-        assert_eq!(&won[..], b"only one");
+        assert_eq!(
+            &won[..],
+            b"only one",
+            "only one of two racing consumers is admitted"
+        );
         assert_eq!(refusal(&lost), Some(Refused::Taken), "{lost:#}");
         producer.close().await.expect("close");
         producer_node.close().await;
@@ -167,7 +196,7 @@ fn a_wrong_secret_reads_nothing() {
         let mut forged: StreamHash = producer.hash().clone();
         let mut wrong = *forged.secret.as_bytes();
         wrong[0] ^= 1;
-        forged.secret = StreamSecret::from_bytes(wrong);
+        forged.secret = StreamSecret::from(wrong);
         let mut reader = consumer_node.open(&forged).await.expect("open");
         let error = read_all(&mut reader).await.expect_err("forged hash");
         assert_eq!(refusal(&error), Some(Refused::Unknown), "{error:#}");
@@ -186,7 +215,11 @@ fn a_closed_stream_is_spent() {
         let hash = producer.hash().clone();
         let writer = tokio::spawn(produce(producer, b"once".to_vec(), 64));
         let mut reader = consumer_node.open(&hash).await.expect("open");
-        assert_eq!(read_all(&mut reader).await.expect("read"), b"once");
+        assert_eq!(
+            read_all(&mut reader).await.expect("read"),
+            b"once",
+            "a closed stream is spent and reads once"
+        );
         writer.await.expect("writer");
 
         let mut again = consumer_node.open(&hash).await.expect("open again");
@@ -204,7 +237,7 @@ fn close_or_abandon_with_no_consumer_abandons_at_once() {
         let (producer_node, consumer_node) = (loopback().await, loopback().await);
         let producer = producer_node.create().await;
         let hash = producer.hash().clone();
-        tokio::time::timeout(Duration::from_secs(1), producer.close_or_abandon())
+        time::timeout(Duration::from_secs(1), producer.close_or_abandon())
             .await
             .expect("no wait for a consumer")
             .expect("abandoned");
@@ -226,7 +259,11 @@ fn close_or_abandon_with_a_consumer_ends_the_stream() {
         let mut reader = consumer_node.open(&hash).await.expect("open");
         producer.write(b"kept").await.expect("write");
         producer.close_or_abandon().await.expect("closed");
-        assert_eq!(read_all(&mut reader).await.expect("read"), b"kept");
+        assert_eq!(
+            read_all(&mut reader).await.expect("read"),
+            b"kept",
+            "closing or abandoning with a consumer ends the stream"
+        );
         producer_node.close().await;
         consumer_node.close().await;
     });
@@ -279,9 +316,9 @@ fn a_producer_dropped_with_its_link_unclaimed_abandons_the_stream() {
         let hash = producer.hash().clone();
         let mut reader = consumer_node.open(&hash).await.expect("open");
         // Past the acceptor's hand-off, without ever calling `attached()`.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
         drop(producer);
-        let outcome = tokio::time::timeout(BUDGET, read_all(&mut reader))
+        let outcome = time::timeout(BUDGET, read_all(&mut reader))
             .await
             .expect("within budget");
         let error = outcome.expect_err("an abandoned stream must not read as ended");
@@ -303,7 +340,7 @@ fn a_consumer_that_leaves_fails_the_write_and_spends_the_hash() {
         drop(reader);
 
         let chunk = vec![0; 64 * 1024];
-        let failed = tokio::time::timeout(BUDGET, async {
+        let failed = time::timeout(BUDGET, async {
             loop {
                 if producer.write(&chunk).await.is_err() {
                     return;
@@ -341,8 +378,16 @@ fn two_streams_on_one_node_stay_apart() {
         );
         let (first_got, second_got) =
             tokio::join!(read_all(&mut first_reader), read_all(&mut second_reader));
-        assert!(first_got.expect("first") == payload(300_000));
-        assert!(second_got.expect("second") == b"second".repeat(50_000));
+        assert_eq!(
+            first_got.expect("first"),
+            payload(300_000),
+            "the first reader gets the whole first payload"
+        );
+        assert_eq!(
+            second_got.expect("second"),
+            b"second".repeat(50_000),
+            "the second reader gets the whole second payload"
+        );
         writers.0.await.expect("first writer");
         writers.1.await.expect("second writer");
         producer_node.close().await;
@@ -352,18 +397,29 @@ fn two_streams_on_one_node_stay_apart() {
 
 /// A node on the local relay, with `transport` as given.
 async fn on_relay(url: &str, transport: Vec<Transport>) -> StreamNode {
-    StreamNode::bind(&StreamOpts {
-        lookup: vec![Lookup::Relay],
-        transport,
-        relay_urls: vec![url.to_owned()],
-    })
-    .await
-    .expect("bind a relay node")
+    let base = StreamOpts::default();
+    let relay_urls = vec![url.to_owned()];
+    let options = base
+        .lookup(vec![Lookup::Relay])
+        .transport(transport)
+        .relay_urls(relay_urls);
+    StreamNode::bind(&options).await.expect("bind a relay node")
+}
+
+/// The relay logs a client that resets while the relay is still accepting its upgrade. These tests
+/// close their two nodes while that upgrade may still run, so the line can come; it is the relay's
+/// own log, not an error of ours, so the guard must not fail on it.
+fn allow_relay_upgrade_reset() {
+    habilis_network_test_tracing::allow_warn(
+        "iroh_relay::server::http_server",
+        "error accepting upgraded connection",
+    );
 }
 
 #[test]
 fn a_relay_transport_stream_admits_a_consumer_with_no_direct_path() {
     let guard = habilis_network_test_tracing::init();
+    allow_relay_upgrade_reset();
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
         let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
         let url = url.to_string();
@@ -372,16 +428,20 @@ fn a_relay_transport_stream_admits_a_consumer_with_no_direct_path() {
         let producer_node = on_relay(&url, vec![Transport::Udp, Transport::Relay]).await;
         let consumer_node = on_relay(&url, vec![Transport::WebRtc, Transport::Relay]).await;
         let producer = producer_node.create().await;
-        assert!(producer.hash().transport.relay_transport);
+        assert!(
+            producer.hash().transport.allows(Transport::Relay),
+            "the producer hash carries the relay transport"
+        );
         let hash = producer.hash().clone();
         let writer = tokio::spawn(produce(producer, b"over the relay".to_vec(), 64));
-        let mut reader = tokio::time::timeout(BUDGET, consumer_node.open(&hash))
+        let mut reader = time::timeout(BUDGET, consumer_node.open(&hash))
             .await
             .expect("within budget")
             .expect("open");
         assert_eq!(
             read_all(&mut reader).await.expect("read"),
-            b"over the relay"
+            b"over the relay",
+            "a relay transport stream admits a consumer with no direct path"
         );
         writer.await.expect("writer");
         producer_node.close().await;
@@ -390,25 +450,29 @@ fn a_relay_transport_stream_admits_a_consumer_with_no_direct_path() {
 }
 
 /// The consumer has no IP path and the relay may not carry the bytes, so the
-/// only way they arrive is the WebRTC data channel.
+/// only way they arrive is the `WebRTC` data channel.
 #[test]
 fn a_webrtc_only_consumer_reads_over_the_data_channel() {
     let guard = habilis_network_test_tracing::init();
+    allow_relay_upgrade_reset();
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
         let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
         let url = url.to_string();
         let producer_node = on_relay(&url, vec![Transport::Udp, Transport::WebRtc]).await;
         let consumer_node = on_relay(&url, vec![Transport::WebRtc]).await;
         let producer = producer_node.create().await;
-        assert!(!producer.hash().transport.relay_transport);
+        assert!(
+            !producer.hash().transport.allows(Transport::Relay),
+            "the webrtc-only producer hash has no relay transport"
+        );
         let hash = producer.hash().clone();
         let sent = payload(1024 * 1024);
         let writer = tokio::spawn(produce(producer, sent.clone(), 16 * 1024));
-        let mut reader = tokio::time::timeout(BUDGET, consumer_node.open(&hash))
+        let mut reader = time::timeout(BUDGET, consumer_node.open(&hash))
             .await
             .expect("within budget")
             .expect("open");
-        let got = tokio::time::timeout(BUDGET, read_all(&mut reader))
+        let got = time::timeout(BUDGET, read_all(&mut reader))
             .await
             .expect("within budget")
             .expect("read");
@@ -420,11 +484,12 @@ fn a_webrtc_only_consumer_reads_over_the_data_channel() {
 }
 
 /// The producer has no IP path, the relay may not carry the bytes, and the
-/// consumer has WebRTC off: no lane can exist, so the open fails at once
+/// consumer has `WebRTC` off: no lane can exist, so the open fails at once
 /// rather than after the direct-path probe.
 #[test]
 fn a_consumer_with_no_lane_to_a_webrtc_only_producer_fails_fast() {
     let guard = habilis_network_test_tracing::init();
+    allow_relay_upgrade_reset();
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
         let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
         let url = url.to_string();
@@ -442,8 +507,8 @@ fn a_consumer_with_no_lane_to_a_webrtc_only_producer_fails_fast() {
     });
 }
 
-/// A WebRTC session that attaches makes its answerer dial the offerer on the nudge ALPN, to move
-/// the connections of the pair onto the session. A stream node with WebRTC must serve that ALPN,
+/// A `WebRTC` session that attaches makes its answerer dial the offerer on the nudge ALPN, to move
+/// the connections of the pair onto the session. A stream node with `WebRTC` must serve that ALPN,
 /// or the dial fails with a TLS alert 120 and the node logs a warning for it.
 #[test]
 fn a_stream_node_with_webrtc_serves_the_nudge_of_a_peer() {
@@ -451,15 +516,11 @@ fn a_stream_node_with_webrtc_serves_the_nudge_of_a_peer() {
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
         let node = loopback().await;
         let producer = node.create().await;
-        let addr = producer.hash().addr.clone();
-        let dialer = habilis_network::iroh::Endpoint::bind(
-            habilis_network::iroh::endpoint::presets::Minimal,
-        )
-        .await
-        .expect("bind a dialer");
-        let nudge = dialer
-            .connect(addr, habilis_network::net::direct::NUDGE_ALPN)
-            .await;
+        let address = producer.hash().address.clone();
+        let dialer = iroh::Endpoint::bind(presets::Minimal)
+            .await
+            .expect("bind a dialer");
+        let nudge = dialer.connect(address, direct::NUDGE_ALPN).await;
         assert!(nudge.is_ok(), "the nudge was refused: {:?}", nudge.err());
         dialer.close().await;
         node.close().await;
@@ -472,6 +533,7 @@ fn a_stream_node_with_webrtc_serves_the_nudge_of_a_peer() {
 #[test]
 fn a_webrtc_only_consumer_of_a_producer_without_webrtc_fails_fast() {
     let guard = habilis_network_test_tracing::init();
+    allow_relay_upgrade_reset();
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
         let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
         let url = url.to_string();
@@ -495,6 +557,7 @@ fn a_webrtc_only_consumer_of_a_producer_without_webrtc_fails_fast() {
 #[test]
 fn a_consumer_without_relay_payload_refuses_a_relay_only_pair() {
     let guard = habilis_network_test_tracing::init();
+    allow_relay_upgrade_reset();
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
         let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
         let url = url.to_string();
@@ -525,9 +588,9 @@ fn a_hash_minted_by_a_bind_for_node_carries_its_relay() {
         let node = StreamNode::bind_for(&given).await.expect("bind for");
         let minted = node.create().await.hash().clone();
         assert!(
-            minted.addr.relay_urls().next().is_some(),
+            minted.address.relay_urls().next().is_some(),
             "no relay in {:?}",
-            minted.addr
+            minted.address
         );
         node.close().await;
         first.close().await;
@@ -545,11 +608,8 @@ fn a_stream_node_refuses_the_gossip_and_multihop_transports() {
             (Transport::Gossip, "a stream has no gossip"),
             (Transport::Multihop, "a stream has no multihop"),
         ] {
-            let opts = StreamOpts {
-                transport: vec![Transport::Udp, transport],
-                ..StreamOpts::default()
-            };
-            let error = StreamNode::bind(&opts)
+            let options = StreamOpts::default().transport(vec![Transport::Udp, transport]);
+            let error = StreamNode::bind(&options)
                 .await
                 .expect_err("the transport must be refused");
             assert!(

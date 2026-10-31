@@ -7,65 +7,69 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
-use habilis_network::membership::{self, Request, Rung, UnknownPeer};
+use habilis_network::membership::{self, Blocking, Linking, Request, Rung, UnknownPeer};
 use habilis_network::protocol::{Lookup, Transport};
 
+use habilis_network::net::test_relay;
 #[test]
 fn a_cut_a_deny_an_offer_and_a_close_on_a_member_the_node_does_not_know_are_refused() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let (sink, _events) = membership::json_sink();
-        let member = membership::join(
-            &membership::Opts {
-                nick: Some("alice".to_owned()),
-                lookup: vec![Lookup::Relay],
-                transport: vec![Transport::Udp],
-                relay_urls: vec![relay.to_string()],
-                ..membership::Opts::default()
-            },
-            sink,
-        )
-        .await
-        .expect("open a member");
+        let options = membership::JoinOptions::default()
+            .nick(Some("alice".to_owned()))
+            .lookup(vec![Lookup::Relay]);
+        let options = options
+            .transport(vec![Transport::Udp])
+            .relay_urls(vec![relay.to_string()]);
+        let member: membership::Membership = membership::join(&options, sink)
+            .await
+            .expect("open a member");
         let nobody = || "nobody".to_owned();
 
         let cut = member
-            .request(|reply| Request::BlockRungTo {
-                rung: Rung::WebRtc,
-                peer: nobody(),
-                blocked: true,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockRungTo {
+                    rung: Rung::WebRtc,
+                    peer: nobody(),
+                    blocked: true,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
         let deny = member
-            .request(|reply| Request::DenyPeer {
-                peer: nobody(),
-                denied: true,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::DenyPeer {
+                    peer: nobody(),
+                    denied: true,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
         let offer = member
-            .request(|reply| Request::OfferSession {
-                peer: nobody(),
-                reply,
+            .request(|reply| {
+                Request::Linking(Linking::OfferSession {
+                    peer: nobody(),
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
         let close = member
-            .request(|reply| Request::CloseLink {
-                peer: nobody(),
-                reply,
+            .request(|reply| {
+                Request::Linking(Linking::CloseLink {
+                    peer: nobody(),
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
 
         let _ = member.node.leave().await;
-        let unknown = Err(UnknownPeer(nobody()));
+        let unknown = Err(UnknownPeer::new(nobody()));
         assert_eq!(
             cut, unknown,
             "the cut of a rung to an unknown member was acknowledged"

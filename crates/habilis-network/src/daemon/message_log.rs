@@ -1,45 +1,26 @@
+use crate::protocol;
+use std::time;
+mod bound;
+mod digest_window;
+mod missing_query;
+mod window_range;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::protocol::message::Verified;
-use crate::protocol::message::sole_addressee;
+use crate::protocol::messages::{Verified, sole_addressee};
 use crate::protocol::{AuthorKey, DedupKey, MessageKind, Nickname, PresenceSubtype, UnixSecs};
 
-/// Where a message sits in the log's total order: its timestamp, then its id
-/// key. Timestamps are whole seconds and a mesh puts hundreds of messages in one
-/// second, so the timestamp alone cannot say which side of a window's edge a
-/// message is on; the key breaks every tie.
-pub(crate) type Bound = (UnixSecs, DedupKey);
+pub(crate) use bound::Bound;
+pub(crate) use digest_window::DigestWindow;
+pub(crate) use missing_query::MissingQuery;
+pub(crate) use window_range::WindowRange;
 
 /// The smallest bound that sorts after `bound`.
 fn bound_after((timestamp, key): Bound) -> Bound {
     match u128::from_be_bytes(key.to_bytes()).checked_add(1) {
-        Some(next) => (timestamp, DedupKey::from_bytes(next.to_be_bytes())),
-        None => (timestamp + std::time::Duration::from_secs(1), DedupKey::MIN),
+        Some(next) => (timestamp, DedupKey::from(next.to_be_bytes())),
+        None => (timestamp + time::Duration::from_secs(1), DedupKey::MIN),
     }
-}
-
-/// One anti-entropy digest window: the inclusive `[lo, hi]` range of
-/// [`Bound`]s it covers and the compact dedup keys the sender holds
-/// in that range. The window is a contiguous slice of the log in bound order, so
-/// the ids it lists are **every** message the sender holds in the range. A
-/// receiver can then re-send only real gaps, and advertising a sub-window of a
-/// large log never makes peers perpetually re-send what the sender already has.
-pub(crate) struct DigestWindow {
-    pub lo: Bound,
-    pub hi: Bound,
-    pub ids: Vec<DedupKey>,
-    /// The window holds the first message of the log: nothing sorts before it.
-    pub from_start: bool,
-}
-
-/// Inclusive `[lo, hi]` bounds to filter by — the shape shared by a
-/// [`DigestWindow`] and a wire-decoded digest window entry (the anti-entropy
-/// caller's own type), grouped so [`MessageLog::missing_in_window`] doesn't
-/// need either concrete type by name.
-#[derive(Clone, Copy)]
-pub(crate) struct WindowRange {
-    pub lo: Bound,
-    pub hi: Bound,
 }
 
 /// A range of whole seconds: every message from second `lo` to second `hi`.
@@ -51,18 +32,6 @@ pub(crate) fn seconds(lo: UnixSecs, hi: UnixSecs) -> WindowRange {
     }
 }
 
-/// One gap query against the log: the window to search, the ids the requester
-/// already advertised, the resend budget left for this round, and **who** is
-/// asking — the last because entitlement is per-peer, not global (see
-/// [`resendable_to`]).
-#[derive(Clone, Copy)]
-pub(crate) struct MissingQuery<'a> {
-    pub range: WindowRange,
-    pub have: &'a HashSet<DedupKey>,
-    pub max: usize,
-    pub requester: &'a Nickname,
-}
-
 /// A bounded buffer of the recent messages a member retains — the
 /// anti-entropy recovery source and the poll/fetch history. Held in arrival
 /// order (push order ≈ ascending timestamp) for the poll cursor and the
@@ -70,7 +39,7 @@ pub(crate) struct MissingQuery<'a> {
 /// front — chosen so the **retained set** is a deterministic function of the
 /// message set, identical on every node regardless of gossip delivery order
 /// (see [`MessageLog::eviction_index`]).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MessageLog {
     capacity: usize,
     messages: VecDeque<Verified>,
@@ -107,14 +76,14 @@ impl MessageLog {
     /// union of divergent arrival-order windows. The returned eviction lets
     /// callers prune side indexes keyed by it (the DAG `by_hash`, fork map). A message whose
     /// dedup key is already held is not added, and nothing is evicted.
-    pub fn push(&mut self, msg: Verified) -> Option<Verified> {
+    pub fn push(&mut self, message: Verified) -> Option<Verified> {
         // A frame that is already held is held once: two paths that retain the same frame
         // (an author that logs its own send and a consumer that pushes it too) cost a lookup.
-        if !self.keys.insert(msg.dedup_key()) {
+        if !self.keys.insert(message.dedup_key()) {
             return None;
         }
-        *self.per_author.entry(msg.key()).or_default() += 1;
-        self.messages.push_back(msg);
+        *self.per_author.entry(message.key()).or_default() += 1;
+        self.messages.push_back(message);
         if self.messages.len() <= self.capacity {
             return None;
         }
@@ -159,7 +128,7 @@ impl MessageLog {
     fn eviction_index(&self) -> usize {
         // Ties go to the lowest author key, so the choice is total and identical
         // on every node.
-        let fullest = self
+        let fullest: AuthorKey = self
             .per_author
             .iter()
             .max_by(|(lhs_key, lhs_count), (rhs_key, rhs_count)| {
@@ -167,10 +136,9 @@ impl MessageLog {
             })
             .map(|(author, _)| *author)
             .expect("over-capacity log is non-empty");
-        self.messages
-            .iter()
-            .enumerate()
-            .filter(|(_, msg)| msg.key() == fullest)
+        let indexed = self.messages.iter().enumerate();
+        let candidates = indexed.filter(|(_, message)| message.key() == fullest);
+        candidates
             .min_by(|(_, lhs), (_, rhs)| eviction_key(lhs).cmp(&eviction_key(rhs)))
             .map(|(index, _)| index)
             .expect("the fullest author holds at least one message")
@@ -187,19 +155,19 @@ impl MessageLog {
     /// them can still backfill them. Every node that holds the goodbye does the same, so the
     /// retained set stays a function of the message set.
     pub(crate) fn drop_presence_of(&mut self, author: &AuthorKey) -> Vec<Verified> {
-        let is_departed_presence = |msg: &Verified| {
-            msg.key() == *author
+        let is_departed_presence = |message: &Verified| {
+            message.key() == *author
                 && matches!(
-                    msg.kind,
+                    message.kind,
                     MessageKind::Presence {
                         subtype: PresenceSubtype::Joined | PresenceSubtype::Alive
                     }
                 )
         };
         let mut dropped = Vec::new();
-        self.messages.retain(|msg| {
-            if is_departed_presence(msg) {
-                dropped.push(msg.clone());
+        self.messages.retain(|message| {
+            if is_departed_presence(message) {
+                dropped.push(message.clone());
                 false
             } else {
                 true
@@ -233,20 +201,22 @@ impl MessageLog {
     /// call site, so the `total`-sized allocation is safe.
     pub(crate) fn collect_shards<'a>(
         &'a self,
-        group: &crate::protocol::ShardGroup,
+        group: &protocol::ShardGroup,
         author: &AuthorKey,
         total: u32,
     ) -> Vec<Option<&'a Verified>> {
         let mut slots: Vec<Option<&Verified>> = vec![None; total as usize];
-        for msg in &self.messages {
-            let Some(shard) = &msg.shard else { continue };
+        for message in &self.messages {
+            let Some(shard) = &message.shard else {
+                continue;
+            };
             if shard.group == *group
                 && shard.total == total
-                && msg.key() == *author
-                && let Some(slot) = slots.get_mut(shard.idx as usize)
+                && message.key() == *author
+                && let Some(slot) = slots.get_mut(shard.index as usize)
                 && slot.is_none()
             {
-                *slot = Some(msg);
+                *slot = Some(message);
             }
         }
         slots
@@ -263,7 +233,7 @@ impl MessageLog {
         let mut bounds: Vec<Bound> = self
             .messages
             .iter()
-            .map(|msg| (msg.timestamp, msg.dedup_key()))
+            .map(|message| (message.timestamp, message.dedup_key()))
             .collect();
         bounds.sort_unstable();
         bounds
@@ -390,13 +360,13 @@ impl MessageLog {
         self.messages
             .iter()
             .rev()
-            .filter(|msg| {
-                let key = msg.dedup_key();
-                let bound = (msg.timestamp, key);
+            .filter(|message| {
+                let key = message.dedup_key();
+                let bound = (message.timestamp, key);
                 bound >= range.lo
                     && bound <= range.hi
                     && !have.contains(&key)
-                    && resendable_to(msg, requester)
+                    && resendable_to(message, requester)
             })
             .take(max)
             .cloned()
@@ -418,12 +388,12 @@ impl MessageLog {
 /// afterwards would still consume a slot and truncate the genuinely-missing
 /// tail.
 ///
-/// Note the advertise side ([`MessageLog::window_at`] and friends) deliberately
+/// Note the advertise side (`MessageLog::window_at` and friends) deliberately
 /// does **not** filter: a directed frame the addressee holds must keep
 /// appearing in its digest ids, or the author would see it as perpetually
 /// missing and re-send it every round forever.
-fn resendable_to(msg: &Verified, requester: &Nickname) -> bool {
-    sole_addressee(&msg.kind).is_none_or(|to| to == requester)
+fn resendable_to(message: &Verified, requester: &Nickname) -> bool {
+    sole_addressee(&message.kind).is_none_or(|to| to == requester)
 }
 
 /// Total order deciding which of an author's messages goes first (smallest is
@@ -436,13 +406,17 @@ fn resendable_to(msg: &Verified, requester: &Nickname) -> bool {
 /// Ranks *within* one author, not across them: because a sender picks these
 /// fields, ordering the whole log by them let one peer stamp its way to
 /// permanent residency. [`MessageLog::eviction_index`] picks the author first.
-fn eviction_key(msg: &Verified) -> (UnixSecs, AuthorKey, Option<u64>, &str) {
-    (msg.timestamp, msg.key(), msg.seq, msg.id.as_str())
+fn eviction_key(message: &Verified) -> (UnixSecs, AuthorKey, Option<u64>, &str) {
+    (
+        message.timestamp,
+        message.key(),
+        message.seq,
+        message.id.as_str(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use super::{
@@ -450,6 +424,7 @@ mod tests {
     };
     use crate::protocol::Message;
 
+    use crate::protocol;
     /// A whole-log gap query for `requester` with nothing already held — the
     /// shape every gate test wants.
     fn all_missing_for<'a>(
@@ -465,26 +440,26 @@ mod tests {
         }
     }
 
-    fn msg(id: &str) -> Verified {
+    fn message(id: &str) -> Verified {
         signed(plain(id))
     }
 
     /// One fixed author for the plain fixtures, so that they share a victim pool the way the
     /// unsigned messages of these tests always did. A signature is not what these tests check.
     fn signed(message: Message) -> Verified {
-        Verified::fixture_unchecked(message, AuthorKey::from_bytes([0x11; 32]))
+        Verified::fixture_unchecked(message, AuthorKey::from([0x11; 32]))
     }
 
     fn plain(id: &str) -> Message {
         Message::new_app(
-            &crate::protocol::MeshId::from("test"),
+            &protocol::MeshId::from("test"),
             &Nickname::from("author"),
-            crate::protocol::AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
-                to: None,
-                corr: None,
-                body: crate::protocol::MessageBody::from(id),
-            },
+            protocol::AppFrameParams::new(
+                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                protocol::MessageBody::from(id),
+            ),
         )
     }
 
@@ -542,6 +517,7 @@ mod tests {
     #[test]
     fn a_window_lists_every_message_inside_its_range() {
         // 300 messages in 12 seconds: about 25 per second, scrambled.
+        let _guard = ::habilis_network_test_tracing::init();
         assert_range_matches_ids(&shuffled_log(300, 12));
     }
 
@@ -549,19 +525,31 @@ mod tests {
     fn a_second_with_more_messages_than_a_window_is_still_listed() {
         // The join burst: every message in one second, far past the 70 a window
         // lists.
+        let _guard = ::habilis_network_test_tracing::init();
         assert_range_matches_ids(&shuffled_log(300, 1));
     }
 
     /// The same frame pushed twice is held once, and the digest lists it once.
     #[test]
     fn a_frame_pushed_twice_is_held_once() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(10);
         let frame = msg_at("once", 10);
-        assert!(log.push(frame.clone()).is_none());
-        assert!(log.push(frame.clone()).is_none());
-        assert_eq!(log.len(), 1);
+        assert!(
+            log.push(frame.clone()).is_none(),
+            "the first push of a frame holds it"
+        );
+        assert!(
+            log.push(frame.clone()).is_none(),
+            "the second push of a held frame is not held again"
+        );
+        assert_eq!(log.len(), 1, "the log holds one frame after two pushes");
         let window = log.window_at(0, 1).expect("one message");
-        assert_eq!(window.ids, vec![frame.dedup_key()]);
+        assert_eq!(
+            window.ids,
+            vec![frame.dedup_key()],
+            "the window lists the one held frame"
+        );
     }
 
     /// A key leaves the index with its message: a frame that was evicted can be held again.
@@ -569,13 +557,23 @@ mod tests {
     /// moment the log lets a frame go, or a re-send of an evicted frame is never processed.
     #[test]
     fn contains_follows_eviction() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(2);
-        let first = msg("m1");
-        let second = msg("m2");
-        assert!(log.push(first.clone()).is_none());
-        assert!(log.push(second.clone()).is_none());
-        assert!(log.contains(&first.dedup_key()) && log.contains(&second.dedup_key()));
-        let gone = log.push(msg("m3")).expect("a third frame evicts one");
+        let first = message("m1");
+        let second = message("m2");
+        assert!(
+            log.push(first.clone()).is_none(),
+            "the first frame is pushed into the log"
+        );
+        assert!(
+            log.push(second.clone()).is_none(),
+            "the second frame is pushed into the log"
+        );
+        assert!(
+            log.contains(&first.dedup_key()) && log.contains(&second.dedup_key()),
+            "both frames are contained before eviction"
+        );
+        let gone = log.push(message("m3")).expect("a third frame evicts one");
         assert!(
             !log.contains(&gone.dedup_key()),
             "an evicted frame is still held"
@@ -593,14 +591,18 @@ mod tests {
 
     #[test]
     fn an_evicted_frame_can_be_held_again() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(1);
-        assert!(log.push(msg_at("first", 10)).is_none());
+        assert!(
+            log.push(msg_at("first", 10)).is_none(),
+            "an evicted frame is held again when pushed"
+        );
         let evicted = log.push(msg_at("second", 20)).expect("the log is full");
         assert!(
             log.push(evicted).is_some(),
             "the evicted frame is new again, so the push evicts one of the two"
         );
-        assert_eq!(log.len(), 1);
+        assert_eq!(log.len(), 1, "the log holds one frame after the re-push");
     }
 
     /// A message tagged with an explicit timestamp, for window tests.
@@ -610,7 +612,7 @@ mod tests {
 
     fn plain_at(body: &str, ts: i64) -> Message {
         let mut message = plain(body);
-        message.timestamp = UnixSecs::from_secs(ts);
+        message.timestamp = UnixSecs::from(ts);
         message
     }
 
@@ -621,16 +623,16 @@ mod tests {
 
     fn plain_to(body: &str, ts: i64, to: &str) -> Message {
         let mut message = Message::new_app(
-            &crate::protocol::MeshId::from("test"),
+            &protocol::MeshId::from("test"),
             &Nickname::from("author"),
-            crate::protocol::AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
-                to: Some(Nickname::from(to)),
-                corr: None,
-                body: crate::protocol::MessageBody::from(body),
-            },
+            protocol::AppFrameParams::new(
+                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                Some(Nickname::from(to)),
+                None,
+                protocol::MessageBody::from(body),
+            ),
         );
-        message.timestamp = UnixSecs::from_secs(ts);
+        message.timestamp = UnixSecs::from(ts);
         message
     }
 
@@ -645,20 +647,32 @@ mod tests {
 
     #[test]
     fn window_at_returns_slice_with_ts_bounds() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(10);
         for ts in [10, 20, 30, 40, 50] {
             log.push(msg_at(&ts.to_string(), ts));
         }
         // A middle slice of 2, starting at index 1 (ts=20).
         let window = log.window_at(1, 2).expect("non-empty window");
-        assert_eq!((window.lo.0.as_secs(), window.hi.0.as_secs()), (20, 30));
-        assert_eq!(window.ids.len(), 2);
+        assert_eq!(
+            (window.lo.0.as_secs(), window.hi.0.as_secs()),
+            (20, 30),
+            "the window bounds are the slice's first and last timestamps"
+        );
+        assert_eq!(window.ids.len(), 2, "the window holds two frames");
         // A max wider than the log starting at 0 covers everything.
         let full = log.window_at(0, 100).expect("non-empty window");
-        assert_eq!((full.lo.0.as_secs(), full.hi.0.as_secs()), (10, 50));
-        assert_eq!(full.ids.len(), 5);
+        assert_eq!(
+            (full.lo.0.as_secs(), full.hi.0.as_secs()),
+            (10, 50),
+            "the full window bounds run from the first to the last timestamp"
+        );
+        assert_eq!(full.ids.len(), 5, "the full window holds five frames");
         // Past the end ⇒ None.
-        assert!(log.window_at(5, 2).is_none());
+        assert!(
+            log.window_at(5, 2).is_none(),
+            "no window is returned for an empty range"
+        );
     }
 
     /// The log keeps arrival order, and gossip does not deliver in timestamp
@@ -671,6 +685,7 @@ mod tests {
         // One copy of each frame, so both logs share ids. The holder has all
         // four; at the advertiser a late-stamped frame arrived first, then
         // the older ones, and the one at ts=20 never arrived at all.
+        let _guard = ::habilis_network_test_tracing::init();
         let frames: Vec<Verified> = [10, 20, 30, 50]
             .into_iter()
             .map(|ts| msg_at(&ts.to_string(), ts))
@@ -684,7 +699,11 @@ mod tests {
             advertiser.push(frames[index].clone());
         }
         let window = advertiser.window_at(0, 10).expect("non-empty window");
-        assert_eq!((window.lo.0.as_secs(), window.hi.0.as_secs()), (10, 50));
+        assert_eq!(
+            (window.lo.0.as_secs(), window.hi.0.as_secs()),
+            (10, 50),
+            "the window bounds are the extent of the slice"
+        );
 
         // The holder answers that window with the gap.
         let have: HashSet<DedupKey> = window.ids.into_iter().collect();
@@ -697,8 +716,12 @@ mod tests {
             max: 10,
             requester: &nick(ANYONE),
         });
-        let bodies: Vec<&str> = gap.iter().map(|msg| msg.body.as_str()).collect();
-        assert_eq!(bodies, ["20"]);
+        let bodies: Vec<&str> = gap.iter().map(|message| message.body.as_str()).collect();
+        assert_eq!(
+            bodies,
+            ["20"],
+            "only the frame inside the slice is in the window"
+        );
     }
 
     #[test]
@@ -706,6 +729,7 @@ mod tests {
         // Sweeping the rolling cursor in `max`-sized steps must advertise
         // every id at least once over a full cycle — so a peer behind by
         // more than one window's worth still recovers across rounds.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(50);
         for index in 0..50 {
             log.push(msg_at(&format!("m{index}"), 100 + index));
@@ -726,6 +750,7 @@ mod tests {
 
     #[test]
     fn missing_in_window_excludes_out_of_window_and_have() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(10);
         for ts in [10, 20, 30, 40, 50] {
             log.push(msg_at(&ts.to_string(), ts));
@@ -738,26 +763,31 @@ mod tests {
             .into_iter()
             .collect();
         let gap = log.missing_in_window(MissingQuery {
-            range: super::seconds(UnixSecs::from_secs(20), UnixSecs::from_secs(40)),
+            range: super::seconds(UnixSecs::from(20), UnixSecs::from(40)),
             have: &have,
             max: 10,
             requester: &nick(ANYONE),
         });
-        let bodies: HashSet<&str> = gap.iter().map(|msg| msg.body.as_str()).collect();
+        let bodies: HashSet<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         // ts 20 and 40 are in-window and missing; 30 is in `have`; 10 and 50
         // are out of window — never re-sent.
-        assert_eq!(bodies, HashSet::from(["20", "40"]));
+        assert_eq!(
+            bodies,
+            HashSet::from(["20", "40"]),
+            "missing_in_window leaves out frames outside the window and the have set"
+        );
     }
 
     // ── the addressee gate ─────────────────────────────────────────
 
     #[test]
     fn directed_frame_is_never_offered_to_a_third_party() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(10);
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob"));
         let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 10, &nick("carol")));
-        let bodies: HashSet<&str> = gap.iter().map(|msg| msg.body.as_str()).collect();
+        let bodies: HashSet<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         assert_eq!(
             bodies,
             HashSet::from(["public"]),
@@ -770,12 +800,17 @@ mod tests {
         // The recovery property the gate must preserve: a small multipart body
         // has no repair path other than anti-entropy (see `repair_tickets`), so
         // dropping the addressee's own backfill would lose the message whole.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(10);
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob"));
         let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 10, &nick("bob")));
-        let bodies: HashSet<&str> = gap.iter().map(|msg| msg.body.as_str()).collect();
-        assert_eq!(bodies, HashSet::from(["public", "private"]));
+        let bodies: HashSet<&str> = gap.iter().map(|message| message.body.as_str()).collect();
+        assert_eq!(
+            bodies,
+            HashSet::from(["public", "private"]),
+            "a directed frame is offered to its own addressee"
+        );
     }
 
     #[test]
@@ -784,11 +819,12 @@ mod tests {
         // iteration is newest-first and `max` is a shared budget, so a directed
         // frame filtered *after* the take would spend the only slot and starve
         // the broadcast the requester actually needs.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(10);
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob")); // newest → seen first
         let gap = log.missing_in_window(all_missing_for(&HashSet::new(), 1, &nick("carol")));
-        let bodies: Vec<&str> = gap.iter().map(|msg| msg.body.as_str()).collect();
+        let bodies: Vec<&str> = gap.iter().map(|message| message.body.as_str()).collect();
         assert_eq!(bodies, vec!["public"], "the budget went to a usable frame");
     }
 
@@ -798,11 +834,20 @@ mod tests {
         // side ever filtered too, the addressee would stop listing a directed
         // frame it holds, the author would read that as a permanent gap, and
         // every round would re-send it forever.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(10);
         log.push(msg_at("public", 10));
         log.push(msg_to("private", 20, "bob"));
-        assert_eq!(log.window_at(0, 10).expect("non-empty").ids.len(), 2);
-        assert_eq!(log.recent_window(10).expect("non-empty").ids.len(), 2);
+        assert_eq!(
+            log.window_at(0, 10).expect("non-empty").ids.len(),
+            2,
+            "the window at zero still advertises the directed ids"
+        );
+        assert_eq!(
+            log.recent_window(10).expect("non-empty").ids.len(),
+            2,
+            "the recent window still advertises the directed ids"
+        );
     }
 
     #[test]
@@ -811,6 +856,7 @@ mod tests {
         // older messages advertises an open-ended newest window, and a
         // holder must offer everything *newer* it lacks. A closed `hi` at
         // the requester's own newest would miss exactly those.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut requester = MessageLog::new(100);
         let mut holder = MessageLog::new(100);
         let mut newer: HashSet<String> = HashSet::new();
@@ -830,19 +876,19 @@ mod tests {
             "newest window must be open-ended"
         );
         let have: HashSet<DedupKey> = window.ids.into_iter().collect();
-        let offered: HashSet<String> = holder
-            .missing_in_window(MissingQuery {
-                range: WindowRange {
-                    lo: window.lo,
-                    hi: window.hi,
-                },
-                have: &have,
-                max: 100,
-                requester: &nick(ANYONE),
-            })
-            .iter()
-            .map(|msg| msg.body.as_str().to_string())
-            .collect();
+        let missing = holder.missing_in_window(MissingQuery {
+            range: WindowRange {
+                lo: window.lo,
+                hi: window.hi,
+            },
+            have: &have,
+            max: 100,
+            requester: &nick(ANYONE),
+        });
+        let mut offered: HashSet<String> = HashSet::new();
+        for message in &missing {
+            offered.insert(message.body.as_str().to_string());
+        }
         assert_eq!(offered, newer, "holder offers exactly the newer messages");
     }
 
@@ -858,24 +904,29 @@ mod tests {
     /// design.
     #[test]
     fn a_far_future_stamp_does_not_make_a_message_unevictable() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(4);
         for index in 0..4 {
             let flood = Verified::fixture_unchecked(
                 plain_at(&format!("flood{index}"), i64::MAX),
-                AuthorKey::from_bytes([0xff; 32]),
+                AuthorKey::from([0xff; 32]),
             );
             log.push(flood);
         }
         let honest = Verified::fixture_unchecked(
             plain_at("honest", 1_700_000_000),
-            AuthorKey::from_bytes([0xaa; 32]),
+            AuthorKey::from([0xaa; 32]),
         );
         let evicted = log.push(honest);
         assert!(
-            evicted.is_some_and(|msg| msg.body.as_str() != "honest"),
+            evicted.is_some_and(|message| message.body.as_str() != "honest"),
             "an honest message must not be evicted the moment it arrives"
         );
-        let bodies: HashSet<&str> = log.messages.iter().map(|msg| msg.body.as_str()).collect();
+        let bodies: HashSet<&str> = log
+            .messages
+            .iter()
+            .map(|message| message.body.as_str())
+            .collect();
         assert!(bodies.contains("honest"), "the honest message must survive");
     }
 
@@ -886,6 +937,7 @@ mod tests {
     fn the_author_counts_match_a_fresh_recount_after_churn() {
         use std::collections::HashMap;
 
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(8);
         // Three authors at different rates, well past capacity, so eviction
         // fires repeatedly and each author is both added and dropped.
@@ -893,7 +945,7 @@ mod tests {
             let author = ["aa", "bb", "cc"][usize::try_from(step).expect("fits") % 3];
             let message = Verified::fixture_unchecked(
                 plain_at(&format!("{author}-{step}"), 1_700_000_000 + step),
-                AuthorKey::from_hex(&author.repeat(32)).expect("hex"),
+                AuthorKey::decode_hex(&author.repeat(32)).expect("hex"),
             );
             log.push(message);
 
@@ -905,7 +957,10 @@ mod tests {
         }
         // A dropped author leaves no zero entry behind, or it would win the
         // lowest-author-key tie-break while holding nothing.
-        assert!(log.per_author.values().all(|count| *count > 0));
+        assert!(
+            log.per_author.values().all(|count| *count > 0),
+            "every author count is positive after churn"
+        );
     }
 
     /// **Retention must not depend on arrival order**, across authors too.
@@ -916,20 +971,22 @@ mod tests {
     /// so any change to how the victim is chosen has to preserve it.
     #[test]
     fn retention_is_the_same_whatever_order_messages_arrive_in() {
+        let _guard = ::habilis_network_test_tracing::init();
         let authors = ["aa", "bb", "cc"];
         let build = || {
             let mut batch = Vec::new();
-            for (index, author) in authors.iter().enumerate() {
+            let indexed_authors: Vec<(usize, &&str)> = authors.iter().enumerate().collect();
+            for (index, author) in indexed_authors {
                 for step in 0..4i64 {
                     let mut message = plain_at(&format!("{author}-{step}"), 1_700_000_000 + step);
                     // One author also stamps far ahead, the shape that used to
                     // buy immunity.
                     if index == 0 {
-                        message.timestamp = UnixSecs::from_secs(i64::MAX - step);
+                        message.timestamp = UnixSecs::from(i64::MAX - step);
                     }
                     batch.push(Verified::fixture_unchecked(
                         message,
-                        AuthorKey::from_hex(&author.repeat(32)).expect("hex"),
+                        AuthorKey::decode_hex(&author.repeat(32)).expect("hex"),
                     ));
                 }
             }
@@ -941,15 +998,17 @@ mod tests {
             forward.push(message);
         }
         let mut backward = MessageLog::new(6);
-        for message in build().into_iter().rev() {
+        let mut reversed: Vec<Verified> = build();
+        reversed.reverse();
+        for message in reversed {
             backward.push(message);
         }
 
         let kept = |log: &MessageLog| -> HashSet<String> {
-            log.messages
-                .iter()
-                .map(|msg| msg.body.as_str().to_owned())
-                .collect()
+            let messages = &log.messages;
+            let to_body = |message: &Verified| message.body.as_str().to_owned();
+            let bodies = messages.iter().map(to_body);
+            bodies.collect()
         };
         assert_eq!(
             kept(&forward),
@@ -963,12 +1022,21 @@ mod tests {
         // Eviction drops the smallest eviction key (here: oldest timestamp),
         // not the front, so retention is independent of push order. Push the
         // newest first to prove arrival order doesn't decide who survives.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut log = MessageLog::new(2);
         log.push(msg_at("c", 30));
         log.push(msg_at("a", 10));
         log.push(msg_at("b", 20)); // over cap → evicts "a" (ts=10), the oldest
-        assert_eq!(log.messages.len(), 2);
-        let bodies: HashSet<&str> = log.messages.iter().map(|msg| msg.body.as_str()).collect();
+        assert_eq!(
+            log.messages.len(),
+            2,
+            "the log keeps the two highest keys when full"
+        );
+        let bodies: HashSet<&str> = log
+            .messages
+            .iter()
+            .map(|message| message.body.as_str())
+            .collect();
         assert_eq!(
             bodies,
             HashSet::from(["b", "c"]),
@@ -977,24 +1045,25 @@ mod tests {
     }
 
     mod prop {
-        use habilis_network_test_tracing::test;
         use proptest::{prop_assert, proptest};
 
-        use super::{MessageLog, msg};
+        use super::{MessageLog, message};
 
+        use crate::proptest_support;
         proptest! {
-            #![proptest_config(crate::proptest_support::config())]
+            #![proptest_config(proptest_support::config())]
             #[test]
             fn prop_message_log_never_exceeds_capacity(
                 cap in 1..50usize,
                 n_pushes in 0..200usize,
             ) {
+                let _guard = ::habilis_network_test_tracing::init();
                 let mut log = MessageLog::new(cap);
-                for i in 0..n_pushes {
-                    log.push(msg(&format!("m{i}")));
+                for pushed in 0..n_pushes {
+                    log.push(message(&format!("m{pushed}")));
                 }
                 prop_assert!(log.messages.len() <= cap);
-            }
+                        }
         }
     }
 }

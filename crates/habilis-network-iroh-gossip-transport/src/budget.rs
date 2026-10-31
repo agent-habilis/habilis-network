@@ -5,13 +5,14 @@
 //! budget. A frame over the budget is dropped, and QUIC retransmits it.
 
 use n0_future::time::Instant;
+use num_traits::ToPrimitive;
 
 /// The first value of the budget, to be replaced by what the Phase 3 gossip cells
 /// measure.
 pub const DEFAULT_BUDGET_BYTES_PER_SEC: u64 = 1 << 20;
 
 /// A token bucket: `rate` bytes per second, and a burst of one second.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Budget {
     rate: u64,
     tokens: f64,
@@ -42,24 +43,25 @@ impl Budget {
 }
 
 /// A byte count as a float. A budget is bytes per second, far below 2^52.
-#[expect(clippy::cast_precision_loss, reason = "a byte budget is below 2^52")]
 fn float(count: u64) -> f64 {
-    count as f64
+    count.to_f64().unwrap_or(f64::NAN)
 }
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
-    use super::*;
-
+    use super::{Budget, Instant};
     #[test]
     fn a_budget_admits_one_second_of_burst_and_then_refuses() {
+        let _guard = ::habilis_network_test_tracing::init();
         let t0 = Instant::now();
         let mut budget = Budget::new(1000, t0);
 
-        assert!(budget.take(t0, 600));
+        assert!(
+            budget.take(t0, 600),
+            "a budget admits one second of burst and then refuses"
+        );
         assert!(!budget.take(t0, 600), "600 more is over the burst");
         assert!(budget.take(t0, 400), "the rest of the burst");
         assert!(!budget.take(t0, 1), "nothing is left");
@@ -67,13 +69,20 @@ mod tests {
 
     #[test]
     fn a_budget_refills_with_time_up_to_the_burst_and_no_more() {
+        let _guard = ::habilis_network_test_tracing::init();
         let t0 = Instant::now();
         let mut budget = Budget::new(1000, t0);
-        assert!(budget.take(t0, 1000));
+        assert!(
+            budget.take(t0, 1000),
+            "a budget takes a full burst after refilling"
+        );
 
         let half = t0 + Duration::from_millis(500);
         assert!(budget.take(half, 500), "half a second refilled 500");
-        assert!(!budget.take(half, 1));
+        assert!(
+            !budget.take(half, 1),
+            "a budget refuses a second take before it refills"
+        );
 
         let long = half + Duration::from_secs(10);
         assert!(budget.take(long, 1000), "refilled to the burst");
@@ -84,6 +93,7 @@ mod tests {
     /// and the budget does not starve: it passes close to that much.
     #[test]
     fn under_overload_a_budget_passes_the_rate_and_no_more() {
+        let _guard = ::habilis_network_test_tracing::init();
         let t0 = Instant::now();
         let mut budget = Budget::new(1000, t0);
         let mut admitted = 0u64;

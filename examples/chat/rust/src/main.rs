@@ -15,19 +15,24 @@
 
 use anyhow::{Context as _, Result, bail};
 use habilis_network::membership::{
-    Inbound, Membership, Opts, Request, depart, join, json_sink, msg_body, parse_to,
+    Inbound, Inspect, JoinOptions, Membership, Messaging, Request, depart, join, json_sink,
+    msg_body, parse_to,
 };
 use tokio::sync::oneshot;
 
+use std::{env, io, thread};
+
+use tokio::sync::mpsc;
+
 struct Args {
-    opts: Opts,
+    opts: JoinOptions,
     robot: bool,
 }
 
 fn parse_args() -> Result<Args> {
-    let mut opts = Opts::default();
+    let mut opts = JoinOptions::default();
     let mut robot = false;
-    let mut args = std::env::args().skip(1);
+    let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().with_context(|| format!("{name} needs a value"));
         match arg.as_str() {
@@ -61,7 +66,7 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "habilis_network=warn".into()),
         )
-        .with_writer(std::io::stderr)
+        .with_writer(io::stderr)
         .init();
 
     let args = parse_args()?;
@@ -70,10 +75,10 @@ async fn main() -> Result<()> {
 
     // Stdin on its own thread: the engine owns no stdio, and tokio's own stdin
     // wants the `io-std` feature this crate deliberately leaves off.
-    let (lines_tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
-    std::thread::spawn(move || {
+    let (lines_tx, mut lines) = mpsc::unbounded_channel::<String>();
+    thread::spawn(move || {
         use std::io::BufRead as _;
-        for line in std::io::stdin().lock().lines() {
+        for line in io::stdin().lock().lines() {
             let Ok(line) = line else { break };
             if lines_tx.send(line).is_err() {
                 break;
@@ -99,7 +104,7 @@ async fn main() -> Result<()> {
             }
         }
     }
-    depart(membership.node).await
+    depart(membership.node).await.map_err(anyhow::Error::from)
 }
 
 /// One line of input. `false` ends the chat.
@@ -111,7 +116,10 @@ async fn handle_line(membership: &Membership, line: &str, robot: bool) -> Result
         return Ok(false);
     }
     if line == "/peers" {
-        let roster = request(membership, |reply| Request::Peers { reply }).await?;
+        let roster = request(membership, |reply| {
+            Request::Inspect(Inspect::Peers { reply })
+        })
+        .await?;
         println!("{roster}");
         return Ok(true);
     }
@@ -132,7 +140,10 @@ async fn handle_line(membership: &Membership, line: &str, robot: bool) -> Result
             return Ok(true);
         }
     };
-    let sent = request(membership, |reply| Request::Send { to, body, reply }).await?;
+    let sent = request(membership, |reply| {
+        Request::Messaging(Messaging::Send { to, body, reply })
+    })
+    .await?;
     if let Err(refusal) = sent {
         report_error(robot, &format!("send failed: {refusal}"));
     }

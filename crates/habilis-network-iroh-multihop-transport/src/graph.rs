@@ -6,11 +6,11 @@
 //! source routing (each hop only knows its neighbours; only the initiator can
 //! reason about a whole path).
 
-use std::cmp::Ordering;
+use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use crate::metric::LinkMetric;
-use crate::role::AppId;
+use crate::app_id::AppId;
+use crate::link_metric::LinkMetric;
 
 /// A directed, metric-weighted view of the link-state graph: for each node, its
 /// outbound links `(neighbour, cost)`. Nodes are keyed by their stable `AppId`.
@@ -23,7 +23,20 @@ pub(crate) struct Graph {
 ///
 /// One struct for the pair, because both are an `AppId` and a call that swaps
 /// them compiles and routes the wrong way.
+///
+/// # Examples
+///
+/// A Leg is built by the routing code, and a caller outside the crate cannot build one, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_iroh_multihop_transport::{Leg, Topology};
+///
+/// # fn demo(topology: &Topology, leg: Leg) -> usize {
+/// topology.route_to(leg, 2).count()
+/// # }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Leg {
     /// Where the route starts.
     pub src: AppId,
@@ -78,7 +91,8 @@ impl Graph {
                 break;
             };
             // Interior hops = every hop except the final destination.
-            let interior: Vec<AppId> = path.hops.iter().rev().skip(1).copied().collect();
+            let trimmed = path.hops.iter().rev().skip(1);
+            let interior: Vec<AppId> = trimmed.copied().collect();
             let exhausted = interior.is_empty();
             blocked.extend(interior);
             paths.push(path);
@@ -120,19 +134,16 @@ impl Graph {
     ) -> Option<Path> {
         let Leg { src, dst } = leg;
         let mut best: HashMap<AppId, LinkMetric> = HashMap::new();
-        let mut prev: HashMap<AppId, AppId> = HashMap::new();
-        let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
+        let mut previous: HashMap<AppId, AppId> = HashMap::new();
+        let mut heap: BinaryHeap<Reverse<(LinkMetric, AppId)>> = BinaryHeap::new();
 
         best.insert(src, LinkMetric::ZERO);
-        heap.push(HeapEntry {
-            cost: LinkMetric::ZERO,
-            node: src,
-        });
+        heap.push(Reverse((LinkMetric::ZERO, src)));
 
-        while let Some(HeapEntry { cost, node }) = heap.pop() {
+        while let Some(Reverse((cost, node))) = heap.pop() {
             if node == dst {
                 return Some(Path {
-                    hops: reconstruct(&prev, leg),
+                    hops: reconstruct(&previous, leg),
                     cost,
                 });
             }
@@ -140,7 +151,10 @@ impl Graph {
             if best.get(&node).is_some_and(|known| *known < cost) {
                 continue;
             }
-            for (next, edge) in self.adj.get(&node).into_iter().flatten() {
+            let Some(edges) = self.adj.get(&node) else {
+                continue;
+            };
+            for (next, edge) in edges {
                 if node == src && refused_first.contains(next) {
                     continue;
                 }
@@ -152,7 +166,7 @@ impl Graph {
                     dst,
                     blocked,
                 };
-                relax(&mut best, &mut prev, &mut heap, candidate);
+                relax(&mut best, &mut previous, &mut heap, candidate);
             }
         }
         None
@@ -163,13 +177,13 @@ impl Graph {
 /// `weight` atop the already-settled `cost` to `node`, gated by `dst` (never
 /// itself blocked) and the `blocked` set.
 #[derive(Clone, Copy)]
-struct RelaxEdge<'a> {
+struct RelaxEdge<'blocked> {
     node: AppId,
     cost: LinkMetric,
     next: AppId,
     weight: LinkMetric,
     dst: AppId,
-    blocked: &'a HashSet<AppId>,
+    blocked: &'blocked HashSet<AppId>,
 }
 
 /// Relax `candidate`: skip it when `next` is blocked (unless it's `dst` itself),
@@ -177,8 +191,8 @@ struct RelaxEdge<'a> {
 /// known cost to `next`.
 fn relax(
     best: &mut HashMap<AppId, LinkMetric>,
-    prev: &mut HashMap<AppId, AppId>,
-    heap: &mut BinaryHeap<HeapEntry>,
+    previous: &mut HashMap<AppId, AppId>,
+    heap: &mut BinaryHeap<Reverse<(LinkMetric, AppId)>>,
     candidate: RelaxEdge<'_>,
 ) {
     let RelaxEdge {
@@ -201,20 +215,17 @@ fn relax(
         return;
     }
     best.insert(next, next_cost);
-    prev.insert(next, node);
-    heap.push(HeapEntry {
-        cost: next_cost,
-        node: next,
-    });
+    previous.insert(next, node);
+    heap.push(Reverse((next_cost, next)));
 }
 
 /// Walk `prev` from `dst` back to `src`, returning the hops after `src` in
 /// forward order (`[first_hop, …, dst]`).
-fn reconstruct(prev: &HashMap<AppId, AppId>, leg: Leg) -> Vec<AppId> {
+fn reconstruct(previous: &HashMap<AppId, AppId>, leg: Leg) -> Vec<AppId> {
     let Leg { src, dst } = leg;
     let mut hops = vec![dst];
     let mut cur = dst;
-    while let Some(&parent) = prev.get(&cur) {
+    while let Some(&parent) = previous.get(&cur) {
         if parent == src {
             break;
         }
@@ -225,44 +236,15 @@ fn reconstruct(prev: &HashMap<AppId, AppId>, leg: Leg) -> Vec<AppId> {
     hops
 }
 
-/// A min-heap entry ordered by cost only, so the graph never needs `Ord` on
-/// `AppId`. The `Ord` impl is reversed so `BinaryHeap` (a max-heap) yields
-/// the lowest-cost node first.
-struct HeapEntry {
-    cost: LinkMetric,
-    node: AppId,
-}
-
-impl PartialEq for HeapEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.cost == other.cost
-    }
-}
-
-impl Eq for HeapEntry {}
-
-impl Ord for HeapEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Reversed: the smallest cost is the greatest heap element.
-        other.cost.cmp(&self.cost)
-    }
-}
-
-impl PartialOrd for HeapEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use iroh::SecretKey;
 
-    use crate::role::AppId;
+    use crate::app_id::AppId;
 
     use super::{Graph, Leg, Link, LinkMetric};
 
+    use std::iter;
     fn eid(seed: u8) -> AppId {
         AppId::new(SecretKey::from_bytes(&[seed; 32]).public())
     }
@@ -284,6 +266,7 @@ mod tests {
 
     #[test]
     fn a_link_from_the_source_to_a_refused_node_is_skipped_also_when_it_is_the_destination() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (src, via, dst) = (eid(1), eid(2), eid(3));
         let mut graph = Graph::default();
         link(&mut graph, src, dst, 1);
@@ -292,7 +275,11 @@ mod tests {
         let refusing = |nodes: &[AppId]| nodes.iter().copied().collect();
 
         let path = |refused| graph.shortest_path_avoiding_first_hops(Leg { src, dst }, &refused);
-        assert_eq!(path(refusing(&[])).expect("direct").hops, vec![dst]);
+        assert_eq!(
+            path(refusing(&[])).expect("direct").hops,
+            vec![dst],
+            "a link to a refused node is skipped even when it is the destination"
+        );
         assert_eq!(
             path(refusing(&[dst])).expect("through via").hops,
             vec![via, dst],
@@ -312,6 +299,7 @@ mod tests {
 
     #[test]
     fn a_refused_first_hop_is_still_a_hop_in_the_middle_of_a_route() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Only the links from the source are refused: `via` can carry the route
         // on from a later node, since the rule reads the first hop alone.
         let (src, near, via, dst) = (eid(1), eid(2), eid(3), eid(4));
@@ -320,15 +308,20 @@ mod tests {
         link(&mut graph, near, via, 1);
         link(&mut graph, via, dst, 1);
         link(&mut graph, src, via, 5);
-        let refused = std::iter::once(via).collect();
+        let refused = iter::once(via).collect();
         let path = graph
             .shortest_path_avoiding_first_hops(Leg { src, dst }, &refused)
             .expect("a route");
-        assert_eq!(path.hops, vec![near, via, dst]);
+        assert_eq!(
+            path.hops,
+            vec![near, via, dst],
+            "a refused first hop is still a hop in the middle of a route"
+        );
     }
 
     #[test]
     fn shortest_path_traces_a_line() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc) = (eid(1), eid(2), eid(3));
         let mut graph = Graph::default();
         link(&mut graph, na, nb, 5);
@@ -336,12 +329,17 @@ mod tests {
         let path = graph
             .shortest_path(Leg { src: na, dst: nc })
             .expect("reachable");
-        assert_eq!(path.hops, vec![nb, nc]);
-        assert_eq!(path.cost, LinkMetric::new(12));
+        assert_eq!(
+            path.hops,
+            vec![nb, nc],
+            "shortest path traces a line of two hops"
+        );
+        assert_eq!(path.cost, LinkMetric::new(12), "the line costs twelve");
     }
 
     #[test]
     fn shortest_path_prefers_a_cheaper_direct_over_the_chain() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc, nd) = (eid(1), eid(2), eid(3), eid(4));
         let mut graph = Graph::default();
         link(&mut graph, na, nb, 1);
@@ -351,12 +349,21 @@ mod tests {
         let path = graph
             .shortest_path(Leg { src: na, dst: nd })
             .expect("reachable");
-        assert_eq!(path.hops, vec![nd]);
-        assert_eq!(path.cost, LinkMetric::new(1));
+        assert_eq!(
+            path.hops,
+            vec![nd],
+            "shortest path prefers the cheaper direct hop"
+        );
+        assert_eq!(
+            path.cost,
+            LinkMetric::new(1),
+            "the cheap direct hop costs one"
+        );
     }
 
     #[test]
     fn shortest_path_prefers_the_chain_when_the_direct_link_is_costlier() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc, nd) = (eid(1), eid(2), eid(3), eid(4));
         let mut graph = Graph::default();
         link(&mut graph, na, nb, 1);
@@ -366,12 +373,21 @@ mod tests {
         let path = graph
             .shortest_path(Leg { src: na, dst: nd })
             .expect("reachable");
-        assert_eq!(path.hops, vec![nb, nc, nd]);
-        assert_eq!(path.cost, LinkMetric::new(3));
+        assert_eq!(
+            path.hops,
+            vec![nb, nc, nd],
+            "shortest path prefers the chain when the direct link costs more"
+        );
+        assert_eq!(
+            path.cost,
+            LinkMetric::new(3),
+            "the chain costs its link sum"
+        );
     }
 
     #[test]
     fn unreachable_destination_is_none() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, lonely) = (eid(1), eid(2), eid(9));
         let mut graph = Graph::default();
         link(&mut graph, na, nb, 1);
@@ -381,12 +397,14 @@ mod tests {
                     src: na,
                     dst: lonely
                 })
-                .is_none()
+                .is_none(),
+            "an unreachable destination has no path"
         );
     }
 
     #[test]
     fn infinite_links_are_dropped() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb) = (eid(1), eid(2));
         let mut graph = Graph::default();
         graph.insert_link(Link {
@@ -394,11 +412,15 @@ mod tests {
             to: nb,
             cost: LinkMetric::INFINITE,
         });
-        assert!(graph.shortest_path(Leg { src: na, dst: nb }).is_none());
+        assert!(
+            graph.shortest_path(Leg { src: na, dst: nb }).is_none(),
+            "infinite links are dropped from the path search"
+        );
     }
 
     #[test]
     fn disjoint_paths_are_node_disjoint() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Diamond: na -> {nb, nc} -> nd. Two interior-disjoint paths exist.
         let (na, nb, nc, nd) = (eid(1), eid(2), eid(3), eid(4));
         let mut graph = Graph::default();
@@ -408,14 +430,25 @@ mod tests {
         link(&mut graph, nc, nd, 1);
         let paths = graph.disjoint_paths(Leg { src: na, dst: nd }, 2);
         assert_eq!(paths.len(), 2, "both diamond arms are available");
-        assert_ne!(paths[0].hops[0], paths[1].hops[0]);
+        assert_ne!(
+            paths[0].hops[0], paths[1].hops[0],
+            "disjoint paths are node-disjoint at their first hop"
+        );
         for path in &paths {
-            assert_eq!(*path.hops.last().unwrap(), nd);
+            assert_eq!(
+                *path
+                    .hops
+                    .last()
+                    .expect("a path built by disjoint_paths has at least one hop"),
+                nd,
+                "each disjoint path ends at the destination"
+            );
         }
     }
 
     #[test]
     fn disjoint_paths_stops_when_no_alternative_exists() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nr, nd) = (eid(1), eid(5), eid(4));
         let mut graph = Graph::default();
         link(&mut graph, na, nr, 1);
@@ -426,6 +459,10 @@ mod tests {
             1,
             "the lone hop can't be reused for a 2nd path"
         );
-        assert_eq!(paths[0].hops, vec![nr, nd]);
+        assert_eq!(
+            paths[0].hops,
+            vec![nr, nd],
+            "disjoint paths stop when no alternative exists"
+        );
     }
 }

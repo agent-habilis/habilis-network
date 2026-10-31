@@ -13,6 +13,7 @@ use xshell::{Shell, cmd};
 use crate::TaskOutcome;
 use crate::util::{metadata, output, repo_root};
 
+use std::{fs, path};
 /// Relative to the target directory, which cargo owns.
 const ARCHIVE: &str = "release/libhabilis_network_ffi.a";
 const HEADER: &str = "crates/habilis-network-ffi/include/habilis_network.h";
@@ -28,7 +29,7 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
         return Err(format!("{} was not produced", archive.display()).into());
     }
 
-    let declared = declared(&std::fs::read_to_string(repo_root().join(HEADER))?);
+    let declared = declared(&fs::read_to_string(repo_root().join(HEADER))?);
     let (reader, flags) = symbol_reader(sh);
     // Non-zero status and a warning for every archive member with no symbols,
     // and a rust staticlib has plenty. The symbols it did print are still the
@@ -99,7 +100,7 @@ fn bundled_nm(sh: &Shell) -> Option<String> {
         .read()
         .ok()?;
     let triple = host_triple(sh)?;
-    let path = std::path::Path::new(sysroot.trim())
+    let path = path::Path::new(sysroot.trim())
         .join("lib/rustlib")
         .join(triple)
         .join("bin/llvm-nm");

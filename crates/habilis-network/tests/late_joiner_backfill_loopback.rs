@@ -8,19 +8,22 @@
 
 #![cfg(feature = "host")]
 
-use habilis_network::protocol::message::Authored;
+use habilis_network::protocol::messages::Authored;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
-use habilis_network::net::TransportOpts;
 use habilis_network::ops::{StateMergeParams, broadcast_state_merge};
 use habilis_network::protocol::{Channel, LookupOpts, MessageKind, Nickname, PresenceSubtype};
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::{Notify, oneshot};
 
+use habilis_network::runtime::tuning;
+use tokio::time::{self, Instant};
 /// The agent-gossip late-joiner test's log size: two and a half answers.
 const WRITES: usize = 160;
 /// Changes one digest answer carries (the default `ANTIENTROPY_MAX_RESEND`).
@@ -40,13 +43,7 @@ struct Store;
 #[habilis_network::async_trait]
 impl NodeApp for Store {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: false,
-            beat: true,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::BEAT.union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -67,31 +64,23 @@ impl NodeDriver for Store {
 
     async fn handle_session(
         &mut self,
-        req: Self::Session,
+        request: Self::Session,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
-        match req {
+        match request {
             Request::Write(merge, done) => {
                 broadcast_state_merge(
                     state,
-                    StateMergeParams {
-                        mesh: ctx.mesh,
-                        author: ctx.author,
-                        merge,
-                        sender: ctx.sender,
-                        sink: ctx.sink,
-                        channel: Channel::State,
-                        surface: false,
-                    },
+                    StateMergeParams::new(context.into(), Channel::State, merge).surface(false),
                 )
                 .await
                 .expect("a small merge is accepted");
                 let _ = done.send(());
                 true
             }
-            Request::Read(resp) => {
-                let _ = resp.send(state.doc(Channel::State).to_json());
+            Request::Read(response) => {
+                let _ = response.send(state.doc(Channel::State).to_json());
                 false
             }
         }
@@ -107,15 +96,15 @@ struct Joined {
 
 impl NodeSink for Joined {
     fn emit(&self, event: NodeEvent) {
-        if let NodeEvent::Presence { msg, .. } = event
+        if let NodeEvent::Presence { message, .. } = event
             && let MessageKind::Presence {
                 subtype: PresenceSubtype::Joined,
-            } = msg.kind
+            } = message.kind
         {
             self.peers
                 .lock()
                 .expect("no poison")
-                .push(msg.author.clone());
+                .push(message.author.clone());
             self.changed.notify_waiters();
         }
     }
@@ -133,7 +122,7 @@ impl Joined {
                 changed.await;
             }
         };
-        tokio::time::timeout(deadline, wait).await.is_ok() || seen()
+        time::timeout(deadline, wait).await.is_ok() || seen()
     }
 }
 
@@ -141,17 +130,16 @@ impl Joined {
 /// a slow join cannot let a tick pass it instead. Per process, and every test
 /// here wants the same value.
 fn pin_antientropy_tick() {
-    habilis_network::runtime::tuning::init(habilis_network::runtime::tuning::Tuning {
-        antientropy_interval: Duration::from_hours(1),
-        ..habilis_network::runtime::tuning::Tuning::DEFAULTS
-    });
+    tuning::init(tuning::Tuning::DEFAULTS.antientropy_interval(Duration::from_hours(1)));
 }
 
 fn nick(name: &str) -> Nickname {
-    Nickname::new(name).expect("valid nickname")
+    Nickname::try_new(name).expect("valid nickname")
 }
 
+// each member's sink is shared with the node that writes to it, and the test reads it
 async fn spawn(topic: &str, name: &str) -> (Node<Store>, Arc<Joined>) {
+    // each member's sink is shared with the node that writes to it, and the test reads it
     let sink = Arc::new(Joined::default());
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
@@ -160,24 +148,14 @@ async fn spawn(topic: &str, name: &str) -> (Node<Store>, Arc<Joined>) {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author: nick(name),
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink: Arc::clone(&sink) as Arc<dyn NodeSink>,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(nick(name), Arc::clone(&sink)).max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
-    (Node::spawn(config, Store, None, false), sink)
+    (
+        Node::spawn(config, Store, None, SignalHandling::Leave),
+        sink,
+    )
 }
 
 /// More changes than one digest answer carries, so the backfill takes several
@@ -212,13 +190,13 @@ fn key_count(document: &serde_json::Value) -> usize {
 /// How many of the log's changes `node` holds once it has a full answer, or
 /// when [`BUDGET`] runs out.
 async fn held_after_first_answer(node: &Node<Store>) -> usize {
-    let started = tokio::time::Instant::now();
+    let started = Instant::now();
     loop {
         let held = key_count(&read(node).await);
         if held >= ONE_ANSWER || started.elapsed() > BUDGET {
             return held;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -227,7 +205,8 @@ fn a_late_joiner_backfills_on_meeting_its_only_peer() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         pin_antientropy_tick();
-        let topic = format!("late-joiner-pair-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("late-joiner-pair-{nonce}");
         let (alice, _) = spawn(&topic, "alice").await;
         write_log(&alice, WRITES).await;
 
@@ -269,7 +248,8 @@ fn a_late_joiner_backfills_on_meeting_a_meshed_pair() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         pin_antientropy_tick();
-        let topic = format!("late-joiner-trio-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("late-joiner-trio-{nonce}");
 
         let (alice, _) = spawn(&topic, "alice").await;
         write_log(&alice, WRITES).await;
@@ -315,7 +295,8 @@ fn a_late_joiner_pulls_a_long_history_in_fast_rounds() {
         const LONG: usize = 300;
         const FAST: Duration = Duration::from_secs(5);
         pin_antientropy_tick();
-        let topic = format!("late-joiner-long-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("late-joiner-long-{nonce}");
 
         let (alice, _) = spawn(&topic, "alice").await;
         write_log(&alice, LONG).await;
@@ -339,7 +320,7 @@ fn a_late_joiner_pulls_a_long_history_in_fast_rounds() {
         // FAST is the time that the fast rounds take on a quiet host, and it is reported. The claim is
         // that they pull the whole history, and a shared runner can be ten times slower and still be
         // right: the test fails only when the history is not held after BUDGET, as its siblings do.
-        let started = tokio::time::Instant::now();
+        let started = Instant::now();
         let mut held = 0;
         let mut held_at_fast = None;
         while started.elapsed() < BUDGET {
@@ -350,7 +331,7 @@ fn a_late_joiner_pulls_a_long_history_in_fast_rounds() {
             if held >= LONG {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            time::sleep(Duration::from_millis(100)).await;
         }
         eprintln!(
             "late held {} of alice's {LONG} changes {FAST:?} after meeting the pair, {held} after {:?}",

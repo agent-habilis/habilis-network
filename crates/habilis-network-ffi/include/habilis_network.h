@@ -81,7 +81,7 @@ typedef struct {
 } habilis_network_msg;
 
 /* Create or join a mesh. NULL on failure. */
-habilis_network_mesh *habilis_network_mesh_open(const habilis_network_opts *opts);
+habilis_network_mesh *habilis_network_mesh_open(const habilis_network_opts *options);
 
 /* Identity of this membership, borrowed for the handle's lifetime. */
 const char *habilis_network_mesh_id(const habilis_network_mesh *handle);
@@ -99,12 +99,12 @@ int habilis_network_msg_send(habilis_network_mesh *handle, const char *to, const
 
 /*
  * Take the next inbound message, waiting up to `timeout_ms`. Returns 1 with the
- * text NUL-terminated in `buf` and `out` filled, 0 on timeout, -1 on failure,
- * or -2 when the text does not fit in `cap`: nothing is written to `buf`, the
+ * text NUL-terminated in `buffer` and `out` filled, 0 on timeout, -1 on failure,
+ * or -2 when the text does not fit in `cap`: nothing is written to `buffer`, the
  * message stays queued, and `out->len` holds its length — retry with a buffer
  * of at least `out->len + 1` bytes.
  */
-long habilis_network_msg_recv(habilis_network_mesh *handle, char *buf, size_t cap, int timeout_ms,
+long habilis_network_msg_recv(habilis_network_mesh *handle, char *buffer, size_t cap, int timeout_ms,
                      habilis_network_msg *out);
 
 /*
@@ -114,15 +114,15 @@ long habilis_network_msg_recv(habilis_network_mesh *handle, char *buf, size_t ca
  * habilis_network_mesh_state_merge() applies an RFC 7386 merge document: present keys are set,
  * keys set to null are removed, everything else is left alone.
  *
- * habilis_network_mesh_state_json() writes the merged document into `buf` and returns the length
+ * habilis_network_mesh_state_json() writes the merged document into `buffer` and returns the length
  * it needs, excluding the NUL. When that does not fit in `cap`, nothing is
  * written — retry with a bigger buffer. -1 on failure.
  */
 int habilis_network_mesh_state_merge(habilis_network_mesh *handle, const char *json);
-long habilis_network_mesh_state_json(habilis_network_mesh *handle, char *buf, size_t cap);
+long habilis_network_mesh_state_json(habilis_network_mesh *handle, char *buffer, size_t cap);
 
 /* The live peer roster as JSON. Same length/`cap` convention as above. */
-long habilis_network_mesh_peers_json(habilis_network_mesh *handle, char *buf, size_t cap);
+long habilis_network_mesh_peers_json(habilis_network_mesh *handle, char *buffer, size_t cap);
 
 /*
  * How many peers other than you are in the mesh right now; 0 means you are
@@ -166,7 +166,7 @@ typedef struct {
 } habilis_network_stream_opts;
 
 /* Stand up a stream node. NULL on failure. */
-habilis_network_streams *habilis_network_streams_bind(const habilis_network_stream_opts *opts);
+habilis_network_streams *habilis_network_streams_bind(const habilis_network_stream_opts *options);
 
 /* A node that can reach the producer of `hash` (its lookups and relay policy). */
 habilis_network_streams *habilis_network_streams_bind_for(const char *hash);
@@ -189,7 +189,7 @@ const char *habilis_network_stream_hash(const habilis_network_producer *producer
  * away). Once a consumer has attached, the call runs until every byte is out,
  * paced by the consumer.
  */
-int habilis_network_stream_write(habilis_network_producer *producer, const uint8_t *buf, size_t len,
+int habilis_network_stream_write(habilis_network_producer *producer, const uint8_t *buffer, size_t len,
                         int timeout_ms);
 
 /*
@@ -205,11 +205,11 @@ habilis_network_reader *habilis_network_stream_open(habilis_network_streams *str
 
 /*
  * Read the next bytes, waiting up to `timeout_ms`. Returns how many bytes were
- * written to `buf` (> 0), 0 on timeout, -1 on failure (the producer refused or
+ * written to `buffer` (> 0), 0 on timeout, -1 on failure (the producer refused or
  * abandoned the stream, or the link was lost), or -2 at the end of the stream.
  * Bytes that do not fit in `cap` wait for the next call.
  */
-long habilis_network_stream_read(habilis_network_reader *reader, uint8_t *buf, size_t cap, int timeout_ms);
+long habilis_network_stream_read(habilis_network_reader *reader, uint8_t *buffer, size_t cap, int timeout_ms);
 
 /* Free a reader, giving up the stream. NULL is a no-op. */
 int habilis_network_reader_close(habilis_network_reader *reader);

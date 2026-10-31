@@ -11,12 +11,13 @@
 //!
 //! Run `chat-native host`, then follow the two lines it prints.
 
+use std::io;
+mod chat_acceptor;
 mod host;
 mod join;
 mod path;
 mod room;
-mod serve;
-mod signal;
+mod signal_acceptor;
 mod terminal;
 mod wire;
 
@@ -31,12 +32,13 @@ use habilis_network_iroh_webrtc_transport::iroh_base::RelayUrl;
     version,
     about = "A chat room over iroh and WebRTC"
 )]
+#[derive(Clone)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum Command {
     /// Open a room, and join it from this terminal.
     Host {
@@ -62,7 +64,7 @@ enum Command {
         /// Reach the room over a `WebRTC` data channel, exactly as a tab does.
         ///
         /// Off by default: a native peer should prefer iroh's own transports,
-        /// which are faster. This is here so the WebRTC path can be exercised
+        /// which are faster. This is here so the `WebRTC` path can be exercised
         /// end to end without a browser.
         #[arg(long)]
         webrtc: bool,
@@ -90,7 +92,7 @@ async fn main() -> Result<()> {
     // is the interesting setting when a negotiation misbehaves.
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
+        .with_writer(io::stderr)
         .init();
 
     match Cli::parse().command {

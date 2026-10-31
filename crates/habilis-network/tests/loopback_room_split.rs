@@ -9,7 +9,7 @@
 //! - **B**: the beacon holder leaves after every member released the rendezvous, then two
 //!   joiners arrive by id.
 //! - **C**: the creator leaves at once, two joiners start together, and the rung probe of
-//!   both reads silence (`Request::BlindRungProbes`). One of them binds the first rung. The
+//!   both reads silence (`Beacons::BlindRungProbes`). One of them binds the first rung. The
 //!   other stays a peer of it: silence does not bind a second rung. Two joiners follow, one by
 //!   one.
 //! - **D**: two released holders, with no IP block. Case E's setup gives a room of five old
@@ -17,12 +17,12 @@
 //!   sides released. Then one old member, with three links or more, reads its rung probe as
 //!   "not ours" and binds the next rung: a holder on a higher rung, with two meshes that share
 //!   no link. The engine must merge them by itself.
-//! - **F**: D, and the holder on the higher rung sheds its beacon (`Request::ShedBeacon`)
+//! - **F**: D, and the holder on the higher rung sheds its beacon (`Beacons::ShedBeacon`)
 //!   instead of waiting for the engine to do it. The merge then needs only that a member that
 //!   reads a holder of another mesh goes to it.
 //!
 //! - **E**: the one-by-one path. The creator leaves while five old members, each with three
-//!   links or more, hold their claims back (`Request::HoldClaims`). A joiner starts and takes
+//!   links or more, hold their claims back (`Beacons::HoldClaims`). A joiner starts and takes
 //!   the free rung. The old members then find the rung "ours" on their walk, want no
 //!   rendezvous (they have three links or more), and graft nothing. A later joiner lands on
 //!   the new holder.
@@ -48,14 +48,18 @@
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, UdpSocket};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
 use std::time::{Duration, Instant};
 
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{self, Beacons, Inspect, Membership, Request};
 use habilis_network::protocol::LockedMesh;
 use habilis_network::runtime::tuning::{Tuning, init};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use futures_util::future;
+use std::{env, fs, io, process};
+use tokio::sync::{self, mpsc};
+use tokio::time;
 /// How long the setup of a split waits for the rosters of its two groups to settle.
 const COUNTS_DEADLINE: Duration = Duration::from_secs(10);
 
@@ -84,22 +88,22 @@ const RELEASE_DEADLINE: Duration = Duration::from_secs(90);
 const RELEASE_LINKS: usize = 3;
 
 /// Tests of this file take turns: they share the log of the round and the loopback ports.
-static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static SERIAL: sync::Mutex<()> = sync::Mutex::const_new(());
 
 /// The file that the log of the running round goes to.
-static ROUND_LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
+static ROUND_LOG: Mutex<Option<fs::File>> = Mutex::new(None);
 
 struct RoundLogWriter;
 
-impl std::io::Write for RoundLogWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+impl io::Write for RoundLogWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if let Some(file) = ROUND_LOG.lock().expect("no poison").as_mut() {
             file.write_all(bytes)?;
         }
         Ok(bytes.len())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
@@ -107,13 +111,13 @@ impl std::io::Write for RoundLogWriter {
 /// One global subscriber that writes to the file of the running round. A per-round
 /// `set_default` would lose the events of the worker threads.
 fn init_process() -> habilis_network_test_tracing::Guard {
-    static ONCE: std::sync::Once = std::sync::Once::new();
+    static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        init(Tuning {
-            heal_interval: Duration::from_secs(3),
-            cohost_grace: Duration::from_secs(2),
-            ..Tuning::DEFAULTS
-        });
+        init(
+            Tuning::DEFAULTS
+                .heal_interval(Duration::from_secs(3))
+                .cohost_grace(Duration::from_secs(2)),
+        );
     });
     habilis_network_test_tracing::init_with_writer("habilis_network=info", || RoundLogWriter)
 }
@@ -135,27 +139,29 @@ impl Round {
 
     fn begin(name: &'static str) -> Self {
         let log = init_process();
-        let prefix = std::env::var("HABILIS_TEST_LOG_DUMP").unwrap_or_else(|_| {
-            std::env::temp_dir()
+        let prefix: String = env::var("HABILIS_TEST_LOG_DUMP").unwrap_or_else(|_| {
+            env::temp_dir()
                 .join("loopback-room-split")
                 .display()
                 .to_string()
         });
-        let path: PathBuf = format!("{prefix}.{name}.{}", std::process::id()).into();
+        let path: PathBuf = format!("{prefix}.{name}.{}", process::id()).into();
         *ROUND_LOG.lock().expect("no poison") =
-            Some(std::fs::File::create(&path).expect("create the log file of the round"));
+            Some(fs::File::create(&path).expect("create the log file of the round"));
         Self { name, path, log }
     }
 
     fn log(&self) -> String {
-        std::fs::read_to_string(&self.path).unwrap_or_default()
+        fs::read_to_string(&self.path).unwrap_or_default()
     }
 
     /// The `(node, port)` of every beacon that was bound on a rung, in order.
     fn beacons(&self) -> Vec<(String, String)> {
-        self.log()
+        let text = self.log();
+        let lines = text
             .lines()
-            .filter(|line| line.contains("beacon assumed: bound rendezvous ladder rung"))
+            .filter(|line| line.contains("beacon assumed: bound rendezvous ladder rung"));
+        lines
             .map(|line| (field(line, "node="), field(line, "port=")))
             .collect()
     }
@@ -163,20 +169,18 @@ impl Round {
     /// How many times the member with the short id `node` read a lower rung that answered as the
     /// beacon of its mesh: each one is a shed of its beacon.
     fn lower_rung_answers_of(&self, node: &str) -> usize {
-        self.log()
+        let text = self.log();
+        let lines = text
             .lines()
-            .filter(|line| line.contains("a lower rung answers as the beacon of our mesh"))
-            .filter(|line| field(line, "node=") == node)
-            .count()
+            .filter(|line| line.contains("a lower rung answers as the beacon of our mesh"));
+        lines.filter(|line| field(line, "node=") == node).count()
     }
 
     /// The ports that the members with the short ids `nodes` bound a beacon on.
     fn ports_bound_by(&self, nodes: &[String]) -> BTreeSet<String> {
-        self.beacons()
-            .into_iter()
-            .filter(|(node, _)| nodes.contains(node))
-            .map(|(_, port)| port)
-            .collect()
+        let beacons = self.beacons();
+        let bound = beacons.into_iter().filter(|(node, _)| nodes.contains(node));
+        bound.map(|(_, port)| port).collect()
     }
 
     /// Whether the member with the short id `node` bound a rung.
@@ -186,17 +190,17 @@ impl Round {
 
     /// How many different members logged a release with `RELEASE_LINKS` links or more.
     fn members_released_with_enough_links(&self) -> usize {
-        self.log()
+        let text = self.log();
+        let members: BTreeSet<_> = text
             .lines()
             .filter(|line| line.contains("released the rendezvous"))
             .filter(|line| {
-                field(line, "links=")
-                    .parse::<usize>()
-                    .is_ok_and(|count| count >= RELEASE_LINKS)
+                let links: Result<usize, _> = field(line, "links=").parse();
+                links.is_ok_and(|count| count >= RELEASE_LINKS)
             })
             .map(|line| field(line, "local="))
-            .collect::<BTreeSet<_>>()
-            .len()
+            .collect();
+        members.len()
     }
 
     /// Print the line of the round and end it. A round that failed panics and keeps its log.
@@ -210,10 +214,10 @@ impl Round {
                     self.name
                 );
                 // A green round that nobody can read gives no reason why it is green.
-                if std::env::var_os("HABILIS_TEST_KEEP_LOG").is_some() {
+                if env::var_os("HABILIS_TEST_KEEP_LOG").is_some() {
                     eprintln!("ROUND {} log kept in {}", self.name, self.path.display());
                 } else {
-                    let _ = std::fs::remove_file(&self.path);
+                    let _ = fs::remove_file(&self.path);
                 }
             }
             Err(text) => panic!(
@@ -227,11 +231,9 @@ impl Round {
 
 /// The value of `key` (like `port=`) in a log line, up to the next space.
 fn field(line: &str, key: &str) -> String {
-    line.split(key)
-        .nth(1)
-        .and_then(|rest| rest.split_whitespace().next())
-        .unwrap_or_default()
-        .to_owned()
+    let value = line.split(key).nth(1);
+    let word = value.and_then(|rest| rest.split_whitespace().next());
+    word.unwrap_or_default().to_owned()
 }
 
 struct Member {
@@ -243,16 +245,12 @@ impl Member {
     /// A creator when `mesh` is `None`, a joiner by id otherwise. No lookup: a loopback room.
     async fn open(nick: &str, mesh: Option<&str>) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(
-            &membership::Opts {
-                nick: Some(nick.to_owned()),
-                mesh: mesh.map(str::to_owned),
-                ..membership::Opts::default()
-            },
-            sink,
-        )
-        .await
-        .expect("open a member");
+        let options: membership::JoinOptions = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .mesh(mesh.map(str::to_owned));
+        let membership: Membership = membership::join(&options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -267,11 +265,11 @@ impl Member {
     async fn peers(&self) -> usize {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
+        let decoded: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+        decoded
             .and_then(|roster| {
                 roster["peers"].as_array().map(|peers| {
                     peers
@@ -290,21 +288,21 @@ impl Member {
 
     async fn stall_beacon(&self) {
         self.membership
-            .request(|reply| Request::StallBeacon { reply })
+            .request(|reply| Request::Beacons(Beacons::StallBeacon { reply }))
             .await
             .expect("the loop answers");
     }
 
     async fn shed_beacon(&self) {
         self.membership
-            .request(|reply| Request::ShedBeacon { reply })
+            .request(|reply| Request::Beacons(Beacons::ShedBeacon { reply }))
             .await
             .expect("the loop answers");
     }
 
     async fn hold_claims(&self, hold: bool) {
         self.membership
-            .request(|reply| Request::HoldClaims { hold, reply })
+            .request(|reply| Request::Beacons(Beacons::HoldClaims { hold, reply }))
             .await
             .expect("the loop answers");
     }
@@ -322,7 +320,7 @@ impl Member {
 
     async fn set_blind_rung_probes(&self, blind: bool) {
         self.membership
-            .request(|reply| Request::BlindRungProbes { blind, reply })
+            .request(|reply| Request::Beacons(Beacons::BlindRungProbes { blind, reply }))
             .await
             .expect("the loop answers");
     }
@@ -350,7 +348,7 @@ async fn become_one_mesh(members: &[&Member], deadline: Duration) -> Result<Dura
                 members.len()
             ));
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -362,7 +360,7 @@ async fn wait_for_beacons(round: &Round, count: usize) -> Result<(), String> {
                 "no beacon was bound on a rung inside {BEACON_DEADLINE:?}"
             ));
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     Ok(())
 }
@@ -375,7 +373,7 @@ async fn wait_for_rung_of(round: &Round, node: &str) -> Result<(), String> {
                 "precondition: member {node} bound no rung inside {BEACON_DEADLINE:?}"
             ));
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     Ok(())
 }
@@ -401,14 +399,14 @@ async fn wait_for_releases(round: &Round, count: usize) -> Result<(), String> {
                 round.members_released_with_enough_links()
             ));
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     Ok(())
 }
 
 async fn open_joiners(members: &mut Vec<Member>, mesh: &str, names: &[String]) {
     for nick in names {
-        tokio::time::sleep(SPACING).await;
+        time::sleep(SPACING).await;
         members.push(Member::open(nick, Some(mesh)).await);
     }
 }
@@ -493,7 +491,7 @@ async fn four_joiners_together_after_a_long_run(
         members.remove(0).leave().await;
     }
     let names = nicks("burst", 4);
-    let opened = futures_util::future::join_all(
+    let opened = future::join_all(
         names
             .iter()
             .map(|nick| Member::open(nick, Some(mesh.as_str()))),
@@ -514,7 +512,7 @@ async fn wait_for_counts(first: &Member, second: &Member, count: usize) -> (usiz
         if counts == (count, count) || started.elapsed() >= COUNTS_DEADLINE {
             return counts;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -576,7 +574,7 @@ impl Drop for BlindNewMembers {
 /// open comes after a walk that read the truth, and that walk is the one that the cases are about.
 async fn open_starters_blind(names: &[String], mesh: &str) -> Vec<Member> {
     let _blind = BlindNewMembers::on();
-    futures_util::future::join_all(names.iter().map(|nick| Member::open(nick, Some(mesh)))).await
+    future::join_all(names.iter().map(|nick| Member::open(nick, Some(mesh)))).await
 }
 
 /// The creator mints the room and leaves, so that no beacon holds a rung. `starters`
@@ -669,7 +667,7 @@ async fn start_burst_on_a_host_that_answers_late(
 
     let names = nicks("starter", 2);
     let opened = open_starters_blind(&names, &mesh).await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    time::sleep(Duration::from_secs(3)).await;
     for member in &opened {
         member.unblind_rung_probes().await;
     }
@@ -705,7 +703,7 @@ async fn holder_whose_beacon_stops_answering(
                     .to_owned(),
             );
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     let mesh = members[0].mesh_id();
     open_joiners(members, &mesh, &nicks("late", 1)).await;
@@ -716,17 +714,13 @@ async fn holder_whose_beacon_stops_answering(
 /// A joiner by id whose sink is read by the caller. The one case that reads what the app is told.
 async fn open_watched(nick: &str, mesh: &str) -> (Member, UnboundedReceiver<String>) {
     let (sink, events) = membership::json_sink();
-    let membership = membership::join(
-        &membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(mesh.to_owned()),
-            ..membership::Opts::default()
-        },
-        sink,
-    )
-    .await
-    .expect("open a member");
-    let (_sender, unread) = tokio::sync::mpsc::unbounded_channel();
+    let options: membership::JoinOptions = membership::JoinOptions::default()
+        .nick(Some(nick.to_owned()))
+        .mesh(Some(mesh.to_owned()));
+    let membership: Membership = membership::join(&options, sink)
+        .await
+        .expect("open a member");
+    let (_sender, unread) = mpsc::unbounded_channel();
     (
         Member {
             membership,
@@ -741,7 +735,7 @@ async fn open_watched(nick: &str, mesh: &str) -> (Member, UnboundedReceiver<Stri
 async fn hold_every_rung(ports: &[u16]) -> Result<Vec<UdpSocket>, String> {
     let until = Instant::now() + Duration::from_secs(10);
     loop {
-        let sockets: Result<Vec<UdpSocket>, std::io::Error> = ports
+        let sockets: Result<Vec<UdpSocket>, io::Error> = ports
             .iter()
             .map(|port| UdpSocket::bind((Ipv4Addr::LOCALHOST, *port)))
             .collect();
@@ -750,14 +744,15 @@ async fn hold_every_rung(ports: &[u16]) -> Result<Vec<UdpSocket>, String> {
             Err(error) if Instant::now() >= until => {
                 return Err(format!("could not hold the ports {ports:?}: {error}"));
             }
-            Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+            Err(_) => time::sleep(Duration::from_millis(250)).await,
         }
     }
 }
 
 /// Whether a line of the sink is the `Info` about a ladder that is taken.
 fn is_taken_ladder_info(line: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(line).is_ok_and(|event| {
+    let decoded: serde_json::Result<serde_json::Value> = serde_json::from_str(line);
+    decoded.is_ok_and(|event| {
         event["kind"] == "info"
             && event["text"]
                 .as_str()
@@ -777,9 +772,10 @@ async fn ladder_held_by_other_processes(
     wait_for_beacons(round, 1).await?;
     let mesh_id = creator.mesh_id();
     creator.leave().await;
-    let mesh = mesh_id
-        .parse::<LockedMesh>()
-        .map_err(|error| format!("the id of the room does not parse: {error}"))?
+    let locked: LockedMesh = mesh_id
+        .parse()
+        .map_err(|error| format!("the id of the room does not parse: {error}"))?;
+    let mesh = locked
         .unlock(None)
         .map_err(|error| format!("the room does not unlock without a password: {error}"))?;
     let _held = hold_every_rung(&mesh.rendezvous_ports()).await?;
@@ -789,8 +785,8 @@ async fn ladder_held_by_other_processes(
     members.push(member);
     let started = Instant::now();
     let mut seen = Vec::new();
-    let first = loop {
-        match tokio::time::timeout(
+    let first: String = loop {
+        match time::timeout(
             NO_RUNG_DEADLINE.saturating_sub(started.elapsed()),
             events.recv(),
         )
@@ -813,18 +809,19 @@ async fn ladder_held_by_other_processes(
         ));
     }
 
-    tokio::time::sleep(NO_RUNG_QUIET).await;
+    time::sleep(NO_RUNG_QUIET).await;
     let mut again = 0;
     while let Ok(line) = events.try_recv() {
         if is_taken_ladder_info(&line) {
             again += 1;
         }
     }
-    let warns = round
-        .log()
-        .lines()
-        .filter(|line| line.contains("WARN") && line.contains("no rendezvous port is free"))
-        .count();
+    let text = round.log();
+    let lines = text.lines().filter(|line| {
+        let warn = line.contains("WARN");
+        warn && line.contains("no rendezvous port is free")
+    });
+    let warns: usize = lines.count();
     let bound = round.beacons().len() - bound_before;
     if again != 0 || warns != 1 || bound != 0 {
         return Err(format!(

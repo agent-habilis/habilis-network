@@ -16,10 +16,14 @@
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Inbound, Membership, Request};
+use habilis_network::membership::{
+    self, Blocking, Inbound, Inspect, Membership, Messaging, Request,
+};
 use habilis_network::protocol::Lookup;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
+use tokio::time;
 /// Past the point where the relay policy closes a gossip link that stayed on the
 /// relay: the probe deadline of 15 s, and a margin. A broadcast sent before it can
 /// still arrive over the relay, which proves nothing about recovery.
@@ -35,9 +39,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::Opts) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -46,32 +52,29 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
-        .await
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
+        let options = options.relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
+        Self::open(&options).await
     }
 
     async fn roster_len(&self) -> usize {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
+        let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+        roster
             .and_then(|roster| roster["peers"].as_array().map(Vec::len))
             .unwrap_or(0)
     }
@@ -82,9 +85,11 @@ impl Member {
 
     async fn block_ip_to(&self, ports: Vec<u16>) {
         self.membership
-            .request(|reply| Request::BlockIpTo {
-                remote_ports: ports,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockIpTo {
+                    remote_ports: ports,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
@@ -93,10 +98,12 @@ impl Member {
     async fn broadcast(&self, text: &str) {
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::Send {
-                to: None,
-                body,
-                reply,
+            .request(|reply| {
+                Request::Messaging(Messaging::Send {
+                    to: None,
+                    body,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers")
@@ -104,20 +111,23 @@ impl Member {
     }
 
     fn saw(&mut self, text: &str) -> bool {
-        while let Ok(msg) = self.membership.inbound.try_recv() {
-            self.seen.push(msg);
+        while let Ok(message) = self.membership.inbound.try_recv() {
+            self.seen.push(message);
         }
-        self.seen.iter().any(|msg| msg.text == text)
+        self.seen.iter().any(|message| message.text == text)
     }
 }
 
 #[test]
 fn a_gossip_pair_that_never_sent_unicast_recovers_when_ip_is_lost() {
     let guard = habilis_network_test_tracing::init();
+    // The test cuts IP on purpose, so the pair stays meshed with no link for a while. The census
+    // calls that a silent partition once the gap outlasts a heal, so that WARN is expected here.
+    // Whether it comes depends on timing, so it is optional. The broadcast after the loss is the
+    // real check, and it stays asserted below.
+    guard.allow_warn("habilis_network::lifecycle", "silent partition");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
         let mut bob = Member::join("bob", &alice).await;
 
@@ -127,7 +137,7 @@ fn a_gossip_pair_that_never_sent_unicast_recovers_when_ip_is_lost() {
                 linking.elapsed() < Duration::from_mins(1),
                 "the pair never linked"
             );
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
 
         // Both ends lose IP to each other. Nothing has been sent between them.
@@ -141,7 +151,7 @@ fn a_gossip_pair_that_never_sent_unicast_recovers_when_ip_is_lost() {
             lowest = lowest
                 .min(alice.roster_len().await)
                 .min(bob.roster_len().await);
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
         eprintln!("lowest roster during the settle: {lowest}");
 
@@ -161,7 +171,7 @@ fn a_gossip_pair_that_never_sent_unicast_recovers_when_ip_is_lost() {
                     seen = true;
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                time::sleep(Duration::from_millis(250)).await;
             }
             if seen {
                 break true;

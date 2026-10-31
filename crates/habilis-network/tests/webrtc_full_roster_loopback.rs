@@ -9,13 +9,17 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{self, Inspect, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 
+use habilis_network::net::test_relay;
+use std::{env, fs};
+use tokio::{sync, time};
 /// One more than `MAX_DIRECT_PEERS + 1`, so that a node cannot hold a session
 /// to every other member and still keep one for the rendezvous.
 const MEMBERS: usize = 18;
@@ -23,31 +27,30 @@ const FORMATION_DEADLINE: Duration = Duration::from_mins(2);
 
 /// The tests share one log buffer, and a test counts lines in it, so a second test that runs at
 /// the same time adds its own lines to the count.
-fn serial() -> &'static tokio::sync::Mutex<()> {
-    static SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))
+fn serial() -> &'static sync::Mutex<()> {
+    static SERIAL: OnceLock<sync::Mutex<()>> = OnceLock::new();
+    SERIAL.get_or_init(|| sync::Mutex::new(()))
 }
 
 fn logs() -> String {
     habilis_network_test_tracing::captured_logs()
 }
 
-async fn open(nick: &str, opts: membership::Opts) -> Membership {
+async fn open(nick: &str, options: membership::JoinOptions) -> Membership {
     let (sink, _events) = membership::json_sink();
-    let opts = membership::Opts {
-        nick: Some(nick.to_owned()),
-        ..opts
-    };
-    membership::join(&opts, sink).await.expect("open a member")
+    let options = options.nick(Some(nick.to_owned()));
+    membership::join(&options, sink)
+        .await
+        .expect("open a member")
 }
 
 async fn roster_len(member: &Membership) -> usize {
     let json = member
-        .request(|reply| Request::Peers { reply })
+        .request(|reply| Request::Inspect(Inspect::Peers { reply }))
         .await
         .unwrap_or_default();
-    serde_json::from_str::<serde_json::Value>(&json)
-        .ok()
+    let decoded: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+    decoded
         .and_then(|roster| {
             // A swept peer stays in the roster as quiet, so count the live ones.
             roster["peers"].as_array().map(|peers| {
@@ -63,14 +66,13 @@ async fn roster_len(member: &Membership) -> usize {
 /// A creator that hosts the rendezvous and `MEMBERS - 1` joiners on one
 /// `WebRTC`-only mesh over a local relay, as live members.
 async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
+    let relay_urls = vec![relay.to_string()];
     let creator = open(
         "member-00",
-        membership::Opts {
-            lookup: vec![Lookup::Relay],
-            transport: vec![Transport::WebRtc],
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        },
+        membership::JoinOptions::default()
+            .lookup(vec![Lookup::Relay])
+            .transport(vec![Transport::WebRtc])
+            .relay_urls(relay_urls),
     )
     .await;
     let beacon_wait = Instant::now();
@@ -79,7 +81,7 @@ async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
             beacon_wait.elapsed() < Duration::from_mins(1),
             "the creator never claimed the beacon"
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
 
     let mesh = creator.node.mesh_id().to_string();
@@ -88,14 +90,11 @@ async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
         members.push(
             open(
                 &format!("member-{index:02}"),
-                membership::Opts {
-                    mesh: Some(mesh.clone()),
-                    ..membership::Opts::default()
-                },
+                membership::JoinOptions::default().mesh(Some(mesh.clone())),
             )
             .await,
         );
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
     members
 }
@@ -105,8 +104,9 @@ async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
 /// it a few milliseconds apart, and the relay then logs a WARN for the connection that it
 /// replaced. That overlap is the contest the beacon resolves by design, and no test here is
 /// about it.
-async fn leave_all(members: Vec<Membership>) {
-    for member in members.into_iter().rev() {
+async fn leave_all(mut members: Vec<Membership>) {
+    members.reverse();
+    for member in members {
         let _ = member.node.leave().await;
     }
 }
@@ -123,7 +123,7 @@ async fn rosters_until(members: &[Membership], peers: usize, deadline: Duration)
         if rosters.iter().all(|len| *len == peers) {
             break;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
     rosters
 }
@@ -137,15 +137,14 @@ fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roster() {
         let _serial = serial().lock().await;
         habilis_network_test_tracing::clear_captured_logs();
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let members = start_group(&relay).await;
 
         let rosters = rosters_until(&members, MEMBERS - 1, FORMATION_DEADLINE).await;
 
         leave_all(members).await;
-        let trace = logs()
+        let text = logs();
+        let lines: Vec<_> = text
             .lines()
             .filter(|line| {
                 ["direct-peer cap", "refused a signal offer", "evicted"]
@@ -153,8 +152,8 @@ fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roster() {
                     .any(|needle| line.contains(needle))
             })
             .take(60)
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect();
+        let trace = lines.join("\n");
         assert!(
             rosters.iter().all(|len| *len == MEMBERS - 1),
             "every roster must hold {} peers; roster sizes by member: {rosters:?}\n{trace}",
@@ -178,9 +177,7 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
         let _serial = serial().lock().await;
         habilis_network_test_tracing::clear_captured_logs();
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let mut members = start_group(&relay).await;
         let rosters = rosters_until(&members, MEMBERS - 1, FORMATION_DEADLINE).await;
         assert!(
@@ -221,17 +218,14 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
              hold it\n{}",
                 come_back_trace()
             );
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
 
         let mesh = members[0].node.mesh_id().to_string();
         members.push(
             open(
                 "late-joiner",
-                membership::Opts {
-                    mesh: Some(mesh),
-                    ..membership::Opts::default()
-                },
+                membership::JoinOptions::default().mesh(Some(mesh)),
             )
             .await,
         );
@@ -249,17 +243,19 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
 
 /// The whole log, written to the file that `HABILIS_TEST_LOG_DUMP` names, if set.
 fn dump_logs() {
-    if let Ok(path) = std::env::var("HABILIS_TEST_LOG_DUMP") {
-        let _ = std::fs::write(path, logs());
+    if let Ok(path) = env::var("HABILIS_TEST_LOG_DUMP") {
+        let _ = fs::write(path, logs());
     }
 }
 
 /// How many times a member has linked to the rendezvous, in this run.
 fn rendezvous_visits() -> usize {
-    logs()
-        .lines()
-        .filter(|line| line.contains("gossip neighbor up") && line.contains("is_rendezvous=true"))
-        .count()
+    let text = logs();
+    let visits = text.lines().filter(|line| {
+        let up = line.contains("gossip neighbor up");
+        up && line.contains("is_rendezvous=true")
+    });
+    visits.count()
 }
 
 /// How many members hold a link to the rendezvous that they made after the crash: those whose
@@ -269,20 +265,17 @@ fn rendezvous_visits() -> usize {
 /// event after it is none of these: it did not come back.
 fn rendezvous_holders(log: &str) -> usize {
     let after_the_crash = log.split("member crashed").nth(1).unwrap_or_default();
-    let mut last_is_up = std::collections::HashMap::new();
-    for line in after_the_crash
-        .lines()
-        .filter(|line| line.contains("is_rendezvous=true"))
-    {
+    let mut last_is_up = HashMap::new();
+    for line in after_the_crash.lines() {
+        if !line.contains("is_rendezvous=true") {
+            continue;
+        }
         let up = line.contains("gossip neighbor up");
         if !up && !line.contains("gossip neighbor down") {
             continue;
         }
-        let Some(local) = line
-            .split("local=")
-            .nth(1)
-            .and_then(|rest| rest.split_whitespace().next())
-        else {
+        let rest = line.split("local=").nth(1);
+        let Some(local) = rest.and_then(|rest| rest.split_whitespace().next()) else {
             continue;
         };
         last_is_up.insert(local, up);
@@ -296,7 +289,7 @@ fn rendezvous_holders(log: &str) -> usize {
 #[test]
 fn a_member_that_the_beacon_dropped_holds_no_link() {
     let rendezvous = "endpoint_id=aa is_rendezvous=true";
-    let log = [
+    let log: String = [
         format!("gossip neighbor up local=stayed {rendezvous}"),
         format!("gossip neighbor up local=crashed {rendezvous}"),
         "member crashed".to_owned(),
@@ -319,7 +312,8 @@ fn a_member_that_the_beacon_dropped_holds_no_link() {
 
 /// The lines that say how the rendezvous was released and visited again.
 fn come_back_trace() -> String {
-    logs()
+    let text = logs();
+    let lines: Vec<_> = text
         .lines()
         .filter(|line| {
             [
@@ -331,11 +325,8 @@ fn come_back_trace() -> String {
             .iter()
             .any(|needle| line.contains(needle))
         })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .take(60)
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    let newest = lines.into_iter().rev().take(60);
+    let recent: Vec<_> = newest.rev().collect();
+    recent.join("\n")
 }

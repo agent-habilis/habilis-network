@@ -5,218 +5,32 @@
 //! producing agent deleting or overwriting the original can't disturb the served
 //! bytes. Spool files are named by hex SHA-256 — traversal-safe and idempotent.
 
-use std::collections::{HashMap, HashSet};
+mod blob_entry;
+mod blob_store;
+mod content_meta;
+mod new_secret;
+mod registered;
+
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 
+#[cfg(test)]
 use crate::util::consts::MAX_BLOB_STORE_BYTES;
 
-use crate::protocol::crypto::TicketSecret;
-
-use super::{BlobDigest, ContentId};
-
-/// One spooled blob: the metadata the fetch path needs, plus the spool path to
-/// stream from. No bytes are held.
-pub(crate) struct BlobEntry {
-    pub path: PathBuf,
-    pub size: u64,
-    /// The value the producer compares a presented token against
-    /// (constant-time): the raw bearer secret, or — when the blob is
-    /// password-protected — the Argon2id stretch of the ticket's public salt.
-    pub secret: TicketSecret,
-    /// The public salt the ticket carries (equal to `secret` when not
-    /// passworded). Retained so a deduped re-registration mints a ticket that
-    /// still matches this entry's compare `secret`.
-    ticket_secret: TicketSecret,
-    /// Whether the minted ticket is password-protected.
-    password: bool,
-    /// Every content group that offloaded these bytes. The spool file goes
-    /// only when the last of them is evicted.
-    owners: HashSet<ContentId>,
-    /// Monotonic order of the last registration or claim, for oldest-first
-    /// eviction under disk pressure.
-    seq: u64,
-}
-
-/// The capability inputs for a fresh registration: the public salt the ticket
-/// carries, the value the fetch handshake is compared against (equal to the salt
-/// when not passworded, its Argon2id stretch otherwise), and the password flag.
-pub(crate) struct NewSecret {
-    pub ticket_secret: TicketSecret,
-    pub compare_secret: TicketSecret,
-    pub password: bool,
-}
-
-/// What a registration hands back for building the ticket: the public salt the
-/// ticket carries and whether it is password-protected.
-pub(crate) struct Registered {
-    pub ticket_secret: TicketSecret,
-    pub password: bool,
-}
-
-/// The content identity of a file being snapshotted into the store —
-/// [`BlobStore::snapshot`]'s content-addressing key plus the content group it
-/// is offloaded under, which becomes one of the blob's owners.
-pub(crate) struct ContentMeta {
-    pub(crate) sha256: BlobDigest,
-    pub(crate) size: u64,
-    pub(crate) content_id: ContentId,
-}
-
-/// One store per peer (per daemon). Holds the blobs this peer offloaded — its
-/// outbound inputs and produced outputs — content-addressed, never replicated.
-pub(crate) struct BlobStore {
-    spool_dir: PathBuf,
-    map: HashMap<BlobDigest, BlobEntry>,
-    total_bytes: u64,
-    next_seq: u64,
-}
-
-impl BlobStore {
-    /// Create the store, ensuring its spool directory exists.
-    ///
-    /// # Errors
-    /// The spool directory cannot be created.
-    pub(crate) fn new(spool_dir: PathBuf) -> Result<Self> {
-        fs::create_dir_all(&spool_dir).with_context(|| {
-            format!("creating the blob spool dir {} failed", spool_dir.display())
-        })?;
-        Ok(Self {
-            spool_dir,
-            map: HashMap::new(),
-            total_bytes: 0,
-            next_seq: 0,
-        })
-    }
-
-    /// Snapshot `src` into the spool under `sha256`, owned by `content_id`.
-    /// `ticket_secret` is the public salt the ticket will carry; `compare_secret`
-    /// is what the fetch handshake is checked against (equal to `ticket_secret`
-    /// when not passworded, its Argon2id stretch otherwise). Returns the salt +
-    /// password flag to mint the ticket — the existing entry's when this content
-    /// is already spooled (content-addressed dedup — first registration wins,
-    /// `content_id` joins its owners), so a fresh ticket still matches the
-    /// stored compare secret.
-    ///
-    /// # Errors
-    /// Snapshotting the file into the spool fails.
-    pub(crate) fn snapshot(
-        &mut self,
-        src: &Path,
-        meta: ContentMeta,
-        secret: &NewSecret,
-    ) -> Result<Registered> {
-        let ContentMeta {
-            sha256,
-            size,
-            content_id,
-        } = meta;
-        if let Some(registered) = self.claim(&sha256, &content_id) {
-            return Ok(registered);
-        }
-        let dest = self.spool_dir.join(sha256.to_string());
-        snapshot_file(src, &dest)?;
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        self.total_bytes += size;
-        self.map.insert(
-            sha256,
-            BlobEntry {
-                path: dest,
-                size,
-                secret: secret.compare_secret.clone(),
-                ticket_secret: secret.ticket_secret.clone(),
-                password: secret.password,
-                owners: HashSet::from([content_id]),
-                seq,
-            },
-        );
-        self.evict_to_budget();
-        Ok(Registered {
-            ticket_secret: secret.ticket_secret.clone(),
-            password: secret.password,
-        })
-    }
-
-    /// The entry for `hash`, if spooled.
-    pub(crate) fn get(&self, hash: &BlobDigest) -> Option<&BlobEntry> {
-        self.map.get(hash)
-    }
-
-    /// For an already-spooled blob (a content-addressed dedup hit), add
-    /// `content_id` to its owners, make it the newest blob for disk-pressure
-    /// eviction, and return its ticket fields; `None` when the blob is not
-    /// spooled. Lets the producer skip the ~100ms password stretch
-    /// when re-offloading content it already holds.
-    pub(crate) fn claim(
-        &mut self,
-        hash: &BlobDigest,
-        content_id: &ContentId,
-    ) -> Option<Registered> {
-        let entry = self.map.get_mut(hash)?;
-        entry.owners.insert(content_id.clone());
-        entry.seq = self.next_seq;
-        self.next_seq += 1;
-        Some(Registered {
-            ticket_secret: entry.ticket_secret.clone(),
-            password: entry.password,
-        })
-    }
-
-    /// Release `content_id`'s hold on every blob (called from the task
-    /// idle-timeout sweep), unlinking each spool file no group owns any more.
-    pub(crate) fn evict_content(&mut self, content_id: &ContentId) {
-        let doomed: Vec<BlobDigest> = self
-            .map
-            .iter_mut()
-            .filter_map(|(hash, entry)| {
-                (entry.owners.remove(content_id) && entry.owners.is_empty()).then_some(*hash)
-            })
-            .collect();
-        for hash in doomed {
-            self.remove(&hash);
-        }
-    }
-
-    /// Unlink the least recently registered or claimed blob first, until the
-    /// store is within `MAX_BLOB_STORE_BYTES`.
-    fn evict_to_budget(&mut self) {
-        while self.total_bytes > MAX_BLOB_STORE_BYTES {
-            let Some(oldest) = self
-                .map
-                .iter()
-                .min_by_key(|(_, entry)| entry.seq)
-                .map(|(hash, _)| *hash)
-            else {
-                break;
-            };
-            self.remove(&oldest);
-        }
-    }
-
-    fn remove(&mut self, hash: &BlobDigest) {
-        if let Some(entry) = self.map.remove(hash) {
-            self.total_bytes = self.total_bytes.saturating_sub(entry.size);
-            let _ = fs::remove_file(&entry.path);
-        }
-    }
-}
-
-impl Drop for BlobStore {
-    fn drop(&mut self) {
-        // Best-effort: on daemon shutdown/leave the whole spool dir goes.
-        let _ = fs::remove_dir_all(&self.spool_dir);
-    }
-}
+pub(crate) use blob_entry::BlobEntry;
+pub(crate) use blob_store::BlobStore;
+pub(crate) use content_meta::ContentMeta;
+pub(crate) use new_secret::NewSecret;
+pub(crate) use registered::Registered;
 
 /// Hardlink `src` into the spool at `dest`, falling back to a copy when the two
 /// are on different filesystems (hardlinks can't cross a mount). Idempotent — a
 /// pre-existing `dest` of the source's size (same content, since it's
 /// hash-named) is left as is. A `dest` of another size is what a copy cut short
 /// leaves, and is replaced.
-fn snapshot_file(src: &Path, dest: &Path) -> Result<()> {
+fn snapshot_file(src: &Path, dest: &Path) -> anyhow::Result<()> {
     if let Ok(existing) = fs::metadata(dest) {
         let src_len = fs::metadata(src)
             .with_context(|| format!("reading {} failed", src.display()))?
@@ -242,13 +56,13 @@ mod tests {
     use super::{BlobStore, ContentMeta};
     use crate::blob::{BlobDigest, ContentId, HASH_LEN, SECRET_LEN};
     use crate::protocol::crypto::TicketSecret;
-    use habilis_network_test_tracing::test;
     use rand::RngCore;
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    use std::env;
     fn temp_dir(tag: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
+        let path = env::temp_dir().join(format!(
             "habilis-network-blob-{tag}-{}",
             rand::rng().next_u64()
         ));
@@ -259,72 +73,84 @@ mod tests {
     /// A passwordless capability: the ticket secret is also the compare secret.
     fn plain_secret(secret: [u8; SECRET_LEN]) -> super::NewSecret {
         super::NewSecret {
-            ticket_secret: TicketSecret::from_bytes(secret),
-            compare_secret: TicketSecret::from_bytes(secret),
+            ticket_secret: TicketSecret::from(secret),
+            compare_secret: TicketSecret::from(secret),
             password: false,
         }
     }
 
     #[test]
-    fn snapshot_then_get_streams_from_spool() {
+    fn snapshot_then_get_streams_from_spool() -> anyhow::Result<()> {
+        let _guard = ::habilis_network_test_tracing::init();
         let src_dir = temp_dir("src");
         let src = src_dir.join("payload.bin");
-        fs::write(&src, vec![7u8; 4096]).unwrap();
+        fs::write(&src, vec![7u8; 4096])?;
 
-        let mut store = BlobStore::new(temp_dir("spool")).unwrap();
-        let hash = BlobDigest::from_bytes([1u8; HASH_LEN]);
-        let registered = store
-            .snapshot(
-                &src,
-                ContentMeta {
-                    sha256: hash,
-                    size: 4096,
-                    content_id: ContentId::new("blob-test-content"),
-                },
-                &plain_secret([9u8; SECRET_LEN]),
-            )
-            .unwrap();
-        assert_eq!(registered.ticket_secret.as_bytes(), &[9u8; SECRET_LEN]);
-        assert!(!registered.password);
+        let mut store = BlobStore::try_new(temp_dir("spool"))?;
+        let hash = BlobDigest::from([1u8; HASH_LEN]);
+        let registered = store.snapshot(
+            &src,
+            ContentMeta {
+                sha256: hash,
+                size: 4096,
+                content_id: ContentId::new("blob-test-content"),
+            },
+            &plain_secret([9u8; SECRET_LEN]),
+        )?;
+        assert_eq!(
+            registered.ticket_secret.as_bytes(),
+            &[9u8; SECRET_LEN],
+            "the snapshot keeps the ticket secret"
+        );
+        assert!(
+            !registered.password,
+            "the snapshot is not password protected"
+        );
 
         let entry = store.get(&hash).expect("entry present");
-        assert_eq!(entry.size, 4096);
-        assert_eq!(fs::read(&entry.path).unwrap(), vec![7u8; 4096]);
+        assert_eq!(entry.size, 4096, "the spool entry has the snapshot size");
+        assert_eq!(
+            fs::read(&entry.path)?,
+            vec![7u8; 4096],
+            "the spool file holds the snapshot bytes"
+        );
 
         fs::remove_dir_all(&src_dir).ok();
+        Ok(())
     }
 
     #[test]
-    fn dedup_keeps_the_first_secret() {
+    fn dedup_keeps_the_first_secret() -> anyhow::Result<()> {
+        let _guard = ::habilis_network_test_tracing::init();
         let src_dir = temp_dir("src");
         let src = src_dir.join("payload.bin");
-        fs::write(&src, b"same content").unwrap();
+        fs::write(&src, b"same content")?;
 
-        let mut store = BlobStore::new(temp_dir("spool")).unwrap();
-        let hash = BlobDigest::from_bytes([2u8; HASH_LEN]);
-        let first = store
-            .snapshot(
-                &src,
-                ContentMeta {
-                    sha256: hash,
-                    size: 12,
-                    content_id: ContentId::new("blob-test-content"),
-                },
-                &plain_secret([1u8; SECRET_LEN]),
-            )
-            .unwrap();
-        let second = store
-            .snapshot(
-                &src,
-                ContentMeta {
-                    sha256: hash,
-                    size: 12,
-                    content_id: ContentId::new("blob-test-content"),
-                },
-                &plain_secret([2u8; SECRET_LEN]),
-            )
-            .unwrap();
-        assert_eq!(first.ticket_secret.as_bytes(), &[1u8; SECRET_LEN]);
+        let mut store = BlobStore::try_new(temp_dir("spool"))?;
+        let hash = BlobDigest::from([2u8; HASH_LEN]);
+        let first = store.snapshot(
+            &src,
+            ContentMeta {
+                sha256: hash,
+                size: 12,
+                content_id: ContentId::new("blob-test-content"),
+            },
+            &plain_secret([1u8; SECRET_LEN]),
+        )?;
+        let second = store.snapshot(
+            &src,
+            ContentMeta {
+                sha256: hash,
+                size: 12,
+                content_id: ContentId::new("blob-test-content"),
+            },
+            &plain_secret([2u8; SECRET_LEN]),
+        )?;
+        assert_eq!(
+            first.ticket_secret.as_bytes(),
+            &[1u8; SECRET_LEN],
+            "dedup keeps the first ticket secret"
+        );
         assert_eq!(
             second.ticket_secret.as_bytes(),
             first.ticket_secret.as_bytes(),
@@ -332,101 +158,133 @@ mod tests {
         );
 
         fs::remove_dir_all(&src_dir).ok();
+        Ok(())
     }
 
     #[test]
-    fn snapshot_replaces_a_partial_dest() {
+    fn snapshot_replaces_a_partial_dest() -> anyhow::Result<()> {
+        let _guard = ::habilis_network_test_tracing::init();
         let dir = temp_dir("partial");
         let src = dir.join("src");
         let dest = dir.join("dest");
-        fs::write(&src, b"whole content").unwrap();
+        fs::write(&src, b"whole content")?;
         // What a copy cut short by a full disk leaves behind.
-        fs::write(&dest, b"whole").unwrap();
+        fs::write(&dest, b"whole")?;
         super::snapshot_file(&src, &dest).expect("snapshot");
-        let got = fs::read(&dest).unwrap();
+        let got = fs::read(&dest)?;
         let _ = fs::remove_dir_all(&dir);
-        assert_eq!(got, b"whole content");
+        assert_eq!(
+            got, b"whole content",
+            "a partial destination is replaced by the whole content"
+        );
+        Ok(())
     }
 
-    fn snapshot_as(store: &mut BlobStore, src: &Path, hash: BlobDigest, group: &ContentId) {
-        store
-            .snapshot(
-                src,
-                ContentMeta {
-                    sha256: hash,
-                    size: fs::metadata(src).unwrap().len(),
-                    content_id: group.clone(),
-                },
-                &plain_secret([0u8; SECRET_LEN]),
-            )
-            .unwrap();
+    fn snapshot_as(
+        store: &mut BlobStore,
+        src: &Path,
+        hash: BlobDigest,
+        group: &ContentId,
+    ) -> anyhow::Result<()> {
+        store.snapshot(
+            src,
+            ContentMeta {
+                sha256: hash,
+                size: fs::metadata(src)?.len(),
+                content_id: group.clone(),
+            },
+            &plain_secret([0u8; SECRET_LEN]),
+        )?;
+        Ok(())
     }
 
     /// Two offloads of the same bytes that both miss the producer's dedup
     /// check land in `snapshot` together; the second must still own the blob.
     #[test]
-    fn a_snapshot_race_adds_the_second_group() {
+    fn a_snapshot_race_adds_the_second_group() -> anyhow::Result<()> {
+        let _guard = ::habilis_network_test_tracing::init();
         let src_dir = temp_dir("src");
         let src = src_dir.join("payload.bin");
-        fs::write(&src, b"shared").unwrap();
+        fs::write(&src, b"shared")?;
 
-        let mut store = BlobStore::new(temp_dir("spool")).unwrap();
-        let hash = BlobDigest::from_bytes([4u8; HASH_LEN]);
+        let mut store = BlobStore::try_new(temp_dir("spool"))?;
+        let hash = BlobDigest::from([4u8; HASH_LEN]);
         let group_a = ContentId::new("blob-test-group-a");
         let group_b = ContentId::new("blob-test-group-b");
-        snapshot_as(&mut store, &src, hash, &group_a);
-        snapshot_as(&mut store, &src, hash, &group_b);
-        let path = store.get(&hash).unwrap().path.clone();
+        snapshot_as(&mut store, &src, hash, &group_a)?;
+        snapshot_as(&mut store, &src, hash, &group_b)?;
+        let path = store
+            .get(&hash)
+            .expect("the snapshot above registered this hash")
+            .path
+            .clone();
 
         store.evict_content(&group_a);
         assert!(store.get(&hash).is_some(), "group B still owns the blob");
-        assert!(path.exists());
+        assert!(path.exists(), "the spool file exists after a snapshot race");
 
         store.evict_content(&group_b);
-        assert!(store.get(&hash).is_none());
+        assert!(
+            store.get(&hash).is_none(),
+            "the racing group is not yet in the store"
+        );
         assert!(
             !path.exists(),
             "the last owner's evict unlinks the spool file"
         );
 
         fs::remove_dir_all(&src_dir).ok();
+        Ok(())
     }
 
     #[test]
-    fn the_same_group_twice_is_one_owner() {
+    fn the_same_group_twice_is_one_owner() -> anyhow::Result<()> {
+        let _guard = ::habilis_network_test_tracing::init();
         let src_dir = temp_dir("src");
         let src = src_dir.join("payload.bin");
-        fs::write(&src, b"twice").unwrap();
+        fs::write(&src, b"twice")?;
 
-        let mut store = BlobStore::new(temp_dir("spool")).unwrap();
-        let hash = BlobDigest::from_bytes([5u8; HASH_LEN]);
+        let mut store = BlobStore::try_new(temp_dir("spool"))?;
+        let hash = BlobDigest::from([5u8; HASH_LEN]);
         let group = ContentId::new("blob-test-group");
-        snapshot_as(&mut store, &src, hash, &group);
-        snapshot_as(&mut store, &src, hash, &group);
-        assert!(store.claim(&hash, &group).is_some());
+        snapshot_as(&mut store, &src, hash, &group)?;
+        snapshot_as(&mut store, &src, hash, &group)?;
+        assert!(
+            store.claim(&hash, &group).is_some(),
+            "the same group claimed twice is one owner"
+        );
         assert_eq!(store.total_bytes, 5, "a dedup hit adds no bytes");
-        let path = store.get(&hash).unwrap().path.clone();
+        let path = store
+            .get(&hash)
+            .expect("the snapshot above registered this hash")
+            .path
+            .clone();
 
         store.evict_content(&group);
-        assert!(store.get(&hash).is_none());
-        assert!(!path.exists());
+        assert!(
+            store.get(&hash).is_none(),
+            "the store drops the blob for the claimed group"
+        );
+        assert!(!path.exists(), "the spool file is removed with the blob");
 
         fs::remove_dir_all(&src_dir).ok();
+        Ok(())
     }
 
     /// A blob a new group claimed a moment ago is the newest, whatever its
     /// first registration said: under disk pressure the next-oldest goes.
     #[test]
-    fn a_claim_makes_the_blob_the_newest_under_disk_pressure() {
+    fn a_claim_makes_the_blob_the_newest_under_disk_pressure() -> anyhow::Result<()> {
+        let _guard = ::habilis_network_test_tracing::init();
         let src_dir = temp_dir("src");
         let src = src_dir.join("payload.bin");
-        fs::write(&src, b"x").unwrap();
+        fs::write(&src, b"x")?;
 
-        let mut store = BlobStore::new(temp_dir("spool")).unwrap();
+        let mut store = BlobStore::try_new(temp_dir("spool"))?;
         let (oldest, next_oldest, filler) = (
-            BlobDigest::from_bytes([6u8; HASH_LEN]),
-            BlobDigest::from_bytes([7u8; HASH_LEN]),
-            BlobDigest::from_bytes([8u8; HASH_LEN]),
+            BlobDigest::from([6u8; HASH_LEN]),
+            BlobDigest::from([7u8; HASH_LEN]),
+            BlobDigest::from([8u8; HASH_LEN]),
         );
         let group_a = ContentId::new("blob-test-group-a");
         let group_b = ContentId::new("blob-test-group-b");
@@ -438,55 +296,65 @@ mod tests {
                 size,
                 content_id: group_a.clone(),
             };
-            store
-                .snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))
-                .unwrap();
+            store.snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))?;
         }
-        assert!(store.claim(&oldest, &group_b).is_some());
+        assert!(
+            store.claim(&oldest, &group_b).is_some(),
+            "a claim makes the blob the newest under disk pressure"
+        );
 
         // One byte over the budget: exactly one blob has to go.
         let meta = ContentMeta {
             sha256: filler,
             size: super::MAX_BLOB_STORE_BYTES - 1,
-            content_id: group_a.clone(),
+            content_id: group_a,
         };
-        store
-            .snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))
-            .unwrap();
+        store.snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))?;
 
         assert!(store.get(&oldest).is_some(), "the claimed blob stays");
         assert!(store.get(&next_oldest).is_none(), "the next oldest goes");
 
         fs::remove_dir_all(&src_dir).ok();
+        Ok(())
     }
 
     #[test]
-    fn evict_task_unlinks_the_spool_file() {
+    fn evict_task_unlinks_the_spool_file() -> anyhow::Result<()> {
+        let _guard = ::habilis_network_test_tracing::init();
         let src_dir = temp_dir("src");
         let src = src_dir.join("payload.bin");
-        fs::write(&src, b"bye").unwrap();
+        fs::write(&src, b"bye")?;
 
-        let mut store = BlobStore::new(temp_dir("spool")).unwrap();
-        let hash = BlobDigest::from_bytes([3u8; HASH_LEN]);
+        let mut store = BlobStore::try_new(temp_dir("spool"))?;
+        let hash = BlobDigest::from([3u8; HASH_LEN]);
         let task = ContentId::new("blob-test-content");
-        store
-            .snapshot(
-                &src,
-                ContentMeta {
-                    sha256: hash,
-                    size: 3,
-                    content_id: task.clone(),
-                },
-                &plain_secret([0u8; SECRET_LEN]),
-            )
-            .unwrap();
-        let path = store.get(&hash).unwrap().path.clone();
-        assert!(path.exists());
+        store.snapshot(
+            &src,
+            ContentMeta {
+                sha256: hash,
+                size: 3,
+                content_id: task.clone(),
+            },
+            &plain_secret([0u8; SECRET_LEN]),
+        )?;
+        let path = store
+            .get(&hash)
+            .expect("the snapshot above registered this hash")
+            .path
+            .clone();
+        assert!(
+            path.exists(),
+            "the spool file exists before the evict task runs"
+        );
 
         store.evict_content(&task);
-        assert!(store.get(&hash).is_none());
+        assert!(
+            store.get(&hash).is_none(),
+            "the evict task removes the blob from the store"
+        );
         assert!(!path.exists(), "spool file must be unlinked on evict");
 
         fs::remove_dir_all(&src_dir).ok();
+        Ok(())
     }
 }

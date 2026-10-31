@@ -3,6 +3,7 @@
 //! heartbeat. The `Alive`/sweep heartbeat ticks live in
 //! `lifecycle::heartbeat`; the gossip healer in `gossip::heal`.
 
+use crate::daemon::state::{Latch, Standing};
 use std::time::Duration;
 
 use iroh::Endpoint;
@@ -10,9 +11,11 @@ use iroh::Endpoint;
 use super::state::EventLoopState;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::util::clock::{Instant, millis_saturating};
-use crate::util::resident_memory;
-use crate::util::tuning;
+use crate::util::{resident_memory, tuning, unix_secs};
 
+use crate::gossip::PathSummary;
+use crate::net;
+use crate::transport::payload_path;
 /// The warn-only resident-memory leak check, run on the slow (1-minute)
 /// housekeeping tick (see `run`'s `intervals.prune`). Kept on this tick now
 /// that rate-limiter pruning — its original co-tenant — is gone.
@@ -42,7 +45,7 @@ fn warn_on_high_resident_memory(
     sink: &dyn NodeSink,
     threshold_mb: u64,
 ) {
-    if threshold_mb == 0 || state.resident_memory_warned {
+    if threshold_mb == 0 || state.latches.contains(&Latch::ResidentMemoryWarned) {
         return;
     }
     let Some(resident_bytes) = resident_memory::peak_resident_memory_bytes() else {
@@ -50,7 +53,7 @@ fn warn_on_high_resident_memory(
     };
     let resident_mb = resident_bytes / (1024 * 1024);
     if resident_mb >= threshold_mb {
-        state.resident_memory_warned = true;
+        state.latches.insert(Latch::ResidentMemoryWarned);
         tracing::warn!(
             target: "habilis_network::lifecycle",
             resident_mb,
@@ -71,7 +74,7 @@ fn warn_on_high_resident_memory(
 /// roster is non-empty is the silent-partition signature, surfaced at
 /// `warn` for post-freeze diagnosis. At `debug` it also classifies each
 /// live peer link `direct`/`relay`/`mixed` (see
-/// [`crate::gossip::conn_path`]) — this periodic reading is the
+/// [`crate::net::conn_path`]) — this periodic reading is the
 /// representative one (post hole-punch upgrade), unlike the `NeighborUp`
 /// snapshot which skews `relay`. Gated on `debug` being live so the
 /// per-peer `remote_info` round-trips are skipped at the default level.
@@ -99,7 +102,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
             target: "habilis_network::lifecycle",
             roster_len,
             link_len,
-            meshed = state.meshed,
+            meshed = state.standing.contains(&Standing::Meshed),
             "neighbor census: silent partition (meshed but zero peer links)"
         );
         return;
@@ -120,12 +123,13 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
     // `RUST_LOG` surgery — and the arms being counted fire up to 150×/min,
     // which is far too often to afford a line each. Deltas, not totals: a
     // reader needs no arithmetic, and a rotated log cannot corrupt the series.
+    let meshed = state.standing.contains(&Standing::Meshed);
     tracing::info!(
         target: "habilis_network::lifecycle",
         roster_len,
         link_len,
-        meshed = state.meshed,
-        relay_transport = state.relay_transport,
+        meshed,
+        relay_transport = state.relay_transport.relay_allowed(),
         links_direct = links.direct,
         links_relay_only = links.relay_only,
         links_pending = links.pending,
@@ -146,7 +150,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         idle_resent = idle.resent,
         idle_resend_dropped = idle.resend_dropped,
         // A total since the process started, unlike the idle fields above, which are per interval.
-        gossip_recursion_closes_total = crate::transport::path::gossip_recursion_closes(),
+        gossip_recursion_closes_total = payload_path::gossip_recursion_closes(),
         "mesh census"
     );
 
@@ -161,19 +165,19 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
     let (mut direct, mut relay, mut other) = (0usize, 0usize, 0usize);
     let linked: Vec<_> = state.linked_endpoints.iter().copied().collect();
     for peer_id in linked {
-        let (conn, relay_url) = crate::gossip::conn_path(endpoint, peer_id).await;
-        match conn {
-            crate::gossip::PathSummary::Direct => direct += 1,
-            crate::gossip::PathSummary::Relay => relay += 1,
-            crate::gossip::PathSummary::Mixed | crate::gossip::PathSummary::Unknown => other += 1,
+        let (connection, relay_url) = net::conn_path(endpoint, peer_id).await;
+        match connection {
+            PathSummary::Direct => direct += 1,
+            PathSummary::Relay => relay += 1,
+            PathSummary::Mixed | PathSummary::Unknown => other += 1,
         }
         // A link that was relayed at `NeighborUp` and has since punched a
         // direct path: refresh the reading the roster and lanes consult.
-        state.observe_path(peer_id, conn);
+        state.observe_path(peer_id, connection);
         tracing::debug!(
             target: "habilis_network::lifecycle",
             endpoint_id = %peer_id,
-            conn = conn.label(),
+            connection = connection.label(),
             relay = relay_url.as_ref().map_or("-", |url| url.as_str()),
             "peer conn path"
         );
@@ -182,7 +186,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         target: "habilis_network::lifecycle",
         roster_len,
         link_len,
-        meshed = state.meshed,
+        meshed,
         direct,
         relay,
         other,
@@ -202,14 +206,14 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
 pub(crate) fn note_tick_gap(
     timer: &'static str,
     last: &mut Instant,
-    last_wall: &mut crate::util::clock::UnixSecs,
+    last_wall: &mut unix_secs::UnixSecs,
     expected: Duration,
 ) -> (Duration, Duration) {
     let now = Instant::now();
     let mono_gap = now.duration_since(*last);
     *last = now;
 
-    let now_wall = crate::util::clock::UnixSecs::now();
+    let now_wall = unix_secs::UnixSecs::now();
     let wall_gap = now_wall.since(*last_wall);
     *last_wall = now_wall;
 
@@ -243,10 +247,8 @@ pub(crate) fn note_tick_gap(
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::fresh_state;
-    use habilis_network_test_tracing::{expect_warn, test};
-
-    use super::warn_on_high_resident_memory;
+    use crate::daemon::state::Latch;
+    use crate::testing;
 
     use crate::gossip::event::CountingSink;
 
@@ -255,33 +257,35 @@ mod tests {
     // mutate anything else. A `0` threshold disables it entirely.
     #[test]
     fn resident_memory_warn_fires_once_then_latches() {
-        expect_warn(
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
             "habilis_network::lifecycle",
             "resident memory crossed the warn threshold",
         );
         let sink = CountingSink::new();
-        let mut state = fresh_state();
+        let mut state = testing::fresh_state();
 
         // Real resident memory is tens of MiB ≫ 1, so this crosses immediately.
-        warn_on_high_resident_memory(&mut state, &sink, 1);
+        super::warn_on_high_resident_memory(&mut state, &sink, 1);
         assert!(
-            state.resident_memory_warned,
+            state.latches.contains(&Latch::ResidentMemoryWarned),
             "first crossing latches the warn"
         );
         assert_eq!(sink.count(), 1, "an info event is emitted on the crossing");
 
         // Second tick: latched, so no second event (no per-tick spam).
-        warn_on_high_resident_memory(&mut state, &sink, 1);
+        super::warn_on_high_resident_memory(&mut state, &sink, 1);
         assert_eq!(sink.count(), 1, "warn fires exactly once per process");
     }
 
     #[test]
     fn resident_memory_warn_disabled_by_zero_threshold() {
+        let _guard = ::habilis_network_test_tracing::init();
         let sink = CountingSink::new();
-        let mut state = fresh_state();
-        warn_on_high_resident_memory(&mut state, &sink, 0);
+        let mut state = testing::fresh_state();
+        super::warn_on_high_resident_memory(&mut state, &sink, 0);
         assert!(
-            !state.resident_memory_warned,
+            !state.latches.contains(&Latch::ResidentMemoryWarned),
             "threshold 0 disables the warn"
         );
         assert_eq!(sink.count(), 0, "no event when disabled");

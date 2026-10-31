@@ -19,10 +19,11 @@ use habilis_network_netplay::{
 };
 use serde::{Deserialize, Serialize};
 
+use std::{cell, mem};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct Input(i32);
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Copy)]
 struct State {
     value: i64,
     frame: i32,
@@ -34,7 +35,7 @@ struct Game;
 impl Config for Game {
     type Input = Input;
     type State = State;
-    type Address = String;
+    type Address = usize;
 }
 
 /// A deterministic pseudo-random source, so "random" loss is reproducible.
@@ -44,10 +45,10 @@ struct Rng(u64);
 
 impl Rng {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut word = self.0;
-        word = (word ^ (word >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        word = (word ^ (word >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        word = (word ^ (word >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        word = (word ^ (word >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         word ^ (word >> 31)
     }
 
@@ -73,63 +74,63 @@ struct Impairment {
 #[derive(Default)]
 struct Network {
     /// Addressee -> packets waiting.
-    inboxes: HashMap<String, Vec<(String, Message<Input>)>>,
+    inboxes: HashMap<usize, Vec<(usize, Message<Input>)>>,
     /// Packets held back to be delivered later, out of order.
-    delayed: Vec<(String, String, Message<Input>)>,
+    delayed: Vec<(usize, usize, Message<Input>)>,
     impairment: Impairment,
     rng_state: u64,
 }
 
 impl Network {
-    fn deliver(&mut self, from: &str, to: &str, message: Message<Input>) {
-        let mut rng = Rng(self.rng_state);
-        let dropped = rng.chance(self.impairment.drop);
-        let duplicated = rng.chance(self.impairment.duplicate);
-        let delayed = rng.chance(self.impairment.reorder);
-        self.rng_state = rng.0;
+    fn deliver(&mut self, from: usize, to: usize, message: Message<Input>) {
+        let mut generator = Rng(self.rng_state);
+        let dropped = generator.chance(self.impairment.drop);
+        let duplicated = generator.chance(self.impairment.duplicate);
+        let delayed = generator.chance(self.impairment.reorder);
+        self.rng_state = generator.0;
 
         if dropped {
             return;
         }
         if delayed {
-            self.delayed.push((from.to_owned(), to.to_owned(), message));
+            self.delayed.push((from, to, message));
             return;
         }
-        let inbox = self.inboxes.entry(to.to_owned()).or_default();
-        inbox.push((from.to_owned(), message.clone()));
+        let inbox = self.inboxes.entry(to).or_default();
+        inbox.push((from, message.clone()));
         if duplicated {
-            inbox.push((from.to_owned(), message));
+            inbox.push((from, message));
         }
     }
 
     /// Release everything held back, ahead of anything sent since — which is
     /// what makes the delivery order wrong.
     fn flush_delayed(&mut self) {
-        for (from, to, message) in std::mem::take(&mut self.delayed) {
+        for (from, to, message) in mem::take(&mut self.delayed) {
             self.inboxes.entry(to).or_default().push((from, message));
         }
     }
 
-    fn take(&mut self, addr: &str) -> Vec<(String, Message<Input>)> {
-        self.inboxes.remove(addr).unwrap_or_default()
+    fn take(&mut self, address: usize) -> Vec<(usize, Message<Input>)> {
+        self.inboxes.remove(&address).unwrap_or_default()
     }
 }
 
 /// One peer's view of the shared network.
 struct Wire {
-    addr: String,
-    net: Rc<std::cell::RefCell<Network>>,
+    address: usize,
+    net: Rc<cell::RefCell<Network>>,
 }
 
 impl Transport<Game> for Wire {
-    fn send_to(&mut self, message: &Message<Input>, addr: &String) {
+    fn send_to(&mut self, message: &Message<Input>, address: &usize) {
         self.net
             .borrow_mut()
-            .deliver(&self.addr, addr, message.clone());
+            .deliver(self.address, *address, message.clone());
     }
 
-    fn receive_all(&mut self) -> Vec<(String, Message<Input>)> {
-        self.net.borrow_mut().take(&self.addr)
+    fn receive_all(&mut self) -> Vec<(usize, Message<Input>)> {
+        self.net.borrow_mut().take(self.address)
     }
 }
 
@@ -148,7 +149,7 @@ impl Peer {
     fn handle(&mut self, request: Request<Game>) {
         match request {
             Request::SaveState { cell, frame } => {
-                cell.save(frame, self.state.clone(), Some(Self::checksum(&self.state)));
+                cell.save(frame, self.state, Some(Self::checksum(&self.state)));
             }
             Request::LoadState { cell } => {
                 self.state = cell.load().expect("the session only loads frames it saved");
@@ -158,23 +159,24 @@ impl Peer {
                 self.state.value += sum;
                 self.state.frame += 1;
             }
+            _ => unreachable!("a request this test does not expect"),
         }
     }
 }
 
 /// Build `count` peers on one network, with the given impairment.
-fn build(count: usize, impairment: Impairment) -> (Rc<std::cell::RefCell<Network>>, Vec<Peer>) {
-    let net = Rc::new(std::cell::RefCell::new(Network {
+fn build(count: usize, impairment: Impairment) -> (Rc<cell::RefCell<Network>>, Vec<Peer>) {
+    let net = Rc::new(cell::RefCell::new(Network {
         impairment,
         rng_state: 0x1234_5678,
         ..Network::default()
     }));
-    let addrs: Vec<String> = (0..count).map(|index| format!("peer-{index}")).collect();
+    let addrs: Vec<usize> = (0..count).collect();
 
     let peers = (0..count)
         .map(|handle| {
             let wire = Wire {
-                addr: addrs[handle].clone(),
+                address: addrs[handle],
                 net: Rc::clone(&net),
             };
             Peer {
@@ -185,7 +187,7 @@ fn build(count: usize, impairment: Impairment) -> (Rc<std::cell::RefCell<Network
                     8,
                     0,
                     // A distinct nonce per peer, as a real session would.
-                    0xA000 + u32::try_from(handle).expect("handle fits"),
+                    0xa000 + u32::try_from(handle).expect("handle fits"),
                 )
                 .expect("handle is in range"),
                 state: State::default(),
@@ -197,7 +199,7 @@ fn build(count: usize, impairment: Impairment) -> (Rc<std::cell::RefCell<Network
 }
 
 /// Run `ticks` of the frame loop across every peer.
-fn run(net: &Rc<std::cell::RefCell<Network>>, peers: &mut [Peer], ticks: usize) {
+fn run(net: &Rc<cell::RefCell<Network>>, peers: &mut [Peer], ticks: usize) {
     for tick in 0..ticks {
         for (handle, peer) in peers.iter_mut().enumerate() {
             peer.session.poll_remote_peers();
@@ -225,6 +227,11 @@ fn run(net: &Rc<std::cell::RefCell<Network>>, peers: &mut [Peer], ticks: usize) 
                 }
                 // The peer is behind, or we are deliberately yielding.
                 Err(RollbackError::PredictionLimit) => {}
+                Err(
+                    error @ (RollbackError::InvalidPlayer(_)
+                    | RollbackError::MissingLocalInput
+                    | RollbackError::Desync { .. }),
+                ) => panic!("unexpected session error: {error}"),
                 Err(other) => panic!("unexpected session error: {other}"),
             }
         }
@@ -238,7 +245,8 @@ fn two_peers_synchronize_before_either_starts() {
     assert!(
         peers
             .iter()
-            .all(|peer| peer.session.state() == SessionState::Synchronizing)
+            .all(|peer| peer.session.state() == SessionState::Synchronizing),
+        "two peers synchronize before either starts"
     );
 
     run(&net, &mut peers, 40);

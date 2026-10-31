@@ -13,7 +13,24 @@ use std::borrow::Borrow;
 use std::collections::{HashSet, VecDeque};
 use std::hash::Hash;
 
-#[derive(Debug)]
+/// A set that holds at most `capacity` items. When an insert goes past the limit, the oldest item
+/// is dropped.
+///
+/// # Examples
+///
+/// A full set forgets its oldest item when a new one arrives.
+///
+/// ```
+/// use habilis_network_util::bounded_fifo_set::BoundedFifoSet;
+///
+/// let mut set = BoundedFifoSet::new(2);
+/// assert!(set.insert(1));
+/// assert!(set.insert(2));
+/// assert!(set.insert(3));
+/// assert!(!set.contains(&1));
+/// assert_eq!(set.len(), 2);
+/// ```
+#[derive(Debug, Clone)]
 pub struct BoundedFifoSet<T> {
     capacity: usize,
     set: HashSet<T>,
@@ -21,6 +38,7 @@ pub struct BoundedFifoSet<T> {
 }
 
 impl<T: Clone + Eq + Hash> BoundedFifoSet<T> {
+    /// A capacity of 0 is raised to 1.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -50,10 +68,10 @@ impl<T: Clone + Eq + Hash> BoundedFifoSet<T> {
     }
 
     /// Remove `item`, keeping the eviction queue consistent. `true` if present.
-    pub fn remove<Q>(&mut self, item: &Q) -> bool
+    pub fn remove<Query>(&mut self, item: &Query) -> bool
     where
-        T: Borrow<Q>,
-        Q: Eq + Hash + ?Sized,
+        T: Borrow<Query>,
+        Query: Eq + Hash + ?Sized,
     {
         if self.set.remove(item) {
             self.order.retain(|queued| queued.borrow() != item);
@@ -63,24 +81,28 @@ impl<T: Clone + Eq + Hash> BoundedFifoSet<T> {
         }
     }
 
-    pub fn contains<Q>(&self, item: &Q) -> bool
+    /// Whether the set holds the item.
+    pub fn contains<Query>(&self, item: &Query) -> bool
     where
-        T: Borrow<Q>,
-        Q: Eq + Hash + ?Sized,
+        T: Borrow<Query>,
+        Query: Eq + Hash + ?Sized,
     {
         self.set.contains(item)
     }
 
+    /// The items, in no particular order.
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.set.iter()
     }
 
     #[must_use]
+    /// The number of items.
     pub fn len(&self) -> usize {
         self.set.len()
     }
 
     #[must_use]
+    /// Whether the set holds no items.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -89,31 +111,40 @@ impl<T: Clone + Eq + Hash> BoundedFifoSet<T> {
 #[cfg(test)]
 mod tests {
     use super::BoundedFifoSet;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn insert_reports_novelty_and_dedupes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut set = BoundedFifoSet::new(8);
         assert!(set.insert(1u32), "first insert is new");
         assert!(!set.insert(1u32), "re-insert is a dup, no-op");
-        assert_eq!(set.len(), 1);
+        assert_eq!(
+            set.len(),
+            1,
+            "inserting a duplicate reports no novelty and keeps one entry"
+        );
     }
 
     #[test]
     fn evicts_oldest_past_capacity() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut set = BoundedFifoSet::new(3);
         for value in 0..3u32 {
             set.insert(value);
         }
         // Pushing a 4th evicts the oldest (0), FIFO; length stays capped.
-        assert!(set.insert(99));
-        assert_eq!(set.len(), 3);
+        assert!(set.insert(99), "a new entry is novel past capacity");
+        assert_eq!(set.len(), 3, "the set keeps its capacity of three");
         assert!(!set.contains(&0), "oldest evicted");
-        assert!(set.contains(&99) && set.contains(&2));
+        assert!(
+            set.contains(&99) && set.contains(&2),
+            "the newest entry and the newest survivor are kept"
+        );
     }
 
     #[test]
     fn stays_capped_under_churn() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut set = BoundedFifoSet::new(10);
         for value in 0..1000u32 {
             set.insert(value);
@@ -123,34 +154,37 @@ mod tests {
 
     #[test]
     fn remove_clears_set_and_order() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut set = BoundedFifoSet::new(8);
         set.insert(1u32);
         set.insert(2u32);
-        assert!(set.remove(&1));
-        assert!(!set.contains(&1));
+        assert!(set.remove(&1), "removing an entry clears it from the set");
+        assert!(!set.contains(&1), "a removed entry is no longer contained");
         assert!(!set.remove(&1), "second remove is a no-op");
         // Re-inserting the removed value works (order queue stayed consistent).
-        assert!(set.insert(1u32));
-        assert_eq!(set.len(), 2);
+        assert!(set.insert(1u32), "a removed entry can be inserted again");
+        assert_eq!(set.len(), 2, "the set holds two entries after the reinsert");
     }
 
     #[test]
     fn zero_capacity_is_clamped_to_one() {
+        let _guard = ::habilis_network_test_tracing::init();
         // A 0 capacity must not yield a set that holds nothing yet reports
         // inserts as new: it's clamped to 1, so membership actually works.
         let mut set = BoundedFifoSet::new(0);
         assert!(set.insert(7u32), "first insert is new");
         assert!(set.contains(&7), "the inserted item is actually retained");
-        assert_eq!(set.len(), 1);
+        assert_eq!(set.len(), 1, "zero capacity is clamped to one entry");
     }
 
     #[test]
     fn remove_by_borrowed_form() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The `Borrow<Q>` bound lets a `String` set be queried/removed by `&str`.
         let mut set: BoundedFifoSet<String> = BoundedFifoSet::new(4);
         set.insert("alice".to_owned());
-        assert!(set.contains("alice"));
-        assert!(set.remove("alice"));
-        assert!(set.is_empty());
+        assert!(set.contains("alice"), "a borrowed key is contained");
+        assert!(set.remove("alice"), "a borrowed key removes its entry");
+        assert!(set.is_empty(), "removing the only entry empties the set");
     }
 }

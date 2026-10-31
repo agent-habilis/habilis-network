@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::Context as _;
 use bytes::Bytes;
 use iroh::EndpointId;
 use str0m::channel::ChannelId;
@@ -12,34 +11,23 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use super::session::{InboundPacket, SessionRegistry};
+use super::channel_ready_target::ChannelReadyTarget;
+use super::inbound_packet::InboundPacket;
+use super::jsep_error::JsepError;
+use super::negotiated_session::NegotiatedSession;
+use super::session_registry::SessionRegistry;
 
+use std::{io, net};
+use tokio::time;
 /// Consecutive receive errors a live session tolerates before giving up. Sized
 /// to ride out a burst of ICMP port-unreachables (one per dead STUN server,
 /// which Windows surfaces here) while still ending a session whose socket has
 /// genuinely stopped reading. Any successful receive resets the count.
 const MAX_CONSECUTIVE_RECV_ERRORS: usize = 32;
 
-/// A `WebRTC` data channel negotiated via JSEP and ready to carry datagrams —
-/// the value handed to [`crate::WebRtcTransport::attach`].
-pub struct NegotiatedSession {
-    pub(crate) rtc: Rtc,
-    pub(crate) socket: UdpSocket,
-    pub(crate) channel_id: ChannelId,
-    pub(crate) advertised: SocketAddr,
-}
-
-impl std::fmt::Debug for NegotiatedSession {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("NegotiatedSession")
-            .field("advertised", &self.advertised)
-            .finish_non_exhaustive()
-    }
-}
-
 pub(crate) fn build_rtc(now: Instant) -> Rtc {
     Rtc::builder()
+        // the TLS provider is shared by every connection the driver makes
         .set_crypto_provider(Arc::new(str0m_aws_lc_rs::default_provider()))
         .build(now)
 }
@@ -48,24 +36,25 @@ pub(crate) fn build_rtc(now: Instant) -> Rtc {
 /// unspecified, advertise a non-loopback interface address so the single
 /// (vanilla-ICE) host candidate is reachable beyond this machine; the
 /// loopback fallback is what makes same-host tests work.
-pub(crate) async fn bind_ephemeral_udp() -> std::io::Result<(UdpSocket, SocketAddr)> {
+pub(crate) async fn bind_ephemeral_udp() -> io::Result<(UdpSocket, SocketAddr)> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
     let local = socket.local_addr()?;
-    let ip = if local.ip().is_unspecified() {
-        if_addrs::get_if_addrs()
-            .ok()
-            .into_iter()
-            .flatten()
-            .find(|iface| !iface.is_loopback() && iface.addr.ip().is_ipv4())
-            .map_or(Ipv4Addr::LOCALHOST.into(), |iface| iface.addr.ip())
+    let ip: net::IpAddr = if local.ip().is_unspecified() {
+        let mut interfaces = if_addrs::get_if_addrs().ok().into_iter().flatten();
+        let external = interfaces.find(|iface| {
+            let ip = iface.addr.ip();
+            !iface.is_loopback() && ip.is_ipv4()
+        });
+        external.map_or(Ipv4Addr::LOCALHOST.into(), |iface| iface.addr.ip())
     } else {
         local.ip()
     };
     Ok((socket, SocketAddr::new(ip, local.port())))
 }
 
-pub(crate) fn add_host_candidate(rtc: &mut Rtc, advertised: SocketAddr) -> anyhow::Result<()> {
-    let candidate = Candidate::host(advertised, "udp").context("ICE host candidate")?;
+pub(crate) fn add_host_candidate(rtc: &mut Rtc, advertised: SocketAddr) -> Result<(), JsepError> {
+    let candidate =
+        Candidate::host(advertised, "udp").map_err(JsepError::engine("ICE host candidate"))?;
     rtc.add_local_candidate(candidate);
     Ok(())
 }
@@ -83,7 +72,7 @@ pub(crate) async fn add_reflexive_candidate(
     rtc: &mut Rtc,
     socket: &UdpSocket,
     base: SocketAddr,
-    config: &super::stun::IceConfig,
+    config: &super::ice_config::IceConfig,
 ) -> bool {
     let Some(reflexive) = super::stun::gather_reflexive(socket, config).await else {
         return false;
@@ -110,11 +99,6 @@ pub(crate) async fn add_reflexive_candidate(
     }
 }
 
-pub(crate) enum ChannelReadyTarget {
-    Offerer(ChannelId),
-    Answerer,
-}
-
 /// Drives ICE/DTLS/SCTP until the data channel opens. Returns the open
 /// channel's id (the answerer learns it from the `ChannelOpen` event).
 pub(crate) async fn drive_until_channel_ready(
@@ -123,9 +107,9 @@ pub(crate) async fn drive_until_channel_ready(
     advertised: SocketAddr,
     target: &ChannelReadyTarget,
     deadline: Duration,
-) -> anyhow::Result<ChannelId> {
+) -> Result<ChannelId, JsepError> {
     let give_up = Instant::now() + deadline;
-    let mut buf = vec![0u8; 2000];
+    let mut buffer = vec![0u8; 2000];
     let mut next_wake = Instant::now();
     let mut opened: Option<ChannelId> = None;
     let mut noise = HandshakeNoise::default();
@@ -137,11 +121,11 @@ pub(crate) async fn drive_until_channel_ready(
             .min(Duration::from_millis(50));
 
         tokio::select! {
-            () = tokio::time::sleep(sleep_for) => {
+            () = time::sleep(sleep_for) => {
                 rtc.handle_input(Input::Timeout(Instant::now()))
-                    .context("str0m timeout input")?;
+                    .map_err(JsepError::engine("str0m timeout input"))?;
             }
-            received = socket.recv_from(&mut buf) => {
+            received = socket.recv_from(&mut buffer) => {
                 // Never fatal, for the reason the STUN gather sharing this
                 // socket is not: Windows reports an ICMP port-unreachable from
                 // a dead server as a receive error, and several dead servers
@@ -152,7 +136,7 @@ pub(crate) async fn drive_until_channel_ready(
                     Err(error) => {
                         tracing::debug!(%error, "transient error reading during the JSEP handshake");
                         noise.recv_errors += 1;
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        time::sleep(Duration::from_millis(10)).await;
                         continue;
                     }
                 };
@@ -175,8 +159,8 @@ pub(crate) async fn drive_until_channel_ready(
                 // What the old bail did buy was a *named* failure instead of a
                 // silent timeout, so the count is carried to the deadline and
                 // reported there.
-                let Ok(receive) = Receive::new(Protocol::Udp, src, advertised, &buf[..len]) else {
-                    if super::stun::is_plain_stun_response(&buf[..len]) {
+                let Ok(receive) = Receive::new(Protocol::Udp, src, advertised, &buffer[..len]) else {
+                    if super::stun::is_plain_stun_response(&buffer[..len]) {
                         tracing::trace!(%src, "ignoring a late STUN gather reply during the handshake");
                     } else {
                         tracing::debug!(%src, len, "ignoring an unparseable datagram during the handshake");
@@ -186,12 +170,15 @@ pub(crate) async fn drive_until_channel_ready(
                     continue;
                 };
                 rtc.handle_input(Input::Receive(Instant::now(), receive))
-                    .context("str0m receive input")?;
+                    .map_err(JsepError::engine("str0m receive input"))?;
             }
         }
 
         loop {
-            match rtc.poll_output().context("str0m poll_output")? {
+            match rtc
+                .poll_output()
+                .map_err(JsepError::engine("str0m poll_output"))?
+            {
                 Output::Timeout(wake) => {
                     next_wake = wake;
                     break;
@@ -210,7 +197,28 @@ pub(crate) async fn drive_until_channel_ready(
                         opened = Some(id);
                     }
                 },
-                Output::Event(_) => {}
+                Output::Event(
+                    Event::Connected
+                    | Event::IceConnectionStateChange(_)
+                    | Event::MediaAdded(_)
+                    | Event::MediaData(_)
+                    | Event::MediaChanged(_)
+                    | Event::ChannelData(_)
+                    | Event::ChannelClose(_)
+                    | Event::ChannelBufferedAmountLow(_)
+                    | Event::PeerStats(_)
+                    | Event::MediaIngressStats(_)
+                    | Event::MediaEgressStats(_)
+                    | Event::EgressBitrateEstimate(_)
+                    | Event::KeyframeRequest(_)
+                    | Event::StreamPaused(_)
+                    | Event::SenderFeedback(_)
+                    | Event::RtpPacket(_)
+                    | Event::AppSpecificFeedback(_)
+                    | Event::Closed
+                    | Event::RawPacket(_)
+                    | _,
+                ) => {}
             }
         }
 
@@ -236,21 +244,20 @@ struct HandshakeNoise {
 }
 
 impl HandshakeNoise {
-    fn into_timeout_error(self) -> anyhow::Error {
-        let base = "timed out waiting for the WebRTC data channel to open";
-        match (self.unparseable, self.recv_errors) {
-            (0, 0) => anyhow::anyhow!("{base}"),
+    fn into_timeout_error(self) -> JsepError {
+        let detail = match (self.unparseable, self.recv_errors) {
+            (0, 0) => String::new(),
             (unparseable, errors) => {
                 let from = self.last_source.map_or_else(
                     || String::from("no source recorded"),
                     |src| format!("last from {src}"),
                 );
-                anyhow::anyhow!(
-                    "{base}; ignored {unparseable} unparseable datagrams ({from}) \
-                     and {errors} receive errors"
+                format!(
+                    "; ignored {unparseable} unparseable datagrams ({from}) and {errors} receive errors"
                 )
             }
-        }
+        };
+        JsepError::Timeout { detail }
     }
 }
 
@@ -266,9 +273,11 @@ pub(crate) async fn drive_session(
     session: NegotiatedSession,
     remote: EndpointId,
     generation: u64,
+    // the driver and the transport share the session registry
     registry: Arc<SessionRegistry>,
     mut out_rx: mpsc::Receiver<Bytes>,
     in_tx: mpsc::Sender<InboundPacket>,
+    // the driver and the session handles share the drop counter
     dropped_rx: Arc<AtomicU64>,
 ) {
     let NegotiatedSession {
@@ -277,7 +286,7 @@ pub(crate) async fn drive_session(
         channel_id,
         advertised,
     } = session;
-    let mut buf = vec![0u8; 2000];
+    let mut buffer = vec![0u8; 2000];
     let mut next_wake = Instant::now();
     let mut consecutive_recv_errors: usize = 0;
 
@@ -288,12 +297,12 @@ pub(crate) async fn drive_session(
             .min(Duration::from_millis(100));
 
         tokio::select! {
-            () = tokio::time::sleep(sleep_for) => {
+            () = time::sleep(sleep_for) => {
                 if let Err(error) = rtc.handle_input(Input::Timeout(Instant::now())) {
                     break SessionEnd::Failed(error.into());
                 }
             }
-            received = socket.recv_from(&mut buf) => {
+            received = socket.recv_from(&mut buffer) => {
                 // A single receive error must not tear down a working session:
                 // this is the socket the STUN gather shares, and Windows
                 // reports an ICMP port-unreachable from a dead server as one.
@@ -311,14 +320,14 @@ pub(crate) async fn drive_session(
                                 "session UDP socket failed repeatedly",
                             ));
                         }
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        time::sleep(Duration::from_millis(10)).await;
                         continue;
                     }
                 };
                 if len == 0 {
                     continue;
                 }
-                let Ok(receive) = Receive::new(Protocol::Udp, src, advertised, &buf[..len]) else {
+                let Ok(receive) = Receive::new(Protocol::Udp, src, advertised, &buffer[..len]) else {
                     continue;
                 };
                 if let Err(error) = rtc.handle_input(Input::Receive(Instant::now(), receive)) {
@@ -341,7 +350,7 @@ pub(crate) async fn drive_session(
                         // The channel refused the write (e.g. buffer full or
                         // closing): drop the datagram, QUIC retransmits.
                         let total = dropped_rx.fetch_add(1, Ordering::Relaxed) + 1;
-                        super::session::note_dropped(&remote, total, "channel write refused");
+                        super::note_dropped::note_dropped(&remote, total, "channel write refused");
                     }
                 }
             }
@@ -429,7 +438,29 @@ async fn pump_outputs(
             Output::Event(Event::IceConnectionStateChange(IceConnectionState::Disconnected)) => {
                 return Err(SessionEnd::Closed("ICE disconnected"));
             }
-            Output::Event(_) => {}
+            Output::Event(
+                Event::Connected
+                | Event::IceConnectionStateChange(_)
+                | Event::MediaAdded(_)
+                | Event::MediaData(_)
+                | Event::MediaChanged(_)
+                | Event::ChannelOpen(_, _)
+                | Event::ChannelData(_)
+                | Event::ChannelClose(_)
+                | Event::ChannelBufferedAmountLow(_)
+                | Event::PeerStats(_)
+                | Event::MediaIngressStats(_)
+                | Event::MediaEgressStats(_)
+                | Event::EgressBitrateEstimate(_)
+                | Event::KeyframeRequest(_)
+                | Event::StreamPaused(_)
+                | Event::SenderFeedback(_)
+                | Event::RtpPacket(_)
+                | Event::AppSpecificFeedback(_)
+                | Event::Closed
+                | Event::RawPacket(_)
+                | _,
+            ) => {}
         }
     }
 }
@@ -440,13 +471,14 @@ mod tests {
         ChannelReadyTarget, HandshakeNoise, bind_ephemeral_udp, build_rtc,
         drive_until_channel_ready,
     };
-    use habilis_network_test_tracing::test;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::time::{Duration, Instant};
     use tokio::net::UdpSocket;
 
+    use tokio::time;
     #[test]
     fn a_quiet_timeout_says_only_that_it_timed_out() {
+        let _guard = ::habilis_network_test_tracing::init();
         let text = HandshakeNoise::default().into_timeout_error().to_string();
         assert!(text.contains("timed out"), "{text}");
         assert!(
@@ -457,6 +489,7 @@ mod tests {
 
     #[test]
     fn a_noisy_timeout_reports_what_it_ignored() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Tolerating stray datagrams must not cost the diagnosis the old
         // fail-fast gave: a timeout has to say something was arriving.
         let noise = HandshakeNoise {
@@ -471,54 +504,56 @@ mod tests {
     }
 
     #[test]
-    async fn a_stray_datagram_does_not_abort_the_handshake() {
-        // The socket is reachable by anything that can route to the host
-        // candidate we put in the SDP, so one garbage packet from a scanner
-        // used to kill a negotiation that was otherwise fine.
-        let (socket, advertised) = bind_ephemeral_udp().await.expect("bind media socket");
-        // The socket binds to the wildcard address, so reach it on loopback
-        // rather than the 0.0.0.0 that `local_addr` reports.
-        let local = SocketAddr::from((
-            Ipv4Addr::LOCALHOST,
-            socket.local_addr().expect("local addr").port(),
-        ));
-        let mut rtc = build_rtc(Instant::now());
+    fn a_stray_datagram_does_not_abort_the_handshake() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // The socket is reachable by anything that can route to the host
+            // candidate we put in the SDP, so one garbage packet from a scanner
+            // used to kill a negotiation that was otherwise fine.
+            let (socket, advertised) = bind_ephemeral_udp().await.expect("bind media socket");
+            // The socket binds to the wildcard address, so reach it on loopback
+            // rather than the 0.0.0.0 that `local_addr` reports.
+            let local = SocketAddr::from((
+                Ipv4Addr::LOCALHOST,
+                socket.local_addr().expect("local addr").port(),
+            ));
+            let mut rtc = build_rtc(Instant::now());
 
-        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("bind sender");
-        let noise = tokio::spawn(async move {
-            for _ in 0..5u8 {
-                let _ = sender.send_to(&[0xFF; 32], local).await;
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
+            let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("bind sender");
+            let noise = tokio::spawn(async move {
+                for _ in 0..5u8 {
+                    let _ = sender.send_to(&[0xff; 32], local).await;
+                    time::sleep(Duration::from_millis(20)).await;
+                }
+            });
+
+            let started = Instant::now();
+            let outcome = drive_until_channel_ready(
+                &mut rtc,
+                &socket,
+                advertised,
+                &ChannelReadyTarget::Answerer,
+                Duration::from_millis(400),
+            )
+            .await;
+            let elapsed = started.elapsed();
+            noise.abort();
+
+            let error = outcome.expect_err("no channel can open without a peer");
+            let text = error.to_string();
+            assert!(
+                text.contains("timed out"),
+                "a stray datagram must not end the handshake early: {text}"
+            );
+            assert!(
+                elapsed >= Duration::from_millis(300),
+                "the loop returned after {elapsed:?}, so it bailed rather than waiting"
+            );
+            assert!(
+                text.contains("unparseable"),
+                "the timeout must name what it ignored: {text}"
+            );
         });
-
-        let started = Instant::now();
-        let outcome = drive_until_channel_ready(
-            &mut rtc,
-            &socket,
-            advertised,
-            &ChannelReadyTarget::Answerer,
-            Duration::from_millis(400),
-        )
-        .await;
-        let elapsed = started.elapsed();
-        noise.abort();
-
-        let error = outcome.expect_err("no channel can open without a peer");
-        let text = error.to_string();
-        assert!(
-            text.contains("timed out"),
-            "a stray datagram must not end the handshake early: {text}"
-        );
-        assert!(
-            elapsed >= Duration::from_millis(300),
-            "the loop returned after {elapsed:?}, so it bailed rather than waiting"
-        );
-        assert!(
-            text.contains("unparseable"),
-            "the timeout must name what it ignored: {text}"
-        );
     }
 }

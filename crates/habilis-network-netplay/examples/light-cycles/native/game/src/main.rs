@@ -18,28 +18,32 @@ use crossterm::{cursor, execute, terminal};
 use tokio::time::MissedTickBehavior;
 
 use habilis_network::embed::SilentSink;
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, MeshConfig, MeshName, Nickname, TransportPolicy};
 use habilis_network::runtime::{
-    Node, SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh,
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config, setup_mesh,
 };
 
 use habilis_network_netplay::RollbackDriver;
 
-use light_cycles_native::app::Snapshot;
-use light_cycles_native::app::{Game, LightCycles};
-use light_cycles_native::grid::{Dir, GRID_H, GRID_W, TICK_MS};
+use light_cycles_native::dir::Dir;
+use light_cycles_native::game::Game;
+use light_cycles_native::grid::{GRID_H, GRID_W, TICK_MS};
+use light_cycles_native::light_cycles::LightCycles;
+use light_cycles_native::snapshot::Snapshot;
 use light_cycles_native::ui;
 
-use visage_rust_tui::reactive::Signal;
 use visage_rust_tui::runtime::{Runtime, render_frame};
-use visage_rust_tui::tui::layout::LayoutState;
+use visage_rust_tui::signal::Signal;
+use visage_rust_tui::tui::layout_state::LayoutState;
 
+use std::fs;
+use tokio::{signal, time};
 #[derive(Parser)]
 #[command(
     name = "light-cycles",
     about = "A real-time multiplayer light-cycles game over habilis-network"
 )]
+#[derive(Clone)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -72,7 +76,7 @@ struct Cli {
     relay_transport: bool,
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 enum Command {
     /// Mint a fresh room code, print it, and join it.
     Create {
@@ -110,9 +114,10 @@ async fn main() -> Result<()> {
 /// all `MakeWriter` asks for — no logging side-crate needed. `with_ansi`
 /// off: this is a file, and colour codes in it only make it harder to read.
 fn start_logging(path: &Path) -> Result<()> {
-    let file = std::fs::File::create(path)?;
+    let file = fs::File::create(path)?;
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        // the subscriber calls the writer from each thread, so the file is shared
         .with_writer(Arc::new(file))
         .with_ansi(false)
         .init();
@@ -169,17 +174,14 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
     };
     let mesh = derive_topic_mesh_config(
         room,
-        MeshConfig {
+        MeshConfig::new(
             lookups,
-            password: None,
-            issuer_pubkey: None,
-            transport: TransportPolicy {
-                relay_transport,
-                ..TransportPolicy::default()
-            },
-        },
+            None,
+            None,
+            TransportPolicy::default().relay_transport(relay_transport),
+        ),
     )?;
-    let author = Nickname::new(nick)?;
+    let author = Nickname::try_new(nick)?;
     let my_nick = author.clone();
     let kind = SetupKind::Topic {
         mesh,
@@ -188,20 +190,7 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
 
     let config = setup_mesh(
         kind,
-        SetupParams {
-            author,
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink: Arc::new(SilentSink),
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author, SilentSink::default()).max_peers(16),
     )
     .await?;
 
@@ -209,8 +198,9 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
     // tokio's signal handler suppresses the OS default-terminate for the
     // whole process, permanently. This CLI races its own `ctrl_c()` in
     // `render_loop` instead, and always reaches `node.leave()` below.
-    let (driver, pending) = RollbackDriver::<LightCycles>::new();
-    let node: Node<RollbackDriver<LightCycles>> = Node::spawn(config, driver, None, false);
+    let (driver, pending): (RollbackDriver<LightCycles>, _) = RollbackDriver::new();
+    let node: Node<RollbackDriver<LightCycles>> =
+        Node::spawn(config, driver, None, SignalHandling::Leave);
     let mut game = Game::new(pending.connect(node.sender()), room.to_string(), my_nick);
 
     let result = render_loop(&mut game).await;
@@ -223,6 +213,7 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
 /// restoring both on drop — including on an early `?` return or an
 /// unwinding panic, since nothing else in this crate touches the terminal
 /// mode (`visage-rust-tui` deliberately leaves that to the caller).
+#[derive(Clone)]
 struct RawModeGuard;
 
 impl RawModeGuard {
@@ -307,7 +298,7 @@ async fn render_loop(game: &mut Game) -> Result<()> {
     let mut needs_full_redraw = true;
 
     // One render tick is one simulation frame — see `Game::tick`.
-    let mut ticker = tokio::time::interval(Duration::from_millis(u64::from(TICK_MS)));
+    let mut ticker = time::interval(Duration::from_millis(u64::from(TICK_MS)));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
@@ -356,7 +347,7 @@ async fn render_loop(game: &mut Game) -> Result<()> {
                     previous = Some(buffer);
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
+            _ = signal::ctrl_c() => {
                 return Ok(());
             }
         }
@@ -390,17 +381,34 @@ fn is_quit_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
         || (modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c' | 'C')))
 }
 
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "only the arrow/WASD keys steer a light-cycle; crossterm's KeyCode has ~20 other \
-              variants (function keys, media keys, ...) irrelevant to this game"
-)]
 fn dir_for_key(code: KeyCode) -> Option<Dir> {
     match code {
         KeyCode::Up | KeyCode::Char('w' | 'W') => Some(Dir::Up),
         KeyCode::Down | KeyCode::Char('s' | 'S') => Some(Dir::Down),
         KeyCode::Left | KeyCode::Char('a' | 'A') => Some(Dir::Left),
         KeyCode::Right | KeyCode::Char('d' | 'D') => Some(Dir::Right),
-        _ => None,
+        KeyCode::Backspace
+        | KeyCode::Enter
+        | KeyCode::Home
+        | KeyCode::End
+        | KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::Tab
+        | KeyCode::BackTab
+        | KeyCode::Delete
+        | KeyCode::Insert
+        | KeyCode::F(_)
+        | KeyCode::Char(_)
+        | KeyCode::Null
+        | KeyCode::Esc
+        | KeyCode::CapsLock
+        | KeyCode::ScrollLock
+        | KeyCode::NumLock
+        | KeyCode::PrintScreen
+        | KeyCode::Pause
+        | KeyCode::Menu
+        | KeyCode::KeypadBegin
+        | KeyCode::Media(_)
+        | KeyCode::Modifier(_) => None,
     }
 }

@@ -30,7 +30,7 @@ Layer: identity. Keyed by seed.
 
 A mesh is a `Mesh` value: a seed, a name, and a config. The mesh id is its Base58Check text. The config is mixed into the gossip topic, so every member shares it.
 
-Code: `protocol::mesh` (`Mesh`, `MeshId`, `MeshConfig`).
+Code: `protocol::meshes` (`Mesh`, `MeshId`, `MeshConfig`).
 
 ### topic mesh
 
@@ -38,7 +38,7 @@ Layer: identity. Keyed by seed.
 
 A mesh whose seed is derived from a string, not minted at random. The string alone fixes the mesh, so every peer that uses the same string meets.
 
-Code: `crypto::topic_seed`, `Mesh::from_topic`.
+Code: `crypto::topic_seed`, `Mesh::for_topic`.
 
 ### password
 
@@ -126,7 +126,7 @@ Layer: protocol. A header on a message.
 
 One slice of a body that is too large for one gossip message. Each shard is a signed message. The receiver puts the shards back together, and only the whole message is surfaced.
 
-Code: `protocol::message::shard`, `protocol::reassembly`.
+Code: `protocol::messages::shard`, `protocol::reassembly`.
 
 ### seal
 
@@ -134,7 +134,7 @@ Layer: protocol. A property of a message body.
 
 The encryption of a body. A directed frame is sealed to the x25519 public key of the addressee. On a passworded mesh, state, meta, and broadcast bodies are sealed with a `SymmetricKey` that every member holds. Encryption comes before signing, so the signature covers the ciphertext.
 
-Code: `protocol::seal`.
+Code: `protocol::seal_error`.
 
 ### blob
 
@@ -180,6 +180,111 @@ Write `target: "habilis_network::<subsystem>"` on every new `tracing` call in th
 
 The `transport` target has no pin. Its lines appear only when `RUST_LOG` names them.
 
+## Rust style
+
+The Google Rust Style Guide is the reference for Rust style in this repository: https://google.github.io/styleguide/rustguide.html
+
+Issue #29 records each decision.
+
+### What each gate refuses
+
+- `cargo fmt --check` runs in CI. It refuses unformatted code. `rustfmt.toml` sets `imports_granularity = "Module"`, which only a nightly `rustfmt` enforces. `rust-toolchain.toml` pins one toolchain for the whole project, for build, lint and format: `nightly-2026-06-05`. To move the date, rerun the clippy rows of `ci.yml` on both dates first and make it a named commit.
+- `cargo clippy` runs in CI with `-D warnings`. Its lints come from `[workspace.lints]` in `Cargo.toml` and from `clippy.toml`. The `pedantic` group is on. These lints are on by name: `unwrap_used`, `wildcard_enum_match_arm`, `await_holding_lock`, `allow_attributes`, `string_add`, `undocumented_unsafe_blocks`, `excessive_nesting`, `shadow_unrelated`, `min_ident_chars` and `semicolon_inside_block`. The four example workspaces (`chat-webrtc`, `chat-web`, and `light-cycles` native and web) deny `allow_attributes` in their own lint tables, so a new `#[allow]` there fails their clippy row too. The rustc lint `missing_docs` and the clippy lints `exhaustive_enums` and `exhaustive_structs` are on by name too, so an undocumented public item, or a public enum or struct that is not `#[non_exhaustive]`, fails the gate. The rustc lints `unsafe_code` and `non_ascii_idents` are denied. The `pedantic` lint `must_use_candidate` refuses a public fn that returns a value without `#[must_use]`; its three `#[expect]` sites in `habilis-network-iroh-multihop-transport/src/lib.rs` each give a reason. `Result` is `#[must_use]` in std, so an error is never ignored by accident, and `double_must_use` refuses a second attribute on it.
+- `missing_copy_implementations` is on by name in `[workspace.lints.rust]`, so a struct whose fields are all `Copy` is `Copy`. Covering gates for the type traits: `missing_debug_implementations` (Debug), `missing_copy_implementations` (Copy), and the derive lints of R2 and R4 below.
+- Leaf file names (O9): `scripts/module-layout/module-layout.ts` refuses a leaf file, one that declares no child module, whose public types are not named after the file (`frame_cache.rs` holds `FrameCache`). A leaf named after its type is fine, and so is a file with no public type.
+- Non-leaf files (O11): the same script refuses a `mod.rs` or `lib.rs` that defines an item (struct, enum, trait, fn, impl, const, static, type). Up to 20 non-blank lines of definitions are small core glue and are not a hit (O13).
+- Constructor names (N10): `scripts/naming/naming.ts` refuses a file with a `fn new_<x>` and no plain `fn new`.
+- Conversion names (N12): the same script refuses a file with a `fn from_<x>` and no `impl From<` in it. `fn from_str` is the `FromStr` method and is not flagged.
+- Trait impls (R2, R4): clippy's default `should_implement_trait` and `derivable_impls` run under `-D warnings`, and no site silences either. A method named like a std trait method must implement the trait, and a hand impl that a derive gives must be the derive.
+- `scripts/style-check/style-check.ts` checks the rules that no compiler lint covers: the `name:` entries of the file, from `poison` to `abbrev_name` (`anyhow_pub` has its own bullet below). Each rule's `why` text says what it refuses. A violation fails the check.
+- `pub_const_fn` in `scripts/style-check/style-check.ts`: a public `const fn` needs a reason that says why it stays const (a const context, a newtype accessor, or a trivial accessor).
+- `scripts/style-check/style-check.ts` rule `anyhow_pub`: a public function of a library file returns a typed error, not `anyhow`. It counts each public fn whose return type names `anyhow::Result` or `anyhow::Error` (also through a `use anyhow::Result as X` or a `pub type` alias, and a `pub trait` method), and it skips binaries, CLIs and `bin/` targets.
+- `scripts/script-language/script-language.ts` refuses a `.sh`, `.bash` or `.py` file, and a file with a shell or Python shebang. See the Scripts section.
+- `typecheck:scripts` in `package.json` runs `tsc --noEmit -p tsconfig.scripts.json`. The `typecheck` script runs it too.
+- No glob import, with no exemption: not `use super::*` in a test module, not a `pub use ...::*` facade, not a third-party prelude. The `glob` rule of `scripts/style-check/style-check.ts` refuses every `::*` import. `warn-on-all-wildcard-imports` in `clippy.toml` stays as a second check. Do not define a prelude of our own.
+- `clippy::doc_paragraphs_missing_punctuation` is on by name: a doc paragraph must end with punctuation. It had 0 hits when it was turned on (2026-10-28). Capital letters at the start of a doc sentence are checked by `scripts/doc-sentence/doc-sentence.ts` (D5): a sentence that starts with a lowercase word fails the gate, except the brand and crate names it lists (`iroh`, `macOS`, ...). It is in CI with its tests.
+- `clippy::clone_on_ref_ptr` and `clippy::redundant_clone` are on by name: an `Arc` or `Rc` clone is written `Arc::clone(&x)`, and a clone that the code never uses again is refused. about 24 sites in 15 files were fixed when they were turned on (2026-10-28). `implicit_clone` is on through `pedantic`, and `clone_on_copy` is in the default set.
+- `clippy::missing_panics_doc` (in `pedantic`, not silenced) refuses a public function that can panic and has no `# Panics` section. A probe fn with `expect` fails with "docs for function which may panic missing `# Panics` section" (2026-10-27).
+- `clippy::missing_assert_message` is on by name in `[workspace.lints]`: an `assert!` outside test code needs a message. A probe `assert!(flag)` fails with "assert without any message" (2026-10-27). Clippy does not look at test code, so about 570 message-less `assert!` calls in tests stay.
+- No `for` loop header holds a combinator chain: a `git grep` for `for … in … .iter()/.into_iter()/.chars()/.lines()/.split() .method(` finds 0 lines (2026-10-27). The reviewer keeps it that way. (P16)
+- `arc_reason` in `scripts/style-check/style-check.ts` (Z28): an `Arc<` type or an `Arc::new(` needs a one-line `//` reason on its line or the line above, saying why the handle is shared (the owners that hold it, or the trait object). `Arc::clone` is not flagged. A site without a reason fails the gate. Where a borrow works, remove the `Arc` instead of commenting it.
+- Every `unsafe fn` has a `# Safety` section: the 4 in `habilis-network-ffi/src/ffi.rs` each carry one. `unsafe_code` is denied everywhere else, and 6 `expect(unsafe_code)` sites remain. (D4)
+- The docs follow the rustdoc rules: the `Doc links` step of `ci.yml` runs `cargo doc --workspace --no-deps --all-features` with `RUSTDOCFLAGS=-D rustdoc::broken_intra_doc_links`. (D10)
+- `clippy::doc_markdown` (in `pedantic`) refuses an identifier in a doc comment that has no backticks. `clippy.toml` extends its list of domain terms. It does not check the rest of the Markdown, so the reviewer does. (D11)
+- `clippy::new_without_default` (default group, not silenced) refuses a `pub fn new() -> Self` with no `Default` impl. A probe with `-D clippy::new_without_default` fails on the bare type and passes once `impl Default` is added (2026-10-28). A `Default` for a type with public fields is still the reviewer's call. (R17)
+- A map key carries `Hash` and `Eq`, and a `BTreeMap` key carries `Ord`: rustc refuses an insert without them. A probe `HashMap` insert of a type with only `PartialEq` fails with exit 1, and the same type with `Eq, Hash` passes (2026-10-28). Every map key of the crates derives both (`git grep` of 17 key types). (R20)
+- A type with a float field cannot derive `Ord` or `Eq`: rustc refuses it. A probe with `Ord` derived on `f64` fails with exit 1, and the same type with `PartialOrd` only passes (2026-10-28). Whether a type with a total order should derive `Ord` is for the reviewer. (R19)
+
+- Do not overuse type inference (P1): three gates name the cases the compiler cannot show. `untyped_generic_let` (P4) counts a let that takes its type from parse, into or try_into. `untyped_long_chain_let` (P5) counts a let of a five-call chain with no type. `turbofish` (P2) counts every turbofish of code except `size_of` and `align_of`. A gate over every untyped let would count 9261 lines and separate no correct code from a wrong one, so P1 is not gated on its own.
+- U10, `_mut` accessors: the `accessor_name` rule of `scripts/style-check/style-check.ts` refuses a method named `*_mut` that does not return `&mut`. A probe `pub fn x_mut(&mut self) -> &u8` makes the rule count 1 (red), and its removal makes the count 0.
+- U11, `take_` methods: the `accessor_name` rule refuses a method named `take_*` that does not take `&mut self`. A probe `pub fn take_x(self) -> u8` makes the rule count 1 (red), and the `&mut self` form counts 0. A free function such as `take_array` is not a method, so the rule does not flag it.
+- U14, `replace_` methods: the `accessor_name` rule refuses a `replace_*` method with no return value. A probe `pub fn replace_x(&mut self, v: u8)` makes the rule count 1 (red), and `-> u8` counts 0.
+- N1, method names with a `self` receiver: the `self_convention` rule of `scripts/style-check/style-check.ts` counts a public `as_`/`to_` method that takes self by value and an `into_` method that takes a reference. The guide lets a Copy type take self by value, so the rule skips the impl of a type that derives Copy in the same file. Clippy's `wrong_self_convention` did not fire in two probes (`as_x(self)` on a non-Copy type, and `into_x(&self)`), so the rule carries the check. Probes: `cargo clippy -p habilis-network-util -- -D warnings` on each.
+- Operator overloads (Z14): the `operator` rule of `scripts/style-check/style-check.ts` counts an `Index` or `IndexMut` impl, which hides a lookup that can fail. An arithmetic or logic operator keeps its math meaning by name, so `Add`, `Sub`, `BitOr` and the like are not flagged. A probe `impl Index<usize> for Demo` makes the rule count 1 (red), and `impl Add<u8> for Demo` counts 0.
+- N7, generic parameter names: the `generic_name` rule of `scripts/style-check/style-check.ts` counts a generic that is not T, U, E, K, V, F, I, R or S and not a CamelCase word of three letters or more. Its 43 hits (A, C, D, H, W, X, O, Q) were renamed to words (Driver, Peer, Decoder, Handle, Writer, Link, Reply, Query, Cmd). A probe `pub struct Wrap<A>` makes the rule count 1 (red), and the renamed form counts 0.
+- N13, letter-deleted abbreviations: the `abbrev_name` rule of `scripts/style-check/style-check.ts` counts a declared or used identifier named ctx, addr, conn, msg, buf, opts, prev, req, resp, idx, cfg, tmp, attr, cmd, ident, rng, pos or sig (not in a string, comment, attribute or path). A probe `let ctx = 1;` makes it count 1 (red); `let context = 1;` counts 0. Serde fields keep the old JSON key with `#[serde(rename)]`.
+
+- A public fn is `const` only where a const or static initializer calls it: `pub_const_fn` reads every `const` and `static` line of the crates for the names they call, and flags a `pub const fn` none of them calls (Z7). A newtype or trivial accessor is not exempt by its shape.
+### Rules we decline, or leave to the reviewer
+
+- `clippy::absolute_paths`: gated. It is `warn` in `[workspace.lints]`, and CI runs clippy with `-D warnings`. It takes the guide's default: a path names at most two segments, so a type is imported and a function is called as `module::fn`. `clippy.toml` sets no override. `scripts/absolute-paths/` rewrites the hits to import the parent module.
+- `non_exhaustive_omitted_patterns`: gated by the `Omitted patterns` CI step. It is an unstable rustc lint. The project toolchain is a nightly. The `Omitted patterns` step in `.github/workflows/ci.yml` runs it with `-Zcrate-attr=feature(non_exhaustive_omitted_patterns_lint)` and `-D non_exhaustive_omitted_patterns`. The step checks three things: the workspace, `habilis-network-bench-wasm` on wasm32, and the `idb_browser`, `origin` and `conformance` tests of `habilis-network-chunks` on wasm32. A crate root gated by `target_arch` drops the crate attribute, so the wasm32 crates are checked on their own. Their test and bench bodies sit in modules for that reason. The step does not check the `wasm_runtime` test on wasm32, because `mio` does not build for wasm32.
+- `exhaustive_enums` and `exhaustive_structs`: gated. Both are `warn` in `[workspace.lints]`. The owner decided to mark public types `#[non_exhaustive]`. All public enums are marked. A public struct is marked too, except one that keeps a private field (`AppClass`). A struct that other crates build gets `new` with all fields (up to four, no two adjacent of one type), or `new` with the required fields and a `with_` method for each optional field that a call site sets. Never set a field after `Default`, because `field_reassign_with_default` refuses it.
+- A `match` on a foreign `#[non_exhaustive]` enum needs a wildcard arm, and `wildcard_enum_match_arm` (gated, `warn` in `[workspace.lints]`) refuses it. Use `if let` when only one variant matters, as `join_params.rs` and `tasks/src/bench/native.rs` do: it has no arm to refuse. A `match` that must name the rest carries `#[expect(clippy::wildcard_enum_match_arm, reason = "...")]` on the narrowest scope, and gets a row in the table below. Use `expect`, never `allow`: a stale `expect` is a warning.
+- Errors in public signatures (gated by `anyhow_pub`): a library crate returns a typed error from each public function. The gate is `anyhow_pub` in `scripts/style-check/style-check.ts` (see What each gate refuses). The bench harness returns `BenchError`, and the test relay helper returns `TestRelayError`. Binaries, CLIs and `bin/` targets are outside the rule and keep `anyhow`.
+- `Arc`: the reviewer judges each use, and no gate checks it. Use `Arc` to share across tasks or threads, or for a trait object, and write the reason when it is not clear.
+- `From<&str>` that can panic: a type that validates its input has `try_new` returning a `Result`, and no `From<&str>`. `AppTag` and `CorrId` follow this, and a `compile_fail` doc test pins it.
+- Returning `Vec<T>` from a public function (gated by `pub_vec_return`): the `pub_vec_return` rule of `style-check.ts` counts each public fn that returns a Vec of values where an iterator fits. A `Vec<u8>` is a byte buffer, so `to_bytes`, `seal_symmetric` and their kin are not flagged.
+- Taking a `Vec<T>` or `impl Into<T>` in a public function (gated by `pub_vec_param` and `pub_impl_into`): the `pub_vec_param` and `pub_impl_into` rules of `style-check.ts` count them. A public function that only iterates takes `impl IntoIterator`. One that stores or sorts the vector takes a `Vec`.
+- `as_`, `to_`, `into_` names (gated by `self_convention`): the rule (N1, above) counts them. It skips the impl of a type that derives Copy in the same file. `clippy::wrong_self_convention` is on by default and nothing in the repository silences it.
+- Taking a `Vec<T>` in a public function: the `pub_vec_param` rule of `style-check.ts` counts a `Vec` parameter that the body only borrows to iterate (`name.iter()`, `for x in &name`). Such a function takes `impl IntoIterator`. A `Vec` that the body stores, mutates or moves on (a by-value loop, `into_iter`) keeps the `Vec` type, and the rule does not count it.
+- Taking `impl Into<T>` in a public function: the `pub_impl_into` rule of `style-check.ts` counts each one, and none is allowed. A library fn takes `&str` and copies it with `to_owned` when the body stores it, or takes the owned type.
+- Doc examples (gated by `crate_example`): the rule of `style-check.ts` (D2) counts each library crate without a doc example (a fenced code block in a `///` or `//!` comment). A `compile_fail` doc test pins each illegal typestate transition (see Typestate). The reviewer asks for an example on a new public item whose use is not clear from the signature. (D2) A public item needs an example when a caller outside the crate can name it: the item is `pub`, and its module is `pub mod` on the path from the crate root, or a `pub use` names it. A `pub(crate)` item, or a `pub` item in a private module that no `pub use` names, needs none, and no fence. A fence is `no_run` when the code compiles from outside but needs a live connection, a mesh or a browser at run time. It is `ignore` only when the type cannot be named from outside the crate, or the item is wasm-only.
+- A doc comment that explains the basics of the language (gated by `doc_basics`): the rule of `style-check.ts` (D6) refuses the phrases that give it away. The reviewer removes the rest. A doc comment that only restates the item name is the `restating_doc` rule (D7).
+- A comment says something the code does not: no gate covers it. No mechanical proxy: a tool cannot tell a true comment from a stale one, as it reads no meaning. The reviewer asks for a rename or an extraction where a comment would only say what the code does. (D7)
+- Type inference: the rules P2, P4 and P5 below cover the three common cases. In any other case the reviewer asks for a type on a variable when the right side does not show it. (P1)
+- Turbofish (gated by `turbofish`): the rule of `style-check.ts` (P2) counts every turbofish of code. Clippy has no lint that asks for a typed variable instead. The type goes on the variable. Only `size_of::<T>()` and `align_of::<T>()` keep one, because no value of the call tells the type. (P2)
+- Generic-return calls (gated by `untyped_generic_let`): the rule of `style-check.ts` (P4) counts a let that takes its type from `parse`, `into` or `try_into`. The compiler already demands a type where it cannot infer one. The reviewer checks that the target type is visible where the rule does not reach. (P4)
+- The result of a five-call iterator chain (gated by `untyped_long_chain_let`): the rule of `style-check.ts` (P5) counts a let of such a chain with no type. The reviewer asks for a typed variable when a chain ends in `collect`, `sum` or `parse` and the type is not clear. (P5)
+- Context strings on `assert!`: `missing_assert_message` makes one required outside test code. Whether the string helps (a logged value, misuse versus bug) is for the reviewer. (P13)
+- An assertion message that only repeats the condition (gated by `assert_repeats_condition`): the rule of `style-check.ts` (P14) counts it. The reviewer asks for a message that adds the value or the reason.
+- Long or complex iterator chains (gated by `long_chain`): the rule of `style-check.ts` (P15) counts a statement with five or more calls in one chain. The reviewer asks for a `for` loop or a named step when a chain is short by that count but still hard to read. (P15)
+- Macros (M3, gated by `macro-rules.ts`): it refuses every `macro_rules!` and proc macro.
+- Macro order for an API (M1): a fn, a generic or a trait comes before a macro. No mechanical proxy: whether a macro is an API is a design call, which syntax does not show. The gate above holds the count.
+- Traits (R7, gated by `pub-trait.ts`): it accepts a `pub trait` that a crate file uses as a generic bound, a dyn object, an impl bound or a supertrait. Any other `pub trait` is refused.
+- When to add an impl (R1): judgment only, because no gate can know which impls a future caller needs. Proxies tried: the derive lints of R2 and R4, `missing_debug_implementations`, `missing_copy_implementations`, and the Clone, Copy, Eq, Ord and Hash gates of the other branches. Red probe, 2026-10-28: a scratch crate with a hand `Default` and a `from_str(&str)` fires `derivable_impls` and `should_implement_trait` under `-D warnings`.
+- Cost of a macro (M2): the cost of a macro is read in review. No mechanical proxy: the cost of a macro is a reading of its use, which no gate measures. The proc macro sits on the test path only.
+- `clippy::disallowed_methods` on a native target: off in `Cargo.toml`, because the ban list is a wasm rule. `n0_future` resolves to tokio on native, so a native run would flag 56 correct timer and spawn calls. The wasm32 clippy rows deny it with `-D clippy::disallowed_methods`, and the crate roots of the wasm crates carry the deny.
+
+### Remaining `#[expect]` attributes
+
+Nine `#[expect(...)]` attributes stay: eight that suppress `unsafe_code` (the C ABI of the ffi crate, and libc calls that have no safe wrapper), and one that suppresses `deprecated`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
+
+| File | Lint | Reason |
+| --- | --- | --- |
+| `habilis-network-stream-cli/src/main.rs` | `unsafe_code` | `libc::sigaction` read: std has no way to query a signal's disposition |
+| `habilis-network-test-tracing/src/guard.rs` | `unsafe_code` | `libc::atexit` and `libc::_exit` are FFI calls |
+| `habilis-network-util/src/process.rs` | `unsafe_code` | `libc::proc_pidinfo` FFI: no safe wrapper exists |
+| `habilis-network-util/src/resident_memory.rs` (task info) | `unsafe_code` | `libc` `task_info` FFI: no safe wrapper for the task's resident size |
+| `habilis-network-util/src/resident_memory.rs` (mach call) | `deprecated` | `libc` points to the `mach2` crate for the mach calls; one read does not warrant a dependency |
+| `habilis-network-util/src/resident_memory.rs` (getrusage) | `unsafe_code` | `libc` `getrusage` FFI: no safe wrapper for `RUSAGE_SELF` maxrss |
+| `habilis-network-util/src/resident_memory.rs` (mmap) | `unsafe_code` | `libc` `mmap` and `munmap`: the pages must go back at once, which a heap allocation does not do on macOS |
+| `habilis-network-ffi/src/ffi.rs` (crate) | `unsafe_code` | this module is the C ABI: raw pointers from the foreign caller, and a boxed handle it owns |
+| `habilis-network-ffi/tests/ffi_smoke.rs` (crate) | `unsafe_code` | the surface under test is `unsafe extern "C"`; calling it is the test |
+
+### Rules of the guide that do not apply
+
+- A rule that the guide tags for Chromium, Android or Fuchsia does not apply. This repository is none of them.
+- The guide names a closure accessor `with_foo`, and this repository keeps that form for closure accessors only (`with_step`, `with_live`, `with_state`). A builder takes its field name (`fn relay(mut self, url) -> Self`), so `with_` is never a builder prefix here (Z31). The `with_ip_addr` and `with_relay_url` calls are iroh's own builders and keep their names.
+
+### Rules still under audit
+
+- Everything else follows the guide until issue #29 records a decision.
+
+## Scripts
+
+Write every script in TypeScript, and run it with Bun (`bun scripts/<name>.ts`). CI fails on any `.sh`, `.bash` or `.py` file, or a shell or Python shebang file. Do not write a new shell script or Python script. A test for a script is a `bun test` file next to it. A script in another language is a fault to port, not a model to copy.
+
 ## Newtypes
 
 A newtype is a struct with one field that gives a primitive a domain meaning. This section holds the rules for newtypes on this branch.
@@ -193,7 +298,7 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 
 ### How to write one
 
-- Write the type by hand in the shape of `TopicId`. Do not use a macro, except the existing `string_newtype!` for validated strings.
+- Write the type by hand in the shape of `TopicId`. Do not use a macro for a newtype: a validated string newtype is written out by hand.
 - Make the field private.
 - Give the type a `const fn from_bytes` or a `const fn new`, where the field allows it. A `SymmetricKey`, a `TicketSecret`, and a `StreamSecret` cannot be const, because each holds a `Zeroizing` value. Their `from_bytes` and `as_bytes` are not `const fn`.
 - Mark each getter `#[must_use]`.
@@ -232,7 +337,7 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 ### Wire format
 
 - Make a newtype serialize as the value it wraps, with `#[serde(transparent)]` or by hand, so the bytes do not change.
-- Treat a wire change as a named decision. Name it in the commit message and in `CHANGELOG.md`.
+- Treat a wire change as a named decision. Name it in the commit message.
 - Pin each wire form with a golden test. When a golden changes, keep the old literal in a second test that asserts the parse error.
 
 ### Where a bare primitive stays
@@ -278,6 +383,147 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `GraftTarget` | `habilis-network/src/transport/probe.rs` | The peer of a graft and the rendezvous it is told apart from. |
 | `RivalFlag` | `habilis-network/src/daemon/state.rs` | What a `PeerInfo` says about the rendezvous: `proven` says that the sender proved its endpoint, and `held` says that it carries the beacon flag. |
 
+### Copy, Clone and Default exceptions (R12, R13, R15, R16, R22)
+
+A type that the guide asks to derive a trait, and that cannot derive it, is listed here with the field that stops it. Each row is checked by the compiler: a derive that compiles is not an exception.
+
+| Rule | Type | File | Reason |
+| --- | --- | --- | --- |
+| R15 | `Cell` (struct) | `habilis-network-iroh-multihop-transport/src/cell.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Route` (struct) | `habilis-network-iroh-multihop-transport/src/route.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Tombstone` (struct) | `habilis-network-iroh-multihop-transport/src/topology.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Held` (struct) | `habilis-network-iroh-multihop-transport/src/topology.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `State` (enum) | `habilis-network-logging/src/log_sink.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `StreamNode` (struct) | `habilis-network-stream/src/node/stream_node.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Link` (struct) | `habilis-network-stream/src/produce/registry.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Entry` (struct) | `habilis-network-stream/src/produce/registry.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Slot` (struct) | `habilis-network-test-tracing/src/guard.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `StreamNode` (struct) | `habilis-network-wasm/src/stream_node.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Slot` (struct) | `habilis-network/src/transport/admission/slot.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Hold` (struct) | `habilis-network/src/transport/webrtc.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `Offer` (struct) | `habilis-network/src/transport/webrtc/backend_native/offer.rs` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `undefined` (13) | `candidates` | holds a field that is not Copy (a handle, a buffer or a mutex) |
+| R15 | `SplitMix64` | `habilis-network-netplay/examples/light-cycles/native/game/src/split_mix64.rs` | a PRNG state: a Copy would fork its stream, so it derives Clone only |
+| R15 | `Fnv1a64` | `habilis-network-netplay/examples/light-cycles/native/game/src/round.rs` | a hasher state: a Copy would fork its stream, so it derives Clone only |
+| R15 | `SplitMix64` | `habilis-network-netplay/examples/light-cycles/web/wasm/src/split_mix64.rs` | a PRNG state: a Copy would fork its stream, so it derives Clone only |
+| R15 | `Fnv1a64` | `habilis-network-netplay/examples/light-cycles/web/wasm/src/round.rs` | a hasher state: a Copy would fork its stream, so it derives Clone only |
+| R13 | `BenchError` | `habilis-network-iroh-webrtc-transport/src/bench_error.rs` | holds error sources that are not Copy, such as `endpoint::BindError` | |
+| R13 | `LobbyError` | `habilis-network-netplay/src/mesh/lobby.rs` | holds a `Nickname`, which owns a `String` | |
+| R13 | `TestRelayError` | `habilis-network/src/lookup/test_relay/test_relay_error.rs` | holds error sources that are not Copy, such as `server::SpawnError` | |
+| R16 | `ChunkError` | `habilis-network-chunks/src/chunk_error.rs` | holds a field type that is not Clone |
+| R16 | `DiskOrigin` | `habilis-network-chunks/src/fs/disk_origin.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `DiskStore` | `habilis-network-chunks/src/fs/disk_store.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `InMemoryStore` | `habilis-network-chunks/src/in_memory_store.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `ProtocolSet` | `habilis-network-iroh-transport-util/src/protocol_set.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `InviteError` | `habilis-network-protocol/src/invite/invite_error.rs` | holds a field type that is not Clone |
+| R16 | `ConfigError` | `habilis-network-protocol/src/meshes/config_error.rs` | holds a field type that is not Clone |
+| R16 | `MessageError` | `habilis-network-protocol/src/messages/message_error.rs` | holds a field type that is not Clone |
+| R16 | `PeerAddrError` | `habilis-network-protocol/src/peer_addr_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `ShardCache` | `habilis-network-protocol/src/reassembly/shard_cache.rs` | holds a field type that is not Clone |
+| R16 | `SealError` | `habilis-network-protocol/src/seal_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `Counters` | `habilis-network-iroh-gossip-transport/src/counters.rs` | holds a field type that is not Clone |
+| R16 | `DocError` | `habilis-network-doc/src/doc_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `MeshDoc` | `habilis-network-doc/src/mesh_doc.rs` | holds a `Box<` field, which is not Clone |
+| R16 | `Shared` | `habilis-network-iroh-gossip-transport/src/shared.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `MultihopTransport` | `habilis-network-iroh-multihop-transport/src/multihop_transport.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `Topology` | `habilis-network-iroh-multihop-transport/src/topology.rs` | holds a field type that is not Clone |
+| R16 | `Forwarder` | `habilis-network-iroh-multihop-transport/src/underlay/forwarder.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `Registry` | `habilis-network-iroh-webrtc-transport/src/registry.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `SignalError` | `habilis-network-iroh-webrtc-transport/src/signal_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `BenchError` | `habilis-network-iroh-webrtc-transport/src/bench_error.rs` | holds a `Connection` field, which is not Clone |
+| R16 | `JsepError` | `habilis-network-iroh-webrtc-transport/src/native/jsep_error.rs` | holds a field type that is not Clone |
+| R16 | `NegotiatedSession` | `habilis-network-iroh-webrtc-transport/src/native/negotiated_session.rs` | holds a `UdpSocket` field, which is not Clone |
+| R16 | `Negotiating` | `habilis-network-iroh-webrtc-transport/src/native/negotiating.rs` | holds a `UdpSocket` field, which is not Clone |
+| R16 | `PendingOffer` | `habilis-network-iroh-webrtc-transport/src/native/pending_offer.rs` | holds a field type that is not Clone |
+| R16 | `SessionHandle` | `habilis-network-iroh-webrtc-transport/src/native/session_handle.rs` | holds a `Arc<` field, which is not Clone |
+| R16 | `WebRtcEndpoint` | `habilis-network-iroh-webrtc-transport/src/native/web_rtc_endpoint.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `WebRtcTransport` | `habilis-network-iroh-webrtc-transport/src/native/web_rtc_transport.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `PendingAnswer` | `habilis-network-iroh-webrtc-transport/src/web/pending_answer.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `BrowserHubTransport` | `habilis-network-iroh-webrtc-transport/src/web/transport/browser_hub_transport.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `BrowserSessionGuard` | `habilis-network-iroh-webrtc-transport/src/web/transport/browser_session_guard.rs` | holds a `Endpoint` field, which is not Clone |
+| R16 | `SessionCounters` | `habilis-network-iroh-webrtc-transport/src/web/transport/session_counters.rs` | holds a field type that is not Clone |
+| R16 | `PendingAnswer` | `habilis-network-iroh-webrtc-transport/src/native/pending_answer.rs` | holds a field type that is not Clone |
+| R16 | `LanEvent` | `habilis-network/src/lookup/lan_event.rs` | holds a `Endpoint` field, which is not Clone |
+| R16 | `Membership` | `habilis-network/src/membership/join_options.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `Messaging` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `MessagingTest` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `Inspect` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `InspectTest` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `InspectHost` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `Linking` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `Ticks` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `Routing` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `Blocking` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `Beacons` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `LinkHold` | `habilis-network/src/membership/membership_app.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `Rendezvous` | `habilis-network/src/beacon/rendezvous.rs` | holds a `JoinHandle` field, which is not Clone |
+| R16 | `RivalProbe` | `habilis-network/src/beacon/rival_probe.rs` | holds a `JoinHandle` field, which is not Clone |
+| R16 | `RungWatch` | `habilis-network/src/beacon/rung_watch.rs` | holds a `JoinHandle` field, which is not Clone |
+| R16 | `BlobError` | `habilis-network/src/blob/error/blob_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `IpcRequest` | `habilis-network/src/daemon/app/ipc_request.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `DriverMode` | `habilis-network/src/daemon/config/driver_mode.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `Endpoints` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `Node` | `habilis-network/src/daemon/node.rs` | holds a `JoinHandle` field, which is not Clone |
+| R16 | `SetupParams` | `habilis-network/src/daemon/setup/setup_params.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `SetupError` | `habilis-network/src/daemon/setup_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `EventLoopState` | `habilis-network/src/daemon/state/event_loop_state.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `PingRound` | `habilis-network/src/daemon/state/ping_round.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `StateFile` | `habilis-network/src/daemon/state_file.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `StateFileError` | `habilis-network/src/daemon/state_file.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `EventLoopError` | `habilis-network/src/daemon/event_loop/event_loop_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `GossipLink` | `habilis-network/src/daemon/heal/gossip_link.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `Resubscribe` | `habilis-network/src/daemon/heal/resubscribe.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `MeshReceiver` | `habilis-network/src/gossip/split/mesh_receiver.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `EndpointError` | `habilis-network/src/lookup/error/endpoint_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `StoppableTask` | `habilis-network/src/lookup/relay/stoppable_task.rs` | holds a `JoinHandle` field, which is not Clone |
+| R16 | `TestRelayError` | `habilis-network/src/lookup/test_relay/test_relay_error.rs` | holds a field type that is not Clone |
+| R16 | `IpcError` | `habilis-network/src/transport/ipc/ipc_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `PoolInner` | `habilis-network/src/transport/pool/unicast_pool.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `Answer` | `habilis-network/src/transport/webrtc/backend_native/answer.rs` | holds a field type that is not Clone |
+| R16 | `Offer` | `habilis-network/src/transport/webrtc/backend_native/offer.rs` | holds a field type that is not Clone |
+| R16 | `Delivered` | `habilis-network/src/transport/send/delivered.rs` | holds a field type that is not Clone |
+| R16 | `SendError` | `habilis-network/src/transport/send/send_error.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `CountingSink` | `habilis-network/src/gossip/event.rs` | holds a field type that is not Clone |
+| R16 | `Request` | `habilis-network/src/membership/membership_app.rs` | holds a field type that is not Clone |
+| R16 | `EventLoopConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `Endpoint` field, which is not Clone |
+| R16 | `RendezvousConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `RuntimeConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `dyn` field, which is not Clone |
+| R16 | `StateInit` | `habilis-network/src/daemon/state/state_init.rs` | holds a `File` field, which is not Clone |
+| R16 | `HashError` | `habilis-network-stream/src/error/hash_error.rs` | holds a field type that is not Clone |
+| R16 | `StreamError` | `habilis-network-stream/src/error/stream_error.rs` | holds a `Stream` field, which is not Clone |
+| R16 | `Producer` | `habilis-network-stream/src/produce/producer.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `Link` | `habilis-network-stream/src/produce/registry.rs` | holds a `Connection` field, which is not Clone |
+| R16 | `Entry` | `habilis-network-stream/src/produce/registry.rs` | holds a `oneshot::Sender` field, which is not Clone |
+| R16 | `Registry` | `habilis-network-stream/src/produce/registry.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `Reader` | `habilis-network-stream/src/read/reader.rs` | holds a `Connection` field, which is not Clone |
+| R16 | `Mailboxes` | `habilis-network-netplay/src/mesh/mailboxes.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `Mesh` | `habilis-network-ffi/src/mesh.rs` | holds a `Receiver` field, which is not Clone |
+| R16 | `Writer` | `habilis-network-ffi/src/streams.rs` | holds a `Arc<` field, which is not Clone |
+| R16 | `ReadEnd` | `habilis-network-ffi/src/streams.rs` | holds a `Arc<` field, which is not Clone |
+| R16 | `Producer` | `habilis-network-wasm/src/stream_node.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `Reader` | `habilis-network-wasm/src/stream_node.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `MeshPeer` | `habilis-network-wasm/src/mesh_peer.rs` | holds a `Mutex` field, which is not Clone |
+| R16 | `HabilisNetworkMesh` | `habilis-network-ffi/src/ffi/habilis_network_mesh.rs` | holds a field type that is not Clone |
+| R16 | `HabilisNetworkProducer` | `habilis-network-ffi/src/ffi/habilis_network_producer.rs` | holds a field type that is not Clone |
+| R16 | `HabilisNetworkReader` | `habilis-network-ffi/src/ffi/habilis_network_reader.rs` | holds a field type that is not Clone |
+| R16 | `Instance` | `habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/component.rs` | holds a `Box` of a `dyn` component and an `Rc<dyn Fn>` thunk |
+| R16 | `Step` | `habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/component.rs` | holds a `View`, which is not Clone (a one-shot builder closure) |
+| R16 | `ComponentView` | `habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/view.rs` | holds a `Box<dyn FnOnce>` builder |
+| R16 | `ComponentMount` | `habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/component_mount.rs` | holds an `Instance`, which is not Clone |
+| R16 | `Mounted` | `habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/mounted.rs` | holds a `ComponentMount`, which is not Clone |
+| R16 | `Runtime` | `habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/runtime.rs` | holds a generic `Backend` that has no Clone bound |
+| R16 | `Bot` | `habilis-network-netplay/examples/light-cycles/native/game/tests/pubprobe.rs` | holds a `Node` handle and a `Game`, neither Clone |
+| R16 | `Bot` | `habilis-network-netplay/examples/light-cycles/native/game/tests/two_bots.rs` | holds a `Node` handle and a `Game`, neither Clone |
+| R16 | `LightCyclesPeer` | `habilis-network-netplay/examples/light-cycles/web/wasm/src/light_cycles_peer.rs` | holds a `Node` handle, which is not Clone |
+| R16 | `ProtoError` | `habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-proto/src/proto_error.rs` | holds a `serde_json::Error`, which is not Clone |
+| R16 | `Inner` | `habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/room.rs` | holds a `Mutex`, an `AtomicU64` and a `broadcast::Sender`, none Clone |
+| R16 | `Membership` | `habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-native/src/room.rs` | holds a `broadcast::Receiver`, which is not Clone |
+| R22 | `EventLoopConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `MeshSpec`, a `RendezvousConfig` and a `RuntimeConfig`, which hold channels, trait objects and task handles with no default |
+| R22 | `RendezvousConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a watch receiver and a `StoppableTask`, which have no default |
+| R22 | `RuntimeConfig` | `habilis-network/src/daemon/config/event_loop_config.rs` | holds a `dyn NodeSink` and a `SelfWriteGate`, which have no default |
+| R12 | `CtxParts`, `RuntimeConfig`, `Victims` | `habilis-network/src/daemon/event_loop/ctx_parts.rs`, `.../config/event_loop_config.rs`, `habilis-network/src/transport/admission/victims.rs` | hold a `dyn` trait object, so Debug prints the name only (`finish_non_exhaustive`) |
+R1 (trait impls early) is review only. For this repository, 'early' means: a library crate (`habilis-network-protocol`, `habilis-network-util`, the transport crates, `habilis-network-chunks`, `habilis-network-stream`) adds the standard impls (Debug, Clone, Copy where it applies, PartialEq, Default for an options type) when the type is written. An application crate (the CLIs, the examples, `habilis-network-tasks`) adds an impl only when a caller in the crate needs it.
+
 ## Typestate
 
 A typestate is a type per state of a value, where each operation exists only on the type of the state it is legal in. A transition consumes the value and returns the value of the next state, so the compiler rejects an operation in the wrong order. Use it where the order is a rule of the code, not a fact of the network.
@@ -312,8 +558,8 @@ Runtime events drive these transitions, so their state is not known at compile t
 | `LockedMesh` / `Mesh` | `habilis-network-protocol/src/mesh/mod.rs` | A decoded mesh with no secret. `unlock` turns it into a `Mesh`, or returns an `UnlockError` that says why not. Only `Mesh` derives a topic, a rendezvous or a port, and `Mesh::new` refuses a config that carries a secret. |
 | `Verified` / `Authored` | `habilis-network-protocol/src/message/verified.rs` | `Verified` is a message whose signature is checked, with its key. It is what the wire and the log take. `Authored` is a message whose author is proven: a read-only view with no `Serialize` of its own. `Deref` is a read door: `Message` has no public `Serialize`, so `&*authored` does not serialize, and only `Verified::serialize` makes a `WireFrame`, which every sender takes. Both share the message behind an `Arc`. `Proof` is the sealed trait both implement, so the gate and the app surface are generic over either. |
 | `WireFrame` | `habilis-network-protocol/src/message/wire.rs` | The bytes of one signed message as they go on a socket. Only `Verified::serialize` makes one, and its field is private, so the senders take a `WireFrame` and cannot be handed an unsigned frame. |
-| `InjectedEndpoint` | `habilis-network/src/daemon/setup.rs` | An endpoint that `InjectedEndpoint::bind` binds. `bind` checks the keys of the handles before it binds, and makes the admission table the hook reports to. The fields are private, so no other path builds one. |
+| `InjectedEndpoint` | `habilis-network/src/daemon/setup/injected_endpoint.rs` | An endpoint that `InjectedEndpoint::bind` binds. `bind` checks the keys of the handles before it binds, and makes the admission table the hook reports to. The fields are private, so no other path builds one. |
 | `PendingOffer` / `PendingAnswer` | `habilis-network-iroh-webrtc-transport/src/native/jsep.rs` (and `web/jsep.rs`) | A JSEP offer or answer that waits for the remote side. `complete` consumes it. |
 | `NegotiatedSession` | `habilis-network-iroh-webrtc-transport/src/native/driver.rs` | A data channel that is open and ready to carry datagrams. Only the `complete` of a pending offer or answer produces one. |
 
-The test-only fixture doors are `Verified::fixture_unchecked`, `Verified::fixture_with_signature` and `WireFrame::fixture_raw`. Each one is behind `test-fixtures`: it exists in unit tests and in any build that enables `test-fixtures`, so a release binary must not enable that feature.
+The test-only fixture doors are `Verified::fixture_unchecked`, `Verified::fixture_with_signature`, `WireFrame::fixture_raw` and `Frame::fixture` (in the transport crate). Each one is behind `test-fixtures`: it exists in unit tests and in any build that enables `test-fixtures`, so a release binary must not enable that feature.

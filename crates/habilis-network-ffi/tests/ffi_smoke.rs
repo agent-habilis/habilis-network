@@ -25,20 +25,13 @@ use habilis_network_ffi::ffi::{
     habilis_network_streams_close, habilis_network_version,
 };
 
+use std::ptr;
 /// Zeroed selectors: no id and no topic, so [`habilis_network_mesh_open`] mints a private
 /// loopback mesh — no discovery, no network, nothing to clean up but the handle.
 fn create_opts(nick: &CStr) -> HabilisNetworkOpts {
-    HabilisNetworkOpts {
-        mesh: std::ptr::null(),
-        topic: std::ptr::null(),
-        nick: nick.as_ptr(),
-        name: std::ptr::null(),
-        lookup: std::ptr::null(),
-        transport: std::ptr::null(),
-        relay_urls: std::ptr::null(),
-        max_peers: 0,
-        max_direct: 0,
-    }
+    let mut options = HabilisNetworkOpts::empty();
+    options.nick = nick.as_ptr();
+    options
 }
 
 /// The error slot's current contents, as an owned string.
@@ -57,10 +50,10 @@ fn last_error() -> Option<String> {
     )
 }
 
-fn open(opts: &HabilisNetworkOpts) -> *mut HabilisNetworkMesh {
+fn open(options: &HabilisNetworkOpts) -> *mut HabilisNetworkMesh {
     // SAFETY: `opts` is a live, fully-initialized `HabilisNetworkOpts` whose string fields
     // are NULL or point at `CStr`s that outlive the call.
-    unsafe { habilis_network_mesh_open(opts) }
+    unsafe { habilis_network_mesh_open(options) }
 }
 
 /// Read a JSON document out through the two-call convention: ask for the length,
@@ -71,14 +64,15 @@ fn read_json(
 ) -> String {
     // SAFETY: a NULL buffer with a zero capacity is the documented "how long is
     // it?" query — the callee writes nothing.
-    let needed = unsafe { reader(handle, std::ptr::null_mut(), 0) };
+    let needed = unsafe { reader(handle, ptr::null_mut(), 0) };
     assert!(needed >= 0, "length query failed: {:?}", last_error());
-    let mut buf = vec![0_u8; usize::try_from(needed).expect("a sane length") + 1];
+    let mut buffer = vec![0_u8; usize::try_from(needed).expect("a sane length") + 1];
+    let destination: *mut c_char = buffer.as_mut_ptr().cast();
     // SAFETY: the buffer is writable for exactly the capacity being passed.
-    let written = unsafe { reader(handle, buf.as_mut_ptr().cast::<c_char>(), buf.len()) };
+    let written = unsafe { reader(handle, destination, buffer.len()) };
     assert_eq!(written, needed, "the second call must agree on the length");
-    buf.truncate(usize::try_from(written).expect("a sane length"));
-    String::from_utf8(buf).expect("the document is UTF-8")
+    buffer.truncate(usize::try_from(written).expect("a sane length"));
+    String::from_utf8(buffer).expect("the document is UTF-8")
 }
 
 #[test]
@@ -101,10 +95,10 @@ fn version_and_max_msg_are_reported() {
 fn a_bad_mesh_id_fails_with_a_reason() {
     let nick = CString::new("solo").expect("no interior NUL");
     let bogus = CString::new("not-a-mesh-id").expect("no interior NUL");
-    let mut opts = create_opts(&nick);
-    opts.mesh = bogus.as_ptr();
+    let mut options = create_opts(&nick);
+    options.mesh = bogus.as_ptr();
 
-    let handle = open(&opts);
+    let handle = open(&options);
     assert!(handle.is_null(), "an unparseable id must not open a handle");
     let error = last_error().expect("a failure must leave a reason in the error slot");
     assert!(
@@ -120,15 +114,19 @@ fn null_arguments_are_errors_not_crashes() {
     // SAFETY: passing NULL is explicitly part of each function's contract — the
     // point of this test is that it is rejected rather than dereferenced.
     unsafe {
-        assert!(habilis_network_mesh_open(std::ptr::null()).is_null());
+        assert!(
+            habilis_network_mesh_open(ptr::null()).is_null(),
+            "a null mesh open is an error, not a crash"
+        );
         assert!(
             last_error().is_some(),
             "habilis_network_mesh_open(NULL) left no reason"
         );
 
         assert_eq!(
-            habilis_network_msg_send(std::ptr::null_mut(), std::ptr::null(), c"hi".as_ptr()),
-            -1
+            habilis_network_msg_send(ptr::null_mut(), ptr::null(), c"hi".as_ptr()),
+            -1,
+            "a null send is an error"
         );
         assert!(
             last_error().is_some(),
@@ -136,8 +134,9 @@ fn null_arguments_are_errors_not_crashes() {
         );
 
         assert_eq!(
-            habilis_network_mesh_state_merge(std::ptr::null_mut(), std::ptr::null()),
-            -1
+            habilis_network_mesh_state_merge(ptr::null_mut(), ptr::null()),
+            -1,
+            "a null state merge is an error"
         );
         assert!(
             last_error().is_some(),
@@ -145,27 +144,45 @@ fn null_arguments_are_errors_not_crashes() {
         );
 
         assert_eq!(
-            habilis_network_mesh_state_json(std::ptr::null_mut(), std::ptr::null_mut(), 0),
-            -1
+            habilis_network_mesh_state_json(ptr::null_mut(), ptr::null_mut(), 0),
+            -1,
+            "a null state json is an error"
         );
         assert!(
             last_error().is_some(),
             "habilis_network_mesh_state_json(NULL) left no reason"
         );
 
-        assert_eq!(habilis_network_mesh_peer_count(std::ptr::null_mut()), -1);
+        assert_eq!(
+            habilis_network_mesh_peer_count(ptr::null_mut()),
+            -1,
+            "a null peer count is an error"
+        );
         assert!(
             last_error().is_some(),
             "habilis_network_mesh_peer_count(NULL) left no reason"
         );
 
-        assert!(habilis_network_mesh_id(std::ptr::null()).is_null());
-        assert!(habilis_network_mesh_name(std::ptr::null()).is_null());
-        assert!(habilis_network_mesh_nickname(std::ptr::null()).is_null());
+        assert!(
+            habilis_network_mesh_id(ptr::null()).is_null(),
+            "a null mesh id is null"
+        );
+        assert!(
+            habilis_network_mesh_name(ptr::null()).is_null(),
+            "a null mesh name is null"
+        );
+        assert!(
+            habilis_network_mesh_nickname(ptr::null()).is_null(),
+            "a null nickname is null"
+        );
 
         // Closing NULL is a no-op success, so a caller's cleanup path needs no
         // guard of its own — and succeeding clears the slot.
-        assert_eq!(habilis_network_mesh_close(std::ptr::null_mut()), 0);
+        assert_eq!(
+            habilis_network_mesh_close(ptr::null_mut()),
+            0,
+            "a null close is an error"
+        );
         assert!(
             last_error().is_none(),
             "a successful call must clear the error slot"
@@ -176,8 +193,8 @@ fn null_arguments_are_errors_not_crashes() {
 #[test]
 fn a_handle_serves_identity_state_and_roster() {
     let nick = CString::new("solo").expect("no interior NUL");
-    let opts = create_opts(&nick);
-    let handle = open(&opts);
+    let options = create_opts(&nick);
+    let handle = open(&options);
     assert!(
         !handle.is_null(),
         "habilis_network_mesh_open failed: {:?}",
@@ -192,7 +209,10 @@ fn a_handle_serves_identity_state_and_roster() {
             habilis_network_mesh_nickname(handle),
         )
     };
-    assert!(!id.is_null() && !mine.is_null());
+    assert!(
+        !id.is_null() && !mine.is_null(),
+        "a handle serves its identity, state, and roster"
+    );
     // SAFETY: both are non-NULL NUL-terminated strings owned by the handle.
     let (id, mine) = unsafe { (CStr::from_ptr(id), CStr::from_ptr(mine)) };
     let id_str = id.to_str().expect("the id is UTF-8");
@@ -241,10 +261,9 @@ fn a_handle_serves_identity_state_and_roster() {
 
     // An undersized buffer must report the length it needs and write nothing.
     let mut too_small = [0_u8; 4];
+    let too_small_destination: *mut c_char = too_small.as_mut_ptr().cast();
     // SAFETY: live handle, and the buffer really is 4 bytes.
-    let needed = unsafe {
-        habilis_network_mesh_state_json(handle, too_small.as_mut_ptr().cast::<c_char>(), 4)
-    };
+    let needed = unsafe { habilis_network_mesh_state_json(handle, too_small_destination, 4) };
     assert!(
         needed > 4,
         "the state document should not fit in 4 bytes (got {needed})"
@@ -255,17 +274,12 @@ fn a_handle_serves_identity_state_and_roster() {
     );
 
     // Nobody else is here, so a receive can only time out.
-    let mut msg = empty_msg();
-    let mut buf = vec![0_u8; 64];
+    let mut message = empty_msg();
+    let mut buffer = vec![0_u8; 64];
+    let destination: *mut c_char = buffer.as_mut_ptr().cast();
     // SAFETY: live handle, buffer writable for the capacity passed, `out` writable.
     let got = unsafe {
-        habilis_network_msg_recv(
-            handle,
-            buf.as_mut_ptr().cast::<c_char>(),
-            buf.len(),
-            200,
-            &raw mut msg,
-        )
+        habilis_network_msg_recv(handle, destination, buffer.len(), 200, &raw mut message)
     };
     assert_eq!(got, 0, "expected a timeout, got {got}: {:?}", last_error());
 
@@ -354,42 +368,33 @@ fn a_joiner_reads_back_the_creators_mesh_name() {
 }
 
 fn empty_msg() -> HabilisNetworkMsg {
-    HabilisNetworkMsg {
-        nick: [0; 64],
-        directed: 0,
-        len: 0,
-    }
+    HabilisNetworkMsg::empty()
 }
 
 /// Receive one message into a buffer of `cap` bytes, waiting up to 20 s.
 /// Returns the call's result, the metadata, and the text when it was written.
 fn recv(handle: *mut HabilisNetworkMesh, cap: usize) -> (c_long, HabilisNetworkMsg, String) {
-    let mut msg = empty_msg();
-    let mut buf = vec![0_u8; cap];
+    let mut message = empty_msg();
+    let mut buffer = vec![0_u8; cap];
+    let destination: *mut c_char = buffer.as_mut_ptr().cast();
     // SAFETY: live handle, buffer writable for `cap` bytes, `out` writable.
-    let got = unsafe {
-        habilis_network_msg_recv(
-            handle,
-            buf.as_mut_ptr().cast::<c_char>(),
-            cap,
-            20_000,
-            &raw mut msg,
-        )
-    };
-    let text = if got == 1 {
+    let got =
+        unsafe { habilis_network_msg_recv(handle, destination, cap, 20_000, &raw mut message) };
+    let text: String = if got == 1 {
+        let source: *const c_char = buffer.as_ptr().cast();
         // SAFETY: a result of 1 means `buf` holds a NUL-terminated text.
-        unsafe { CStr::from_ptr(buf.as_ptr().cast::<c_char>()) }
+        unsafe { CStr::from_ptr(source) }
             .to_string_lossy()
             .into_owned()
     } else {
         String::new()
     };
-    (got, msg, text)
+    (got, message, text)
 }
 
-fn nick_of(msg: &HabilisNetworkMsg) -> String {
+fn nick_of(message: &HabilisNetworkMsg) -> String {
     // SAFETY: `write_nick` always NUL-terminates inside the array.
-    unsafe { CStr::from_ptr(msg.nick.as_ptr()) }
+    unsafe { CStr::from_ptr(message.nick.as_ptr()) }
         .to_string_lossy()
         .into_owned()
 }
@@ -429,8 +434,7 @@ fn two_handles_exchange_messages() {
     }
 
     // SAFETY: live handle, NUL-terminated strings.
-    let broadcast =
-        unsafe { habilis_network_msg_send(alice, std::ptr::null(), c"hello mesh".as_ptr()) };
+    let broadcast = unsafe { habilis_network_msg_send(alice, ptr::null(), c"hello mesh".as_ptr()) };
     assert_eq!(broadcast, 0, "broadcast failed: {:?}", last_error());
     let (heard, heard_meta, heard_text) = recv(bob, 256);
     assert_eq!(heard, 1, "bob got no broadcast: {:?}", last_error());
@@ -440,9 +444,14 @@ fn two_handles_exchange_messages() {
             heard_meta.directed,
             heard_text.as_str()
         ),
-        ("alice", 0, "hello mesh")
+        ("alice", 0, "hello mesh"),
+        "bob hears alice's meta message"
     );
-    assert_eq!(heard_meta.len, heard_text.len());
+    assert_eq!(
+        heard_meta.len,
+        heard_text.len(),
+        "bob's text length matches what was sent"
+    );
 
     let long = "a directed message longer than sixteen bytes";
     let long_c = CString::new(long).expect("no interior NUL");
@@ -474,42 +483,44 @@ fn two_handles_exchange_messages() {
             retried_meta.directed,
             retried_text.as_str()
         ),
-        ("bob", 1, long)
+        ("bob", 1, long),
+        "the retried meta message reaches bob"
     );
 
     // SAFETY: each handle came from `habilis_network_mesh_open` and is not used after this.
     unsafe {
-        assert_eq!(habilis_network_mesh_close(bob), 0);
-        assert_eq!(habilis_network_mesh_close(alice), 0);
+        assert_eq!(
+            habilis_network_mesh_close(bob),
+            0,
+            "bob's close returns zero"
+        );
+        assert_eq!(
+            habilis_network_mesh_close(alice),
+            0,
+            "alice's close returns zero"
+        );
     }
 }
 
 /// Zeroed selectors except `mesh`, so [`habilis_network_mesh_open`] joins the given id rather
 /// than creating a fresh mesh.
 fn create_opts_for_join(id: &CStr, nick: &CStr) -> HabilisNetworkOpts {
-    HabilisNetworkOpts {
-        mesh: id.as_ptr(),
-        topic: std::ptr::null(),
-        nick: nick.as_ptr(),
-        name: std::ptr::null(),
-        lookup: std::ptr::null(),
-        transport: std::ptr::null(),
-        relay_urls: std::ptr::null(),
-        max_peers: 0,
-        max_direct: 0,
-    }
+    let mut options = HabilisNetworkOpts::empty();
+    options.mesh = id.as_ptr();
+    options.nick = nick.as_ptr();
+    options
 }
 
 /// Four peers (creator + 3 joiners) must each see the other three.
 /// Regression for rooms that stalled at 3 total participants.
 fn four_peers_converge(public: bool) {
     let creator_nick = CString::new("p0").expect("no interior NUL");
-    let mut opts = create_opts(&creator_nick);
+    let mut options = create_opts(&creator_nick);
     if public {
         // Match a typical consumer's default create-room lookups.
-        opts.lookup = c"mdns,dht,relay".as_ptr();
+        options.lookup = c"mdns,dht,relay".as_ptr();
     }
-    let creator = open(&opts);
+    let creator = open(&options);
     assert!(
         !creator.is_null(),
         "habilis_network_mesh_open (create) failed: {:?}",
@@ -541,10 +552,12 @@ fn four_peers_converge(public: bool) {
 
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut counts = vec![0_i64; handles.len()];
+    let indexed_handles: Vec<(usize, &*mut HabilisNetworkMesh)> =
+        handles.iter().enumerate().collect();
     while Instant::now() < deadline {
-        for (idx, &handle) in handles.iter().enumerate() {
+        for &(index, &handle) in &indexed_handles {
             // SAFETY: each handle came from habilis_network_mesh_open and is still open.
-            counts[idx] = unsafe { habilis_network_mesh_peer_count(handle) };
+            counts[index] = unsafe { habilis_network_mesh_peer_count(handle) };
         }
         if counts.iter().all(|&count| count >= 3) {
             break;
@@ -557,8 +570,8 @@ fn four_peers_converge(public: bool) {
         "expected every peer to see ≥3 others within 45s (public={public}); peer_counts={counts:?}"
     );
 
-    // SAFETY: each handle came from habilis_network_mesh_open and is not used after this.
     for handle in handles {
+        // SAFETY: each handle came from habilis_network_mesh_open and is not used after this.
         unsafe {
             assert_eq!(
                 habilis_network_mesh_close(handle),
@@ -582,13 +595,9 @@ fn four_peers_converge_on_public() {
 }
 
 fn loopback_streams() -> *mut HabilisNetworkStreams {
-    let opts = HabilisNetworkStreamOpts {
-        lookup: std::ptr::null(),
-        transport: std::ptr::null(),
-        relay_urls: std::ptr::null(),
-    };
+    let options = HabilisNetworkStreamOpts::empty();
     // SAFETY: a fully-initialized struct with NULL strings.
-    let streams = unsafe { habilis_network_streams_bind(&raw const opts) };
+    let streams = unsafe { habilis_network_streams_bind(&raw const options) };
     assert!(
         !streams.is_null(),
         "habilis_network_streams_bind failed: {:?}",
@@ -668,9 +677,21 @@ fn a_stream_carries_bytes_to_its_one_reader() {
 
     // SAFETY: each handle is released once and not used after.
     unsafe {
-        assert_eq!(habilis_network_reader_close(reader), 0);
-        assert_eq!(habilis_network_streams_close(consuming), 0);
-        assert_eq!(habilis_network_streams_close(producing), 0);
+        assert_eq!(
+            habilis_network_reader_close(reader),
+            0,
+            "the reader closes with zero"
+        );
+        assert_eq!(
+            habilis_network_streams_close(consuming),
+            0,
+            "the consuming stream closes with zero"
+        );
+        assert_eq!(
+            habilis_network_streams_close(producing),
+            0,
+            "the producing stream closes with zero"
+        );
     }
 }
 
@@ -695,6 +716,10 @@ fn a_write_with_no_consumer_times_out_and_a_wrong_hash_is_refused() {
             0,
             "abandoning is not a failure"
         );
-        assert_eq!(habilis_network_streams_close(streams), 0);
+        assert_eq!(
+            habilis_network_streams_close(streams),
+            0,
+            "a write with no consumer times out and a wrong hash is refused"
+        );
     }
 }

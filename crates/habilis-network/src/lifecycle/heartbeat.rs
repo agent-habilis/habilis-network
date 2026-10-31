@@ -2,6 +2,7 @@
 //! that evicts peers we've stopped hearing from. Part of the
 //! lifecycle subsystem (it drives `peer_timeout` / the roster).
 
+use crate::daemon::state::RendezvousFlag;
 use crate::transport::MeshSender;
 
 use crate::daemon::state::EventLoopState;
@@ -21,8 +22,8 @@ pub(crate) async fn tick_alive(
     if state.last_sent_at.elapsed() < ALIVE_INTERVAL {
         return;
     }
-    let msg = Message::new_alive(mesh, author).sign(&state.identity);
-    if let Ok(bytes) = msg.serialize() {
+    let message = Message::new_alive(mesh, author).sign(&state.identity);
+    if let Ok(bytes) = message.serialize() {
         let _ = sender.broadcast(bytes).await;
     }
     state.idle.broadcasts += 1;
@@ -54,7 +55,11 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
             state.write_peer_count();
             // Remembered as a quiet peer, but no longer a holder: its flag was last said before it
             // went silent, and a crashed holder never says it again.
-            if let Some(endpoint) = state.peer_endpoints.get(nick.as_str()).map(|addr| addr.id) {
+            if let Some(endpoint) = state
+                .peer_endpoints
+                .get(nick.as_str())
+                .map(|address| address.id)
+            {
                 state.forget_rival_holder(endpoint);
             }
             if state.surfaced.remove(nick.as_str()) {
@@ -63,7 +68,7 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
                 // node that let go of the rendezvous owes it one return. A node
                 // that still holds the link owes nothing: it would be owed
                 // after the next release, and make the node grab it again.
-                if !state.rendezvous_linked {
+                if !state.rendezvous_flags.contains(&RendezvousFlag::Linked) {
                     state.owe_rendezvous_return(now);
                 }
                 state.quiet.insert(nick.clone());
@@ -76,11 +81,11 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
                 // returned peer undeliverable for directed frames until its
                 // gossip link happens to bounce.
                 state.quiet_since.insert(nick.clone(), seen);
+                tracing::debug!(nickname = %nick, age_secs = age, "peer evicted (silence timeout)");
                 sink.emit(NodeEvent::PeerTimeout {
-                    nickname: nick.clone(),
+                    nickname: nick,
                     last_seen_secs_ago: age,
                 });
-                tracing::debug!(nickname = %nick, age_secs = age, "peer evicted (silence timeout)");
             } else {
                 state.forget_peer_endpoint(nick.as_str());
                 tracing::trace!(
@@ -115,21 +120,23 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
 
 #[cfg(test)]
 mod tests {
+    use crate::daemon::state::RendezvousFlag;
     use crate::testing::{fresh_state, nick};
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use super::{Instant, Nickname, tick_sweep};
     use crate::gossip::event::SilentSink;
-    use crate::util::tuning::alive_timeout;
+    use crate::util::tuning;
     use std::time::Duration;
 
+    use crate::{protocol, testing};
     #[test]
     fn sweep_evicts_surfaced_peer_into_quiet() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("swift-cedar"), expired_at);
         state.peers.insert(nick("swift-cedar"));
         // Arrival was surfaced => departure must be too.
@@ -137,10 +144,22 @@ mod tests {
 
         tick_sweep(&mut state, &SilentSink);
 
-        assert!(!state.last_seen.contains_key("swift-cedar"));
-        assert!(!state.peers.contains("swift-cedar"));
-        assert!(state.quiet.contains("swift-cedar"));
-        assert!(!state.surfaced.contains("swift-cedar"));
+        assert!(
+            !state.last_seen.contains_key("swift-cedar"),
+            "a swept surfaced peer leaves the last-seen map"
+        );
+        assert!(
+            !state.peers.contains("swift-cedar"),
+            "a swept surfaced peer leaves the roster"
+        );
+        assert!(
+            state.quiet.contains("swift-cedar"),
+            "a swept surfaced peer goes quiet"
+        );
+        assert!(
+            !state.surfaced.contains("swift-cedar"),
+            "a swept surfaced peer is no longer surfaced"
+        );
     }
 
     /// A node that let go of the rendezvous, whose silent neighbour is swept,
@@ -148,15 +167,14 @@ mod tests {
     /// is where the islands meet.
     #[test]
     fn sweeping_a_silent_known_peer_owes_a_return_to_the_rendezvous() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.rendezvous_release_links = 1;
-        state
-            .linked_endpoints
-            .insert(crate::testing::endpoint_id(1));
+        state.linked_endpoints.insert(testing::endpoint_id(1));
         assert!(!state.rendezvous_wanted(), "enough links: it let go");
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("lost-heron"), expired_at);
         state.peers.insert(nick("lost-heron"));
         state.surfaced.insert(nick("lost-heron"));
@@ -170,22 +188,24 @@ mod tests {
     /// after the next release, and make the node grab the link again.
     #[test]
     fn a_node_still_linked_to_the_rendezvous_owes_no_return() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.rendezvous_release_links = 1;
-        state
-            .linked_endpoints
-            .insert(crate::testing::endpoint_id(1));
-        state.rendezvous_linked = true;
+        state.linked_endpoints.insert(testing::endpoint_id(1));
+        state.rendezvous_flags.insert(RendezvousFlag::Linked);
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("lost-heron"), expired_at);
         state.peers.insert(nick("lost-heron"));
         state.surfaced.insert(nick("lost-heron"));
 
         tick_sweep(&mut state, &SilentSink);
 
-        assert!(state.rendezvous_comeback_until.is_none());
+        assert!(
+            state.rendezvous_comeback_until.is_none(),
+            "a node still linked to the rendezvous owes no return"
+        );
     }
 
     /// A holder that crashed or was killed never sends a `PeerInfo` without the flag. The sweep
@@ -193,18 +213,22 @@ mod tests {
     /// a flag that stays known shuts every debt to a new holder for as long as it lives.
     #[test]
     fn the_flag_of_an_evicted_holder_is_forgotten() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
-        let holder = crate::testing::endpoint_id(7);
+        let holder = testing::endpoint_id(7);
         state
             .peer_endpoints
             .insert(nick("lost-heron"), iroh::EndpointAddr::new(holder));
         state
             .rival_holders
-            .insert(crate::protocol::AuthorKey::from_bytes([4u8; 32]), holder);
-        assert!(state.rival_holder_known());
+            .insert(protocol::AuthorKey::from([4u8; 32]), holder);
+        assert!(
+            state.rival_holder_known(),
+            "the evicted holder's flag is known before the sweep"
+        );
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("lost-heron"), expired_at);
         state.peers.insert(nick("lost-heron"));
         state.surfaced.insert(nick("lost-heron"));
@@ -224,14 +248,13 @@ mod tests {
 
     #[test]
     fn sweeping_a_ghost_owes_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.rendezvous_release_links = 1;
-        state
-            .linked_endpoints
-            .insert(crate::testing::endpoint_id(1));
+        state.linked_endpoints.insert(testing::endpoint_id(1));
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("ghost-oak"), expired_at);
         state.peers.insert(nick("ghost-oak"));
 
@@ -247,10 +270,11 @@ mod tests {
     fn quiet_peer_reports_real_recency_in_roster() {
         // Regression: a quiet peer must still report how long ago it was
         // last heard (not `null`), even though eviction drops `last_seen`.
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("calm-otter"), expired_at);
         state.peers.insert(nick("calm-otter"));
         state.surfaced.insert(nick("calm-otter"));
@@ -258,27 +282,28 @@ mod tests {
         tick_sweep(&mut state, &SilentSink);
 
         let roster = state.roster_snapshot();
-        let entry = roster
+        let found = roster
             .peers
             .iter()
-            .find(|entry| entry.nickname.as_str() == "calm-otter")
-            .expect("quiet peer present in roster");
+            .find(|entry| entry.nickname.as_str() == "calm-otter");
+        let entry = found.expect("quiet peer present in roster");
         assert!(entry.quiet, "evicted peer is marked quiet");
         let secs = entry
             .last_seen_secs_ago
             .expect("quiet peer reports real recency, not null");
         assert!(
-            secs >= alive_timeout().as_secs(),
+            secs >= tuning::alive_timeout().as_secs(),
             "recency reflects the actual silence age, got {secs}s"
         );
     }
 
     #[test]
     fn sweep_keeps_a_quiet_peers_endpoint_for_its_return() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("swift-cedar"), expired_at);
         state.peers.insert(nick("swift-cedar"));
         state.surfaced.insert(nick("swift-cedar"));
@@ -289,7 +314,10 @@ mod tests {
 
         tick_sweep(&mut state, &SilentSink);
 
-        assert!(state.quiet.contains("swift-cedar"));
+        assert!(
+            state.quiet.contains("swift-cedar"),
+            "a sweep keeps a quiet peer's name in quiet for its return"
+        );
         assert_eq!(
             state.peer_endpoints.get("swift-cedar"),
             Some(&iroh::EndpointAddr::new(endpoint)),
@@ -299,6 +327,7 @@ mod tests {
 
     #[test]
     fn sweep_prunes_endpoints_of_nicks_neither_active_nor_quiet() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let endpoint = iroh::SecretKey::from_bytes(&[8; 32]).public();
         // Not in `peers`, not in `quiet`: fell off the quiet FIFO or
@@ -309,15 +338,19 @@ mod tests {
 
         tick_sweep(&mut state, &SilentSink);
 
-        assert!(!state.peer_endpoints.contains_key("gone-fern"));
+        assert!(
+            !state.peer_endpoints.contains_key("gone-fern"),
+            "a sweep prunes endpoints of names that are neither active nor quiet"
+        );
     }
 
     #[test]
     fn sweep_evicts_unsurfaced_peer_silently() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("ghost-elm"), expired_at);
         state.peers.insert(nick("ghost-elm"));
         // Never in `surfaced`: known only via pre-join backlog.
@@ -325,39 +358,66 @@ mod tests {
         tick_sweep(&mut state, &SilentSink);
 
         // Still evicted from the roster (hygiene preserved)...
-        assert!(!state.last_seen.contains_key("ghost-elm"));
-        assert!(!state.peers.contains("ghost-elm"));
+        assert!(
+            !state.last_seen.contains_key("ghost-elm"),
+            "a sweep evicts an unsurfaced peer from last-seen"
+        );
+        assert!(
+            !state.peers.contains("ghost-elm"),
+            "a sweep evicts an unsurfaced peer from the roster"
+        );
         // ...but never parked in `quiet` => no `went quiet` emitted.
-        assert!(!state.quiet.contains("ghost-elm"));
+        assert!(
+            !state.quiet.contains("ghost-elm"),
+            "a sweep never puts an unsurfaced peer in quiet"
+        );
     }
 
     #[test]
     fn sweep_keeps_recent_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.last_seen.insert(nick("swift-cedar"), Instant::now());
         state.peers.insert(nick("swift-cedar"));
 
         tick_sweep(&mut state, &SilentSink);
 
-        assert!(state.last_seen.contains_key("swift-cedar"));
-        assert!(state.peers.contains("swift-cedar"));
-        assert!(!state.quiet.contains("swift-cedar"));
+        assert!(
+            state.last_seen.contains_key("swift-cedar"),
+            "a recent peer stays in last-seen"
+        );
+        assert!(
+            state.peers.contains("swift-cedar"),
+            "a recent peer stays in the roster"
+        );
+        assert!(
+            !state.quiet.contains("swift-cedar"),
+            "a recent peer is not quiet"
+        );
     }
 
     #[test]
     fn sweep_noop_on_empty_last_seen() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         tick_sweep(&mut state, &SilentSink);
-        assert!(state.peers.is_empty());
-        assert!(state.quiet.is_empty());
+        assert!(
+            state.peers.is_empty(),
+            "a sweep on empty last-seen keeps the roster empty"
+        );
+        assert!(
+            state.quiet.is_empty(),
+            "a sweep on empty last-seen keeps quiet empty"
+        );
     }
 
     #[test]
     fn sweep_preserves_other_peers() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let expired_at = Instant::now()
-            .checked_sub(alive_timeout() + Duration::from_secs(10))
-            .unwrap();
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
+            .expect("the monotonic clock has run past the alive timeout since boot");
         state.last_seen.insert(nick("stale-nick"), expired_at);
         state.peers.insert(nick("stale-nick"));
         state.last_seen.insert(nick("fresh-nick"), Instant::now());
@@ -366,6 +426,9 @@ mod tests {
         tick_sweep(&mut state, &SilentSink);
 
         let expected_peers: HashSet<Nickname> = [nick("fresh-nick")].into_iter().collect();
-        assert_eq!(state.peers, expected_peers);
+        assert_eq!(
+            state.peers, expected_peers,
+            "a sweep preserves the other peers"
+        );
     }
 }

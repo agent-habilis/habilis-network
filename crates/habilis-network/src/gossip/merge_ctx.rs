@@ -1,0 +1,926 @@
+//! Gossip **outbound/send plane** (engine primitives): fire-and-forget
+//! broadcast, the shared-state merge write, and presence / `PeerInfo`
+//! announcements. The application payload send path (broadcast chat, task
+//! legs, directed RPC) lives app-side in the application's send plane; this layer only
+//! carries the generic transport primitives the app rides. Inbound dispatch
+//! lives in [`super::recv`].
+
+use crate::daemon::state::{Latch, RendezvousFlag, Standing};
+use std::fmt;
+
+use crate::transport::MeshSender;
+
+use crate::daemon::handler_ctx::HandlerCtx;
+use crate::daemon::state::{EventLoopState, PingRound};
+use crate::gossip::app::AppClass;
+use crate::gossip::event::{NodeEvent, NodeSink};
+use crate::protocol::messages::{AppFrameParams, Verified, WireFrame, sole_addressee};
+use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
+use crate::util::consts::MAX_MESSAGE_SIZE;
+
+use crate::logging::messages;
+use crate::protocol::peer_addr_error;
+use crate::transport;
+use crate::transport::{proven_endpoints, webrtc};
+use crate::util::{clock, tuning};
+use n0_future::task;
+use n0_future::time::Instant as n0future_Instant;
+use tokio::sync::oneshot;
+/// Build → sign → deliver one outbound `App` frame — the payload-generic
+/// counterpart to the application's own (chain-stamping, sharding, sealing) chat /
+/// task builders. A consumer with its own data model emits its `App`-tagged payloads through
+/// this one primitive: it stamps the frame with `tag`/`to`/`corr`, signs it with
+/// the loop identity, and routes it with the same single-send decision the application
+/// path uses ([`crate::transport::deliver`]) — unicast to a sole addressee,
+/// gossip for a broadcast (`to == None`).
+///
+/// Reliability matches the engine's own plumbing: while unmeshed the frame is
+/// buffered into `pending_outbound` and flushed through the send decision on
+/// the meshed edge; a directed frame whose addressee is still unknown at that
+/// flush is re-buffered and retried as `PeerInfo`s arrive (dropped only when
+/// the bounded buffer overflows).
+///
+/// This is a **single-frame** send: unlike the application's chat path it does not split a
+/// large body across shards (that logic is entangled with the application's per-author hash
+/// chain), so `body` must fit one wire frame. A body whose signed frame would
+/// exceed [`MAX_MESSAGE_SIZE`] is refused rather than silently dropped by the
+/// gossip actor; a bytes-carrying consumer chunks its stream below that bound.
+/// It also does **not** seal a directed frame — the recipient's encryption key
+/// is discovered through an app-level convention (the application publishes cards to the
+/// meta channel) the engine does not own; a directed `App` frame sent here rides
+/// in plaintext (authenticated by the Ed25519 frame signature).
+///
+/// Nor does it seal a **broadcast** body: on a passworded mesh (a
+/// `broadcast_key` is set), receivers require every broadcast body to be
+/// mesh-key-sealed and drop a plaintext one on decrypt (see
+/// `gossip::recv::decrypt_broadcast`). A generic consumer that needs passworded
+/// broadcast must therefore seal its body under the mesh key before calling
+/// this; the shipped application does so on its broadcast chat path.
+///
+/// `frame` comes from [`app_frame`], and `class` is what the app says of it
+/// (`app.classify(&frame)`). A **broadcast** frame that the class marks as loggable is kept in
+/// the message log of the sender, as at the ingest of the same frame on a peer. Without it a peer that holds the frame
+/// would resend it to its author on every digest round, and the author could not serve it to a
+/// peer that missed it. A frame the app does not log is not kept. The log holds a frame
+/// once, so a consumer that also pushes the same frame into it costs a lookup, not a duplicate.
+///
+/// A directed frame to a cold peer comes back as [`crate::transport::Delivered::Pending`]: the dial runs on a task,
+/// and the caller awaits the handle off its event loop.
+///
+/// # Errors
+/// Refuses a body too large for one frame, propagates a serialize/deliver
+/// failure, and errors if the unmeshed buffer is full.
+///
+/// # Examples
+///
+/// It sends an application frame to the peers that the class names, and it reports how the send went. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::{EventLoopState, HandlerCtx};
+/// use habilis_network::embed::AppClass;
+/// use habilis_network::ops::send_app;
+/// use habilis_network::protocol::Verified;
+///
+/// # async fn demo(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: Verified, class: AppClass) {
+/// let _ = send_app(state, context, frame, class).await;
+/// # }
+/// ```
+pub async fn send_app(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+    frame: Verified,
+    class: AppClass,
+) -> Result<transport::Delivered, transport::SendError> {
+    if frame.wire_len() > MAX_MESSAGE_SIZE {
+        return Err(transport::SendError::Oversize(format!(
+            "app frame too large: {} bytes exceeds the {MAX_MESSAGE_SIZE}-byte single-frame limit",
+            frame.wire_len()
+        )));
+    }
+    let bytes = frame
+        .serialize()
+        .map_err(|error| transport::SendError::Internal(error.into()))?;
+    messages::log_out(&frame);
+    if state.standing.contains(&Standing::Meshed) {
+        // Directed vs. broadcast is decided inside `deliver` from the frame's
+        // `to` — the same routing the application's send path rides. A frame
+        // held off a relay-only peer is parked, not failed: the proven direct
+        // path flushes it (see `gossip::recv::flush_pending`).
+        match transport::deliver(&frame, bytes.clone(), state, context.sender).await {
+            Err(transport::SendError::Held { .. }) => {
+                park_and_offer(state, context, &frame, &bytes);
+            }
+            outcome => {
+                if outcome.is_ok() {
+                    super::recv::retain_own_app_broadcast(state, &frame, class);
+                }
+                return outcome;
+            }
+        }
+    } else {
+        park_and_offer(state, context, &frame, &bytes);
+    }
+    if state.pending_outbound.push((frame.clone(), bytes)) {
+        // Buffered until the meshed edge flushes it through the same send
+        // decision (see `gossip::recv::flush_pending`). A parked frame is still ours.
+        super::recv::retain_own_app_broadcast(state, &frame, class);
+        Ok(transport::Delivered::Done)
+    } else {
+        Err(transport::SendError::internal(anyhow::anyhow!(
+            "pending outbound buffer full; app frame dropped"
+        )))
+    }
+}
+
+/// Build and sign the frame that [`send_app`] sends. A plain function, so that a caller can
+/// classify the frame (`app.classify(&frame)`) before the send and hold no reference to the app
+/// across the `await` of [`send_app`]: the app is not `Sync`, and a future that holds it is not
+/// `Send`.
+///
+/// # Examples
+///
+/// It builds a signed application frame from the handler context. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::HandlerCtx;
+/// use habilis_network::ops::app_frame;
+/// use habilis_network::protocol::{AppFrameParams, Verified};
+///
+/// # fn demo(context: &HandlerCtx<'_>, params: AppFrameParams) -> Verified {
+/// app_frame(context, params)
+/// # }
+/// ```
+#[must_use]
+pub fn app_frame(context: &HandlerCtx<'_>, params: AppFrameParams) -> Verified {
+    Message::new_app(context.mesh, context.author, params).sign(context.identity)
+}
+
+/// Fire-and-forget gossip broadcast. Serialize errors are swallowed:
+/// this helper is for presence / `PeerInfo` announcements where a
+/// failed serialize must not block the daemon. A failed *broadcast* is
+/// logged — it means the gossip actor refused the send (the wedge the
+/// roster-collapse soak hit silently), not a routine empty gossip.
+///
+/// # Examples
+///
+/// It broadcasts a signed message on the gossip, and a failure to send is only logged. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::ops::{MeshSender, broadcast_msg};
+/// use habilis_network::protocol::Verified;
+///
+/// # async fn demo(sender: &MeshSender, message: &Verified) {
+/// broadcast_msg(sender, message).await;
+/// # }
+/// ```
+pub async fn broadcast_msg(sender: &MeshSender, message: &Verified) {
+    messages::log_out(message);
+    if let Ok(bytes) = message.serialize()
+        && let Err(error) = sender.broadcast(bytes).await
+    {
+        tracing::warn!(
+            target: "habilis_network::gossip",
+            %error,
+            "presence/plumbing broadcast failed"
+        );
+    }
+}
+
+/// Start an RTT round: arm it and broadcast the first probe. The event loop sends the second probe
+/// at the middle of the window (`send_second_probe`); the round ends at its deadline and reports
+/// the first pong of each peer. This is the one place that starts a round.
+///
+/// # Examples
+///
+/// It starts a round of pings to the peers, and an optional channel gets the round trip times. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::{EventLoopState, HandlerCtx};
+/// use habilis_network::ops::start_ping_round;
+///
+/// # async fn demo(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+/// start_ping_round(state, context, None).await;
+/// # }
+/// ```
+pub async fn start_ping_round(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+    response: Option<oneshot::Sender<Vec<(Nickname, u64)>>>,
+) {
+    let now = n0future_Instant::now();
+    let window = tuning::ping_window();
+    let probe = Message::new_ping(context.mesh, context.author).sign(context.identity);
+    state.arm_ping_round(PingRound::new(&probe, now, now + window, response));
+    broadcast_msg(context.sender, &probe).await;
+}
+
+/// Send the second probe of the round in flight, a fresh ping: a repeat of the first one would be
+/// dropped as a duplicate by gossip and by `ingest`, and would never reach a peer's `auto_pong`.
+pub(crate) async fn send_second_probe(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    let Some(round) = state.ping_round.as_mut() else {
+        return;
+    };
+    let probe = Message::new_ping(context.mesh, context.author).sign(context.identity);
+    round
+        .probes
+        .insert(probe.id.clone(), n0future_Instant::now());
+    broadcast_msg(context.sender, &probe).await;
+}
+
+/// The four refs that a state write needs from the loop: the mesh, the author, the sender of the
+/// topic, and the sink that reports the write. A [`HandlerCtx`] holds all four.
+///
+/// # Examples
+///
+/// A merge context names the mesh and the author of a write. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::ops::MergeCtx;
+///
+/// # fn demo(ctx: MergeCtx<'_>) {
+/// let _mesh = ctx.mesh;
+/// let _author = ctx.author;
+/// # }
+/// ```
+#[non_exhaustive]
+#[derive(Clone)]
+pub struct MergeCtx<'mesh> {
+    /// The id of the mesh that the write belongs to.
+    pub mesh: &'mesh MeshId,
+    /// The author of the write.
+    pub author: &'mesh Nickname,
+    /// The sender of the topic.
+    pub sender: &'mesh MeshSender,
+    /// The sink that reports the write.
+    pub sink: &'mesh dyn NodeSink,
+}
+
+// Hand-written: `sink` is a `dyn NodeSink`, which has no `Debug` to print.
+impl fmt::Debug for MergeCtx<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MergeCtx")
+            .field("mesh", &self.mesh)
+            .field("author", &self.author)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'mesh> MergeCtx<'mesh> {
+    /// Gather the four parts of a write context. An app that holds the parts and no
+    /// [`HandlerCtx`] builds the context with this.
+    #[must_use]
+    pub fn new<Sink: NodeSink>(
+        mesh: &'mesh MeshId,
+        author: &'mesh Nickname,
+        sender: &'mesh MeshSender,
+        sink: &'mesh Sink,
+    ) -> Self {
+        Self {
+            mesh,
+            author,
+            sender,
+            sink,
+        }
+    }
+}
+
+impl<'context> From<&HandlerCtx<'context>> for MergeCtx<'context> {
+    fn from(context: &HandlerCtx<'context>) -> Self {
+        Self {
+            mesh: context.mesh,
+            author: context.author,
+            sender: context.sender,
+            sink: context.sink,
+        }
+    }
+}
+
+/// Parameters for [`broadcast_state_merge`]. Agent-driven writes surface to the operator, so
+/// `surface` is `true` unless [`StateMergeParams::surface`] says otherwise.
+///
+/// # Examples
+///
+/// The parameters of a state merge name the context of the write and its channel. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::ops::StateMergeParams;
+///
+/// # fn demo(params: StateMergeParams<'_>) {
+/// let _channel = params.channel;
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct StateMergeParams<'mesh> {
+    /// The context of the write.
+    pub context: MergeCtx<'mesh>,
+    /// The channel of the write.
+    pub channel: Channel,
+    /// The RFC 7386 merge to apply.
+    pub merge: serde_json::Value,
+    /// Whether the write is reported to the operator as a `state` or `meta` event. Default `true`.
+    pub surface: bool,
+    /// Whether the merged frame also goes to each peer over the unicast plane. Default
+    /// [`Farewell::GossipOnly`].
+    pub farewell: Farewell,
+}
+
+impl<'mesh> StateMergeParams<'mesh> {
+    /// A write on `channel` that surfaces to the operator.
+    #[must_use]
+    pub fn new(context: MergeCtx<'mesh>, channel: Channel, merge: serde_json::Value) -> Self {
+        Self {
+            context,
+            channel,
+            merge,
+            surface: true,
+            farewell: Farewell::GossipOnly,
+        }
+    }
+
+    /// Whether the write is reported to the operator as a `state` or `meta` event.
+    #[must_use]
+    pub fn surface(
+        self,
+        // true reports the write to the operator as a state or meta event
+        surface: bool,
+    ) -> Self {
+        Self { surface, ..self }
+    }
+
+    /// Whether the merged frame also goes to each peer over the unicast plane.
+    #[must_use]
+    pub fn farewell(
+        self,
+        // the frame is also sent to each peer by unicast, so it survives a linkless overlay
+        farewell: Farewell,
+    ) -> Self {
+        Self { farewell, ..self }
+    }
+}
+
+/// Whether a merged frame also goes to each peer over the unicast plane.
+///
+/// A frame that announces a departure must not die with the leaver. Gossip alone can lose it in
+/// a silently linkless overlay, and anti-entropy cannot heal a frame that no live replica holds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Farewell {
+    /// The frame goes over gossip only.
+    #[default]
+    GossipOnly,
+    /// The frame also goes to each rostered peer by unicast.
+    UnicastMirror,
+}
+
+/// The single shared-state write helper, shared by the IPC `state_merge` command
+/// and the in-process `StateMerge` request. Translates the RFC 7386 merge into one
+/// automerge change, gossips it inside a signed frame, and retains it locally so
+/// anti-entropy can serve it (gossip never echoes to self).
+///
+/// The change is built on a fork and the frame size-gated **before** the change
+/// touches the live doc, so an oversize merge never lands in a doc it could not
+/// be gossiped for. Applying then runs through [`MeshDoc::ingest`](crate::doc::MeshDoc::ingest)'s gate, so a
+/// local write that would forge another peer's card is refused, not silently
+/// diverged.
+///
+/// `surface` controls whether the local write is reported to the operator/agent
+/// as a `state`/`meta` event (`you changed …`). Agent-driven merges pass
+/// `true`; the daemon's own automatic card publish passes `false` — that write is
+/// internal plumbing, not something the agent did, so it must not appear as a
+/// "you changed shared state" event (nor race into a `fetch_messages` long-poll).
+///
+/// # Errors
+/// Unrepresentable merge, oversize frame, a rejected foreign-card write, or a
+/// broadcast refusal.
+///
+/// # Examples
+///
+/// It applies a state merge and broadcasts it to the mesh. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::EventLoopState;
+/// use habilis_network::ops::{StateMergeParams, broadcast_state_merge};
+///
+/// # async fn demo(state: &mut EventLoopState, params: StateMergeParams<'_>) {
+/// let _ = broadcast_state_merge(state, params).await;
+/// # }
+/// ```
+pub async fn broadcast_state_merge(
+    state: &mut EventLoopState,
+    params: StateMergeParams<'_>,
+) -> Result<(), transport::SendError> {
+    use crate::doc::Ingested;
+
+    let StateMergeParams {
+        context:
+            MergeCtx {
+                mesh,
+                author,
+                sender,
+                sink,
+            },
+        channel,
+        merge,
+        surface,
+        farewell,
+    } = params;
+
+    // 1. Build the change on a fork (no live mutation yet); a no-op merge is a
+    //    silent success.
+    // The actor seed is the session's signing key, not the nickname: a
+    // rejoined session under a nickname-derived actor would collide seq
+    // numbers with its predecessor's history (see `doc::actor_for`).
+    let actor_seed = *state.identity.public().as_bytes();
+    let fork_doc = state.doc(channel);
+    let built = fork_doc
+        .build_change(&merge, &actor_seed)
+        .map_err(|error| transport::SendError::Internal(error.into()))?;
+    let Some(change_bytes) = built else {
+        return Ok(());
+    };
+
+    // 2. Compose + sign + size-gate before the change touches the live doc.
+    //    Carry the input merge as the surfaced delta only for agent-visible
+    //    writes; the internal card publish stays lean (no delta on the wire).
+    //    On a passworded mesh the wire body is sealed under the channel key;
+    //    `plain_body` keeps the plaintext for our own surfacing below.
+    let channel_doc = state.doc(channel);
+    let composed = channel_doc.compose_wire_body(&change_bytes, surface.then_some(&merge));
+    let (wire_body, plain_body) =
+        composed.map_err(|error| transport::SendError::Internal(error.into()))?;
+    let signed = Message::new_channel_event(mesh, author, wire_body, channel).sign(&state.identity);
+    let bytes = signed
+        .serialize()
+        .map_err(|error| transport::SendError::Internal(error.into()))?;
+    messages::log_out(&signed);
+
+    // 3. Apply the signed frame to the live doc through the authorization gate.
+    //    Ingest retains the frame as the re-serve store (replacing `StateLog`),
+    //    so anti-entropy can forward it with its original signature.
+    let ingested = state.doc_mut(channel).ingest(&signed);
+    let after = match ingested {
+        Ingested::Applied { doc, .. } => doc,
+        Ingested::Duplicate => return Ok(()),
+        Ingested::Rejected => {
+            return Err(transport::SendError::internal(anyhow::anyhow!(
+                "write rejected: a member may only write its own /peers/<nick>/card"
+            )));
+        }
+        Ingested::Buffered => unreachable!("a locally-built change's deps are always present"),
+        Ingested::Ignored => unreachable!("a locally-built change body always decodes"),
+        _ => {
+            return Err(transport::SendError::internal(anyhow::anyhow!(
+                "the document did not take the change"
+            )));
+        }
+    };
+
+    // A departure is mirrored before gossip takes the frame: once gossip has it, the frame is
+    // no longer ours to copy, and a leaver can exit before the overlay carries it.
+    if farewell == Farewell::UnicastMirror {
+        unicast_farewell(state, &bytes);
+    }
+
+    // 4. Surface our own change, and gossip it (or buffer while no gossip path
+    //    exists — the change is safe in the local doc for heads-based
+    //    anti-entropy).
+    if surface {
+        // Surface our own change from a plaintext-bodied view so the `m` delta
+        // renders even when the wire body we signed is sealed.
+        sink.emit(NodeEvent::StateChanged {
+            channel,
+            event: Box::new(signed.copy_with_body(plain_body)),
+            document: after,
+            is_self: true,
+        });
+    }
+    if state.overlay_reachable() {
+        sender
+            .broadcast(bytes)
+            .await
+            .map_err(|error| transport::SendError::internal(anyhow::anyhow!("{error}")))?;
+    } else {
+        // No gossip path yet: buffer until we mesh. (The change is already in
+        // the local doc, so heads anti-entropy still reconciles it if the
+        // buffer is full.)
+        state.pending_outbound.push((signed, bytes));
+    }
+    Ok(())
+}
+
+/// Mirror a farewell frame over the unicast plane to every rostered peer —
+/// fire-and-forget dials racing the shutdown propagation sleep. The gossip
+/// overlay can be silently linkless (a post-join flap heals in seconds, but a
+/// leaver exits first), and a farewell that dies with the leaver can never be
+/// healed by anti-entropy — no live replica holds it. Receiver-side dedup
+/// makes the double delivery a no-op; the unicast acceptor feeds the same
+/// `ingest` path as gossip. Spawned dials that outlive the shutdown window
+/// die with the endpoint — still best-effort, just no longer single-path.
+///
+/// For channel-event farewells (the meta retraction) ONLY — never presence:
+/// a mirrored `Left` from a beacon host can land while a survivor's gossip
+/// still holds the dying beacon's link, and the presence-driven fast-reclaim
+/// then re-stands the beacon into a stale connection and stalls
+/// (iroh-gossip#10).
+///
+/// # Examples
+///
+/// It sends a farewell frame to each peer that has an endpoint. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::embed::EventLoopState;
+/// use habilis_network::ops::unicast_farewell;
+/// use habilis_network::protocol::messages::WireFrame;
+///
+/// # fn demo(state: &EventLoopState, bytes: &WireFrame) {
+/// unicast_farewell(state, bytes);
+/// # }
+/// ```
+pub fn unicast_farewell(state: &EventLoopState, bytes: &WireFrame) {
+    for (nick, endpoint_id) in &state.peer_endpoints {
+        // The rendezvous pseudo-node is never a directed target, and a
+        // quiet/ghost peer's stale hint isn't worth a dial at shutdown.
+        if state.rendezvous_id == Some(endpoint_id.id) || !state.peers.contains(nick) {
+            continue;
+        }
+        let pool = state.unicast_pool.clone();
+        let endpoint_id = endpoint_id.id;
+        let bytes = bytes.clone();
+        task::spawn(async move {
+            if let Err(error) = pool.dial_and_send(endpoint_id, bytes.into_bytes()).await {
+                tracing::debug!(target: "habilis_network::gossip", %error, "unicast farewell mirror failed");
+            }
+        });
+    }
+}
+
+/// The body of our `PeerInfo`: our address, the proof that we own it, and, while we hold the
+/// rendezvous, a flag that lets another holder in the same overlay order itself against us.
+pub(crate) fn peer_info_json(
+    address: &iroh::EndpointAddr,
+    proof: String,
+    holds_beacon: bool,
+) -> serde_json::Value {
+    let mut json = peer_addr_error::endpoint_addr_to_json(address);
+    json["proof"] = serde_json::Value::String(proof);
+    if holds_beacon {
+        json["beacon"] = serde_json::Value::Bool(true);
+    }
+    json
+}
+
+/// Broadcast a `PeerInfo` carrying our endpoint address so peers can
+/// dial us directly. Unlike `joined`, `PeerInfo` never enters the
+/// message log (`handle_peer_info` returns before the log push), so
+/// re-sending it is invisible to `poll`/`fetch_messages` consumers —
+/// safe to repeat on every new neighbor. Stamps `peerinfo_flooded_at`, the
+/// window the `joined` re-flood gate reads.
+pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    state.peerinfo_flooded_at = Some(clock::Instant::now());
+    state.latches.remove(&Latch::PeerInfoDeferred);
+    let our_addr = context.endpoint.addr();
+    state.last_flooded_addr = Some(our_addr.clone());
+    let our_ips: Vec<_> = our_addr.ip_addrs().collect();
+    let local = context.endpoint.id().fmt_short();
+    let relay = our_addr.relay_urls().next();
+    tracing::debug!(
+        target: "habilis_network::gossip",
+        local = %local,
+        relay = ?relay,
+        addrs = our_ips.len(),
+        ip_addrs = ?our_ips,
+        "peerinfo flooded"
+    );
+    let proof = state
+        .peer_info_proof
+        .get_or_insert_with(|| {
+            let author_key = state.identity.author_key();
+            proven_endpoints::sign(context.endpoint.secret_key(), context.mesh, &author_key)
+        })
+        .clone();
+    let addr_json = peer_info_json(
+        &our_addr,
+        proof,
+        state
+            .rendezvous_flags
+            .contains(&RendezvousFlag::HostsRendezvous),
+    );
+    let addr_data = serde_json::to_string(&addr_json)
+        .expect("endpoint_addr_to_json produces a Value that always serializes");
+    let addr_body =
+        MessageBody::try_new(&addr_data).expect("endpoint address JSON has no control characters");
+    broadcast_msg(
+        context.sender,
+        &Message::new_peer_info(context.mesh, context.author, addr_body).sign(context.identity),
+    )
+    .await;
+}
+
+/// Announce our arrival: `joined` presence followed by `PeerInfo`.
+/// Called once at the top of the event loop; the caller bumps
+/// `last_sent_at` afterwards.
+///
+/// Takes `state` only to retain the `joined` locally — see
+/// [`retain_own_broadcast`](super::recv::retain_own_broadcast) for why a node
+/// that does not hold its own presence makes anti-entropy unconvergeable.
+pub(super) async fn announce_arrival(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    let joined = Message::new_joined(context.mesh, context.author).sign(context.identity);
+    broadcast_msg(context.sender, &joined).await;
+    super::recv::retain_own_broadcast(state, joined);
+    broadcast_peer_info(state, context).await;
+}
+
+/// A directed frame that is parked because the node is not meshed yet still asks for the session
+/// of a peer that needs one: a node becomes meshed by its first link to a member, and on a lane pair
+/// that link needs the session, so a frame that waited for the link could never ask for it. The rule
+/// is the one of a frame held on a meshed node ([`crate::transport::note_held`]).
+fn mark_parked(state: &mut EventLoopState, frame: &Verified, bytes: &WireFrame) {
+    if let Err(error) = transport::resolve(frame, bytes.clone(), state) {
+        transport::note_held(state, &error);
+    }
+}
+
+/// A directed frame is parked, by `send_app` or by a flush that held it again: ask for the session
+/// of its peer, and offer it now. One helper for both, so that the two cannot drift.
+pub(crate) fn park_and_offer(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+    frame: &Verified,
+    bytes: &WireFrame,
+) {
+    mark_parked(state, frame, bytes);
+    offer_for_parked(state, context, frame);
+}
+
+/// Offer the session of the peer now, if the parked frame asked for it. Without this the offer waits
+/// for the next tick of the retry pass, up to 30 s, and a user waits with it. The peer is a lane peer,
+/// or a pair with an IP path that reads as the relay (`note_held` marks both).
+fn offer_for_parked(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: &Verified) {
+    let Some(nick) = sole_addressee(&frame.kind) else {
+        return;
+    };
+    let Some(address) = state.peer_endpoints.get(nick).cloned() else {
+        return;
+    };
+    if state.lane_session_wanted(address.id, clock::Instant::now()) {
+        webrtc::negotiate_session::negotiate_session(state, context, address.id, address);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::daemon::state::Standing;
+    use crate::transport::UdpTransport;
+
+    use super::{mark_parked, peer_info_json};
+    use crate::protocol::{MeshId, Message};
+    use crate::testing::{endpoint_id, fresh_state, nick};
+
+    use crate::protocol;
+    use crate::protocol::messages::AppFrameParams;
+    use crate::protocol::peer_addr_error;
+    #[cfg(feature = "host")]
+    use crate::testing;
+    use crate::util::clock;
+    /// A departure written with a farewell reaches each peer by unicast at once. The overlay is
+    /// not meshed, so gossip carries nothing: only the unicast mirror can deliver the frame, and
+    /// no anti-entropy round is needed.
+    #[test]
+    fn a_farewell_merge_reaches_each_peer_by_unicast() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use std::time::Duration;
+
+                use iroh::endpoint::presets;
+                use iroh::protocol::Router;
+                use iroh_gossip::{net, proto};
+                use tokio::sync::mpsc;
+                use tokio::time;
+
+                use crate::gossip::event::SilentSink;
+                use crate::gossip::{Farewell, MergeCtx, StateMergeParams, broadcast_state_merge};
+                use crate::lookup;
+                use crate::protocol::Channel;
+                use crate::transport::{
+                    MeshSender, PayloadPath, UNICAST_ALPN, UnicastAcceptor, UnicastPool,
+                };
+
+                let (tx, mut frames) = mpsc::channel(8);
+                let server = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let router = Router::builder(server.clone())
+                    .accept(
+                        UNICAST_ALPN,
+                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                    )
+                    .spawn();
+
+                let node = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint");
+                let gossip = net::Gossip::builder().spawn(node.clone());
+                let topic = gossip
+                    .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = MeshSender::new(gossip_sender);
+
+                let mut state = fresh_state();
+                state.unicast_pool = UnicastPool::new(node.clone(), false);
+                lookup::add_peer_addr(&lookup::address_book(&node), server.addr());
+                state.peer_endpoints.insert(nick("bob"), server.addr());
+                state.peers.insert(nick("bob"));
+
+                let mesh = MeshId::from("test");
+                let author = nick("alice");
+                let context = MergeCtx {
+                    mesh: &mesh,
+                    author: &author,
+                    sender: &sender,
+                    sink: &SilentSink,
+                };
+                let params = StateMergeParams::new(
+                    context,
+                    Channel::Meta,
+                    serde_json::json!({"peers": {"alice": null}}),
+                )
+                .surface(false)
+                .farewell(Farewell::UnicastMirror);
+                broadcast_state_merge(&mut state, params)
+                    .await
+                    .expect("the farewell is accepted");
+
+                let delivered = time::timeout(Duration::from_secs(5), frames.recv()).await;
+                assert!(
+                    matches!(delivered, Ok(Some(ref bytes)) if !bytes.is_empty()),
+                    "a farewell reaches the peer by unicast, without waiting for anti-entropy"
+                );
+                router.shutdown().await.expect("shutdown");
+                node.close().await;
+            },
+        );
+    }
+
+    #[test]
+    fn our_peer_info_says_so_while_we_hold_the_rendezvous() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let address = iroh::EndpointAddr::new(iroh::SecretKey::generate().public());
+
+        let holding = peer_info_json(&address, "proof".to_owned(), true);
+        let idle = peer_info_json(&address, "proof".to_owned(), false);
+
+        assert_eq!(
+            holding["beacon"],
+            serde_json::Value::Bool(true),
+            "our peer info says the beacon is held while we hold the rendezvous"
+        );
+        assert_eq!(
+            holding["proof"], "proof",
+            "our peer info carries the proof while we hold the rendezvous"
+        );
+        assert!(
+            idle.get("beacon").is_none(),
+            "no key while we do not hold it"
+        );
+    }
+
+    /// Members built before the flag read the body by key. The new key must not stop them from
+    /// reading the address.
+    #[test]
+    fn a_reader_that_predates_the_flag_still_reads_the_address() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let id = iroh::SecretKey::generate().public();
+        let json = peer_info_json(&iroh::EndpointAddr::new(id), "proof".to_owned(), true);
+
+        let (read, _) = peer_addr_error::endpoint_addr_from_json(&json).expect("the address reads");
+
+        assert_eq!(
+            read, id,
+            "a reader that predates the flag still reads the address"
+        );
+    }
+
+    /// A node that is not meshed parks a directed frame to a lane peer, and the park asks for the
+    /// peer's session.
+    #[test]
+    fn an_unmeshed_directed_frame_to_a_lane_peer_marks_the_peer_wanted() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.remove(&Standing::Meshed);
+        state.local_udp_transport = UdpTransport::Present;
+        let bob = endpoint_id(1);
+        state.peer_endpoints.insert(
+            nick("bob"),
+            iroh::EndpointAddr::new(bob)
+                .with_relay_url("https://relay.invalid".parse().expect("relay url")),
+        );
+        let frame = Message::new_pong(
+            &MeshId::from("test"),
+            &nick("alice"),
+            nick("bob"),
+            &protocol::MessageId::random(),
+        )
+        .sign(&protocol::Identity::generate());
+        let bytes = frame.serialize().expect("serialize");
+        let now = clock::Instant::now();
+        assert!(
+            !state.lane_session_wanted(bob, now),
+            "nothing is parked yet"
+        );
+
+        mark_parked(&mut state, &frame, &bytes);
+
+        assert!(state.lane_session_wanted(bob, now), "the parked frame asks");
+    }
+
+    /// A broadcast has no addressee, so parking it asks for nothing.
+    #[test]
+    fn an_unmeshed_broadcast_asks_for_no_session() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.remove(&Standing::Meshed);
+        let bob = endpoint_id(1);
+        state
+            .peer_endpoints
+            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        let frame = Message::new_app(
+            &MeshId::from("test"),
+            &nick("alice"),
+            AppFrameParams::new(
+                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                protocol::MessageBody::from("hi"),
+            ),
+        )
+        .sign(&protocol::Identity::generate());
+        mark_parked(&mut state, &frame, &frame.serialize().expect("serialize"));
+        assert!(
+            !state.lane_session_wanted(bob, clock::Instant::now()),
+            "an unmeshed broadcast asks for no session"
+        );
+    }
+
+    /// The offer goes out at once for a peer that is wanted, and a second call does not start a
+    /// second one: the admission table keeps one round per peer.
+    #[cfg(feature = "host")]
+    #[test]
+    fn offering_for_a_parked_frame_starts_one_round_and_no_more() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let node = testing::LaneNode::start().await;
+                let context = node.context();
+                let mut state = node.state();
+                let frame = node.frame_to_bob();
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    0,
+                    "no admission slot is in flight after the offer for a parked frame"
+                );
+
+                state.want_lane_session(node.bob, clock::Instant::now());
+                super::offer_for_parked(&mut state, &context, &frame);
+                assert_eq!(state.webrtc_admission.in_flight(), 1, "the offer is out");
+                super::offer_for_parked(&mut state, &context, &frame);
+                assert_eq!(state.webrtc_admission.in_flight(), 1, "not a second round");
+
+                state.webrtc_admission.close();
+                node.endpoint.close().await;
+            },
+        );
+    }
+
+    /// A peer that nobody asked for is not offered a session.
+    #[cfg(feature = "host")]
+    #[test]
+    fn nothing_is_offered_for_a_peer_that_is_not_wanted() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let node = testing::LaneNode::start().await;
+                let context = node.context();
+                let mut state = node.state();
+                super::offer_for_parked(&mut state, &context, &node.frame_to_bob());
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    0,
+                    "no admission slot is in flight when nothing is offered"
+                );
+                node.endpoint.close().await;
+            },
+        );
+    }
+}

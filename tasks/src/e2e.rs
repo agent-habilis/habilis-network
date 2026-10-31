@@ -17,10 +17,15 @@ use crate::TaskOutcome;
 use crate::util::webdriver::{Driver, SAFARI_TP};
 use crate::util::{Skip, json_to_string, output};
 
+#[cfg(not(feature = "mesh"))]
+use crate::util;
+use crate::util::{cdp as util_cdp, wasm};
+use std::env;
 pub(crate) mod build;
 mod cdp;
 #[cfg(feature = "mesh")]
 mod chat;
+mod harness;
 mod loopback;
 #[cfg(feature = "mesh")]
 mod mesh;
@@ -28,12 +33,11 @@ mod mesh;
 mod multihop;
 #[cfg(feature = "mesh")]
 mod page;
-mod server;
 #[cfg(feature = "mesh")]
 mod stream;
 mod webdriver;
 
-use server::Harness;
+use harness::Harness;
 
 /// A sweep at pressure 8 is ~20× slower than at rest, so this is generous. A
 /// stall is *indefinite*, so being generous costs only wall-clock on a cell
@@ -228,7 +232,7 @@ fn browsers() -> Vec<Browser> {
         Browser {
             name: "chrome-ci",
             backend: Backend::WebDriver,
-            binary: std::env::var("CHROME_BIN").unwrap_or_default(),
+            binary: env::var("CHROME_BIN").unwrap_or_default(),
             pressures: &[0],
         },
         Browser {
@@ -308,7 +312,7 @@ fn run_engine_suite(args: &Args) -> TaskOutcome {
 /// build; a plain `--workspace` build never sees `iroh-test-utils`.
 #[cfg(not(feature = "mesh"))]
 fn run_engine_suite(_: &Args) -> TaskOutcome {
-    crate::util::reexec_with_feature("mesh", "the engine suites", false)
+    util::reexec_with_feature("mesh", "the engine suites", false)
 }
 
 pub(crate) fn run(args: &Args) -> TaskOutcome {
@@ -322,7 +326,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     let env = if args.list {
         BTreeMap::new()
     } else {
-        crate::util::wasm::wasm_env()?
+        wasm::wasm_env()?
     };
     if !args.list {
         build::check_tooling()?;
@@ -331,7 +335,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     // The fast suite reports per-test through the runner rather than through a
     // published table, so it takes its own path and returns here.
     if args.suite == Suite::Loopback {
-        let chrome = crate::util::cdp::chrome_for_testing().map_err(|Skip(why)| why)?;
+        let chrome = util_cdp::chrome_for_testing().map_err(|Skip(why)| why)?;
         return loopback::run(&chrome.to_string_lossy(), &env);
     }
 
@@ -357,9 +361,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
             let missing = match browser.backend {
                 Backend::Cdp if args.list => None,
                 Backend::Cdp => chrome_for_testing
-                    .get_or_insert_with(|| {
-                        crate::util::cdp::chrome_for_testing().map_err(|Skip(why)| why)
-                    })
+                    .get_or_insert_with(|| util_cdp::chrome_for_testing().map_err(|Skip(why)| why))
                     .clone()
                     .err(),
                 Backend::WebDriver => (!PathBuf::from(&browser.binary).exists())

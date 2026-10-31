@@ -6,19 +6,36 @@
 //! they resolve their options the same way, so that resolution lives here
 //! once. Bulk bytes do not ride a membership: they take a stream.
 
-mod app;
-mod event;
-mod join;
+mod join_options;
+mod membership_app;
+mod membership_event;
 
+pub use crate::daemon::SetupError;
+pub use crate::transport::SendError;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-pub use app::Rung;
+pub use join_options::blind_new_members;
+pub use join_options::{JoinOptions, Membership, depart, join, resolve_kind};
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-pub use app::UnknownPeer;
-pub use app::{
-    DEPARTURE_GRACE, INBOUND_CAP, Inbound, MAX_MSG, MSG_TAG, MembershipApp, Request, msg_body,
-    msg_fits, parse_to,
+pub use membership_app::Rung;
+#[cfg(all(
+    feature = "iroh-test-utils",
+    not(target_arch = "wasm32"),
+    feature = "multihop"
+))]
+pub use membership_app::Ticks;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub use membership_app::UnknownPeer;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub use membership_app::{Beacons, Blocking, InspectTest, Linking, MessagingTest};
+pub use membership_app::{
+    DEPARTURE_GRACE, INBOUND_CAP, Inbound, Inspect, MAX_MSG, MSG_TAG, MembershipApp, Messaging,
+    Request, msg_body, msg_fits, parse_to,
 };
-pub use event::{MembershipEvent, json_sink};
-#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-pub use join::blind_new_members;
-pub use join::{Membership, Opts, depart, join, resolve_kind};
+#[cfg(all(
+    feature = "iroh-test-utils",
+    feature = "host",
+    not(target_arch = "wasm32")
+))]
+pub use membership_app::{InspectHost, LinkHold, Routing};
+
+pub use membership_event::{MembershipEvent, json_sink};

@@ -18,7 +18,7 @@ default = ["host"]
 #
 # `async-io` rides along: `bounded_read` exists only for the engine's IPC
 # listener, which is itself host-only.
-host = ["dep:libc", "async-io"]
+host = ["dep:libc", "dep:rustix", "async-io"]
 # Exposes helpers that exist only for assertions (clock::unix_nanos,
 # Cooldown::len). habilis-network turns it on through dev-dependencies.
 test-fixtures = []
@@ -48,9 +48,14 @@ tokio = { workspace = true, optional = true }
 tracing.workspace = true
 web-time.workspace = true
 
+# Only the host reaches a process table, and a wasm32 build has none, so rustix is never a
+# dependency there.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, optional = true }
+
 # Stamps the build's git short hash + dirty flag into `version::VERSION`.
 [build-dependencies]
-vergen-gitcl = "1"
+vergen-gitcl = "9"
 
 [dev-dependencies]
 habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }

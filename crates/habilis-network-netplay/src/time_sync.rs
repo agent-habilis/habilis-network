@@ -28,7 +28,7 @@ const MIN_ADVANTAGE_TO_CORRECT: i64 = 2;
 const MAX_SKIP: u32 = 8;
 
 /// Rolling measurement of how far ahead of its peers this peer is running.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct TimeSync {
     /// Our frame minus the last frame we have input for, sampled per frame.
     local: [i32; WINDOW],
@@ -105,38 +105,53 @@ pub(crate) fn frame_advantage(current_frame: Frame, last_received_frame: Frame) 
 #[cfg(test)]
 mod tests {
     use super::TimeSync;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn a_steady_state_recommends_no_correction() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = TimeSync::default();
         for _ in 0..super::WINDOW {
             sync.advance(0, 0);
         }
-        assert_eq!(sync.recommend_skip(), 0);
+        assert_eq!(
+            sync.recommend_skip(),
+            0,
+            "a steady state recommends no correction"
+        );
     }
 
     #[test]
     fn a_small_lead_is_treated_as_jitter_not_drift() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = TimeSync::default();
         for _ in 0..super::WINDOW {
             sync.advance(2, 0);
         }
         // Lead of 1 after halving — below the correction floor.
-        assert_eq!(sync.recommend_skip(), 0);
+        assert_eq!(
+            sync.recommend_skip(),
+            0,
+            "a small lead is jitter, so no correction is recommended"
+        );
     }
 
     #[test]
     fn a_persistent_lead_recommends_yielding() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = TimeSync::default();
         for _ in 0..super::WINDOW {
             sync.advance(10, 0);
         }
-        assert_eq!(sync.recommend_skip(), 5);
+        assert_eq!(
+            sync.recommend_skip(),
+            5,
+            "a persistent lead recommends yielding five frames"
+        );
     }
 
     #[test]
     fn the_peer_being_further_ahead_is_never_our_turn_to_yield() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = TimeSync::default();
         for _ in 0..super::WINDOW {
             sync.advance(4, 12);
@@ -150,10 +165,15 @@ mod tests {
 
     #[test]
     fn a_correction_is_capped_so_it_is_never_more_visible_than_the_drift() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut sync = TimeSync::default();
         for _ in 0..super::WINDOW {
             sync.advance(1000, 0);
         }
-        assert_eq!(sync.recommend_skip(), super::MAX_SKIP);
+        assert_eq!(
+            sync.recommend_skip(),
+            super::MAX_SKIP,
+            "the correction is capped at the drift"
+        );
     }
 }

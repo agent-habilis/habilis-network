@@ -6,6 +6,8 @@
 //! (`publish = false`); a consumer crate depends on it and re-exports
 //! the curated public surface.
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 // ── Role-based public facade ──────────────────────────────────────────────
 //
 // The modules below are grouped by what a consumer needs, not by the engine's
@@ -64,8 +66,9 @@ pub mod protocol {
         PresenceSubtype, Proof, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Seed,
         Shard, ShardGroup, Signer, SymmetricKey, TicketAuth, TicketSecret, TopicId, Transport,
         TransportPolicy, UnixSecs, UnlockError, Verified, base58check, crypto, ct_eq, directory,
-        encode_pubkey, identity, invite, iroh_base, mesh, message, nickname, peer_addr, reassembly,
-        resolve_lookups, resolver, seal, seal_to_body, sole_addressee, validate_advertise,
+        encode_pubkey, identity, invite, iroh_base, meshes, messages, nickname_error,
+        peer_addr_error, reassembly, resolve_lookups, resolver, seal_error, seal_to_body,
+        sole_addressee, validate_advertise,
     };
     #[cfg(any(test, feature = "test-fixtures"))]
     pub use habilis_network_protocol::{BuildMsgParams, ChainCtx, build_msg_bytes};
@@ -75,8 +78,7 @@ pub mod protocol {
 /// `resolver::JoinTarget::Invite`; `mint` is re-exported for consumers
 /// through [`ops::invite`](crate::ops::invite).
 pub(crate) use habilis_network_protocol::directory;
-pub(crate) use habilis_network_protocol::invite;
-pub(crate) use habilis_network_protocol::resolver;
+pub(crate) use habilis_network_protocol::{invite, resolver};
 
 pub(crate) use habilis_network_protocol::reassembly;
 
@@ -95,8 +97,8 @@ pub(crate) mod testing;
 pub mod util {
     // Listed rather than a glob, for the reason given on [`protocol`].
     pub use habilis_network_util::{
-        bounded_fifo_set, bounded_queue, clock, consts, cooldown, logs, mesh_prefix,
-        resident_memory, tuning, version,
+        bounded_fifo_set, bounded_queue, clock, consts, cooldown, log_config as logs, mesh_prefix,
+        resident_memory, tuning, unix_secs, version,
     };
     // The runtime-directory helpers are `host`-gated in the leaf crate: they
     // are filesystem and uid work a browser has no equivalent of. The glob
@@ -106,12 +108,12 @@ pub mod util {
         ensure_mesh_runtime_dir, ensure_parent_private, ensure_runtime_base, is_under_runtime_base,
         mesh_runtime_dir, runtime_base,
     };
-    // `bounded_read` is gated on `habilis-network-util`'s `async-io`, which this crate
+    // `line_read` is gated on `habilis-network-util`'s `async-io`, which this crate
     // turns on unconditionally in its manifest — so it is always here, and a
     // `#[cfg(feature = "async-io")]` would be checking a feature *this* crate
     // does not have and silently never fire. `process` is gated on `host`,
     // which both crates do have, and this one forwards.
-    pub use habilis_network_util::bounded_read;
+    pub use habilis_network_util::line_read;
     #[cfg(feature = "host")]
     pub use habilis_network_util::process;
 

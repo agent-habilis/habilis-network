@@ -1,7 +1,9 @@
 //! The content hash of a message.
 
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 
+use crate::identity;
+use std::fmt;
 /// The SHA-256 of the canonical bytes of a message: its id for another author's `prev`
 /// backlink, for the DAG `parents`, and for fork detection. It is recomputed on receive and
 /// never trusted off the wire.
@@ -14,55 +16,56 @@ use sha2::{Digest, Sha256};
 /// ```compile_fail,E0308
 /// use habilis_network_protocol::ContentHash;
 ///
-/// let _ = ContentHash::from_bytes([0u8; 32]) == [0u8; 32];
+/// let _ = ContentHash::from([0u8; 32]) == [0u8; 32];
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ContentHash([u8; 32]);
+
+impl From<[u8; 32]> for ContentHash {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
 
 impl ContentHash {
     /// The SHA-256 of `bytes`.
     #[must_use]
     pub fn of(bytes: &[u8]) -> Self {
+        use sha2::Digest;
         Self(Sha256::digest(bytes).into())
-    }
-
-    /// Wrap 32 raw bytes.
-    #[must_use]
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
     }
 
     /// The raw bytes, borrowed.
     #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 32] {
+    pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
     /// Read the 64-character lowercase hex form, the only one the wire carries. `None` for any
     /// other length, for an uppercase digit, and for a non-hex character.
     #[must_use]
-    pub fn from_hex(hex: &str) -> Option<Self> {
-        crate::identity::decode_lower_hex_32(hex).map(Self)
+    pub fn decode_hex(hex: &str) -> Option<Self> {
+        identity::decode_lower_hex_32(hex).map(Self)
     }
 
     /// The 64 ASCII bytes of the lowercase hex form, on the stack: what the signed bytes of a
     /// message carry for its `prev` and, inside a JSON array, for each of its `parents`.
     #[must_use]
     pub fn hex(&self) -> [u8; 64] {
-        crate::identity::encode_lower_hex_32(&self.0)
+        identity::encode_lower_hex_32(&self.0)
     }
 }
 
 // Hex, so a log line and an assertion failure stay readable.
-impl std::fmt::Debug for ContentHash {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for ContentHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ContentHash({self})")
     }
 }
 
-impl std::fmt::Display for ContentHash {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        crate::identity::write_hex(f, &self.0)
+impl fmt::Display for ContentHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        identity::write_hex(f, &self.0)
     }
 }
 
@@ -77,30 +80,63 @@ impl serde::Serialize for ContentHash {
 #[cfg(test)]
 mod tests {
     use super::ContentHash;
-    use habilis_network_test_tracing::test;
 
     /// SHA-256 of the empty string.
     const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
     #[test]
     fn it_hashes_with_sha256_and_prints_its_hex() {
+        let _guard = ::habilis_network_test_tracing::init();
         let hash = ContentHash::of(b"");
-        assert_eq!(hash.to_string(), EMPTY);
-        assert_eq!(format!("{hash:?}"), format!("ContentHash({EMPTY})"));
-        assert_eq!(hash.hex().as_slice(), EMPTY.as_bytes());
+        assert_eq!(
+            hash.to_string(),
+            EMPTY,
+            "the empty hash prints its sha256 hex"
+        );
+        assert_eq!(
+            format!("{hash:?}"),
+            format!("ContentHash({EMPTY})"),
+            "the content hash debug prints its hex"
+        );
+        assert_eq!(
+            hash.hex().as_slice(),
+            EMPTY.as_bytes(),
+            "the hex bytes are the display text"
+        );
     }
 
     #[test]
     fn it_reads_only_lowercase_64_char_hex() {
-        assert_eq!(ContentHash::from_hex(EMPTY), Some(ContentHash::of(b"")));
-        assert!(ContentHash::from_hex(&EMPTY.to_uppercase()).is_none());
-        assert!(ContentHash::from_hex(&EMPTY[..62]).is_none());
-        assert!(ContentHash::from_hex(&format!("{EMPTY}00")).is_none());
-        assert!(ContentHash::from_hex(&"é".repeat(32)).is_none());
+        let _guard = ::habilis_network_test_tracing::init();
+        assert_eq!(
+            ContentHash::decode_hex(EMPTY),
+            Some(ContentHash::of(b"")),
+            "the lowercase 64-character hex reads back to the hash"
+        );
+        assert!(
+            ContentHash::decode_hex(&EMPTY.to_uppercase()).is_none(),
+            "upper-case hex is refused"
+        );
+        assert!(
+            ContentHash::decode_hex(&EMPTY[..62]).is_none(),
+            "a short hex is refused"
+        );
+        assert!(
+            ContentHash::decode_hex(&format!("{EMPTY}00")).is_none(),
+            "a hex with extra characters is refused"
+        );
+        assert!(
+            ContentHash::decode_hex(&"é".repeat(32)).is_none(),
+            "non-ascii hex is refused"
+        );
     }
 
     #[test]
     fn it_orders_by_its_bytes() {
-        assert!(ContentHash::from_bytes([1; 32]) < ContentHash::from_bytes([2; 32]));
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            ContentHash::from([1; 32]) < ContentHash::from([2; 32]),
+            "content hashes order by their bytes"
+        );
     }
 }

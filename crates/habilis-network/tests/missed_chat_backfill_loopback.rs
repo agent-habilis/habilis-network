@@ -8,21 +8,25 @@
 
 #![cfg(feature = "host")]
 
-use habilis_network::protocol::message::Authored;
+use habilis_network::protocol::messages::Authored;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{
     AppFrameParams, AppTag, LookupOpts, Message, MessageBody, MessageId, MessageKind, Nickname,
     PresenceSubtype,
 };
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::{Notify, oneshot};
 
+use habilis_network::ops;
+use habilis_network::runtime::tuning;
+use tokio::time::{self, Instant};
 /// Bounds a slow join only: with the tick pinned away, nothing but the ask on
 /// the first link can deliver.
 const BUDGET: Duration = Duration::from_secs(15);
@@ -34,20 +38,18 @@ const AHEAD: Duration = Duration::from_secs(30);
 /// Logs every chat frame and records the surfaceable ones it receives.
 #[derive(Clone, Default)]
 struct Chat {
+    // the chat shares the received list with the test, which reads it
     received: Arc<Mutex<Vec<MessageId>>>,
+    // the chat and the test share the notify that wakes the reader
     changed: Arc<Notify>,
 }
 
 #[habilis_network::async_trait]
 impl NodeApp for Chat {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: true,
-            beat: false,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::NONE
+            .union(AppClass::LOGGABLE)
+            .union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -78,22 +80,22 @@ impl NodeDriver for Chat {
         &mut self,
         sent: Self::Session,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
         let mut frame = Message::new_app(
-            ctx.mesh,
-            ctx.author,
-            AppFrameParams {
-                tag: AppTag::from("chat"),
-                to: None,
-                corr: None,
-                body: MessageBody::new("\"hello\"").expect("a JSON body"),
-            },
+            context.mesh,
+            context.author,
+            AppFrameParams::new(
+                AppTag::try_new("chat").expect("a valid app tag"),
+                None,
+                None,
+                MessageBody::try_new("\"hello\"").expect("a JSON body"),
+            ),
         );
         frame.timestamp = frame.timestamp + AHEAD;
-        let frame = frame.sign(ctx.identity);
+        let frame = frame.sign(context.identity);
         let bytes = frame.serialize().expect("serialize");
-        let _ = habilis_network::ops::deliver(&frame, bytes.clone(), state, ctx.sender)
+        let _ = ops::deliver(&frame, bytes.clone(), state, context.sender)
             .await
             .expect("a meshed node broadcasts");
         // The sender keeps its own frame, as a chat app does, so any peer late
@@ -116,7 +118,7 @@ impl Chat {
                 changed.await;
             }
         };
-        tokio::time::timeout(deadline, wait).await.is_ok() || seen()
+        time::timeout(deadline, wait).await.is_ok() || seen()
     }
 }
 
@@ -129,15 +131,15 @@ struct Joined {
 
 impl NodeSink for Joined {
     fn emit(&self, event: NodeEvent) {
-        if let NodeEvent::Presence { msg, .. } = event
+        if let NodeEvent::Presence { message, .. } = event
             && let MessageKind::Presence {
                 subtype: PresenceSubtype::Joined,
-            } = msg.kind
+            } = message.kind
         {
             self.peers
                 .lock()
                 .expect("no poison")
-                .push(msg.author.clone());
+                .push(message.author.clone());
             self.changed.notify_waiters();
         }
     }
@@ -155,22 +157,21 @@ impl Joined {
                 changed.await;
             }
         };
-        tokio::time::timeout(deadline, wait).await.is_ok() || seen()
+        time::timeout(deadline, wait).await.is_ok() || seen()
     }
 }
 
 fn pin_antientropy_tick() {
-    habilis_network::runtime::tuning::init(habilis_network::runtime::tuning::Tuning {
-        antientropy_interval: Duration::from_hours(1),
-        ..habilis_network::runtime::tuning::Tuning::DEFAULTS
-    });
+    tuning::init(tuning::Tuning::DEFAULTS.antientropy_interval(Duration::from_hours(1)));
 }
 
 fn nick(name: &str) -> Nickname {
-    Nickname::new(name).expect("valid nickname")
+    Nickname::try_new(name).expect("valid nickname")
 }
 
+// each member's sink is shared with the node that writes to it, and the test reads it
 async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Chat, Arc<Joined>) {
+    // each member's sink is shared with the node that writes to it, and the test reads it
     let sink = Arc::new(Joined::default());
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
@@ -179,25 +180,16 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Chat, Arc<Joined>) {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author: nick(name),
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink: Arc::clone(&sink) as Arc<dyn NodeSink>,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(nick(name), Arc::clone(&sink)).max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
     let chat = Chat::default();
-    (Node::spawn(config, chat.clone(), None, false), chat, sink)
+    (
+        Node::spawn(config, chat.clone(), None, SignalHandling::Leave),
+        chat,
+        sink,
+    )
 }
 
 #[test]
@@ -205,7 +197,8 @@ fn a_node_gets_the_chat_it_missed_on_its_first_real_peer_link() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         pin_antientropy_tick();
-        let topic = format!("missed-chat-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("missed-chat-{nonce}");
 
         let (alice, _, alice_saw) = spawn(&topic, "alice").await;
         let (early, early_chat, _) = spawn(&topic, "early").await;
@@ -225,7 +218,7 @@ fn a_node_gets_the_chat_it_missed_on_its_first_real_peer_link() {
             "early never got the frame, so it cannot hold it for late"
         );
 
-        let started = tokio::time::Instant::now();
+        let started = Instant::now();
         let (late, late_chat, late_saw) = spawn(&topic, "late").await;
         assert!(
             late_saw.wait_for(&nick("early"), BUDGET).await,

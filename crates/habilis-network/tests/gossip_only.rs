@@ -21,10 +21,15 @@ use std::time::{Duration, Instant};
 
 use common::GOSSIP_INSTALLED;
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Inbound, Membership, Request};
+use habilis_network::membership::{
+    self, Blocking, Inbound, Inspect, InspectTest, Membership, Messaging, MessagingTest, Request,
+};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
+use std::any;
+use tokio::time;
 /// Long enough for the gossip path to be tried and chosen: a probe goes every second.
 const STEP_DEADLINE: Duration = Duration::from_mins(2);
 const PAYLOAD_DEADLINE: Duration = Duration::from_secs(20);
@@ -38,9 +43,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::Opts) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -49,33 +56,31 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport: vec![Transport::Udp, Transport::Gossip],
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
-        .await
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
+        let options = options
+            .transport(vec![Transport::Udp, Transport::Gossip])
+            .relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
+        Self::open(&options).await
     }
 
     async fn roster_len(&self) -> usize {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
+        let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+        roster
             .and_then(|roster| roster["peers"].as_array().map(Vec::len))
             .unwrap_or(0)
     }
@@ -86,9 +91,11 @@ impl Member {
 
     async fn block_ip_to(&self, ports: Vec<u16>) {
         self.membership
-            .request(|reply| Request::BlockIpTo {
-                remote_ports: ports,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockIpTo {
+                    remote_ports: ports,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
@@ -97,9 +104,11 @@ impl Member {
     /// The rung of the selected path on this member's pooled connection to `peer`.
     async fn rung_to(&self, peer: &str) -> Option<&'static str> {
         self.membership
-            .request(|reply| Request::SelectedRung {
-                peer: peer.to_owned(),
-                reply,
+            .request(|reply| {
+                Request::InspectTest(InspectTest::SelectedRung {
+                    peer: peer.to_owned(),
+                    reply,
+                })
             })
             .await
             .ok()
@@ -111,51 +120,53 @@ impl Member {
         let to = membership::parse_to(Some(to)).expect("a nickname");
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::Send { to, body, reply })
+            .request(|reply| Request::Messaging(Messaging::Send { to, body, reply }))
             .await
             .expect("the loop answers")
     }
 
     /// The nicknames that answered one ping round.
     async fn ping(&self) -> Vec<String> {
-        self.membership
-            .request(|reply| Request::Ping { reply })
+        let answers = self
+            .membership
+            .request(|reply| Request::MessagingTest(MessagingTest::Ping { reply }))
             .await
-            .expect("the loop answers")
+            .expect("the loop answers");
+        let names = answers
             .into_iter()
-            .map(|(nick, _)| nick.as_str().to_owned())
-            .collect()
+            .map(|(nick, _)| String::from(nick.as_str()));
+        names.collect()
     }
 
     /// How many gossip connections the recursion rule has closed in this process so far.
     async fn recursion_closes(&self) -> u64 {
         self.membership
-            .request(|reply| Request::GossipRecursionCloses { reply })
+            .request(|reply| Request::InspectTest(InspectTest::GossipRecursionCloses { reply }))
             .await
             .expect("the loop answers")
     }
 
     async fn state_merge(&self, merge: serde_json::Value) -> Result<(), String> {
         self.membership
-            .request(|reply| Request::StateMerge { merge, reply })
+            .request(|reply| Request::Messaging(Messaging::StateMerge { merge, reply }))
             .await
             .expect("the loop answers")
     }
 
     async fn state_json(&self) -> String {
         self.membership
-            .request(|reply| Request::StateJson { reply })
+            .request(|reply| Request::Inspect(Inspect::StateJson { reply }))
             .await
             .expect("the loop answers")
     }
 
     fn saw_msg(&mut self, text: &str) -> bool {
-        while let Ok(msg) = self.membership.inbound.try_recv() {
-            self.seen_msgs.push(msg);
+        while let Ok(message) = self.membership.inbound.try_recv() {
+            self.seen_msgs.push(message);
         }
         self.seen_msgs
             .iter()
-            .any(|msg| msg.directed && msg.text == text)
+            .any(|message| message.directed && message.text == text)
     }
 
     /// Settle the pair on `expected`, driving it as production does: the engine tries a better
@@ -176,7 +187,7 @@ impl Member {
             } else {
                 held_since = None;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
         panic!(
             "{name}: expected the rung {expected}, the last rung read was {seen:?} after {probes} probes"
@@ -201,7 +212,7 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
         if started.elapsed() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -212,14 +223,12 @@ struct Fixture {
     bob: Member,
     carol: Member,
     dave: Member,
-    _relay: Box<dyn std::any::Any + Send>,
+    _relay: Box<dyn any::Any + Send>,
 }
 
 impl Fixture {
     async fn stand_up(name: &str) -> Self {
-        let (relay_url, relay) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay_url, relay) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay_url).await;
         let bob = Member::join("bob", &alice).await;
         let carol = Member::join("carol", &alice).await;
@@ -294,7 +303,7 @@ fn a_directed_message_crosses_a_pair_with_no_other_path_on_the_gossip_rung() {
                 started.elapsed() < PAYLOAD_DEADLINE,
                 "{NAME}: the message never reached carol on the gossip rung"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
 
         let reply = format!("{NAME} carol to alice");
@@ -309,7 +318,7 @@ fn a_directed_message_crosses_a_pair_with_no_other_path_on_the_gossip_rung() {
                 reply_started.elapsed() < PAYLOAD_DEADLINE,
                 "{NAME}: the reply never reached alice on the gossip rung"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
 
         assert_eq!(
@@ -387,7 +396,7 @@ fn a_pair_with_only_the_gossip_rung_does_not_churn_its_gossip_link() {
                 .alice
                 .send("carol", &format!("churn probe {NAME} {probes}"))
                 .await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
         let closes = fixture.alice.recursion_closes().await - before;
         eprintln!("DIAG {NAME}: {closes} closes of the recursion rule in {CHURN_WINDOW:?}");
@@ -439,7 +448,7 @@ fn state_written_by_alice_reaches_carol_while_the_pair_has_only_the_gossip_rung(
                 started.elapsed() < PAYLOAD_DEADLINE,
                 "{NAME}: carol never held alice's change"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         fixture.leave().await;
     });

@@ -11,22 +11,23 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
-use habilis_network::protocol::message::Authored;
+use habilis_network::protocol::messages::Authored;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use habilis_network::embed::{
-    AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeSink, SilentSink,
-    TestDrop,
+    AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SilentSink, TestDrop,
 };
-use habilis_network::net::TransportOpts;
 use habilis_network::ops::{StateMergeParams, app_frame, broadcast_state_merge, send_app};
 use habilis_network::protocol::{
     AppFrameParams, AppTag, Channel, LookupOpts, MessageBody, Nickname,
 };
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::oneshot;
 
+use tokio::{sync, time};
 /// Two anti-entropy cycles (10 s each) and margin, less than the 90 s dedup of the gossip layer.
 const REPAIR: Duration = Duration::from_secs(40);
 const MEETING: Duration = Duration::from_mins(1);
@@ -35,9 +36,9 @@ const MEETING: Duration = Duration::from_mins(1);
 /// answer point-to-point (seen at 29 s in the run without the nonce).
 const REPAIR_STATE: Duration = Duration::from_secs(20);
 
-fn serial() -> &'static tokio::sync::Mutex<()> {
-    static SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))
+fn serial() -> &'static sync::Mutex<()> {
+    static SERIAL: OnceLock<sync::Mutex<()>> = OnceLock::new();
+    SERIAL.get_or_init(|| sync::Mutex::new(()))
 }
 
 fn logs() -> String {
@@ -46,15 +47,16 @@ fn logs() -> String {
 
 /// The lines that say how a state change travelled, from `before` on.
 fn lines_since(before: usize) -> String {
-    logs()[before..]
+    let text = logs();
+    let lines: Vec<_> = text[before..]
         .lines()
         .filter(|line| {
             ["peerinfo received", "state anti-entropy", "state digest"]
                 .iter()
                 .any(|needle| line.contains(needle))
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    lines.join("\n")
 }
 
 enum Request {
@@ -68,19 +70,16 @@ enum Request {
 
 /// An app that logs every frame it reads and keeps what it read.
 struct Chat {
+    // the app writes what it reads here, and the test reads it after the run
     read: Arc<Mutex<Vec<String>>>,
 }
 
 #[habilis_network::async_trait]
 impl NodeApp for Chat {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: true,
-            beat: false,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::NONE
+            .union(AppClass::LOGGABLE)
+            .union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -89,10 +88,8 @@ impl NodeApp for Chat {
         _state: &mut EventLoopState,
         _ctx: &HandlerCtx<'_>,
     ) -> bool {
-        self.read
-            .lock()
-            .expect("no poison")
-            .push(frame.message.body.as_str().to_owned());
+        let body = frame.message.body.as_str().to_owned();
+        self.read.lock().expect("no poison").push(body);
         true
     }
 }
@@ -105,23 +102,23 @@ impl NodeDriver for Chat {
 
     async fn handle_session(
         &mut self,
-        req: Self::Session,
+        request: Self::Session,
         state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
-        match req {
+        match request {
             Request::Say(text, done) => {
                 let frame = app_frame(
-                    ctx,
-                    AppFrameParams {
-                        tag: AppTag::from("app_msg"),
-                        to: None,
-                        corr: None,
-                        body: MessageBody::from(text.as_str()),
-                    },
+                    context,
+                    AppFrameParams::new(
+                        AppTag::try_new("app_msg").expect("a valid app tag"),
+                        None,
+                        None,
+                        MessageBody::from(text.as_str()),
+                    ),
                 );
                 let class = self.classify(&frame.authored());
-                let _ = send_app(state, ctx, frame, class)
+                let _ = send_app(state, context, frame, class)
                     .await
                     .expect("a small frame is accepted");
                 let _ = done.send(());
@@ -132,30 +129,22 @@ impl NodeDriver for Chat {
                 let _ = done.send(());
                 false
             }
-            Request::Fired(resp) => {
-                let _ = resp.send(state.inbound_drops_fired());
+            Request::Fired(response) => {
+                let _ = response.send(state.inbound_drops_fired());
                 false
             }
             Request::Merge(merge, done) => {
                 broadcast_state_merge(
                     state,
-                    StateMergeParams {
-                        mesh: ctx.mesh,
-                        author: ctx.author,
-                        merge,
-                        sender: ctx.sender,
-                        sink: ctx.sink,
-                        channel: Channel::State,
-                        surface: false,
-                    },
+                    StateMergeParams::new(context.into(), Channel::State, merge).surface(false),
                 )
                 .await
                 .expect("a small merge is accepted");
                 let _ = done.send(());
                 true
             }
-            Request::Read(resp) => {
-                let _ = resp.send(state.doc(Channel::State).to_json());
+            Request::Read(response) => {
+                let _ = response.send(state.doc(Channel::State).to_json());
                 false
             }
             Request::ForgetProof(peer, done) => {
@@ -168,10 +157,12 @@ impl NodeDriver for Chat {
 }
 
 fn nick(name: &str) -> Nickname {
-    Nickname::new(name).expect("valid nickname")
+    Nickname::try_new(name).expect("valid nickname")
 }
 
+// the app writes what it reads here, and the test reads it after the run
 async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Arc<Mutex<Vec<String>>>) {
+    // the app writes what it reads here, and the test reads it after the run
     let read = Arc::new(Mutex::new(Vec::new()));
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
@@ -180,20 +171,7 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Arc<Mutex<Vec<String>>>)
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author: nick(name),
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink: Arc::new(SilentSink) as Arc<dyn NodeSink>,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(nick(name), SilentSink::default()).max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
@@ -203,7 +181,7 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Arc<Mutex<Vec<String>>>)
             read: Arc::clone(&read),
         },
         None,
-        false,
+        SignalHandling::Leave,
     );
     (node, read)
 }
@@ -229,8 +207,8 @@ async fn drop_inbound(node: &Node<Chat>, what: TestDrop) {
 async fn assert_dropped_once(node: &Node<Chat>) {
     let started = Instant::now();
     loop {
-        let (resp, fired) = oneshot::channel();
-        node.send(Request::Fired(resp))
+        let (response, fired) = oneshot::channel();
+        node.send(Request::Fired(response))
             .await
             .expect("the request reaches the loop");
         let count = fired.await.expect("the loop answers");
@@ -241,7 +219,7 @@ async fn assert_dropped_once(node: &Node<Chat>) {
             count == 0 && started.elapsed() < Duration::from_secs(10),
             "the hook dropped {count} frames, not one"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -262,13 +240,14 @@ async fn forget_proof(node: &Node<Chat>, peer: &str) {
 }
 
 async fn state_has(node: &Node<Chat>, key: &str) -> bool {
-    let (resp, document) = oneshot::channel();
-    node.send(Request::Read(resp))
+    let (response, document) = oneshot::channel();
+    node.send(Request::Read(response))
         .await
         .expect("the request reaches the loop");
     document.await.expect("the loop answers").get(key).is_some()
 }
 
+// the app writes what it reads here, and the test reads it after the run
 fn has_read(read: &Arc<Mutex<Vec<String>>>, text: &str) -> bool {
     read.lock()
         .expect("no poison")
@@ -278,6 +257,7 @@ fn has_read(read: &Arc<Mutex<Vec<String>>>, text: &str) -> bool {
 
 /// Wait until `text` is in `read`; the time it took, or `None`.
 async fn waits_for(
+    // the app writes what it reads here, and the test reads it after the run
     read: &Arc<Mutex<Vec<String>>>,
     text: &str,
     deadline: Duration,
@@ -287,7 +267,7 @@ async fn waits_for(
         if has_read(read, text) {
             return Some(started.elapsed());
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     has_read(read, text).then(|| started.elapsed())
 }
@@ -301,7 +281,8 @@ fn a_frame_the_app_dropped_is_repaired_by_anti_entropy() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _one_at_a_time = serial().lock().await;
-        let topic = format!("resend-dedup-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("resend-dedup-{nonce}");
 
         let (alice, _alice_read) = spawn(&topic, "alice").await;
         let (bob, bob_read) = spawn(&topic, "bob").await;
@@ -312,7 +293,7 @@ fn a_frame_the_app_dropped_is_repaired_by_anti_entropy() {
         while !(has_read(&bob_read, "hello") && has_read(&carol_read, "hello")) {
             assert!(meeting.elapsed() < MEETING, "the three never meshed");
             say(&alice, "hello").await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
 
         drop_inbound(&bob, TestDrop::AppBody("dropped-once".to_owned())).await;
@@ -344,7 +325,8 @@ fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _one_at_a_time = serial().lock().await;
-        let topic = format!("resend-dedup-state-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("resend-dedup-state-{nonce}");
 
         let (alice, _alice_read) = spawn(&topic, "alice").await;
         let (bob, bob_read) = spawn(&topic, "bob").await;
@@ -353,7 +335,7 @@ fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
         while !has_read(&bob_read, "hello") {
             assert!(meeting.elapsed() < MEETING, "the pair never meshed");
             say(&alice, "hello").await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
 
         // Alice must hold the proof of bob before she forgets it, or the first `PeerInfo` of bob, late,
@@ -367,7 +349,7 @@ fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
                 waiting.elapsed() < MEETING,
                 "alice never took the PeerInfo of bob"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         // The forget models a member whose `PeerInfo` does not reach the asker side, the state the
         // gossip answer exists for; the wait below forgets again after every poll.
@@ -387,17 +369,17 @@ fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
             );
             // A PeerInfo of bob restores the proof; forgetting it again keeps the answer on gossip.
             forget_proof(&alice, "bob").await;
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         eprintln!(
             "the dropped state change reached the app after: {:?}",
             started.elapsed()
         );
-        let answers: Vec<String> = lines_since(before)
+        let lines = lines_since(before);
+        let matching = lines
             .lines()
-            .filter(|line| line.contains("state anti-entropy: resent frames a peer lacked"))
-            .map(str::to_owned)
-            .collect();
+            .filter(|line| line.contains("state anti-entropy: resent frames a peer lacked"));
+        let answers: Vec<String> = matching.map(str::to_owned).collect();
         for line in &answers {
             eprintln!("state digest answer: {line}");
         }
@@ -420,7 +402,8 @@ fn a_peer_does_not_resend_to_its_author_the_frame_she_kept() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _one_at_a_time = serial().lock().await;
-        let topic = format!("resend-author-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("resend-author-{nonce}");
 
         let (alice, _alice_read) = spawn(&topic, "alice").await;
         let (bob, bob_read) = spawn(&topic, "bob").await;
@@ -429,12 +412,12 @@ fn a_peer_does_not_resend_to_its_author_the_frame_she_kept() {
         while !has_read(&bob_read, "hello") {
             assert!(meeting.elapsed() < MEETING, "the pair never meshed");
             say(&alice, "hello").await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
         // One digest round of each node to settle, then two rounds in which nothing may be resent.
-        tokio::time::sleep(Duration::from_secs(12)).await;
+        time::sleep(Duration::from_secs(12)).await;
         let before = logs().len();
-        tokio::time::sleep(Duration::from_secs(25)).await;
+        time::sleep(Duration::from_secs(25)).await;
         let log = logs();
         let resends: Vec<&str> = log[before..]
             .lines()
@@ -463,7 +446,8 @@ fn a_frame_the_app_dropped_comes_back_from_its_author_when_she_kept_it() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _one_at_a_time = serial().lock().await;
-        let topic = format!("resend-author-dedup-{}", rand::random::<u64>());
+        let nonce: u64 = rand::random();
+        let topic = format!("resend-author-dedup-{nonce}");
 
         let (alice, _alice_read) = spawn(&topic, "alice").await;
         let (bob, bob_read) = spawn(&topic, "bob").await;
@@ -472,7 +456,7 @@ fn a_frame_the_app_dropped_comes_back_from_its_author_when_she_kept_it() {
         while !has_read(&bob_read, "hello") {
             assert!(meeting.elapsed() < MEETING, "the pair never meshed");
             say(&alice, "hello").await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
 
         drop_inbound(&bob, TestDrop::AppBody("dropped-once".to_owned())).await;

@@ -7,58 +7,34 @@
 //! which is what the plan's `visage-rust-tui` section means by "enough
 //! widgets for a grid + HUD" rather than full parity.
 
+use crate::tui::arena::Arena;
+use crate::tui::clip::Clip;
 use crate::tui::color::DEFAULT_COLOR;
-use crate::tui::node::{Arena, NodeId, Tag, TextAlign, TuiNode};
-use crate::tui::width::{Truncate, char_width, graphemes, string_width, truncate as truncate_text};
+use crate::tui::node_id::NodeId;
+use crate::tui::screen_buffer::ScreenBuffer;
+use crate::tui::style::Style;
+use crate::tui::tag::Tag;
+use crate::tui::text_align::TextAlign;
+use crate::tui::truncate::Truncate;
+use crate::tui::tui_node::TuiNode;
+use crate::tui::width::{char_width, graphemes, string_width, truncate as truncate_text};
 use crate::view::Border;
-
-/// One grapheme cluster per cell — never a `char`, since a cell can hold a
-/// multi-code-point cluster (ZWJ emoji, combining marks). An empty string
-/// marks the second half of a wide glyph (the continuation cell).
-#[derive(Debug, Clone)]
-pub struct ScreenBuffer {
-    pub width: i32,
-    pub height: i32,
-    pub chars: Vec<String>,
-    pub fg: Vec<i32>,
-    pub bg: Vec<i32>,
-    pub attrs: Vec<u8>,
-}
-
-impl ScreenBuffer {
-    #[must_use]
-    pub fn new(width: i32, height: i32) -> Self {
-        let size = usize::try_from(width.max(0) * height.max(0)).unwrap_or(0);
-        Self {
-            width,
-            height,
-            chars: vec![" ".to_string(); size],
-            fg: vec![DEFAULT_COLOR; size],
-            bg: vec![DEFAULT_COLOR; size],
-            attrs: vec![0; size],
-        }
-    }
-
-    pub fn clear(&mut self) {
-        for cell in &mut self.chars {
-            cell.clear();
-            cell.push(' ');
-        }
-        self.fg.fill(DEFAULT_COLOR);
-        self.bg.fill(DEFAULT_COLOR);
-        self.attrs.fill(0);
-    }
-}
+use std::iter::Enumerate;
+use std::slice;
 
 /// Order is top-left, top-right, bottom-left, bottom-right, horizontal,
 /// vertical.
-const BORDER_SINGLE: [char; 6] = ['┌', '┐', '└', '┘', '─', '│'];
-const BORDER_ROUND: [char; 6] = ['╭', '╮', '╰', '╯', '─', '│'];
-const BORDER_DOUBLE: [char; 6] = ['╔', '╗', '╚', '╝', '═', '║'];
-const BORDER_BOLD: [char; 6] = ['┏', '┓', '┗', '┛', '━', '┃'];
-const BORDER_ASCII: [char; 6] = ['+', '+', '+', '+', '-', '|'];
+pub(crate) const BORDER_SINGLE: [char; 6] = ['┌', '┐', '└', '┘', '─', '│'];
 
-fn border_chars(style: Border) -> Option<[char; 6]> {
+pub(crate) const BORDER_ROUND: [char; 6] = ['╭', '╮', '╰', '╯', '─', '│'];
+
+pub(crate) const BORDER_DOUBLE: [char; 6] = ['╔', '╗', '╚', '╝', '═', '║'];
+
+pub(crate) const BORDER_BOLD: [char; 6] = ['┏', '┓', '┗', '┛', '━', '┃'];
+
+pub(crate) const BORDER_ASCII: [char; 6] = ['+', '+', '+', '+', '-', '|'];
+
+pub(crate) fn border_chars(style: Border) -> Option<[char; 6]> {
     match style {
         Border::None => None,
         Border::Single => Some(BORDER_SINGLE),
@@ -69,16 +45,7 @@ fn border_chars(style: Border) -> Option<[char; 6]> {
     }
 }
 
-/// `right`/`bottom` are exclusive.
-#[derive(Debug, Clone, Copy)]
-struct Clip {
-    x: i32,
-    y: i32,
-    right: i32,
-    bottom: i32,
-}
-
-fn intersect(a: Clip, b: Clip) -> Clip {
+pub(crate) fn intersect(a: Clip, b: Clip) -> Clip {
     Clip {
         x: a.x.max(b.x),
         y: a.y.max(b.y),
@@ -87,14 +54,7 @@ fn intersect(a: Clip, b: Clip) -> Clip {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Style {
-    fg: i32,
-    bg: i32,
-    attrs: u8,
-}
-
-const ROOT_STYLE: Style = Style {
+pub(crate) const ROOT_STYLE: Style = Style {
     fg: DEFAULT_COLOR,
     bg: DEFAULT_COLOR,
     attrs: 0,
@@ -111,7 +71,13 @@ pub fn paint(buffer: &mut ScreenBuffer, arena: &Arena, root: NodeId) {
     paint_node(buffer, arena, root, clip, ROOT_STYLE);
 }
 
-fn paint_node(buffer: &mut ScreenBuffer, arena: &Arena, id: NodeId, clip: Clip, inherited: Style) {
+pub(crate) fn paint_node(
+    buffer: &mut ScreenBuffer,
+    arena: &Arena,
+    id: NodeId,
+    clip: Clip,
+    inherited: Style,
+) {
     let node = arena.get(id);
     if !node.visible || node.tag == Tag::Hole {
         return;
@@ -167,10 +133,11 @@ fn paint_node(buffer: &mut ScreenBuffer, arena: &Arena, id: NodeId, clip: Clip, 
     }
 }
 
-fn paint_text(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: Style) {
+pub(crate) fn paint_text(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: Style) {
     let empty = Vec::new();
     let lines = node.lines.as_ref().unwrap_or(&empty);
-    for (i, raw_line) in lines.iter().enumerate() {
+    let indexed_lines: Enumerate<slice::Iter<'_, String>> = lines.iter().enumerate();
+    for (i, raw_line) in indexed_lines {
         let Ok(row) = i32::try_from(i) else { break };
         if row >= node.lh {
             break; // lines beyond node.lh are dropped, never clipped
@@ -200,7 +167,7 @@ fn paint_text(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: Styl
     }
 }
 
-fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: Style) {
+pub(crate) fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: Style) {
     let Some(chars) = border_chars(node.border) else {
         return;
     };
@@ -217,14 +184,14 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
     let right = node.lx + node.lw - 1;
     let bottom = node.ly + node.lh - 1;
 
-    let mut buf = [0u8; 4];
+    let mut utf8 = [0u8; 4];
     for x in (left + 1)..right {
         put(
             buffer,
             clip,
             x,
             top,
-            chars[4].encode_utf8(&mut buf),
+            chars[4].encode_utf8(&mut utf8),
             edge,
             1,
         );
@@ -233,7 +200,7 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
             clip,
             x,
             bottom,
-            chars[4].encode_utf8(&mut buf),
+            chars[4].encode_utf8(&mut utf8),
             edge,
             1,
         );
@@ -244,7 +211,7 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
             clip,
             left,
             y,
-            chars[5].encode_utf8(&mut buf),
+            chars[5].encode_utf8(&mut utf8),
             edge,
             1,
         );
@@ -253,7 +220,7 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
             clip,
             right,
             y,
-            chars[5].encode_utf8(&mut buf),
+            chars[5].encode_utf8(&mut utf8),
             edge,
             1,
         );
@@ -263,7 +230,7 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
         clip,
         left,
         top,
-        chars[0].encode_utf8(&mut buf),
+        chars[0].encode_utf8(&mut utf8),
         edge,
         1,
     );
@@ -272,7 +239,7 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
         clip,
         right,
         top,
-        chars[1].encode_utf8(&mut buf),
+        chars[1].encode_utf8(&mut utf8),
         edge,
         1,
     );
@@ -281,7 +248,7 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
         clip,
         left,
         bottom,
-        chars[2].encode_utf8(&mut buf),
+        chars[2].encode_utf8(&mut utf8),
         edge,
         1,
     );
@@ -290,7 +257,7 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
         clip,
         right,
         bottom,
-        chars[3].encode_utf8(&mut buf),
+        chars[3].encode_utf8(&mut utf8),
         edge,
         1,
     );
@@ -312,13 +279,19 @@ fn paint_border(buffer: &mut ScreenBuffer, node: &TuiNode, clip: Clip, style: St
     }
 }
 
-// See `layout::arrange`'s doc comment on why `x`/`y`/`w`/`h` stay short.
-#[allow(clippy::many_single_char_names)]
-fn fill(buffer: &mut ScreenBuffer, clip: Clip, x: i32, y: i32, w: i32, h: i32, style: Style) {
-    let x0 = clip.x.max(x).max(0);
-    let x1 = clip.right.min(x + w).min(buffer.width);
-    let y0 = clip.y.max(y).max(0);
-    let y1 = clip.bottom.min(y + h).min(buffer.height);
+pub(crate) fn fill(
+    buffer: &mut ScreenBuffer,
+    clip: Clip,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+    style: Style,
+) {
+    let x0 = clip.x.max(left).max(0);
+    let x1 = clip.right.min(left + width).min(buffer.width);
+    let y0 = clip.y.max(top).max(0);
+    let y1 = clip.bottom.min(top + height).min(buffer.height);
     for row in y0..y1 {
         for col in x0..x1 {
             let i = index(buffer, row, col);
@@ -336,7 +309,7 @@ fn fill(buffer: &mut ScreenBuffer, clip: Clip, x: i32, y: i32, w: i32, h: i32, s
 /// style, which matters for the diff's cell-equality test. A wide glyph
 /// clipped at the right edge downgrades its lead cell to a space, matching
 /// what a terminal itself does.
-fn put(
+pub(crate) fn put(
     buffer: &mut ScreenBuffer,
     clip: Clip,
     x: i32,
@@ -373,7 +346,14 @@ fn put(
 
 /// Clusters left of `clip.x` are dropped by `put` but still advance
 /// `column` — correct for a horizontally-scrolled/clipped line.
-fn write(buffer: &mut ScreenBuffer, clip: Clip, x: i32, y: i32, text: &str, style: Style) {
+pub(crate) fn write(
+    buffer: &mut ScreenBuffer,
+    clip: Clip,
+    x: i32,
+    y: i32,
+    text: &str,
+    style: Style,
+) {
     if y < clip.y || y >= clip.bottom {
         return;
     }
@@ -391,23 +371,26 @@ fn write(buffer: &mut ScreenBuffer, clip: Clip, x: i32, y: i32, text: &str, styl
     }
 }
 
-fn index(buffer: &ScreenBuffer, row: i32, col: i32) -> usize {
+pub(crate) fn index(buffer: &ScreenBuffer, row: i32, col: i32) -> usize {
     usize::try_from(row * buffer.width + col).expect("caller has already bounds-checked row/col")
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ScreenBuffer, paint};
-    use crate::tui::node::{Arena, Tag};
-    use crate::tui::width::string_width;
-    use habilis_network_test_tracing::test;
+    use crate::tui::arena::Arena;
+    use crate::tui::tag::Tag;
+    use crate::tui::width;
 
+    use crate::tui::color;
+    use crate::tui::truncate::Truncate;
     #[test]
     fn a_text_node_writes_its_content_into_the_buffer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Text);
         {
-            let n = arena.get_mut(root);
+            let n = arena.node_mut(root);
             n.text = Some("hi".to_string());
             n.lx = 0;
             n.ly = 0;
@@ -417,18 +400,19 @@ mod tests {
         }
         let mut buffer = ScreenBuffer::new(5, 1);
         paint(&mut buffer, &arena, root);
-        assert_eq!(buffer.chars[0], "h");
-        assert_eq!(buffer.chars[1], "i");
-        assert_eq!(buffer.chars[2], " ");
+        assert_eq!(buffer.chars[0], "h", "the first cell holds h");
+        assert_eq!(buffer.chars[1], "i", "the second cell holds i");
+        assert_eq!(buffer.chars[2], " ", "the third cell holds a space");
     }
 
     #[test]
     fn a_background_color_fills_the_whole_border_box() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Box);
         {
-            let n = arena.get_mut(root);
-            n.bg = crate::tui::color::palette(1);
+            let n = arena.node_mut(root);
+            n.bg = color::palette(1);
             n.lx = 0;
             n.ly = 0;
             n.lw = 3;
@@ -437,16 +421,21 @@ mod tests {
         let mut buffer = ScreenBuffer::new(3, 2);
         paint(&mut buffer, &arena, root);
         for bg in &buffer.bg {
-            assert_eq!(*bg, crate::tui::color::palette(1));
+            assert_eq!(
+                *bg,
+                color::palette(1),
+                "a background fills the whole border box with palette one"
+            );
         }
     }
 
     #[test]
     fn a_wide_glyph_writes_a_continuation_cell() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Text);
         {
-            let n = arena.get_mut(root);
+            let n = arena.node_mut(root);
             n.text = Some("字a".to_string());
             n.lx = 0;
             n.ly = 0;
@@ -456,27 +445,42 @@ mod tests {
         }
         let mut buffer = ScreenBuffer::new(5, 1);
         paint(&mut buffer, &arena, root);
-        assert_eq!(string_width(&buffer.chars[0]), 2);
-        assert_eq!(buffer.chars[1], ""); // continuation
-        assert_eq!(buffer.chars[2], "a");
+        assert_eq!(
+            width::string_width(&buffer.chars[0]),
+            2,
+            "a wide glyph is two cells wide"
+        );
+        assert_eq!(
+            buffer.chars[1], "",
+            "a wide glyph leaves a continuation cell"
+        ); // continuation
+        assert_eq!(
+            buffer.chars[2], "a",
+            "the cell after the continuation holds a"
+        );
     }
 
     #[test]
     fn text_clipped_at_the_right_edge_still_advances_by_full_width() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut arena = Arena::new();
         let root = arena.create(Tag::Text);
         {
-            let n = arena.get_mut(root);
+            let n = arena.node_mut(root);
             n.text = Some("toolong".to_string());
             n.lx = 0;
             n.ly = 0;
             n.lw = 3;
             n.lh = 1;
-            n.truncate = crate::tui::width::Truncate::None;
+            n.truncate = Truncate::None;
             n.lines = Some(vec!["toolong".to_string()]);
         }
         let mut buffer = ScreenBuffer::new(3, 1);
         paint(&mut buffer, &arena, root);
-        assert_eq!(buffer.chars, vec!["t", "o", "o"]);
+        assert_eq!(
+            buffer.chars,
+            vec!["t", "o", "o"],
+            "clipped text still advances by its full width"
+        );
     }
 }
