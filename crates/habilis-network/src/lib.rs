@@ -98,7 +98,7 @@ pub mod util {
     // Listed rather than a glob, for the reason given on [`protocol`].
     pub use habilis_network_util::{
         bounded_fifo_set, bounded_queue, clock, consts, cooldown, log_config as logs, mesh_prefix,
-        resident_memory, tuning, unix_secs, version,
+        process_usage, resident_memory, tuning, unix_secs, version,
     };
     // The runtime-directory helpers are `host`-gated in the leaf crate: they
     // are filesystem and uid work a browser has no equivalent of. The glob

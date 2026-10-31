@@ -293,6 +293,7 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, me: 
             // Charged even when the send failed: an addressee with no endpoint
             // yet must not be retried inside this digest; it retries next round.
             have.insert(missing.dedup_key());
+            state.idle.note_resend_for(&message.author);
             resent += 1;
             budget -= 1;
         }

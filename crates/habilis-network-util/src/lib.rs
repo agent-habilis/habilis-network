@@ -22,6 +22,7 @@ pub mod unix_secs;
 // Portable: the reading itself is `cfg`'d down to `None` off a libc host, so
 // the leak gauge compiles everywhere and simply reports 0 in a browser. Keeping
 // the module un-gated is what lets `timers` stay free of `cfg` at its call sites.
+pub mod process_usage;
 pub mod resident_memory;
 pub mod tuning;
 pub mod version;

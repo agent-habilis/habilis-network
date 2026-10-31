@@ -32,7 +32,7 @@ use crate::util::tuning;
 
 pub use event_loop_state::EventLoopState;
 
-pub(crate) use idle_counters::IdleCounters;
+pub(crate) use idle_counters::{IdleCounters, note_ppid_wake, note_sampler_wake, top_requesters};
 pub(crate) use latch::Latch;
 pub(crate) use mesh_secrets::MeshSecrets;
 pub(crate) use ping_round::PingRound;
