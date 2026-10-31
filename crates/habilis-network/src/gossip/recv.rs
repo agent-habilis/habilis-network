@@ -1161,7 +1161,9 @@ fn dispatch_channel(
         channel, message, ..
     } = event;
     let count_before = state.doc(channel).change_count();
-    ingest_channel_event(event, state.doc_mut(channel), context);
+    if ingest_channel_event(event, state.doc_mut(channel), context) {
+        state.idle.state_rejected += 1;
+    }
     let changed = state.doc(channel).change_count() > count_before;
     if changed {
         state.fast_rounds.note_change(channel, Instant::now());
@@ -1191,12 +1193,18 @@ fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
     }
 }
 
+/// Returns whether the document refused or ignored the change.
+///
 /// Ingest a durable channel event (`State`/`Meta`) into its `log`: dedup-insert,
 /// then surface a `StateChanged` for `channel` only when the derived doc changed
 /// and we're past the join horizon (a backfilling joiner updates its doc silently
 /// instead of reacting to replayed intermediate states). A received event is
 /// never our own (`is_self = false`). Both channels share this path verbatim.
-fn ingest_channel_event(event: ChannelEvent<'_>, doc: &mut doc::MeshDoc, context: &HandlerCtx<'_>) {
+fn ingest_channel_event(
+    event: ChannelEvent<'_>,
+    doc: &mut doc::MeshDoc,
+    context: &HandlerCtx<'_>,
+) -> bool {
     use crate::doc::Ingested;
 
     let ChannelEvent {
@@ -1230,9 +1238,12 @@ fn ingest_channel_event(event: ChannelEvent<'_>, doc: &mut doc::MeshDoc, context
                 "dropping a {} change that forges another peer's agent card",
                 channel.label()
             );
+            return true;
         }
-        Ingested::Duplicate | Ingested::Buffered | Ingested::Ignored | _ => {}
+        Ingested::Ignored => return true,
+        Ingested::Duplicate | Ingested::Buffered | _ => {}
     }
+    false
 }
 
 /// A directed leg (a directed `app_msg` or a `Task`) is surfaced **only by
@@ -4216,6 +4227,31 @@ mod dedup_counter_tests {
             reader.doc(Channel::State).to_json(),
             json!({ "key": 1 }),
             "only the genuine change is applied"
+        );
+    }
+
+    /// A frame whose body is no change is ignored by the document, and the census counts it.
+    #[test]
+    fn a_state_frame_that_the_document_ignores_is_counted_as_rejected() {
+        let writer = fresh_state();
+        let junk = Message::new_channel_event(
+            &MeshId::from("test"),
+            &nick("writer"),
+            "not a change".into(),
+            Channel::State,
+        )
+        .sign(&writer.identity);
+        let (frame, _forged) = frame_and_forgery();
+        let reader = reader_after(&[&junk, &frame], false);
+
+        assert_eq!(
+            reader.idle.state_rejected, 1,
+            "only the junk frame is refused"
+        );
+        assert_eq!(
+            reader.doc(Channel::State).to_json(),
+            json!({ "key": 1 }),
+            "the real change is applied"
         );
     }
 

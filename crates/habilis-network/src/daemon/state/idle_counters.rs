@@ -67,6 +67,19 @@ pub(crate) struct IdleCounters {
     /// Authenticated frames that the app dedup kept as first sightings. With `duplicates`, it
     /// gives the frames per interval that reached the dedup.
     pub fresh: u64,
+    /// Digests of ours that a fast round sent to one peer (`ask`), the retries included.
+    pub fr_asks: u64,
+    /// The asks that the reclaim tick sent without a digest arriving (`resume_fast_rounds`).
+    pub fr_retries: u64,
+    /// State and meta digest answers that went out, on either plane.
+    pub state_answers: u64,
+    /// The frames of those answers that went to one peer.
+    pub state_frames_unicast: u64,
+    /// The frames of those answers that went out on gossip.
+    pub state_frames_broadcast: u64,
+    /// State and meta frames that the document refused or ignored: a forged entry, a repeated
+    /// `(actor, seq)` with other content, or a body that is no change.
+    pub state_rejected: u64,
     /// The anti-entropy resends queued, by the author of the digest that asked.
     pub resent_by: HashMap<Nickname, u64>,
     /// The process CPU time at the last census. It is not reset by `take`.
@@ -201,6 +214,12 @@ mod tests {
             reclaim: 3,
             duplicates: 4,
             fresh: 6,
+            fr_asks: 7,
+            fr_retries: 2,
+            state_answers: 3,
+            state_frames_unicast: 5,
+            state_frames_broadcast: 9,
+            state_rejected: 1,
             ..IdleCounters::default()
         };
         counters.ext.note_gossip(Some(&Ok(Event::Lagged)));
@@ -213,6 +232,12 @@ mod tests {
         assert_eq!(reading.loop_arms.reclaim, 3);
         assert_eq!(reading.loop_arms.duplicates, 4);
         assert_eq!(reading.loop_arms.fresh, 6);
+        assert_eq!(reading.loop_arms.fr_asks, 7);
+        assert_eq!(reading.loop_arms.fr_retries, 2);
+        assert_eq!(reading.loop_arms.state_answers, 3);
+        assert_eq!(reading.loop_arms.state_frames_unicast, 5);
+        assert_eq!(reading.loop_arms.state_frames_broadcast, 9);
+        assert_eq!(reading.loop_arms.state_rejected, 1);
         assert_eq!(reading.loop_arms.ext.lagged, 1);
         assert_eq!(reading.loop_arms.ext.gossip_end, 1);
         assert_eq!(reading.loop_arms.ext.total(), 5);
@@ -222,6 +247,16 @@ mod tests {
         assert_eq!(next.loop_arms.reclaim, 0, "take resets the arms");
         assert_eq!(next.loop_arms.duplicates, 0, "take resets the duplicates");
         assert_eq!(next.loop_arms.fresh, 0, "take resets the first sightings");
+        assert_eq!(
+            next.loop_arms.fr_asks
+                + next.loop_arms.fr_retries
+                + next.loop_arms.state_answers
+                + next.loop_arms.state_frames_unicast
+                + next.loop_arms.state_frames_broadcast
+                + next.loop_arms.state_rejected,
+            0,
+            "take resets the fast-round and answer counters"
+        );
         assert_eq!(next.loop_arms.ext.total(), 0, "take resets the split");
         assert!(
             next.loop_arms.resent_by.is_empty(),

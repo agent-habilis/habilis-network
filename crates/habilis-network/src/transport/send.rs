@@ -1147,6 +1147,12 @@ mod tests {
                 refused,
                 "a second unicast answer inside the window"
             );
+            assert_eq!(state.idle.state_answers, 3, "the 3 answers that went out");
+            assert_eq!(state.idle.state_frames_broadcast, 6, "2 answers on gossip");
+            assert_eq!(
+                state.idle.state_frames_unicast, 3,
+                "1 answer to the linked asker"
+            );
             bob_endpoint.close().await;
             net.endpoint.close().await;
         });
@@ -1207,6 +1213,13 @@ mod tests {
             antientropy::handle_state_digest(Channel::State, &ahead, &mut state, &context).await;
             let first = state.fast_rounds.asked_heads(Channel::State);
             assert!(first.is_some(), "bob is ahead, so we ask him");
+            assert_eq!(state.idle.fr_asks, 1, "the ask is counted");
+            assert_eq!(state.idle.fr_retries, 0, "a digest, not the tick, made it");
+            assert_eq!(
+                state.fast_rounds.ahead_count(),
+                1,
+                "bob is remembered as ahead"
+            );
 
             apply_one(&mut state, &net.mesh, 100);
             antientropy::handle_state_digest(Channel::State, &ahead, &mut state, &context).await;
