@@ -30,6 +30,9 @@
 //!   underlay measurement: the app endpoint and the underlay fall back to `WebRTC`.
 //! - `MESH_UNDERLAY_LEG=off`: the multihop underlay holds no `WebRTC` leg. This is
 //!   the control cell of the same measurement.
+//! - `MESH_PUBLISH_CHAT_N=60` and `MESH_PUBLISH_STATE_N=5`: once the roster holds a
+//!   peer, the node sends that many broadcast messages and shared-state merges, one
+//!   time, then idles. A short-lived member leaves this history behind.
 //!
 //! Prints one line per second:
 //! `t <s> phase <1|2> peers <roster> links <gossip neighbors> sessions <app WebRTC
@@ -227,6 +230,34 @@ async fn block_udp(sender: &mpsc::Sender<Request>) {
         .await;
 }
 
+/// Send `chats` broadcast messages and `merges` shared-state merges, one time.
+async fn publish_once(
+    sender: &mpsc::Sender<Request>,
+    chats: u64,
+    merges: u64,
+) -> anyhow::Result<()> {
+    for index in 0..chats {
+        let (reply, _) = oneshot::channel();
+        let _ = sender
+            .send(Request::Messaging(Messaging::Send {
+                to: None,
+                body: msg_body(&format!("chat {index}"))?,
+                reply,
+            }))
+            .await;
+    }
+    for index in 0..merges {
+        let (reply, _) = oneshot::channel();
+        let _ = sender
+            .send(Request::Messaging(Messaging::StateMerge {
+                merge: serde_json::json!({ "load": { "merge": index } }),
+                reply,
+            }))
+            .await;
+    }
+    Ok(())
+}
+
 /// The redial counters of the node, all zero when the node is gone.
 async fn redial_counts(sender: &mpsc::Sender<Request>) -> [u64; 6] {
     let (reply, answer) = oneshot::channel();
@@ -249,6 +280,9 @@ async fn main() -> anyhow::Result<()> {
     let block_udp_after = Some(env_number("MESH_BLOCK_UDP_AFTER_SECS")).filter(|secs| *secs > 0);
     let traffic_until = Some(env_number("MESH_TRAFFIC_UNTIL_SECS")).filter(|secs| *secs > 0);
     let bursty = env::var("MESH_TRAFFIC_BURSTY").as_deref() == Ok("1");
+    let publish_chats = env_number("MESH_PUBLISH_CHAT_N");
+    let publish_merges = env_number("MESH_PUBLISH_STATE_N");
+    let mut published = publish_chats == 0 && publish_merges == 0;
     let (flood_peers, role) = flood_plan();
     let mut flooding = false;
     if env::var("MESH_UNDERLAY_LEG").as_deref() == Ok("off") {
@@ -312,6 +346,10 @@ async fn main() -> anyhow::Result<()> {
             if flood_peers > 0 && !flooding && elapsed >= 30 && nicks.len() >= flood_peers {
                 flooding = true;
                 tokio::spawn(flood(sender.clone(), nicks.clone(), flood_peers));
+            }
+            if !published && !nicks.is_empty() {
+                published = true;
+                publish_once(&sender, publish_chats, publish_merges).await?;
             }
             if traffic && traffic_until.is_none_or(|until| elapsed < until) {
                 talk(&sender, &nicks, bursty, elapsed, &mut next_burst).await?;
