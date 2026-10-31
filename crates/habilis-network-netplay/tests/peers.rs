@@ -35,7 +35,7 @@ struct Game;
 impl Config for Game {
     type Input = Input;
     type State = State;
-    type Address = String;
+    type Address = usize;
 }
 
 /// A deterministic pseudo-random source, so "random" loss is reproducible.
@@ -74,15 +74,15 @@ struct Impairment {
 #[derive(Default)]
 struct Network {
     /// Addressee -> packets waiting.
-    inboxes: HashMap<String, Vec<(String, Message<Input>)>>,
+    inboxes: HashMap<usize, Vec<(usize, Message<Input>)>>,
     /// Packets held back to be delivered later, out of order.
-    delayed: Vec<(String, String, Message<Input>)>,
+    delayed: Vec<(usize, usize, Message<Input>)>,
     impairment: Impairment,
     rng_state: u64,
 }
 
 impl Network {
-    fn deliver(&mut self, from: &str, to: &str, message: Message<Input>) {
+    fn deliver(&mut self, from: usize, to: usize, message: Message<Input>) {
         let mut generator = Rng(self.rng_state);
         let dropped = generator.chance(self.impairment.drop);
         let duplicated = generator.chance(self.impairment.duplicate);
@@ -93,13 +93,13 @@ impl Network {
             return;
         }
         if delayed {
-            self.delayed.push((from.to_owned(), to.to_owned(), message));
+            self.delayed.push((from, to, message));
             return;
         }
-        let inbox = self.inboxes.entry(to.to_owned()).or_default();
-        inbox.push((from.to_owned(), message.clone()));
+        let inbox = self.inboxes.entry(to).or_default();
+        inbox.push((from, message.clone()));
         if duplicated {
-            inbox.push((from.to_owned(), message));
+            inbox.push((from, message));
         }
     }
 
@@ -111,26 +111,26 @@ impl Network {
         }
     }
 
-    fn take(&mut self, address: &str) -> Vec<(String, Message<Input>)> {
-        self.inboxes.remove(address).unwrap_or_default()
+    fn take(&mut self, address: usize) -> Vec<(usize, Message<Input>)> {
+        self.inboxes.remove(&address).unwrap_or_default()
     }
 }
 
 /// One peer's view of the shared network.
 struct Wire {
-    address: String,
+    address: usize,
     net: Rc<cell::RefCell<Network>>,
 }
 
 impl Transport<Game> for Wire {
-    fn send_to(&mut self, message: &Message<Input>, address: &String) {
+    fn send_to(&mut self, message: &Message<Input>, address: &usize) {
         self.net
             .borrow_mut()
-            .deliver(&self.address, address, message.clone());
+            .deliver(self.address, *address, message.clone());
     }
 
-    fn receive_all(&mut self) -> Vec<(String, Message<Input>)> {
-        self.net.borrow_mut().take(&self.address)
+    fn receive_all(&mut self) -> Vec<(usize, Message<Input>)> {
+        self.net.borrow_mut().take(self.address)
     }
 }
 
@@ -171,12 +171,12 @@ fn build(count: usize, impairment: Impairment) -> (Rc<cell::RefCell<Network>>, V
         rng_state: 0x1234_5678,
         ..Network::default()
     }));
-    let addrs: Vec<String> = (0..count).map(|index| format!("peer-{index}")).collect();
+    let addrs: Vec<usize> = (0..count).collect();
 
     let peers = (0..count)
         .map(|handle| {
             let wire = Wire {
-                address: addrs[handle].clone(),
+                address: addrs[handle],
                 net: Rc::clone(&net),
             };
             Peer {
