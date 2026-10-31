@@ -5,6 +5,7 @@ mod latch;
 mod mesh_secrets;
 mod ping_round;
 mod state_init;
+mod wire_tally;
 
 mod beacon_note;
 mod direct_counts;
@@ -37,6 +38,9 @@ pub(crate) use latch::Latch;
 pub(crate) use mesh_secrets::MeshSecrets;
 pub(crate) use ping_round::PingRound;
 pub(crate) use state_init::StateInit;
+pub(crate) use wire_tally::{FrameShape, WireIn, WireOut, by_class, note_wire_out, take_wire_out};
+#[cfg(test)]
+pub(crate) use wire_tally::{app_frame_with_tag, sent_tag_bytes};
 
 pub(crate) use beacon_note::BeaconNote;
 pub(crate) use direct_counts::DirectCounts;

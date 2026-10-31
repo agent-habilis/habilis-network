@@ -6,7 +6,7 @@ use super::TestDrop;
 use super::TestHold;
 use super::{
     BeaconNote, DirectCounts, DirectState, IdleCounters, Latch, MeshSecrets, PingRound, Reach,
-    RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot, Standing, StateInit,
+    RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot, Standing, StateInit, WireIn,
 };
 use crate::daemon::cohost_arm;
 use crate::daemon::doc::MeshDoc;
@@ -521,6 +521,8 @@ pub struct EventLoopState {
     pub(crate) broadcast_key: Option<SymmetricKey>,
     /// Where the event loop's wakeups went since the last census.
     pub(crate) idle: IdleCounters,
+    /// The frames received since the last census, by kind and by what became of them.
+    pub(crate) wire_in: WireIn,
 }
 
 impl EventLoopState {
@@ -650,6 +652,7 @@ impl EventLoopState {
             mint_mesh: None,
             broadcast_key,
             idle: IdleCounters::default(),
+            wire_in: WireIn::default(),
         }
     }
 

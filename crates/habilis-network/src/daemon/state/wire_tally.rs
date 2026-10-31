@@ -1,0 +1,495 @@
+//! Wire bytes by kind of frame, for the `mesh census` line: what a node receives, split into first
+//! sightings and repeats, and what it hands to the transport. The body bytes of each frame are
+//! counted beside the wire bytes, so the difference is the cost of the envelope: the JSON keys,
+//! the ids, the hex of the key and of the signature.
+//!
+//! The counts read the bytes of a frame, not its parsed form: the send side holds bytes only, and
+//! one reader then serves both sides. It relies on the field order of the wire form that
+//! `habilis-network-protocol` pins with golden tests; a frame it cannot read counts as `other`.
+
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::{mem, str};
+
+/// The most distinct app tags kept per interval and direction. A peer can name any tag, so the
+/// rest are added to [`OTHER_TAGS`].
+const MAX_TAGS: usize = 32;
+const OTHER_TAGS: &str = "~other";
+/// The tags that the census line names, largest first.
+const TOP_TAGS: usize = 6;
+/// How far from the start of a frame the kind, the tag and the start of the body lie.
+const HEAD_SCAN: usize = 600;
+/// How far from the end of a frame the end of the body and the shard header lie.
+const TAIL_SCAN: usize = 2048;
+
+/// The kinds of frame that the census tells apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FrameClass {
+    /// An application payload: chat, tasks, status, artifacts. The tag tells them apart.
+    App,
+    Presence,
+    PeerInfo,
+    /// The anti-entropy digest of the chat log.
+    Digest,
+    StateDigest,
+    MetaDigest,
+    /// A change of the `state` channel.
+    State,
+    /// A change of the `meta` channel.
+    Meta,
+    LinkState,
+    PingPong,
+    /// One slice of a body that is too large for one frame.
+    Shard,
+    /// A frame that this reader cannot place.
+    Other,
+}
+
+pub(crate) const CLASS_COUNT: usize = 12;
+
+impl FrameClass {
+    const ALL: [Self; CLASS_COUNT] = [
+        Self::App,
+        Self::Presence,
+        Self::PeerInfo,
+        Self::Digest,
+        Self::StateDigest,
+        Self::MetaDigest,
+        Self::State,
+        Self::Meta,
+        Self::LinkState,
+        Self::PingPong,
+        Self::Shard,
+        Self::Other,
+    ];
+
+    /// The name of the class in the census line.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::App => "app",
+            Self::Presence => "presence",
+            Self::PeerInfo => "peerinfo",
+            Self::Digest => "digest",
+            Self::StateDigest => "statedigest",
+            Self::MetaDigest => "metadigest",
+            Self::State => "state",
+            Self::Meta => "meta",
+            Self::LinkState => "linkstate",
+            Self::PingPong => "pingpong",
+            Self::Shard => "shard",
+            Self::Other => "other",
+        }
+    }
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The class of the `type` of a frame, as the wire spells it.
+    fn of_wire_type(wire_type: &[u8]) -> Self {
+        match wire_type {
+            b"app" => Self::App,
+            b"presence" => Self::Presence,
+            b"peerinfo" => Self::PeerInfo,
+            b"digest" => Self::Digest,
+            b"statedigest" => Self::StateDigest,
+            b"metadigest" => Self::MetaDigest,
+            b"state" => Self::State,
+            b"meta" => Self::Meta,
+            b"linkstate" => Self::LinkState,
+            b"ping" | b"pong" => Self::PingPong,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// What the census reads from the bytes of one frame.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FrameShape<'frame> {
+    pub(crate) class: FrameClass,
+    /// The bytes on the wire: the frame with its resend trailer, if it has one.
+    pub(crate) wire: usize,
+    /// The bytes of the body, as written in the JSON. Zero when the frame has no signature block
+    /// to end it.
+    pub(crate) body: usize,
+    /// The tag of an app frame.
+    pub(crate) tag: Option<&'frame str>,
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// The bytes after `key` up to the next quote, and where they start.
+fn value_after<'frame>(
+    frame: &'frame [u8],
+    key: &[u8],
+    from: usize,
+) -> Option<(&'frame [u8], usize)> {
+    let head = frame.get(from..frame.len().min(from + HEAD_SCAN))?;
+    let start = from + find(head, key)? + key.len();
+    let rest = frame.get(start..)?;
+    let end = rest.iter().position(|&byte| byte == b'"')?;
+    Some((rest.get(..end)?, start))
+}
+
+impl<'frame> FrameShape<'frame> {
+    /// Read the shape of `frame`. A frame that does not look like ours is `other`, with its wire
+    /// bytes and no body.
+    pub(crate) fn of(frame: &'frame [u8]) -> Self {
+        let other = Self {
+            class: FrameClass::Other,
+            wire: frame.len(),
+            body: 0,
+            tag: None,
+        };
+        let Some((wire_type, type_at)) = value_after(frame, b"\"type\":\"", 0) else {
+            return other;
+        };
+        let mut class = FrameClass::of_wire_type(wire_type);
+        let tag = if class == FrameClass::App {
+            value_after(frame, b"\"tag\":\"", type_at).and_then(|(tag, _)| str::from_utf8(tag).ok())
+        } else {
+            None
+        };
+        let tail_from = frame.len().saturating_sub(TAIL_SCAN).max(type_at);
+        let tail = frame.get(tail_from..).unwrap_or_default();
+        let signed_at = find(tail, b"\",\"pubkey\":\"").map(|at| tail_from + at);
+        let body_start = value_after(frame, b"\"body\":\"", type_at).map(|(_, start)| start);
+        let body = match (body_start, signed_at) {
+            (Some(start), Some(end)) if end >= start => end - start,
+            _ => 0,
+        };
+        if let Some(at) = signed_at
+            && frame
+                .get(at..)
+                .is_some_and(|rest| find(rest, b",\"shard\":{").is_some())
+        {
+            class = FrameClass::Shard;
+        }
+        Self {
+            class,
+            wire: frame.len(),
+            body,
+            tag,
+        }
+    }
+}
+
+/// Bytes by app tag. Bounded, because a peer can name any tag.
+#[derive(Clone, Default, Debug)]
+pub(crate) struct TagBytes(HashMap<String, u64>);
+
+impl TagBytes {
+    fn add(&mut self, tag: &str, bytes: usize) {
+        let key = if self.0.len() >= MAX_TAGS && !self.0.contains_key(tag) {
+            OTHER_TAGS
+        } else {
+            tag
+        };
+        *self.0.entry(key.to_owned()).or_default() += u64::try_from(bytes).unwrap_or(u64::MAX);
+    }
+
+    /// The `TOP_TAGS` tags with the most bytes as `tag:bytes` joined by `,`, or `-`. Ties go by
+    /// tag, so the line is stable.
+    pub(crate) fn top(&self) -> String {
+        let mut rows: Vec<(&String, u64)> =
+            self.0.iter().map(|(tag, bytes)| (tag, *bytes)).collect();
+        rows.sort_unstable_by(|(left_tag, left), (right_tag, right)| {
+            right.cmp(left).then_with(|| left_tag.cmp(right_tag))
+        });
+        let named: Vec<String> = rows
+            .iter()
+            .take(TOP_TAGS)
+            .map(|(tag, bytes)| format!("{tag}:{bytes}"))
+            .collect();
+        if named.is_empty() {
+            "-".to_owned()
+        } else {
+            named.join(",")
+        }
+    }
+}
+
+/// `class:bytes` for each class with bytes, joined by `,`, or `-`.
+pub(crate) fn by_class(bytes: &[u64; CLASS_COUNT]) -> String {
+    let named: Vec<String> = FrameClass::ALL
+        .iter()
+        .filter(|class| bytes[class.index()] > 0)
+        .map(|class| format!("{}:{}", class.name(), bytes[class.index()]))
+        .collect();
+    if named.is_empty() {
+        "-".to_owned()
+    } else {
+        named.join(",")
+    }
+}
+
+fn add_bytes(slot: &mut u64, bytes: usize) {
+    *slot += u64::try_from(bytes).unwrap_or(u64::MAX);
+}
+
+/// The frames that the node received in one census interval.
+#[derive(Clone, Default, Debug)]
+pub(crate) struct WireIn {
+    /// Wire bytes of the frames that were new to the node, by class.
+    pub(crate) fresh: [u64; CLASS_COUNT],
+    /// Wire bytes of the frames that the dedup dropped as repeats, by class.
+    pub(crate) dup: [u64; CLASS_COUNT],
+    /// Every frame that reached `ingest`, fresh, repeat or dropped by a later check.
+    pub(crate) wire: u64,
+    pub(crate) body: u64,
+    pub(crate) frames: u64,
+    /// Wire bytes of the app frames, fresh and repeat, by tag.
+    pub(crate) tags: TagBytes,
+}
+
+impl WireIn {
+    pub(crate) fn note_received(&mut self, shape: &FrameShape<'_>) {
+        add_bytes(&mut self.wire, shape.wire);
+        add_bytes(&mut self.body, shape.body);
+        self.frames += 1;
+    }
+
+    pub(crate) fn note_fresh(&mut self, shape: &FrameShape<'_>) {
+        add_bytes(&mut self.fresh[shape.class.index()], shape.wire);
+        self.note_tag(shape);
+    }
+
+    pub(crate) fn note_dup(&mut self, shape: &FrameShape<'_>) {
+        add_bytes(&mut self.dup[shape.class.index()], shape.wire);
+        self.note_tag(shape);
+    }
+
+    fn note_tag(&mut self, shape: &FrameShape<'_>) {
+        if let Some(tag) = shape.tag {
+            self.tags.add(tag, shape.wire);
+        }
+    }
+}
+
+/// The frames that the node handed to the transport in one census interval. A broadcast counts
+/// once, whatever the number of neighbors that gossip forwards it to.
+#[derive(Clone, Default, Debug)]
+pub(crate) struct WireOut {
+    pub(crate) bytes: [u64; CLASS_COUNT],
+    pub(crate) wire: u64,
+    pub(crate) body: u64,
+    pub(crate) frames: u64,
+    pub(crate) tags: TagBytes,
+}
+
+impl WireOut {
+    pub(crate) fn note(&mut self, frame: &[u8]) {
+        let shape = FrameShape::of(frame);
+        add_bytes(&mut self.bytes[shape.class.index()], shape.wire);
+        add_bytes(&mut self.wire, shape.wire);
+        add_bytes(&mut self.body, shape.body);
+        self.frames += 1;
+        if let Some(tag) = shape.tag {
+            self.tags.add(tag, shape.wire);
+        }
+    }
+}
+
+/// The send paths hold no `&mut` state, so their counts are kept here, as the wakes of the tickers
+/// off the loop are. A process that hosts several nodes mixes their counts.
+static OUT: LazyLock<Mutex<WireOut>> = LazyLock::new(|| Mutex::new(WireOut::default()));
+
+/// Count a frame that went to the transport, on gossip or point to point.
+pub(crate) fn note_wire_out(frame: &[u8]) {
+    if let Ok(mut out) = OUT.lock() {
+        out.note(frame);
+    }
+}
+
+/// Read the sent frames of the interval and start the next one.
+pub(crate) fn take_wire_out() -> WireOut {
+    OUT.lock()
+        .map(|mut out| mem::take(&mut *out))
+        .unwrap_or_default()
+}
+
+/// The bytes sent so far under `tag`, read without ending the interval. A frame with a tag that no
+/// other test uses is the way to find one's own send among those of the tests that run beside it.
+#[cfg(test)]
+pub(crate) fn sent_tag_bytes(tag: &str) -> u64 {
+    OUT.lock()
+        .ok()
+        .and_then(|out| out.tags.0.get(tag).copied())
+        .unwrap_or(0)
+}
+
+/// A frame of the app kind with the given `tag`, as the serializer writes it.
+#[cfg(test)]
+pub(crate) fn app_frame_with_tag(tag: &str) -> Vec<u8> {
+    format!(
+        r#"{{"v":"12.0","id":"i","type":"app","tag":"{tag}","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{{}}}}"#
+    )
+    .into_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CLASS_COUNT, FrameClass, FrameShape, TagBytes, WireIn, WireOut, by_class};
+    use crate::protocol::identity::Identity;
+    use crate::protocol::messages::{AppFrameParams, AppTag};
+    use crate::protocol::{Channel, MeshId, Message};
+    use crate::testing::nick;
+
+    const APP: &[u8] = br#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca","seq":3,"ext":{}}"#;
+
+    #[test]
+    fn an_app_frame_has_its_tag_its_body_and_its_wire_size() {
+        let shape = FrameShape::of(APP);
+        assert_eq!(shape.class, FrameClass::App);
+        assert_eq!(shape.tag, Some("app_msg"));
+        assert_eq!(shape.body, "hello, golden".len());
+        assert_eq!(shape.wire, APP.len());
+    }
+
+    /// The reader and the serializer must agree, or the census reads every frame as `other`: the
+    /// frames here are made by the real constructors and the real serializer.
+    #[test]
+    fn frames_from_the_real_serializer_are_read_by_kind_tag_and_body() {
+        let mesh = MeshId::from("test");
+        let author = nick("alice");
+        let tag = AppTag::try_new("app_msg").expect("a valid tag");
+        let app = AppFrameParams::new(tag, None, None, "say \"hi\"".into());
+        let frames = [
+            (Message::new_app(&mesh, &author, app), FrameClass::App),
+            (Message::new_joined(&mesh, &author), FrameClass::Presence),
+            (
+                Message::new_peer_info(&mesh, &author, "addr".into()),
+                FrameClass::PeerInfo,
+            ),
+            (
+                Message::new_digest(&mesh, &author, "[]".into()),
+                FrameClass::Digest,
+            ),
+            (
+                Message::new_state_digest(&mesh, &author, "{}".into()),
+                FrameClass::StateDigest,
+            ),
+            (
+                Message::new_channel_digest(&mesh, &author, "{}".into(), Channel::Meta),
+                FrameClass::MetaDigest,
+            ),
+            (
+                Message::new_channel_event(&mesh, &author, "{\"k\":1}".into(), Channel::State),
+                FrameClass::State,
+            ),
+            (
+                Message::new_channel_event(&mesh, &author, "{\"k\":1}".into(), Channel::Meta),
+                FrameClass::Meta,
+            ),
+            (
+                Message::new_link_state(&mesh, &author, "{}".into()),
+                FrameClass::LinkState,
+            ),
+            (Message::new_ping(&mesh, &author), FrameClass::PingPong),
+        ];
+        let identity = Identity::generate();
+        for (message, class) in frames {
+            let written = message.body.as_str().to_owned();
+            let wire = message
+                .sign(&identity)
+                .serialize()
+                .expect("a signed message serializes");
+            let shape = FrameShape::of(wire.as_bytes());
+            let json_body = serde_json::to_string(&written).expect("a string encodes");
+            assert_eq!(shape.class, class, "{written}");
+            assert_eq!(shape.wire, wire.len());
+            assert_eq!(shape.body, json_body.len() - 2, "the body of {class:?}");
+            if class == FrameClass::App {
+                assert_eq!(shape.tag, Some("app_msg"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_quoted_body_does_not_end_the_body_early() {
+        let frame = br#"{"v":"12.0","id":"i","type":"state","mesh":"m","author":"a","ts":1,"body":"say \",\"pubkey\":\" now","pubkey":"ab","sig":"cd","ext":{}}"#;
+        let shape = FrameShape::of(frame);
+        assert_eq!(shape.class, FrameClass::State);
+        assert_eq!(shape.body, r#"say \",\"pubkey\":\" now"#.len());
+    }
+
+    #[test]
+    fn the_wire_types_are_told_apart() {
+        for (wire_type, class) in [
+            ("presence", FrameClass::Presence),
+            ("peerinfo", FrameClass::PeerInfo),
+            ("digest", FrameClass::Digest),
+            ("statedigest", FrameClass::StateDigest),
+            ("metadigest", FrameClass::MetaDigest),
+            ("meta", FrameClass::Meta),
+            ("linkstate", FrameClass::LinkState),
+            ("ping", FrameClass::PingPong),
+            ("pong", FrameClass::PingPong),
+            ("nonsense", FrameClass::Other),
+        ] {
+            let frame = format!(
+                r#"{{"v":"12.0","id":"i","type":"{wire_type}","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{{}}}}"#
+            );
+            assert_eq!(FrameShape::of(frame.as_bytes()).class, class, "{wire_type}");
+        }
+    }
+
+    #[test]
+    fn a_frame_with_a_shard_header_is_a_shard() {
+        let frame = br#"{"v":"12.0","id":"i","type":"app","tag":"t","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","shard":{"group":"g","idx":0,"total":2},"ext":{}}"#;
+        assert_eq!(FrameShape::of(frame).class, FrameClass::Shard);
+    }
+
+    #[test]
+    fn bytes_that_are_no_frame_are_other_with_their_wire_size() {
+        let junk: &[u8] = b"\xff not a frame";
+        let shape = FrameShape::of(junk);
+        assert_eq!(shape.class, FrameClass::Other);
+        assert_eq!(shape.wire, junk.len());
+        assert_eq!(shape.body, 0);
+    }
+
+    #[test]
+    fn the_received_bytes_are_split_by_class_and_by_fresh_and_repeat() {
+        let app = FrameShape::of(APP);
+        let mut received = WireIn::default();
+        for _ in 0..3 {
+            received.note_received(&app);
+        }
+        received.note_fresh(&app);
+        received.note_dup(&app);
+        received.note_dup(&app);
+        assert_eq!(received.frames, 3);
+        assert_eq!(received.wire, 3 * APP.len() as u64);
+        assert_eq!(received.body, 3 * "hello, golden".len() as u64);
+        assert_eq!(by_class(&received.fresh), format!("app:{}", APP.len()));
+        assert_eq!(by_class(&received.dup), format!("app:{}", 2 * APP.len()));
+        assert_eq!(received.tags.top(), format!("app_msg:{}", 3 * APP.len()));
+    }
+
+    #[test]
+    fn the_sent_bytes_are_counted_by_class_and_tag() {
+        let mut sent = WireOut::default();
+        sent.note(APP);
+        sent.note(b"junk");
+        assert_eq!(sent.frames, 2);
+        assert_eq!(sent.wire, APP.len() as u64 + 4);
+        assert_eq!(by_class(&sent.bytes), format!("app:{},other:4", APP.len()));
+    }
+
+    #[test]
+    fn an_empty_tally_prints_a_dash_and_the_tags_stay_bounded() {
+        assert_eq!(by_class(&[0; CLASS_COUNT]), "-");
+        assert_eq!(TagBytes::default().top(), "-");
+        let mut tags = TagBytes::default();
+        for index in 0..100 {
+            tags.add(&format!("tag-{index}"), 1);
+        }
+        assert!(tags.0.len() <= super::MAX_TAGS + 1, "{} tags", tags.0.len());
+        assert_eq!(tags.0.values().sum::<u64>(), 100, "no byte is lost");
+    }
+}

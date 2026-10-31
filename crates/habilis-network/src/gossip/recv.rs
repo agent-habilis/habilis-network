@@ -6,7 +6,7 @@
 //! layer never touches the peer roster directly — it calls into
 //! `lifecycle::observe` and dispatches by kind.
 
-use crate::daemon::state::{RendezvousFlag, Standing};
+use crate::daemon::state::{FrameShape, RendezvousFlag, Standing};
 use std::ops::ControlFlow;
 
 use bytes::Bytes;
@@ -532,6 +532,8 @@ pub(crate) async fn ingest(
     app: &mut dyn NodeApp,
     context: &HandlerCtx<'_>,
 ) {
+    let shape = FrameShape::of(&frame);
+    state.wire_in.note_received(&shape);
     let Ok((message, _resend_nonce)) = Message::parse_wire(&frame) else {
         context
             .sink
@@ -587,8 +589,10 @@ pub(crate) async fn ingest(
     // `joined`/`Alive` mint fresh ids so they are never falsely suppressed
     // here. Only authenticated messages reach this gate.
     if state.mark_seen(&verified) {
+        state.wire_in.note_dup(&shape);
         return;
     }
+    state.wire_in.note_fresh(&shape);
     // Identity is the signing key, not the nickname (p2panda-style): the
     // signature above authenticates the *key*; the `author` nickname is a
     // non-unique display label and is deliberately **not** pinned/claimed,
@@ -3925,5 +3929,120 @@ mod parked_link_state_tests {
             );
             theirs.close().await;
         });
+    }
+}
+
+/// The census reads each received frame by kind: its wire bytes and its body bytes, and whether it
+/// was new, a repeat, or dropped by a later check.
+#[cfg(test)]
+mod wire_counter_tests {
+    use iroh::endpoint::presets;
+    use iroh_gossip::net::Gossip;
+    use iroh_gossip::proto;
+    use serde_json::json;
+
+    use crate::daemon::handler_ctx::HandlerCtx;
+    use crate::daemon::state::{EventLoopState, by_class};
+    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+    use crate::gossip::event::SilentSink;
+    use crate::protocol::identity::Identity;
+    use crate::protocol::messages::{Authored, Verified};
+    use crate::protocol::{Channel, MeshId, Message};
+    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::transport::MeshSender;
+
+    struct Inert;
+
+    #[async_trait::async_trait]
+    impl NodeApp for Inert {
+        fn classify(&self, _message: &Authored) -> AppClass {
+            AppClass::BEAT.union(AppClass::VALID)
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _context: &HandlerCtx<'_>,
+        ) -> bool {
+            false
+        }
+    }
+
+    fn state_frame() -> Verified {
+        let mesh = MeshId::from("test");
+        let writer = fresh_state();
+        let seed = *writer.identity.public().as_bytes();
+        let change = writer
+            .doc(Channel::State)
+            .build_change(&json!({ "key": 1 }), &seed)
+            .expect("a JSON object merges")
+            .expect("a non-empty merge yields a change");
+        let (body, _plain) = writer
+            .doc(Channel::State)
+            .compose_wire_body(&change, None)
+            .expect("compose the wire body");
+        Message::new_channel_event(&mesh, &nick("writer"), body, Channel::State)
+            .sign(&writer.identity)
+    }
+
+    /// A fresh reader that is handed `frames` one by one, in order.
+    fn reader_after(frames: &[&Verified]) -> EventLoopState {
+        let mut reader = fresh_state();
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mesh = MeshId::from("test");
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(proto::TopicId::from_bytes([5u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            let sender = MeshSender::new(gossip_sender);
+            let identity = Identity::generate();
+            let reader_nick = nick("reader");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &reader_nick,
+                identity: &identity,
+                our_pubkey: identity.author_key(),
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let mut app = Inert;
+            for frame in frames {
+                let bytes = frame.serialize().expect("serialize").into_bytes();
+                super::ingest(bytes, &mut reader, &mut app, &context).await;
+            }
+            endpoint.close().await;
+        });
+        reader
+    }
+
+    #[test]
+    fn the_received_bytes_are_counted_by_kind_and_by_what_became_of_the_frame() {
+        let frame = state_frame();
+        let reader = reader_after(&[&frame, &frame, &frame]);
+        let genuine = frame.serialize().expect("serialize").len() as u64;
+        let body = serde_json::to_string(frame.body.as_str())
+            .expect("a string encodes")
+            .len() as u64
+            - 2;
+
+        let received = &reader.wire_in;
+        assert_eq!(received.frames, 3, "every frame that reached ingest");
+        assert_eq!(received.wire, 3 * genuine);
+        assert_eq!(received.body, 3 * body);
+        assert_eq!(by_class(&received.fresh), format!("state:{genuine}"));
+        assert_eq!(by_class(&received.dup), format!("state:{}", 2 * genuine));
+        assert!(received.body < received.wire, "the envelope is the rest");
     }
 }

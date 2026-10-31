@@ -4,11 +4,12 @@
 //! `lifecycle::heartbeat`; the gossip healer in `gossip::heal`.
 
 use crate::daemon::state::{Latch, Standing};
+use std::mem;
 use std::time::Duration;
 
 use iroh::Endpoint;
 
-use super::state::EventLoopState;
+use super::state::{EventLoopState, WireIn, WireOut, by_class, take_wire_out};
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::util::clock::{Instant, millis_saturating};
 use crate::util::{resident_memory, tuning, unix_secs};
@@ -95,6 +96,8 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
     // own arm columns. Do not "correct" it by adding one here; that
     // double-counts the census iteration and inflates the total every interval.
     let idle = state.idle.take();
+    let wire_in = mem::take(&mut state.wire_in);
+    let wire_out = take_wire_out();
     let links = state.direct_counts();
 
     if state.silent_partition_due(roster_len, Instant::now()) {
@@ -153,6 +156,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         gossip_recursion_closes_total = payload_path::gossip_recursion_closes(),
         "mesh census"
     );
+    log_wire_census(&wire_in, &wire_out);
 
     // The per-peer conn classification feeds only the DEBUG census
     // below, and each `conn_path` is a `remote_info` actor round-trip.
@@ -243,6 +247,28 @@ pub(crate) fn note_tick_gap(
         );
     }
     (mono_gap, wall_gap)
+}
+
+/// The wire bytes of the interval by kind of frame, on a line of their own: a reader of the census
+/// line takes the last line that names it. `idle_bin_*` are frames received (first sightings and
+/// repeats), `idle_bout*` frames handed to the transport. The wire total less the body total is
+/// the cost of the envelope.
+fn log_wire_census(received: &WireIn, sent: &WireOut) {
+    tracing::info!(
+        target: "habilis_network::lifecycle",
+        idle_bin_fresh = %by_class(&received.fresh),
+        idle_bin_dup = %by_class(&received.dup),
+        idle_bin_tags = %received.tags.top(),
+        idle_bout = %by_class(&sent.bytes),
+        idle_bout_tags = %sent.tags.top(),
+        idle_wire_in = received.wire,
+        idle_body_in = received.body,
+        idle_frames_in = received.frames,
+        idle_wire_out = sent.wire,
+        idle_body_out = sent.body,
+        idle_frames_out = sent.frames,
+        "wire census"
+    );
 }
 
 #[cfg(test)]
