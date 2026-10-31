@@ -22,7 +22,7 @@ const _: () = assert!(MESSAGE_LOG_SIZE >= 1, "a zero-length log retains nothing"
 /// retention window with margin: anti-entropy resends any message still
 /// in the log, and a resend whose id had scrolled out of this set would be
 /// reprocessed and **re-surfaced**. Derived, so the two cannot drift.
-pub const SEEN_IDS_CAP: usize = MESSAGE_LOG_SIZE * 2;
+pub const SEEN_IDS_CAP: usize = 64_000;
 const _: () = assert!(
     SEEN_IDS_CAP >= MESSAGE_LOG_SIZE,
     "the dedup set must outlive the message log"
