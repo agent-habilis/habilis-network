@@ -587,6 +587,7 @@ pub(crate) async fn ingest(
     // `joined`/`Alive` mint fresh ids so they are never falsely suppressed
     // here. Only authenticated messages reach this gate.
     if state.mark_seen(&verified) {
+        state.idle.duplicates += 1;
         return;
     }
     // Identity is the signing key, not the nickname (p2panda-style): the

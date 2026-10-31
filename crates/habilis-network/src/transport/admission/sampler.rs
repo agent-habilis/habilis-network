@@ -1,5 +1,6 @@
 //! The sampler of the gossip view and the spawn of its task.
 
+use crate::daemon::state::note_sampler_wake;
 use crate::transport::probe;
 use std::sync::{Mutex, Weak};
 use std::time::Duration;
@@ -25,6 +26,7 @@ pub(crate) fn spawn_sampler(table: Weak<Mutex<Inner>>, period: Duration) {
     task::spawn(async move {
         loop {
             time::sleep(period).await;
+            note_sampler_wake();
             let Some(table) = table.upgrade() else {
                 return;
             };

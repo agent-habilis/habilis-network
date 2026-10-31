@@ -1023,29 +1023,29 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
 
     /// Finalizes the ping round at its deadline.
     fn ping_deadline(&mut self) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.deadlines += 1;
         finalize_ping_round(&mut self.state, self.parts.sink);
     }
 
     /// Sends the second probe of the ping round.
     async fn second_probe(&mut self) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.deadlines += 1;
         let context = self.parts.handler_ctx(&self.sender);
         gossip::send_second_probe(&mut self.state, &context).await;
     }
 
     fn poll_deadline(&mut self) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.deadlines += 1;
         self.app.poll_deadline_elapsed();
     }
 
     fn expire_deadlines(&mut self) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.deadlines += 1;
         self.app.expire_deadlines(TokioInstant::now());
     }
 
     async fn ipc(&mut self, (command, response): IpcMessage<Driver::Ipc>) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.ipc += 1;
         let context = self.parts.handler_ctx(&self.sender);
         let request = super::app::IpcRequest {
             command,
@@ -1062,7 +1062,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     }
 
     async fn http(&mut self, request: Driver::Http) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.http += 1;
         let context = self.parts.handler_ctx(&self.sender);
         self.app
             .handle_http(request, &mut self.state, &context)
@@ -1070,13 +1070,13 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     }
 
     async fn gossip_event(&mut self, event: Option<Result<Event, ApiError>>) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.note_gossip(event.as_ref());
         let context = self.parts.handler_ctx(&self.sender);
         gossip::handle_gossip_event(event, &mut self.state, &mut self.app, &context).await;
     }
 
     async fn direct_outcome(&mut self, outcome: probe::DirectOutcome) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.direct_rx += 1;
         let context = self.parts.handler_ctx(&self.sender);
         probe::on_outcome(outcome, &mut self.state, &context).await;
         probe::ensure_watchers(
@@ -1087,14 +1087,14 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     }
 
     fn flush_failed(&mut self, (message, bytes): (Verified, messages::WireFrame)) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.other += 1;
         let context = self.parts.handler_ctx(&self.sender);
         gossip::requeue_failed(&mut self.state, &context, message, bytes);
     }
 
     /// A lane slot freed: the offers that waited for it are made now.
     async fn top_up_lanes(&mut self) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.other += 1;
         let context = self.parts.handler_ctx(&self.sender);
         probe::top_up_lane_offers(&mut self.state, &context).await;
     }
@@ -1114,19 +1114,19 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     /// the best first hop to a pair on the relay can be another now, and waiting for the stuck
     /// deadline and a link-state tick would cost 20 s or more.
     fn route_wake(&mut self) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.other += 1;
         let context = self.parts.handler_ctx(&self.sender);
         route_wake_arm(&mut self.state, &context);
     }
 
     async fn lan_event(&mut self, event: lookup::LanEvent) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.other += 1;
         let context = self.parts.handler_ctx(&self.sender);
         gossip::lan::on_lan_event(event, &mut self.state, &context).await;
     }
 
     async fn path_change(&mut self, change: probe::PathChange) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.path_rx += 1;
         let context = self.parts.handler_ctx(&self.sender);
         if Some(change.peer) == self.state.rendezvous_id {
             webrtc::rendezvous::offer_rendezvous_on_path_loss(&mut self.state, &context);
@@ -1137,7 +1137,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
 
     /// Inbound unicast rides the *same* validate + dedup path as gossip (`ingest`).
     async fn unicast(&mut self, bytes: bytes::Bytes) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.unicast += 1;
         let context = self.parts.handler_ctx(&self.sender);
         gossip::ingest(bytes, &mut self.state, &mut self.app, &context).await;
     }
@@ -1256,7 +1256,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
 
     /// A bootstrap rung chosen off-loop (startup probe / beacon self-monitor); apply it cheaply.
     fn rung_change(&mut self) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.rung_change += 1;
         apply_rung_change(
             &mut self.state,
             &mut self.rendezvous_params,
@@ -1270,7 +1270,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     /// another 15s interval before anyone binds it would hand back the claim latency this change
     /// was meant to leave untouched.
     async fn probe_verdict(&mut self, found_rival: bool) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.probe_verdict += 1;
         let found_rival = verdict_after_known_holders(found_rival, &self.state);
         let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
         self.state
@@ -1333,7 +1333,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     /// A probe task of the private ladder answered. Its own arm, so that the walk that asked for
     /// it walks again at once and no tick has to wait.
     async fn rung_report(&mut self, report: beacon::RungReport) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.rung_report += 1;
         self.state.rungs.note(report, Instant::now());
         let context = self.parts.handler_ctx(&self.sender);
         let arm = CohostArm {
@@ -1456,7 +1456,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     }
 
     async fn session_request(&mut self, request: Driver::Session) {
-        self.state.idle.external += 1;
+        self.state.idle.ext.session += 1;
         let context = self.parts.handler_ctx(&self.sender);
         if self
             .app
@@ -1664,7 +1664,7 @@ async fn run_loop<Driver: NodeDriver>(
             Some(failed) = lp.flush_failed_rx.recv() => { lp.flush_failed(failed); },
             () = slot_freed.notified() => { lp.top_up_lanes().await; },
             () = underlay_slot_freed.notified() => {
-                lp.state.idle.external += 1;
+                lp.state.idle.ext.other += 1;
                 #[cfg(feature = "multihop")]
                 lp.underlay_round_ended().await;
             }
@@ -1674,7 +1674,7 @@ async fn run_loop<Driver: NodeDriver>(
                 Some(event) => { lp.lan_event(event).await; },
             },
             Some(address) = address_changes.next() => {
-                lp.state.idle.external += 1;
+                lp.state.idle.ext.address += 1;
                 if lp.state.address_flood_due(&address) {
                     let context = lp.parts.handler_ctx(&lp.sender);
                     gossip::broadcast_peer_info(&mut lp.state, &context).await;
