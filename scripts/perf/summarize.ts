@@ -23,6 +23,15 @@
 //   `idle_duplicates`, `idle_fresh`, `idle_fr_asks`, `idle_fr_retries`, `idle_state_answers`,
 //   `idle_state_frames_unicast`, `idle_state_frames_broadcast` and `idle_state_rejected` deltas of
 //   every census line.
+// - wire_in / body_in / frames_in / wire_out / body_out / frames_out: the sums of the `idle_wire_in`,
+//   `idle_body_in`, `idle_frames_in`, `idle_wire_out`, `idle_body_out` and `idle_frames_out`
+//   deltas (the `wire census` line). The wire is the frame as it goes on a socket; the body is its
+//   payload as written in the JSON. Out counts a broadcast once, not once per neighbor.
+// - dup_share: the bytes of the frames that the dedup dropped as repeats, over all frames of the
+//   kinds that reached it. env_in / env_out: 1 - body / wire, the share of the envelope.
+// - bin_fresh / bin_dup / bout: `kind:bytes` sums, by kind of frame (app, presence, peerinfo,
+//   digest, statedigest, metadigest, state, meta, linkstate, pingpong, shard, other), largest first.
+//   tags_in / tags_out: the same for the tags of the app frames.
 // - ext_<arm>: the sums of the `idle_ext_<arm>` deltas, the wakes of each arm that is not a timer.
 //   Only the arms that woke.
 // - ahead_max: the largest `idle_ahead_peers` gauge of any census line.
@@ -55,7 +64,36 @@ const TOTALS: [string, string][] = [
   ["frames_uni", "idle_state_frames_unicast"],
   ["frames_bc", "idle_state_frames_broadcast"],
   ["rejected", "idle_state_rejected"],
+  ["wire_in", "idle_wire_in"],
+  ["body_in", "idle_body_in"],
+  ["frames_in", "idle_frames_in"],
+  ["wire_out", "idle_wire_out"],
+  ["body_out", "idle_body_out"],
+  ["frames_out", "idle_frames_out"],
 ];
+
+// A census field of `name:bytes` pairs joined by commas (`app:120,presence:40`, or `-`): add the
+// bytes of each name into `into`.
+function addPairs(text: string, field: string, into: Map<string, number>): void {
+  for (const found of text.matchAll(new RegExp(`\\b${field}=(\\S+)`, "g"))) {
+    for (const pair of (found[1] ?? "").split(",")) {
+      const colon = pair.lastIndexOf(":");
+      if (colon <= 0) continue;
+      const name = pair.slice(0, colon);
+      into.set(name, (into.get(name) ?? 0) + Number(pair.slice(colon + 1)));
+    }
+  }
+}
+
+const pairsText = (pairs: Map<string, number>): string =>
+  [...pairs]
+    .sort(([a, x], [b, y]) => y - x || a.localeCompare(b))
+    .map(([name, bytes]) => `${name}:${bytes}`)
+    .join(",") || "-";
+
+const total = (pairs: Map<string, number>): number => sum([...pairs.values()]);
+const percent = (part: number, whole: number): string =>
+  whole > 0 ? `${((100 * part) / whole).toFixed(1)}%` : "-";
 
 // Python's str.split("\n") in a line loop: a final newline does not make an extra line.
 const lines = (text: string): string[] => {
@@ -85,6 +123,13 @@ function summarize(run: string): string {
   let censusLines = 0;
   const totals = new Map<string, number>(TOTALS.map(([name]) => [name, 0]));
   const ext = new Map<string, number>();
+  const kinds = {
+    fresh: new Map<string, number>(),
+    dup: new Map<string, number>(),
+    out: new Map<string, number>(),
+    tagsIn: new Map<string, number>(),
+    tagsOut: new Map<string, number>(),
+  };
   const ahead: number[] = [];
   const nodeLoads: number[] = [];
   for (const file of readdirSync(run).filter((f) => /^n.*\.err$/.test(f))) {
@@ -105,6 +150,11 @@ function summarize(run: string): string {
     for (const arm of text.matchAll(/\bidle_ext_(\w+?)=(\d+)/g)) {
       ext.set(arm[1] ?? "", (ext.get(arm[1] ?? "") ?? 0) + Number(arm[2]));
     }
+    addPairs(text, "idle_bin_fresh", kinds.fresh);
+    addPairs(text, "idle_bin_dup", kinds.dup);
+    addPairs(text, "idle_bout", kinds.out);
+    addPairs(text, "idle_bin_tags", kinds.tagsIn);
+    addPairs(text, "idle_bout_tags", kinds.tagsOut);
     ahead.push(...numbers(text, /\bidle_ahead_peers=(\d+)/));
     nodeLoads.push(...numbers(text, /\bload_1m=([0-9.]+)/));
   }
@@ -129,6 +179,15 @@ function summarize(run: string): string {
   const loadMax = loads.length ? show({ value: Math.max(...loads), float: true }) : "-";
   const maxOf = (values: number[]) => (values.length ? Math.max(...values) : 0);
   const totalsText = [...totals].map(([name, value]) => `${name}=${value}`).join(" ");
+  const wireIn = totals.get("wire_in") ?? 0;
+  const wireOut = totals.get("wire_out") ?? 0;
+  const received = total(kinds.fresh) + total(kinds.dup);
+  const wireText =
+    `dup_share=${percent(total(kinds.dup), received)} ` +
+    `env_in=${percent(wireIn - (totals.get("body_in") ?? 0), wireIn)} ` +
+    `env_out=${percent(wireOut - (totals.get("body_out") ?? 0), wireOut)} ` +
+    `bin_fresh=${pairsText(kinds.fresh)} bin_dup=${pairsText(kinds.dup)} bout=${pairsText(kinds.out)} ` +
+    `tags_in=${pairsText(kinds.tagsIn)} tags_out=${pairsText(kinds.tagsOut)}`;
   const extText = [...ext]
     .filter(([, value]) => value > 0)
     .sort(([a], [b]) => a.localeCompare(b))
@@ -143,7 +202,7 @@ function summarize(run: string): string {
     `| disc_nodes=${discs.size} worst_disc=${maxOf([...discs.values()])} ` +
     `| resent=${resent} resend_dropped=${resendDropped} ` +
     `| census_lines=${censusLines} ${totalsText} ahead_max=${maxOf(ahead)} ` +
-    `node_load_max=${show({ value: maxOf(nodeLoads), float: true })} | ${extText} ` +
+    `node_load_max=${show({ value: maxOf(nodeLoads), float: true })} | ${wireText} | ${extText} ` +
     `| mem_med=${memMed} mem_max=${memMax} ` +
     `| load1 median=${loadMed} max=${loadMax} ` +
     `| canary_pauses=${gaps.length}`
