@@ -38,8 +38,9 @@ use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
-    KNOWN_ENDPOINTS_CAP, LANE_WANTED, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP,
-    RECLAIM_WINDOW, REGRAFT_AFTER, RELINK_COOLDOWN, SEEN_IDS_CAP, STARVED,
+    FAST_ROUND_STALL_BACKOFF_CAP, KNOWN_ENDPOINTS_CAP, LANE_WANTED, MESSAGE_LOG_SIZE,
+    PENDING_OUTBOUND_CAP, QUIET_CAP, RECLAIM_WINDOW, REGRAFT_AFTER, RELINK_COOLDOWN, SEEN_IDS_CAP,
+    STARVED,
 };
 
 use crate::gossip::{antientropy, lan};
@@ -576,7 +577,7 @@ impl EventLoopState {
             test_drops_fired: 0,
             resend_receiver: Some(resend_receiver),
             state_digest_serves: antientropy::ServeBudget::default(),
-            fast_rounds: antientropy::FastRounds::default(),
+            fast_rounds: antientropy::FastRounds::new(FAST_ROUND_STALL_BACKOFF_CAP),
             peers: HashSet::new(),
             last_seen: HashMap::new(),
             peer_endpoints: HashMap::new(),
