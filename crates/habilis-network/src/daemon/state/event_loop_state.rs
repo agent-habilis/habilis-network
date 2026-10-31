@@ -1309,6 +1309,11 @@ impl EventLoopState {
         self.message_log.contains(&key) || !self.seen.insert(key)
     }
 
+    /// Whether [`Self::mark_seen`] would call `key` a duplicate, without recording it.
+    pub(crate) fn is_seen(&self, key: &DedupKey) -> bool {
+        self.message_log.contains(key) || self.seen.contains(key)
+    }
+
     /// Try to reassemble the sharded body the `trigger` shard belongs to:
     /// buffer it in the dedicated [`reassembly`](Self::reassembly) store and,
     /// when it completes its group (and the group has not been surfaced

@@ -539,6 +539,16 @@ pub(crate) async fn ingest(
         tracing::warn!(target: "habilis_network::gossip", "failed to parse inbound gossip message");
         return;
     };
+    // A frame whose key is already seen is a repeat: the verify would only prove what the first
+    // delivery proved. A forged copy that claims a seen key is dropped here, as `mark_seen` would
+    // drop it after the verify. The key is read, never recorded, so a forgery cannot poison `seen`.
+    if state.is_seen(&message.dedup_key()) {
+        if state.note_inbound(Instant::now()) {
+            flush_pending(state, context, "inbound traffic resumed").await;
+        }
+        state.idle.duplicates += 1;
+        return;
+    }
     // Authenticity gate, **before** the self-echo drop, dedup, and every other step: every inbound
     // message must carry a valid signature over its canonical bytes. Verifying before `mark_seen`
     // stops a forged/unsigned message from poisoning the dedup window with a replayed id and
@@ -4097,7 +4107,7 @@ mod dedup_counter_tests {
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
     use crate::protocol::identity::Identity;
-    use crate::protocol::messages::Authored;
+    use crate::protocol::messages::{Authored, Verified};
     use crate::protocol::{Channel, MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
@@ -4176,6 +4186,20 @@ mod dedup_counter_tests {
                 "the first delivery is a first sighting"
             );
             assert_eq!(reader.idle.duplicates, 2, "the 2 repeats are duplicates");
+
+            // A copy that claims the same key and id but carries a bad signature is a repeat too:
+            // it is dropped before the verify, so it never reaches the invalid-signature path.
+            let mut forged = frame.clone().into_message();
+            forged.body = "forged".into();
+            let bytes = Verified::fixture_with_signature(forged)
+                .serialize()
+                .expect("serialize")
+                .into_bytes();
+            super::ingest(bytes, &mut reader, &mut app, &context).await;
+            assert_eq!(
+                reader.idle.duplicates, 3,
+                "a bad-signature copy of a seen frame is dropped as a repeat, with no verify"
+            );
             endpoint.close().await;
         });
     }
