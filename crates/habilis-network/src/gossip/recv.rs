@@ -1187,13 +1187,13 @@ fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
     }
 }
 
-/// Returns what the document made of the change.
-///
 /// Ingest a durable channel event (`State`/`Meta`) into its `log`: dedup-insert,
 /// then surface a `StateChanged` for `channel` only when the derived doc changed
 /// and we're past the join horizon (a backfilling joiner updates its doc silently
 /// instead of reacting to replayed intermediate states). A received event is
 /// never our own (`is_self = false`). Both channels share this path verbatim.
+///
+/// Returns what the document made of the change.
 fn ingest_channel_event(
     event: ChannelEvent<'_>,
     doc: &mut doc::MeshDoc,
