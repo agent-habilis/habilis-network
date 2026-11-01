@@ -186,6 +186,16 @@ impl MessageLog {
         dropped
     }
 
+    /// The messages held, and the bytes of their bodies.
+    pub(crate) fn size(&self) -> (usize, usize) {
+        let bytes = self
+            .messages
+            .iter()
+            .map(|message| message.body.as_str().len())
+            .sum();
+        (self.messages.len(), bytes)
+    }
+
     #[cfg(any(test, feature = "iroh-test-utils"))]
     pub(crate) fn len(&self) -> usize {
         self.messages.len()

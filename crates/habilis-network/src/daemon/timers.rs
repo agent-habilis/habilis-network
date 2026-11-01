@@ -3,7 +3,7 @@
 //! heartbeat. The `Alive`/sweep heartbeat ticks live in
 //! `lifecycle::heartbeat`; the gossip healer in `gossip::heal`.
 
-use crate::daemon::state::{Latch, Standing};
+use crate::daemon::state::{CollectionSizes, Latch, Standing};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -362,6 +362,42 @@ pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &Nickname) {
         doc_state_json_bytes = shared.json_bytes,
         doc_save_taken = with_save,
         "doc census"
+    );
+}
+
+/// The size of each long-lived collection, on a line of their own, once per call (the 1-minute
+/// tick). The keys are `col_<name>` and `col_<name>_bytes`.
+pub(crate) fn tick_collection_census(state: &EventLoopState) {
+    let sizes = CollectionSizes::read(state);
+    tracing::info!(
+        target: "habilis_network::lifecycle",
+        col_seen = sizes.seen,
+        col_known_endpoints = sizes.known_endpoints,
+        col_quiet = sizes.quiet,
+        col_left = sizes.left,
+        col_left_keys = sizes.left_keys,
+        col_reassembled_groups = sizes.reassembled_groups,
+        col_pending_outbound = sizes.pending_outbound,
+        col_message_log = sizes.message_log,
+        col_message_log_bytes = sizes.message_log_bytes,
+        col_reassembly = sizes.reassembly,
+        col_reassembly_bytes = sizes.reassembly_bytes,
+        col_shard_cache = sizes.shard_cache,
+        col_shard_cache_bytes = sizes.shard_cache_bytes,
+        col_author_seqs = sizes.author_seqs,
+        col_author_seq_entries = sizes.author_seq_entries,
+        col_forked = sizes.forked,
+        col_by_hash = sizes.by_hash,
+        col_dag_heads = sizes.dag_heads,
+        col_peers = sizes.peers,
+        col_last_seen = sizes.last_seen,
+        col_peer_endpoints = sizes.peer_endpoints,
+        col_left_at = sizes.left_at,
+        col_quiet_since = sizes.quiet_since,
+        col_surfaced = sizes.surfaced,
+        col_direct = sizes.direct,
+        col_linked_endpoints = sizes.linked_endpoints,
+        "collection census"
     );
 }
 

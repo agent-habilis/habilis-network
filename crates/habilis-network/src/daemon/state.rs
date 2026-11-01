@@ -1,3 +1,4 @@
+mod collection_sizes;
 mod event_loop_state;
 
 mod gossip_msgs;
@@ -35,6 +36,7 @@ use crate::util::tuning;
 
 pub use event_loop_state::EventLoopState;
 
+pub(crate) use collection_sizes::CollectionSizes;
 pub(crate) use gossip_msgs::{GossipMsgs, by_variant, gossip_msgs_delta};
 pub(crate) use idle_counters::{IdleCounters, note_ppid_wake, note_sampler_wake, top_requesters};
 pub(crate) use latch::Latch;
