@@ -7,7 +7,7 @@ use crate::daemon::setup::LiveCount;
 #[cfg(feature = "host")]
 use crate::daemon::shutdown::{Owner, OwnerPidError};
 
-use crate::transport::UdpTransport;
+use crate::transport::{UdpTransport, UnicastFrame};
 use std::path::PathBuf;
 
 use iroh::Endpoint;
@@ -159,7 +159,7 @@ pub(crate) struct Endpoints {
     /// Inbound unicast frames from the `UNICAST_ALPN` acceptor. The event loop
     /// drains this into `gossip::ingest` (the same path as gossip), so both
     /// transports share signature-verify + dedup. Built in `setup_mesh`.
-    pub(crate) unicast_rx: mpsc::Receiver<bytes::Bytes>,
+    pub(crate) unicast_rx: mpsc::Receiver<UnicastFrame>,
     /// The members of this mesh that the LAN announces, read by the event loop. `None` when the
     /// endpoint has no mDNS handle: there is no LAN arm then.
     pub(crate) lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,

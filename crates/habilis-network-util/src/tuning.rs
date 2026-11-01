@@ -1057,6 +1057,20 @@ pub const FAST_ROUND_ACTIVE: Duration = Duration::from_secs(1);
 /// anti-entropy tick. The reclaim timer drives the check, so this matches it.
 pub const FAST_ROUND_RETRY: Duration = Duration::from_millis(400);
 
+/// Whether the anti-entropy digests go to one peer and are answered to the asker alone. Off, every
+/// node broadcasts its digests at each tick and the holders re-broadcast the missing frames with a
+/// new nonce, as before. On, a node sends its chat and state digests by unicast to one random linked
+/// peer, the peer that holds more answers the asker only, on a unicast stream, with the frames
+/// as they were signed (no new nonce, no re-broadcast), and a digest that arrives broadcast
+/// (an older peer) is answered by unicast too. The first-link pull, the new-peer pull and the fast
+/// rounds are not changed. Where no unicast path can start, the answer goes as it did, on gossip.
+pub const UNICAST_DIGESTS: bool = false;
+
+/// The retries of a chat digest that a full answer calls for, at most, after one tick's ask: the
+/// ask is repeated while each answer is full (the log grew by the resend cap), so a long gap does
+/// not wait one tick per cap, and it stops after this many.
+pub const CHAT_RETRIES_MAX: u32 = 16;
+
 /// The longest wait that a peer gets between retries of a stalled fast round. Each retry that
 /// finds our heads unmoved doubles the wait for that peer from [`FAST_ROUND_RETRY`] up to this
 /// cap, so a peer that advertises heads we can never hold costs one small digest per cap, not
