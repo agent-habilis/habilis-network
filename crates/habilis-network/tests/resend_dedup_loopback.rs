@@ -66,6 +66,7 @@ enum Request {
     Merge(serde_json::Value, oneshot::Sender<()>),
     Read(oneshot::Sender<serde_json::Value>),
     ForgetProof(String, oneshot::Sender<()>),
+    UnicastDigests(bool, oneshot::Sender<()>),
 }
 
 /// An app that logs every frame it reads and keeps what it read.
@@ -149,6 +150,11 @@ impl NodeDriver for Chat {
             }
             Request::ForgetProof(peer, done) => {
                 state.forget_endpoint_proof(&nick(&peer));
+                let _ = done.send(());
+                false
+            }
+            Request::UnicastDigests(enabled, done) => {
+                state.set_unicast_digests(enabled);
                 let _ = done.send(());
                 false
             }
@@ -239,6 +245,14 @@ async fn forget_proof(node: &Node<Chat>, peer: &str) {
     armed.await.expect("the loop answers");
 }
 
+async fn use_unicast_digests(node: &Node<Chat>) {
+    let (done, armed) = oneshot::channel();
+    node.send(Request::UnicastDigests(true, done))
+        .await
+        .expect("the request reaches the loop");
+    armed.await.expect("the loop answers");
+}
+
 async fn state_has(node: &Node<Chat>, key: &str) -> bool {
     let (response, document) = oneshot::channel();
     node.send(Request::Read(response))
@@ -322,6 +336,17 @@ fn a_frame_the_app_dropped_is_repaired_by_anti_entropy() {
 
 #[test]
 fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
+    a_dropped_state_change_is_repaired(false);
+}
+
+/// The unicast form: the answer goes to the connection of the digest, never on gossip, and the
+/// repair still works.
+#[test]
+fn a_state_change_the_app_dropped_is_repaired_by_a_unicast_state_digest_answer() {
+    a_dropped_state_change_is_repaired(true);
+}
+
+fn a_dropped_state_change_is_repaired(unicast: bool) {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _one_at_a_time = serial().lock().await;
@@ -330,6 +355,10 @@ fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
 
         let (alice, _alice_read) = spawn(&topic, "alice").await;
         let (bob, bob_read) = spawn(&topic, "bob").await;
+        if unicast {
+            use_unicast_digests(&alice).await;
+            use_unicast_digests(&bob).await;
+        }
 
         let meeting = Instant::now();
         while !has_read(&bob_read, "hello") {
@@ -383,11 +412,20 @@ fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
         for line in &answers {
             eprintln!("state digest answer: {line}");
         }
-        assert!(
-            !answers.is_empty() && answers.iter().all(|line| !line.contains("broadcast=0")),
-            "a state digest was answered point-to-point, so the dedup was not what the repair beat\n{}",
-            lines_since(before)
-        );
+        if unicast {
+            assert!(
+                answers.iter().any(|line| !line.contains("unicast=0"))
+                    && answers.iter().all(|line| line.contains("broadcast=0")),
+                "the unicast form answers to the connection of the digest, never on gossip\n{}",
+                lines_since(before)
+            );
+        } else {
+            assert!(
+                !answers.is_empty() && answers.iter().all(|line| !line.contains("broadcast=0")),
+                "a state digest was answered point-to-point, so the dedup was not what the repair beat\n{}",
+                lines_since(before)
+            );
+        }
 
         alice.leave().await.expect("alice leaves");
         bob.leave().await.expect("bob leaves");
