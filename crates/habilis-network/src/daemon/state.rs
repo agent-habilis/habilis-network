@@ -1,5 +1,6 @@
 mod event_loop_state;
 
+mod gossip_msgs;
 mod idle_counters;
 mod latch;
 mod mesh_secrets;
@@ -34,6 +35,7 @@ use crate::util::tuning;
 
 pub use event_loop_state::EventLoopState;
 
+pub(crate) use gossip_msgs::{GossipMsgs, by_variant, gossip_msgs_delta};
 pub(crate) use idle_counters::IdleCounters;
 pub(crate) use latch::Latch;
 pub(crate) use mesh_secrets::MeshSecrets;

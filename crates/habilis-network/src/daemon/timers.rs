@@ -8,10 +8,11 @@ use std::mem;
 use std::time::Duration;
 
 use iroh::Endpoint;
+use iroh_gossip::net::Gossip;
 
 use super::state::{
-    EventLoopState, GossipPathBytes, SocketBytes, WireIn, WireOut, by_class, gossip_path_delta,
-    socket_delta, take_wire_out,
+    EventLoopState, GossipMsgs, GossipPathBytes, SocketBytes, WireIn, WireOut, by_class,
+    by_variant, gossip_msgs_delta, gossip_path_delta, socket_delta, take_wire_out,
 };
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::util::clock::{Instant, millis_saturating};
@@ -85,7 +86,11 @@ fn warn_on_high_resident_memory(
 ///
 /// Takes `&mut` because it also drains [`IdleCounters`](super::state::IdleCounters)
 /// onto the census line — this tick is the reporting interval for them.
-pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &Endpoint) {
+pub(crate) async fn tick_state_refresh(
+    state: &mut EventLoopState,
+    endpoint: &Endpoint,
+    gossip: &Gossip,
+) {
     state.write_peer_count();
     let roster_len = state.peers.len();
     let link_len = state.linked_endpoints.len();
@@ -103,6 +108,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
     let wire_out = take_wire_out();
     let socket = socket_delta(endpoint);
     let gossip_path = gossip_path_delta(state.gossip_handle.as_ref());
+    let gossip_msgs = gossip_msgs_delta(gossip.metrics());
     let links = state.direct_counts();
 
     if state.silent_partition_due(roster_len, Instant::now()) {
@@ -161,7 +167,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         gossip_recursion_closes_total = payload_path::gossip_recursion_closes(),
         "mesh census"
     );
-    log_wire_census(&wire_in, &wire_out, socket, gossip_path);
+    log_wire_census(&wire_in, &wire_out, socket, gossip_path, &gossip_msgs);
 
     // The per-peer conn classification feeds only the DEBUG census
     // below, and each `conn_path` is a `remote_info` actor round-trip.
@@ -263,6 +269,7 @@ fn log_wire_census(
     sent: &WireOut,
     socket: SocketBytes,
     gossip_path: GossipPathBytes,
+    msgs: &GossipMsgs,
 ) {
     tracing::info!(
         target: "habilis_network::lifecycle",
@@ -305,6 +312,17 @@ fn log_wire_census(
         idle_gt_bytes_in = gossip_path.bytes_in,
         idle_gt_not_for_us = gossip_path.not_for_us,
         idle_gt_dropped = gossip_path.dropped,
+        // The messages of the iroh-gossip protocol, by variant: the number and the bytes of what the
+        // actor wrote and read, with the 4 bytes of length prefix of each. `gossip` carries our
+        // frames; the others are the membership and the control of the broadcast layer.
+        idle_gm_nout = %by_variant(&msgs.sent),
+        idle_gm_bout = %by_variant(&msgs.sent_bytes),
+        idle_gm_nin = %by_variant(&msgs.recv),
+        idle_gm_bin = %by_variant(&msgs.recv_bytes),
+        idle_gm_ctrl_out = msgs.ctrl_out,
+        idle_gm_data_out = msgs.data_out,
+        idle_gm_ctrl_in = msgs.ctrl_in,
+        idle_gm_data_in = msgs.data_in,
         "wire census"
     );
 }
