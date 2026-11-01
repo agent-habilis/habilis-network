@@ -172,6 +172,14 @@ function openFiles(): number {
   return Number(Bun.spawnSync(["sysctl", "-n", "kern.num_files"]).stdout.toString().trim());
 }
 
+// The system limit on open files. The limit of one process (`ulimit -n`) is written to host.jsonl, because
+// every daemon inherits it: run the benchmark after `ulimit -n 10240`, as the default of macOS is 256.
+function fileLimit(): number {
+  if (platform() === "linux") return Number(readFileSync("/proc/sys/fs/file-max", "utf8"));
+  return Number(Bun.spawnSync(["sysctl", "-n", "kern.maxfiles"]).stdout.toString().trim());
+}
+const processFileLimit = Bun.spawnSync(["sh", "-c", "ulimit -n"]).stdout.toString().trim();
+
 // RSS of the daemons of this run: the processes that name the state folder of the run.
 function daemonRss(): { daemons: number; rss_kb_sum: number; rss_kb_max: number } {
   const rows = Bun.spawnSync(["ps", "-axo", "rss=,command="]).stdout.toString().split("\n");
@@ -181,7 +189,10 @@ function daemonRss(): { daemons: number; rss_kb_sum: number; rss_kb_max: number 
 
 // The sample goes to host.jsonl at once, outside /tmp: a crash of the host still leaves the data.
 function sample() {
-  const point = { ts: Date.now(), load1: loadavg()[0] ?? 0, avail_bytes: availableBytes(), open_files: openFiles(), ...daemonRss() };
+  const point = {
+    ts: Date.now(), load1: loadavg()[0] ?? 0, avail_bytes: availableBytes(), open_files: openFiles(),
+    file_limit: fileLimit(), ulimit_n: processFileLimit, ...daemonRss(),
+  };
   appendFileSync(`${OUT}/host.jsonl`, JSON.stringify(point) + "\n");
   return point;
 }
@@ -192,6 +203,7 @@ const MIN_AVAILABLE_BYTES = 2 * 1024 ** 3;
 function overLimit(point: ReturnType<typeof sample>): string | null {
   if (point.load1 > MAX_LOAD_PER_CORE * cpus().length) return `load1 ${point.load1.toFixed(1)} is above ${MAX_LOAD_PER_CORE} x ${cpus().length} cores`;
   if (point.avail_bytes < MIN_AVAILABLE_BYTES) return `available memory ${(point.avail_bytes / 1024 ** 3).toFixed(1)} GiB is below 2 GiB`;
+  if (point.open_files > 0.8 * point.file_limit) return `open files ${point.open_files} are above 80% of ${point.file_limit}`;
   return null;
 }
 
