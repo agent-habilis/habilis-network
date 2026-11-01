@@ -1446,7 +1446,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     // interval is itself in that interval's numbers.
     async fn state_refresh(&mut self) {
         self.state.idle.state_refresh += 1;
-        timers::tick_state_refresh(&mut self.state, self.parts.endpoint).await;
+        timers::tick_state_refresh(&mut self.state, self.parts.endpoint, &self.gossip).await;
     }
 
     async fn linkstate(&mut self) {
