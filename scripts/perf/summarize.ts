@@ -317,6 +317,73 @@ function summarize(run: string): string {
   );
 }
 
+interface Phase {
+  name: string;
+  start_ms: number;
+  end_ms: number;
+}
+
+// The ratio of the metadata to the data, by phase. It needs `result.json` (the phase windows)
+// and `oracle.jsonl` (the data that the runner sent); a run folder without them gets no ratio.
+// A census line counts in the phase that holds its time stamp, an oracle line in the phase that
+// holds its `ts`. A census interval that crosses a phase edge lands whole in one phase.
+//
+// - <phase>_meta_bps_per_daemon: for a phase with no data, the received frame bytes per second per daemon.
+// - delivered_data_bytes / frame_meta_per_data / udp_meta_per_data: for a phase with data, the sum of
+//   bytes x receivers of its oracle lines, and the metadata bytes per data byte at the frame layer
+//   (`idle_wire_in`) and at the UDP layer (`idle_net_recv_*`). The frame layer is asserted: wire bytes
+//   below the data bytes mean that the census or the oracle is wrong, and the run fails.
+function phaseReport(run: string): string {
+  if (!existsSync(`${run}/result.json`) || !existsSync(`${run}/oracle.jsonl`)) return "";
+  const phases: Phase[] = JSON.parse(readFileSync(`${run}/result.json`, "utf8")).phases ?? [];
+  const nodes = readdirSync(run).filter((f) => /^n.*\.err$/.test(f));
+  const inPhase = (phase: Phase, at: number) => at >= phase.start_ms && at < phase.end_ms;
+  const wire = new Map<string, number>();
+  const udp = new Map<string, number>();
+  const delivered = new Map<string, number>();
+  const add = (into: Map<string, number>, name: string, value: number) =>
+    into.set(name, (into.get(name) ?? 0) + value);
+  for (const file of nodes) {
+    for (const line of lines(clean(readFileSync(`${run}/${file}`, "utf8")))) {
+      const stamp = line.match(/^(\d{4}-\d\d-\d\dT[0-9:.]+Z)/);
+      if (!stamp || !line.includes("mesh census")) continue;
+      const phase = phases.find((p) => inPhase(p, Date.parse(stamp[1] ?? "")));
+      if (!phase) continue;
+      add(wire, phase.name, sum(numbers(line, /\bidle_wire_in=(\d+)/)));
+      add(udp, phase.name, sum(["ip", "relay", "custom"].flatMap((via) => numbers(line, new RegExp(`\\bidle_net_recv_${via}=(\\d+)`)))));
+    }
+  }
+  for (const line of lines(readFileSync(`${run}/oracle.jsonl`, "utf8"))) {
+    const sent: { bytes: number; receivers: number; ts: number } = JSON.parse(line);
+    const phase = phases.find((p) => inPhase(p, sent.ts));
+    if (phase) add(delivered, phase.name, sent.bytes * sent.receivers);
+  }
+  const fields: string[] = [];
+  for (const phase of phases) {
+    const data = delivered.get(phase.name) ?? 0;
+    const frames = wire.get(phase.name) ?? 0;
+    if (frames < data) {
+      throw new Error(`frame layer: phase ${phase.name} received ${frames} wire bytes, below ${data} delivered data bytes`);
+    }
+    if (data === 0) {
+      const seconds = (phase.end_ms - phase.start_ms) / 1000;
+      fields.push(`${phase.name}_meta_bps_per_daemon=${(frames / (seconds * nodes.length)).toFixed(1)}`);
+    } else {
+      fields.push(
+        `delivered_data_bytes=${data}`,
+        `frame_meta_per_data=${((frames - data) / data).toFixed(2)}`,
+        `udp_meta_per_data=${(((udp.get(phase.name) ?? 0) - data) / data).toFixed(2)}`,
+      );
+    }
+  }
+  return fields.join(" ");
+}
+
 for (const run of process.argv.slice(2).map((r) => r.replace(/\/+$/, ""))) {
-  console.log(summarize(run));
+  try {
+    console.log(`${summarize(run)} | ${phaseReport(run)}`);
+  } catch (error) {
+    console.error(`${path.basename(run)}: ${(error as Error).message}`);
+    process.exitCode = 1;
+  }
 }
