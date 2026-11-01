@@ -130,6 +130,41 @@ pub async fn broadcast_msg(sender: &MeshSender, msg: &Verified) {
     }
 }
 
+/// Whether a maintenance frame in a full mesh goes to the neighbors only. The A/B builds flip it.
+const MAINTENANCE_NEIGHBORS: bool = false;
+
+/// Whether a maintenance frame can go to the neighbors only. A neighbor frame is not relayed, so
+/// it reaches the whole roster only when every peer of the roster is a neighbor.
+fn neighbors_reach_roster(roster_len: usize, link_len: usize) -> bool {
+    roster_len > 0 && link_len == roster_len
+}
+
+/// Broadcast a maintenance frame (digest, alive, linkstate). In a full mesh it goes to the
+/// neighbors only, which skips the lazy push and the cache of the swarm scope. In a partial mesh
+/// it keeps the swarm scope, so a peer that is not a neighbor still hears it.
+pub(crate) async fn broadcast_maintenance(
+    sender: &MeshSender,
+    state: &EventLoopState,
+    msg: &Verified,
+) {
+    if !(MAINTENANCE_NEIGHBORS
+        && neighbors_reach_roster(state.peers.len(), state.linked_endpoints.len()))
+    {
+        broadcast_msg(sender, msg).await;
+        return;
+    }
+    crate::logging::messages::log_out(msg);
+    if let Ok(bytes) = msg.serialize()
+        && let Err(error) = sender.broadcast_neighbors(bytes).await
+    {
+        tracing::warn!(
+            target: "habilis_network::gossip",
+            %error,
+            "maintenance neighbor broadcast failed"
+        );
+    }
+}
+
 /// Start an RTT round: arm it and broadcast the first probe. The event loop sends the second probe
 /// at the middle of the window (`send_second_probe`); the round ends at its deadline and reports
 /// the first pong of each peer. This is the one place that starts a round.
@@ -422,9 +457,17 @@ fn offer_for_parked(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, frame: &Ve
 mod tests {
     use habilis_network_test_tracing::test;
 
-    use super::{mark_parked, peer_info_json};
+    use super::{mark_parked, neighbors_reach_roster, peer_info_json};
     use crate::protocol::{MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick};
+
+    #[test]
+    fn a_neighbor_frame_is_for_a_full_mesh_only() {
+        assert!(neighbors_reach_roster(3, 3), "every peer is a neighbor");
+        assert!(!neighbors_reach_roster(0, 0), "nobody to reach");
+        assert!(!neighbors_reach_roster(3, 2), "a peer behind a neighbor");
+        assert!(!neighbors_reach_roster(2, 3), "a link that is not on the roster");
+    }
 
     #[test]
     fn our_peer_info_says_so_while_we_hold_the_rendezvous() {

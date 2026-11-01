@@ -1110,6 +1110,7 @@ fn spawn_sampler(table: Weak<Mutex<Inner>>, period: Duration) {
     n0_future::task::spawn(async move {
         loop {
             n0_future::time::sleep(period).await;
+            crate::daemon::idle_counters::note_sampler_wake();
             let Some(table) = table.upgrade() else {
                 return;
             };

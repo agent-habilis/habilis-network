@@ -91,7 +91,10 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
     // this one. The two cancel: a line's `wakeups` still equals the sum of its
     // own arm columns. Do not "correct" it by adding one here; that
     // double-counts the census iteration and inflates the total every interval.
-    let idle = state.idle.take();
+    let reading = state.idle.take();
+    let idle = reading.loop_arms;
+    let ext = idle.ext;
+    let cpu = reading.cpu.unwrap_or_default();
     let links = state.direct_counts();
 
     if state.silent_partition_due(roster_len, Instant::now()) {
@@ -141,7 +144,30 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         idle_antientropy = idle.antientropy,
         idle_state_refresh = idle.state_refresh,
         idle_linkstate = idle.linkstate,
-        idle_external = idle.external,
+        idle_external = ext.total(),
+        idle_ext_gossip_rx = ext.gossip_rx,
+        idle_ext_neighbor_up = ext.neighbor_up,
+        idle_ext_neighbor_down = ext.neighbor_down,
+        idle_ext_lagged = ext.lagged,
+        idle_ext_gossip_end = ext.gossip_end,
+        idle_ext_unicast = ext.unicast,
+        idle_ext_path_rx = ext.path_rx,
+        idle_ext_address = ext.address,
+        idle_ext_direct_rx = ext.direct_rx,
+        idle_ext_rung_change = ext.rung_change,
+        idle_ext_rung_report = ext.rung_report,
+        idle_ext_probe_verdict = ext.probe_verdict,
+        idle_ext_ipc = ext.ipc,
+        idle_ext_http = ext.http,
+        idle_ext_session = ext.session,
+        idle_ext_deadlines = ext.deadlines,
+        idle_ext_other = ext.other,
+        // Off the loop: their own tasks, so they are not in `idle_wakeups`.
+        idle_ppid = reading.ppid,
+        idle_sampler = reading.sampler,
+        // Process CPU time of the interval, from `getrusage`; 0 where it is unreadable.
+        cpu_user_ms = millis_saturating(cpu.user),
+        cpu_sys_ms = millis_saturating(cpu.system),
         idle_broadcasts = idle.broadcasts,
         idle_resent = idle.resent,
         idle_resend_dropped = idle.resend_dropped,

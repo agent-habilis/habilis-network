@@ -37,6 +37,7 @@ const _: () = assert!(
     "MAX_MESSAGE_SIZE leaves too little headroom under iroh-gossip's DEFAULT_MAX_MESSAGE_SIZE"
 );
 
+pub(crate) use broadcast::broadcast_maintenance;
 pub use broadcast::{
     StateMergeParams, app_frame, broadcast_msg, broadcast_state_merge, send_app, start_ping_round,
     unicast_farewell,

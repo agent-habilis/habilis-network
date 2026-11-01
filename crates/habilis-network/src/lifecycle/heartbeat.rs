@@ -22,9 +22,7 @@ pub(crate) async fn tick_alive(
         return;
     }
     let msg = Message::new_alive(mesh, author).sign(&state.identity);
-    if let Ok(bytes) = msg.serialize() {
-        let _ = sender.broadcast(bytes).await;
-    }
+    crate::gossip::broadcast_maintenance(sender, state, &msg).await;
     state.idle.broadcasts += 1;
     state.last_sent_at = Instant::now();
     tracing::trace!("alive keepalive broadcast");

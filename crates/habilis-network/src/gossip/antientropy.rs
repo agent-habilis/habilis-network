@@ -37,7 +37,6 @@ use crate::util::tuning::{
     FAST_ROUND_MIN_INTERVAL, FAST_ROUND_RETRY, antientropy_max_resend,
 };
 
-use super::broadcast_msg;
 
 /// One window on the wire: its `[lo, hi]` bounds (`hi` timestamp `i64::MAX` ⇒
 /// open-ended), each a timestamp and the id key of the message at that edge, plus
@@ -151,11 +150,8 @@ pub(crate) async fn broadcast_digest(
     };
     tracing::trace!(ids = total_ids, "anti-entropy digest broadcast");
     state.idle.broadcasts += 1;
-    broadcast_msg(
-        sender,
-        &Message::new_digest(mesh, author, body).sign(&state.identity),
-    )
-    .await;
+    let digest = Message::new_digest(mesh, author, body).sign(&state.identity);
+    super::broadcast_maintenance(sender, state, &digest).await;
 }
 
 /// The windows a digest advertises: the newest, plus the next slice of the
@@ -416,7 +412,7 @@ async fn broadcast_state_digest(
     };
     state.idle.broadcasts += 1;
     tracing::debug!(me = %origin.author, ?channel, heads = heads_key(&digest), ?trigger, "broadcast a state digest on gossip");
-    broadcast_msg(sender, &digest).await;
+    super::broadcast_maintenance(sender, state, &digest).await;
 }
 
 /// The signed heads digest for `channel`, or `None` while no gossip path can

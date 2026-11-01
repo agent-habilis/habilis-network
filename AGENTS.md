@@ -166,6 +166,12 @@ A message is surfaced if and only if its timestamp is not before `joined_at`. On
 
 Arrival and departure are surfaced once each, as `joined` and `left`, keyed by nickname. The heartbeat adds `peer_timeout` and `peer_return`. All of them obey the join horizon. A raw link to a node id is not peer lifecycle, so it has no event of its own.
 
+### Memory is bounded
+
+A mesh must run for 1 year or more with no restart. Every data structure that lives as long as the process has a bound: a cap, a time limit, or both. This covers every map, set, queue, log, cache, document, table of dead peers and list of pending items. Only memory counts. Log files on disk are out of scope.
+
+State the bound where you declare the collection. Use a bounded type (`BoundedFifoSet`, `BoundedQueue`) or write one comment with the cap and the reason for its size. Write down what happens when the bound is full: drop the oldest item, or refuse the new one. A new collection with no bound fails review. A bound has proof: a test that feeds the collection 10 times its cap, or a size gauge in the census line.
+
 ### Lookups are independently sufficient
 
 Each lookup bootstraps a mesh and runs it with no other lookup present. An added lookup adds reliability and never a feature.

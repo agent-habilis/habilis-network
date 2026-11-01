@@ -562,7 +562,7 @@ async fn advertise_links(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, only_
     // that every digest asks us for again.
     let vector_msg =
         crate::protocol::Message::new_link_state(ctx.mesh, ctx.author, body).sign(&state.identity);
-    gossip::broadcast_msg(ctx.sender, &vector_msg).await;
+    gossip::broadcast_maintenance(ctx.sender, state, &vector_msg).await;
     // The vector that this node just sent is what a peer that turned our offer away lacked: the
     // wait that its turn-aways earned ends, and the underlay offers again at once. One offer per
     // vector sent: a link event, or the tick.
@@ -811,26 +811,26 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         }
         tokio::select! {
             () = sleep_until_opt(state.ping_round.as_ref().map(|round| round.deadline)) => {
-                state.idle.external += 1;
+                state.idle.ext.deadlines += 1;
                 finalize_ping_round(&mut state, sink.as_ref());
             }
             () = sleep_until_opt(state.ping_round.as_ref().and_then(|round| round.second_probe_at())) => {
-                state.idle.external += 1;
+                state.idle.ext.deadlines += 1;
                 let ctx = parts.ctx(&sender);
                 gossip::send_second_probe(&mut state, &ctx).await;
             }
             () = sleep_until_opt(app.earliest_poll_deadline()) => {
-                state.idle.external += 1;
+                state.idle.ext.deadlines += 1;
                 app.poll_deadline_elapsed();
             }
             () = sleep_until_opt(app.earliest_deadline()) => {
-                state.idle.external += 1;
+                state.idle.ext.deadlines += 1;
                 app.expire_deadlines(TokioInstant::now());
             }
             ipc_msg = recv_opt(&mut ipc_rx) => match ipc_msg {
                 None => ipc_rx = None,
                 Some((cmd, resp_tx)) => {
-                    state.idle.external += 1;
+                    state.idle.ext.ipc += 1;
                     let ctx = parts.ctx(&sender);
                     let req = super::app::IpcRequest {
                         cmd,
@@ -845,29 +845,29 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             http_req = recv_opt(&mut http_rx) => match http_req {
                 None => http_rx = None,
                 Some(req) => {
-                    state.idle.external += 1;
+                    state.idle.ext.http += 1;
                     let ctx = parts.ctx(&sender);
                     app.handle_http(req, &mut state, &ctx).await;
                 }
             },
             event = receiver.next(), if state.gossip_open => {
-                state.idle.external += 1;
+                state.idle.ext.note_gossip(event.as_ref());
                 let ctx = parts.ctx(&sender);
                 gossip::handle_gossip_event(event, &mut state, &mut app, &ctx).await;
             }
             Some(outcome) = direct_rx.recv() => {
-                state.idle.external += 1;
+                state.idle.ext.direct_rx += 1;
                 let ctx = parts.ctx(&sender);
                 crate::transport::probe::on_outcome(outcome, &mut state, &ctx).await;
                 crate::transport::probe::ensure_watchers(&mut state, ctx.endpoint.id(), ctx.rendezvous_id);
             }
             Some((msg, bytes)) = flush_failed_rx.recv() => {
-                state.idle.external += 1;
+                state.idle.ext.other += 1;
                 let ctx = parts.ctx(&sender);
                 gossip::requeue_failed(&mut state, &ctx, msg, bytes);
             }
             () = slot_freed.notified() => {
-                state.idle.external += 1;
+                state.idle.ext.other += 1;
                 let ctx = parts.ctx(&sender);
                 crate::transport::probe::top_up_lane_offers(&mut state, &ctx).await;
             }
@@ -876,7 +876,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             // now, and not at the alive tick. A session that the round attached is an edge of this
             // node: its vector goes out at once, and nothing goes out when the set did not change.
             () = underlay_slot_freed.notified() => {
-                state.idle.external += 1;
+                state.idle.ext.other += 1;
                 #[cfg(feature = "multihop")]
                 {
                     crate::transport::underlay_webrtc::tick_now(&state);
@@ -888,20 +888,20 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             // it refused: the best first hop to a pair on the relay can be another now, and
             // waiting for the stuck deadline and a link-state tick would cost 20 s or more.
             () = route_wake.notified() => {
-                state.idle.external += 1;
+                state.idle.ext.other += 1;
                 let ctx = parts.ctx(&sender);
                 route_wake_arm(&mut state, &ctx);
             }
             lan_event = recv_opt(&mut lan_contacts) => match lan_event {
                 None => lan_contacts = None,
                 Some(event) => {
-                    state.idle.external += 1;
+                    state.idle.ext.other += 1;
                     let ctx = parts.ctx(&sender);
                     gossip::lan::on_lan_event(event, &mut state, &ctx).await;
                 }
             },
             Some(address) = address_changes.next() => {
-                state.idle.external += 1;
+                state.idle.ext.address += 1;
                 if state.address_flood_due(&address) {
                     let ctx = parts.ctx(&sender);
                     gossip::broadcast_peer_info(&mut state, &ctx).await;
@@ -909,7 +909,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 }
             }
             Some(change) = path_rx.recv() => {
-                state.idle.external += 1;
+                state.idle.ext.path_rx += 1;
                 let ctx = parts.ctx(&sender);
                 if Some(change.peer) == state.rendezvous_id {
                     crate::transport::webrtc::offer_rendezvous_on_path_loss(&mut state, &ctx);
@@ -920,7 +920,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             // Inbound unicast rides the *same* validate + dedup path as gossip (`ingest`).
             frame = recv_opt(&mut unicast_rx) => match frame {
                 Some(bytes) => {
-                    state.idle.external += 1;
+                    state.idle.ext.unicast += 1;
                     gossip::ingest(bytes, &mut state, &mut app, &parts.ctx(&sender)).await;
                 }
                 None => unicast_rx = None,
@@ -994,12 +994,12 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             }
             // A bootstrap rung chosen off-loop (startup probe / beacon self-monitor); apply it cheaply.
             // `Ok(())` only: a closed channel (impossible while the beacon params live) disables the arm.
-            // Counted `external`: like the probe verdict below it is beacon
+            // Counted with the external arms: like the probe verdict below it is beacon
             // work driven from off-loop, not by one of our maintenance tickers,
-            // and it is silent on a settled daemon — so `external` still reads
+            // and it is silent on a settled daemon — so `idle_external` still reads
             // 0 when idle while `wakeups` stays equal to the column sum.
             Ok(()) = rung_rx.changed() => {
-                state.idle.external += 1;
+                state.idle.ext.rung_change += 1;
                 apply_rung_change(&mut state, &mut rendezvous_params, &mut rendezvous, &rung_rx);
             }
             // The off-loop probe-before-claim answered. Its own arm rather
@@ -1008,7 +1008,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             // 15s interval before anyone binds it would hand back the claim
             // latency this change was meant to leave untouched.
             found_rival = beacon::probe_verdict(&mut rival_probe) => {
-                state.idle.external += 1;
+                state.idle.ext.probe_verdict += 1;
                 let found_rival = verdict_after_known_holders(found_rival, &state);
                 let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
                 state.probe_backoff.note_verdict(found_rival, Instant::now(), spread);
@@ -1046,7 +1046,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             // A probe task of the private ladder answered. Its own arm, so that the walk that
             // asked for it walks again at once and no tick has to wait.
             Some(report) = rung_reports.recv() => {
-                state.idle.external += 1;
+                state.idle.ext.rung_report += 1;
                 state.rungs.note(report, Instant::now());
                 let ctx = parts.ctx(&sender);
                 let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
@@ -1122,7 +1122,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             req = recv_opt(&mut external_req_rx) => match req {
                 None => external_req_rx = None,
                 Some(req) => {
-                    state.idle.external += 1;
+                    state.idle.ext.session += 1;
                     let ctx = parts.ctx(&sender);
                     if app.handle_session(req, &mut state, &ctx).await {
                         state.last_sent_at = Instant::now();

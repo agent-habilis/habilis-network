@@ -38,6 +38,15 @@ impl MeshSender {
         self.current().broadcast(message.into_bytes()).await
     }
 
+    /// Broadcast to the direct neighbors only: no relay, no lazy push, no message cache.
+    /// # Errors
+    /// The gossip topic has been closed, or the send buffer is full.
+    pub async fn broadcast_neighbors(&self, message: WireFrame) -> Result<(), ApiError> {
+        self.current()
+            .broadcast_neighbors(message.into_bytes())
+            .await
+    }
+
     pub(crate) async fn join_peers(&self, peers: Vec<EndpointId>) -> Result<(), ApiError> {
         self.current().join_peers(peers).await
     }
