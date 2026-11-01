@@ -38,7 +38,7 @@ pub(crate) use idle_counters::IdleCounters;
 pub(crate) use latch::Latch;
 pub(crate) use mesh_secrets::MeshSecrets;
 pub(crate) use ping_round::PingRound;
-pub(crate) use socket_bytes::{SocketBytes, socket_delta};
+pub(crate) use socket_bytes::{GossipPathBytes, SocketBytes, gossip_path_delta, socket_delta};
 pub(crate) use state_init::StateInit;
 pub(crate) use wire_tally::{FrameShape, WireIn, WireOut, by_class, note_wire_out, take_wire_out};
 #[cfg(test)]
