@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 use std::mem;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::{Mutex, PoisonError};
 
 use iroh_gossip::api::{ApiError, Event};
 
@@ -16,6 +18,11 @@ use crate::util::process_usage::{CpuTimes, cpu_times};
 static PPID_WAKES: AtomicU64 = AtomicU64::new(0);
 /// Wakes of the admission sampler (`transport::admission`), for the same reason.
 static SAMPLER_WAKES: AtomicU64 = AtomicU64::new(0);
+
+/// Held by `take` and by the test that counts wakes, so that a `take` of another test cannot drain
+/// the statics between a count and the read of it.
+#[cfg(test)]
+static STATICS_GATE: Mutex<()> = Mutex::new(());
 
 /// Count one wake of the orphan watch.
 pub(crate) fn note_ppid_wake() {
@@ -163,6 +170,12 @@ impl IdleCounters {
     /// interval's own work rather than a running total a reader has to
     /// difference (and that a rotated log would corrupt).
     pub(crate) fn take(&mut self) -> IdleReading {
+        #[cfg(test)]
+        let _gate = STATICS_GATE.lock().unwrap_or_else(PoisonError::into_inner);
+        self.take_ungated()
+    }
+
+    fn take_ungated(&mut self) -> IdleReading {
         let cpu_now = cpu_times();
         let mark = self.cpu_mark;
         let loop_arms = mem::take(self);
@@ -287,11 +300,13 @@ mod tests {
     #[test]
     fn take_drains_the_off_loop_wakes() {
         let mut counters = IdleCounters::default();
+        // No `take` of another test runs between the counts and the read. A task of another test can
+        // still bump the statics, so only a lower bound holds.
+        let _gate = STATICS_GATE.lock().unwrap_or_else(PoisonError::into_inner);
         note_ppid_wake();
         note_sampler_wake();
         note_sampler_wake();
-        // Other tests can bump the same statics in parallel, so only a lower bound holds.
-        let reading = counters.take();
+        let reading = counters.take_ungated();
         assert!(reading.ppid >= 1);
         assert!(reading.sampler >= 2);
     }
