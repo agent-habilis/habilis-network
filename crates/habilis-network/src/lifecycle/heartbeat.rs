@@ -211,6 +211,67 @@ mod tests {
     }
 
     #[test]
+    fn a_peer_that_died_during_a_stall_is_evicted_one_timeout_later() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let timeout = tuning::alive_timeout();
+        let long_ago = Instant::now()
+            .checked_sub(timeout * 3)
+            .expect("the monotonic clock has run past three alive timeouts since boot");
+        for name in ["swift-cedar", "lost-heron"] {
+            state.last_seen.insert(nick(name), long_ago);
+            state.peers.insert(nick(name));
+            state.surfaced.insert(nick(name));
+        }
+
+        forgive_stall(&mut state, timeout * 2);
+        tick_sweep(&mut state, &SilentSink);
+        assert_eq!(state.peers.len(), 2, "the stall is forgiven");
+
+        // One timeout later: swift-cedar spoke 5 s ago, lost-heron died during the stall.
+        let spoke = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .expect("the monotonic clock has run past 5 s since boot");
+        let silent = Instant::now()
+            .checked_sub(timeout + Duration::from_secs(1))
+            .expect("the monotonic clock has run past the alive timeout since boot");
+        state.last_seen.insert(nick("swift-cedar"), spoke);
+        state.last_seen.insert(nick("lost-heron"), silent);
+        tick_sweep(&mut state, &SilentSink);
+        assert!(
+            state.peers.contains("swift-cedar") && !state.peers.contains("lost-heron"),
+            "the peer that died in the stall goes one timeout later: {:?}",
+            state.peers
+        );
+        assert!(state.quiet.contains("lost-heron"), "and it is quiet");
+    }
+
+    #[test]
+    fn the_holder_keys_follow_the_roster() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.peers.insert(nick("swift-cedar"));
+        state.quiet.insert(nick("lost-heron"));
+        for (name, byte) in [("swift-cedar", 1), ("lost-heron", 2), ("calm-otter", 3)] {
+            state
+                .peer_keys
+                .insert(nick(name), protocol::AuthorKey::from([byte; 32]));
+        }
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.peer_keys.contains_key("swift-cedar")
+                && state.peer_keys.contains_key("lost-heron"),
+            "a peer and a quiet peer keep their key"
+        );
+        assert!(
+            !state.peer_keys.contains_key("calm-otter"),
+            "a nickname that is neither a peer nor quiet drops its key"
+        );
+    }
+
+    #[test]
     fn a_quiet_peer_expires_after_the_quiet_ttl() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();

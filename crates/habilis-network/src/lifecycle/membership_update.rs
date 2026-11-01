@@ -119,9 +119,11 @@ pub(crate) fn compute(
         | MessageKind::LinkState
         | _ => !known,
     };
+    // A first contact is an arrival only when the frame proves presence: an old durable frame
+    // that a relay re-sends (a peer that left long ago, or after the quiet TTL) is no arrival.
     MembershipUpdate {
         returned: quiet,
-        joined_new: unseen,
+        joined_new: unseen && proves_presence(kind, timestamp),
         stale: false,
     }
 }
@@ -371,6 +373,90 @@ mod tests {
                 "a replay stamped {skew} s after the last frame heard"
             );
         }
+    }
+
+    /// A first contact is an arrival only when the frame proves presence. A peer info or a digest
+    /// that a relay re-sends from a peer that left an hour ago is no arrival.
+    #[test]
+    fn an_old_durable_frame_from_an_unknown_peer_is_no_arrival() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let state = fresh_state();
+        let who = nick("swift-cedar");
+        let old = UnixSecs::now() - Duration::from_hours(2);
+        for kind in [
+            MessageKind::PeerInfo,
+            MessageKind::StateDigest,
+            MessageKind::MetaDigest,
+            MessageKind::Digest,
+        ] {
+            let stale_copy = compute(&kind, &who, old, &state);
+            assert!(
+                !stale_copy.joined_new,
+                "{kind:?} stamped 2 h ago made an arrival"
+            );
+            let fresh = compute(&kind, &who, UnixSecs::now(), &state);
+            assert!(fresh.joined_new, "{kind:?} stamped now is an arrival");
+        }
+    }
+
+    /// The clocks of two nodes can differ. Within the margin (a third of the alive timeout, 30 s),
+    /// a replay is still stale and a fresh durable frame still returns a quiet peer.
+    #[test]
+    fn a_clock_30_secs_off_changes_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (state, who) = quiet_since_100_secs();
+        let heard_at = UnixSecs::now() - Duration::from_secs(100);
+        let alive = MessageKind::Presence {
+            subtype: PresenceSubtype::Alive,
+        };
+        let ahead = compute(&alive, &who, heard_at + Duration::from_secs(30), &state);
+        assert!(
+            ahead.stale && !ahead.returned,
+            "a replay from a clock 30 s ahead"
+        );
+        let behind = compute(
+            &MessageKind::Meta,
+            &who,
+            UnixSecs::now() - Duration::from_secs(30),
+            &state,
+        );
+        assert!(
+            behind.returned && !behind.stale,
+            "a meta change from a clock 30 s behind"
+        );
+    }
+
+    /// Known limit, not fixed: a sender whose clock runs 120 s ahead makes a replay of its last
+    /// frame look like a return. The check compares a stamp with our clock, so it cannot be
+    /// exact for a skew above the margin.
+    #[test]
+    #[ignore = "known limit: a sender clock more than 30 s ahead"]
+    fn a_replay_from_a_clock_120_secs_ahead_is_stale() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (state, who) = quiet_since_100_secs();
+        let heard_at = UnixSecs::now() - Duration::from_secs(100);
+        let alive = MessageKind::Presence {
+            subtype: PresenceSubtype::Alive,
+        };
+        let replay = compute(&alive, &who, heard_at + Duration::from_secs(120), &state);
+        assert!(replay.stale && !replay.returned, "{replay:?}");
+    }
+
+    /// Known limit, not fixed: a sender whose clock runs 120 s behind stamps every frame older
+    /// than the alive timeout, so a peer that sends only meta changes or peer info never proves
+    /// life and never returns.
+    #[test]
+    #[ignore = "known limit: a sender clock more than 90 s behind"]
+    fn a_meta_change_from_a_clock_120_secs_behind_returns_a_quiet_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (state, who) = quiet_since_100_secs();
+        let update = compute(
+            &MessageKind::Meta,
+            &who,
+            UnixSecs::now() - Duration::from_secs(120),
+            &state,
+        );
+        assert!(update.returned && !update.stale, "{update:?}");
     }
 
     /// A goodbye is final for the key that said it, whatever the kind of the frame and whatever its

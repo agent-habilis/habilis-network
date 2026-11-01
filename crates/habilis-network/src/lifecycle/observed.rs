@@ -87,6 +87,7 @@ pub(crate) fn observe(
     if surfaceable
         && !update.returned
         && !update.stale
+        && membership_update::proves_presence(&message.kind, message.timestamp)
         && !state.surfaced.contains(message.author.as_str())
         && !matches!(message.kind, MessageKind::Presence { .. })
     {
@@ -809,6 +810,45 @@ mod churn_red {
                     .any(|line| line == "return swift-cedar"),
                 "a fresh meta change did not return the quiet peer: {:?}",
                 rig.sink.lines()
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// An hour after a peer went quiet it is no longer known. A relay then re-sends an old frame
+    /// of that peer. A durable frame stamped long ago is no arrival, even when the stamp lies after
+    /// our own join; a fresh one is.
+    #[test]
+    fn a_replay_after_the_quiet_ttl_is_no_arrival() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let peer = Identity::generate();
+            let mut state = fresh_state();
+            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
+            let old = UnixSecs::now() - Duration::from_hours(2);
+            for make in [peer_info, state_digest, meta_digest, state_change] {
+                let replay = make(&rig.mesh, &who, &peer, old);
+                assert!(
+                    receive(&replay, &mut state, &context),
+                    "the frame is new to the seen set"
+                );
+            }
+            assert!(
+                rig.sink.lines().is_empty() && !state.peers.contains(who.as_str()),
+                "an old durable frame made an arrival: {:?}",
+                rig.sink.lines()
+            );
+
+            let fresh = peer_info(&rig.mesh, &who, &peer, UnixSecs::now());
+            assert!(
+                receive(&fresh, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert!(
+                state.peers.contains(who.as_str()) && !rig.sink.lines().is_empty(),
+                "a fresh peer info is an arrival"
             );
             rig.endpoint.close().await;
         });
