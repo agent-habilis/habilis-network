@@ -275,10 +275,11 @@ function summarize(run: string): string {
     `env_out=${percent(wireOut - (totals.get("body_out") ?? 0), wireOut)} ` +
     `bin_fresh=${pairsText(kinds.fresh)} bin_dup=${pairsText(kinds.dup)} bout=${pairsText(kinds.out)} ` +
     `tags_in=${pairsText(kinds.tagsIn)} tags_out=${pairsText(kinds.tagsOut)}`;
-  // The data tags are what users create. The tags a2a_req and a2a_resp carry directed calls that
+  // The data tags are what users create; `msg` and `app_msg` are the tags of the engine example driver
+  // and of the engine tests. The tags a2a_req and a2a_resp carry directed calls that
   // can hold user text or a protocol call, so they are reported apart. The census line names only
   // its 6 largest tags per interval, so a small data tag can be missing from the sum.
-  const dataTags = ["a2a_broadcast", "a2a_msg", "a2a_status", "a2a_artifact"];
+  const dataTags = ["a2a_broadcast", "a2a_msg", "a2a_status", "a2a_artifact", "msg", "app_msg"];
   const callTags = ["a2a_req", "a2a_resp"];
   const tagSum = (tags: Map<string, number>, names: string[]) => names.reduce((sum, name) => sum + (tags.get(name) ?? 0), 0);
   const ratio = (metadata: number, data: number) => (data > 0 ? (metadata / data).toFixed(1) : "no-data");
