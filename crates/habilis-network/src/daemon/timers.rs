@@ -4,6 +4,8 @@
 //! `lifecycle::heartbeat`; the gossip healer in `gossip::heal`.
 
 use crate::daemon::state::{Latch, Standing};
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use iroh::Endpoint;
@@ -20,6 +22,7 @@ use crate::util::{resident_memory, tuning, unix_secs};
 
 use crate::gossip::PathSummary;
 use crate::net;
+use crate::protocol::{Channel, Nickname};
 use crate::transport::payload_path;
 /// The warn-only resident-memory leak check, run on the slow (1-minute)
 /// housekeeping tick (see `run`'s `intervals.prune`). Kept on this tick now
@@ -204,7 +207,15 @@ pub(crate) async fn tick_state_refresh(
         gossip_recursion_closes_total = payload_path::gossip_recursion_closes(),
         "mesh census"
     );
-    log_wire_census(&idle, &reading.wire_out, socket, gossip_path, &gossip_msgs);
+    let join_phase = in_join_phase(state.joined_at, unix_secs::UnixSecs::now());
+    log_wire_census(
+        &idle,
+        &reading.wire_out,
+        socket,
+        gossip_path,
+        &gossip_msgs,
+        join_phase,
+    );
 
     // The per-peer conn classification feeds only the DEBUG census
     // below, and each `conn_path` is a `remote_info` actor round-trip.
@@ -297,6 +308,59 @@ pub(crate) fn note_tick_gap(
     (mono_gap, wall_gap)
 }
 
+/// How long after the join a node is in its join phase, the time of its backfill.
+const JOIN_PHASE: Duration = Duration::from_mins(5);
+
+/// Whether a node that joined at `joined_at` is still in its join phase at `now`.
+fn in_join_phase(joined_at: unix_secs::UnixSecs, now: unix_secs::UnixSecs) -> bool {
+    now.since(joined_at) < JOIN_PHASE
+}
+
+/// The entries of the per-peer map that belong to nobody on the roster and are not ours: members
+/// that left and whose entry stays in the document for good.
+fn absent_entries(nicks: &[String], roster: &HashSet<Nickname>, me: &Nickname) -> usize {
+    let absent = |nick: &&String| {
+        let owner = Nickname::try_new(nick);
+        owner.is_ok_and(|owner| owner != *me && !roster.contains(&owner))
+    };
+    nicks.iter().filter(absent).count()
+}
+
+/// Every how many doc censuses the whole document is encoded as well: that costs CPU, and its size
+/// moves slowly.
+const DOC_SAVE_EVERY: u64 = 5;
+
+static DOC_CENSUS_RUNS: AtomicU64 = AtomicU64::new(0);
+
+/// The sizes of the meta and the state document, on a line of their own, once per call (the
+/// 1-minute tick): the changes and frames that the node keeps for good, their bytes, the JSON, the
+/// save every [`DOC_SAVE_EVERY`] runs, and the entries of the per-peer map of members that are
+/// gone. A reader of the numbers can tell what a keyframe scheme would save.
+pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &Nickname) {
+    let run = DOC_CENSUS_RUNS.fetch_add(1, Ordering::Relaxed);
+    let with_save = run % DOC_SAVE_EVERY == 0;
+    let meta = state.doc_mut(Channel::Meta).census(with_save);
+    let shared = state.doc_mut(Channel::State).census(with_save);
+    let absent = absent_entries(&meta.peer_nicks, &state.peers, me);
+    tracing::info!(
+        target: "habilis_network::lifecycle",
+        doc_meta_changes = meta.changes,
+        doc_meta_frames = meta.frames,
+        doc_meta_frame_bytes = meta.frame_bytes,
+        doc_meta_save_bytes = meta.save_bytes.unwrap_or(0),
+        doc_meta_json_bytes = meta.json_bytes,
+        doc_meta_peer_entries = meta.peer_nicks.len(),
+        doc_meta_absent_entries = absent,
+        doc_state_changes = shared.changes,
+        doc_state_frames = shared.frames,
+        doc_state_frame_bytes = shared.frame_bytes,
+        doc_state_save_bytes = shared.save_bytes.unwrap_or(0),
+        doc_state_json_bytes = shared.json_bytes,
+        doc_save_taken = with_save,
+        "doc census"
+    );
+}
+
 /// The wire bytes of the interval by kind of frame, on a line of their own: the census line is at
 /// the limit of one function, and a reader of that line takes the last line that names it.
 /// `idle_bin_*` are frames received (first sightings and repeats), `idle_bout*` frames handed to the
@@ -307,9 +371,11 @@ fn log_wire_census(
     socket: SocketBytes,
     gossip_path: GossipPathBytes,
     msgs: &GossipMsgs,
+    join_phase: bool,
 ) {
     tracing::info!(
         target: "habilis_network::lifecycle",
+        idle_join_phase = join_phase,
         idle_bin_fresh = %by_class(&idle.wire_in.fresh),
         idle_bin_dup = %by_class(&idle.wire_in.dup),
         idle_bin_cdup = %by_class(&idle.wire_in.cdup),
@@ -368,8 +434,72 @@ fn log_wire_census(
 mod tests {
     use crate::daemon::state::Latch;
     use crate::testing;
+    use crate::util::unix_secs::UnixSecs;
+    use std::collections::HashSet;
 
     use crate::gossip::event::CountingSink;
+
+    /// The join phase is the first 5 minutes after the join, and the census says so.
+    #[test]
+    fn the_join_phase_lasts_5_minutes() {
+        let joined = UnixSecs::from_secs(1_700_000_000);
+        let at = |secs: i64| UnixSecs::from_secs(1_700_000_000 + secs);
+        assert!(super::in_join_phase(joined, at(0)), "at the join");
+        assert!(
+            super::in_join_phase(joined, at(299)),
+            "just before 5 minutes"
+        );
+        assert!(!super::in_join_phase(joined, at(300)), "at 5 minutes");
+        assert!(!super::in_join_phase(joined, at(3_600)), "an hour later");
+    }
+
+    /// An entry of the per-peer map is absent when its owner is neither on the roster nor us.
+    #[test]
+    fn an_entry_of_a_member_off_the_roster_is_absent() {
+        let me = testing::nick("me");
+        let roster: HashSet<_> = [testing::nick("alice")].into_iter().collect();
+        let entries: Vec<String> = ["me", "alice", "bob", "carol"].map(str::to_owned).into();
+
+        assert_eq!(
+            super::absent_entries(&entries, &roster, &me),
+            2,
+            "bob and carol"
+        );
+        assert_eq!(
+            super::absent_entries(&[], &roster, &me),
+            0,
+            "no entry, none absent"
+        );
+    }
+
+    /// The doc census line says what each document keeps, and how many entries of the per-peer map
+    /// are absent.
+    #[test]
+    fn the_doc_census_line_names_the_sizes_of_both_documents() {
+        let _guard =
+            ::habilis_network_test_tracing::init_capturing("habilis_network::lifecycle=info");
+        let mut state = testing::fresh_state();
+
+        super::tick_doc_census(&mut state, &testing::nick("me"));
+
+        let logs = ::habilis_network_test_tracing::captured_logs();
+        let line = logs
+            .lines()
+            .find(|line| line.contains("doc census"))
+            .expect("a doc census line");
+        for field in [
+            "doc_meta_changes=",
+            "doc_meta_frames=",
+            "doc_meta_frame_bytes=",
+            "doc_meta_json_bytes=",
+            "doc_meta_absent_entries=0",
+            "doc_state_changes=",
+            "doc_state_json_bytes=",
+            "doc_save_taken=",
+        ] {
+            assert!(line.contains(field), "{field} is in: {line}");
+        }
+    }
 
     // The warn-only resident-memory leak signal: a threshold the live process
     // already exceeds (1 MiB) must fire exactly once and latch, never exit or
