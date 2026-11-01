@@ -144,8 +144,9 @@ mod churn_red {
     use crate::daemon::state::EventLoopState;
     use crate::gossip::antientropy::handle_state_digest;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+    use crate::gossip::broadcast_msg;
     use crate::gossip::event::{NodeEvent, NodeSink};
-    use crate::lifecycle::heartbeat::tick_sweep;
+    use crate::lifecycle::heartbeat::{tick_alive, tick_sweep};
     use crate::lifecycle::{PresenceEvent, handle_presence, membership_update};
     use crate::lookup::{TransportOpts, build_peer_multihop};
     use crate::protocol;
@@ -155,7 +156,7 @@ mod churn_red {
     use crate::protocol::{
         Channel, MeshId, Message, MessageBody, Nickname, PresenceSubtype, UnixSecs, Verified,
     };
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::testing::{FrameClass, WireCounter, endpoint_id, fresh_state, nick};
     use crate::transport::{MeshSender, PayloadPath};
     use crate::util::clock::Instant;
     use crate::util::tuning::{SEEN_IDS_CAP, alive_timeout};
@@ -552,6 +553,115 @@ mod churn_red {
             assert_eq!(
                 arrivals, 1,
                 "four joined of one key are {arrivals} arrivals"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// A data frame of `len` payload bytes, signed by this node.
+    fn data_frame(rig: &Rig, len: usize) -> Verified {
+        let mut message = Message::new_app(
+            &rig.mesh,
+            &rig.us,
+            protocol::AppFrameParams::new(
+                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                MessageBody::from("x".repeat(len).as_str()),
+            ),
+        );
+        message.timestamp = UnixSecs::now();
+        message.sign(&rig.identity)
+    }
+
+    /// The wire cost of a join burst. Five peers join while this node sends five data frames of
+    /// 512 bytes. Every frame this node broadcasts that is not data is metadata. The `joined`
+    /// that a node announces again for each arrival, and the peer info that it floods again for
+    /// each arrival, repeat a fact that every member already holds.
+    #[test]
+    fn wire_cost_of_a_5_peer_join_burst() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            for name in [
+                "swift-cedar",
+                "lost-heron",
+                "calm-otter",
+                "bold-finch",
+                "wild-crane",
+            ] {
+                let joined =
+                    Message::new_joined(&rig.mesh, &nick(name)).sign(&Identity::generate());
+                let observed = observe(&joined, &mut state, &context);
+                handle_presence(
+                    PresenceEvent {
+                        message: &joined,
+                        subtype: PresenceSubtype::Joined,
+                        update: &observed.update,
+                        surfaceable: observed.surfaceable,
+                    },
+                    &mut state,
+                    &mut app,
+                    &context,
+                )
+                .await;
+            }
+            for _ in 0..5 {
+                broadcast_msg(&rig.sender, &data_frame(&rig, 512)).await;
+            }
+            let counter = WireCounter::of(&rig.sender.broadcast_frames());
+            eprintln!("WIRE join burst: {counter}");
+            assert_eq!(
+                counter.frames(FrameClass::Joined),
+                0,
+                "this node announced its own joined again for an arrival: {counter}"
+            );
+            // One peer info per arrival is what the code sends today. Each one after the first
+            // repeats the address that every member already holds; the bound pins today's cost.
+            assert!(
+                counter.frames(FrameClass::Announce) <= 5,
+                "more than one peer info per arrival: {counter}"
+            );
+            assert!(
+                counter.metadata_percent() <= 45,
+                "the metadata share of a 5-peer join burst is too high: {counter}"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// The wire cost of 60 s of idle. Nothing arrives and nothing is sent but the keepalive.
+    #[test]
+    fn wire_cost_of_60_idle_seconds() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let mut state = fresh_state();
+            let mut since_send = 0u64;
+            for _ in 0..60 {
+                since_send += 1;
+                state.last_sent_at = Instant::now()
+                    .checked_sub(Duration::from_secs(since_send))
+                    .expect("the monotonic clock has run past 60 s since boot");
+                let before = rig.sender.broadcast_frames().len();
+                tick_alive(&mut state, &rig.sender, &rig.mesh, &rig.us).await;
+                if rig.sender.broadcast_frames().len() > before {
+                    since_send = 0;
+                }
+            }
+            let counter = WireCounter::of(&rig.sender.broadcast_frames());
+            eprintln!("WIRE idle 60 s: {counter}");
+            assert_eq!(counter.frames(FrameClass::Data), 0, "idle sends no data");
+            assert_eq!(
+                counter.frames(FrameClass::Alive),
+                2,
+                "60 s of idle needs one keepalive per ALIVE_INTERVAL of 30 s: {counter}"
+            );
+            assert_eq!(
+                counter.total_bytes(),
+                counter.bytes(FrameClass::Alive),
+                "idle sends nothing but keepalives: {counter}"
             );
             rig.endpoint.close().await;
         });

@@ -11,6 +11,7 @@ use std::net;
 use tokio::runtime;
 mod lane_node;
 mod log_capture;
+mod wire_counter;
 
 use std::sync::Arc;
 
@@ -27,6 +28,7 @@ use iroh::address_lookup::memory;
 pub(crate) use lane_node::LaneNode;
 #[cfg(feature = "multihop")]
 pub(crate) use log_capture::LogCapture;
+pub(crate) use wire_counter::{FrameClass, WireCounter};
 /// The key of the test author `name`: its bytes, zero-padded to 32. Two names keep the order
 /// that their bytes have, and a test reads the name back in a failure message.
 ///

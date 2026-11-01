@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
 
 use iroh::EndpointId;
@@ -29,6 +31,10 @@ use crate::protocol::messages::WireFrame;
 pub struct MeshSender {
     // the sender is shared by the mesh handles, which swap the gossip under it
     gossip: Arc<RwLock<GossipSender>>,
+    /// The bytes of every broadcast frame, in order, so a test can count what a node puts on the
+    /// wire.
+    #[cfg(test)]
+    tap: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
 impl MeshSender {
@@ -36,7 +42,15 @@ impl MeshSender {
         Self {
             // the sender is shared by the mesh handles, which swap the gossip under it
             gossip: Arc::new(RwLock::new(gossip)),
+            #[cfg(test)]
+            tap: Arc::default(),
         }
+    }
+
+    /// The frames broadcast so far, as they went on the wire.
+    #[cfg(test)]
+    pub(crate) fn broadcast_frames(&self) -> Vec<Vec<u8>> {
+        self.tap.lock().expect("the tap lock").clone()
     }
 
     /// The current gossip handle. Cloned out of the lock, so no lock is held
@@ -50,7 +64,12 @@ impl MeshSender {
     /// # Errors
     /// The gossip topic has been closed, or the send buffer is full.
     pub async fn broadcast(&self, message: WireFrame) -> Result<(), ApiError> {
-        self.current().broadcast(message.into_bytes()).await
+        let bytes = message.into_bytes();
+        #[cfg(test)]
+        if let Ok(mut tap) = self.tap.lock() {
+            tap.push(bytes.to_vec());
+        }
+        self.current().broadcast(bytes).await
     }
 
     pub(crate) async fn join_peers(&self, peers: Vec<EndpointId>) -> Result<(), ApiError> {
