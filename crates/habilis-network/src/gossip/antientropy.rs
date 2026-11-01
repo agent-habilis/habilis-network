@@ -25,6 +25,8 @@ use std::iter;
 mod answered;
 mod digest_trigger;
 mod fast_rounds;
+#[cfg(test)]
+mod frame_cost;
 mod plane;
 mod resend_memory;
 mod serve_budget;
