@@ -1098,8 +1098,20 @@ mod tests {
         carrier
     }
 
+    /// The bytes that one fixture frame takes on the wire, counted by hand from its JSON, on the
+    /// mesh `test`: 103 bytes of fixed text (the keys, the quotes, the commas and `{"v":"12.0"`
+    /// through `"ext":{}}`), a 36 byte id, a 62 byte mesh id, a 10 digit timestamp, a 64 byte hex
+    /// key and a 128 byte hex signature, which is 300 bytes, and then the author and the body. The
+    /// body is written as a JSON string, so each of its quotes costs one more byte for the
+    /// backslash.
+    fn hand_counted_wire_len(frame: &Verified) -> usize {
+        let body = frame.body.as_str();
+        403 + frame.author.as_str().len() + body.len() + body.matches('"').count()
+    }
+
     /// The census counts what the document keeps: the changes with the genesis, the frames
-    /// without it, their bytes, the JSON, the save on request, and the owners of the peer map.
+    /// without it, their bytes, the JSON, the save on request, and the owners of the peer map. The
+    /// sizes are counted by hand, not read back with the code that makes them.
     #[test]
     fn a_census_counts_changes_frames_and_sizes() {
         let mut doc = MeshDoc::new_gated(card_gate());
@@ -1114,14 +1126,15 @@ mod tests {
             &bob,
             &json!({ "peers": { "bob": { "card": 2 } } }),
         );
-        let wire_bytes: usize = [&first, &second]
-            .iter()
-            .map(|frame| frame.serialize().expect("serialize").as_bytes().len())
-            .sum();
+        assert_eq!(
+            hand_counted_wire_len(&first),
+            639,
+            "the hand count of the first frame matches the frame as it serializes"
+        );
+        let wire_bytes = hand_counted_wire_len(&first) + hand_counted_wire_len(&second);
 
         let light = doc.census(false);
 
-        assert_eq!(light.changes, doc.change_count(), "every applied change");
         assert_eq!(light.changes, 3, "the genesis and two changes");
         assert_eq!(light.frames, 2, "the genesis has no frame");
         assert_eq!(
@@ -1137,8 +1150,11 @@ mod tests {
         let heavy = doc.census(true);
 
         assert_eq!(heavy.frame_bytes, wire_bytes, "the same sum");
-        let json_len = serde_json::to_vec(&doc.to_json()).expect("json").len();
-        assert_eq!(heavy.json_bytes, Some(json_len), "the hydrated JSON");
+        assert_eq!(
+            heavy.json_bytes,
+            Some(47),
+            r#"{"peers":{"alice":{"card":1},"bob":{"card":2}}} is 47 bytes, counted by hand"#
+        );
         let mut nicks = heavy.peer_nicks.expect("the heavy census lists the owners");
         nicks.sort();
         assert_eq!(nicks, ["alice", "bob"], "the owners of the peer map");

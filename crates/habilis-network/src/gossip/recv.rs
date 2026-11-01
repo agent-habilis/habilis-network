@@ -4076,7 +4076,11 @@ mod dedup_counter_tests {
     #[test]
     fn the_received_bytes_are_counted_by_kind_and_by_what_became_of_the_frame() {
         let writer = fresh_state();
-        let frame = state_frame(&writer, change_body(&writer));
+        let body = change_body(&writer);
+        // The body is a JSON string in the frame: its text, and 1 more byte for the backslash of
+        // each of its quotes. Counted from the text, not with the reader that is under test.
+        let body_on_the_wire = (body.as_str().len() + body.as_str().matches('"').count()) as u64;
+        let frame = state_frame(&writer, body);
         let reader = reader_after(&[&frame, &frame, &frame]);
         let one = wire(&frame);
 
@@ -4085,7 +4089,11 @@ mod dedup_counter_tests {
         assert_eq!(received.wire, 3 * one);
         assert_eq!(by_class(&received.fresh), format!("state:{one}"));
         assert_eq!(by_class(&received.dup), format!("state:{}", 2 * one));
-        assert!(received.body < received.wire, "the envelope is the rest");
+        assert_eq!(
+            received.body,
+            3 * body_on_the_wire,
+            "the body of each of the 3 frames, without the envelope"
+        );
     }
 
     /// A frame can be new by id and carry a change that the document applied already: the same
