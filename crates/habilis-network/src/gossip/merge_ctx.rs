@@ -23,6 +23,7 @@ use crate::protocol::peer_addr_error;
 use crate::transport;
 use crate::transport::{proven_endpoints, webrtc};
 use crate::util::{clock, tuning};
+use iroh::EndpointId;
 use n0_future::task;
 use n0_future::time::Instant as n0future_Instant;
 use tokio::sync::oneshot;
@@ -580,6 +581,28 @@ pub(crate) fn peer_info_json(
 pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     state.peerinfo_flooded_at = Some(clock::Instant::now());
     state.latches.remove(&Latch::PeerInfoDeferred);
+    broadcast_msg(context.sender, &build_peer_info(state, context)).await;
+}
+
+/// Send our `PeerInfo` to one peer, point-to-point, instead of flooding it to the mesh. Returns
+/// whether the send started (see `UnicastPool::send_batch_in_background`); the caller falls back
+/// to the flood when it did not.
+pub(crate) async fn unicast_peer_info(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+    peer: EndpointId,
+) -> bool {
+    let Ok(bytes) = build_peer_info(state, context).serialize() else {
+        return false;
+    };
+    state
+        .unicast_pool
+        .send_batch_in_background(peer, vec![bytes])
+        .await
+}
+
+/// The signed `PeerInfo` that carries our endpoint address.
+fn build_peer_info(state: &mut EventLoopState, context: &HandlerCtx<'_>) -> Verified {
     let our_addr = context.endpoint.addr();
     state.last_flooded_addr = Some(our_addr.clone());
     let our_ips: Vec<_> = our_addr.ip_addrs().collect();
@@ -611,11 +634,7 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &Ha
         .expect("endpoint_addr_to_json produces a Value that always serializes");
     let addr_body =
         MessageBody::try_new(&addr_data).expect("endpoint address JSON has no control characters");
-    broadcast_msg(
-        context.sender,
-        &Message::new_peer_info(context.mesh, context.author, addr_body).sign(context.identity),
-    )
-    .await;
+    Message::new_peer_info(context.mesh, context.author, addr_body).sign(context.identity)
 }
 
 /// Announce our arrival: `joined` presence followed by `PeerInfo`.

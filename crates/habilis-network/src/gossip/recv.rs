@@ -28,7 +28,7 @@ use n0_future::time::Instant as TokioInstant;
 
 use super::antientropy;
 use super::app::{AppClass, InboundApp, NodeApp};
-use super::merge_ctx::{announce_arrival, broadcast_peer_info};
+use super::merge_ctx::{announce_arrival, broadcast_peer_info, unicast_peer_info};
 use crate::net;
 
 #[cfg(feature = "multihop")]
@@ -1605,6 +1605,21 @@ async fn handle_peer_info(
             });
         }
     }
+    // A peer that arrived after us is owed our address, and it learns it from us alone: a flood
+    // would reach every member for one newcomer, and each member would flood for it (N²). If the
+    // send cannot start, the flood of a `NeighborUp` is the fallback.
+    if first_sighting
+        && message.timestamp >= state.joined_at
+        && !unicast_peer_info(state, context, peer_id).await
+    {
+        let now = Instant::now();
+        if state.neighbor_up_refloods_peerinfo(now) {
+            broadcast_peer_info(state, context).await;
+            state.last_sent_at = now;
+        } else {
+            state.defer_peerinfo();
+        }
+    }
     // A buffered directed frame addressed to this author may just have become
     // deliverable — its endpoint binding and dial address are now registered.
     // Only while meshed: the pre-mesh backlog waits for the meshed edge.
@@ -2233,6 +2248,7 @@ mod first_contact_tests {
     use crate::daemon::state::{RendezvousFlag, Standing};
     use crate::transport::UdpTransport;
     use iroh::endpoint::presets;
+    use iroh::protocol::Router;
     use iroh_gossip::api::Event;
     use iroh_gossip::net::Gossip;
 
@@ -3279,6 +3295,80 @@ mod first_contact_tests {
                 0,
                 "a second real-peer link"
             );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// The address of this node reaches a newcomer point-to-point: its `joined` and its `PeerInfo`
+    /// make this node send one `PeerInfo` to the newcomer's endpoint and flood none to the mesh.
+    #[test]
+    fn a_newcomers_peer_info_is_answered_point_to_point() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::peer_addr_error;
+            use crate::testing::{FrameClass, WireCounter};
+
+            let node = Node::spawn().await;
+            let context = node.context();
+            let (tx, mut frames) = mpsc::channel(8);
+            // A lower id than ours, so the first-sighting tie-break leaves the dial to the newcomer
+            // and no graft competes with the unicast dial of this test.
+            let bob = loop {
+                let candidate = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind the newcomer endpoint");
+                if candidate.id() < node.endpoint.id() {
+                    break candidate;
+                }
+                candidate.close().await;
+            };
+            let router = Router::builder(bob.clone())
+                .accept(
+                    transport::UNICAST_ALPN,
+                    transport::UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                )
+                .spawn();
+            let mut state = fresh_state();
+            state.unicast_pool = transport::UnicastPool::new(node.endpoint.clone(), false);
+            let mut app = Inert;
+            let newcomer = Identity::generate();
+            let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
+            let joined = Message::new_joined(&node.mesh, &nick("bob")).sign(&newcomer);
+            let body = MessageBody::try_new(
+                &peer_addr_error::endpoint_addr_to_json(&bob.addr()).to_string(),
+            )
+            .expect("an address body");
+            let info = Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&newcomer);
+            ingest(wire(&joined), &mut state, &mut app, &context).await;
+            ingest(wire(&info), &mut state, &mut app, &context).await;
+
+            let received = tokio_time::timeout(std_Duration::from_secs(10), frames.recv())
+                .await
+                .expect("the newcomer got a frame within 10 s")
+                .expect("the acceptor channel is open");
+            let answer = Message::parse(&received).expect("a message");
+            assert_eq!(
+                (answer.kind, answer.author),
+                (protocol::MessageKind::PeerInfo, nick("holder")),
+                "the newcomer got our peer info"
+            );
+            let flooded = WireCounter::of(&node.sender.broadcast_frames());
+            assert_eq!(
+                flooded.frames(FrameClass::Announce),
+                0,
+                "a newcomer made us flood our peer info to the mesh: {flooded}"
+            );
+            let unicast = WireCounter::of(&state.unicast_pool.sent_frames());
+            assert_eq!(
+                unicast.frames(FrameClass::Announce),
+                1,
+                "one peer info goes to the newcomer: {unicast}"
+            );
+            router
+                .shutdown()
+                .await
+                .expect("shut the newcomer router down");
             node.endpoint.close().await;
         });
     }

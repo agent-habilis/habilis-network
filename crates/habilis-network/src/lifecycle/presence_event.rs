@@ -7,9 +7,6 @@ use crate::protocol::messages::Verified;
 
 use super::membership_update;
 
-use crate::gossip;
-use crate::util::clock::Instant;
-
 /// A received `Presence` frame plus the roster delta `membership_update::observe`
 /// already computed for it, passed to [`handle_presence`]. Constructed by
 /// `crate::gossip::recv::ingest`, across the `gossip`/`lifecycle` module
@@ -91,32 +88,18 @@ pub(crate) async fn handle_presence(
         if surfaceable {
             app.on_peer_left(&message.author, state, context).await;
         }
-    } else if subtype == PresenceSubtype::Joined && !update.stale {
-        // Every `joined` re-floods our `PeerInfo`, newcomer and rejoin
-        // alike. A newcomer linked to the *rendezvous*, so no `NeighborUp`
-        // fires on this loop to re-send it and our arrival flood predates
-        // them; a rejoin across a beacon epoch may have lost it the same way
-        // (both observed native↔browser in the mesh matrix: a roster entry
-        // with no endpoint binding reads "unreachable" forever). Throttled
-        // by `joined_refloods_peerinfo`.
-        let now = Instant::now();
-        if state.joined_refloods_peerinfo(update.joined_new, now) {
-            gossip::broadcast_peer_info(state, context).await;
-            state.last_sent_at = now;
-        }
-        if update.joined_new {
-            // Suppress "has joined" when we already printed "came back"
-            // from the quiet check, or when this `joined` predates
-            // our own join (relayed backlog).
-            // Gated on `surfaced` too: a synthetic arrival may have shown this peer already.
-            if surfaceable && !update.returned && state.surfaced.insert(message.author.clone()) {
-                context.sink.emit(NodeEvent::Presence {
-                    message: Box::new(message.authored()),
-                    peer: message.key(),
-                    synthetic: false,
-                });
-                tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer joined (announced)");
-            }
+    } else if subtype == PresenceSubtype::Joined && !update.stale && update.joined_new {
+        // Suppress "has joined" when we already printed "came back"
+        // from the quiet check, or when this `joined` predates
+        // our own join (relayed backlog).
+        // Gated on `surfaced` too: a synthetic arrival may have shown this peer already.
+        if surfaceable && !update.returned && state.surfaced.insert(message.author.clone()) {
+            context.sink.emit(NodeEvent::Presence {
+                message: Box::new(message.authored()),
+                peer: message.key(),
+                synthetic: false,
+            });
+            tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer joined (announced)");
         }
     }
 }
