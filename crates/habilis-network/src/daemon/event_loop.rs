@@ -1145,6 +1145,8 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     fn prune(&mut self) {
         self.state.idle.prune += 1;
         timers::tick_prune(&mut self.state, self.parts.sink);
+        let context = self.parts.handler_ctx(&self.sender);
+        timers::tick_doc_census(&mut self.state, context.author);
     }
 
     async fn alive(&mut self) {

@@ -43,4 +43,4 @@ pub use doc_error::DocError;
 
 mod mesh_doc;
 
-pub use mesh_doc::{Ingested, MeshDoc, SelfWriteGate};
+pub use mesh_doc::{DocCensus, Ingested, MeshDoc, SelfWriteGate};

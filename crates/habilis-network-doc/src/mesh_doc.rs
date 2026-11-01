@@ -128,6 +128,23 @@ struct Pending {
     arrival: u64,
 }
 
+/// What a [`MeshDoc`] holds, as [`MeshDoc::census`] reads it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DocCensus {
+    /// The changes applied, the genesis included.
+    pub changes: usize,
+    /// The signed frames kept to serve the changes again.
+    pub frames: usize,
+    /// The wire bytes of those frames.
+    pub frame_bytes: usize,
+    /// The bytes of the whole document as Automerge saves it, when the caller asked.
+    pub save_bytes: Option<usize>,
+    /// The bytes of the document as JSON.
+    pub json_bytes: usize,
+    /// The nicknames that have an entry in the per-peer map, empty for a document with no gate.
+    pub peer_nicks: Vec<String>,
+}
+
 /// One channel's automerge document plus the bookkeeping to apply changes in
 /// causal order and re-serve them.
 ///
@@ -347,6 +364,32 @@ impl MeshDoc {
             .get_heads()
             .into_iter()
             .map(|hash| encode_hash(&hash))
+    }
+
+    /// What the document holds, for the census: the sizes that a keyframe scheme would shrink.
+    /// `with_save` also encodes the whole document, which costs CPU, so a caller asks for it only
+    /// now and then.
+    #[must_use]
+    pub fn census(&mut self, with_save: bool) -> DocCensus {
+        let json = doc_json(&self.doc);
+        let frame_bytes = self
+            .frames
+            .values()
+            .filter_map(|frame| frame.serialize().ok())
+            .map(|wire| wire.as_bytes().len())
+            .sum();
+        DocCensus {
+            changes: self.applied.len(),
+            frames: self.frames.len(),
+            frame_bytes,
+            save_bytes: with_save.then(|| self.doc.save().len()),
+            json_bytes: serde_json::to_vec(&json).map_or(0, |bytes| bytes.len()),
+            peer_nicks: self
+                .gate
+                .as_ref()
+                .map(|gate| gated_entries(&json, gate).keys().cloned().collect())
+                .unwrap_or_default(),
+        }
     }
 
     /// How many changes this document holds, the internal genesis included.
@@ -1040,6 +1083,46 @@ mod tests {
             "expected applied, got {outcome:?}"
         );
         carrier
+    }
+
+    /// The census counts what the document keeps: the changes with the genesis, the frames
+    /// without it, their bytes, the JSON, the save on request, and the owners of the peer map.
+    #[test]
+    fn a_census_counts_changes_frames_and_sizes() {
+        let mut doc = MeshDoc::new_gated(card_gate());
+        let (alice, bob) = (nick("alice"), nick("bob"));
+        let first = author(
+            &mut doc,
+            &alice,
+            &json!({ "peers": { "alice": { "card": 1 } } }),
+        );
+        let second = author(
+            &mut doc,
+            &bob,
+            &json!({ "peers": { "bob": { "card": 2 } } }),
+        );
+        let wire_bytes: usize = [&first, &second]
+            .iter()
+            .map(|frame| frame.serialize().expect("serialize").as_bytes().len())
+            .sum();
+
+        let census = doc.census(false);
+
+        assert_eq!(census.changes, doc.change_count(), "every applied change");
+        assert_eq!(census.changes, 3, "the genesis and two changes");
+        assert_eq!(census.frames, 2, "the genesis has no frame");
+        assert_eq!(
+            census.frame_bytes, wire_bytes,
+            "the wire bytes of the frames"
+        );
+        let json_len = serde_json::to_vec(&doc.to_json()).expect("json").len();
+        assert_eq!(census.json_bytes, json_len, "the hydrated JSON");
+        assert_eq!(census.save_bytes, None, "no save unless asked");
+        let mut nicks = census.peer_nicks;
+        nicks.sort();
+        assert_eq!(nicks, ["alice", "bob"], "the owners of the peer map");
+        let saved = doc.census(true).save_bytes.expect("a save was asked for");
+        assert!(saved > 0, "the save has bytes");
     }
 
     #[test]
