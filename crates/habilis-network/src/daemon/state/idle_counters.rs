@@ -209,13 +209,18 @@ pub(crate) fn top_requesters(resent_by: &HashMap<Nickname, u64>) -> String {
 #[cfg(test)]
 mod tests {
     use std::hint::black_box;
+    use std::sync::{Mutex, PoisonError};
     use std::time::{Duration, Instant};
 
     use super::*;
     use crate::testing::nick;
 
+    /// `take` drains process-wide statics, so the tests that call it run one at a time.
+    static TAKES: Mutex<()> = Mutex::new(());
+
     #[test]
     fn take_zeroes_the_arms_and_sums_the_external_split() {
+        let _drain = TAKES.lock().unwrap_or_else(PoisonError::into_inner);
         let mut counters = IdleCounters {
             reclaim: 3,
             duplicates: 4,
@@ -298,6 +303,7 @@ mod tests {
 
     #[test]
     fn take_drains_the_off_loop_wakes() {
+        let _drain = TAKES.lock().unwrap_or_else(PoisonError::into_inner);
         let mut counters = IdleCounters::default();
         note_ppid_wake();
         note_sampler_wake();
@@ -311,6 +317,7 @@ mod tests {
     #[cfg(all(unix, feature = "host"))]
     #[test]
     fn take_reports_the_cpu_time_of_the_interval() {
+        let _drain = TAKES.lock().unwrap_or_else(PoisonError::into_inner);
         let mut counters = IdleCounters::default();
         let first = counters.take().cpu.expect("getrusage works on a unix host");
         // A busy loop of 50 ms, so the next interval holds user time.
