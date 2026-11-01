@@ -2,7 +2,7 @@
 // One benchmark run of the app binary: N real daemons in a private mesh on one host.
 //
 // usage: bun scripts/perf/bench.ts <app binary> <arm> [--nodes 64] [--seed 1] [--stagger 0.5]
-//          [--settle 480] [--idle 600] [--loaded 600] [--lookup mdns] [--out-root ~/bench-results]
+//          [--settle 480] [--idle 600] [--loaded 600] [--lookup <list>] [--out-root ~/bench-results]
 //          [--record ~/bench-results/baseline/<arm>.json]
 //
 // --record names the JSON that build-arm.ts wrote. The runner copies it into result.json as `build`.
@@ -18,7 +18,7 @@
 
 import { spawn } from "node:child_process";
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir, loadavg, cpus, hostname } from "node:os";
+import { homedir, loadavg, cpus, hostname, freemem, platform } from "node:os";
 import path from "node:path";
 
 const flags = new Map<string, string>();
@@ -41,7 +41,9 @@ const STAGGER = num("stagger", 0.5);
 const SETTLE = num("settle", 480);
 const IDLE = num("idle", 600);
 const LOADED = num("loaded", 600);
-const LOOKUP = flags.get("lookup") ?? "mdns";
+// No --lookup flag: `create` then uses the loopback ladder, so the 64 daemons meet over 127.0.0.1 and
+// need no network. Name a lookup (mdns, dht, relay) only to test that lookup.
+const LOOKUP = flags.get("lookup") ?? "";
 const PERIOD = num("period", 30);
 const PAYLOAD = "x".repeat(200);
 
@@ -153,16 +155,58 @@ function collectLogs(): void {
   }
 }
 
+// Memory that a new process can use, in bytes. os.freemem() is only the free pages, which is far too low on macOS.
+function availableBytes(): number {
+  if (platform() === "linux") {
+    const kb = readFileSync("/proc/meminfo", "utf8").match(/MemAvailable:\s+(\d+) kB/)?.[1];
+    return Number(kb ?? 0) * 1024;
+  }
+  const text = Bun.spawnSync(["vm_stat"]).stdout.toString();
+  const pageSize = Number(text.match(/page size of (\d+) bytes/)?.[1] ?? 16384);
+  const pages = (name: string) => Number(text.match(new RegExp(`Pages ${name}:\\s+(\\d+)`))?.[1] ?? 0);
+  return (pages("free") + pages("inactive") + pages("speculative")) * pageSize || freemem();
+}
+
+function openFiles(): number {
+  if (platform() === "linux") return Number(readFileSync("/proc/sys/fs/file-nr", "utf8").split(/\s+/)[0]);
+  return Number(Bun.spawnSync(["sysctl", "-n", "kern.num_files"]).stdout.toString().trim());
+}
+
+// RSS of the daemons of this run: the processes that name the state folder of the run.
+function daemonRss(): { daemons: number; rss_kb_sum: number; rss_kb_max: number } {
+  const rows = Bun.spawnSync(["ps", "-axo", "rss=,command="]).stdout.toString().split("\n");
+  const sizes = rows.filter((row) => row.includes(`${OUT}/state/`)).map((row) => Number(row.trim().split(/\s+/)[0]));
+  return { daemons: sizes.length, rss_kb_sum: sizes.reduce((a, b) => a + b, 0), rss_kb_max: Math.max(0, ...sizes) };
+}
+
+// The sample goes to host.jsonl at once, outside /tmp: a crash of the host still leaves the data.
+function sample() {
+  const point = { ts: Date.now(), load1: loadavg()[0] ?? 0, avail_bytes: availableBytes(), open_files: openFiles(), ...daemonRss() };
+  appendFileSync(`${OUT}/host.jsonl`, JSON.stringify(point) + "\n");
+  return point;
+}
+
+// Start no new daemon when the host is near its limit. The host of the first try went down at 64 daemons.
+const MAX_LOAD_PER_CORE = 2;
+const MIN_AVAILABLE_BYTES = 2 * 1024 ** 3;
+function overLimit(point: ReturnType<typeof sample>): string | null {
+  if (point.load1 > MAX_LOAD_PER_CORE * cpus().length) return `load1 ${point.load1.toFixed(1)} is above ${MAX_LOAD_PER_CORE} x ${cpus().length} cores`;
+  if (point.avail_bytes < MIN_AVAILABLE_BYTES) return `available memory ${(point.avail_bytes / 1024 ** 3).toFixed(1)} GiB is below 2 GiB`;
+  return null;
+}
+
 let stopping = false;
+sample();
 const sampler = setInterval(() => {
   loads.push({ ts: Date.now(), load1: loadavg()[0] ?? 0 });
+  sample();
   if (loads.length % 6 === 0) saveResult();
 }, 10_000);
 
 // Join.
 const owner = String(process.pid);
 const created = await cli([
-  "create", "--name", `bench-${stamp}`, "--nickname", nick(1), "--lookup", LOOKUP,
+  "create", "--name", `bench-${stamp}`, "--nickname", nick(1), ...(LOOKUP ? ["--lookup", LOOKUP] : []),
   "--owner-pid", owner, "--state-file", stateFile(1),
 ]);
 if (created.code !== 0) await abort(`create failed: ${created.err.trim()}`);
@@ -170,6 +214,8 @@ const ready = await cli(["ready", "--state-file", stateFile(1), "--timeout-secs"
 gossip = ready.out.match(/"gossip":"([^"]+)"/)?.[1] ?? "";
 if (!gossip) await abort(`no gossip id: ${ready.out.trim()} ${ready.err.trim()}`);
 for (let i = 2; i <= NODES; i++) {
+  const limit = overLimit(sample());
+  if (limit) await abort(`start-up stopped before ${nick(i)}: ${limit}`);
   const joined = await cli(["join", gossip, "--nickname", nick(i), "--owner-pid", owner, "--state-file", stateFile(i)]);
   if (joined.code !== 0) await abort(`join ${nick(i)} failed: ${joined.err.trim()}`);
   await sleep(STAGGER);
