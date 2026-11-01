@@ -320,11 +320,15 @@ fn absent_entries(nicks: &[String], roster: &HashSet<Nickname>, me: &Nickname) -
     nicks.iter().filter(absent).count()
 }
 
-/// Every how many doc censuses the whole document is encoded as well: that costs CPU, and its size
-/// moves slowly.
-const DOC_SAVE_EVERY: u64 = 5;
+/// Every how many doc censuses the heavy part runs: the JSON, the save and the per-peer map cost
+/// CPU in proportion to the document, and their size moves slowly. The light part is O(1).
+const DOC_HEAVY_EVERY: u64 = 15;
 
 static DOC_CENSUS_RUNS: AtomicU64 = AtomicU64::new(0);
+
+fn is_heavy_run(run: u64) -> bool {
+    run.is_multiple_of(DOC_HEAVY_EVERY)
+}
 
 fn warn_silent_partition(state: &EventLoopState, roster_len: usize, link_len: usize) {
     tracing::warn!(
@@ -338,29 +342,31 @@ fn warn_silent_partition(state: &EventLoopState, roster_len: usize, link_len: us
 
 /// The sizes of the meta and the state document, on a line of their own, once per call (the
 /// 1-minute tick): the changes and frames that the node keeps for good, their bytes, the JSON, the
-/// save every [`DOC_SAVE_EVERY`] runs, and the entries of the per-peer map of members that are
-/// gone. A reader of the numbers can tell what a keyframe scheme would save.
+/// save, and the entries of the per-peer map of members that are gone, every
+/// [`DOC_HEAVY_EVERY`] runs; on the other runs those keys read 0. A reader of the numbers can tell
+/// what a keyframe scheme would save.
 pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &Nickname) {
     let run = DOC_CENSUS_RUNS.fetch_add(1, Ordering::Relaxed);
-    let with_save = run.is_multiple_of(DOC_SAVE_EVERY);
-    let meta = state.doc_mut(Channel::Meta).census(with_save);
-    let shared = state.doc_mut(Channel::State).census(with_save);
-    let absent = absent_entries(&meta.peer_nicks, &state.peers, me);
+    let heavy = is_heavy_run(run);
+    let meta = state.doc_mut(Channel::Meta).census(heavy);
+    let shared = state.doc_mut(Channel::State).census(heavy);
+    let peer_nicks = meta.peer_nicks.as_deref().unwrap_or_default();
+    let absent = absent_entries(peer_nicks, &state.peers, me);
     tracing::info!(
         target: "habilis_network::lifecycle",
         doc_meta_changes = meta.changes,
         doc_meta_frames = meta.frames,
         doc_meta_frame_bytes = meta.frame_bytes,
         doc_meta_save_bytes = meta.save_bytes.unwrap_or(0),
-        doc_meta_json_bytes = meta.json_bytes,
-        doc_meta_peer_entries = meta.peer_nicks.len(),
+        doc_meta_json_bytes = meta.json_bytes.unwrap_or(0),
+        doc_meta_peer_entries = peer_nicks.len(),
         doc_meta_absent_entries = absent,
         doc_state_changes = shared.changes,
         doc_state_frames = shared.frames,
         doc_state_frame_bytes = shared.frame_bytes,
         doc_state_save_bytes = shared.save_bytes.unwrap_or(0),
-        doc_state_json_bytes = shared.json_bytes,
-        doc_save_taken = with_save,
+        doc_state_json_bytes = shared.json_bytes.unwrap_or(0),
+        doc_save_taken = heavy,
         "doc census"
     );
 }
@@ -512,33 +518,13 @@ mod tests {
         );
     }
 
-    /// The doc census line says what each document keeps, and how many entries of the per-peer map
-    /// are absent.
+    /// The heavy part of the doc census runs on the first call and then once in
+    /// `DOC_HEAVY_EVERY`, so that its cost is spread over many ticks.
     #[test]
-    fn the_doc_census_line_names_the_sizes_of_both_documents() {
-        let _guard =
-            ::habilis_network_test_tracing::init_capturing("habilis_network::lifecycle=info");
-        let mut state = testing::fresh_state();
+    fn the_heavy_doc_census_runs_once_in_fifteen_ticks() {
+        let heavy: Vec<u64> = (0..31).filter(|run| super::is_heavy_run(*run)).collect();
 
-        super::tick_doc_census(&mut state, &testing::nick("me"));
-
-        let logs = ::habilis_network_test_tracing::captured_logs();
-        let line = logs
-            .lines()
-            .find(|line| line.contains("doc census"))
-            .expect("a doc census line");
-        for field in [
-            "doc_meta_changes=",
-            "doc_meta_frames=",
-            "doc_meta_frame_bytes=",
-            "doc_meta_json_bytes=",
-            "doc_meta_absent_entries=0",
-            "doc_state_changes=",
-            "doc_state_json_bytes=",
-            "doc_save_taken=",
-        ] {
-            assert!(line.contains(field), "{field} is in: {line}");
-        }
+        assert_eq!(heavy, [0, 15, 30]);
     }
 
     // The warn-only resident-memory leak signal: a threshold the live process

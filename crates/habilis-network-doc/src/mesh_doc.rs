@@ -138,12 +138,19 @@ pub struct DocCensus {
     pub frames: usize,
     /// The wire bytes of those frames.
     pub frame_bytes: usize,
-    /// The bytes of the whole document as Automerge saves it, when the caller asked.
+    /// The bytes of the whole document as Automerge saves it, when the caller asked for the
+    /// heavy census.
     pub save_bytes: Option<usize>,
-    /// The bytes of the document as JSON.
-    pub json_bytes: usize,
-    /// The nicknames that have an entry in the per-peer map, empty for a document with no gate.
-    pub peer_nicks: Vec<String>,
+    /// The bytes of the document as JSON, when the caller asked for the heavy census.
+    pub json_bytes: Option<usize>,
+    /// The nicknames that have an entry in the per-peer map, when the caller asked for the heavy
+    /// census. Empty for a document with no gate.
+    pub peer_nicks: Option<Vec<String>>,
+}
+
+/// The bytes of a frame on the wire, 0 for a frame that does not serialize.
+fn wire_len(frame: &Verified) -> usize {
+    frame.serialize().map_or(0, |wire| wire.as_bytes().len())
 }
 
 /// One channel's automerge document plus the bookkeeping to apply changes in
@@ -172,6 +179,9 @@ pub struct MeshDoc {
     /// the re-serve store (a peer forwards another author's change with its
     /// original signature intact). Replaces the old `StateLog`.
     frames: HashMap<ChangeHash, Verified>,
+    /// The wire bytes of every frame in `frames`, kept as a running sum so that the census does
+    /// not serialize them all again.
+    frame_bytes: usize,
     /// Orphan frames awaiting their change's deps, keyed by change hash.
     ///
     /// Bounded per author and overall: the frames arriving here have passed
@@ -240,6 +250,7 @@ impl MeshDoc {
             doc: Box::new(doc),
             applied,
             frames: HashMap::new(),
+            frame_bytes: 0,
             pending: HashMap::new(),
             pending_arrivals: 0,
             refusals: HashMap::new(),
@@ -368,28 +379,26 @@ impl MeshDoc {
     }
 
     /// What the document holds, for the census: the sizes that a keyframe scheme would shrink.
-    /// `with_save` also encodes the whole document, which costs CPU, so a caller asks for it only
-    /// now and then.
+    /// The counts and the frame bytes are O(1). `heavy` also hydrates the JSON, lists the
+    /// per-peer map and encodes the whole document, which costs CPU in proportion to the
+    /// document, so a caller asks for it only now and then.
     #[must_use]
-    pub fn census(&mut self, with_save: bool) -> DocCensus {
-        let json = doc_json(&self.doc);
-        let frame_bytes = self
-            .frames
-            .values()
-            .filter_map(|frame| frame.serialize().ok())
-            .map(|wire| wire.as_bytes().len())
-            .sum();
+    pub fn census(&mut self, heavy: bool) -> DocCensus {
+        let json = heavy.then(|| doc_json(&self.doc));
         DocCensus {
             changes: self.applied.len(),
             frames: self.frames.len(),
-            frame_bytes,
-            save_bytes: with_save.then(|| self.doc.save().len()),
-            json_bytes: serde_json::to_vec(&json).map_or(0, |bytes| bytes.len()),
-            peer_nicks: self
-                .gate
+            frame_bytes: self.frame_bytes,
+            save_bytes: heavy.then(|| self.doc.save().len()),
+            json_bytes: json
                 .as_ref()
-                .map(|gate| gated_entries(&json, gate).keys().cloned().collect())
-                .unwrap_or_default(),
+                .map(|json| serde_json::to_vec(json).map_or(0, |bytes| bytes.len())),
+            peer_nicks: json.as_ref().map(|json| {
+                self.gate
+                    .as_ref()
+                    .map(|gate| gated_entries(json, gate).keys().cloned().collect())
+                    .unwrap_or_default()
+            }),
         }
     }
 
@@ -550,7 +559,10 @@ impl MeshDoc {
             return false;
         }
         self.applied.insert(hash);
-        self.frames.insert(hash, frame);
+        self.frame_bytes += wire_len(&frame);
+        if let Some(replaced) = self.frames.insert(hash, frame) {
+            self.frame_bytes -= wire_len(&replaced);
+        }
         true
     }
 
@@ -1107,23 +1119,33 @@ mod tests {
             .map(|frame| frame.serialize().expect("serialize").as_bytes().len())
             .sum();
 
-        let census = doc.census(false);
+        let light = doc.census(false);
 
-        assert_eq!(census.changes, doc.change_count(), "every applied change");
-        assert_eq!(census.changes, 3, "the genesis and two changes");
-        assert_eq!(census.frames, 2, "the genesis has no frame");
+        assert_eq!(light.changes, doc.change_count(), "every applied change");
+        assert_eq!(light.changes, 3, "the genesis and two changes");
+        assert_eq!(light.frames, 2, "the genesis has no frame");
         assert_eq!(
-            census.frame_bytes, wire_bytes,
+            light.frame_bytes, wire_bytes,
             "the wire bytes of the frames"
         );
+        assert_eq!(
+            (light.json_bytes, light.save_bytes, light.peer_nicks),
+            (None, None, None),
+            "the light census reads nothing that costs in proportion to the document"
+        );
+
+        let heavy = doc.census(true);
+
+        assert_eq!(heavy.frame_bytes, wire_bytes, "the same sum");
         let json_len = serde_json::to_vec(&doc.to_json()).expect("json").len();
-        assert_eq!(census.json_bytes, json_len, "the hydrated JSON");
-        assert_eq!(census.save_bytes, None, "no save unless asked");
-        let mut nicks = census.peer_nicks;
+        assert_eq!(heavy.json_bytes, Some(json_len), "the hydrated JSON");
+        let mut nicks = heavy.peer_nicks.expect("the heavy census lists the owners");
         nicks.sort();
         assert_eq!(nicks, ["alice", "bob"], "the owners of the peer map");
-        let saved = doc.census(true).save_bytes.expect("a save was asked for");
-        assert!(saved > 0, "the save has bytes");
+        assert!(
+            heavy.save_bytes.expect("a save was asked for") > 0,
+            "the save has bytes"
+        );
     }
 
     #[test]
