@@ -76,7 +76,7 @@ impl CollectionSizes {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::CollectionSizes;
     use crate::testing::{fresh_state, nick};
 
     #[test]

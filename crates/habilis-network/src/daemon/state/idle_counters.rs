@@ -233,11 +233,14 @@ pub(crate) fn top_requesters(resent_by: &HashMap<Nickname, u64>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::hint::black_box;
     use std::sync::{Mutex, PoisonError};
     use std::time::{Duration, Instant};
 
-    use super::*;
+    use iroh_gossip::api::Event;
+
+    use super::{IdleCounters, MAX_REQUESTERS, note_ppid_wake, note_sampler_wake, top_requesters};
     use crate::testing::nick;
 
     /// `take` drains process-wide statics, so the tests that call it run one at a time.

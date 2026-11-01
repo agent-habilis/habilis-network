@@ -106,7 +106,9 @@ pub const fn load_average_1m() -> Option<f64> {
 
 #[cfg(all(test, unix, feature = "host"))]
 mod tests {
-    use super::*;
+    use std::time::Duration;
+
+    use super::{CpuTimes, cpu_times, load_average_1m};
 
     #[test]
     fn since_is_the_difference_and_saturates() {
