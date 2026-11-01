@@ -97,6 +97,58 @@ The marginal memory of one session is (the delta with the leg on minus the delta
 leg off) divided by the mean number of underlay sessions per node. Each run takes about
 6 min, so the two cells take about 36 min.
 
+## Oracle file
+
+The oracle file is the record of the user data that the runner sent. It is the only
+source of the data bytes in the ratio. The engine counters do not name data.
+
+The file is `oracle.jsonl` in the run folder. It has one JSON line per user payload that
+the runner sends. Each line has these keys, and no other key:
+
+| Key | Type | Meaning |
+| -- | -- | -- |
+| `sender` | string | the nickname of the sending daemon |
+| `kind` | string | `broadcast`, `msg`, `task_brief`, `task_status` or `task_artifact` |
+| `receivers` | integer | how many daemons must receive the payload: 63 for a broadcast in a mesh of 64, 1 for a `msg` |
+| `bytes` | integer | the length of the user text that the runner sent, in bytes of UTF-8 |
+| `seq` | integer | the number of the line, from 0, one count for the whole run |
+| `ts` | integer | the send time, in milliseconds since the epoch |
+
+The runner writes the line when the send command returns without an error. A payload
+that failed to send has no line.
+
+### Rules for the ratio
+
+- Data is the exact user text that the runner sent. The envelope of a frame is not data:
+  the header, the signature, the ids and the nonce are metadata.
+- Delivered data bytes are the sum of `bytes` times `receivers` over all lines.
+- A duplicate copy of a data frame counts as metadata. The first copy that a receiver
+  gets is data.
+- Metadata bytes are the wire bytes minus the delivered data bytes.
+- The runner plays the worker of each task. Each task makes one `task_brief`, one or more
+  `task_status`, and one `task_artifact`. Each of them has a line.
+
+### Two layers
+
+- Frame layer: the wire bytes of the frames, from the `idle_wire_*` census fields. The
+  summary asserts this layer. It fails if the metadata bytes are negative.
+- UDP layer: the bytes of the iroh socket, from the `idle_net_*` census fields. The
+  summary reports this layer and asserts nothing, because QUIC adds its own framing.
+
+### Two phases
+
+- Idle phase (no workload): the result is the metadata bytes per second per daemon. It
+  is an absolute number. There is no data, so there is no ratio.
+- Loaded phase (workload): the result is the metadata bytes per delivered data byte. The
+  window of the phase comes from `result.json`.
+
+### Example
+
+A mesh of 2 daemons. The runner sends one broadcast of 200 bytes and one `msg` of
+200 bytes. Then `receivers` is 1 for both lines, and the delivered data bytes are
+200 + 200 = 400. If the wire bytes are 1000, the metadata bytes are 600, and the ratio
+is 1.5.
+
 ## What it does not do
 
 - The nodes are native processes. A browser costs more.
