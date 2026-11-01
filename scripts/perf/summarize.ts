@@ -27,6 +27,14 @@
 //   `idle_body_in`, `idle_frames_in`, `idle_wire_out`, `idle_body_out` and `idle_frames_out`
 //   deltas (the `wire census` line). The wire is the frame as it goes on a socket; the body is its
 //   payload as written in the JSON. Out counts a broadcast once, not once per neighbor.
+// - net_send_ip / net_send_relay / net_recv_ip / net_recv_relay / net_recv_custom / net_recv_dgrams /
+//   net_hdr_in: the sums of the `idle_net_*` deltas: the UDP payload that the iroh socket sent and
+//   received (all of QUIC: frames, acknowledgements, keep-alives, handshakes), the datagrams
+//   received, and 28 bytes of IPv4 and UDP header per received datagram. The first census of a node
+//   covers the time since its endpoint started. There is no send counter for the custom transports.
+// - frames_of_udp_in / frames_of_udp_out: wire_in and wire_out over the socket bytes of the same
+//   direction. The rest is below our frames: gossip messages, QUIC framing, acknowledgements, keep-alives.
+//   Out counts a broadcast once, so it understates the frames by the fan-out.
 // - dup_share: the bytes of the frames that the dedup dropped as repeats, over all frames of the
 //   kinds that reached it. env_in / env_out: 1 - body / wire, the share of the envelope.
 // - bin_fresh / bin_dup / bout: `kind:bytes` sums, by kind of frame (app, presence, peerinfo,
@@ -70,6 +78,13 @@ const TOTALS: [string, string][] = [
   ["wire_out", "idle_wire_out"],
   ["body_out", "idle_body_out"],
   ["frames_out", "idle_frames_out"],
+  ["net_send_ip", "idle_net_send_ip"],
+  ["net_send_relay", "idle_net_send_relay"],
+  ["net_recv_ip", "idle_net_recv_ip"],
+  ["net_recv_relay", "idle_net_recv_relay"],
+  ["net_recv_custom", "idle_net_recv_custom"],
+  ["net_recv_dgrams", "idle_net_recv_dgrams"],
+  ["net_hdr_in", "idle_net_hdr_in"],
 ];
 
 // A census field of `name:bytes` pairs joined by commas (`app:120,presence:40`, or `-`): add the
@@ -182,7 +197,11 @@ function summarize(run: string): string {
   const wireIn = totals.get("wire_in") ?? 0;
   const wireOut = totals.get("wire_out") ?? 0;
   const received = total(kinds.fresh) + total(kinds.dup);
+  const netIn =
+    (totals.get("net_recv_ip") ?? 0) + (totals.get("net_recv_relay") ?? 0) + (totals.get("net_recv_custom") ?? 0);
+  const netOut = (totals.get("net_send_ip") ?? 0) + (totals.get("net_send_relay") ?? 0);
   const wireText =
+    `frames_of_udp_in=${percent(wireIn, netIn)} frames_of_udp_out=${percent(wireOut, netOut)} ` +
     `dup_share=${percent(total(kinds.dup), received)} ` +
     `env_in=${percent(wireIn - (totals.get("body_in") ?? 0), wireIn)} ` +
     `env_out=${percent(wireOut - (totals.get("body_out") ?? 0), wireOut)} ` +
