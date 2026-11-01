@@ -117,9 +117,7 @@ pub(crate) struct FrameShape<'frame> {
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
+    memchr::memmem::find(haystack, needle)
 }
 
 /// The bytes after `key` up to the next quote, and where they start.
@@ -184,12 +182,17 @@ pub(crate) struct TagBytes(HashMap<String, u64>);
 
 impl TagBytes {
     fn add(&mut self, tag: &str, bytes: usize) {
-        let key = if self.0.len() >= MAX_TAGS && !self.0.contains_key(tag) {
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        if let Some(total) = self.0.get_mut(tag) {
+            *total += bytes;
+            return;
+        }
+        let key = if self.0.len() >= MAX_TAGS {
             OTHER_TAGS
         } else {
             tag
         };
-        *self.0.entry(key.to_owned()).or_default() += u64::try_from(bytes).unwrap_or(u64::MAX);
+        *self.0.entry(key.to_owned()).or_default() += bytes;
     }
 
     /// The `TOP_TAGS` tags with the most bytes as `tag:bytes` joined by `,`, or `-`. Ties go by
@@ -518,6 +521,21 @@ mod tests {
         assert_eq!(sent.frames, 2);
         assert_eq!(sent.wire, APP.len() as u64 + 4);
         assert_eq!(by_class(&sent.bytes), format!("app:{},other:4", APP.len()));
+    }
+
+    #[test]
+    fn a_tag_that_is_kept_still_counts_when_the_tags_are_full() {
+        let mut tags = TagBytes::default();
+        for index in 0..super::MAX_TAGS {
+            tags.add(&format!("tag-{index}"), 1);
+        }
+
+        tags.add("tag-0", 10);
+        tags.add("a-new-tag", 5);
+
+        assert_eq!(tags.0["tag-0"], 11, "a kept tag adds up");
+        assert_eq!(tags.0[super::OTHER_TAGS], 5, "a new tag goes to the rest");
+        assert!(!tags.0.contains_key("a-new-tag"));
     }
 
     #[test]

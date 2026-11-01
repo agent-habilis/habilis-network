@@ -1688,6 +1688,7 @@ dependencies = [
  "iroh-mainline-address-lookup",
  "iroh-mdns-address-lookup",
  "iroh-relay",
+ "memchr",
  "n0-future",
  "parking_lot",
  "proptest",
