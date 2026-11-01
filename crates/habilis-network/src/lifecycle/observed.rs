@@ -3,7 +3,9 @@ use crate::daemon::state::EventLoopState;
 use crate::gossip::event::NodeEvent;
 use crate::protocol::identity::Identity;
 use crate::protocol::messages::Verified;
-use crate::protocol::{AuthorKey, MeshId, Message, MessageId, MessageKind};
+use crate::protocol::{
+    AuthorKey, MeshId, Message, MessageId, MessageKind, PresenceSubtype, UnixSecs,
+};
 use uuid::Uuid;
 
 use super::membership_update;
@@ -89,7 +91,14 @@ pub(crate) fn observe(
         && !update.stale
         && membership_update::proves_presence(&message.kind, message.timestamp)
         && !state.surfaced.contains(message.author.as_str())
-        && !matches!(message.kind, MessageKind::Presence { .. })
+        // A real `joined` is surfaced by `handle_presence`, with its own id. Any other frame is
+        // not, an `alive` too: a peer whose `joined` was lost arrives on its first live frame.
+        && !matches!(
+            message.kind,
+            MessageKind::Presence {
+                subtype: PresenceSubtype::Joined
+            }
+        )
     {
         state.surfaced.insert(message.author.clone());
         context
@@ -108,15 +117,18 @@ pub(crate) fn observe(
 /// `joined` that reports it, so the proof names this node, and the nickname stays the
 /// peer's. `peer` is the key of the frame that triggered it, which is the peer's own.
 ///
-/// The id comes from that key, so one peer has one arrival id, however often this runs. A random
-/// id would make each call a new fact that an app cannot fold into the first.
+/// The id comes from the key and the stamp of the triggering frame: copies of one arrival share
+/// an id, and the next arrival of the same key (after the quiet TTL, when this node has forgotten
+/// the peer) is triggered by a later frame and has another. A random id would make each call a
+/// new fact that an app cannot fold into the first, and an id from the key alone would make a
+/// second arrival look like a copy of the first, to an app that drops a repeated id.
 pub(crate) fn synthetic_arrival(
     mesh: &MeshId,
     identity: &Identity,
     triggering: &Verified,
 ) -> NodeEvent {
     let mut arrival = Message::new_joined(mesh, &triggering.author);
-    arrival.id = arrival_id(triggering.key());
+    arrival.id = arrival_id(triggering.key(), triggering.timestamp);
     let arrival = arrival.sign(identity);
     NodeEvent::Presence {
         message: Box::new(arrival.authored()),
@@ -125,10 +137,14 @@ pub(crate) fn synthetic_arrival(
     }
 }
 
-/// The 16 bytes at the start of a public key already differ for every key, so they make the id.
-fn arrival_id(key: AuthorKey) -> MessageId {
+/// The 12 bytes at the start of a public key already differ for every key. The 4 low bytes of the
+/// stamp follow them.
+fn arrival_id(key: AuthorKey, stamp: UnixSecs) -> MessageId {
     let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&key.as_bytes()[..16]);
+    bytes[..12].copy_from_slice(&key.as_bytes()[..12]);
+    let seconds = u32::try_from(stamp.as_secs().rem_euclid(i64::from(u32::MAX) + 1))
+        .expect("a remainder below 2^32 fits a u32");
+    bytes[12..].copy_from_slice(&seconds.to_be_bytes());
     MessageId::try_new(&Uuid::from_bytes(bytes).to_string())
         .expect("a formatted UUID is a valid message id")
 }
@@ -201,8 +217,8 @@ mod churn_red {
                 NodeEvent::Presence {
                     message, synthetic, ..
                 } => format!(
-                    "presence {} {:?} synthetic={synthetic}",
-                    message.author, message.kind
+                    "presence {} {:?} synthetic={synthetic} id={}",
+                    message.author, message.kind, message.id
                 ),
                 NodeEvent::Ready { .. }
                 | NodeEvent::Info(_)
@@ -849,6 +865,103 @@ mod churn_red {
             assert!(
                 state.peers.contains(who.as_str()) && !rig.sink.lines().is_empty(),
                 "a fresh peer info is an arrival"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// The ids of the arrivals this node surfaced for `who`, in order.
+    fn arrival_ids(rig: &Rig, who: &str) -> Vec<String> {
+        rig.sink
+            .lines()
+            .iter()
+            .filter(|line| line.starts_with(&format!("presence {who} ")))
+            .filter_map(|line| line.split("id=").nth(1).map(str::to_owned))
+            .collect()
+    }
+
+    /// The app drops a frame whose (key, id) it saw lately. A key that this node forgot (it went
+    /// quiet and the quiet TTL passed) and that speaks again is a second arrival, and it must not
+    /// have the id of the first.
+    #[test]
+    fn h4_a_second_arrival_of_one_key_has_its_own_id() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let peer = Identity::generate();
+            let mut state = fresh_state();
+            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
+
+            let first = chat(
+                &rig.mesh,
+                &who,
+                &peer,
+                UnixSecs::now() - Duration::from_secs(100),
+            );
+            assert!(
+                receive(&first, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            let gone_quiet = Instant::now()
+                .checked_sub(alive_timeout() + Duration::from_secs(10))
+                .expect("the monotonic clock has run past the alive timeout since boot");
+            state.last_seen.insert(who.clone(), gone_quiet);
+            tick_sweep(&mut state, &rig.sink);
+            assert!(state.quiet.contains(who.as_str()), "the peer is quiet");
+            let long_gone = Instant::now()
+                .checked_sub(Duration::from_hours(2))
+                .expect("the monotonic clock has run past 2 h since boot");
+            state.quiet_since.insert(who.clone(), long_gone);
+            tick_sweep(&mut state, &rig.sink);
+            assert!(!state.quiet.contains(who.as_str()), "the quiet TTL passed");
+
+            let again = chat(&rig.mesh, &who, &peer, UnixSecs::now());
+            assert!(
+                receive(&again, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            let ids = arrival_ids(&rig, "swift-cedar");
+            assert_eq!(ids.len(), 2, "two arrivals: {:?}", rig.sink.lines());
+            assert_ne!(ids[0], ids[1], "the second arrival has the id of the first");
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// A new peer whose clock runs 2 min behind: its first frame is a peer info stamped older than
+    /// the alive timeout, which proves nothing, so it is no arrival. Its next live frame (an
+    /// alive, at most 30 s later) is.
+    #[test]
+    fn a_new_peer_with_a_slow_clock_arrives_on_its_first_live_frame() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let peer = Identity::generate();
+            let mut state = fresh_state();
+            state.joined_at = UnixSecs::now() - Duration::from_hours(1);
+            let slow = UnixSecs::now() - Duration::from_secs(120);
+
+            let info = peer_info(&rig.mesh, &who, &peer, slow);
+            assert!(
+                receive(&info, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert!(
+                arrival_ids(&rig, "swift-cedar").is_empty(),
+                "a peer info stamped 2 min ago made an arrival"
+            );
+
+            let beat = alive(&rig.mesh, &who, &peer, slow);
+            assert!(
+                receive(&beat, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert_eq!(
+                arrival_ids(&rig, "swift-cedar").len(),
+                1,
+                "the alive of the slow peer is its arrival: {:?}",
+                rig.sink.lines()
             );
             rig.endpoint.close().await;
         });
