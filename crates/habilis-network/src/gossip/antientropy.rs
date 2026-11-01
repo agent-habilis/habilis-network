@@ -23,6 +23,7 @@ use crate::daemon::state::Standing;
 use crate::transport;
 use std::iter;
 mod answered;
+mod base58;
 mod digest_trigger;
 mod fast_rounds;
 #[cfg(test)]
@@ -75,11 +76,11 @@ struct WireWindow {
 }
 
 fn encode_key(key: &DedupKey) -> String {
-    bs58::encode(key.as_bytes()).into_string()
+    base58::encode(key.as_bytes())
 }
 
 fn decode_key(text: &str) -> Option<DedupKey> {
-    let bytes: [u8; 16] = bs58::decode(text).into_vec().ok()?.try_into().ok()?;
+    let bytes: [u8; 16] = base58::decode(text)?.try_into().ok()?;
     Some(DedupKey::from(bytes))
 }
 
@@ -94,7 +95,7 @@ impl WireWindow {
             lo_key: encode_key(&window.lo.1),
             hi: window.hi.0.as_secs(),
             hi_key: encode_key(&window.hi.1),
-            ids: bs58::encode(packed).into_string(),
+            ids: base58::encode(&packed),
         }
     }
 
@@ -109,7 +110,7 @@ impl WireWindow {
     /// Decode the packed ids into a set, or `None` if the Base58 / length
     /// is malformed.
     fn decode_ids(&self) -> Option<HashSet<DedupKey>> {
-        let raw = bs58::decode(&self.ids).into_vec().ok()?;
+        let raw = base58::decode(&self.ids)?;
         if raw.len() % 16 != 0 {
             return None;
         }
