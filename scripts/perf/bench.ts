@@ -3,6 +3,11 @@
 //
 // usage: bun scripts/perf/bench.ts <app binary> <arm> [--nodes 64] [--seed 1] [--stagger 0.5]
 //          [--settle 480] [--idle 600] [--loaded 600] [--lookup mdns] [--out-root ~/bench-results]
+//          [--record ~/bench-results/baseline/<arm>.json]
+//
+// --record names the JSON that build-arm.ts wrote. The runner copies it into result.json as `build`.
+// Use it for the sha and the dirty flag: the version text of a binary built with an engine override
+// can say dirty:true, because cargo rewrites Cargo.lock before the build script runs.
 //
 // Phases: join, settle, idle, loaded, idle. In the loaded phase every daemon sends, every 30 s, one
 // broadcast of 200 bytes, one directed msg of 200 bytes to a random peer, and one task. The runner
@@ -12,7 +17,7 @@
 // n<i>.err (the tracing log of daemon i, which holds the census lines) and `done`. summarize.ts reads it.
 
 import { spawn } from "node:child_process";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, loadavg, cpus, hostname } from "node:os";
 import path from "node:path";
 
@@ -74,6 +79,7 @@ const result: Record<string, unknown> = {
   arm: ARM,
   binary: BIN,
   version: versionText,
+  build: flags.has("record") ? JSON.parse(readFileSync(flags.get("record") ?? "", "utf8")) : null,
   sha: build?.[1] ?? null,
   dirty: build ? build[2] === "true" : null,
   host: hostname(),
