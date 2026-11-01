@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::{mem, str};
 
+use memchr::memmem;
+
 /// The most distinct app tags kept per interval and direction. A peer can name any tag, so the
 /// rest are added to [`OTHER_TAGS`].
 const MAX_TAGS: usize = 32;
@@ -117,7 +119,7 @@ pub(crate) struct FrameShape<'frame> {
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    memchr::memmem::find(haystack, needle)
+    memmem::find(haystack, needle)
 }
 
 /// The bytes after `key` up to the next quote, and where they start.

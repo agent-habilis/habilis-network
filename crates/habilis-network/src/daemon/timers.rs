@@ -107,12 +107,7 @@ pub(crate) async fn tick_state_refresh(
     // own arm columns. Do not "correct" it by adding one here; that
     // double-counts the census iteration and inflates the total every interval.
     let reading = state.idle.take();
-    let socket = socket_delta(&mut state.idle.socket_mark, endpoint);
-    let gossip_path = gossip_path_delta(
-        &mut state.idle.gossip_path_mark,
-        state.gossip_handle.as_ref(),
-    );
-    let gossip_msgs = gossip_msgs_delta(&mut state.idle.gossip_msgs_mark, gossip.metrics());
+    let (socket, gossip_path, gossip_msgs) = read_deltas(state, endpoint, gossip);
     let idle = reading.loop_arms;
     let ext = idle.ext;
     let cpu = reading.cpu.unwrap_or_default();
@@ -331,6 +326,21 @@ static DOC_CENSUS_RUNS: AtomicU64 = AtomicU64::new(0);
 
 fn is_heavy_run(run: u64) -> bool {
     run.is_multiple_of(DOC_HEAVY_EVERY)
+}
+
+/// What the socket, the gossip transport and the gossip actor of this loop moved since the last
+/// census.
+fn read_deltas(
+    state: &mut EventLoopState,
+    endpoint: &Endpoint,
+    gossip: &Gossip,
+) -> (SocketBytes, GossipPathBytes, GossipMsgs) {
+    let idle = &mut state.idle;
+    (
+        socket_delta(&mut idle.socket_mark, endpoint),
+        gossip_path_delta(&mut idle.gossip_path_mark, state.gossip_handle.as_ref()),
+        gossip_msgs_delta(&mut idle.gossip_msgs_mark, gossip.metrics()),
+    )
 }
 
 fn warn_silent_partition(state: &EventLoopState, roster_len: usize, link_len: usize) {

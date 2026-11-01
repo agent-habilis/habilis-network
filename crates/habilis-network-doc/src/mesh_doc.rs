@@ -1153,7 +1153,7 @@ mod tests {
         assert_eq!(
             heavy.json_bytes,
             Some(47),
-            r#"{"peers":{"alice":{"card":1},"bob":{"card":2}}} is 47 bytes, counted by hand"#
+            "the 47 bytes of the two-entry document, counted by hand"
         );
         let mut nicks = heavy.peer_nicks.expect("the heavy census lists the owners");
         nicks.sort();
