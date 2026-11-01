@@ -43,7 +43,7 @@ pub(crate) async fn handle_presence(
         if state.key_said_goodbye(message.key()) {
             return;
         }
-        state.note_left(&message.author, message.key(), message.timestamp);
+        state.note_left(message.key());
         state.drop_departed_presence(&message.key());
         // The nickname may belong to a newer run by now. The goodbye of an older key ends that
         // key only, and the roster entry of the newer run stays.

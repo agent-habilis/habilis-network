@@ -7,6 +7,7 @@
 use crate::daemon::state::EventLoopState;
 use crate::protocol::{MessageKind, Nickname, PresenceSubtype, UnixSecs, Verified};
 use crate::util::clock::Instant;
+use crate::util::tuning::alive_timeout;
 
 /// Summary of how a newly received message changes our view of the
 /// sender's membership. Computed from the message kind + current state
@@ -27,28 +28,43 @@ pub(crate) struct MembershipUpdate {
     pub stale: bool,
 }
 
-/// Whether a frame of this kind can prove that its author is alive now. A relay or an
-/// anti-entropy answer re-sends stored frames of any author, a dead one too: the peer info, the
-/// durable state and meta changes, and the digests. Those prove nothing about the present.
-pub(crate) const fn proves_presence(kind: &MessageKind) -> bool {
-    matches!(
-        kind,
+/// Whether a frame proves that its author is alive now. A `left` never does. A frame of a live kind does. A frame of
+/// any other kind (peer info, the durable state and meta changes, the digests) does only when it
+/// was stamped within one alive timeout: a relay or an anti-entropy answer re-sends stored frames
+/// of any author, a dead one too, and those are old. A frame stamped within the timeout says that
+/// its author was alive within the timeout, which is all that the timeout asks.
+pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
+    match kind {
+        MessageKind::Presence {
+            subtype: PresenceSubtype::Left,
+        } => false,
         MessageKind::App { .. }
-            | MessageKind::Presence {
-                subtype: PresenceSubtype::Alive | PresenceSubtype::Joined
-            }
-            | MessageKind::Ping
-            | MessageKind::Pong { .. }
-    )
+        | MessageKind::Presence {
+            subtype: PresenceSubtype::Alive | PresenceSubtype::Joined,
+        }
+        | MessageKind::Ping
+        | MessageKind::Pong { .. } => true,
+        MessageKind::PeerInfo
+        | MessageKind::State
+        | MessageKind::Meta
+        | MessageKind::Digest
+        | MessageKind::StateDigest
+        | MessageKind::MetaDigest
+        | MessageKind::LinkState
+        | _ => timestamp > UnixSecs::now() - alive_timeout(),
+    }
 }
 
-/// Whether a frame stamped `timestamp` was sent before we last heard from the quiet `author`.
-/// Such a frame is a copy that a relay held, not news: the author sent nothing after it.
+/// Whether a frame stamped `timestamp` was sent before, or too near to, the last frame that we
+/// heard from the quiet `author`. Such a frame is a copy that a relay held, not news: the author
+/// sent nothing after it. The margin covers the clocks of two nodes, which can differ by a few
+/// seconds. A real return comes at least one alive timeout after the last frame, so a margin of a
+/// third of the timeout costs nothing.
 fn sent_before_silence(author: &Nickname, timestamp: UnixSecs, state: &EventLoopState) -> bool {
-    state
-        .quiet_since
-        .get(author)
-        .is_some_and(|heard| timestamp <= UnixSecs::now() - Instant::now().duration_since(*heard))
+    state.quiet_since.get(author).is_some_and(|heard| {
+        let heard_at = UnixSecs::now() - Instant::now().duration_since(*heard);
+        timestamp <= heard_at + alive_timeout() / 3
+    })
 }
 
 /// Decide what a message from `author` means for our peer
@@ -60,9 +76,9 @@ fn sent_before_silence(author: &Nickname, timestamp: UnixSecs, state: &EventLoop
 /// haven't seen the peer before, we treat the message as proof of
 /// presence.
 ///
-/// One rule decides a return: a quiet peer is back only when the frame is of a kind that proves
-/// presence (see [`proves_presence`]) and was sent after we last heard from the peer. Any other
-/// frame of a quiet peer is stale (see [`MembershipUpdate::stale`]).
+/// One rule decides a return: a quiet peer is back only when the frame proves presence (see
+/// [`proves_presence`]) and was sent after we last heard from the peer. Any other frame of a quiet
+/// peer is stale (see [`MembershipUpdate::stale`]).
 pub(crate) fn compute(
     kind: &MessageKind,
     author: &Nickname,
@@ -70,7 +86,8 @@ pub(crate) fn compute(
     state: &EventLoopState,
 ) -> MembershipUpdate {
     let quiet = state.quiet.contains(author.as_str());
-    let proves_return = proves_presence(kind) && !sent_before_silence(author, timestamp, state);
+    let proves_return =
+        proves_presence(kind, timestamp) && !sent_before_silence(author, timestamp, state);
     if quiet && !proves_return {
         return MembershipUpdate {
             returned: false,
@@ -149,6 +166,8 @@ pub(crate) fn apply(update: &MembershipUpdate, author: &Nickname, state: &mut Ev
 
 #[cfg(test)]
 mod tests {
+    use crate::daemon::state::EventLoopState;
+    use crate::protocol::Nickname;
     use crate::testing::{fresh_state, nick};
 
     use crate::protocol::identity::Identity;
@@ -289,12 +308,8 @@ mod tests {
         );
     }
 
-    /// A quiet peer is back when a live frame is stamped after the silence began, and not before:
-    /// a copy that a relay held says nothing about the present, and neither does a frame of a kind
-    /// that a relay or an anti-entropy answer re-sends.
-    #[test]
-    fn a_quiet_peer_returns_only_on_a_live_frame_sent_after_its_silence() {
-        let _guard = ::habilis_network_test_tracing::init();
+    /// A quiet peer whose last frame we heard 100 s ago.
+    fn quiet_since_100_secs() -> (EventLoopState, Nickname) {
         let who = nick("swift-cedar");
         let mut state = fresh_state();
         state.quiet.insert(who.clone());
@@ -302,36 +317,58 @@ mod tests {
             .checked_sub(Duration::from_secs(100))
             .expect("the monotonic clock has run past 100 s since boot");
         state.quiet_since.insert(who.clone(), heard);
+        (state, who)
+    }
+
+    /// A quiet peer is back when a frame proves it is alive and was sent after its silence began.
+    /// A copy that a relay held was sent before the silence, whatever its kind, and a frame of a
+    /// durable kind proves life only when it is fresh.
+    #[test]
+    fn a_quiet_peer_returns_only_on_a_frame_sent_after_its_silence() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (state, who) = quiet_since_100_secs();
         let now = UnixSecs::now();
         let before = now - Duration::from_secs(200);
 
-        let app = MessageKind::app_broadcast("app_msg");
-        let alive = MessageKind::Presence {
-            subtype: PresenceSubtype::Alive,
-        };
-        for kind in [&app, &alive] {
-            let back = compute(kind, &who, now, &state);
-            assert!(
-                back.returned && !back.stale,
-                "{kind:?} sent after the silence"
-            );
-            let copy = compute(kind, &who, before, &state);
-            assert!(
-                copy.stale && !copy.returned,
-                "{kind:?} sent before the silence"
-            );
-        }
         for kind in [
+            MessageKind::app_broadcast("app_msg"),
+            MessageKind::Presence {
+                subtype: PresenceSubtype::Alive,
+            },
             MessageKind::PeerInfo,
             MessageKind::State,
             MessageKind::Meta,
             MessageKind::StateDigest,
             MessageKind::MetaDigest,
         ] {
-            let update = compute(&kind, &who, now, &state);
+            let back = compute(&kind, &who, now, &state);
             assert!(
-                update.stale && !update.returned && !update.joined_new,
-                "{kind:?} is no proof of presence, even stamped after the silence"
+                back.returned && !back.stale,
+                "{kind:?} sent after the silence"
+            );
+            let copy = compute(&kind, &who, before, &state);
+            assert!(
+                copy.stale && !copy.returned && !copy.joined_new,
+                "{kind:?} sent before the silence"
+            );
+        }
+    }
+
+    /// A copy of the last frame that we heard is not news, even when the clock of its sender runs a
+    /// few seconds ahead of ours. The frame is stamped in the second that we heard it, or after.
+    #[test]
+    fn a_replay_of_the_last_frame_heard_does_not_return_a_quiet_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (state, who) = quiet_since_100_secs();
+        let heard_at = UnixSecs::now() - Duration::from_secs(100);
+        let alive = MessageKind::Presence {
+            subtype: PresenceSubtype::Alive,
+        };
+        for skew in [0, 1, 5] {
+            let replay = compute(&alive, &who, heard_at + Duration::from_secs(skew), &state);
+            assert!(
+                replay.stale && !replay.returned,
+                "a replay stamped {skew} s after the last frame heard"
             );
         }
     }
@@ -346,7 +383,7 @@ mod tests {
         let leaver = Identity::generate();
         let at = UnixSecs::from(1_000);
         let mut state = fresh_state();
-        state.note_left(&who, leaver.author_key(), at);
+        state.note_left(leaver.author_key());
 
         let mut frames = Vec::new();
         for kind in [
@@ -383,7 +420,7 @@ mod tests {
         let who = nick("swift-cedar");
         let at = UnixSecs::from(1_000);
         let mut state = fresh_state();
-        state.note_left(&who, Identity::generate().author_key(), at);
+        state.note_left(Identity::generate().author_key());
 
         let mut joined = Message::new_joined(&mesh, &who);
         joined.timestamp = at;
@@ -408,7 +445,7 @@ mod tests {
             !compute_for(&left, &state).stale,
             "the first goodbye of a key is not stale"
         );
-        state.note_left(&who, leaver.author_key(), left.timestamp);
+        state.note_left(leaver.author_key());
         assert!(
             compute_for(&left, &state).stale,
             "a copy of the goodbye is stale"
@@ -424,7 +461,7 @@ mod tests {
         let who = nick("swift-cedar");
         let leaver = Identity::generate();
         let mut state = fresh_state();
-        state.note_left(&who, leaver.author_key(), UnixSecs::from(1_000));
+        state.note_left(leaver.author_key());
 
         let replay = Message::new_joined(&mesh, &who).sign(&leaver);
         let update = compute_for(&replay, &state);

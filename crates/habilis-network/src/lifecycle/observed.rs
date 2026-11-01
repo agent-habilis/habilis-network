@@ -30,24 +30,27 @@ pub(crate) fn observe(
     context: &HandlerCtx<'_>,
 ) -> Observed {
     let update = membership_update::compute_for(message, state);
-    // Implicit heartbeat: any received message updates last_seen. Not a stale one: a copy of a
-    // departed key's frame says nothing about whoever holds the nickname now.
+    // Implicit heartbeat: a frame that proves presence updates last_seen. Not a stale one: a copy of
+    // a departed key's frame says nothing about whoever holds the nickname now. Not a replayed
+    // frame of a durable kind either: it would keep a dead peer from its eviction. A peer that is
+    // new to us gets its first entry from any frame, or the sweep could never evict it.
     if !update.stale {
+        let proves = membership_update::proves_presence(&message.kind, message.timestamp);
         match state.last_seen.get_mut(message.author.as_str()) {
-            Some(seen) => *seen = Instant::now(),
+            Some(seen) if proves => *seen = Instant::now(),
+            Some(_) => {}
             None => {
                 state
                     .last_seen
                     .insert(message.author.clone(), Instant::now());
             }
         }
-    }
-    // The holder of a nickname is the last key that proved it was alive under that name. A
-    // `left` is no such proof, and a replayed frame of an older run is not either.
-    if !update.stale && membership_update::proves_presence(&message.kind) {
-        state
-            .peer_keys
-            .insert(message.author.clone(), message.key());
+        // The holder of a nickname is the last key that proved it was alive under that name.
+        if proves {
+            state
+                .peer_keys
+                .insert(message.author.clone(), message.key());
+        }
     }
     membership_update::apply(&update, &message.author, state);
 
@@ -129,8 +132,8 @@ fn arrival_id(key: AuthorKey) -> MessageId {
         .expect("a formatted UUID is a valid message id")
 }
 
-/// Red tests for issue 75 (H1, H4, H7). Each test states the property that a correct engine has
-/// and fails today for the reason in its name. No fix code lives here.
+/// Tests for issue 75 (H1, H4, H7). Each test states the property that a correct engine has. They
+/// were red on f7cd9bbc for the reason in their names (see the PR).
 #[cfg(all(test, feature = "host"))]
 mod churn_red {
     use std::sync::Mutex;
@@ -558,6 +561,13 @@ mod churn_red {
         });
     }
 
+    /// Every frame this node put on the wire: the gossip broadcasts and the pooled unicast writes.
+    fn sent_frames(rig: &Rig, state: &EventLoopState) -> Vec<Vec<u8>> {
+        let mut frames = rig.sender.broadcast_frames();
+        frames.extend(state.unicast_pool.sent_frames());
+        frames
+    }
+
     /// A data frame of `len` payload bytes, signed by this node.
     fn data_frame(rig: &Rig, len: usize) -> Verified {
         let mut message = Message::new_app(
@@ -611,7 +621,7 @@ mod churn_red {
             for _ in 0..5 {
                 broadcast_msg(&rig.sender, &data_frame(&rig, 512)).await;
             }
-            let counter = WireCounter::of(&rig.sender.broadcast_frames());
+            let counter = WireCounter::of(&sent_frames(&rig, &state));
             eprintln!("WIRE join burst: {counter}");
             assert_eq!(
                 counter.frames(FrameClass::Joined),
@@ -651,7 +661,7 @@ mod churn_red {
                     since_send = 0;
                 }
             }
-            let counter = WireCounter::of(&rig.sender.broadcast_frames());
+            let counter = WireCounter::of(&sent_frames(&rig, &state));
             eprintln!("WIRE idle 60 s: {counter}");
             assert_eq!(counter.frames(FrameClass::Data), 0, "idle sends no data");
             assert_eq!(
@@ -711,6 +721,95 @@ mod churn_red {
                 .filter(|line| line.starts_with("presence swift-cedar"))
                 .count();
             assert_eq!(arrivals, 1, "one peer, {arrivals} arrivals: {lines:?}");
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// A replay of an old durable frame (a relay or an anti-entropy answer re-sends it) does not
+    /// move the last-heard mark of a peer, so it cannot keep a dead peer from its eviction.
+    #[test]
+    fn a_replayed_old_frame_does_not_keep_a_dead_peer_alive() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let peer = Identity::generate();
+            let mut state = fresh_state();
+            let hello = chat(&rig.mesh, &who, &peer, UnixSecs::now());
+            assert!(
+                receive(&hello, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            let silent = Instant::now()
+                .checked_sub(Duration::from_secs(60))
+                .expect("the monotonic clock has run past 60 s since boot");
+            state.last_seen.insert(who.clone(), silent);
+
+            for make in [state_change, meta_change, peer_info] {
+                let old = make(&rig.mesh, &who, &peer, long_ago());
+                assert!(
+                    receive(&old, &mut state, &context),
+                    "the frame is new to the seen set"
+                );
+            }
+            let age = Instant::now().duration_since(state.last_seen[&who]);
+            assert!(
+                age >= Duration::from_secs(59),
+                "a replay moved the last-heard mark to {age:?} ago"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// A fresh frame of a durable kind does prove life: a peer that only changes its meta, or only
+    /// floods its address, is alive, and it must neither be evicted nor stay quiet.
+    #[test]
+    fn a_fresh_durable_frame_keeps_a_peer_alive_and_returns_a_quiet_one() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let peer = Identity::generate();
+            let mut state = fresh_state();
+            let hello = chat(&rig.mesh, &who, &peer, UnixSecs::now());
+            assert!(
+                receive(&hello, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            let silent = Instant::now()
+                .checked_sub(Duration::from_secs(60))
+                .expect("the monotonic clock has run past 60 s since boot");
+            state.last_seen.insert(who.clone(), silent);
+            let info = peer_info(&rig.mesh, &who, &peer, UnixSecs::now());
+            assert!(
+                receive(&info, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            let age = Instant::now().duration_since(state.last_seen[&who]);
+            assert!(
+                age < Duration::from_secs(5),
+                "a fresh peer info did not count as a sign of life: {age:?} ago"
+            );
+
+            let gone_quiet = Instant::now()
+                .checked_sub(alive_timeout() + Duration::from_secs(10))
+                .expect("the monotonic clock has run past the alive timeout since boot");
+            state.last_seen.insert(who.clone(), gone_quiet);
+            tick_sweep(&mut state, &rig.sink);
+            assert!(state.quiet.contains(who.as_str()), "the peer is quiet");
+            let change = meta_change(&rig.mesh, &who, &peer, UnixSecs::now());
+            assert!(
+                receive(&change, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert!(
+                rig.sink
+                    .lines()
+                    .iter()
+                    .any(|line| line == "return swift-cedar"),
+                "a fresh meta change did not return the quiet peer: {:?}",
+                rig.sink.lines()
+            );
             rig.endpoint.close().await;
         });
     }
@@ -813,7 +912,7 @@ mod churn_red {
         let new_run = Identity::generate();
         let at = UnixSecs::from(1_000);
         let mut state = fresh_state();
-        state.note_left(&who, old_run.author_key(), at);
+        state.note_left(old_run.author_key());
 
         let mut joined = Message::new_joined(&mesh, &who);
         joined.timestamp = at;

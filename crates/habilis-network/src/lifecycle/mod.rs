@@ -65,7 +65,7 @@ mod departed_tests {
     use crate::protocol::identity::Identity;
     use crate::protocol::meshes::LookupOpts;
     use crate::protocol::messages::Authored;
-    use crate::protocol::{MeshId, Message, PresenceSubtype, UnixSecs};
+    use crate::protocol::{MeshId, Message, PresenceSubtype};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::{MeshSender, PayloadPath};
 
@@ -280,7 +280,7 @@ mod departed_tests {
             let who = nick("swift-cedar");
             let first_run = Identity::generate();
             let mut state = fresh_state();
-            state.note_left(&who, first_run.author_key(), UnixSecs::from(1_000));
+            state.note_left(first_run.author_key());
             // A second run took the nickname and went quiet.
             state.quiet.insert(who.clone());
 
@@ -327,7 +327,7 @@ mod departed_tests {
             let who = nick("swift-cedar");
             let departed = Identity::generate();
             let mut state = fresh_state();
-            state.note_left(&who, departed.author_key(), UnixSecs::from(1_000));
+            state.note_left(departed.author_key());
 
             let replay = Message::new_joined(&mesh, &who).sign(&departed);
             let observed = observe(&replay, &mut state, &context);

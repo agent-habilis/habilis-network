@@ -243,19 +243,11 @@ pub struct EventLoopState {
     /// it stays bounded by `QUIET_CAP`; `roster_snapshot` only reads it for
     /// peers currently in `quiet`, so a stale entry never surfaces.
     pub(crate) quiet_since: HashMap<Nickname, Instant>,
-    /// Peers that said goodbye, with the timestamp of their `left`. A message of such a peer
-    /// that is stamped no later was sent before the goodbye and reached us after it (a
-    /// re-announce still in flight, a replayed message): it is no proof of presence and brings
-    /// the peer back into neither the roster nor the surfaced arrivals. A message stamped later is
-    /// a real return. Bounded like `quiet`; pruned to the same FIFO on every sweep.
-    pub(crate) left: BoundedFifoSet<Nickname>,
-    /// The timestamps of [`Self::left`], pruned to its membership.
-    pub(crate) left_at: HashMap<Nickname, UnixSecs>,
     /// The keys that said goodbye. A key is minted per run, so a key that left never speaks again:
     /// anything it signs afterwards is a replay, whatever its timestamp says. Keyed on the key
     /// and not on the nickname, which another run may take.
     ///
-    /// Bounded like `quiet` and `left`, by the same rule: keys are free, so an unbounded set is
+    /// Bounded like `quiet`, by the same rule: keys are free, so an unbounded set is
     /// a memory leak under churn. The bound is a second layer, not the first: a replay of a
     /// frame this node still holds is dropped by [`Self::mark_seen`] before membership sees it,
     /// whatever this set holds. What the bound gives up is narrow: a frame of a key that left
@@ -588,8 +580,6 @@ impl EventLoopState {
             quiet: BoundedFifoSet::new(QUIET_CAP),
             quiet_since: HashMap::new(),
             peer_keys: HashMap::new(),
-            left: BoundedFifoSet::new(QUIET_CAP),
-            left_at: HashMap::new(),
             left_keys: BoundedFifoSet::new(QUIET_CAP),
             surfaced: HashSet::new(),
             last_sent_at: now,
@@ -985,13 +975,9 @@ impl EventLoopState {
     /// stays. It describes the pooled unicast connection, which outlives the
     /// link; erasing it parked every directed frame on a link flap until the
     /// alive tick re-probed (about 40 s with the relink cooldown).
-    /// Remember that `nick` said goodbye at `at`. A later `left` of the same peer moves the mark
-    /// forward, and an older one (a delayed copy) leaves it where it is.
-    pub(crate) fn note_left(&mut self, nick: &Nickname, key: AuthorKey, at: UnixSecs) {
-        self.left.insert(nick.clone());
+    /// Remember that `key` said goodbye. A key is minted per run, so it never speaks again.
+    pub(crate) fn note_left(&mut self, key: AuthorKey) {
         self.left_keys.insert(key);
-        let mark = self.left_at.entry(nick.clone()).or_insert(at);
-        *mark = (*mark).max(at);
     }
 
     pub(crate) fn key_said_goodbye(&self, key: AuthorKey) -> bool {
