@@ -794,12 +794,13 @@ pub(crate) async fn linkstate_now(state: &mut EventLoopState, context: &HandlerC
 /// The sweep-tick arm: note the gap, then evict silent peers. The app's own
 /// timers that ride this cadence run via [`NodeDriver::on_tick`] right after.
 fn sweep_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, sink: &dyn NodeSink) {
-    timers::note_tick_gap(
+    let (mono_gap, wall_gap) = timers::note_tick_gap(
         "sweep",
         &mut anchors.sweep,
         &mut anchors.sweep_wall,
         sweep_interval(),
     );
+    lifecycle::heartbeat::forgive_stall(state, mono_gap.max(wall_gap));
     lifecycle::heartbeat::tick_sweep(state, sink);
 }
 

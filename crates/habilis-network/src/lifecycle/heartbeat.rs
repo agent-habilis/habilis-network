@@ -9,7 +9,14 @@ use crate::daemon::state::EventLoopState;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::{MeshId, Message, Nickname};
 use crate::util::clock::Instant;
+use std::time::Duration;
+
 use crate::util::tuning::{ALIVE_INTERVAL, alive_timeout};
+
+/// How long a quiet peer stays in `quiet` and in the roster snapshot. A peer that has not come back
+/// after this long is gone: it would only take a slot of the bounded `quiet` set from a peer that
+/// can still return.
+const QUIET_TTL: Duration = Duration::from_hours(1);
 
 /// Emit an `Alive` keepalive if we haven't broadcast anything
 /// recently. Chatty daemons pay zero heartbeat cost.
@@ -29,6 +36,25 @@ pub(crate) async fn tick_alive(
     state.idle.broadcasts += 1;
     state.last_sent_at = Instant::now();
     tracing::trace!("alive keepalive broadcast");
+}
+
+/// A sweep that comes later than one alive timeout means that this node did not run: the process
+/// was suspended or starved. The silence of every peer is then our own, so each peer gets a full
+/// timeout again from now to be heard, instead of leaving the roster all at once and returning
+/// all at once. `gap` is the larger of the monotonic and the wall-clock gap between two sweeps.
+pub(crate) fn forgive_stall(state: &mut EventLoopState, gap: Duration) {
+    if gap <= alive_timeout() {
+        return;
+    }
+    let now = Instant::now();
+    for seen in state.last_seen.values_mut() {
+        *seen = now;
+    }
+    tracing::debug!(
+        target: "habilis_network::lifecycle",
+        gap_secs = gap.as_secs(),
+        "the sweep came late: peers get a full alive timeout from now"
+    );
 }
 
 /// Sweep `last_seen` for peers we've not heard from past the
@@ -96,6 +122,18 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
             }
         }
     }
+    // A quiet peer that did not come back within the TTL is gone for good.
+    let gone: Vec<Nickname> = state
+        .quiet_since
+        .iter()
+        .filter(|(_, heard)| now.duration_since(**heard) > QUIET_TTL)
+        .map(|(nick, _)| nick.clone())
+        .collect();
+    for nick in gone {
+        state.quiet.remove(nick.as_str());
+        state.quiet_since.remove(nick.as_str());
+        state.forget_peer_endpoint(nick.as_str());
+    }
     // Keep `quiet_since` bounded to current `quiet` membership: peers that
     // returned (drained from `quiet`) or fell off the bounded `quiet` FIFO
     // drop their stale recency here.
@@ -126,12 +164,79 @@ mod tests {
     use crate::testing::{fresh_state, nick};
     use std::collections::HashSet;
 
-    use super::{Instant, Nickname, tick_sweep};
+    use super::{Instant, Nickname, QUIET_TTL, forgive_stall, tick_sweep};
     use crate::gossip::event::SilentSink;
     use crate::util::tuning;
     use std::time::Duration;
 
     use crate::{protocol, testing};
+    #[test]
+    fn a_late_sweep_gives_every_peer_a_new_timeout() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let silent_for = tuning::alive_timeout() + Duration::from_secs(30);
+        for name in ["swift-cedar", "lost-heron"] {
+            let seen = Instant::now()
+                .checked_sub(silent_for)
+                .expect("the monotonic clock has run past the alive timeout since boot");
+            state.last_seen.insert(nick(name), seen);
+            state.peers.insert(nick(name));
+            state.surfaced.insert(nick(name));
+        }
+
+        // The loop did not run for 4.5 min (one alive timeout and one starvation threshold).
+        let stall = tuning::alive_timeout() + tuning::starvation_threshold();
+        forgive_stall(&mut state, stall);
+        tick_sweep(&mut state, &SilentSink);
+        assert_eq!(
+            state.peers.len(),
+            2,
+            "a stalled loop evicted peers that it could not have heard"
+        );
+
+        // A sweep that came on time changes nothing: the silent peers go.
+        let mut punctual = fresh_state();
+        let seen = Instant::now()
+            .checked_sub(silent_for)
+            .expect("the monotonic clock has run past the alive timeout since boot");
+        punctual.last_seen.insert(nick("swift-cedar"), seen);
+        punctual.peers.insert(nick("swift-cedar"));
+        punctual.surfaced.insert(nick("swift-cedar"));
+        forgive_stall(&mut punctual, tuning::sweep_interval());
+        tick_sweep(&mut punctual, &SilentSink);
+        assert!(
+            punctual.peers.is_empty() && punctual.quiet.contains("swift-cedar"),
+            "an on-time sweep still evicts a peer that is silent past the timeout"
+        );
+    }
+
+    #[test]
+    fn a_quiet_peer_expires_after_the_quiet_ttl() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let long_gone = Instant::now()
+            .checked_sub(QUIET_TTL + Duration::from_secs(60))
+            .expect("the monotonic clock has run past the quiet TTL since boot");
+        let recent = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .expect("the monotonic clock has run past 60 s since boot");
+        for (name, heard) in [("swift-cedar", long_gone), ("lost-heron", recent)] {
+            state.quiet.insert(nick(name));
+            state.quiet_since.insert(nick(name), heard);
+        }
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            !state.quiet.contains("swift-cedar") && !state.quiet_since.contains_key("swift-cedar"),
+            "a peer quiet for more than the TTL leaves the quiet set"
+        );
+        assert!(
+            state.quiet.contains("lost-heron"),
+            "a peer quiet for a minute stays"
+        );
+    }
+
     #[test]
     fn sweep_evicts_surfaced_peer_into_quiet() {
         let _guard = ::habilis_network_test_tracing::init();
