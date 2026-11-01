@@ -27,6 +27,10 @@
 //   `idle_body_in`, `idle_frames_in`, `idle_wire_out`, `idle_body_out` and `idle_frames_out`
 //   deltas (the `wire census` line). The wire is the frame as it goes on a socket; the body is its
 //   payload as written in the JSON. Out counts a broadcast once, not once per neighbor.
+// - d_share / d_by_kind: D, the bytes of content that came again over all bytes received: the
+//   repeats that the dedup caught (`idle_bin_dup`) plus the frames that were new by id but carried
+//   a change that the document had applied (`idle_bin_cdup`), by kind and in all. cdup is
+//   part of the fresh bytes, so it is added to dup, not subtracted from fresh.
 // - net_send_ip / net_send_relay / net_recv_ip / net_recv_relay / net_recv_custom / net_recv_dgrams /
 //   net_hdr_in: the sums of the `idle_net_*` deltas: the UDP payload that the iroh socket sent and
 //   received (all of QUIC: frames, acknowledgements, keep-alives, handshakes), the datagrams
@@ -37,7 +41,7 @@
 //   Out counts a broadcast once, so it understates the frames by the fan-out.
 // - dup_share: the bytes of the frames that the dedup dropped as repeats, over all frames of the
 //   kinds that reached it. env_in / env_out: 1 - body / wire, the share of the envelope.
-// - bin_fresh / bin_dup / bout: `kind:bytes` sums, by kind of frame (app, presence, peerinfo,
+// - bin_fresh / bin_dup / bin_cdup / bout: `kind:bytes` sums, by kind of frame (app, presence, peerinfo,
 //   digest, statedigest, metadigest, state, meta, linkstate, pingpong, shard, other), largest first.
 //   tags_in / tags_out: the same for the tags of the app frames.
 // - ext_<arm>: the sums of the `idle_ext_<arm>` deltas, the wakes of each arm that is not a timer.
@@ -141,6 +145,7 @@ function summarize(run: string): string {
   const kinds = {
     fresh: new Map<string, number>(),
     dup: new Map<string, number>(),
+    cdup: new Map<string, number>(),
     out: new Map<string, number>(),
     tagsIn: new Map<string, number>(),
     tagsOut: new Map<string, number>(),
@@ -167,6 +172,7 @@ function summarize(run: string): string {
     }
     addPairs(text, "idle_bin_fresh", kinds.fresh);
     addPairs(text, "idle_bin_dup", kinds.dup);
+    addPairs(text, "idle_bin_cdup", kinds.cdup);
     addPairs(text, "idle_bout", kinds.out);
     addPairs(text, "idle_bin_tags", kinds.tagsIn);
     addPairs(text, "idle_bout_tags", kinds.tagsOut);
@@ -200,9 +206,22 @@ function summarize(run: string): string {
   const netIn =
     (totals.get("net_recv_ip") ?? 0) + (totals.get("net_recv_relay") ?? 0) + (totals.get("net_recv_custom") ?? 0);
   const netOut = (totals.get("net_send_ip") ?? 0) + (totals.get("net_send_relay") ?? 0);
+  // D: the bytes of content that came again, over all bytes received, by kind. A repeat that the
+  // dedup caught is in `dup`; a frame that was new by id but carried a change that the document
+  // held is in `cdup`, which is part of `fresh`, so the two do not overlap.
+  const dByKind = [...new Set([...kinds.fresh.keys(), ...kinds.dup.keys()])]
+    .map((kind): [string, number] => {
+      const all = (kinds.fresh.get(kind) ?? 0) + (kinds.dup.get(kind) ?? 0);
+      const again = (kinds.dup.get(kind) ?? 0) + (kinds.cdup.get(kind) ?? 0);
+      return [kind, all > 0 ? (100 * again) / all : 0];
+    })
+    .sort(([a, x], [b, y]) => y - x || a.localeCompare(b))
+    .map(([kind, share]) => `${kind}:${share.toFixed(1)}%`)
+    .join(",") || "-";
   const wireText =
     `frames_of_udp_in=${percent(wireIn, netIn)} frames_of_udp_out=${percent(wireOut, netOut)} ` +
     `dup_share=${percent(total(kinds.dup), received)} ` +
+    `d_share=${percent(total(kinds.dup) + total(kinds.cdup), received)} d_by_kind=${dByKind} ` +
     `env_in=${percent(wireIn - (totals.get("body_in") ?? 0), wireIn)} ` +
     `env_out=${percent(wireOut - (totals.get("body_out") ?? 0), wireOut)} ` +
     `bin_fresh=${pairsText(kinds.fresh)} bin_dup=${pairsText(kinds.dup)} bout=${pairsText(kinds.out)} ` +
