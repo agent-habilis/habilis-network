@@ -36,6 +36,14 @@
 //   received (all of QUIC: frames, acknowledgements, keep-alives, handshakes), the datagrams
 //   received, and 28 bytes of IPv4 and UDP header per received datagram. The first census of a node
 //   covers the time since its endpoint started. There is no send counter for the custom transports.
+// - net_paths_custom / net_ip_added / net_ip_removed / net_relay_added / net_relay_removed /
+//   net_custom_added / net_custom_removed: the sums of the `idle_net_*` path counters: custom paths
+//   made, and paths opened and closed by kind of transport (a custom path is a WebRTC, multihop or
+//   gossip path).
+// - gt_frames_out / gt_bytes_out / gt_frames_in / gt_bytes_in / gt_not_for_us / gt_dropped: the sums
+//   of the `idle_gt_*` deltas: the gossip transport, which carries QUIC packets as frames on the mesh
+//   topic for a pair with no other path. All zero when the mesh has none. gt_of_udp_in / gt_of_udp_out:
+//   its bytes over the socket bytes of the same direction.
 // - frames_of_udp_in / frames_of_udp_out: wire_in and wire_out over the socket bytes of the same
 //   direction. The rest is below our frames: gossip messages, QUIC framing, acknowledgements, keep-alives.
 //   Out counts a broadcast once, so it understates the frames by the fan-out.
@@ -89,6 +97,19 @@ const TOTALS: [string, string][] = [
   ["net_recv_custom", "idle_net_recv_custom"],
   ["net_recv_dgrams", "idle_net_recv_dgrams"],
   ["net_hdr_in", "idle_net_hdr_in"],
+  ["net_paths_custom", "idle_net_paths_custom"],
+  ["net_ip_added", "idle_net_ip_added"],
+  ["net_ip_removed", "idle_net_ip_removed"],
+  ["net_relay_added", "idle_net_relay_added"],
+  ["net_relay_removed", "idle_net_relay_removed"],
+  ["net_custom_added", "idle_net_custom_added"],
+  ["net_custom_removed", "idle_net_custom_removed"],
+  ["gt_frames_out", "idle_gt_frames_out"],
+  ["gt_bytes_out", "idle_gt_bytes_out"],
+  ["gt_frames_in", "idle_gt_frames_in"],
+  ["gt_bytes_in", "idle_gt_bytes_in"],
+  ["gt_not_for_us", "idle_gt_not_for_us"],
+  ["gt_dropped", "idle_gt_dropped"],
 ];
 
 // A census field of `name:bytes` pairs joined by commas (`app:120,presence:40`, or `-`): add the
@@ -219,6 +240,7 @@ function summarize(run: string): string {
     .map(([kind, share]) => `${kind}:${share.toFixed(1)}%`)
     .join(",") || "-";
   const wireText =
+    `gt_of_udp_in=${percent(totals.get("gt_bytes_in") ?? 0, netIn)} gt_of_udp_out=${percent(totals.get("gt_bytes_out") ?? 0, netOut)} ` +
     `frames_of_udp_in=${percent(wireIn, netIn)} frames_of_udp_out=${percent(wireOut, netOut)} ` +
     `dup_share=${percent(total(kinds.dup), received)} ` +
     `d_share=${percent(total(kinds.dup) + total(kinds.cdup), received)} d_by_kind=${dByKind} ` +
