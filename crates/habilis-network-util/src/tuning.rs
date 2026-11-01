@@ -22,7 +22,7 @@ const _: () = assert!(MESSAGE_LOG_SIZE >= 1, "a zero-length log retains nothing"
 /// retention window with margin: anti-entropy resends any message still
 /// in the log, and a resend whose id had scrolled out of this set would be
 /// reprocessed and **re-surfaced**. Derived, so the two cannot drift.
-pub const SEEN_IDS_CAP: usize = MESSAGE_LOG_SIZE * 2;
+pub const SEEN_IDS_CAP: usize = 64_000;
 const _: () = assert!(
     SEEN_IDS_CAP >= MESSAGE_LOG_SIZE,
     "the dedup set must outlive the message log"
@@ -1062,7 +1062,7 @@ pub const FAST_ROUND_RETRY: Duration = Duration::from_millis(400);
 /// cap, so a peer that advertises heads we can never hold costs one small digest per cap, not
 /// 2.5 per second. A retry after progress, or a new digest with other heads, starts again at
 /// [`FAST_ROUND_RETRY`]. Zero is off: every retry waits [`FAST_ROUND_RETRY`], as before.
-pub const FAST_ROUND_STALL_BACKOFF_CAP: Duration = Duration::ZERO;
+pub const FAST_ROUND_STALL_BACKOFF_CAP: Duration = Duration::from_secs(16);
 
 /// How many peers a node remembers as ahead of it, per channel.
 pub const FAST_ROUND_AHEAD_MAX: usize = 16;
