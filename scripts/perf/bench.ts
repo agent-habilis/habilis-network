@@ -2,7 +2,7 @@
 // One benchmark run of the app binary: N real daemons in a private mesh on one host.
 //
 // usage: bun scripts/perf/bench.ts <app binary> <arm> [--nodes 64] [--seed 1] [--stagger 0.5]
-//          [--settle 480] [--idle 600] [--loaded 600] [--lookup <list>] [--out-root ~/bench-results]
+//          [--settle 480] [--idle 600] [--loaded 600] [--lookup <list>] [--min-avail-gib 2] [--out-root ~/bench-results]
 //          [--record ~/bench-results/baseline/<arm>.json]
 //
 // --record names the JSON that build-arm.ts wrote. The runner copies it into result.json as `build`.
@@ -199,10 +199,10 @@ function sample() {
 
 // Start no new daemon when the host is near its limit. The host of the first try went down at 64 daemons.
 const MAX_LOAD_PER_CORE = 2;
-const MIN_AVAILABLE_BYTES = 2 * 1024 ** 3;
+const MIN_AVAILABLE_BYTES = num("min-avail-gib", 2) * 1024 ** 3;
 function overLimit(point: ReturnType<typeof sample>): string | null {
   if (point.load1 > MAX_LOAD_PER_CORE * cpus().length) return `load1 ${point.load1.toFixed(1)} is above ${MAX_LOAD_PER_CORE} x ${cpus().length} cores`;
-  if (point.avail_bytes < MIN_AVAILABLE_BYTES) return `available memory ${(point.avail_bytes / 1024 ** 3).toFixed(1)} GiB is below 2 GiB`;
+  if (point.avail_bytes < MIN_AVAILABLE_BYTES) return `available memory ${(point.avail_bytes / 1024 ** 3).toFixed(1)} GiB is below ${MIN_AVAILABLE_BYTES / 1024 ** 3} GiB`;
   if (point.open_files > 0.8 * point.file_limit) return `open files ${point.open_files} are above 80% of ${point.file_limit}`;
   return null;
 }
