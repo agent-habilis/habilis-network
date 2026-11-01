@@ -39,60 +39,9 @@ pub(crate) struct GossipMsgs {
 impl GossipMsgs {
     /// The counters of `metrics` now.
     pub(crate) fn read(metrics: &Metrics) -> Self {
-        Self {
-            sent: [
-                metrics.msgs_join_sent.get(),
-                metrics.msgs_forward_join_sent.get(),
-                metrics.msgs_shuffle_sent.get(),
-                metrics.msgs_shuffle_reply_sent.get(),
-                metrics.msgs_neighbor_sent.get(),
-                metrics.msgs_disconnect_sent.get(),
-                metrics.msgs_gossip_sent.get(),
-                metrics.msgs_ihave_sent.get(),
-                metrics.msgs_graft_sent.get(),
-                metrics.msgs_prune_sent.get(),
-            ],
-            sent_bytes: [
-                metrics.msgs_join_sent_size.get(),
-                metrics.msgs_forward_join_sent_size.get(),
-                metrics.msgs_shuffle_sent_size.get(),
-                metrics.msgs_shuffle_reply_sent_size.get(),
-                metrics.msgs_neighbor_sent_size.get(),
-                metrics.msgs_disconnect_sent_size.get(),
-                metrics.msgs_gossip_sent_size.get(),
-                metrics.msgs_ihave_sent_size.get(),
-                metrics.msgs_graft_sent_size.get(),
-                metrics.msgs_prune_sent_size.get(),
-            ],
-            recv: [
-                metrics.msgs_join_recv.get(),
-                metrics.msgs_forward_join_recv.get(),
-                metrics.msgs_shuffle_recv.get(),
-                metrics.msgs_shuffle_reply_recv.get(),
-                metrics.msgs_neighbor_recv.get(),
-                metrics.msgs_disconnect_recv.get(),
-                metrics.msgs_gossip_recv.get(),
-                metrics.msgs_ihave_recv.get(),
-                metrics.msgs_graft_recv.get(),
-                metrics.msgs_prune_recv.get(),
-            ],
-            recv_bytes: [
-                metrics.msgs_join_recv_size.get(),
-                metrics.msgs_forward_join_recv_size.get(),
-                metrics.msgs_shuffle_recv_size.get(),
-                metrics.msgs_shuffle_reply_recv_size.get(),
-                metrics.msgs_neighbor_recv_size.get(),
-                metrics.msgs_disconnect_recv_size.get(),
-                metrics.msgs_gossip_recv_size.get(),
-                metrics.msgs_ihave_recv_size.get(),
-                metrics.msgs_graft_recv_size.get(),
-                metrics.msgs_prune_recv_size.get(),
-            ],
-            ctrl_out: metrics.msgs_ctrl_sent_size.get(),
-            data_out: metrics.msgs_data_sent_size.get(),
-            ctrl_in: metrics.msgs_ctrl_recv_size.get(),
-            data_in: metrics.msgs_data_recv_size.get(),
-        }
+        // This fork revision has no byte counters, so the reading is zero.
+        let _ = metrics;
+        Self::default()
     }
 
     /// The counts since `earlier`, field by field. Zero, not a wrap, if a field went back.
