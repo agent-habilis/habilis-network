@@ -1155,8 +1155,10 @@ fn dispatch_channel(
         channel, message, ..
     } = event;
     let count_before = state.doc(channel).change_count();
-    if ingest_channel_event(event, state.doc_mut(channel), context) {
-        state.idle.state_rejected += 1;
+    match ingest_channel_event(event, state.doc_mut(channel), context) {
+        ChannelOutcome::Refused => state.idle.state_rejected += 1,
+        ChannelOutcome::Repeat => state.idle.wire_in.note_content_dup(),
+        ChannelOutcome::Taken => {}
     }
     let changed = state.doc(channel).change_count() > count_before;
     if changed {
@@ -1185,7 +1187,7 @@ fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
     }
 }
 
-/// Returns whether the document refused or ignored the change.
+/// Returns what the document made of the change.
 ///
 /// Ingest a durable channel event (`State`/`Meta`) into its `log`: dedup-insert,
 /// then surface a `StateChanged` for `channel` only when the derived doc changed
@@ -1196,7 +1198,7 @@ fn ingest_channel_event(
     event: ChannelEvent<'_>,
     doc: &mut doc::MeshDoc,
     context: &HandlerCtx<'_>,
-) -> bool {
+) -> ChannelOutcome {
     use crate::doc::Ingested;
 
     let ChannelEvent {
@@ -1230,12 +1232,22 @@ fn ingest_channel_event(
                 "dropping a {} change that forges another peer's agent card",
                 channel.label()
             );
-            return true;
+            return ChannelOutcome::Refused;
         }
-        Ingested::Ignored => return true,
-        Ingested::Duplicate | Ingested::Buffered | _ => {}
+        Ingested::Ignored => return ChannelOutcome::Refused,
+        Ingested::Duplicate => return ChannelOutcome::Repeat,
+        Ingested::Buffered | _ => {}
     }
-    false
+    ChannelOutcome::Taken
+}
+
+/// What the document made of a channel event.
+enum ChannelOutcome {
+    /// The document refused or ignored the change.
+    Refused,
+    /// The document had applied this change already.
+    Repeat,
+    Taken,
 }
 
 /// A directed leg (a directed `app_msg` or a `Task`) is surfaced **only by
