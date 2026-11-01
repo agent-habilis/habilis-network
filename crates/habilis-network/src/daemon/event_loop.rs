@@ -462,6 +462,7 @@ fn wire_transports(
     state
         .unicast_pool
         .set_admission(state.webrtc_admission.clone());
+    state.unicast_pool.set_tally(state.idle.wire_out.clone());
     // Before the first write, so the initial advertisement carries a real count.
     state.live_count = live_count;
     state.relay_transport = transports.relay_transport;
@@ -584,7 +585,7 @@ fn join_gossip(
     }
     let receiver = gossip::split::spawn_split(receiver, state.gossip_handle.clone());
 
-    let sender = MeshSender::new(gossip_sender);
+    let sender = MeshSender::new(gossip_sender).counting(state.idle.wire_out.clone());
     // The task that sends the digest answers, so that the loop never waits for
     // the gossip actor to take them.
     if let Some(resends) = state.resend_receiver.take() {

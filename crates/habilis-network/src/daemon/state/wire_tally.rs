@@ -8,7 +8,7 @@
 //! `habilis-network-protocol` pins with golden tests; a frame it cannot read counts as `other`.
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 use std::{mem, str};
 
 /// The most distinct app tags kept per interval and direction. A peer can name any tag, so the
@@ -309,32 +309,37 @@ impl WireOut {
     }
 }
 
-/// The send paths hold no `&mut` state, so their counts are kept here, as the wakes of the tickers
-/// off the loop are. A process that hosts several nodes mixes their counts.
-static OUT: LazyLock<Mutex<WireOut>> = LazyLock::new(|| Mutex::new(WireOut::default()));
+/// The frames that the senders of one event loop handed to the transport. The send paths hold no
+/// `&mut` state, so each loop hands a clone of this handle to its senders and reads the tally with
+/// `take`. Two loops in one process do not share a tally.
+#[derive(Clone, Default, Debug)]
+pub(crate) struct WireOutTally(Arc<Mutex<WireOut>>);
 
-/// Count a frame that went to the transport, on gossip or point to point.
-pub(crate) fn note_wire_out(frame: &[u8]) {
-    if let Ok(mut out) = OUT.lock() {
-        out.note(frame);
+impl WireOutTally {
+    /// Count a frame that went to the transport, on gossip or point to point.
+    pub(crate) fn note(&self, frame: &[u8]) {
+        if let Ok(mut out) = self.0.lock() {
+            out.note(frame);
+        }
     }
-}
 
-/// Read the sent frames of the interval and start the next one.
-pub(super) fn take_wire_out() -> WireOut {
-    OUT.lock()
-        .map(|mut out| mem::take(&mut *out))
-        .unwrap_or_default()
-}
+    /// Read the sent frames of the interval and start the next one.
+    pub(super) fn take(&self) -> WireOut {
+        self.0
+            .lock()
+            .map(|mut out| mem::take(&mut *out))
+            .unwrap_or_default()
+    }
 
-/// The bytes sent so far under `tag`, read without ending the interval. A frame with a tag that no
-/// other test uses is the way to find one's own send among those of the tests that run beside it.
-#[cfg(test)]
-pub(crate) fn sent_tag_bytes(tag: &str) -> u64 {
-    OUT.lock()
-        .ok()
-        .and_then(|out| out.tags.0.get(tag).copied())
-        .unwrap_or(0)
+    /// The bytes sent so far under `tag`, read without ending the interval.
+    #[cfg(test)]
+    pub(crate) fn tag_bytes(&self, tag: &str) -> u64 {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|out| out.tags.0.get(tag).copied())
+            .unwrap_or(0)
+    }
 }
 
 /// A frame of the app kind with the given `tag`, as the serializer writes it.

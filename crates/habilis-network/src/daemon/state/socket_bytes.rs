@@ -4,7 +4,6 @@
 //! census keeps the last reading and reports the difference.
 
 use std::mem;
-use std::sync::{Mutex, PoisonError};
 
 use habilis_network_iroh_gossip_transport::{GossipHandle, Stats};
 use iroh::Endpoint;
@@ -12,16 +11,12 @@ use iroh::Endpoint;
 /// The bytes of an `IPv4` and a `UDP` header, which the socket counters do not include.
 const IP_UDP_HEADER: u64 = 28;
 
-/// The reading at the last census. The counters belong to the endpoint, which a process has one of,
-/// so the mark is kept here and not in the state of the loop.
-static MARK: Mutex<SocketBytes> = Mutex::new(SocketBytes::ZERO);
-
-/// The bytes that the socket moved since the last call. The first call covers the time since the
-/// endpoint started.
-pub(crate) fn socket_delta(endpoint: &Endpoint) -> SocketBytes {
+/// The bytes that the socket moved since the reading in `mark`, which becomes the new reading. The
+/// mark belongs to the loop that owns `endpoint`: a process with two loops has two endpoints and
+/// two marks. The first call, with a zero mark, covers the time since the endpoint started.
+pub(crate) fn socket_delta(mark: &mut SocketBytes, endpoint: &Endpoint) -> SocketBytes {
     let now = SocketBytes::read(endpoint);
-    let mut mark = MARK.lock().unwrap_or_else(PoisonError::into_inner);
-    now.since(mem::replace(&mut *mark, now))
+    now.since(mem::replace(mark, now))
 }
 
 /// The socket counters at one moment, or the difference of two readings.
@@ -48,22 +43,6 @@ pub(crate) struct SocketBytes {
 }
 
 impl SocketBytes {
-    const ZERO: Self = Self {
-        send_ip: 0,
-        send_relay: 0,
-        recv_ip: 0,
-        recv_relay: 0,
-        recv_custom: 0,
-        recv_datagrams: 0,
-        paths_custom: 0,
-        ip_paths_added: 0,
-        ip_paths_removed: 0,
-        relay_paths_added: 0,
-        relay_paths_removed: 0,
-        custom_paths_added: 0,
-        custom_paths_removed: 0,
-    };
-
     /// The counters of `endpoint` now.
     pub(crate) fn read(endpoint: &Endpoint) -> Self {
         let socket = &endpoint.metrics().socket;
@@ -177,25 +156,18 @@ impl GossipPathBytes {
     }
 }
 
-/// The reading at the last census, for the gossip transport of the process.
-static GOSSIP_MARK: Mutex<GossipPathBytes> = Mutex::new(GossipPathBytes {
-    frames_out: 0,
-    bytes_out: 0,
-    frames_in: 0,
-    bytes_in: 0,
-    not_for_us: 0,
-    dropped: 0,
-});
-
-/// What the gossip transport counted since the last call: all zero when the mesh has no gossip
-/// transport. The first call covers the time since the handle was made.
-pub(crate) fn gossip_path_delta(handle: Option<&GossipHandle>) -> GossipPathBytes {
+/// What the gossip transport counted since the reading in `mark`, which becomes the new reading:
+/// all zero when the mesh has no gossip transport. The mark belongs to the loop that owns
+/// `handle`. The first call, with a zero mark, covers the time since the handle was made.
+pub(crate) fn gossip_path_delta(
+    mark: &mut GossipPathBytes,
+    handle: Option<&GossipHandle>,
+) -> GossipPathBytes {
     let Some(handle) = handle else {
         return GossipPathBytes::default();
     };
     let now = GossipPathBytes::from_stats(handle.stats());
-    let mut mark = GOSSIP_MARK.lock().unwrap_or_else(PoisonError::into_inner);
-    now.since(mem::replace(&mut *mark, now))
+    now.since(mem::replace(mark, now))
 }
 
 #[cfg(test)]
@@ -205,7 +177,7 @@ mod tests {
 
     use habilis_network_iroh_gossip_transport::Stats;
 
-    use super::{GossipPathBytes, SocketBytes, gossip_path_delta};
+    use super::{GossipPathBytes, SocketBytes, gossip_path_delta, socket_delta};
     use crate::lookup;
 
     const ALPN: &[u8] = b"socket-bytes-test";
@@ -261,7 +233,7 @@ mod tests {
             "saturates"
         );
         assert_eq!(
-            gossip_path_delta(None),
+            gossip_path_delta(&mut GossipPathBytes::default(), None),
             GossipPathBytes::default(),
             "no handle, no count"
         );
@@ -305,6 +277,10 @@ mod tests {
                 lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
                 let (client_before, server_before) =
                     (SocketBytes::read(&client), SocketBytes::read(&server));
+                let (mut client_mark, mut server_mark) =
+                    (SocketBytes::default(), SocketBytes::default());
+                socket_delta(&mut client_mark, &client);
+                socket_delta(&mut server_mark, &server);
 
                 let connection = client
                     .connect(server.id(), ALPN)
@@ -336,6 +312,16 @@ mod tests {
                     "the client opened an IP path: {paths:?}"
                 );
                 assert_eq!(paths.custom_paths_added, 0, "no custom path on loopback");
+
+                // Two loops in one process: the read of the server does not take the bytes that
+                // the client is about to report.
+                let by_server = socket_delta(&mut server_mark, &server);
+                let by_client = socket_delta(&mut client_mark, &client);
+                assert!(by_server.recv_ip >= sent as u64, "{by_server:?}");
+                assert!(
+                    by_client.send_ip >= sent as u64,
+                    "the client keeps its own mark: {by_client:?}"
+                );
 
                 router.shutdown().await.expect("shutdown");
                 client.close().await;

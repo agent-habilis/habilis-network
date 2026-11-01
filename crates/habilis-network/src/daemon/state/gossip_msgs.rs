@@ -4,8 +4,6 @@
 //! is the 4 bytes of the length prefix and the encoding of the message. The counters are totals
 //! since the actor started, so the census keeps the last reading and reports the difference.
 
-use std::sync::{Mutex, PoisonError};
-
 use iroh_gossip::metrics::Metrics;
 
 /// The variants, in the order of the arrays below.
@@ -134,14 +132,11 @@ pub(crate) fn by_variant(values: &[u64; 10]) -> String {
     }
 }
 
-/// The reading at the last census, for the gossip actor of the process.
-static MARK: Mutex<Option<GossipMsgs>> = Mutex::new(None);
-
-/// What the gossip actor counted since the last call. The first call covers the time since the
-/// actor started.
-pub(crate) fn gossip_msgs_delta(metrics: &Metrics) -> GossipMsgs {
+/// What the gossip actor counted since the reading in `mark`, which becomes the new reading. The
+/// mark belongs to the loop that owns the actor behind `metrics`. The first call, with no mark,
+/// covers the time since the actor started.
+pub(crate) fn gossip_msgs_delta(mark: &mut Option<GossipMsgs>, metrics: &Metrics) -> GossipMsgs {
     let now = GossipMsgs::read(metrics);
-    let mut mark = MARK.lock().unwrap_or_else(PoisonError::into_inner);
     let earlier = mark.replace(now).unwrap_or_default();
     now.since(earlier)
 }

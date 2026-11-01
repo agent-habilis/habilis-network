@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use iroh::EndpointId;
 use iroh_gossip::api::{ApiError, GossipSender};
 
-use crate::daemon::state::note_wire_out;
+use crate::daemon::state::WireOutTally;
 use crate::protocol::messages::WireFrame;
 
 /// The mesh's outbound broadcast plane: a thin wrapper over the gossip sender
@@ -30,6 +30,9 @@ use crate::protocol::messages::WireFrame;
 pub struct MeshSender {
     // the sender is shared by the mesh handles, which swap the gossip under it
     gossip: Arc<RwLock<GossipSender>>,
+    /// Where the sent frames are counted: the tally of the loop that owns this sender. A sender
+    /// that no loop owns counts into a tally that nobody reads.
+    tally: WireOutTally,
 }
 
 impl MeshSender {
@@ -37,7 +40,15 @@ impl MeshSender {
         Self {
             // the sender is shared by the mesh handles, which swap the gossip under it
             gossip: Arc::new(RwLock::new(gossip)),
+            tally: WireOutTally::default(),
         }
+    }
+
+    /// Count the frames of this sender into `tally`, the tally of the loop that owns it.
+    #[must_use]
+    pub(crate) fn counting(mut self, tally: WireOutTally) -> Self {
+        self.tally = tally;
+        self
     }
 
     /// The current gossip handle. Cloned out of the lock, so no lock is held
@@ -54,7 +65,7 @@ impl MeshSender {
         let bytes = message.into_bytes();
         let sent = self.current().broadcast(bytes.clone()).await;
         if sent.is_ok() {
-            note_wire_out(&bytes);
+            self.tally.note(&bytes);
         }
         sent
     }
@@ -88,12 +99,11 @@ mod tests {
     use iroh_gossip::proto;
 
     use super::MeshSender;
-    use crate::daemon::state::{app_frame_with_tag, sent_tag_bytes};
+    use crate::daemon::state::{WireOutTally, app_frame_with_tag};
     use crate::protocol::messages::WireFrame;
 
-    /// A broadcast is counted in the sent bytes, once, under the kind and the tag of the frame. The
-    /// tag is the test's own, and the send repeats until it shows, because the tests that end an
-    /// interval run beside this one and can take the count first.
+    /// A broadcast is counted in the tally of its own sender, once, under the tag of the frame, and
+    /// not in the tally of another loop.
     #[test]
     fn a_broadcast_is_counted_in_the_sent_bytes() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
@@ -107,24 +117,21 @@ mod tests {
                 .await
                 .expect("subscribe to a peerless topic");
             let (gossip_sender, _receiver) = topic.split();
-            let sender = MeshSender::new(gossip_sender);
+            let ours = WireOutTally::default();
+            let other = WireOutTally::default();
+            let sender = MeshSender::new(gossip_sender).counting(ours.clone());
             let bytes = app_frame_with_tag("broadcast_count_probe");
-            let mut counted = 0;
-            for _ in 0..50 {
-                let frame = WireFrame::fixture_raw(bytes::Bytes::from(bytes.clone()));
-                sender
-                    .broadcast(frame)
-                    .await
-                    .expect("a peerless broadcast is accepted");
-                counted = sent_tag_bytes("broadcast_count_probe");
-                if counted >= bytes.len() as u64 {
-                    break;
-                }
-            }
-            assert!(
-                counted >= bytes.len() as u64,
-                "{counted} bytes counted for a frame of {}",
-                bytes.len()
+            let frame = WireFrame::fixture_raw(bytes::Bytes::from(bytes.clone()));
+            sender
+                .broadcast(frame)
+                .await
+                .expect("a peerless broadcast is accepted");
+            let counted = ours.tag_bytes("broadcast_count_probe");
+            assert_eq!(counted, bytes.len() as u64, "the one frame, once");
+            assert_eq!(
+                other.tag_bytes("broadcast_count_probe"),
+                0,
+                "the tally of another loop does not take the bytes"
             );
             endpoint.close().await;
         });

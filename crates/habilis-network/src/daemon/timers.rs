@@ -107,9 +107,12 @@ pub(crate) async fn tick_state_refresh(
     // own arm columns. Do not "correct" it by adding one here; that
     // double-counts the census iteration and inflates the total every interval.
     let reading = state.idle.take();
-    let socket = socket_delta(endpoint);
-    let gossip_path = gossip_path_delta(state.gossip_handle.as_ref());
-    let gossip_msgs = gossip_msgs_delta(gossip.metrics());
+    let socket = socket_delta(&mut state.idle.socket_mark, endpoint);
+    let gossip_path = gossip_path_delta(
+        &mut state.idle.gossip_path_mark,
+        state.gossip_handle.as_ref(),
+    );
+    let gossip_msgs = gossip_msgs_delta(&mut state.idle.gossip_msgs_mark, gossip.metrics());
     let idle = reading.loop_arms;
     let ext = idle.ext;
     let cpu = reading.cpu.unwrap_or_default();

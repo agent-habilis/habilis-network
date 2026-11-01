@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use iroh_gossip::api::{ApiError, Event};
 
-use super::wire_tally::{WireIn, WireOut, take_wire_out};
+use super::gossip_msgs::GossipMsgs;
+use super::socket_bytes::{GossipPathBytes, SocketBytes};
+use super::wire_tally::{WireIn, WireOut, WireOutTally};
 use crate::protocol::Nickname;
 use crate::util::process_usage::{CpuTimes, cpu_times};
 
@@ -93,6 +95,15 @@ pub(crate) struct IdleCounters {
     pub resent_by: HashMap<Nickname, u64>,
     /// The process CPU time at the last census. It is not reset by `take`.
     cpu_mark: CpuTimes,
+    /// The readings of the socket, the gossip transport and the gossip actor at the last census.
+    /// They belong to this loop, whose endpoint they read, so two loops in one process do not
+    /// take each other's bytes. `take` keeps them.
+    pub(crate) socket_mark: SocketBytes,
+    pub(crate) gossip_path_mark: GossipPathBytes,
+    pub(crate) gossip_msgs_mark: Option<GossipMsgs>,
+    /// The frames that the senders of this loop sent in the interval. The senders hold a clone.
+    /// `take` keeps the handle and empties what it holds.
+    pub(crate) wire_out: WireOutTally,
 }
 
 /// The wakes of each arm that is not a maintenance timer.
@@ -176,13 +187,18 @@ impl IdleCounters {
     pub(crate) fn take(&mut self) -> IdleReading {
         let cpu_now = cpu_times();
         let mark = self.cpu_mark;
-        let loop_arms = mem::take(self);
+        let mut loop_arms = mem::take(self);
         self.cpu_mark = cpu_now.unwrap_or(mark);
+        self.socket_mark = mem::take(&mut loop_arms.socket_mark);
+        self.gossip_path_mark = mem::take(&mut loop_arms.gossip_path_mark);
+        self.gossip_msgs_mark = loop_arms.gossip_msgs_mark.take();
+        self.wire_out = mem::take(&mut loop_arms.wire_out);
+        let wire_out = self.wire_out.take();
         IdleReading {
             loop_arms,
             ppid: PPID_WAKES.swap(0, Ordering::Relaxed),
             sampler: SAMPLER_WAKES.swap(0, Ordering::Relaxed),
-            wire_out: take_wire_out(),
+            wire_out,
             cpu: cpu_now.map(|now| now.since(mark)),
         }
     }
@@ -246,6 +262,33 @@ mod tests {
             !counters
                 .resent_by
                 .contains_key(&nick(&format!("peer-{MAX_REQUESTERS}")))
+        );
+    }
+
+    #[test]
+    fn two_loops_take_only_the_frames_that_their_own_senders_sent() {
+        let _one_at_a_time = TAKES.lock().unwrap_or_else(PoisonError::into_inner);
+        let (mut first, mut second) = (IdleCounters::default(), IdleCounters::default());
+        let frame = br#"{"v":"12.0","id":"i","type":"app","tag":"t","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{}}"#;
+        let handle_of_first = first.wire_out.clone();
+
+        handle_of_first.note(frame);
+        let second_reading = second.take();
+        let first_reading = first.take();
+
+        assert_eq!(
+            second_reading.wire_out.frames, 0,
+            "the other loop took nothing"
+        );
+        assert_eq!(first_reading.wire_out.frames, 1);
+        assert_eq!(first_reading.wire_out.wire, frame.len() as u64);
+
+        handle_of_first.note(frame);
+
+        assert_eq!(
+            first.take().wire_out.frames,
+            1,
+            "take keeps the handle that the senders hold"
         );
     }
 
