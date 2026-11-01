@@ -1177,8 +1177,10 @@ fn dispatch_channel(
         channel, message, ..
     } = event;
     let count_before = state.doc(channel).change_count();
-    if ingest_channel_event(event, state.doc_mut(channel), context) {
-        state.idle.state_rejected += 1;
+    match ingest_channel_event(event, state.doc_mut(channel), context) {
+        ChannelOutcome::Refused => state.idle.state_rejected += 1,
+        ChannelOutcome::Repeat => state.idle.wire_in.note_content_dup(),
+        ChannelOutcome::Taken => {}
     }
     let changed = state.doc(channel).change_count() > count_before;
     if changed {
@@ -1209,7 +1211,7 @@ fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
     }
 }
 
-/// Returns whether the document refused or ignored the change.
+/// Returns what the document made of the change.
 ///
 /// Ingest a durable channel event (`State`/`Meta`) into its `log`: dedup-insert,
 /// then surface a `StateChanged` for `channel` only when the derived doc changed
@@ -1220,7 +1222,7 @@ fn ingest_channel_event(
     event: ChannelEvent<'_>,
     doc: &mut doc::MeshDoc,
     context: &HandlerCtx<'_>,
-) -> bool {
+) -> ChannelOutcome {
     use crate::doc::Ingested;
 
     let ChannelEvent {
@@ -1254,12 +1256,22 @@ fn ingest_channel_event(
                 "dropping a {} change that forges another peer's agent card",
                 channel.label()
             );
-            return true;
+            return ChannelOutcome::Refused;
         }
-        Ingested::Ignored => return true,
-        Ingested::Duplicate | Ingested::Buffered | _ => {}
+        Ingested::Ignored => return ChannelOutcome::Refused,
+        Ingested::Duplicate => return ChannelOutcome::Repeat,
+        Ingested::Buffered | _ => {}
     }
-    false
+    ChannelOutcome::Taken
+}
+
+/// What the document made of a channel event.
+enum ChannelOutcome {
+    /// The document refused or ignored the change.
+    Refused,
+    /// The document had applied this change already.
+    Repeat,
+    Taken,
 }
 
 /// A directed leg (a directed `app_msg` or a `Task`) is surfaced **only by
@@ -4134,7 +4146,7 @@ mod dedup_counter_tests {
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
     use crate::protocol::identity::Identity;
-    use crate::protocol::messages::{Authored, Verified};
+    use crate::protocol::messages::{Authored, MessageBody, Verified};
     use crate::protocol::{Channel, MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
@@ -4282,6 +4294,46 @@ mod dedup_counter_tests {
             format!("state:{}", 2 * genuine + copy)
         );
         assert!(received.body < received.wire, "the envelope is the rest");
+    }
+
+    /// A frame can be new by id and carry a change that the document applied already: the same
+    /// signed change in another frame, or a frame that the dedup forgot. The census counts the
+    /// bytes of such a frame as content that came back, beside the repeats that the dedup caught.
+    #[test]
+    fn a_new_frame_with_a_change_the_document_holds_counts_as_content_that_came_back() {
+        let mesh = MeshId::from("test");
+        let writer = fresh_state();
+        let seed = *writer.identity.public().as_bytes();
+        let change = writer
+            .doc(Channel::State)
+            .build_change(&json!({ "key": 1 }), &seed)
+            .expect("a JSON object merges")
+            .expect("a non-empty merge yields a change");
+        let (wire_body, _plain) = writer
+            .doc(Channel::State)
+            .compose_wire_body(&change, None)
+            .expect("compose the wire body");
+        let signed = |body: MessageBody| {
+            Message::new_channel_event(&mesh, &nick("writer"), body, Channel::State)
+                .sign(&writer.identity)
+        };
+        let (first, again) = (signed(wire_body.clone()), signed(wire_body));
+        assert_ne!(first.dedup_key(), again.dedup_key(), "two frames, two ids");
+
+        let reader = reader_after(&[&first, &again], false);
+        let wire = |message: &Verified| message.serialize().expect("serialize").len() as u64;
+        let received = &reader.idle.wire_in;
+        assert_eq!(
+            by_class(&received.fresh),
+            format!("state:{}", wire(&first) + wire(&again)),
+            "both frames are new by id"
+        );
+        assert_eq!(by_class(&received.dup), "-", "the dedup caught nothing");
+        assert_eq!(
+            by_class(&received.cdup),
+            format!("state:{}", wire(&again)),
+            "the second carries a change that was applied"
+        );
     }
 
     /// A frame whose body is no change is ignored by the document, and the census counts it.
