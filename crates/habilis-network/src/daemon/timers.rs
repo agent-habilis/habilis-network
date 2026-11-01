@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use iroh::Endpoint;
 
-use super::state::{EventLoopState, WireIn, WireOut, by_class, take_wire_out};
+use super::state::{
+    EventLoopState, SocketBytes, WireIn, WireOut, by_class, socket_delta, take_wire_out,
+};
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::util::clock::{Instant, millis_saturating};
 use crate::util::{resident_memory, tuning, unix_secs};
@@ -98,6 +100,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
     let idle = state.idle.take();
     let wire_in = mem::take(&mut state.wire_in);
     let wire_out = take_wire_out();
+    let socket = socket_delta(endpoint);
     let links = state.direct_counts();
 
     if state.silent_partition_due(roster_len, Instant::now()) {
@@ -156,7 +159,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         gossip_recursion_closes_total = payload_path::gossip_recursion_closes(),
         "mesh census"
     );
-    log_wire_census(&wire_in, &wire_out);
+    log_wire_census(&wire_in, &wire_out, socket);
 
     // The per-peer conn classification feeds only the DEBUG census
     // below, and each `conn_path` is a `remote_info` actor round-trip.
@@ -253,7 +256,7 @@ pub(crate) fn note_tick_gap(
 /// line takes the last line that names it. `idle_bin_*` are frames received (first sightings and
 /// repeats), `idle_bout*` frames handed to the transport. The wire total less the body total is
 /// the cost of the envelope.
-fn log_wire_census(received: &WireIn, sent: &WireOut) {
+fn log_wire_census(received: &WireIn, sent: &WireOut, socket: SocketBytes) {
     tracing::info!(
         target: "habilis_network::lifecycle",
         idle_bin_fresh = %by_class(&received.fresh),
@@ -267,6 +270,16 @@ fn log_wire_census(received: &WireIn, sent: &WireOut) {
         idle_wire_out = sent.wire,
         idle_body_out = sent.body,
         idle_frames_out = sent.frames,
+        // What the iroh socket moved: the UDP payload of all of QUIC, and the IP and UDP headers of the
+        // received datagrams, which only the host sees. The first census of a process covers the time
+        // since its endpoint started.
+        idle_net_send_ip = socket.send_ip,
+        idle_net_send_relay = socket.send_relay,
+        idle_net_recv_ip = socket.recv_ip,
+        idle_net_recv_relay = socket.recv_relay,
+        idle_net_recv_custom = socket.recv_custom,
+        idle_net_recv_dgrams = socket.recv_datagrams,
+        idle_net_hdr_in = socket.header_bytes_in(),
         "wire census"
     );
 }
