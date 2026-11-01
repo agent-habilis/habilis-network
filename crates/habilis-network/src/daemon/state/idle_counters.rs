@@ -18,6 +18,7 @@ static PPID_WAKES: AtomicU64 = AtomicU64::new(0);
 static SAMPLER_WAKES: AtomicU64 = AtomicU64::new(0);
 
 /// Count one wake of the orphan watch.
+#[cfg(all(unix, feature = "host"))]
 pub(crate) fn note_ppid_wake() {
     PPID_WAKES.fetch_add(1, Ordering::Relaxed);
 }
