@@ -8,8 +8,11 @@ use std::mem;
 use habilis_network_iroh_gossip_transport::{GossipHandle, Stats};
 use iroh::Endpoint;
 
-/// The bytes of an `IPv4` and a `UDP` header, which the socket counters do not include.
-const IP_UDP_HEADER: u64 = 28;
+/// The bytes of an `IPv4` header (20) and a `UDP` header (8), which the socket counters do not
+/// include.
+const IPV4_UDP_HEADER: u64 = 28;
+/// The bytes of an `IPv6` header (40) and a `UDP` header (8).
+const IPV6_UDP_HEADER: u64 = 48;
 
 /// The bytes that the socket moved since the reading in `mark`, which becomes the new reading. The
 /// mark belongs to the loop that owns `endpoint`: a process with two loops has two endpoints and
@@ -27,6 +30,8 @@ pub(crate) struct SocketBytes {
     pub(crate) send_relay: u64,
     /// Data bytes received over `IPv4` and `IPv6`.
     pub(crate) recv_ip: u64,
+    /// Of those, the bytes received over `IPv6`.
+    pub(crate) recv_ipv6: u64,
     pub(crate) recv_relay: u64,
     pub(crate) recv_custom: u64,
     /// `QUIC` datagrams received. The send side has no such counter.
@@ -56,6 +61,7 @@ impl SocketBytes {
                 .recv_data_ipv4
                 .get()
                 .saturating_add(socket.recv_data_ipv6.get()),
+            recv_ipv6: socket.recv_data_ipv6.get(),
             recv_relay: socket.recv_data_relay.get(),
             recv_custom: socket.recv_data_custom.get(),
             recv_datagrams: socket.recv_datagrams.get(),
@@ -75,6 +81,7 @@ impl SocketBytes {
             send_ip: self.send_ip.saturating_sub(earlier.send_ip),
             send_relay: self.send_relay.saturating_sub(earlier.send_relay),
             recv_ip: self.recv_ip.saturating_sub(earlier.recv_ip),
+            recv_ipv6: self.recv_ipv6.saturating_sub(earlier.recv_ipv6),
             recv_relay: self.recv_relay.saturating_sub(earlier.recv_relay),
             recv_custom: self.recv_custom.saturating_sub(earlier.recv_custom),
             recv_datagrams: self.recv_datagrams.saturating_sub(earlier.recv_datagrams),
@@ -98,9 +105,24 @@ impl SocketBytes {
         }
     }
 
-    /// The `IPv4` and `UDP` header bytes of the received datagrams, which only the host sees.
+    /// The `IP` and `UDP` header bytes of the received datagrams, which only the host sees: 28
+    /// bytes for a datagram over `IPv4` and 48 over `IPv6`. The socket counts datagrams without the
+    /// family, so the share of `IPv6` datagrams is taken from the share of `IPv6` bytes, and the
+    /// result is an estimate.
     pub(crate) fn header_bytes_in(self) -> u64 {
-        self.recv_datagrams.saturating_mul(IP_UDP_HEADER)
+        let ipv6_datagrams = if self.recv_ip == 0 {
+            0
+        } else {
+            let share = u128::from(self.recv_datagrams) * u128::from(self.recv_ipv6)
+                / u128::from(self.recv_ip);
+            u64::try_from(share)
+                .unwrap_or(u64::MAX)
+                .min(self.recv_datagrams)
+        };
+        let ipv4_datagrams = self.recv_datagrams - ipv6_datagrams;
+        ipv4_datagrams
+            .saturating_mul(IPV4_UDP_HEADER)
+            .saturating_add(ipv6_datagrams.saturating_mul(IPV6_UDP_HEADER))
     }
 }
 
@@ -197,13 +219,29 @@ mod tests {
         let delta = later.since(earlier);
         assert_eq!(delta.send_ip, 15);
         assert_eq!(delta.recv_datagrams, 0, "a field that went back reads zero");
+    }
+
+    /// The header of a datagram is 28 bytes over `IPv4` and 48 over `IPv6`.
+    #[test]
+    fn the_header_bytes_follow_the_share_of_ipv6() {
+        let received = |recv_ip, recv_ipv6| SocketBytes {
+            recv_datagrams: 4,
+            recv_ip,
+            recv_ipv6,
+            ..SocketBytes::default()
+        };
+
+        assert_eq!(received(1000, 0).header_bytes_in(), 4 * 28, "all IPv4");
+        assert_eq!(received(1000, 1000).header_bytes_in(), 4 * 48, "all IPv6");
         assert_eq!(
-            SocketBytes {
-                recv_datagrams: 4,
-                ..SocketBytes::default()
-            }
-            .header_bytes_in(),
-            4 * 28
+            received(1000, 500).header_bytes_in(),
+            2 * 28 + 2 * 48,
+            "half of the bytes over IPv6: 2 datagrams each"
+        );
+        assert_eq!(
+            received(0, 0).header_bytes_in(),
+            4 * 28,
+            "no bytes to tell by"
         );
     }
 
