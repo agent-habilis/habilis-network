@@ -12,6 +12,10 @@ use super::wire_tally::{WireIn, WireOut, take_wire_out};
 use crate::protocol::Nickname;
 use crate::util::process_usage::{CpuTimes, cpu_times};
 
+/// The most requesters that `resent_by` names in one interval. The census line names 3, so 32 is
+/// ample, and a map of 32 nicknames stays small. A requester past it is refused.
+const MAX_REQUESTERS: usize = 32;
+
 /// Wakes of the orphan watch (`daemon::shutdown`). It is a task of its own, so
 /// it cannot reach the event loop's `&mut` counters.
 static PPID_WAKES: AtomicU64 = AtomicU64::new(0);
@@ -83,7 +87,9 @@ pub(crate) struct IdleCounters {
     pub state_rejected: u64,
     /// The frames received in the interval, by kind and by what became of them.
     pub wire_in: WireIn,
-    /// The anti-entropy resends queued, by the author of the digest that asked.
+    /// The anti-entropy resends queued, by the author of the digest that asked. At most
+    /// [`MAX_REQUESTERS`] authors: a digest names any author, so a requester past the cap is not
+    /// counted here. `take` empties the map each interval; the total of resends is `resent`.
     pub resent_by: HashMap<Nickname, u64>,
     /// The process CPU time at the last census. It is not reset by `take`.
     cpu_mark: CpuTimes,
@@ -183,6 +189,9 @@ impl IdleCounters {
 
     /// Count one resend queued for the digest of `requester`.
     pub(crate) fn note_resend_for(&mut self, requester: &Nickname) {
+        if self.resent_by.len() >= MAX_REQUESTERS && !self.resent_by.contains_key(requester) {
+            return;
+        }
         *self.resent_by.entry(requester.clone()).or_default() += 1;
     }
 }
@@ -217,6 +226,28 @@ mod tests {
 
     /// `take` drains process-wide statics, so the tests that call it run one at a time.
     static TAKES: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn resent_by_names_at_most_the_cap_of_requesters_however_many_ask() {
+        let mut counters = IdleCounters::default();
+
+        for index in 0..10 * MAX_REQUESTERS {
+            counters.note_resend_for(&nick(&format!("peer-{index}")));
+        }
+        counters.note_resend_for(&nick("peer-0"));
+
+        assert_eq!(counters.resent_by.len(), MAX_REQUESTERS);
+        assert_eq!(
+            counters.resent_by[&nick("peer-0")],
+            2,
+            "a requester that is named keeps counting"
+        );
+        assert!(
+            !counters
+                .resent_by
+                .contains_key(&nick(&format!("peer-{MAX_REQUESTERS}")))
+        );
+    }
 
     #[test]
     fn take_zeroes_the_arms_and_sums_the_external_split() {
