@@ -90,7 +90,9 @@ const loads = result.load as { ts: number; load1: number }[];
 saveResult();
 
 const nick = (i: number) => `bench${String(i).padStart(2, "0")}`;
-const stateFile = (i: number) => `${RUNTIME}/sessions/bench-${stamp}-${i}.json`;
+// Not in the sessions folder of the runtime: the Stop hook of the agent counts the daemons there.
+mkdirSync(`${OUT}/state`, { recursive: true });
+const stateFile = (i: number) => `${OUT}/state/${nick(i)}.json`;
 let gossip = "";
 let seq = 0;
 
@@ -114,6 +116,20 @@ async function allAlive(where: string): Promise<void> {
   const states = await Promise.all(Array.from({ length: NODES }, (_, k) => alive(k + 1)));
   const dead = states.flatMap((ok, k) => (ok ? [] : [nick(k + 1)]));
   if (dead.length > 0) await abort(`${where}: daemons not alive: ${dead.join(",")}`);
+}
+
+// Every daemon must see the other N-1 members before the idle phase starts.
+async function checkMesh(): Promise<void> {
+  const seen = await Promise.all(
+    Array.from({ length: NODES }, async (_, k) => {
+      const peers = JSON.parse((await cli(["peers", "--gossip", gossip, "--nickname", nick(k + 1)])).out || "{}").peers ?? [];
+      return peers.filter((peer: { quiet: boolean }) => !peer.quiet).length;
+    }),
+  );
+  result.roster = seen;
+  saveResult();
+  const short = seen.flatMap((count, k) => (count < NODES - 1 ? [`${nick(k + 1)} sees ${count} of ${NODES - 1}`] : []));
+  if (short.length > 0) await abort(`mesh did not form: ${short.join(", ")}`);
 }
 
 async function cleanup(): Promise<void> {
@@ -232,6 +248,7 @@ async function phase(name: string, seconds: number, work?: () => Promise<void>):
 
 for (let i = 1; i <= NODES; i++) void listen(i);
 await sleep(SETTLE);
+await checkMesh();
 await phase("idle1", IDLE);
 await phase("loaded", LOADED, async () => {
   const until = Date.now() + LOADED * 1000;
