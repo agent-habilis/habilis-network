@@ -196,7 +196,7 @@ impl MessageLog {
         (self.messages.len(), bytes)
     }
 
-    #[cfg(any(test, feature = "iroh-test-utils"))]
+    /// How many messages the log holds.
     pub(crate) fn len(&self) -> usize {
         self.messages.len()
     }

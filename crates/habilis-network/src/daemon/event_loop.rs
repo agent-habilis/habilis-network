@@ -649,16 +649,7 @@ async fn antientropy_arm(
         &mut anchors.antientropy_wall,
         antientropy_interval(),
     );
-    gossip::antientropy::broadcast_digest(state, context.sender, context.mesh, context.author)
-        .await;
-    gossip::antientropy::broadcast_state_digests(
-        state,
-        context.sender,
-        context.mesh,
-        context.author,
-        gossip::antientropy::DigestTrigger::Tick,
-    )
-    .await;
+    gossip::antientropy::tick_digests(state, context).await;
 }
 
 /// The multihop link-state tick: re-broadcast our own links (one per direct
@@ -862,7 +853,7 @@ struct EventLoop<Driver: NodeDriver> {
     /// Inbound unicast frames from the `UNICAST_ALPN` acceptor, drained into
     /// `gossip::ingest` (same validation + dedup path as gossip). `Option` so
     /// the `select!` arm can disable itself if the channel ever closes.
-    unicast_rx: Option<mpsc::Receiver<bytes::Bytes>>,
+    unicast_rx: Option<mpsc::Receiver<transport::UnicastFrame>>,
     /// The members of this mesh that the LAN announces (`gossip::lan`). `Option` so the arm is
     /// off without an mDNS handle and when the channel closes.
     lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
@@ -920,7 +911,7 @@ struct Loop<'node, Driver: NodeDriver> {
     quit_rx: mpsc::Receiver<()>,
     exit_on_quit: bool,
     http_rx: Option<mpsc::Receiver<Driver::Http>>,
-    unicast_rx: Option<mpsc::Receiver<bytes::Bytes>>,
+    unicast_rx: Option<mpsc::Receiver<transport::UnicastFrame>>,
     lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
     direct_rx: mpsc::UnboundedReceiver<probe::DirectOutcome>,
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
@@ -1137,10 +1128,14 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     }
 
     /// Inbound unicast rides the *same* validate + dedup path as gossip (`ingest`).
-    async fn unicast(&mut self, bytes: bytes::Bytes) {
+    async fn unicast(&mut self, frame: transport::UnicastFrame) {
         self.state.idle.ext.unicast += 1;
         let context = self.parts.handler_ctx(&self.sender);
-        gossip::ingest(bytes, &mut self.state, &mut self.app, &context).await;
+        // The digest handlers answer a unicast digest on the plane it came by, to the endpoint of
+        // its connection.
+        self.state.state_digest_serves.unicast.arrived_from = Some(frame.from);
+        gossip::ingest(frame.bytes, &mut self.state, &mut self.app, &context).await;
+        self.state.state_digest_serves.unicast.arrived_from = None;
     }
 
     fn prune(&mut self) {
@@ -1687,7 +1682,7 @@ async fn run_loop<Driver: NodeDriver>(
             }
             Some(change) = lp.path_rx.recv() => { lp.path_change(change).await; },
             frame = recv_opt(&mut lp.unicast_rx) => match frame {
-                Some(bytes) => { lp.unicast(bytes).await; },
+                Some(frame) => { lp.unicast(frame).await; },
                 None => { lp.unicast_rx = None; },
             },
             _ = lp.intervals.prune.tick() => { lp.prune(); },

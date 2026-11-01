@@ -762,7 +762,7 @@ mod tests {
 
                 let delivered = time::timeout(Duration::from_secs(5), frames.recv()).await;
                 assert!(
-                    matches!(delivered, Ok(Some(ref bytes)) if !bytes.is_empty()),
+                    matches!(delivered, Ok(Some(ref frame)) if !frame.bytes.is_empty()),
                     "a farewell reaches the peer by unicast, without waiting for anti-entropy"
                 );
                 router.shutdown().await.expect("shutdown");

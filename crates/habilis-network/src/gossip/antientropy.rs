@@ -28,6 +28,10 @@ mod fast_rounds;
 mod plane;
 mod resend_memory;
 mod serve_budget;
+mod unicast_digests;
+
+use iroh::EndpointId;
+use rand::seq::IndexedRandom as _;
 
 use std::collections::HashSet;
 use std::hash::{Hash as _, Hasher as _};
@@ -42,7 +46,8 @@ use crate::protocol::messages::{Verified, WireFrame};
 use crate::protocol::{AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, UnixSecs};
 use crate::util::clock::Instant;
 use crate::util::tuning::{
-    ANTIENTROPY_ANSWERERS, ANTIENTROPY_DIGEST_WINDOW_IDS, antientropy_max_resend,
+    ANTIENTROPY_ANSWERERS, ANTIENTROPY_DIGEST_WINDOW_IDS, CHAT_RETRIES_MAX, FAST_ROUND_ACTIVE,
+    FAST_ROUND_MIN_INTERVAL, antientropy_max_resend,
 };
 
 use std::collections::hash_map;
@@ -53,6 +58,7 @@ pub(crate) use fast_rounds::FastRounds;
 pub(crate) use plane::Plane;
 pub(crate) use resend_memory::ResendMemory;
 pub(crate) use serve_budget::ServeBudget;
+pub(crate) use unicast_digests::{ChatAsk, UnicastDigests};
 /// One window on the wire: its `[lo, hi]` bounds (`hi` timestamp `i64::MAX` ⇒
 /// open-ended), each a timestamp and the id key of the message at that edge, plus
 /// its dedup keys packed as 16 bytes each, Base58-encoded. The key is what lets an
@@ -151,25 +157,25 @@ pub(crate) async fn broadcast_digest(
     mesh: &MeshId,
     author: &Nickname,
 ) {
+    let Some(digest) = chat_digest(state, mesh, author) else {
+        return;
+    };
+    state.idle.broadcasts += 1;
+    super::broadcast_msg(sender, &digest).await;
+}
+
+/// The signed chat digest, or `None` before any real peer has linked and for an empty log.
+fn chat_digest(state: &mut EventLoopState, mesh: &MeshId, author: &Nickname) -> Option<Verified> {
     // No real peer has ever linked — a digest would broadcast into the
     // void (mirrors `tick_heal`/`tick_alive` no-peer guards).
     if !state.standing.contains(&Standing::Meshed) {
-        return;
+        return None;
     }
-    let Some(windows) = digest_windows(state) else {
-        return; // empty log
-    };
+    let windows = digest_windows(state)?; // empty log: none
     let total_ids: usize = windows.iter().map(|window| window.ids.len()).sum();
-    let Some(body) = super::json_body(&DigestBody { windows }) else {
-        return;
-    };
-    tracing::trace!(ids = total_ids, "anti-entropy digest broadcast");
-    state.idle.broadcasts += 1;
-    super::broadcast_msg(
-        sender,
-        &Message::new_digest(mesh, author, body).sign(&state.identity),
-    )
-    .await;
+    let body = super::json_body(&DigestBody { windows })?;
+    tracing::trace!(ids = total_ids, "anti-entropy digest");
+    Some(Message::new_digest(mesh, author, body).sign(&state.identity))
 }
 
 /// The windows a digest advertises: the newest, plus the next slice of the
@@ -252,9 +258,12 @@ fn handle_digest_at(message: &Verified, state: &mut EventLoopState, me: &Nicknam
         report_unreadable_digest(message, state);
         return;
     };
-    // Only a few members answer one digest (see `answers_digest`).
+    // Only a few members answer one digest (see `answers_digest`). A digest that came to this node
+    // alone, by unicast, is for it to answer.
+    let unicast = &state.state_digest_serves.unicast;
+    let asked_alone = unicast.enabled && unicast.arrived_from.is_some();
     let members = state.peers.iter().chain(iter::once(me));
-    if !answers_digest(me, &message.author, message.id.as_str(), members) {
+    if !asked_alone && !answers_digest(me, &message.author, message.id.as_str(), members) {
         return;
     }
     // One serve per author per window. Answering costs up to
@@ -279,6 +288,7 @@ fn handle_digest_at(message: &Verified, state: &mut EventLoopState, me: &Nicknam
         .state_digest_serves
         .resends
         .extend_have(&message.key(), now, &mut have);
+    let reply_to = unicast_reply_to(&message.key(), state);
     let mut budget = antientropy_max_resend();
     let mut resent = 0usize;
     for window in &body.windows {
@@ -295,7 +305,7 @@ fn handle_digest_at(message: &Verified, state: &mut EventLoopState, me: &Nicknam
             max: budget,
             requester: &message.author,
         }) {
-            if !resend_one(&missing, state) {
+            if !resend_one_to(&missing, state, reply_to) {
                 continue;
             }
             // Mark it sent so the next (overlapping) window doesn't re-send it
@@ -321,7 +331,21 @@ fn handle_digest_at(message: &Verified, state: &mut EventLoopState, me: &Nicknam
 /// drains the outbox. Never waits. Returns whether it was attempted at all —
 /// `false` only for the unserializable frame we somehow hold, which must not be
 /// charged to the round's budget.
+///
+/// With `reply_to` (the unicast form of the digests) a resend that would be broadcast goes to the asker
+/// alone, as it was signed: the nonce is only there to get past the gossip layer, which a unicast
+/// stream does not cross.
+#[cfg(test)]
 fn resend_one(message: &Verified, state: &mut EventLoopState) -> bool {
+    resend_one_to(message, state, None)
+}
+
+/// [`resend_one`], with the asker that the unicast form answers to.
+fn resend_one_to(
+    message: &Verified,
+    state: &mut EventLoopState,
+    reply_to: Option<EndpointId>,
+) -> bool {
     let Ok(bytes) = message.serialize() else {
         return false;
     };
@@ -329,11 +353,12 @@ fn resend_one(message: &Verified, state: &mut EventLoopState) -> bool {
         Ok(resend) => {
             // The gossip layer drops a payload it has seen for 90 s, whether the app read it or
             // not. A broadcast resend therefore carries a new nonce, and so a new name.
-            let resend = match resend {
-                Resend::Broadcast(frame) => {
+            let resend = match (resend, reply_to) {
+                (Resend::Broadcast(frame), Some(asker)) => Resend::Unicast(asker, frame),
+                (Resend::Broadcast(frame), None) => {
                     Resend::Broadcast(frame.copy_with_resend_nonce(rand::random()))
                 }
-                unicast @ Resend::Unicast(..) => unicast,
+                (unicast @ Resend::Unicast(..), _) => unicast,
             };
             if state.resend_outbox.offer(resend) {
                 state.idle.resent += 1;
@@ -525,6 +550,9 @@ fn heads_key_of(state: &EventLoopState, channel: Channel) -> u64 {
 /// peer refused us. Runs on a short timer; asks one peer that is still ahead
 /// and reachable now, once nothing was asked for a retry interval.
 pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    if state.state_digest_serves.unicast.enabled {
+        retry_chat_ask(state, context).await;
+    }
     for channel in [Channel::State, Channel::Meta] {
         let now = Instant::now();
         let ahead = state.fast_rounds.ahead(channel);
@@ -627,7 +655,23 @@ pub(crate) async fn handle_state_digest(
     let heads = heads_key(message);
     let author = message.key();
     let serve = |plane| (author, channel, plane);
-    let target = transport::unicast_answer_target(&author, state);
+    // The unicast form: a digest that came by gossip is answered by a few members, as a chat digest is,
+    // and every answer goes to the connection that the asker's digest came on, or to its proven endpoint.
+    let unicast = &state.state_digest_serves.unicast;
+    let (enabled, arrived_from) = (unicast.enabled, unicast.arrived_from);
+    if enabled && arrived_from.is_none() {
+        let members = state.peers.iter().chain(iter::once(context.author));
+        if !answers_digest(
+            context.author,
+            &message.author,
+            message.id.as_str(),
+            members,
+        ) {
+            return Answered::default();
+        }
+    }
+    let target = transport::unicast_answer_target(&author, state)
+        .or_else(|| arrived_from.filter(|eid| enabled && transport::can_unicast(*eid, state)));
     let plane = if target.is_some() {
         Plane::Unicast
     } else {
@@ -722,6 +766,128 @@ fn missing_frames(channel: Channel, digest: &Verified, state: &EventLoopState) -
         .doc(channel)
         .changes_since_not_by(&body.heads, Some(&digest.key()), antientropy_max_resend())
         .collect()
+}
+
+/// Where an answer in the unicast form goes: the connection that the digest at hand came on, or the
+/// proven endpoint of its signer, where a unicast can start. `None` when the form is off, or when no
+/// such path exists: the answer then goes as it always did.
+fn unicast_reply_to(signer: &AuthorKey, state: &EventLoopState) -> Option<EndpointId> {
+    let unicast = &state.state_digest_serves.unicast;
+    if !unicast.enabled {
+        return None;
+    }
+    unicast
+        .arrived_from
+        .filter(|eid| transport::can_unicast(*eid, state))
+        .or_else(|| transport::unicast_answer_target(signer, state))
+}
+
+/// The anti-entropy tick: the chat digest and both channel digests. In the unicast form they go to one
+/// random linked peer; with no such peer, or when the send cannot start, they are broadcast as before.
+pub(crate) async fn tick_digests(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    if state.state_digest_serves.unicast.enabled && digests_to_one_peer(state, context).await {
+        return;
+    }
+    broadcast_digest(state, context.sender, context.mesh, context.author).await;
+    broadcast_state_digests(
+        state,
+        context.sender,
+        context.mesh,
+        context.author,
+        DigestTrigger::Tick,
+    )
+    .await;
+}
+
+async fn digests_to_one_peer(state: &mut EventLoopState, context: &HandlerCtx<'_>) -> bool {
+    let peers: Vec<EndpointId> = transport::unicast_peers(state).collect();
+    let Some(peer) = peers.choose(&mut rand::rng()).copied() else {
+        return false;
+    };
+    send_digests(state, context, peer, DigestSet::All).await
+}
+
+/// Which digests a unicast carries.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DigestSet {
+    All,
+    ChatOnly,
+}
+
+/// Send our digests to `peer` as one unicast batch. Returns whether the batch went out, or whether
+/// there was nothing to send (no digest exists then, so a broadcast would send none either).
+async fn send_digests(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+    peer: EndpointId,
+    set: DigestSet,
+) -> bool {
+    let origin = DigestOrigin {
+        mesh: context.mesh,
+        author: context.author,
+    };
+    let chat = chat_digest(state, context.mesh, context.author);
+    let asks_for_chat = chat.is_some();
+    let mut frames: Vec<WireFrame> = chat
+        .iter()
+        .filter_map(|digest| digest.serialize().ok())
+        .collect();
+    if set == DigestSet::All {
+        for channel in [Channel::State, Channel::Meta] {
+            let digest = state_digest(state, origin, channel);
+            frames.extend(digest.iter().filter_map(|digest| digest.serialize().ok()));
+        }
+    }
+    if frames.is_empty() {
+        return true;
+    }
+    if !state
+        .unicast_pool
+        .send_batch_in_background(peer, frames)
+        .await
+    {
+        return false;
+    }
+    if asks_for_chat {
+        state.state_digest_serves.unicast.chat_ask = Some(ChatAsk {
+            peer,
+            log_len: state.message_log.len(),
+            at: Instant::now(),
+            retries: 0,
+        });
+    }
+    true
+}
+
+/// Ask the peer of the last chat digest again while its answers are full, because a gap longer than one
+/// answer would wait one tick per answer. It stops when an answer is not full (the log did not grow by
+/// the resend cap) and after `CHAT_RETRIES_MAX` repeats, so it cannot become a loop.
+pub(crate) async fn retry_chat_ask(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
+    let Some(ask) = state.state_digest_serves.unicast.chat_ask else {
+        return;
+    };
+    let now = Instant::now();
+    let full = state.message_log.len().saturating_sub(ask.log_len) >= antientropy_max_resend();
+    if !full {
+        if now.duration_since(ask.at) >= FAST_ROUND_ACTIVE {
+            state.state_digest_serves.unicast.chat_ask = None;
+        }
+        return;
+    }
+    if ask.retries >= CHAT_RETRIES_MAX {
+        state.state_digest_serves.unicast.chat_ask = None;
+        return;
+    }
+    if now.duration_since(ask.at) < FAST_ROUND_MIN_INTERVAL {
+        return;
+    }
+    if send_digests(state, context, ask.peer, DigestSet::ChatOnly).await {
+        if let Some(next) = state.state_digest_serves.unicast.chat_ask.as_mut() {
+            next.retries = ask.retries + 1;
+        }
+    } else {
+        state.state_digest_serves.unicast.chat_ask = None;
+    }
 }
 
 #[cfg(test)]
@@ -1233,6 +1399,7 @@ mod budget_tests {
 mod tests {
     use crate::daemon::state::{RendezvousFlag, Standing};
     use std::collections::HashSet;
+    use std::hint::black_box;
     use std::time::Duration;
 
     use super::{
@@ -1246,7 +1413,7 @@ mod tests {
     use crate::protocol::{
         AuthorKey, Channel, DedupKey, Identity, MeshId, Message, MessageBody, Nickname, UnixSecs,
     };
-    use crate::testing::{fresh_state, nick};
+    use crate::testing::{endpoint_id, fresh_state, nick};
 
     use crate::protocol::messages;
     use crate::transport::Resend;
@@ -1482,6 +1649,173 @@ mod tests {
             windows: vec![WireWindow::encode(&window)],
         })
         .expect("a digest serializes")
+    }
+
+    /// The unicast form is off by default: the const says so, and the switch of a fresh state follows it.
+    #[test]
+    fn the_unicast_form_is_off_by_default() {
+        assert!(!black_box(tuning::UNICAST_DIGESTS), "the const is off");
+        assert!(!fresh_state().state_digest_serves.unicast.enabled);
+    }
+
+    /// A state with a log of `count` messages, a peer `asker` known by its key and proven at
+    /// `asker_endpoint`, linked, and a drained outbox.
+    fn holder_for_unicast(
+        count: i64,
+        asker: &Identity,
+        asker_endpoint: iroh::EndpointId,
+    ) -> (EventLoopState, mpsc::Receiver<Resend>) {
+        let mut state = fresh_state();
+        state.state_digest_serves.unicast.enabled = true;
+        state.relay_transport = transport::PayloadPath::RelayAllowed;
+        state.peers.insert(nick("asker"));
+        for index in 0..count {
+            state
+                .message_log
+                .push(chat_at(&format!("message {index}"), 1_700_000_000 + index));
+        }
+        let (outbox, resends) = transport::ResendOutbox::new(256);
+        state.resend_outbox = outbox;
+        state.linked_endpoints.insert(asker_endpoint);
+        let linked = state.linked_endpoints.clone();
+        state
+            .proven_endpoints
+            .insert(asker.author_key(), asker_endpoint, &linked);
+        (state, resends)
+    }
+
+    /// Everything that is in the outbox now.
+    fn drained(resends: &mut mpsc::Receiver<Resend>) -> Vec<Resend> {
+        let mut all = Vec::new();
+        while let Ok(resend) = resends.try_recv() {
+            all.push(resend);
+        }
+        all
+    }
+
+    /// A digest that came to this node by unicast is answered to the connection it came on, with the
+    /// frames as they were signed: no nonce, no broadcast.
+    #[test]
+    fn a_chat_digest_that_came_by_unicast_is_answered_to_the_asker_alone() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let asker_identity = Identity::generate();
+        let asker_endpoint = endpoint_id(7);
+        let (mut state, mut resends) = holder_for_unicast(3, &asker_identity, asker_endpoint);
+        state.state_digest_serves.unicast.arrived_from = Some(asker_endpoint);
+        let digest =
+            Message::new_digest(&MeshId::from("test"), &nick("asker"), empty_digest_body())
+                .sign(&asker_identity);
+
+        super::handle_digest(&digest, &mut state, &nick("holder"));
+
+        let answers = drained(&mut resends);
+        assert_eq!(answers.len(), 3, "the 3 messages of the log are sent");
+        for answer in &answers {
+            let Resend::Unicast(to, frame) = answer else {
+                panic!("a unicast digest is answered by unicast: {answer:?}");
+            };
+            assert_eq!(*to, asker_endpoint, "to the connection of the digest");
+            let (_parsed, nonce) = Message::parse_wire(frame.as_bytes()).expect("a frame parses");
+            assert_eq!(nonce, None, "the frame goes as it was signed");
+        }
+    }
+
+    /// The same digest with the form off is answered as always: a broadcast with a nonce.
+    #[test]
+    fn with_the_unicast_form_off_a_chat_digest_is_answered_by_broadcast() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let asker_identity = Identity::generate();
+        let asker_endpoint = endpoint_id(7);
+        let (mut state, mut resends) = holder_for_unicast(3, &asker_identity, asker_endpoint);
+        state.state_digest_serves.unicast.enabled = false;
+        state.state_digest_serves.unicast.arrived_from = Some(asker_endpoint);
+        let digest =
+            Message::new_digest(&MeshId::from("test"), &nick("asker"), empty_digest_body())
+                .sign(&asker_identity);
+
+        super::handle_digest(&digest, &mut state, &nick("holder"));
+
+        let answers = drained(&mut resends);
+        assert_eq!(answers.len(), 3);
+        assert!(
+            answers
+                .iter()
+                .all(|answer| matches!(answer, Resend::Broadcast(_))),
+            "{answers:?}"
+        );
+    }
+
+    /// The rule that a few members answer one digest (`answers_digest`) is for a digest that all of
+    /// them hear. A unicast digest has one recipient, who must answer it.
+    #[test]
+    fn a_unicast_digest_is_answered_by_its_recipient_though_the_k_rule_would_skip_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let asker_identity = Identity::generate();
+        let asker_endpoint = endpoint_id(7);
+        let me = nick("holder");
+        // A digest that the rule leaves to other members: 30 members, and a digest id that ranks
+        // this node last.
+        let members: Vec<_> = (0..30)
+            .map(|index| nick(&format!("member-{index}")))
+            .collect();
+        let skipped = (0..200)
+            .map(|_| {
+                Message::new_digest(&MeshId::from("test"), &nick("asker"), empty_digest_body())
+                    .sign(&asker_identity)
+            })
+            .find(|digest| {
+                !super::answers_digest(&me, &nick("asker"), digest.id.as_str(), members.iter())
+            })
+            .expect("a digest id that skips this node among 30 members");
+        for (unicast, answered) in [(true, true), (false, false)] {
+            let (mut state, mut resends) = holder_for_unicast(2, &asker_identity, asker_endpoint);
+            state.peers.extend(members.iter().cloned());
+            if unicast {
+                state.state_digest_serves.unicast.arrived_from = Some(asker_endpoint);
+            }
+            super::handle_digest(&skipped, &mut state, &me);
+            assert_eq!(
+                !drained(&mut resends).is_empty(),
+                answered,
+                "unicast arrival: {unicast}"
+            );
+        }
+    }
+
+    /// A broadcast digest (an older peer) is answered by unicast to its signer where a unicast path
+    /// exists, and as before where none does: a gap is never left without an answer.
+    #[test]
+    fn a_broadcast_digest_is_answered_by_unicast_where_a_path_exists_and_on_gossip_where_not() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let asker_identity = Identity::generate();
+        let asker_endpoint = endpoint_id(7);
+        let digest =
+            Message::new_digest(&MeshId::from("test"), &nick("asker"), empty_digest_body())
+                .sign(&asker_identity);
+
+        let (mut state, mut resends) = holder_for_unicast(2, &asker_identity, asker_endpoint);
+        super::handle_digest(&digest, &mut state, &nick("holder"));
+        let answers = drained(&mut resends);
+        assert!(
+            answers
+                .iter()
+                .all(|answer| matches!(answer, Resend::Unicast(to, _) if *to == asker_endpoint)),
+            "a proven linked asker is answered by unicast: {answers:?}"
+        );
+        assert_eq!(answers.len(), 2);
+
+        let (mut unlinked, mut unlinked_resends) =
+            holder_for_unicast(2, &asker_identity, asker_endpoint);
+        unlinked.linked_endpoints.clear();
+        super::handle_digest(&digest, &mut unlinked, &nick("holder"));
+        let gossiped = drained(&mut unlinked_resends);
+        assert_eq!(gossiped.len(), 2, "the gap is still answered");
+        assert!(
+            gossiped
+                .iter()
+                .all(|answer| matches!(answer, Resend::Broadcast(_))),
+            "with no unicast path the answer is the broadcast of before: {gossiped:?}"
+        );
     }
 
     /// A broadcast resend is a new gossip message: the gossip layer names a message by the hash of

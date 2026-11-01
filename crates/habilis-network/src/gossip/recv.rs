@@ -2634,7 +2634,7 @@ mod first_contact_tests {
                 let delivered =
                     tokio_time::timeout(std_Duration::from_secs(5), frames.recv()).await;
                 assert_eq!(
-                    delivered.ok().flatten(),
+                    delivered.ok().flatten().map(|inbound| inbound.bytes),
                     Some(bytes.into_bytes()),
                     "bob never got the parked frame"
                 );

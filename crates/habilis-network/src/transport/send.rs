@@ -9,8 +9,11 @@ mod delivered;
 pub use delivered::Delivered;
 mod deliver;
 mod route;
+pub(crate) use deliver::{
+    can_unicast, lane_for, note_held, resolve, send_best_effort, unicast_answer_target,
+    unicast_peers,
+};
 pub use deliver::{deliver, deliver_in_background};
-pub(crate) use deliver::{lane_for, note_held, resolve, send_best_effort, unicast_answer_target};
 #[cfg(test)]
 use route::{Route, route};
 mod lane;
@@ -1437,6 +1440,261 @@ mod tests {
             }
             (got, bob_endpoint)
         })
+    }
+
+    /// A state digest that came by unicast is answered to its connection, even when the asker is
+    /// neither linked nor proven: the connection is the address. On gossip it would be a re-broadcast
+    /// of every frame to the whole mesh.
+    #[test]
+    fn a_state_digest_that_came_by_unicast_is_answered_to_its_connection() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::gossip::antientropy::Answered;
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, frames) = holder(bob_endpoint.addr(), 3).await;
+            state.state_digest_serves.unicast.enabled = true;
+            state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
+            let received = read_frames(bob_endpoint, 4);
+            let asker = Identity::generate();
+            let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
+
+            let answered = antientropy::handle_state_digest(
+                Channel::State,
+                &digest,
+                &mut state,
+                &net.context(),
+            )
+            .await;
+
+            assert_eq!(
+                answered,
+                Answered {
+                    unicast: 3,
+                    broadcast: 0
+                },
+                "the three frames go to the connection of the digest, none on gossip"
+            );
+            let (got, returned_endpoint) =
+                tokio_time::timeout(std_Duration::from_secs(5), received)
+                    .await
+                    .expect("bob reads the answer in time")
+                    .expect("reader task");
+            let expected: Vec<Vec<u8>> = frames
+                .iter()
+                .map(|frame| frame.as_bytes().to_vec())
+                .collect();
+            assert_eq!(
+                got[..3],
+                expected[..],
+                "the frames as they were signed, in order"
+            );
+            returned_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// A digest that came by gossip is answered by a few members, as a chat digest is, when the
+    /// unicast form is on. Here the k rule leaves this holder out: it sends nothing.
+    #[test]
+    fn a_state_digest_that_came_by_gossip_is_left_to_the_answerers_when_the_form_is_on() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::gossip::antientropy::Answered;
+            use crate::protocol::Channel;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
+            state.state_digest_serves.unicast.enabled = true;
+            let members: Vec<_> = (0..30)
+                .map(|index| nick(&format!("member-{index}")))
+                .collect();
+            state.peers.extend(members.iter().cloned());
+            let asker = Identity::generate();
+            let skipped = (0..200)
+                .map(|_| digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker))
+                .find(|digest| {
+                    !antientropy::answers_digest(
+                        &net.author,
+                        &nick("bob"),
+                        digest.id.as_str(),
+                        members.iter(),
+                    )
+                })
+                .expect("a digest id that skips the holder among 30 members");
+
+            let answered = antientropy::handle_state_digest(
+                Channel::State,
+                &skipped,
+                &mut state,
+                &net.context(),
+            )
+            .await;
+
+            assert_eq!(
+                answered,
+                Answered::default(),
+                "the holder is not an answerer"
+            );
+            bob_endpoint_close(bob_endpoint).await;
+            net.endpoint.close().await;
+        });
+    }
+
+    async fn bob_endpoint_close(bob: iroh::Endpoint) {
+        bob.close().await;
+    }
+
+    /// A node with a linked peer sends its three digests to that one peer, in one unicast batch, and
+    /// broadcasts none.
+    #[test]
+    fn the_tick_sends_the_digests_to_one_linked_peer_and_broadcasts_none() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::protocol::MessageKind;
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 2).await;
+            state.state_digest_serves.unicast.enabled = true;
+            state.linked_endpoints.insert(bob_endpoint.id());
+            state.standing.insert(Standing::Meshed);
+            state.message_log.push(directed_msg());
+            let received = read_frames(bob_endpoint, 3);
+
+            antientropy::tick_digests(&mut state, &net.context()).await;
+
+            let (got, returned_endpoint) =
+                tokio_time::timeout(std_Duration::from_secs(5), received)
+                    .await
+                    .expect("bob reads the digests in time")
+                    .expect("reader task");
+            let mut kinds: Vec<String> = got
+                .iter()
+                .map(|bytes| {
+                    Message::parse(bytes)
+                        .expect("a digest parses")
+                        .kind
+                        .to_string()
+                })
+                .collect();
+            kinds.sort();
+            assert_eq!(
+                kinds,
+                [
+                    MessageKind::Digest.to_string(),
+                    MessageKind::MetaDigest.to_string(),
+                    MessageKind::StateDigest.to_string()
+                ],
+                "the chat, state and meta digests"
+            );
+            assert_eq!(state.idle.broadcasts, 0, "none is broadcast");
+            assert!(
+                state.state_digest_serves.unicast.chat_ask.is_some(),
+                "the chat ask is remembered for the retry"
+            );
+            returned_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// With no linked peer to ask, the tick broadcasts as before: a node that is linked only to the
+    /// rendezvous would otherwise never ask.
+    #[test]
+    fn with_no_linked_peer_the_tick_broadcasts_the_digests() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 2).await;
+            state.state_digest_serves.unicast.enabled = true;
+            state.standing.insert(Standing::Meshed);
+            state.message_log.push(directed_msg());
+
+            antientropy::tick_digests(&mut state, &net.context()).await;
+
+            assert!(state.idle.broadcasts >= 1, "the digests are broadcast");
+            assert!(state.state_digest_serves.unicast.chat_ask.is_none());
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// With the form off the tick broadcasts, and a linked peer gets nothing by unicast.
+    #[test]
+    fn with_the_form_off_the_tick_broadcasts_and_sends_nothing_by_unicast() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 2).await;
+            state.state_digest_serves.unicast.enabled = false;
+            state.linked_endpoints.insert(bob_endpoint.id());
+            state.standing.insert(Standing::Meshed);
+            state.message_log.push(directed_msg());
+
+            antientropy::tick_digests(&mut state, &net.context()).await;
+
+            assert!(state.idle.broadcasts >= 1, "the digests are broadcast");
+            let nothing =
+                tokio_time::timeout(std_Duration::from_millis(500), bob_endpoint.accept()).await;
+            assert!(nothing.is_err(), "bob got no connection for a unicast");
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
+    }
+
+    /// A chat ask whose answer was full (the log grew by the resend cap) is repeated to the same peer,
+    /// and it is not repeated once its own cap is reached: the retry cannot loop.
+    #[test]
+    fn the_chat_retry_repeats_a_full_answer_and_stops_at_its_cap() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::gossip::antientropy::{ChatAsk, retry_chat_ask};
+
+            let (bob_endpoint, _bob_sender) = loopback_node().await;
+            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 1).await;
+            state.state_digest_serves.unicast.enabled = true;
+            state.standing.insert(Standing::Meshed);
+            state.message_log.push(directed_msg());
+            let long_ago = clock::Instant::now()
+                .checked_sub(std_Duration::from_secs(60))
+                .expect("the clock is older than 60 s");
+            let full_answer = ChatAsk {
+                peer: bob_endpoint.id(),
+                log_len: 0,
+                at: long_ago,
+                retries: 0,
+            };
+            // The log holds 1 message and the cap is 64: this answer was not full.
+            state.state_digest_serves.unicast.chat_ask = Some(full_answer);
+            retry_chat_ask(&mut state, &net.context()).await;
+            assert!(
+                state.state_digest_serves.unicast.chat_ask.is_none(),
+                "a short answer ends the ask: nothing is left to ask again"
+            );
+
+            // A full answer at the cap ends the ask without a send.
+            for _ in 0..tuning::antientropy_max_resend() {
+                state.message_log.push(directed_msg());
+            }
+            state.state_digest_serves.unicast.chat_ask = Some(ChatAsk {
+                retries: tuning::CHAT_RETRIES_MAX,
+                ..full_answer
+            });
+            retry_chat_ask(&mut state, &net.context()).await;
+            assert!(
+                state.state_digest_serves.unicast.chat_ask.is_none(),
+                "at the cap the retry stops"
+            );
+
+            // A full answer below the cap is asked again, once more counted.
+            state.state_digest_serves.unicast.chat_ask = Some(full_answer);
+            retry_chat_ask(&mut state, &net.context()).await;
+            assert_eq!(
+                state
+                    .state_digest_serves
+                    .unicast
+                    .chat_ask
+                    .map(|ask| ask.retries),
+                Some(1),
+                "a full answer is asked again"
+            );
+            bob_endpoint.close().await;
+            net.endpoint.close().await;
+        });
     }
 
     /// A point-to-point answer ends with the holder's own heads, so the asker
