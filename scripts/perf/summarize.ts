@@ -60,6 +60,14 @@
 // - bin_fresh / bin_dup / bin_cdup / bout: `kind:bytes` sums, by kind of frame (app, presence, peerinfo,
 //   digest, statedigest, metadigest, state, meta, linkstate, pingpong, shard, other), largest first.
 //   tags_in / tags_out: the same for the tags of the app frames.
+// - doc_<meta|state>_<changes|frames|frame_bytes|save_bytes|json_bytes>_max: the largest value that
+//   any `doc census` line of any node reported: the changes the document applied, the signed frames it
+//   keeps to serve them again and their wire bytes, the Automerge save (taken every 5th census, else 0),
+//   and the hydrated JSON. doc_meta_peer_entries_max / doc_meta_absent_max: the entries of the
+//   per-peer map, and those of members that are off the roster. These are gauges, not sums.
+// - join_wire_in / join_bin_fresh: the sums of `idle_wire_in` and of `idle_bin_fresh` over the wire census
+//   lines of the first 5 minutes after each node joined (`idle_join_phase=true`): the bytes of a join, by
+//   kind. They hold the backfill and the live traffic of those minutes together.
 // - ext_<arm>: the sums of the `idle_ext_<arm>` deltas, the wakes of each arm that is not a timer.
 //   Only the arms that woke.
 // - ahead_max: the largest `idle_ahead_peers` gauge of any census line.
@@ -80,6 +88,23 @@ const sum = (values: number[]): number => values.reduce((a, b) => a + b, 0);
 
 // The census fields that are per-interval deltas, summed over a run: the summary name, then the
 // census field.
+// The gauges of the `doc census` line: the summary name, then the census field. The report keeps the
+// largest value of each.
+const DOC_GAUGES: [string, string][] = [
+  ["doc_meta_changes_max", "doc_meta_changes"],
+  ["doc_meta_frames_max", "doc_meta_frames"],
+  ["doc_meta_frame_bytes_max", "doc_meta_frame_bytes"],
+  ["doc_meta_save_bytes_max", "doc_meta_save_bytes"],
+  ["doc_meta_json_bytes_max", "doc_meta_json_bytes"],
+  ["doc_meta_peer_entries_max", "doc_meta_peer_entries"],
+  ["doc_meta_absent_max", "doc_meta_absent_entries"],
+  ["doc_state_changes_max", "doc_state_changes"],
+  ["doc_state_frames_max", "doc_state_frames"],
+  ["doc_state_frame_bytes_max", "doc_state_frame_bytes"],
+  ["doc_state_save_bytes_max", "doc_state_save_bytes"],
+  ["doc_state_json_bytes_max", "doc_state_json_bytes"],
+];
+
 const TOTALS: [string, string][] = [
   ["cpu_user_ms", "cpu_user_ms"],
   ["cpu_sys_ms", "cpu_sys_ms"],
@@ -189,6 +214,9 @@ function summarize(run: string): string {
   };
   const ahead: number[] = [];
   const nodeLoads: number[] = [];
+  const docGauges = new Map<string, number>(DOC_GAUGES.map(([name]) => [name, 0]));
+  const joinFresh = new Map<string, number>();
+  let joinWireIn = 0;
   for (const file of readdirSync(run).filter((f) => /^n.*\.err$/.test(f))) {
     const text = clean(readFileSync(`${run}/${file}`, "utf8"));
     stalls.push(...numbers(text, /timer stalled[^\n]*?mono_gap_ms=(\d+)/));
@@ -217,6 +245,14 @@ function summarize(run: string): string {
     addPairs(text, "idle_gm_bin", kinds.gmBytesIn);
     addPairs(text, "idle_gm_nout", kinds.gmCountOut);
     addPairs(text, "idle_gm_nin", kinds.gmCountIn);
+    for (const [name, field] of DOC_GAUGES) {
+      const seen = numbers(text, new RegExp(`\\b${field}=(\\d+)`));
+      docGauges.set(name, Math.max(docGauges.get(name) ?? 0, ...seen));
+    }
+    for (const line of lines(text).filter((l) => l.includes("idle_join_phase=true"))) {
+      addPairs(line, "idle_bin_fresh", joinFresh);
+      joinWireIn += sum(numbers(line, /\bidle_wire_in=(\d+)/));
+    }
     ahead.push(...numbers(text, /\bidle_ahead_peers=(\d+)/));
     nodeLoads.push(...numbers(text, /\bload_1m=([0-9.]+)/));
   }
@@ -294,6 +330,8 @@ function summarize(run: string): string {
     `meta_per_data_in_loose=${ratio(wireIn - dataIn - callsIn, dataIn + callsIn)} ` +
     `udp_per_data_in=${ratio(netIn, dataIn)} udp_per_data_out=${ratio(netOut, dataOut)} ` +
     `gossip_per_data_in=${ratio(gmIn, dataIn)} gossip_per_data_out=${ratio(gmOut, dataOut)}`;
+  const docText = [...docGauges].map(([name, value]) => `${name}=${value}`).join(" ");
+  const joinText = `join_wire_in=${joinWireIn} join_bin_fresh=${pairsText(joinFresh)}`;
   const extText = [...ext]
     .filter(([, value]) => value > 0)
     .sort(([a], [b]) => a.localeCompare(b))
@@ -308,7 +346,7 @@ function summarize(run: string): string {
     `| disc_nodes=${discs.size} worst_disc=${maxOf([...discs.values()])} ` +
     `| resent=${resent} resend_dropped=${resendDropped} ` +
     `| census_lines=${censusLines} ${totalsText} ahead_max=${maxOf(ahead)} ` +
-    `node_load_max=${show({ value: maxOf(nodeLoads), float: true })} | ${wireText} | ${gossipText} | ${ratioText} | ${extText} ` +
+    `node_load_max=${show({ value: maxOf(nodeLoads), float: true })} | ${wireText} | ${gossipText} | ${ratioText} | ${docText} ${joinText} | ${extText} ` +
     `| mem_med=${memMed} mem_max=${memMax} ` +
     `| load1 median=${loadMed} max=${loadMax} ` +
     `| canary_pauses=${gaps.length}`

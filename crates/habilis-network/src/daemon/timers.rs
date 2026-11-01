@@ -24,6 +24,7 @@ use crate::gossip::PathSummary;
 use crate::net;
 use crate::protocol::{Channel, Nickname};
 use crate::transport::payload_path;
+use habilis_network_doc::DocCensus;
 /// The warn-only resident-memory leak check, run on the slow (1-minute)
 /// housekeeping tick (see `run`'s `intervals.prune`). Kept on this tick now
 /// that rate-limiter pruning — its original co-tenant — is gone.
@@ -116,13 +117,7 @@ pub(crate) async fn tick_state_refresh(
     let links = state.direct_counts();
 
     if state.silent_partition_due(roster_len, Instant::now()) {
-        tracing::warn!(
-            target: "habilis_network::lifecycle",
-            roster_len,
-            link_len,
-            meshed = state.standing.contains(&Standing::Meshed),
-            "neighbor census: silent partition (meshed but zero peer links)"
-        );
+        warn_silent_partition(state, roster_len, link_len);
         return;
     }
 
@@ -207,14 +202,13 @@ pub(crate) async fn tick_state_refresh(
         gossip_recursion_closes_total = payload_path::gossip_recursion_closes(),
         "mesh census"
     );
-    let join_phase = in_join_phase(state.joined_at, unix_secs::UnixSecs::now());
     log_wire_census(
         &idle,
         &reading.wire_out,
         socket,
         gossip_path,
         &gossip_msgs,
-        join_phase,
+        state.joined_at,
     );
 
     // The per-peer conn classification feeds only the DEBUG census
@@ -308,6 +302,16 @@ pub(crate) fn note_tick_gap(
     (mono_gap, wall_gap)
 }
 
+fn warn_silent_partition(state: &EventLoopState, roster_len: usize, link_len: usize) {
+    tracing::warn!(
+        target: "habilis_network::lifecycle",
+        roster_len,
+        link_len,
+        meshed = state.standing.contains(&Standing::Meshed),
+        "neighbor census: silent partition (meshed but zero peer links)"
+    );
+}
+
 /// How long after the join a node is in its join phase, the time of its backfill.
 const JOIN_PHASE: Duration = Duration::from_mins(5);
 
@@ -332,16 +336,37 @@ const DOC_SAVE_EVERY: u64 = 5;
 
 static DOC_CENSUS_RUNS: AtomicU64 = AtomicU64::new(0);
 
+/// What the census read from the two documents.
+struct DocReading {
+    meta: DocCensus,
+    shared: DocCensus,
+    /// The entries of the per-peer map that belong to nobody on the roster and are not ours.
+    absent: usize,
+}
+
+fn read_docs(state: &mut EventLoopState, me: &Nickname, with_save: bool) -> DocReading {
+    let meta = state.doc_mut(Channel::Meta).census(with_save);
+    let shared = state.doc_mut(Channel::State).census(with_save);
+    let absent = absent_entries(&meta.peer_nicks, &state.peers, me);
+    DocReading {
+        meta,
+        shared,
+        absent,
+    }
+}
+
 /// The sizes of the meta and the state document, on a line of their own, once per call (the
 /// 1-minute tick): the changes and frames that the node keeps for good, their bytes, the JSON, the
 /// save every [`DOC_SAVE_EVERY`] runs, and the entries of the per-peer map of members that are
 /// gone. A reader of the numbers can tell what a keyframe scheme would save.
 pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &Nickname) {
     let run = DOC_CENSUS_RUNS.fetch_add(1, Ordering::Relaxed);
-    let with_save = run % DOC_SAVE_EVERY == 0;
-    let meta = state.doc_mut(Channel::Meta).census(with_save);
-    let shared = state.doc_mut(Channel::State).census(with_save);
-    let absent = absent_entries(&meta.peer_nicks, &state.peers, me);
+    let with_save = run.is_multiple_of(DOC_SAVE_EVERY);
+    let DocReading {
+        meta,
+        shared,
+        absent,
+    } = read_docs(state, me, with_save);
     tracing::info!(
         target: "habilis_network::lifecycle",
         doc_meta_changes = meta.changes,
@@ -371,11 +396,11 @@ fn log_wire_census(
     socket: SocketBytes,
     gossip_path: GossipPathBytes,
     msgs: &GossipMsgs,
-    join_phase: bool,
+    joined_at: unix_secs::UnixSecs,
 ) {
     tracing::info!(
         target: "habilis_network::lifecycle",
-        idle_join_phase = join_phase,
+        idle_join_phase = in_join_phase(joined_at, unix_secs::UnixSecs::now()),
         idle_bin_fresh = %by_class(&idle.wire_in.fresh),
         idle_bin_dup = %by_class(&idle.wire_in.dup),
         idle_bin_cdup = %by_class(&idle.wire_in.cdup),
@@ -472,33 +497,27 @@ mod tests {
         );
     }
 
-    /// The doc census line says what each document keeps, and how many entries of the per-peer map
-    /// are absent.
+    /// The reading asks for the Automerge save only when told to, and finds no absent entry in a
+    /// document that has no peer entry.
     #[test]
-    fn the_doc_census_line_names_the_sizes_of_both_documents() {
-        let _guard =
-            ::habilis_network_test_tracing::init_capturing("habilis_network::lifecycle=info");
+    fn the_doc_reading_saves_only_when_asked() {
         let mut state = testing::fresh_state();
+        let me = testing::nick("me");
 
-        super::tick_doc_census(&mut state, &testing::nick("me"));
+        let quick = super::read_docs(&mut state, &me, false);
+        assert_eq!(quick.meta.save_bytes, None, "no save for the meta document");
+        assert_eq!(
+            quick.shared.save_bytes, None,
+            "no save for the state document"
+        );
+        assert_eq!(quick.absent, 0, "no entry, none absent");
 
-        let logs = ::habilis_network_test_tracing::captured_logs();
-        let line = logs
-            .lines()
-            .find(|line| line.contains("doc census"))
-            .expect("a doc census line");
-        for field in [
-            "doc_meta_changes=",
-            "doc_meta_frames=",
-            "doc_meta_frame_bytes=",
-            "doc_meta_json_bytes=",
-            "doc_meta_absent_entries=0",
-            "doc_state_changes=",
-            "doc_state_json_bytes=",
-            "doc_save_taken=",
-        ] {
-            assert!(line.contains(field), "{field} is in: {line}");
-        }
+        let full = super::read_docs(&mut state, &me, true);
+        assert!(full.meta.save_bytes.is_some(), "the meta document is saved");
+        assert!(
+            full.shared.save_bytes.is_some(),
+            "the state document is saved"
+        );
     }
 
     // The warn-only resident-memory leak signal: a threshold the live process
