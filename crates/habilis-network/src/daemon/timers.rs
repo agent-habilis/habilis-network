@@ -261,6 +261,7 @@ fn log_wire_census(received: &WireIn, sent: &WireOut, socket: SocketBytes) {
         target: "habilis_network::lifecycle",
         idle_bin_fresh = %by_class(&received.fresh),
         idle_bin_dup = %by_class(&received.dup),
+        idle_bin_cdup = %by_class(&received.cdup),
         idle_bin_tags = %received.tags.top(),
         idle_bout = %by_class(&sent.bytes),
         idle_bout_tags = %sent.tags.top(),

@@ -1153,7 +1153,9 @@ fn dispatch_channel(
         channel, message, ..
     } = event;
     let changes = state.doc(channel).change_count();
-    ingest_channel_event(event, state.doc_mut(channel), context);
+    if ingest_channel_event(event, state.doc_mut(channel), context) {
+        state.wire_in.note_content_dup();
+    }
     if state.doc(channel).change_count() > changes {
         state.fast_rounds.note_change(channel, Instant::now());
     }
@@ -1180,12 +1182,18 @@ fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
     }
 }
 
+/// Returns whether the document had applied this change already.
+///
 /// Ingest a durable channel event (`State`/`Meta`) into its `log`: dedup-insert,
 /// then surface a `StateChanged` for `channel` only when the derived doc changed
 /// and we're past the join horizon (a backfilling joiner updates its doc silently
 /// instead of reacting to replayed intermediate states). A received event is
 /// never our own (`is_self = false`). Both channels share this path verbatim.
-fn ingest_channel_event(event: ChannelEvent<'_>, doc: &mut doc::MeshDoc, context: &HandlerCtx<'_>) {
+fn ingest_channel_event(
+    event: ChannelEvent<'_>,
+    doc: &mut doc::MeshDoc,
+    context: &HandlerCtx<'_>,
+) -> bool {
     use crate::doc::Ingested;
 
     let ChannelEvent {
@@ -1220,8 +1228,10 @@ fn ingest_channel_event(event: ChannelEvent<'_>, doc: &mut doc::MeshDoc, context
                 channel.label()
             );
         }
-        Ingested::Duplicate | Ingested::Buffered | Ingested::Ignored | _ => {}
+        Ingested::Duplicate => return true,
+        Ingested::Buffered | Ingested::Ignored | _ => {}
     }
+    false
 }
 
 /// A directed leg (a directed `app_msg` or a `Task`) is surfaced **only by
@@ -3946,7 +3956,7 @@ mod wire_counter_tests {
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
     use crate::protocol::identity::Identity;
-    use crate::protocol::messages::{Authored, Verified};
+    use crate::protocol::messages::{Authored, MessageBody, Verified};
     use crate::protocol::{Channel, MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
@@ -4025,6 +4035,46 @@ mod wire_counter_tests {
             endpoint.close().await;
         });
         reader
+    }
+
+    /// A frame can be new by id and carry a change that the document applied already: the same
+    /// signed change in another frame. The census counts the bytes of such a frame as content that
+    /// came back.
+    #[test]
+    fn a_new_frame_with_a_change_the_document_holds_counts_as_content_that_came_back() {
+        let mesh = MeshId::from("test");
+        let writer = fresh_state();
+        let seed = *writer.identity.public().as_bytes();
+        let change = writer
+            .doc(Channel::State)
+            .build_change(&json!({ "key": 1 }), &seed)
+            .expect("a JSON object merges")
+            .expect("a non-empty merge yields a change");
+        let (wire_body, _plain) = writer
+            .doc(Channel::State)
+            .compose_wire_body(&change, None)
+            .expect("compose the wire body");
+        let signed = |body: MessageBody| {
+            Message::new_channel_event(&mesh, &nick("writer"), body, Channel::State)
+                .sign(&writer.identity)
+        };
+        let (first, again) = (signed(wire_body.clone()), signed(wire_body));
+        assert_ne!(first.dedup_key(), again.dedup_key(), "two frames, two ids");
+
+        let reader = reader_after(&[&first, &again]);
+        let wire = |message: &Verified| message.serialize().expect("serialize").len() as u64;
+        let received = &reader.wire_in;
+        assert_eq!(
+            by_class(&received.fresh),
+            format!("state:{}", wire(&first) + wire(&again)),
+            "both frames are new by id"
+        );
+        assert_eq!(by_class(&received.dup), "-", "the dedup caught nothing");
+        assert_eq!(
+            by_class(&received.cdup),
+            format!("state:{}", wire(&again)),
+            "the second carries a change that was applied"
+        );
     }
 
     #[test]

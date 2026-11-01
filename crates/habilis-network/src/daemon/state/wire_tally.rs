@@ -244,16 +244,24 @@ pub(crate) struct WireIn {
     pub(crate) frames: u64,
     /// Wire bytes of the app frames, fresh and repeat, by tag.
     pub(crate) tags: TagBytes,
+    /// Wire bytes, by class, of frames that were new by id and whose content the node already held:
+    /// a change that the document had applied. They are part of `fresh`, so a reader adds them to
+    /// `dup` to get every byte of content that came again.
+    pub(crate) cdup: [u64; CLASS_COUNT],
+    /// The class and the wire bytes of the last frame that was new by id, until the next frame.
+    last_fresh: Option<(FrameClass, usize)>,
 }
 
 impl WireIn {
     pub(crate) fn note_received(&mut self, shape: &FrameShape<'_>) {
+        self.last_fresh = None;
         add_bytes(&mut self.wire, shape.wire);
         add_bytes(&mut self.body, shape.body);
         self.frames += 1;
     }
 
     pub(crate) fn note_fresh(&mut self, shape: &FrameShape<'_>) {
+        self.last_fresh = Some((shape.class, shape.wire));
         add_bytes(&mut self.fresh[shape.class.index()], shape.wire);
         self.note_tag(shape);
     }
@@ -261,6 +269,13 @@ impl WireIn {
     pub(crate) fn note_dup(&mut self, shape: &FrameShape<'_>) {
         add_bytes(&mut self.dup[shape.class.index()], shape.wire);
         self.note_tag(shape);
+    }
+
+    /// The frame that was just counted as new carried content that the node already held.
+    pub(crate) fn note_content_dup(&mut self) {
+        if let Some((class, wire)) = self.last_fresh.take() {
+            add_bytes(&mut self.cdup[class.index()], wire);
+        }
     }
 
     fn note_tag(&mut self, shape: &FrameShape<'_>) {
@@ -469,6 +484,25 @@ mod tests {
         assert_eq!(by_class(&received.fresh), format!("app:{}", APP.len()));
         assert_eq!(by_class(&received.dup), format!("app:{}", 2 * APP.len()));
         assert_eq!(received.tags.top(), format!("app_msg:{}", 3 * APP.len()));
+    }
+
+    #[test]
+    fn a_frame_new_by_id_can_be_counted_again_as_content_that_came_back() {
+        let app = FrameShape::of(APP);
+        let mut received = WireIn::default();
+        received.note_received(&app);
+        received.note_content_dup();
+        assert_eq!(by_class(&received.cdup), "-", "nothing was fresh yet");
+        received.note_received(&app);
+        received.note_fresh(&app);
+        received.note_content_dup();
+        received.note_content_dup();
+        assert_eq!(
+            by_class(&received.cdup),
+            format!("app:{}", APP.len()),
+            "once per frame"
+        );
+        assert_eq!(by_class(&received.fresh), format!("app:{}", APP.len()));
     }
 
     #[test]
