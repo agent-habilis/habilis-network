@@ -3,7 +3,8 @@ use crate::daemon::state::EventLoopState;
 use crate::gossip::event::NodeEvent;
 use crate::protocol::identity::Identity;
 use crate::protocol::messages::Verified;
-use crate::protocol::{MeshId, Message, MessageKind};
+use crate::protocol::{AuthorKey, MeshId, Message, MessageId, MessageKind};
+use uuid::Uuid;
 
 use super::membership_update;
 
@@ -40,6 +41,13 @@ pub(crate) fn observe(
                     .insert(message.author.clone(), Instant::now());
             }
         }
+    }
+    // The holder of a nickname is the last key that proved it was alive under that name. A
+    // `left` is no such proof, and a replayed frame of an older run is not either.
+    if !update.stale && membership_update::proves_presence(&message.kind) {
+        state
+            .peer_keys
+            .insert(message.author.clone(), message.key());
     }
     membership_update::apply(&update, &message.author, state);
 
@@ -95,15 +103,665 @@ pub(crate) fn observe(
 /// The presence this node surfaces for a peer's first arrival. This node signs the
 /// `joined` that reports it, so the proof names this node, and the nickname stays the
 /// peer's. `peer` is the key of the frame that triggered it, which is the peer's own.
+///
+/// The id comes from that key, so one peer has one arrival id, however often this runs. A random
+/// id would make each call a new fact that an app cannot fold into the first.
 pub(crate) fn synthetic_arrival(
     mesh: &MeshId,
     identity: &Identity,
     triggering: &Verified,
 ) -> NodeEvent {
-    let arrival = Message::new_joined(mesh, &triggering.author).sign(identity);
+    let mut arrival = Message::new_joined(mesh, &triggering.author);
+    arrival.id = arrival_id(triggering.key());
+    let arrival = arrival.sign(identity);
     NodeEvent::Presence {
         message: Box::new(arrival.authored()),
         peer: triggering.key(),
         synthetic: true,
+    }
+}
+
+/// The 16 bytes at the start of a public key already differ for every key, so they make the id.
+fn arrival_id(key: AuthorKey) -> MessageId {
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&key.as_bytes()[..16]);
+    MessageId::try_new(&Uuid::from_bytes(bytes).to_string())
+        .expect("a formatted UUID is a valid message id")
+}
+
+/// Red tests for issue 75 (H1, H4, H7). Each test states the property that a correct engine has
+/// and fails today for the reason in its name. No fix code lives here.
+#[cfg(all(test, feature = "host"))]
+mod churn_red {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use iroh_gossip::net::Gossip;
+    use iroh_gossip::proto;
+
+    use super::{observe, synthetic_arrival};
+    use crate::daemon::handler_ctx::HandlerCtx;
+    use crate::daemon::state::EventLoopState;
+    use crate::gossip::antientropy::handle_state_digest;
+    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+    use crate::gossip::event::{NodeEvent, NodeSink};
+    use crate::lifecycle::heartbeat::tick_sweep;
+    use crate::lifecycle::{PresenceEvent, handle_presence, membership_update};
+    use crate::lookup::{TransportOpts, build_peer_multihop};
+    use crate::protocol;
+    use crate::protocol::identity::Identity;
+    use crate::protocol::meshes::LookupOpts;
+    use crate::protocol::messages::Authored;
+    use crate::protocol::{
+        Channel, MeshId, Message, MessageBody, Nickname, PresenceSubtype, UnixSecs, Verified,
+    };
+    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::transport::{MeshSender, PayloadPath};
+    use crate::util::clock::Instant;
+    use crate::util::tuning::{SEEN_IDS_CAP, alive_timeout};
+
+    struct Inert;
+
+    #[async_trait::async_trait]
+    impl NodeApp for Inert {
+        fn classify(&self, _message: &Authored) -> AppClass {
+            AppClass::BEAT.union(AppClass::VALID)
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            false
+        }
+    }
+
+    /// Keeps one line per surfaced lifecycle event, so a test reads what the operator would see.
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<String>>);
+
+    impl Recorder {
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().expect("the recorder lock").clone()
+        }
+    }
+
+    impl NodeSink for Recorder {
+        fn emit(&self, event: NodeEvent) {
+            let line = match event {
+                NodeEvent::PeerTimeout { nickname, .. } => format!("timeout {nickname}"),
+                NodeEvent::PeerReturn { nickname } => format!("return {nickname}"),
+                NodeEvent::Presence {
+                    message, synthetic, ..
+                } => format!(
+                    "presence {} {:?} synthetic={synthetic}",
+                    message.author, message.kind
+                ),
+                NodeEvent::Ready { .. }
+                | NodeEvent::Info(_)
+                | NodeEvent::Error(_)
+                | NodeEvent::Fork { .. }
+                | NodeEvent::PingReport { .. }
+                | NodeEvent::StateChanged { .. } => return,
+            };
+            self.0.lock().expect("the recorder lock").push(line);
+        }
+    }
+
+    /// What a `HandlerCtx` borrows: one bound endpoint, a sender on a peerless topic, and a sink.
+    struct Rig {
+        endpoint: iroh::Endpoint,
+        sender: MeshSender,
+        mesh: MeshId,
+        identity: Identity,
+        us: Nickname,
+        sink: Recorder,
+    }
+
+    impl Rig {
+        async fn new() -> Self {
+            let (endpoint, handle, _webrtc) = build_peer_multihop(
+                &LookupOpts::loopback(),
+                TransportOpts::default(),
+                None,
+                PayloadPath::DirectOnly,
+            )
+            .await
+            .expect("a peer binds");
+            handle.close().await;
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            Self {
+                endpoint,
+                sender: MeshSender::new(gossip_sender),
+                mesh: MeshId::from("test"),
+                identity: Identity::generate(),
+                us: nick("us"),
+                sink: Recorder::default(),
+            }
+        }
+
+        fn context(&self) -> HandlerCtx<'_> {
+            HandlerCtx {
+                sender: &self.sender,
+                endpoint: &self.endpoint,
+                mesh: &self.mesh,
+                author: &self.us,
+                identity: &self.identity,
+                our_pubkey: self.identity.author_key(),
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &self.sink,
+            }
+        }
+    }
+
+    fn chat(mesh: &MeshId, who: &Nickname, by: &Identity, at: UnixSecs) -> Verified {
+        let mut message = Message::new_app(
+            mesh,
+            who,
+            protocol::AppFrameParams::new(
+                protocol::AppTag::try_new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                MessageBody::from("hello"),
+            ),
+        );
+        message.timestamp = at;
+        message.sign(by)
+    }
+
+    fn alive(mesh: &MeshId, who: &Nickname, by: &Identity, at: UnixSecs) -> Verified {
+        let mut message = Message::new_alive(mesh, who);
+        message.timestamp = at;
+        message.sign(by)
+    }
+
+    fn peer_info(mesh: &MeshId, who: &Nickname, by: &Identity, at: UnixSecs) -> Verified {
+        let mut message = Message::new_peer_info(mesh, who, MessageBody::from("{}"));
+        message.timestamp = at;
+        message.sign(by)
+    }
+
+    fn channel_event(
+        mesh: &MeshId,
+        who: &Nickname,
+        by: &Identity,
+        at: UnixSecs,
+        channel: Channel,
+    ) -> Verified {
+        let mut message = Message::new_channel_event(mesh, who, MessageBody::from("{}"), channel);
+        message.timestamp = at;
+        message.sign(by)
+    }
+
+    fn state_change(mesh: &MeshId, who: &Nickname, by: &Identity, at: UnixSecs) -> Verified {
+        channel_event(mesh, who, by, at, Channel::State)
+    }
+
+    fn meta_change(mesh: &MeshId, who: &Nickname, by: &Identity, at: UnixSecs) -> Verified {
+        channel_event(mesh, who, by, at, Channel::Meta)
+    }
+
+    fn channel_digest(
+        mesh: &MeshId,
+        who: &Nickname,
+        by: &Identity,
+        at: UnixSecs,
+        channel: Channel,
+    ) -> Verified {
+        let mut message = Message::new_channel_digest(mesh, who, MessageBody::from("{}"), channel);
+        message.timestamp = at;
+        message.sign(by)
+    }
+
+    fn state_digest(mesh: &MeshId, who: &Nickname, by: &Identity, at: UnixSecs) -> Verified {
+        channel_digest(mesh, who, by, at, Channel::State)
+    }
+
+    fn meta_digest(mesh: &MeshId, who: &Nickname, by: &Identity, at: UnixSecs) -> Verified {
+        channel_digest(mesh, who, by, at, Channel::Meta)
+    }
+
+    /// The stamp of every frame that a peer sent before it died: far enough back that the dead
+    /// peer had been silent for a full alive timeout when the sweep evicted it.
+    fn long_ago() -> UnixSecs {
+        UnixSecs::now() - alive_timeout() - Duration::from_secs(200)
+    }
+
+    /// One received frame, through the same gate and the same `observe` call as `ingest`.
+    fn receive(frame: &Verified, state: &mut EventLoopState, context: &HandlerCtx<'_>) -> bool {
+        if state.mark_seen(frame) {
+            return false;
+        }
+        observe(frame, state, context);
+        true
+    }
+
+    /// H1. A peer is killed by `SIGKILL`: it never sends `left`, so no guard of #34 covers its key. A frame
+    /// that it sent while alive and that is not in the message log (a keepalive, a `PeerInfo`)
+    /// dedups only through the `seen` set. When a busy room pushes it out of that set, a copy that
+    /// a relay still holds is new again, and it revives the dead peer.
+    async fn a_replayed_frame_must_not_revive_a_sigkilled_peer(
+        make: fn(&MeshId, &Nickname, &Identity, UnixSecs) -> Verified,
+    ) {
+        let rig = Rig::new().await;
+        let context = rig.context();
+        let who = nick("swift-cedar");
+        let victim = Identity::generate();
+        let mut state = fresh_state();
+        state.joined_at = long_ago() - Duration::from_secs(10);
+
+        let hello = chat(&rig.mesh, &who, &victim, long_ago());
+        let beat = make(&rig.mesh, &who, &victim, long_ago());
+        assert!(
+            receive(&hello, &mut state, &context),
+            "the frame is new to the seen set"
+        );
+        assert!(
+            receive(&beat, &mut state, &context),
+            "the frame is new to the seen set"
+        );
+        assert!(state.surfaced.contains(who.as_str()), "the victim arrived");
+
+        // SIGKILL: nothing more arrives. The sweep evicts the victim.
+        let silent = Instant::now()
+            .checked_sub(alive_timeout() + Duration::from_secs(10))
+            .expect("the monotonic clock has run past the alive timeout since boot");
+        state.last_seen.insert(who.clone(), silent);
+        tick_sweep(&mut state, &rig.sink);
+        assert!(state.quiet.contains(who.as_str()), "the victim is quiet");
+        assert!(
+            !state.key_said_goodbye(victim.author_key()),
+            "a SIGKILL sends no left"
+        );
+
+        // A busy room: SEEN_IDS_CAP other frames push the beat out of the seen set.
+        let talker = Identity::generate();
+        let talker_nick = nick("busy-room");
+        for _ in 0..SEEN_IDS_CAP {
+            state.mark_seen(&alive(&rig.mesh, &talker_nick, &talker, UnixSecs::now()));
+        }
+
+        // A relay that still holds the beat sends it again.
+        assert!(
+            receive(&beat, &mut state, &context),
+            "precondition: the seen set forgot the beat, so a copy is new again"
+        );
+        let lines = rig.sink.lines();
+        assert!(
+            !lines.iter().any(|line| line == "return swift-cedar"),
+            "a replayed frame of a SIGKILLed peer revived it: {lines:?}"
+        );
+        rig.endpoint.close().await;
+    }
+
+    #[test]
+    fn h1_a_replayed_alive_revives_a_sigkilled_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            a_replayed_frame_must_not_revive_a_sigkilled_peer(alive).await;
+        });
+    }
+
+    #[test]
+    fn h1_a_replayed_peer_info_revives_a_sigkilled_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            a_replayed_frame_must_not_revive_a_sigkilled_peer(peer_info).await;
+        });
+    }
+
+    // The same hole for the kinds of the durable state: the engine never keeps them in the message
+    // log, so after the seen set forgot them nothing stops a copy, and `returned` reads no kind.
+    #[test]
+    fn h1_a_replayed_state_change_revives_a_sigkilled_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            a_replayed_frame_must_not_revive_a_sigkilled_peer(state_change).await;
+        });
+    }
+
+    #[test]
+    fn h1_a_replayed_meta_change_revives_a_sigkilled_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            a_replayed_frame_must_not_revive_a_sigkilled_peer(meta_change).await;
+        });
+    }
+
+    #[test]
+    fn h1_a_replayed_state_digest_revives_a_sigkilled_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            a_replayed_frame_must_not_revive_a_sigkilled_peer(state_digest).await;
+        });
+    }
+
+    #[test]
+    fn h1_a_replayed_meta_digest_revives_a_sigkilled_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            a_replayed_frame_must_not_revive_a_sigkilled_peer(meta_digest).await;
+        });
+    }
+
+    /// H4. The `joined` that a node mints for a peer's first frame gets a new id on every call, so
+    /// the app cannot fold two of them into one. The same peer arrival must name the same id.
+    #[test]
+    fn h4_a_synthetic_joined_gets_a_new_id_each_time() {
+        let node = Identity::generate();
+        let peer = Identity::generate();
+        let mesh = MeshId::from("test");
+        let trigger = chat(&mesh, &nick("swift-cedar"), &peer, UnixSecs::now());
+        let id_of = |event: NodeEvent| {
+            let NodeEvent::Presence { message, .. } = event else {
+                panic!("a synthetic arrival is a presence");
+            };
+            message.id.to_string()
+        };
+        let first = id_of(synthetic_arrival(&mesh, &node, &trigger));
+        let second = id_of(synthetic_arrival(&mesh, &node, &trigger));
+        assert_eq!(
+            first, second,
+            "two synthetic joined for one peer have two ids"
+        );
+    }
+
+    /// H4. Each `joined_new` makes this node announce its own `joined` again, and retain it.
+    /// Five peers that join make five new `joined` frames, each one a message that every other
+    /// peer receives, and the cost of a burst of joiners grows with the square of the roster.
+    #[test]
+    fn h4_every_new_peer_makes_us_announce_again() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            assert_eq!(state.message_log.len(), 0, "the log starts empty");
+            for name in [
+                "swift-cedar",
+                "lost-heron",
+                "calm-otter",
+                "bold-finch",
+                "wild-crane",
+            ] {
+                let who = nick(name);
+                let joined = Message::new_joined(&rig.mesh, &who).sign(&Identity::generate());
+                let observed = observe(&joined, &mut state, &context);
+                handle_presence(
+                    PresenceEvent {
+                        message: &joined,
+                        subtype: PresenceSubtype::Joined,
+                        update: &observed.update,
+                        surfaceable: observed.surfaceable,
+                    },
+                    &mut state,
+                    &mut app,
+                    &context,
+                )
+                .await;
+            }
+            let own_joined = state.message_log.len();
+            assert!(
+                own_joined <= 1,
+                "five arrivals made {own_joined} new frames of ours (one re-announced joined each)"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// H4, receive side. The same peer announces itself four times in one second, each frame with a
+    /// new id and the same stamp (the re-announce of every new arrival did that). The operator
+    /// sees one arrival.
+    #[test]
+    fn h4_four_joined_of_one_key_in_a_second_are_one_arrival() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let peer = Identity::generate();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            for _ in 0..4 {
+                let mut joined = Message::new_joined(&rig.mesh, &who);
+                joined.timestamp = UnixSecs::now();
+                let joined = joined.sign(&peer);
+                assert!(!state.mark_seen(&joined));
+                let observed = observe(&joined, &mut state, &context);
+                handle_presence(
+                    PresenceEvent {
+                        message: &joined,
+                        subtype: PresenceSubtype::Joined,
+                        update: &observed.update,
+                        surfaceable: observed.surfaceable,
+                    },
+                    &mut state,
+                    &mut app,
+                    &context,
+                )
+                .await;
+            }
+            let arrivals = rig
+                .sink
+                .lines()
+                .iter()
+                .filter(|line| line.starts_with("presence swift-cedar"))
+                .count();
+            assert_eq!(
+                arrivals, 1,
+                "four joined of one key are {arrivals} arrivals"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// H7. The roster is keyed by nickname. Two live keys with one nickname share one entry, so
+    /// the live count is too low.
+    #[test]
+    #[ignore = "open: the roster is keyed by nickname, so two live keys share one entry"]
+    fn h7_two_live_keys_with_one_nickname_count_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let mut state = fresh_state();
+            let first = chat(&rig.mesh, &who, &Identity::generate(), UnixSecs::now());
+            let second = chat(&rig.mesh, &who, &Identity::generate(), UnixSecs::now());
+            assert!(
+                receive(&first, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert!(
+                receive(&second, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert_eq!(
+                state.peers.len(),
+                2,
+                "two live keys are one roster entry: {:?}",
+                state.peers
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// H7. The first run of a nickname dies and its `left` is delayed. A second run took the
+    /// nickname in the meantime. The first `left` of the old key (not a replay) removes the new
+    /// run from the roster, and un-surfaces it.
+    #[test]
+    fn h7_a_late_left_of_the_old_run_removes_the_new_run() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let old_run = Identity::generate();
+            let new_run = Identity::generate();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            assert!(
+                receive(
+                    &chat(&rig.mesh, &who, &old_run, UnixSecs::now()),
+                    &mut state,
+                    &context
+                ),
+                "the frame is new to the seen set"
+            );
+            assert!(
+                receive(
+                    &chat(&rig.mesh, &who, &new_run, UnixSecs::now()),
+                    &mut state,
+                    &context
+                ),
+                "the frame is new to the seen set"
+            );
+
+            let left = Message::new_left(&rig.mesh, &who).sign(&old_run);
+            assert!(!state.mark_seen(&left));
+            let observed = observe(&left, &mut state, &context);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            assert!(
+                state.peers.contains(who.as_str()),
+                "the late left of the old run removed the new run from the roster"
+            );
+            assert!(
+                state.surfaced.contains(who.as_str()),
+                "the late left of the old run un-surfaced the new run"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// H7. A goodbye is kept by nickname with the resolution of one second. A new run that starts
+    /// in the second of the goodbye of the old run is stale from its first frame, although it is
+    /// another key.
+    #[test]
+    fn h7_a_restart_in_the_second_of_a_goodbye_is_stale() {
+        let mesh = MeshId::from("test");
+        let who = nick("swift-cedar");
+        let old_run = Identity::generate();
+        let new_run = Identity::generate();
+        let at = UnixSecs::from(1_000);
+        let mut state = fresh_state();
+        state.note_left(&who, old_run.author_key(), at);
+
+        let mut joined = Message::new_joined(&mesh, &who);
+        joined.timestamp = at;
+        let joined = joined.sign(&new_run);
+        let update = membership_update::compute_for(&joined, &state);
+        assert!(
+            !update.stale && update.joined_new,
+            "the first frame of a new key in the second of the old goodbye is stale: {update:?}"
+        );
+    }
+
+    /// H1, route A, in one process. A late joiner sends a meta digest with no heads. A node that
+    /// holds the signed change of a dead peer answers it with that frame (the answer is
+    /// `handle_state_digest`, which serves the frames of any author). The frame reaches a live
+    /// node that has the dead peer in `quiet` and whose seen set forgot the frame. The live node
+    /// must not report the dead peer as back.
+    #[test]
+    fn h1_route_a_a_late_joiners_digest_revives_a_sigkilled_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let dead = nick("swift-cedar");
+
+            // The dead peer wrote one meta change, signed with its key.
+            let writer = fresh_state();
+            let seed = *writer.identity.public().as_bytes();
+            let change = writer
+                .doc(Channel::Meta)
+                .build_change(&serde_json::json!({ "status": "busy" }), &seed)
+                .expect("a JSON object merges")
+                .expect("a non-empty merge yields a change");
+            let (wire, _plain) = writer
+                .doc(Channel::Meta)
+                .compose_wire_body(&change, None)
+                .expect("compose the wire body");
+            let mut change_frame =
+                Message::new_channel_event(&rig.mesh, &dead, wire, Channel::Meta);
+            change_frame.timestamp = long_ago();
+            let change_frame = change_frame.sign(&writer.identity);
+
+            // The live node saw the peer alive and its change, then the peer was killed by `SIGKILL`.
+            let mut live = fresh_state();
+            live.joined_at = long_ago() - Duration::from_secs(10);
+            let hello = chat(&rig.mesh, &dead, &writer.identity, long_ago());
+            assert!(
+                receive(&hello, &mut live, &context),
+                "the frame is new to the seen set"
+            );
+            assert!(
+                receive(&change_frame, &mut live, &context),
+                "the frame is new to the seen set"
+            );
+            let silent = Instant::now()
+                .checked_sub(alive_timeout() + Duration::from_secs(10))
+                .expect("the monotonic clock has run past the alive timeout since boot");
+            live.last_seen.insert(dead.clone(), silent);
+            tick_sweep(&mut live, &rig.sink);
+            assert!(live.quiet.contains(dead.as_str()), "the peer is quiet");
+            let talker = Identity::generate();
+            for _ in 0..SEEN_IDS_CAP {
+                live.mark_seen(&alive(
+                    &rig.mesh,
+                    &nick("busy-room"),
+                    &talker,
+                    UnixSecs::now(),
+                ));
+            }
+
+            // Another node holds the change of the dead peer and gets a digest from a late joiner.
+            let mut holder = fresh_state();
+            let _ = holder.doc_mut(Channel::Meta).ingest(&change_frame);
+            assert!(
+                holder
+                    .doc(Channel::Meta)
+                    .changes_since(&[], 10)
+                    .any(|frame| frame.key() == victim_key(&writer)),
+                "precondition: the holder has the change of the dead peer"
+            );
+            let joiner = Identity::generate();
+            let digest = Message::new_channel_digest(
+                &rig.mesh,
+                &nick("late-joiner"),
+                MessageBody::from(r#"{"heads":[]}"#),
+                Channel::Meta,
+            )
+            .sign(&joiner);
+            let answered = handle_state_digest(Channel::Meta, &digest, &mut holder, &context).await;
+            assert!(
+                answered.broadcast + answered.unicast > 0,
+                "precondition: the holder answers the digest with the frame of the dead peer"
+            );
+
+            // The answer reaches the live node.
+            for frame in holder.doc(Channel::Meta).changes_since(&[], 10) {
+                receive(&frame, &mut live, &context);
+            }
+            let lines = rig.sink.lines();
+            assert!(
+                !lines.iter().any(|line| line == "return swift-cedar"),
+                "a late joiner digest made a live node report the dead peer as back: {lines:?}"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    fn victim_key(writer: &EventLoopState) -> protocol::AuthorKey {
+        writer.identity.author_key()
     }
 }

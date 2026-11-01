@@ -2,8 +2,8 @@ use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
+use crate::protocol::PresenceSubtype;
 use crate::protocol::messages::Verified;
-use crate::protocol::{Message, PresenceSubtype};
 
 use super::membership_update;
 
@@ -45,6 +45,16 @@ pub(crate) async fn handle_presence(
         }
         state.note_left(&message.author, message.key(), message.timestamp);
         state.drop_departed_presence(&message.key());
+        // The nickname may belong to a newer run by now. The goodbye of an older key ends that
+        // key only, and the roster entry of the newer run stays.
+        if state
+            .peer_keys
+            .get(&message.author)
+            .is_some_and(|holder| *holder != message.key())
+        {
+            return;
+        }
+        state.peer_keys.remove(&message.author);
         if state.peers.remove(message.author.as_str()) {
             state.write_peer_count();
         }
@@ -95,14 +105,6 @@ pub(crate) async fn handle_presence(
             state.last_sent_at = now;
         }
         if update.joined_new {
-            // Re-announce so late joiners seed their roster. Retained locally: a
-            // re-announce mints a fresh id, so without this each one becomes
-            // another message we can never acknowledge and every peer re-sends to
-            // us forever (see `gossip::recv::retain_own_broadcast`).
-            let joined = Message::new_joined(context.mesh, context.author).sign(context.identity);
-            gossip::broadcast_msg(context.sender, &joined).await;
-            gossip::retain_own_broadcast(state, joined);
-            state.last_sent_at = Instant::now();
             // Suppress "has joined" when we already printed "came back"
             // from the quiet check, or when this `joined` predates
             // our own join (relayed backlog).

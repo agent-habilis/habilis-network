@@ -209,6 +209,10 @@ pub struct EventLoopState {
     /// Implicit-heartbeat tracker: nickname -> last time we heard
     /// anything from that peer. Drives sweep-based eviction.
     pub(crate) last_seen: HashMap<Nickname, Instant>,
+    /// The key that spoke last under each nickname. A nickname is a label that two runs can hold
+    /// in turn, so a `left` from another key is the goodbye of an older run and leaves the
+    /// roster entry of the newer run alone.
+    pub(crate) peer_keys: HashMap<Nickname, AuthorKey>,
     /// Bridge from membership back to transport: nickname -> the endpoint id
     /// that nickname last self-advertised in a signed `PeerInfo`. That
     /// signature is the only thing tying a nickname to an endpoint (the
@@ -583,6 +587,7 @@ impl EventLoopState {
             rendezvous_id: None,
             quiet: BoundedFifoSet::new(QUIET_CAP),
             quiet_since: HashMap::new(),
+            peer_keys: HashMap::new(),
             left: BoundedFifoSet::new(QUIET_CAP),
             left_at: HashMap::new(),
             left_keys: BoundedFifoSet::new(QUIET_CAP),
@@ -665,12 +670,19 @@ impl EventLoopState {
         .key(key)
     }
 
+    /// The number of members of the mesh as this node counts them: the roster and this node. Every
+    /// surface that shows a count (the state file, the live counter, the roster snapshot) reads it
+    /// here.
+    pub(crate) fn member_count(&self) -> usize {
+        self.peers.len() + 1
+    }
+
     /// Write `peer_count = peers.len() + 1` (we add 1
     /// for self) to the state file, if configured, carrying the current
     /// `ready` flag, and mirror the count into the advertise counter, if
     /// present. No-op for neither.
     pub(crate) fn write_peer_count(&self) {
-        let count = self.peers.len() + 1;
+        let count = self.member_count();
         #[cfg(feature = "host")]
         if let Some(sf) = self.state_file.as_ref() {
             sf.write(count, self.standing.contains(&Standing::Ready));
@@ -714,7 +726,7 @@ impl EventLoopState {
         peers.sort_by_key(|entry| entry.last_seen_secs_ago.unwrap_or(u64::MAX));
         RosterSnapshot {
             peers,
-            count: self.peers.len() + 1,
+            count: self.member_count(),
         }
     }
 
@@ -996,11 +1008,6 @@ impl EventLoopState {
                 self.forget_msg_seq(&gone.key(), seq, &hash);
             }
         }
-    }
-
-    /// Whether a message of `nick` stamped `at` was sent no later than the goodbye of `nick`.
-    pub(crate) fn sent_before_goodbye(&self, nick: &Nickname, at: UnixSecs) -> bool {
-        self.left_at.get(nick).is_some_and(|left| at <= *left)
     }
 
     pub(crate) fn unlink(&mut self, peer: EndpointId) {

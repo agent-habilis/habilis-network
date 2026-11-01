@@ -6,6 +6,7 @@
 
 use crate::daemon::state::EventLoopState;
 use crate::protocol::{MessageKind, Nickname, PresenceSubtype, UnixSecs, Verified};
+use crate::util::clock::Instant;
 
 /// Summary of how a newly received message changes our view of the
 /// sender's membership. Computed from the message kind + current state
@@ -20,10 +21,34 @@ pub(crate) struct MembershipUpdate {
     /// state-file write and the `has joined` line (we suppress it
     /// when `returned` — we print `came back` instead).
     pub joined_new: bool,
-    /// The sender said goodbye and this message was stamped no later than that goodbye: a copy
-    /// that was sent before it and arrived after it. It proves no presence, so it adds the
-    /// sender to nothing and surfaces no arrival.
+    /// The message proves no presence: a key that said goodbye signed it, or it is a copy of a
+    /// frame of a quiet peer that does not prove the peer is back. It adds the sender to nothing
+    /// and surfaces no arrival.
     pub stale: bool,
+}
+
+/// Whether a frame of this kind can prove that its author is alive now. A relay or an
+/// anti-entropy answer re-sends stored frames of any author, a dead one too: the peer info, the
+/// durable state and meta changes, and the digests. Those prove nothing about the present.
+pub(crate) const fn proves_presence(kind: &MessageKind) -> bool {
+    matches!(
+        kind,
+        MessageKind::App { .. }
+            | MessageKind::Presence {
+                subtype: PresenceSubtype::Alive | PresenceSubtype::Joined
+            }
+            | MessageKind::Ping
+            | MessageKind::Pong { .. }
+    )
+}
+
+/// Whether a frame stamped `timestamp` was sent before we last heard from the quiet `author`.
+/// Such a frame is a copy that a relay held, not news: the author sent nothing after it.
+fn sent_before_silence(author: &Nickname, timestamp: UnixSecs, state: &EventLoopState) -> bool {
+    state
+        .quiet_since
+        .get(author)
+        .is_some_and(|heard| timestamp <= UnixSecs::now() - Instant::now().duration_since(*heard))
 }
 
 /// Decide what a message from `author` means for our peer
@@ -33,22 +58,26 @@ pub(crate) struct MembershipUpdate {
 /// farewell is not an arrival. Everything else (including `Alive`,
 /// `Msg`, `PeerInfo`) participates in self-heal: if we
 /// haven't seen the peer before, we treat the message as proof of
-/// presence, unless the peer said goodbye and the message was stamped no later
-/// than the goodbye (see [`MembershipUpdate::stale`]).
+/// presence.
+///
+/// One rule decides a return: a quiet peer is back only when the frame is of a kind that proves
+/// presence (see [`proves_presence`]) and was sent after we last heard from the peer. Any other
+/// frame of a quiet peer is stale (see [`MembershipUpdate::stale`]).
 pub(crate) fn compute(
     kind: &MessageKind,
     author: &Nickname,
     timestamp: UnixSecs,
     state: &EventLoopState,
 ) -> MembershipUpdate {
-    let is_left = matches!(
-        kind,
-        MessageKind::Presence {
-            subtype: PresenceSubtype::Left
-        }
-    );
-    let after_goodbye = !is_left && state.sent_before_goodbye(author, timestamp);
-    let returned = !after_goodbye && state.quiet.contains(author.as_str());
+    let quiet = state.quiet.contains(author.as_str());
+    let proves_return = proves_presence(kind) && !sent_before_silence(author, timestamp, state);
+    if quiet && !proves_return {
+        return MembershipUpdate {
+            returned: false,
+            joined_new: false,
+            stale: true,
+        };
+    }
     let known = state.peers.contains(author.as_str());
     let unseen = match kind {
         // A `Left` is explicit departure; durable state events never mark a
@@ -74,9 +103,9 @@ pub(crate) fn compute(
         | _ => !known,
     };
     MembershipUpdate {
-        returned,
-        joined_new: unseen && !after_goodbye,
-        stale: after_goodbye,
+        returned: quiet,
+        joined_new: unseen,
+        stale: false,
     }
 }
 
@@ -123,7 +152,11 @@ mod tests {
     use crate::testing::{fresh_state, nick};
 
     use crate::protocol::identity::Identity;
-    use crate::protocol::{AuthorKey, MeshId, Message};
+    use crate::protocol::{MeshId, Message};
+
+    use std::time::Duration;
+
+    use crate::util::clock::Instant;
 
     use super::{
         MembershipUpdate, MessageKind, PresenceSubtype, UnixSecs, apply, compute, compute_for,
@@ -256,88 +289,129 @@ mod tests {
         );
     }
 
-    /// A goodbye is final for every message that was sent before it. A re-announce of `joined` that
-    /// was in flight when the peer left reaches us after the `left`, stamped with the same second:
-    /// it must not bring the peer back into the roster.
+    /// A quiet peer is back when a live frame is stamped after the silence began, and not before:
+    /// a copy that a relay held says nothing about the present, and neither does a frame of a kind
+    /// that a relay or an anti-entropy answer re-sends.
     #[test]
-    fn a_message_sent_in_the_second_of_a_goodbye_is_stale() {
+    fn a_quiet_peer_returns_only_on_a_live_frame_sent_after_its_silence() {
         let _guard = ::habilis_network_test_tracing::init();
+        let who = nick("swift-cedar");
+        let mut state = fresh_state();
+        state.quiet.insert(who.clone());
+        let heard = Instant::now()
+            .checked_sub(Duration::from_secs(100))
+            .expect("the monotonic clock has run past 100 s since boot");
+        state.quiet_since.insert(who.clone(), heard);
+        let now = UnixSecs::now();
+        let before = now - Duration::from_secs(200);
+
+        let app = MessageKind::app_broadcast("app_msg");
+        let alive = MessageKind::Presence {
+            subtype: PresenceSubtype::Alive,
+        };
+        for kind in [&app, &alive] {
+            let back = compute(kind, &who, now, &state);
+            assert!(
+                back.returned && !back.stale,
+                "{kind:?} sent after the silence"
+            );
+            let copy = compute(kind, &who, before, &state);
+            assert!(
+                copy.stale && !copy.returned,
+                "{kind:?} sent before the silence"
+            );
+        }
+        for kind in [
+            MessageKind::PeerInfo,
+            MessageKind::State,
+            MessageKind::Meta,
+            MessageKind::StateDigest,
+            MessageKind::MetaDigest,
+        ] {
+            let update = compute(&kind, &who, now, &state);
+            assert!(
+                update.stale && !update.returned && !update.joined_new,
+                "{kind:?} is no proof of presence, even stamped after the silence"
+            );
+        }
+    }
+
+    /// A goodbye is final for the key that said it, whatever the kind of the frame and whatever its
+    /// timestamp says: a copy that was in flight when the peer left, or a replay, adds nothing.
+    #[test]
+    fn a_frame_of_a_key_that_said_goodbye_is_stale() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mesh = MeshId::from("test");
+        let who = nick("swift-cedar");
+        let leaver = Identity::generate();
         let at = UnixSecs::from(1_000);
         let mut state = fresh_state();
-        state.note_left(&nick("swift-cedar"), AuthorKey::from([1; 32]), at);
-        let joined = MessageKind::Presence {
-            subtype: PresenceSubtype::Joined,
-        };
+        state.note_left(&who, leaver.author_key(), at);
 
+        let mut frames = Vec::new();
         for kind in [
-            joined,
+            MessageKind::Presence {
+                subtype: PresenceSubtype::Joined,
+            },
             MessageKind::PeerInfo,
             MessageKind::app_broadcast("app_msg"),
             MessageKind::Presence {
                 subtype: PresenceSubtype::Alive,
             },
         ] {
-            let update = compute(&kind, &nick("swift-cedar"), at, &state);
-            assert!(update.stale, "{kind:?} of the second of the goodbye");
-            assert!(!update.joined_new, "{kind:?} brings the peer back");
-            let older = compute(&kind, &nick("swift-cedar"), UnixSecs::from(990), &state);
-            assert!(older.stale && !older.joined_new, "{kind:?} sent before it");
+            for stamp in [UnixSecs::from(990), at, UnixSecs::from(1_001)] {
+                let mut message = Message::new_frame(&mesh, &who, kind.clone(), "".into());
+                message.timestamp = stamp;
+                frames.push((kind.clone(), stamp, message.sign(&leaver)));
+            }
+        }
+        for (kind, stamp, frame) in frames {
+            let update = compute_for(&frame, &state);
+            assert!(
+                update.stale && !update.joined_new,
+                "{kind:?} stamped {stamp} of a key that said goodbye"
+            );
         }
     }
 
-    /// A message stamped after the goodbye is a real return, and a stranger is not touched by the
-    /// goodbye of another peer.
+    /// The goodbye of one key does not touch another key. A new run takes the nickname in the very
+    /// second of the goodbye of the old run, and it is a real arrival.
     #[test]
-    fn a_message_stamped_after_a_goodbye_is_a_return() {
+    fn another_key_is_not_stale_after_a_goodbye() {
         let _guard = ::habilis_network_test_tracing::init();
+        let mesh = MeshId::from("test");
+        let who = nick("swift-cedar");
         let at = UnixSecs::from(1_000);
         let mut state = fresh_state();
-        state.note_left(&nick("swift-cedar"), AuthorKey::from([1; 32]), at);
-        let joined = MessageKind::Presence {
-            subtype: PresenceSubtype::Joined,
-        };
+        state.note_left(&who, Identity::generate().author_key(), at);
 
-        let back = compute(&joined, &nick("swift-cedar"), UnixSecs::from(1_001), &state);
+        let mut joined = Message::new_joined(&mesh, &who);
+        joined.timestamp = at;
+        let update = compute_for(&joined.sign(&Identity::generate()), &state);
         assert!(
-            !back.stale,
-            "a message stamped after a goodbye is not stale"
-        );
-        assert!(back.joined_new, "a later joined is a new arrival");
-        let other = compute(&joined, &nick("lost-heron"), at, &state);
-        assert!(
-            !other.stale && other.joined_new,
-            "another peer is not stale"
+            !update.stale && update.joined_new,
+            "a new key in the second of an old goodbye is an arrival: {update:?}"
         );
     }
 
-    /// The goodbye itself is never stale, and a copy of an older goodbye does not move the mark
-    /// back: a peer that left, came back and left again stays gone for the first goodbye's copies.
+    /// A second goodbye of one key (a copy that a peer still held) changes nothing: the key stays
+    /// gone, and the first goodbye is the only one that the nickname loses its entry for.
     #[test]
-    fn the_mark_of_a_goodbye_only_moves_forward() {
+    fn a_second_goodbye_of_one_key_is_stale() {
         let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
+        let mesh = MeshId::from("test");
         let who = nick("swift-cedar");
-        state.note_left(&who, AuthorKey::from([1; 32]), UnixSecs::from(1_000));
-        state.note_left(&who, AuthorKey::from([1; 32]), UnixSecs::from(900));
+        let leaver = Identity::generate();
+        let mut state = fresh_state();
+        let left = Message::new_left(&mesh, &who).sign(&leaver);
         assert!(
-            state.sent_before_goodbye(&who, UnixSecs::from(1_000)),
-            "a goodbye marks the messages sent before it"
+            !compute_for(&left, &state).stale,
+            "the first goodbye of a key is not stale"
         );
-        state.note_left(&who, AuthorKey::from([1; 32]), UnixSecs::from(1_200));
+        state.note_left(&who, leaver.author_key(), left.timestamp);
         assert!(
-            state.sent_before_goodbye(&who, UnixSecs::from(1_100)),
-            "messages sent just before the goodbye mark still count"
-        );
-        assert!(
-            !state.sent_before_goodbye(&who, UnixSecs::from(1_201)),
-            "a message sent after the goodbye is not marked"
-        );
-        let left = MessageKind::Presence {
-            subtype: PresenceSubtype::Left,
-        };
-        assert!(
-            !compute(&left, &who, UnixSecs::from(1_200), &state).stale,
-            "a left message stamped after the goodbye is not stale"
+            compute_for(&left, &state).stale,
+            "a copy of the goodbye is stale"
         );
     }
 
