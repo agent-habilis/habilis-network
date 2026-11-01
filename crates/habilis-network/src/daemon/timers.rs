@@ -26,6 +26,7 @@ use crate::transport::payload_path;
 /// that rate-limiter pruning — its original co-tenant — is gone.
 pub(crate) fn tick_prune(state: &mut EventLoopState, sink: &dyn NodeSink) {
     warn_on_high_resident_memory(state, sink, tuning::RESIDENT_MEMORY_WARN_MB);
+    log_census(state);
     let evicted = state.reassembly.sweep_stale(Instant::now());
     if evicted > 0 {
         // A reaped group means a transfer stalled past the TTL — the body is
@@ -37,6 +38,23 @@ pub(crate) fn tick_prune(state: &mut EventLoopState, sink: &dyn NodeSink) {
             "stale partial shard groups evicted from the reassembly store"
         );
     }
+}
+
+/// What fills the chat log, by kind and tag, once a minute. A reading only.
+fn log_census(state: &EventLoopState) {
+    let kinds = state
+        .message_log
+        .census()
+        .into_iter()
+        .map(|(label, count)| format!("{label}={count}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    tracing::info!(
+        target: "habilis_network::gossip",
+        log_len = state.message_log.len(),
+        kinds = kinds.as_str(),
+        "log census"
+    );
 }
 
 /// One-shot leak-visibility signal: if resident memory has crossed

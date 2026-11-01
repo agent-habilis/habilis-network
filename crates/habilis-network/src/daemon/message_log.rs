@@ -5,7 +5,7 @@ mod digest_window;
 mod missing_query;
 mod window_range;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use crate::protocol::messages::{Verified, sole_addressee};
 use crate::protocol::{AuthorKey, DedupKey, MessageKind, Nickname, PresenceSubtype, UnixSecs};
@@ -189,6 +189,15 @@ impl MessageLog {
     /// How many messages the log holds.
     pub(crate) fn len(&self) -> usize {
         self.messages.len()
+    }
+
+    /// How many held messages each kind and tag accounts for: the census of what fills the log.
+    pub(crate) fn census(&self) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for message in &self.messages {
+            *counts.entry(census_label(&message.kind)).or_default() += 1;
+        }
+        counts
     }
 
     /// The retained shards of multipart `group` authored by `author`, slotted by
@@ -415,6 +424,18 @@ fn eviction_key(message: &Verified) -> (UnixSecs, AuthorKey, Option<u64>, &str) 
     )
 }
 
+/// The census name of a kind: an app frame by its tag, a presence frame by its subtype.
+fn census_label(kind: &MessageKind) -> String {
+    if let MessageKind::App { tag, to, .. } = kind {
+        let directed = if to.is_some() { ":directed" } else { "" };
+        format!("app:{tag}{directed}")
+    } else if let MessageKind::Presence { subtype } = kind {
+        format!("presence:{subtype}")
+    } else {
+        kind.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -512,6 +533,43 @@ mod tests {
     fn in_range(message: &Message, window: &super::DigestWindow) -> bool {
         let bound = (message.timestamp, message.dedup_key());
         bound >= window.lo && bound <= window.hi
+    }
+
+    #[test]
+    fn the_census_counts_the_held_messages_by_kind_and_tag() {
+        let mesh = protocol::MeshId::from("test");
+        let author = Nickname::from("author");
+        let directed = Message::new_app(
+            &mesh,
+            &author,
+            protocol::AppFrameParams::new(
+                protocol::AppTag::try_new("a2a_msg").expect("a valid app tag"),
+                Some(Nickname::from("peer")),
+                None,
+                protocol::MessageBody::from("hi"),
+            ),
+        );
+        let mut log = MessageLog::new(100);
+        for message in [
+            plain("one"),
+            plain("two"),
+            directed,
+            Message::new_joined(&mesh, &author),
+            Message::new_left(&mesh, &author),
+        ] {
+            log.push(signed(message));
+        }
+
+        let census: Vec<(String, usize)> = log.census().into_iter().collect();
+        assert_eq!(
+            census,
+            [
+                ("app:a2a_msg:directed".to_owned(), 1),
+                ("app:app_msg".to_owned(), 2),
+                ("presence:joined".to_owned(), 1),
+                ("presence:left".to_owned(), 1),
+            ]
+        );
     }
 
     #[test]
