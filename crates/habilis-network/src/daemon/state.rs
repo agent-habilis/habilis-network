@@ -2034,23 +2034,23 @@ mod tests {
         let mut refloods = 0;
         for index in 0..20u64 {
             let now = start + Duration::from_millis(index * 10);
-            if state.joined_refloods_peerinfo(now) {
+            if state.joined_refloods_peerinfo(false, now) {
                 state.peerinfo_flooded_at = Some(now);
                 refloods += 1;
             }
         }
         assert_eq!(refloods, 1, "once per window, not once per peer");
 
-        // A first sighting inside the window is throttled too; the deferred flood serves it.
+        // A first sighting inside the window is not throttled.
         assert!(
-            !state.joined_refloods_peerinfo(start + Duration::from_secs(1)),
-            "a newcomer's joined inside the window does not flood again"
+            state.joined_refloods_peerinfo(true, start + Duration::from_secs(1)),
+            "a newcomer's joined re-floods peer info"
         );
 
         // Past the window a re-announce floods once more (no permanent silence).
         let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
         assert!(
-            state.joined_refloods_peerinfo(later),
+            state.joined_refloods_peerinfo(false, later),
             "a joined that is not new still re-floods once the window is open"
         );
     }
