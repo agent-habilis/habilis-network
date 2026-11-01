@@ -116,13 +116,7 @@ pub(crate) async fn tick_state_refresh(
     let links = state.direct_counts();
 
     if state.silent_partition_due(roster_len, Instant::now()) {
-        tracing::warn!(
-            target: "habilis_network::lifecycle",
-            roster_len,
-            link_len,
-            meshed = state.standing.contains(&Standing::Meshed),
-            "neighbor census: silent partition (meshed but zero peer links)"
-        );
+        warn_silent_partition(state, roster_len, link_len);
         return;
     }
 
@@ -332,13 +326,23 @@ const DOC_SAVE_EVERY: u64 = 5;
 
 static DOC_CENSUS_RUNS: AtomicU64 = AtomicU64::new(0);
 
+fn warn_silent_partition(state: &EventLoopState, roster_len: usize, link_len: usize) {
+    tracing::warn!(
+        target: "habilis_network::lifecycle",
+        roster_len,
+        link_len,
+        meshed = state.standing.contains(&Standing::Meshed),
+        "neighbor census: silent partition (meshed but zero peer links)"
+    );
+}
+
 /// The sizes of the meta and the state document, on a line of their own, once per call (the
 /// 1-minute tick): the changes and frames that the node keeps for good, their bytes, the JSON, the
 /// save every [`DOC_SAVE_EVERY`] runs, and the entries of the per-peer map of members that are
 /// gone. A reader of the numbers can tell what a keyframe scheme would save.
 pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &Nickname) {
     let run = DOC_CENSUS_RUNS.fetch_add(1, Ordering::Relaxed);
-    let with_save = run % DOC_SAVE_EVERY == 0;
+    let with_save = run.is_multiple_of(DOC_SAVE_EVERY);
     let meta = state.doc_mut(Channel::Meta).census(with_save);
     let shared = state.doc_mut(Channel::State).census(with_save);
     let absent = absent_entries(&meta.peer_nicks, &state.peers, me);

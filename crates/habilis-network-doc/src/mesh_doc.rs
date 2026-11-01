@@ -130,6 +130,7 @@ struct Pending {
 
 /// What a [`MeshDoc`] holds, as [`MeshDoc::census`] reads it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DocCensus {
     /// The changes applied, the genesis included.
     pub changes: usize,
