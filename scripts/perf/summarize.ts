@@ -155,7 +155,8 @@ const lines = (text: string): string[] => {
 };
 
 function summarize(run: string): string {
-  const rows = lines(readFileSync(`${run}/summary.txt`, "utf8")).map(
+  const summaryFile = `${run}/summary.txt`;
+  const rows = (existsSync(summaryFile) ? lines(readFileSync(summaryFile, "utf8")) : []).map(
     (line) => Object.fromEntries([...line.matchAll(/(\w+)=(\d+)/g)].map((m) => [m[1], m[2]])),
   );
   const census = rows.filter((row) => "roster_len" in row);
@@ -163,7 +164,8 @@ function summarize(run: string): string {
   const mem = census
     .filter((row) => "peak_resident_memory_mb" in row)
     .map((row) => Number(row.peak_resident_memory_mb));
-  const n = rows.length;
+  const logs = readdirSync(run).filter((f) => /^n.*\.err$/.test(f)).length;
+  const n = rows.length || logs;
 
   const stalls: number[] = [];
   const drops = new Map<string, number>();
