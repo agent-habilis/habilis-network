@@ -44,6 +44,14 @@
 //   of the `idle_gt_*` deltas: the gossip transport, which carries QUIC packets as frames on the mesh
 //   topic for a pair with no other path. All zero when the mesh has none. gt_of_udp_in / gt_of_udp_out:
 //   its bytes over the socket bytes of the same direction.
+// - gm_ctrl_out / gm_data_out / gm_ctrl_in / gm_data_in: the sums of the `idle_gm_*` deltas: the bytes of
+//   the iroh-gossip protocol messages that the gossip actor wrote and read, control (membership and
+//   ihave, graft, prune) and data (the `gossip` message, which carries our frames), with the 4 bytes of
+//   length prefix of each. A broadcast is counted once per neighbor it is written to. gm_of_udp_in /
+//   gm_of_udp_out: the gossip layer over the socket bytes of the same direction. gm_ctrl_share_*:
+//   the control share of the gossip bytes. gm_bin / gm_bout / gm_nin / gm_nout: `variant:value` sums
+//   by variant (join, forward_join, shuffle, shuffle_reply, neighbor, disconnect, gossip, ihave, graft,
+//   prune): bytes in, bytes out, messages in, messages out.
 // - frames_of_udp_in / frames_of_udp_out: wire_in and wire_out over the socket bytes of the same
 //   direction. The rest is below our frames: gossip messages, QUIC framing, acknowledgements, keep-alives.
 //   Out counts a broadcast once, so it understates the frames by the fan-out.
@@ -110,6 +118,10 @@ const TOTALS: [string, string][] = [
   ["gt_bytes_in", "idle_gt_bytes_in"],
   ["gt_not_for_us", "idle_gt_not_for_us"],
   ["gt_dropped", "idle_gt_dropped"],
+  ["gm_ctrl_out", "idle_gm_ctrl_out"],
+  ["gm_data_out", "idle_gm_data_out"],
+  ["gm_ctrl_in", "idle_gm_ctrl_in"],
+  ["gm_data_in", "idle_gm_data_in"],
 ];
 
 // A census field of `name:bytes` pairs joined by commas (`app:120,presence:40`, or `-`): add the
@@ -170,6 +182,10 @@ function summarize(run: string): string {
     out: new Map<string, number>(),
     tagsIn: new Map<string, number>(),
     tagsOut: new Map<string, number>(),
+    gmBytesOut: new Map<string, number>(),
+    gmBytesIn: new Map<string, number>(),
+    gmCountOut: new Map<string, number>(),
+    gmCountIn: new Map<string, number>(),
   };
   const ahead: number[] = [];
   const nodeLoads: number[] = [];
@@ -197,6 +213,10 @@ function summarize(run: string): string {
     addPairs(text, "idle_bout", kinds.out);
     addPairs(text, "idle_bin_tags", kinds.tagsIn);
     addPairs(text, "idle_bout_tags", kinds.tagsOut);
+    addPairs(text, "idle_gm_bout", kinds.gmBytesOut);
+    addPairs(text, "idle_gm_bin", kinds.gmBytesIn);
+    addPairs(text, "idle_gm_nout", kinds.gmCountOut);
+    addPairs(text, "idle_gm_nin", kinds.gmCountIn);
     ahead.push(...numbers(text, /\bidle_ahead_peers=(\d+)/));
     nodeLoads.push(...numbers(text, /\bload_1m=([0-9.]+)/));
   }
@@ -239,6 +259,13 @@ function summarize(run: string): string {
     .sort(([a, x], [b, y]) => y - x || a.localeCompare(b))
     .map(([kind, share]) => `${kind}:${share.toFixed(1)}%`)
     .join(",") || "-";
+  const gmIn = (totals.get("gm_ctrl_in") ?? 0) + (totals.get("gm_data_in") ?? 0);
+  const gmOut = (totals.get("gm_ctrl_out") ?? 0) + (totals.get("gm_data_out") ?? 0);
+  const gossipText =
+    `gm_of_udp_in=${percent(gmIn, netIn)} gm_of_udp_out=${percent(gmOut, netOut)} ` +
+    `gm_ctrl_share_in=${percent(totals.get("gm_ctrl_in") ?? 0, gmIn)} gm_ctrl_share_out=${percent(totals.get("gm_ctrl_out") ?? 0, gmOut)} ` +
+    `gm_bin=${pairsText(kinds.gmBytesIn)} gm_bout=${pairsText(kinds.gmBytesOut)} ` +
+    `gm_nin=${pairsText(kinds.gmCountIn)} gm_nout=${pairsText(kinds.gmCountOut)}`;
   const wireText =
     `gt_of_udp_in=${percent(totals.get("gt_bytes_in") ?? 0, netIn)} gt_of_udp_out=${percent(totals.get("gt_bytes_out") ?? 0, netOut)} ` +
     `frames_of_udp_in=${percent(wireIn, netIn)} frames_of_udp_out=${percent(wireOut, netOut)} ` +
@@ -262,7 +289,7 @@ function summarize(run: string): string {
     `| disc_nodes=${discs.size} worst_disc=${maxOf([...discs.values()])} ` +
     `| resent=${resent} resend_dropped=${resendDropped} ` +
     `| census_lines=${censusLines} ${totalsText} ahead_max=${maxOf(ahead)} ` +
-    `node_load_max=${show({ value: maxOf(nodeLoads), float: true })} | ${wireText} | ${extText} ` +
+    `node_load_max=${show({ value: maxOf(nodeLoads), float: true })} | ${wireText} | ${gossipText} | ${extText} ` +
     `| mem_med=${memMed} mem_max=${memMax} ` +
     `| load1 median=${loadMed} max=${loadMax} ` +
     `| canary_pauses=${gaps.length}`
