@@ -2,7 +2,7 @@
 // beside the fixture it comes from.
 
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -72,4 +72,24 @@ test("a wire total below the delivered data bytes fails the frame layer", () => 
   const proc = run(fixture([200, 100]));
   expect(proc.exitCode).not.toBe(0);
   expect(proc.stderr.toString()).toContain("frame layer");
+});
+
+test("the wire fields are read from a separate wire census line", () => {
+  const dir = fixture([1200, 800]);
+  // The engine writes the wire counters on a `wire census` line beside the `mesh census` line.
+  // Move them there: the node logs keep their phases and their totals.
+  for (const node of ["n1", "n2"]) {
+    const file = `${dir}/${node}.err`;
+    const moved = readFileSync(file, "utf8")
+      .split("\n")
+      .filter((line) => line)
+      .flatMap((line) => [
+        line.replace(/ idle_wire_in=\d+ idle_net_recv_ip=\d+/, ""),
+        line.replace("mesh census roster_len=2", "wire census"),
+      ]);
+    writeFileSync(file, moved.join("\n") + "\n");
+  }
+  const out = run(dir).stdout.toString();
+  expect(out).toContain("frame_meta_per_data=4.00");
+  expect(out).toContain("idle1_meta_bps_per_daemon=50.0");
 });

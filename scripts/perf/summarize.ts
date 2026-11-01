@@ -346,7 +346,7 @@ function phaseReport(run: string): string {
   for (const file of nodes) {
     for (const line of lines(clean(readFileSync(`${run}/${file}`, "utf8")))) {
       const stamp = line.match(/^(\d{4}-\d\d-\d\dT[0-9:.]+Z)/);
-      if (!stamp || !line.includes("mesh census")) continue;
+      if (!stamp || !line.includes(" census")) continue;
       const phase = phases.find((p) => inPhase(p, Date.parse(stamp[1] ?? "")));
       if (!phase) continue;
       add(wire, phase.name, sum(numbers(line, /\bidle_wire_in=(\d+)/)));
