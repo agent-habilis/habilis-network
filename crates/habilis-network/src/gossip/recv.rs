@@ -3967,11 +3967,11 @@ mod dedup_counter_tests {
     use serde_json::json;
 
     use crate::daemon::handler_ctx::HandlerCtx;
-    use crate::daemon::state::EventLoopState;
+    use crate::daemon::state::{EventLoopState, by_class};
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
     use crate::protocol::identity::Identity;
-    use crate::protocol::messages::Authored;
+    use crate::protocol::messages::{Authored, MessageBody, Verified};
     use crate::protocol::{Channel, MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
@@ -3994,24 +3994,29 @@ mod dedup_counter_tests {
         }
     }
 
-    #[test]
-    fn a_frame_delivered_3_times_counts_1_first_sighting_and_2_repeats() {
+    fn state_frame(writer: &EventLoopState, body: MessageBody) -> Verified {
+        Message::new_channel_event(&MeshId::from("test"), &nick("writer"), body, Channel::State)
+            .sign(&writer.identity)
+    }
+
+    /// A signed frame of the writer that carries `{"key": 1}` as one change.
+    fn change_body(writer: &EventLoopState) -> MessageBody {
+        let seed = *writer.identity.public().as_bytes();
+        let change = writer
+            .doc(Channel::State)
+            .build_change(&json!({ "key": 1 }), &seed)
+            .expect("a JSON object merges")
+            .expect("a non-empty merge yields a change");
+        let (body, _plain) = writer
+            .doc(Channel::State)
+            .compose_wire_body(&change, None)
+            .expect("compose the wire body");
+        body
+    }
+
+    fn reader_after(frames: &[&Verified]) -> EventLoopState {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let mesh = MeshId::from("test");
-            let writer = fresh_state();
-            let seed = *writer.identity.public().as_bytes();
-            let change = writer
-                .doc(Channel::State)
-                .build_change(&json!({ "key": 1 }), &seed)
-                .expect("a JSON object merges")
-                .expect("a non-empty merge yields a change");
-            let (body, _plain) = writer
-                .doc(Channel::State)
-                .compose_wire_body(&change, None)
-                .expect("compose the wire body");
-            let frame = Message::new_channel_event(&mesh, &nick("writer"), body, Channel::State)
-                .sign(&writer.identity);
-
             let endpoint = iroh::Endpoint::builder(presets::Minimal)
                 .bind()
                 .await
@@ -4040,17 +4045,94 @@ mod dedup_counter_tests {
             };
             let mut reader = fresh_state();
             let mut app = Inert;
-            for _ in 0..3 {
+            for frame in frames {
                 let bytes = frame.serialize().expect("serialize").into_bytes();
                 super::ingest(bytes, &mut reader, &mut app, &context).await;
             }
-
-            assert_eq!(
-                reader.idle.fresh, 1,
-                "the first delivery is a first sighting"
-            );
-            assert_eq!(reader.idle.duplicates, 2, "the 2 repeats are duplicates");
             endpoint.close().await;
-        });
+            reader
+        })
+    }
+
+    fn wire(frame: &Verified) -> u64 {
+        frame.serialize().expect("serialize").len() as u64
+    }
+
+    #[test]
+    fn a_frame_delivered_3_times_counts_1_first_sighting_and_2_repeats() {
+        let writer = fresh_state();
+        let frame = state_frame(&writer, change_body(&writer));
+        let reader = reader_after(&[&frame, &frame, &frame]);
+
+        assert_eq!(
+            reader.idle.fresh, 1,
+            "the first delivery is a first sighting"
+        );
+        assert_eq!(reader.idle.duplicates, 2, "the 2 repeats are duplicates");
+    }
+
+    /// The census reads each received frame by kind: its wire bytes, and whether it was new or a
+    /// repeat. The expected numbers are 1 frame of `wire` bytes new, and 2 of the same repeated.
+    #[test]
+    fn the_received_bytes_are_counted_by_kind_and_by_what_became_of_the_frame() {
+        let writer = fresh_state();
+        let frame = state_frame(&writer, change_body(&writer));
+        let reader = reader_after(&[&frame, &frame, &frame]);
+        let one = wire(&frame);
+
+        let received = &reader.idle.wire_in;
+        assert_eq!(received.frames, 3, "every frame that reached ingest");
+        assert_eq!(received.wire, 3 * one);
+        assert_eq!(by_class(&received.fresh), format!("state:{one}"));
+        assert_eq!(by_class(&received.dup), format!("state:{}", 2 * one));
+        assert!(received.body < received.wire, "the envelope is the rest");
+    }
+
+    /// A frame can be new by id and carry a change that the document applied already: the same
+    /// signed change in another frame. The census counts its bytes as content that came back.
+    #[test]
+    fn a_new_frame_with_a_change_the_document_holds_counts_as_content_that_came_back() {
+        let writer = fresh_state();
+        let body = change_body(&writer);
+        let (first, again) = (
+            state_frame(&writer, body.clone()),
+            state_frame(&writer, body),
+        );
+        assert_ne!(first.dedup_key(), again.dedup_key(), "two frames, two ids");
+
+        let reader = reader_after(&[&first, &again]);
+
+        let received = &reader.idle.wire_in;
+        assert_eq!(
+            by_class(&received.fresh),
+            format!("state:{}", wire(&first) + wire(&again)),
+            "both frames are new by id"
+        );
+        assert_eq!(by_class(&received.dup), "-", "the dedup caught nothing");
+        assert_eq!(
+            by_class(&received.cdup),
+            format!("state:{}", wire(&again)),
+            "the second carries a change that was applied"
+        );
+    }
+
+    /// A frame whose body is no change is ignored by the document, and the census counts it.
+    #[test]
+    fn a_state_frame_that_the_document_ignores_is_counted_as_rejected() {
+        let writer = fresh_state();
+        let junk = state_frame(&writer, "not a change".into());
+        let real = state_frame(&writer, change_body(&writer));
+
+        let reader = reader_after(&[&junk, &real]);
+
+        assert_eq!(
+            reader.idle.state_rejected, 1,
+            "only the junk frame is refused"
+        );
+        assert_eq!(
+            reader.doc(Channel::State).to_json(),
+            json!({ "key": 1 }),
+            "the real change is applied"
+        );
     }
 }
