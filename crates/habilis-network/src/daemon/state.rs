@@ -36,7 +36,9 @@ use crate::util::tuning;
 pub use event_loop_state::EventLoopState;
 
 pub(crate) use gossip_msgs::{GossipMsgs, by_variant, gossip_msgs_delta};
-pub(crate) use idle_counters::{IdleCounters, note_ppid_wake, note_sampler_wake, top_requesters};
+#[cfg(all(unix, feature = "host"))]
+pub(crate) use idle_counters::note_ppid_wake;
+pub(crate) use idle_counters::{IdleCounters, note_sampler_wake, top_requesters};
 pub(crate) use latch::Latch;
 pub(crate) use mesh_secrets::MeshSecrets;
 pub(crate) use ping_round::PingRound;
@@ -361,7 +363,7 @@ mod tests {
             now,
         );
 
-        for state in [no_flag, unproven, ourselves] {
+        for state in [&no_flag, &unproven, &ourselves] {
             assert!(
                 !state.beacon_notes.contains(&BeaconNote::YieldToLower),
                 "a flag that does not count does not make us yield"

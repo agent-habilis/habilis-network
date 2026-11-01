@@ -64,7 +64,15 @@ impl SocketBytes {
         custom_paths_removed: 0,
     };
 
+    /// The counters of `endpoint` now. The browser build of iroh has no endpoint metrics, so
+    /// there they read zero.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn read(_endpoint: &Endpoint) -> Self {
+        Self::ZERO
+    }
+
     /// The counters of `endpoint` now.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn read(endpoint: &Endpoint) -> Self {
         let socket = &endpoint.metrics().socket;
         Self {
