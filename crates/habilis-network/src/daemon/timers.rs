@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use iroh::Endpoint;
 
-use super::state::{EventLoopState, IdleCounters, WireOut, by_class, top_requesters};
+use super::state::{
+    EventLoopState, IdleCounters, SocketBytes, WireOut, by_class, socket_delta, top_requesters,
+};
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::util::clock::{Instant, millis_saturating};
 use crate::util::process_usage::load_average_1m;
@@ -96,6 +98,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
     // own arm columns. Do not "correct" it by adding one here; that
     // double-counts the census iteration and inflates the total every interval.
     let reading = state.idle.take();
+    let socket = socket_delta(endpoint);
     let idle = reading.loop_arms;
     let ext = idle.ext;
     let cpu = reading.cpu.unwrap_or_default();
@@ -193,7 +196,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         gossip_recursion_closes_total = payload_path::gossip_recursion_closes(),
         "mesh census"
     );
-    log_wire_census(&idle, &reading.wire_out);
+    log_wire_census(&idle, &reading.wire_out, socket);
 
     // The per-peer conn classification feeds only the DEBUG census
     // below, and each `conn_path` is a `remote_info` actor round-trip.
@@ -290,7 +293,7 @@ pub(crate) fn note_tick_gap(
 /// the limit of one function, and a reader of that line takes the last line that names it.
 /// `idle_bin_*` are frames received (first sightings and repeats), `idle_bout*` frames handed to the
 /// transport. The wire total less the body total is the cost of the envelope.
-fn log_wire_census(idle: &IdleCounters, sent: &WireOut) {
+fn log_wire_census(idle: &IdleCounters, sent: &WireOut, socket: SocketBytes) {
     tracing::info!(
         target: "habilis_network::lifecycle",
         idle_bin_fresh = %by_class(&idle.wire_in.fresh),
@@ -304,6 +307,16 @@ fn log_wire_census(idle: &IdleCounters, sent: &WireOut) {
         idle_wire_out = sent.wire,
         idle_body_out = sent.body,
         idle_frames_out = sent.frames,
+        // What the iroh socket moved: the UDP payload of all of QUIC, and the IP and UDP headers of the
+        // received datagrams, which only the host sees. The first census of a process covers the time
+        // since its endpoint started.
+        idle_net_send_ip = socket.send_ip,
+        idle_net_send_relay = socket.send_relay,
+        idle_net_recv_ip = socket.recv_ip,
+        idle_net_recv_relay = socket.recv_relay,
+        idle_net_recv_custom = socket.recv_custom,
+        idle_net_recv_dgrams = socket.recv_datagrams,
+        idle_net_hdr_in = socket.header_bytes_in(),
         "wire census"
     );
 }
