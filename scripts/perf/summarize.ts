@@ -275,6 +275,24 @@ function summarize(run: string): string {
     `env_out=${percent(wireOut - (totals.get("body_out") ?? 0), wireOut)} ` +
     `bin_fresh=${pairsText(kinds.fresh)} bin_dup=${pairsText(kinds.dup)} bout=${pairsText(kinds.out)} ` +
     `tags_in=${pairsText(kinds.tagsIn)} tags_out=${pairsText(kinds.tagsOut)}`;
+  // The data tags are what users create. The tags a2a_req and a2a_resp carry directed calls that
+  // can hold user text or a protocol call, so they are reported apart. The census line names only
+  // its 6 largest tags per interval, so a small data tag can be missing from the sum.
+  const dataTags = ["a2a_broadcast", "a2a_msg", "a2a_status", "a2a_artifact"];
+  const callTags = ["a2a_req", "a2a_resp"];
+  const tagSum = (tags: Map<string, number>, names: string[]) => names.reduce((sum, name) => sum + (tags.get(name) ?? 0), 0);
+  const ratio = (metadata: number, data: number) => (data > 0 ? (metadata / data).toFixed(1) : "no-data");
+  const dataIn = tagSum(kinds.tagsIn, dataTags);
+  const dataOut = tagSum(kinds.tagsOut, dataTags);
+  const callsIn = tagSum(kinds.tagsIn, callTags);
+  const callsOut = tagSum(kinds.tagsOut, callTags);
+  const ratioText =
+    `data_in=${dataIn} data_out=${dataOut} calls_in=${callsIn} calls_out=${callsOut} ` +
+    `meta_share_in=${percent(wireIn - dataIn, wireIn)} meta_share_out=${percent(wireOut - dataOut, wireOut)} ` +
+    `meta_per_data_in=${ratio(wireIn - dataIn, dataIn)} meta_per_data_out=${ratio(wireOut - dataOut, dataOut)} ` +
+    `meta_per_data_in_loose=${ratio(wireIn - dataIn - callsIn, dataIn + callsIn)} ` +
+    `udp_per_data_in=${ratio(netIn, dataIn)} udp_per_data_out=${ratio(netOut, dataOut)} ` +
+    `gossip_per_data_in=${ratio(gmIn, dataIn)} gossip_per_data_out=${ratio(gmOut, dataOut)}`;
   const extText = [...ext]
     .filter(([, value]) => value > 0)
     .sort(([a], [b]) => a.localeCompare(b))
@@ -289,7 +307,7 @@ function summarize(run: string): string {
     `| disc_nodes=${discs.size} worst_disc=${maxOf([...discs.values()])} ` +
     `| resent=${resent} resend_dropped=${resendDropped} ` +
     `| census_lines=${censusLines} ${totalsText} ahead_max=${maxOf(ahead)} ` +
-    `node_load_max=${show({ value: maxOf(nodeLoads), float: true })} | ${wireText} | ${gossipText} | ${extText} ` +
+    `node_load_max=${show({ value: maxOf(nodeLoads), float: true })} | ${wireText} | ${gossipText} | ${ratioText} | ${extText} ` +
     `| mem_med=${memMed} mem_max=${memMax} ` +
     `| load1 median=${loadMed} max=${loadMax} ` +
     `| canary_pauses=${gaps.length}`
