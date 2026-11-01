@@ -6,6 +6,7 @@
 use std::mem;
 use std::sync::{Mutex, PoisonError};
 
+use habilis_network_iroh_gossip_transport::{GossipHandle, Stats};
 use iroh::Endpoint;
 
 /// The bytes of an `IPv4` and a `UDP` header, which the socket counters do not include.
@@ -35,6 +36,15 @@ pub(crate) struct SocketBytes {
     pub(crate) recv_custom: u64,
     /// `QUIC` datagrams received. The send side has no such counter.
     pub(crate) recv_datagrams: u64,
+    /// Paths opened and closed, by kind of transport, and the custom paths that were made. A
+    /// custom path is a `WebRTC`, multihop or gossip path.
+    pub(crate) paths_custom: u64,
+    pub(crate) ip_paths_added: u64,
+    pub(crate) ip_paths_removed: u64,
+    pub(crate) relay_paths_added: u64,
+    pub(crate) relay_paths_removed: u64,
+    pub(crate) custom_paths_added: u64,
+    pub(crate) custom_paths_removed: u64,
 }
 
 impl SocketBytes {
@@ -45,6 +55,13 @@ impl SocketBytes {
         recv_relay: 0,
         recv_custom: 0,
         recv_datagrams: 0,
+        paths_custom: 0,
+        ip_paths_added: 0,
+        ip_paths_removed: 0,
+        relay_paths_added: 0,
+        relay_paths_removed: 0,
+        custom_paths_added: 0,
+        custom_paths_removed: 0,
     };
 
     /// The counters of `endpoint` now.
@@ -63,6 +80,13 @@ impl SocketBytes {
             recv_relay: socket.recv_data_relay.get(),
             recv_custom: socket.recv_data_custom.get(),
             recv_datagrams: socket.recv_datagrams.get(),
+            paths_custom: socket.paths_custom.get(),
+            ip_paths_added: socket.transport_ip_paths_added.get(),
+            ip_paths_removed: socket.transport_ip_paths_removed.get(),
+            relay_paths_added: socket.transport_relay_paths_added.get(),
+            relay_paths_removed: socket.transport_relay_paths_removed.get(),
+            custom_paths_added: socket.transport_custom_paths_added.get(),
+            custom_paths_removed: socket.transport_custom_paths_removed.get(),
         }
     }
 
@@ -75,6 +99,23 @@ impl SocketBytes {
             recv_relay: self.recv_relay.saturating_sub(earlier.recv_relay),
             recv_custom: self.recv_custom.saturating_sub(earlier.recv_custom),
             recv_datagrams: self.recv_datagrams.saturating_sub(earlier.recv_datagrams),
+            paths_custom: self.paths_custom.saturating_sub(earlier.paths_custom),
+            ip_paths_added: self.ip_paths_added.saturating_sub(earlier.ip_paths_added),
+            ip_paths_removed: self
+                .ip_paths_removed
+                .saturating_sub(earlier.ip_paths_removed),
+            relay_paths_added: self
+                .relay_paths_added
+                .saturating_sub(earlier.relay_paths_added),
+            relay_paths_removed: self
+                .relay_paths_removed
+                .saturating_sub(earlier.relay_paths_removed),
+            custom_paths_added: self
+                .custom_paths_added
+                .saturating_sub(earlier.custom_paths_added),
+            custom_paths_removed: self
+                .custom_paths_removed
+                .saturating_sub(earlier.custom_paths_removed),
         }
     }
 
@@ -84,12 +125,87 @@ impl SocketBytes {
     }
 }
 
+/// What the gossip transport counted: `QUIC` packets that the mesh topic carried for a pair with
+/// no other path, from [`GossipHandle::stats`]. Totals since the handle was made, or the difference
+/// of two readings. A frame here is a flood on the topic, so its bytes are paid by every member.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub(crate) struct GossipPathBytes {
+    pub(crate) frames_out: u64,
+    pub(crate) bytes_out: u64,
+    pub(crate) frames_in: u64,
+    pub(crate) bytes_in: u64,
+    /// Frames of the topic that were for another member.
+    pub(crate) not_for_us: u64,
+    /// Frames and datagrams that were dropped, whatever the reason.
+    pub(crate) dropped: u64,
+}
+
+impl GossipPathBytes {
+    pub(crate) fn from_stats(stats: Stats) -> Self {
+        let dropped = [
+            stats.queue_full,
+            stats.dropped_no_sink,
+            stats.dropped_too_large,
+            stats.dropped_empty,
+            stats.dropped_sink_refused,
+            stats.dropped_not_allowed,
+            stats.dropped_budget,
+            stats.dropped_oversized_in,
+        ];
+        Self {
+            frames_out: stats.frames_out,
+            bytes_out: stats.bytes_out,
+            frames_in: stats.frames_in,
+            bytes_in: stats.bytes_in,
+            not_for_us: stats.not_for_us,
+            dropped: dropped
+                .iter()
+                .fold(0, |sum, count| sum.saturating_add(*count)),
+        }
+    }
+
+    /// The counts since `earlier`, field by field. Zero, not a wrap, if a field went back.
+    pub(crate) fn since(self, earlier: Self) -> Self {
+        Self {
+            frames_out: self.frames_out.saturating_sub(earlier.frames_out),
+            bytes_out: self.bytes_out.saturating_sub(earlier.bytes_out),
+            frames_in: self.frames_in.saturating_sub(earlier.frames_in),
+            bytes_in: self.bytes_in.saturating_sub(earlier.bytes_in),
+            not_for_us: self.not_for_us.saturating_sub(earlier.not_for_us),
+            dropped: self.dropped.saturating_sub(earlier.dropped),
+        }
+    }
+}
+
+/// The reading at the last census, for the gossip transport of the process.
+static GOSSIP_MARK: Mutex<GossipPathBytes> = Mutex::new(GossipPathBytes {
+    frames_out: 0,
+    bytes_out: 0,
+    frames_in: 0,
+    bytes_in: 0,
+    not_for_us: 0,
+    dropped: 0,
+});
+
+/// What the gossip transport counted since the last call: all zero when the mesh has no gossip
+/// transport. The first call covers the time since the handle was made.
+pub(crate) fn gossip_path_delta(handle: Option<&GossipHandle>) -> GossipPathBytes {
+    let Some(handle) = handle else {
+        return GossipPathBytes::default();
+    };
+    let now = GossipPathBytes::from_stats(handle.stats());
+    let mut mark = GOSSIP_MARK.lock().unwrap_or_else(PoisonError::into_inner);
+    now.since(mem::replace(&mut *mark, now))
+}
+
 #[cfg(test)]
 mod tests {
     use iroh::endpoint::{self, presets};
     use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 
-    use super::SocketBytes;
+    use habilis_network_iroh_gossip_transport::Stats;
+
+    use super::{GossipPathBytes, SocketBytes, gossip_path_delta};
     use crate::lookup;
 
     const ALPN: &[u8] = b"socket-bytes-test";
@@ -116,6 +232,38 @@ mod tests {
             }
             .header_bytes_in(),
             4 * 28
+        );
+    }
+
+    #[test]
+    fn the_gossip_transport_stats_are_summed_and_differenced() {
+        let mut stats = Stats::default();
+        stats.frames_out = 4;
+        stats.bytes_out = 4_000;
+        stats.frames_in = 9;
+        stats.bytes_in = 9_000;
+        stats.not_for_us = 5;
+        stats.queue_full = 1;
+        stats.dropped_budget = 2;
+        stats.dropped_empty = 3;
+        let reading = GossipPathBytes::from_stats(stats);
+        assert_eq!(reading.dropped, 6, "every kind of drop is in the sum");
+        assert_eq!(reading.bytes_in, 9_000);
+
+        stats.frames_out = 7;
+        stats.bytes_out = 5_500;
+        let later = GossipPathBytes::from_stats(stats).since(reading);
+        assert_eq!((later.frames_out, later.bytes_out), (3, 1_500));
+        assert_eq!(later.frames_in, 0, "nothing came in since");
+        assert_eq!(
+            GossipPathBytes::default().since(reading).bytes_in,
+            0,
+            "saturates"
+        );
+        assert_eq!(
+            gossip_path_delta(None),
+            GossipPathBytes::default(),
+            "no handle, no count"
         );
     }
 
@@ -182,6 +330,12 @@ mod tests {
                 );
                 assert!(received_by_server.recv_datagrams > 0);
                 assert_eq!(sent_by_client.send_relay, 0, "no relay on loopback");
+                let paths = SocketBytes::read(&client).since(client_before);
+                assert!(
+                    paths.ip_paths_added >= 1,
+                    "the client opened an IP path: {paths:?}"
+                );
+                assert_eq!(paths.custom_paths_added, 0, "no custom path on loopback");
 
                 router.shutdown().await.expect("shutdown");
                 client.close().await;

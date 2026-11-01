@@ -9,7 +9,8 @@ use std::time::Duration;
 use iroh::Endpoint;
 
 use super::state::{
-    EventLoopState, IdleCounters, SocketBytes, WireOut, by_class, socket_delta, top_requesters,
+    EventLoopState, GossipPathBytes, IdleCounters, SocketBytes, WireOut, by_class,
+    gossip_path_delta, socket_delta, top_requesters,
 };
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::util::clock::{Instant, millis_saturating};
@@ -99,6 +100,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
     // double-counts the census iteration and inflates the total every interval.
     let reading = state.idle.take();
     let socket = socket_delta(endpoint);
+    let gossip_path = gossip_path_delta(state.gossip_handle.as_ref());
     let idle = reading.loop_arms;
     let ext = idle.ext;
     let cpu = reading.cpu.unwrap_or_default();
@@ -196,7 +198,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         gossip_recursion_closes_total = payload_path::gossip_recursion_closes(),
         "mesh census"
     );
-    log_wire_census(&idle, &reading.wire_out, socket);
+    log_wire_census(&idle, &reading.wire_out, socket, gossip_path);
 
     // The per-peer conn classification feeds only the DEBUG census
     // below, and each `conn_path` is a `remote_info` actor round-trip.
@@ -293,7 +295,12 @@ pub(crate) fn note_tick_gap(
 /// the limit of one function, and a reader of that line takes the last line that names it.
 /// `idle_bin_*` are frames received (first sightings and repeats), `idle_bout*` frames handed to the
 /// transport. The wire total less the body total is the cost of the envelope.
-fn log_wire_census(idle: &IdleCounters, sent: &WireOut, socket: SocketBytes) {
+fn log_wire_census(
+    idle: &IdleCounters,
+    sent: &WireOut,
+    socket: SocketBytes,
+    gossip_path: GossipPathBytes,
+) {
     tracing::info!(
         target: "habilis_network::lifecycle",
         idle_bin_fresh = %by_class(&idle.wire_in.fresh),
@@ -318,6 +325,23 @@ fn log_wire_census(idle: &IdleCounters, sent: &WireOut, socket: SocketBytes) {
         idle_net_recv_custom = socket.recv_custom,
         idle_net_recv_dgrams = socket.recv_datagrams,
         idle_net_hdr_in = socket.header_bytes_in(),
+        // Paths opened and closed by kind, and the custom paths made: a registered custom path can be
+        // probed and kept alive, so these say whether the mesh has any.
+        idle_net_paths_custom = socket.paths_custom,
+        idle_net_ip_added = socket.ip_paths_added,
+        idle_net_ip_removed = socket.ip_paths_removed,
+        idle_net_relay_added = socket.relay_paths_added,
+        idle_net_relay_removed = socket.relay_paths_removed,
+        idle_net_custom_added = socket.custom_paths_added,
+        idle_net_custom_removed = socket.custom_paths_removed,
+        // The gossip transport: QUIC packets carried as frames on the mesh topic, for a pair with no
+        // other path. All zero when the mesh has none.
+        idle_gt_frames_out = gossip_path.frames_out,
+        idle_gt_bytes_out = gossip_path.bytes_out,
+        idle_gt_frames_in = gossip_path.frames_in,
+        idle_gt_bytes_in = gossip_path.bytes_in,
+        idle_gt_not_for_us = gossip_path.not_for_us,
+        idle_gt_dropped = gossip_path.dropped,
         "wire census"
     );
 }
