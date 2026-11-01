@@ -100,16 +100,20 @@ pub(crate) async fn handle_presence(
         // with no endpoint binding reads "unreachable" forever). Throttled
         // by `joined_refloods_peerinfo`.
         let now = Instant::now();
-        if state.joined_refloods_peerinfo(update.joined_new, now) {
+        if state.joined_refloods_peerinfo(now) {
             gossip::broadcast_peer_info(state, context).await;
             state.last_sent_at = now;
+        } else if update.joined_new {
+            // The newcomer still gets our address, from the flood that the event loop pays when
+            // the window opens. One flood per window serves every newcomer of a burst.
+            state.defer_peerinfo();
         }
         if update.joined_new {
             // Suppress "has joined" when we already printed "came back"
             // from the quiet check, or when this `joined` predates
             // our own join (relayed backlog).
-            if surfaceable && !update.returned {
-                state.surfaced.insert(message.author.clone());
+            // Gated on `surfaced` too: a synthetic arrival may have shown this peer already.
+            if surfaceable && !update.returned && state.surfaced.insert(message.author.clone()) {
                 context.sink.emit(NodeEvent::Presence {
                     message: Box::new(message.authored()),
                     peer: message.key(),

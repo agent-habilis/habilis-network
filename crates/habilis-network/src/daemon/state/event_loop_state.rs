@@ -764,7 +764,7 @@ impl EventLoopState {
     /// let every new link flood again, and every flood is answered by a graft
     /// from each peer that hears it. A flapping link floods once per window too.
     pub(crate) fn neighbor_up_refloods_peerinfo(&self, now: Instant) -> bool {
-        self.joined_refloods_peerinfo(false, now)
+        self.joined_refloods_peerinfo(now)
     }
 
     /// Record how many links this node holds out of `max_peers` (G). Below G - 1 starts
@@ -954,17 +954,13 @@ impl EventLoopState {
             .is_some_and(|flooded| flooded != current)
     }
 
-    /// Whether a `joined` received at `now` re-floods our `PeerInfo`. A first
-    /// sighting (`joined_new`) always does: the newcomer linked to the
-    /// rendezvous, so no `NeighborUp` on this loop will send it our address.
-    /// A re-announce does only once per window since any flood: one newcomer
-    /// makes every member re-announce, and a per-trigger key would let each
-    /// member flood once per re-announce it hears (N²).
-    pub(crate) fn joined_refloods_peerinfo(&self, joined_new: bool, now: Instant) -> bool {
-        joined_new
-            || self
-                .peerinfo_flooded_at
-                .is_none_or(|at| now.duration_since(at) >= RELINK_COOLDOWN)
+    /// Whether a `joined` received at `now` re-floods our `PeerInfo`: once per window since any
+    /// flood, a first sighting too. A newcomer that arrives inside the window is owed the address
+    /// and gets it from the deferred flood (see [`Self::defer_peerinfo`]). A flood for each
+    /// arrival would make every member flood once per arrival it hears (N²).
+    pub(crate) fn joined_refloods_peerinfo(&self, now: Instant) -> bool {
+        self.peerinfo_flooded_at
+            .is_none_or(|at| now.duration_since(at) >= RELINK_COOLDOWN)
     }
 
     /// Drop `nick`'s dial hint and, with it, the path verdict keyed on that

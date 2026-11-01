@@ -618,14 +618,14 @@ mod churn_red {
                 0,
                 "this node announced its own joined again for an arrival: {counter}"
             );
-            // One peer info per arrival is what the code sends today. Each one after the first
-            // repeats the address that every member already holds; the bound pins today's cost.
+            // The burst lasts less than one RELINK_COOLDOWN, so this node floods its peer info once.
+            // The newcomers after the first get it from the deferred flood when the window opens.
             assert!(
-                counter.frames(FrameClass::Announce) <= 5,
-                "more than one peer info per arrival: {counter}"
+                counter.frames(FrameClass::Announce) <= 1,
+                "more than one peer info flood in one cooldown window: {counter}"
             );
             assert!(
-                counter.metadata_percent() <= 45,
+                counter.metadata_percent() <= 15,
                 "the metadata share of a 5-peer join burst is too high: {counter}"
             );
             rig.endpoint.close().await;
@@ -663,6 +663,53 @@ mod churn_red {
                 counter.bytes(FrameClass::Alive),
                 "idle sends nothing but keepalives: {counter}"
             );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// H4, the app view. The first frame of a peer is a meta change, which never adds the peer to
+    /// the roster, so `observe` surfaces a synthetic arrival. The peer's own `joined` comes next,
+    /// and it is a first sighting for the roster. The operator sees one arrival, not two.
+    #[test]
+    fn h4_a_synthetic_arrival_and_the_real_joined_are_one_arrival() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let peer = Identity::generate();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let meta = meta_change(&rig.mesh, &who, &peer, UnixSecs::now());
+            assert!(
+                receive(&meta, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            let mut joined = Message::new_joined(&rig.mesh, &who);
+            joined.timestamp = UnixSecs::now();
+            let joined = joined.sign(&peer);
+            assert!(
+                !state.mark_seen(&joined),
+                "the frame is new to the seen set"
+            );
+            let observed = observe(&joined, &mut state, &context);
+            handle_presence(
+                PresenceEvent {
+                    message: &joined,
+                    subtype: PresenceSubtype::Joined,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            let lines = rig.sink.lines();
+            let arrivals = lines
+                .iter()
+                .filter(|line| line.starts_with("presence swift-cedar"))
+                .count();
+            assert_eq!(arrivals, 1, "one peer, {arrivals} arrivals: {lines:?}");
             rig.endpoint.close().await;
         });
     }
