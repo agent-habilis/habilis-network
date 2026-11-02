@@ -147,6 +147,12 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
     state
         .peer_keys
         .retain(|nick, _| is_peer(nick) || is_quiet(nick));
+    state
+        .peer_stamp
+        .retain(|nick, _| is_peer(nick) || is_quiet(nick));
+    state
+        .step_back
+        .retain(|nick, _| is_peer(nick) || is_quiet(nick));
     // Same bound for the endpoint dial hints: an entry lives as long as its
     // nick is an active peer or a returnable quiet evictee, so the map
     // is capped at |peers| + QUIET_CAP even under nickname churn.

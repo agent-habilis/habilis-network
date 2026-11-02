@@ -4,11 +4,12 @@
 //! transport, presentation, or surfacing concern. See the Concept
 //! Glossary in AGENTS.md for the layer split.
 
-use crate::daemon::state::EventLoopState;
+use crate::daemon::state::{EventLoopState, StepBack};
 use crate::lifecycle::heartbeat;
 use crate::protocol::{MessageKind, Nickname, PresenceSubtype, UnixSecs, Verified};
 use crate::util::clock::Instant;
-use crate::util::tuning;
+use crate::util::tuning::{self, ALIVE_INTERVAL};
+use std::time::Duration;
 
 /// Summary of how a newly received message changes our view of the
 /// sender's membership. Computed from the message kind + current state
@@ -60,16 +61,66 @@ pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
     }
 }
 
-/// Whether a frame stamped `timestamp` was sent before, or too near to, the last frame that we
-/// heard from the quiet `author`. Such a frame is a copy that a relay held, not news: the author
-/// sent nothing after it. The margin covers the clocks of two nodes, which can differ by a few
-/// seconds. A real return comes at least one alive timeout after the last frame, so a margin of a
-/// third of the timeout costs nothing.
-fn sent_before_silence(author: &Nickname, timestamp: UnixSecs, state: &EventLoopState) -> bool {
-    state.quiet_since.get(author).is_some_and(|heard| {
-        let heard_at = UnixSecs::now() - Instant::now().duration_since(*heard);
-        timestamp <= heard_at + tuning::alive_timeout() / 3
-    })
+/// Whether a frame stamped `timestamp` is stamped after the newest frame that we heard from the
+/// quiet `author`. A copy of a frame that a relay held carries the stamp of that frame or an older
+/// one, so it is not news. Both stamps come from the clock of the author, so a constant skew
+/// between that clock and ours cancels. With no stamp on record every frame is news.
+fn stamped_after_last_heard(
+    author: &Nickname,
+    timestamp: UnixSecs,
+    state: &EventLoopState,
+) -> bool {
+    state
+        .peer_stamp
+        .get(author)
+        .is_none_or(|newest| timestamp > *newest)
+}
+
+/// The number of frames that must rise in a row from a base below the newest stamp before a quiet
+/// peer returns. One replayed frame, or one frame repeated, never gets there. Three is the least
+/// that tells a clock that stepped back (a peer that keeps sending) from a relay that re-sends one
+/// or two old frames.
+const STEP_BACK_FRAMES: u8 = 3;
+
+/// A frame of a quiet peer counts toward a step back only if it arrives this long after the last
+/// one that counted, on our clock. A live peer sends a frame every alive interval, so half of it
+/// is met in a second or two; a relay that answers an anti-entropy digest sends its frames in one
+/// burst, so only the first counts.
+fn step_back_spacing() -> Duration {
+    ALIVE_INTERVAL / 2
+}
+
+/// Count a frame of the quiet `author` that proves presence but is stamped at or below the newest
+/// stamp on record. The clock of the author may have stepped back (a laptop that woke, a clock
+/// that was set right): then its stamps rise from a lower base and never pass the old stamp, which
+/// would hide a live peer. When [`STEP_BACK_FRAMES`] frames, each stamped after the one before
+/// and each arriving [`step_back_spacing`] after it, have counted, the old stamp is dropped and
+/// the next check lets the peer return. Returns whether the run is complete.
+fn note_step_back(author: &Nickname, timestamp: UnixSecs, state: &mut EventLoopState) -> bool {
+    let now = Instant::now();
+    let Some(run) = state.step_back.get_mut(author) else {
+        state.step_back.insert(
+            author.clone(),
+            StepBack {
+                last: timestamp,
+                at: now,
+                count: 1,
+            },
+        );
+        return false;
+    };
+    let rises = timestamp > run.last;
+    let spaced = now.duration_since(run.at) >= step_back_spacing();
+    if rises && spaced {
+        run.last = timestamp;
+        run.at = now;
+        run.count += 1;
+    }
+    if run.count >= STEP_BACK_FRAMES {
+        state.step_back.remove(author);
+        return true;
+    }
+    false
 }
 
 /// Decide what a message from `author` means for our peer
@@ -82,8 +133,9 @@ fn sent_before_silence(author: &Nickname, timestamp: UnixSecs, state: &EventLoop
 /// presence.
 ///
 /// One rule decides a return: a quiet peer is back only when the frame proves presence (see
-/// [`proves_presence`]) and was sent after we last heard from the peer. Any other frame of a quiet
-/// peer is stale (see [`MembershipUpdate::stale`]).
+/// [`proves_presence`]) and is stamped after the newest frame heard from the peer (see
+/// [`stamped_after_last_heard`]). Any other frame of a quiet peer is stale (see
+/// [`MembershipUpdate::stale`]).
 pub(crate) fn compute(
     kind: &MessageKind,
     author: &Nickname,
@@ -92,7 +144,7 @@ pub(crate) fn compute(
 ) -> MembershipUpdate {
     let quiet = state.quiet.contains(author.as_str());
     let proves_return =
-        proves_presence(kind, timestamp) && !sent_before_silence(author, timestamp, state);
+        proves_presence(kind, timestamp) && stamped_after_last_heard(author, timestamp, state);
     if quiet && !proves_return {
         return MembershipUpdate {
             returned: false,
@@ -148,6 +200,23 @@ pub(crate) fn compute_for(message: &Verified, state: &EventLoopState) -> Members
     compute(&message.kind, &message.author, message.timestamp, state)
 }
 
+/// [`compute_for`] for the receive path, which may also complete a step back (see
+/// [`note_step_back`]): a live frame of a quiet peer, stale only because its stamp is not after
+/// the newest one on record, that closes a run of rising frames drops the old stamp, and the
+/// update is computed again. A key that said goodbye never returns this way.
+pub(crate) fn compute_observed(message: &Verified, state: &mut EventLoopState) -> MembershipUpdate {
+    let update = compute_for(message, state);
+    let steps_back: bool = update.stale
+        && state.quiet.contains(message.author.as_str())
+        && !state.key_said_goodbye(message.key())
+        && proves_presence(&message.kind, message.timestamp);
+    if steps_back && note_step_back(&message.author, message.timestamp, state) {
+        state.peer_stamp.remove(message.author.as_str());
+        return compute_for(message, state);
+    }
+    update
+}
+
 /// Apply a membership update to the mutable state. Mirror of the
 /// pure `compute`: all side effects live here so tests of `compute`
 /// remain free of any mutation.
@@ -178,14 +247,15 @@ mod tests {
     use crate::testing::{fresh_state, nick};
 
     use crate::protocol::identity::Identity;
-    use crate::protocol::{MeshId, Message};
+    use crate::protocol::{MeshId, Message, Verified};
 
     use std::time::Duration;
 
     use crate::util::clock::Instant;
 
     use super::{
-        MembershipUpdate, MessageKind, PresenceSubtype, UnixSecs, apply, compute, compute_for,
+        MembershipUpdate, MessageKind, PresenceSubtype, STEP_BACK_FRAMES, UnixSecs, apply, compute,
+        compute_for, compute_observed,
     };
 
     #[test]
@@ -324,6 +394,10 @@ mod tests {
             .checked_sub(Duration::from_secs(100))
             .expect("the monotonic clock has run past 100 s since boot");
         state.quiet_since.insert(who.clone(), heard);
+        // The newest stamp of the peer is the one of its last frame, on its own clock.
+        state
+            .peer_stamp
+            .insert(who.clone(), UnixSecs::now() - Duration::from_secs(100));
         (state, who)
     }
 
@@ -361,21 +435,30 @@ mod tests {
         }
     }
 
-    /// A copy of the last frame that we heard is not news, even when the clock of its sender runs a
-    /// few seconds ahead of ours. The frame is stamped in the second that we heard it, or after.
+    /// A copy of the last frame that we heard is not news, whatever the clock of its sender says.
+    /// The copy carries the stamp of that frame, so it is not after the newest stamp on record,
+    /// and a skew between the clock of the sender and ours cancels in the comparison.
     #[test]
     fn a_replay_of_the_last_frame_heard_does_not_return_a_quiet_peer() {
         let _guard = ::habilis_network_test_tracing::init();
-        let (state, who) = quiet_since_100_secs();
+        let (mut state, who) = quiet_since_100_secs();
         let heard_at = UnixSecs::now() - Duration::from_secs(100);
         let alive = MessageKind::Presence {
             subtype: PresenceSubtype::Alive,
         };
-        for skew in [0, 1, 5] {
-            let replay = compute(&alive, &who, heard_at + Duration::from_secs(skew), &state);
+        let stamps = [
+            ("on time", heard_at),
+            ("5 s ahead", heard_at + Duration::from_secs(5)),
+            ("120 s ahead", heard_at + Duration::from_secs(120)),
+            ("5 s behind", heard_at - Duration::from_secs(5)),
+            ("120 s behind", heard_at - Duration::from_secs(120)),
+        ];
+        for (clock, stamp) in stamps {
+            state.peer_stamp.insert(who.clone(), stamp);
+            let replay = compute(&alive, &who, stamp, &state);
             assert!(
                 replay.stale && !replay.returned,
-                "a replay stamped {skew} s after the last frame heard"
+                "a replay of the last frame from a clock {clock}"
             );
         }
     }
@@ -404,21 +487,28 @@ mod tests {
         }
     }
 
-    /// The clocks of two nodes can differ. Within the margin (a third of the alive timeout, 30 s),
-    /// a replay is still stale and a fresh durable frame still returns a quiet peer.
+    /// The clocks of two nodes differ, and the difference changes nothing: a replay is stale and a
+    /// fresh frame returns a quiet peer, whether the clock of the peer runs 30 s ahead or behind.
+    /// The skew is not a margin any more: the check compares two stamps of the clock of the peer.
     #[test]
     fn a_clock_30_secs_off_changes_nothing() {
         let _guard = ::habilis_network_test_tracing::init();
-        let (state, who) = quiet_since_100_secs();
+        let (mut state, who) = quiet_since_100_secs();
         let heard_at = UnixSecs::now() - Duration::from_secs(100);
         let alive = MessageKind::Presence {
             subtype: PresenceSubtype::Alive,
         };
+        state
+            .peer_stamp
+            .insert(who.clone(), heard_at + Duration::from_secs(30));
         let ahead = compute(&alive, &who, heard_at + Duration::from_secs(30), &state);
         assert!(
             ahead.stale && !ahead.returned,
             "a replay from a clock 30 s ahead"
         );
+        state
+            .peer_stamp
+            .insert(who.clone(), heard_at - Duration::from_secs(30));
         let behind = compute(
             &MessageKind::Meta,
             &who,
@@ -431,37 +521,152 @@ mod tests {
         );
     }
 
-    /// Known limit, not fixed: a sender whose clock runs 120 s ahead makes a replay of its last
-    /// frame look like a return. The check compares a stamp with our clock, so it cannot be
-    /// exact for a skew above the margin.
+    /// A sender whose clock runs 120 s ahead cannot make a replay of its last frame look like a
+    /// return: the replay is stamped as the last frame was, and the stamp is not after itself.
     #[test]
-    #[ignore = "known limit: a sender clock more than 30 s ahead"]
     fn a_replay_from_a_clock_120_secs_ahead_is_stale() {
         let _guard = ::habilis_network_test_tracing::init();
-        let (state, who) = quiet_since_100_secs();
+        let (mut state, who) = quiet_since_100_secs();
         let heard_at = UnixSecs::now() - Duration::from_secs(100);
         let alive = MessageKind::Presence {
             subtype: PresenceSubtype::Alive,
         };
+        state
+            .peer_stamp
+            .insert(who.clone(), heard_at + Duration::from_secs(120));
         let replay = compute(&alive, &who, heard_at + Duration::from_secs(120), &state);
         assert!(replay.stale && !replay.returned, "{replay:?}");
     }
 
-    /// Known limit, not fixed: a sender whose clock runs 120 s behind stamps every frame older
-    /// than the alive timeout, so a peer that sends only meta changes or peer info never proves
-    /// life and never returns.
+    /// A sender whose clock runs 120 s behind stamps every frame 120 s old on our clock. A live
+    /// frame still returns a quiet peer, because it is stamped after the last frame heard from that
+    /// clock. A peer that sends only a meta change or a peer info (a durable kind, which proves
+    /// life only within one alive timeout of our clock) returns on its next alive, 30 s later.
     #[test]
-    #[ignore = "known limit: a sender clock more than 90 s behind"]
-    fn a_meta_change_from_a_clock_120_secs_behind_returns_a_quiet_peer() {
+    fn a_live_frame_from_a_clock_120_secs_behind_returns_a_quiet_peer() {
         let _guard = ::habilis_network_test_tracing::init();
-        let (state, who) = quiet_since_100_secs();
+        let (mut state, who) = quiet_since_100_secs();
+        let heard_at = UnixSecs::now() - Duration::from_secs(100);
+        state
+            .peer_stamp
+            .insert(who.clone(), heard_at - Duration::from_secs(120));
+        let alive = MessageKind::Presence {
+            subtype: PresenceSubtype::Alive,
+        };
         let update = compute(
-            &MessageKind::Meta,
+            &alive,
             &who,
             UnixSecs::now() - Duration::from_secs(120),
             &state,
         );
         assert!(update.returned && !update.stale, "{update:?}");
+    }
+
+    /// An instant 20 s before `at`: the next frame of a live peer comes one alive interval later.
+    fn back_20_secs(at: Instant) -> Instant {
+        at.checked_sub(Duration::from_secs(20))
+            .expect("the monotonic clock has run past 20 s since boot")
+    }
+
+    /// A quiet peer whose frame is signed by `by` and stamped `at`.
+    fn live_frame(who: &Nickname, by: &Identity, at: UnixSecs) -> Verified {
+        let mut message = Message::new_alive(&MeshId::from("test"), who);
+        message.timestamp = at;
+        message.sign(by)
+    }
+
+    /// The clock of a peer stepped back (a laptop woke, a clock was set right): the newest stamp on
+    /// record is ahead of every new stamp. A peer that keeps sending frames that rise from the new
+    /// base returns after `STEP_BACK_FRAMES` of them, each one alive interval apart, so it is not
+    /// hidden until its stamps pass the old one. Tested for a step of 1 h and of 120 s.
+    #[test]
+    fn a_clock_that_stepped_back_returns_after_a_run_of_rising_frames() {
+        let _guard = ::habilis_network_test_tracing::init();
+        for step in [Duration::from_hours(1), Duration::from_secs(120)] {
+            let (mut state, who) = quiet_since_100_secs();
+            let by = Identity::generate();
+            state.peer_stamp.insert(who.clone(), UnixSecs::now() + step);
+            for index in 0..STEP_BACK_FRAMES {
+                let stamp = UnixSecs::now() + Duration::from_secs(u64::from(index) * 30);
+                let update = compute_observed(&live_frame(&who, &by, stamp), &mut state);
+                let counted = index + 1;
+                if counted < STEP_BACK_FRAMES {
+                    assert!(
+                        update.stale && !update.returned,
+                        "step {step:?}: frame {counted} of the run returned the peer"
+                    );
+                    // The next frame comes one alive interval later on our clock.
+                    let run = state
+                        .step_back
+                        .get_mut(who.as_str())
+                        .expect("the run is on record");
+                    run.at = back_20_secs(run.at);
+                } else {
+                    assert!(
+                        update.returned && !update.stale,
+                        "step {step:?}: the run of {STEP_BACK_FRAMES} frames did not return the peer: {update:?}"
+                    );
+                }
+            }
+            assert!(
+                !state.peer_stamp.contains_key(who.as_str()),
+                "the old newest stamp is dropped when the peer returns"
+            );
+        }
+    }
+
+    /// What does not return a quiet peer whose newest stamp is ahead: one old frame, the same frame
+    /// again and again, and a burst of different frames in one second (what a relay sends when it
+    /// answers an anti-entropy digest). Only frames that rise and arrive one alive interval apart
+    /// count.
+    #[test]
+    fn a_replay_does_not_pass_for_a_step_back() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, who) = quiet_since_100_secs();
+        let by = Identity::generate();
+        state
+            .peer_stamp
+            .insert(who.clone(), UnixSecs::now() + Duration::from_hours(1));
+        let one = live_frame(&who, &by, UnixSecs::now());
+        for repeat in 0..10 {
+            let update = compute_observed(&one, &mut state);
+            assert!(
+                update.stale && !update.returned,
+                "the same frame, seen {} times, returned the peer",
+                repeat + 1
+            );
+        }
+        for index in 1..=10u64 {
+            let stamp = UnixSecs::now() + Duration::from_secs(index * 30);
+            let update = compute_observed(&live_frame(&who, &by, stamp), &mut state);
+            assert!(
+                update.stale && !update.returned,
+                "burst frame {index}, with no spacing, returned the peer"
+            );
+        }
+    }
+
+    /// A key that said goodbye never returns through a run of rising frames.
+    #[test]
+    fn a_goodbye_is_not_undone_by_a_run_of_rising_frames() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, who) = quiet_since_100_secs();
+        let by = Identity::generate();
+        state.note_left(by.author_key());
+        state
+            .peer_stamp
+            .insert(who.clone(), UnixSecs::now() + Duration::from_hours(1));
+        for index in 0..STEP_BACK_FRAMES + 2 {
+            let stamp = UnixSecs::now() + Duration::from_secs(u64::from(index) * 30);
+            let update = compute_observed(&live_frame(&who, &by, stamp), &mut state);
+            assert!(
+                update.stale && !update.returned,
+                "frame {index} of a key that said goodbye returned the peer"
+            );
+            if let Some(run) = state.step_back.get_mut(who.as_str()) {
+                run.at = back_20_secs(run.at);
+            }
+        }
     }
 
     /// A goodbye is final for the key that said it, whatever the kind of the frame and whatever its

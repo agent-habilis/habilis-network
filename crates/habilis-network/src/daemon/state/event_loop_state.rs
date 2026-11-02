@@ -53,6 +53,16 @@ use crate::util::tuning;
 use iroh::address_lookup::memory;
 use tokio::sync::{mpsc, oneshot};
 
+/// A run of frames of a quiet peer whose stamps rise from a base below the newest stamp that we
+/// heard from it: `last` is the stamp of the latest frame that counted, `at` is when it arrived on
+/// our clock, and `count` is the number of frames that counted.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StepBack {
+    pub(crate) last: UnixSecs,
+    pub(crate) at: Instant,
+    pub(crate) count: u8,
+}
+
 use crate::{beacon, gossip, protocol, transport};
 /// All mutable state owned by the event loop.
 ///
@@ -213,6 +223,13 @@ pub struct EventLoopState {
     /// in turn, so a `left` from another key is the goodbye of an older run and leaves the
     /// roster entry of the newer run alone.
     pub(crate) peer_keys: HashMap<Nickname, AuthorKey>,
+    /// The newest stamp that we heard from each peer in a frame that proved it was alive, on the
+    /// clock of that peer. A quiet peer returns only on a frame stamped after it: two stamps of
+    /// one clock compare at any skew between that clock and ours.
+    pub(crate) peer_stamp: HashMap<Nickname, UnixSecs>,
+    /// The run of frames of a quiet peer that rise from a stamp below `peer_stamp`, which says
+    /// that its clock stepped back. See `membership_update::note_step_back`.
+    pub(crate) step_back: HashMap<Nickname, StepBack>,
     /// Bridge from membership back to transport: nickname -> the endpoint id
     /// that nickname last self-advertised in a signed `PeerInfo`. That
     /// signature is the only thing tying a nickname to an endpoint (the
@@ -581,6 +598,8 @@ impl EventLoopState {
             quiet: BoundedFifoSet::new(QUIET_CAP),
             quiet_since: HashMap::new(),
             peer_keys: HashMap::new(),
+            peer_stamp: HashMap::new(),
+            step_back: HashMap::new(),
             left_keys: BoundedFifoSet::new(QUIET_CAP),
             surfaced: HashSet::new(),
             last_sent_at: now,

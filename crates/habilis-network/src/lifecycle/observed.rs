@@ -31,7 +31,7 @@ pub(crate) fn observe(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
 ) -> Observed {
-    let update = membership_update::compute_for(message, state);
+    let update = membership_update::compute_observed(message, state);
     // Implicit heartbeat: a frame that proves presence updates last_seen. Not a stale one: a copy of
     // a departed key's frame says nothing about whoever holds the nickname now. Not a replayed
     // frame of a durable kind either: it would keep a dead peer from its eviction. A peer that is
@@ -52,6 +52,14 @@ pub(crate) fn observe(
             state
                 .peer_keys
                 .insert(message.author.clone(), message.key());
+            // The newest stamp of the author, on its own clock: the test of a return compares two
+            // stamps of one clock, so a skew between that clock and ours cancels.
+            let newest = state
+                .peer_stamp
+                .entry(message.author.clone())
+                .or_insert(message.timestamp);
+            *newest = (*newest).max(message.timestamp);
+            state.step_back.remove(message.author.as_str());
         }
     }
     membership_update::apply(&update, &message.author, state);
@@ -786,7 +794,13 @@ mod churn_red {
             let who = nick("swift-cedar");
             let peer = Identity::generate();
             let mut state = fresh_state();
-            let hello = chat(&rig.mesh, &who, &peer, UnixSecs::now());
+            state.joined_at = UnixSecs::now() - Duration::from_secs(300);
+            let hello = chat(
+                &rig.mesh,
+                &who,
+                &peer,
+                UnixSecs::now() - Duration::from_secs(120),
+            );
             assert!(
                 receive(&hello, &mut state, &context),
                 "the frame is new to the seen set"
@@ -795,7 +809,12 @@ mod churn_red {
                 .checked_sub(Duration::from_secs(60))
                 .expect("the monotonic clock has run past 60 s since boot");
             state.last_seen.insert(who.clone(), silent);
-            let info = peer_info(&rig.mesh, &who, &peer, UnixSecs::now());
+            let info = peer_info(
+                &rig.mesh,
+                &who,
+                &peer,
+                UnixSecs::now() - Duration::from_secs(80),
+            );
             assert!(
                 receive(&info, &mut state, &context),
                 "the frame is new to the seen set"
