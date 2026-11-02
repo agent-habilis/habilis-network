@@ -897,7 +897,12 @@ mod churn_red {
                 ("ping", sign_at(probe.clone())),
                 (
                     "pong",
-                    sign_at(Message::new_pong(&rig.mesh, &who, nick("calm-fern"), &probe.id)),
+                    sign_at(Message::new_pong(
+                        &rig.mesh,
+                        &who,
+                        nick("calm-fern"),
+                        &probe.id,
+                    )),
                 ),
             ];
             for (name, replay) in &replays {
