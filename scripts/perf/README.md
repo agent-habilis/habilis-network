@@ -156,6 +156,19 @@ the largest RSS sum gives `rss_n` (the daemon count), `rss_mean_mb_per_daemon`, 
 daemon in the run) and `rss_sum_mb`. A run of 16 daemons that gives 52.6 MB per daemon and a run of 8 that
 gives 29.7 MB show how the RSS per daemon grows with N.
 
+## Load gates
+
+`gate.ts` holds the numbers, from the idle meshes on nyc-macmini1 (8 cores, 8 GiB). `b4.ts` applies them.
+
+- Start gate: load1 is at most 1.5 now, and at most 2.0 in the 3 min before. The driver waits up to 20 min.
+- Phase gate: the median load1 of a phase is at most 4.0, and the max is at most 6.0. A run with a phase over
+  the gate is void and runs again, twice at most.
+- A/B gate: the idle1 medians of the two arms of a pair are within 25 percent. A pair that fails runs once more.
+
+`b4.ts` runs pairs of arm a (the plain baseline, for CPU) and arm b (the baseline with counters, for bytes and
+the ratio), in turn, with the order swapped in every second pair. Both arms have the same warm-up (300 s of
+settle). Arm a has no loaded phase: it has no wire counters, so it gives no ratio. Run it after `ulimit -n 10240`.
+
 ## What it does not do
 
 - The nodes are native processes. A browser costs more.
