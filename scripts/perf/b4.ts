@@ -25,6 +25,8 @@ const ARMS = {
 };
 const PAIRS = Number(flags.get("pairs") ?? 3);
 const NODES = Number(flags.get("nodes") ?? 16);
+// With --curve the driver runs the plain arm only, at each node count in turn, --reps times: the CPU curve.
+const CURVE = (flags.get("curve") ?? "").split(",").filter(Boolean).map(Number);
 const ROOT = flags.get("out-root") ?? path.join(homedir(), "bench-results", "b4");
 mkdirSync(ROOT, { recursive: true });
 const HERE = import.meta.dir;
@@ -49,12 +51,12 @@ async function waitForStart(): Promise<void> {
 
 type Run = { arm: string; pair: number; folder: string; phases: Record<string, { median: number; max: number; ok: boolean }>; void: boolean };
 
-async function runOnce(arm: "plain" | "counters", pair: number, attempt: number): Promise<Run> {
+async function runOnce(arm: "plain" | "counters", pair: number, attempt: number, nodes = NODES): Promise<Run> {
   await waitForStart();
   const spec = ARMS[arm];
-  const label = `b4-${arm}-p${pair}${attempt ? `-r${attempt}` : ""}`;
+  const label = `b4-${arm}${CURVE.length ? `-n${nodes}` : ""}-p${pair}${attempt ? `-r${attempt}` : ""}`;
   const args = [
-    process.execPath, `${HERE}/bench.ts`, spec.binary, label, "--nodes", String(NODES), "--stagger", "0.5", "--settle", "300",
+    process.execPath, `${HERE}/bench.ts`, spec.binary, label, "--nodes", String(nodes), "--stagger", "0.5", "--settle", "300",
     "--idle", "240", "--loaded", String(spec.loaded), "--min-avail-gib", "1", "--out-root", ROOT,
     ...(spec.record ? ["--record", spec.record] : []),
   ];
@@ -90,9 +92,9 @@ function markVoid(folder: string): string {
   return named;
 }
 
-async function runValid(arm: "plain" | "counters", pair: number): Promise<Run> {
+async function runValid(arm: "plain" | "counters", pair: number, nodes = NODES): Promise<Run> {
   for (let attempt = 0; attempt < 3; attempt++) {
-    const run = await runOnce(arm, pair, attempt);
+    const run = await runOnce(arm, pair, attempt, nodes);
     if (!run.void) return run;
   }
   log(`pair ${pair} ${arm}: 3 void runs, the host is too loaded; stop`);
@@ -109,6 +111,18 @@ const gates = {
   reason: "widened by the leader on 2026-11-02 after the first start gate (1.5) failed on an idle host",
 };
 const kept: Run[] = [];
+if (CURVE.length) {
+  const curve: { nodes: number; rep: number; folder: string; phases: Run["phases"] }[] = [];
+  for (let rep = 1; rep <= PAIRS; rep++) {
+    for (const nodes of CURVE) {
+      const run = await runValid("plain", rep, nodes);
+      curve.push({ nodes, rep, folder: run.folder, phases: run.phases });
+      writeFileSync(`${ROOT}/curve.json`, JSON.stringify({ gates, curve }, null, 2));
+    }
+  }
+  log("all pairs done");
+  process.exit(0);
+}
 const pairs: { pair: number; ab: ReturnType<typeof abGate>; runs: string[] }[] = [];
 for (let pair = 1; pair <= PAIRS; pair++) {
   const order: ("plain" | "counters")[] = pair % 2 === 1 ? ["plain", "counters"] : ["counters", "plain"];
