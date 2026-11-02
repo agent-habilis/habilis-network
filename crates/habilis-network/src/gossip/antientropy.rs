@@ -900,7 +900,8 @@ mod budget_tests {
     use crate::testing::{author_of, nick};
     use crate::util::clock::Instant;
     use crate::util::tuning::{
-        ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE, FAST_ROUND_RETRY, antientropy_max_resend,
+        ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE, FAST_ROUND_RETRY,
+        FAST_ROUND_STALL_BACKOFF_CAP, antientropy_max_resend,
     };
 
     use crate::{protocol, testing, transport};
@@ -1217,7 +1218,7 @@ mod budget_tests {
     #[test]
     fn the_const_backs_off_a_stalled_retry() {
         let _guard = ::habilis_network_test_tracing::init();
-        let picks = retry_picks(crate::util::tuning::FAST_ROUND_STALL_BACKOFF_CAP, false);
+        let picks = retry_picks(FAST_ROUND_STALL_BACKOFF_CAP, false);
         assert_eq!(picks.len(), 9, "9 asks in 60 s, not 151");
     }
 
