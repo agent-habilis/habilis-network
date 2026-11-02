@@ -104,3 +104,19 @@ test("the host samples give the resident memory per daemon at the peak, with the
   // The peak sum is 50000 / 1024 = 48.8 MB.
   expect(out).toContain("rss_n=2 rss_mean_mb_per_daemon=24.4 rss_max_mb=29.3 rss_sum_mb=48.8");
 });
+
+test("the cputime of the daemon processes gives the CPU per daemon in each phase", () => {
+  const dir = fixture([1200, 800]);
+  const sample = (at: number, cpu: number) =>
+    JSON.stringify({ ts: T0 + at * 1000, load1: 1, avail_bytes: 0, open_files: 0, daemons: 2, rss_kb_sum: 1, rss_kb_max: 1, cpu_s_sum: cpu });
+  // idle1 spans 0-60 s: the sums are 10 s at 0 s and 70 s at 60 s. The two daemons used 60 s of CPU in 60 s.
+  // idle2 spans 120-180 s: 100 s at 120 s and 112 s at 180 s. They used 12 s in 60 s.
+  writeFileSync(
+    `${dir}/host.jsonl`,
+    [sample(0, 10), sample(30, 40), sample(60, 70), sample(120, 100), sample(180, 112)].join("\n") + "\n",
+  );
+  const out = run(dir).stdout.toString();
+  // idle1: 60 s / (60 s x 2 daemons) = 50.0 percent of a core. idle2: 12 / 120 = 10.0 percent.
+  expect(out).toContain("idle1_cpu_pct_per_daemon=50.0");
+  expect(out).toContain("idle2_cpu_pct_per_daemon=10.0");
+});

@@ -392,10 +392,31 @@ function rssReport(run: string): string {
   return `rss_n=${peak.daemons} rss_mean_mb_per_daemon=${mb(peak.rss_kb_sum / peak.daemons)} rss_max_mb=${mb(biggest)} rss_sum_mb=${mb(peak.rss_kb_sum)}`;
 }
 
+// The CPU per daemon in each phase, as a percent of one core. The runner sums the `ps` cputime of the daemon
+// processes into `cpu_s_sum` of each host sample. The census of the plain baseline has no cpu fields, so this
+// is the CPU number for every arm. A phase uses the first sample at or after its start and the last sample at
+// or before its end, and divides by the time between them.
+function cpuReport(run: string): string {
+  if (!existsSync(`${run}/host.jsonl`) || !existsSync(`${run}/result.json`)) return "";
+  const phases: Phase[] = JSON.parse(readFileSync(`${run}/result.json`, "utf8")).phases ?? [];
+  const samples: { ts: number; daemons: number; cpu_s_sum?: number }[] = lines(readFileSync(`${run}/host.jsonl`, "utf8")).map((line) => JSON.parse(line));
+  const fields: string[] = [];
+  for (const phase of phases) {
+    const inside = samples.filter((sample) => sample.cpu_s_sum !== undefined && sample.ts >= phase.start_ms && sample.ts <= phase.end_ms);
+    const first = inside[0];
+    const last = inside[inside.length - 1];
+    if (!first || !last || last.ts <= first.ts || first.daemons === 0) continue;
+    const seconds = (last.ts - first.ts) / 1000;
+    const used = (last.cpu_s_sum ?? 0) - (first.cpu_s_sum ?? 0);
+    fields.push(`${phase.name}_cpu_pct_per_daemon=${((100 * used) / (seconds * first.daemons)).toFixed(1)}`);
+  }
+  return fields.join(" ");
+}
+
 for (const run of process.argv.slice(2).map((r) => r.replace(/\/+$/, ""))) {
   try {
-    const rss = rssReport(run);
-    console.log(`${summarize(run)} | ${phaseReport(run)}${rss ? ` | ${rss}` : ""}`);
+    const extra = [rssReport(run), cpuReport(run)].filter((part) => part);
+    console.log(`${summarize(run)} | ${phaseReport(run)}${extra.map((part) => ` | ${part}`).join("")}`);
   } catch (error) {
     console.error(`${path.basename(run)}: ${(error as Error).message}`);
     process.exitCode = 1;

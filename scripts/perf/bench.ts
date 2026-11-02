@@ -187,10 +187,18 @@ function fileLimit(): number {
 const processFileLimit = Bun.spawnSync(["sh", "-c", "ulimit -n"]).stdout.toString().trim();
 
 // RSS of the daemons of this run: the processes that name the state folder of the run.
-function daemonRss(): { daemons: number; rss_kb_sum: number; rss_kb_max: number } {
-  const rows = Bun.spawnSync(["ps", "-axo", "rss=,command="]).stdout.toString().split("\n");
-  const sizes = rows.filter((row) => row.includes(`${OUT}/state/`)).map((row) => Number(row.trim().split(/\s+/)[0]));
-  return { daemons: sizes.length, rss_kb_sum: sizes.reduce((a, b) => a + b, 0), rss_kb_max: Math.max(0, ...sizes) };
+// `ps` prints cputime as [[H:]M:]S.cc, in seconds of CPU the process used since it started.
+const cpuSeconds = (text: string) => text.split(":").reduce((total, part) => total * 60 + Number(part), 0);
+function daemonRss(): { daemons: number; rss_kb_sum: number; rss_kb_max: number; cpu_s_sum: number } {
+  const rows = Bun.spawnSync(["ps", "-axo", "rss=,cputime=,command="]).stdout.toString().split("\n");
+  const mine = rows.filter((row) => row.includes(`${OUT}/state/`)).map((row) => row.trim().split(/\s+/));
+  const sizes = mine.map((cols) => Number(cols[0]));
+  return {
+    daemons: sizes.length,
+    rss_kb_sum: sizes.reduce((a, b) => a + b, 0),
+    rss_kb_max: Math.max(0, ...sizes),
+    cpu_s_sum: mine.reduce((total, cols) => total + cpuSeconds(cols[1] ?? "0"), 0),
+  };
 }
 
 // The sample goes to host.jsonl at once, outside /tmp: a crash of the host still leaves the data.
