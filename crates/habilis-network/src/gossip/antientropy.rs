@@ -1586,6 +1586,35 @@ mod tests {
         );
     }
 
+    /// A node that a daemon starts keeps the memory on: it is the state the const gives, with no override.
+    #[test]
+    fn a_fresh_state_sends_a_frame_to_an_asker_twice_in_the_window() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, asker) = (nick("holder"), nick("asker"));
+        let asker_identity = Identity::generate();
+        let digest = Message::new_digest(&MeshId::from("test"), &asker, empty_digest_body())
+            .sign(&asker_identity);
+        let mut state = fresh_state();
+        state.peers.insert(asker);
+        let (outbox, mut resends) = transport::ResendOutbox::new(64);
+        state.resend_outbox = outbox;
+        state.message_log.push(chat_at("never kept", 1_700_000_000));
+        let start = Instant::now();
+
+        let step = tuning::ANTIENTROPY_SERVE_COOLDOWN + Duration::from_secs(1);
+        let rounds: Vec<usize> = (0..3)
+            .map(|index| {
+                round_resends(&mut state, &mut resends, &digest, &me, start + step * index).len()
+            })
+            .collect();
+
+        assert_eq!(
+            rounds,
+            vec![1, 1, 0],
+            "the frame goes out twice, and the 3rd round skips it"
+        );
+    }
+
     /// With the memory a frame goes to an asker `repeats` times in the window. The round after
     /// the last repeat skips it, the budget of the round goes to the frames that were sent less
     /// often, and a frame that is still missing when the window ends is sent again.

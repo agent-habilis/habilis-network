@@ -7,7 +7,7 @@ use crate::util::clock::Instant;
 /// How many times one frame is re-sent to one asker in a [`ANTIENTROPY_RESEND_WINDOW`]. Zero
 /// turns the memory off: every digest is answered with every frame its author lacks, as before
 /// the memory existed.
-pub(crate) const ANTIENTROPY_RESEND_REPEATS: usize = 0;
+pub(crate) const ANTIENTROPY_RESEND_REPEATS: usize = 2;
 
 /// The window in which [`ANTIENTROPY_RESEND_REPEATS`] counts.
 pub(crate) const ANTIENTROPY_RESEND_WINDOW: Duration = Duration::from_secs(300);
