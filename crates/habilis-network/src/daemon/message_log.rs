@@ -54,6 +54,15 @@ pub struct MessageLog {
     per_author: HashMap<AuthorKey, usize>,
     /// The dedup key of every held message, so a frame that is pushed twice is held once.
     keys: HashSet<DedupKey>,
+    /// The wire bytes of every held frame, kept as a running sum so that the census gauge costs no
+    /// walk. The log holds whole signed frames, so this is what it keeps, not the text of the
+    /// bodies: a presence frame has no body.
+    frame_bytes: usize,
+}
+
+/// The bytes of a frame on the wire, 0 for a frame that does not serialize.
+fn wire_len(frame: &Verified) -> usize {
+    frame.serialize().map_or(0, |wire| wire.as_bytes().len())
 }
 
 impl MessageLog {
@@ -63,6 +72,7 @@ impl MessageLog {
             messages: VecDeque::with_capacity(capacity),
             per_author: HashMap::new(),
             keys: HashSet::new(),
+            frame_bytes: 0,
         }
     }
 
@@ -83,6 +93,7 @@ impl MessageLog {
             return None;
         }
         *self.per_author.entry(message.key()).or_default() += 1;
+        self.frame_bytes += wire_len(&message);
         self.messages.push_back(message);
         if self.messages.len() <= self.capacity {
             return None;
@@ -91,6 +102,7 @@ impl MessageLog {
         let evicted = self.messages.remove(victim);
         if let Some(gone) = &evicted {
             self.keys.remove(&gone.dedup_key());
+            self.frame_bytes = self.frame_bytes.saturating_sub(wire_len(gone));
         }
         if let Some(gone) = &evicted
             && let Some(held) = self.per_author.get_mut(&gone.key())
@@ -175,6 +187,7 @@ impl MessageLog {
         });
         for gone in &dropped {
             self.keys.remove(&gone.dedup_key());
+            self.frame_bytes = self.frame_bytes.saturating_sub(wire_len(gone));
         }
         match self.per_author.get_mut(author) {
             Some(held) if *held > dropped.len() => *held -= dropped.len(),
@@ -186,14 +199,9 @@ impl MessageLog {
         dropped
     }
 
-    /// The messages held, and the bytes of their bodies.
+    /// The messages held, and the wire bytes of their frames.
     pub(crate) fn size(&self) -> (usize, usize) {
-        let bytes = self
-            .messages
-            .iter()
-            .map(|message| message.body.as_str().len())
-            .sum();
-        (self.messages.len(), bytes)
+        (self.messages.len(), self.frame_bytes)
     }
 
     #[cfg(any(test, feature = "iroh-test-utils"))]
@@ -448,6 +456,35 @@ mod tests {
             max,
             requester,
         }
+    }
+
+    /// The bytes of a plain fixture frame on the wire, counted by hand from its JSON: 417 bytes of
+    /// fixed text (the keys, the quotes, the commas, a 36 byte id, a 62 byte mesh id, a 10 digit
+    /// timestamp, a 64 byte hex key and a 128 byte hex signature), then the 6 bytes of the author
+    /// `author`, then the body. The fixture bodies hold no quote.
+    fn hand_counted_wire_len(frame: &Verified) -> usize {
+        417 + 6 + frame.body.as_str().len()
+    }
+
+    /// The gauge counts the frames that the log holds, not the text of their bodies: a presence
+    /// frame has no body and still takes its 400 bytes or more.
+    #[test]
+    fn the_gauge_counts_the_frame_bytes_the_log_holds() {
+        let mut log = MessageLog::new(2);
+        assert_eq!(log.size(), (0, 0), "an empty log holds nothing");
+
+        let second = message("m22");
+        log.push(message("m1"));
+        log.push(second.clone());
+        assert_eq!(log.size(), (2, 425 + 426), "two frames of 425 and 426 bytes");
+
+        log.push(second);
+        assert_eq!(log.size(), (2, 425 + 426), "a frame that is held twice counts once");
+
+        log.push(message("m333"));
+        let held: usize = log.messages.iter().map(hand_counted_wire_len).sum();
+        assert_eq!(log.size(), (2, held), "the evicted frame leaves the count");
+        assert!(held == 426 + 427 || held == 425 + 427, "two of the three frames stay: {held}");
     }
 
     fn message(id: &str) -> Verified {
