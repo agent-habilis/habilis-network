@@ -10,10 +10,10 @@
 // load of the two idle1 phases; a pair that fails it runs once more. See README.md, "Load gates".
 // Run it after `ulimit -n 10240`. The result goes to <out-root>/b4.json.
 
-import { appendFileSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir, loadavg } from "node:os";
 import path from "node:path";
-import { abGate, phaseGate, startGate } from "./gate.ts";
+import { AB_RATIO_MAX, PHASE_MAX, PHASE_MEDIAN_MAX, START_NOW_MAX, START_WINDOW_MAX, abGate, phaseGate, startGate } from "./gate.ts";
 
 const flags = new Map<string, string>();
 const argv = process.argv.slice(2);
@@ -79,7 +79,15 @@ async function runOnce(arm: "plain" | "counters", pair: number, attempt: number)
   writeFileSync(`${folder}/summary.txt`, summary.stdout.toString() + summary.stderr.toString());
   const bad = Object.entries(phases).filter(([, gate]) => !gate.ok).map(([name]) => name);
   log(`run ${label} done: ${Object.entries(phases).map(([n, g]) => `${n} median ${g.median.toFixed(2)} max ${g.max.toFixed(2)}`).join("; ")}${bad.length ? `; VOID (${bad.join(",")})` : ""}`);
-  return { arm, pair, folder, phases, void: bad.length > 0 };
+  if (bad.length > 0) return { arm, pair, folder: markVoid(folder), phases, void: true };
+  return { arm, pair, folder, phases, void: false };
+}
+
+// A void run stays on disk under a name that says so.
+function markVoid(folder: string): string {
+  const named = path.join(path.dirname(folder), `void-${path.basename(folder)}`);
+  renameSync(folder, named);
+  return named;
 }
 
 async function runValid(arm: "plain" | "counters", pair: number): Promise<Run> {
@@ -91,6 +99,15 @@ async function runValid(arm: "plain" | "counters", pair: number): Promise<Run> {
   process.exit(1);
 }
 
+// The first start gate (load1 1.5) never opened: the host idles at 1.5 to 1.76 with none of our daemons.
+const gates = {
+  start_now_max: START_NOW_MAX,
+  start_window_max: START_WINDOW_MAX,
+  phase_median_max: PHASE_MEDIAN_MAX,
+  phase_max: PHASE_MAX,
+  ab_ratio_max: AB_RATIO_MAX,
+  reason: "widened by the leader on 2026-11-02 after the first start gate (1.5) failed on an idle host",
+};
 const kept: Run[] = [];
 const pairs: { pair: number; ab: ReturnType<typeof abGate>; runs: string[] }[] = [];
 for (let pair = 1; pair <= PAIRS; pair++) {
@@ -105,7 +122,8 @@ for (let pair = 1; pair <= PAIRS; pair++) {
       pairs.push({ pair, ab, runs: done.map((run) => run.folder) });
       break;
     }
+    for (const run of done) run.folder = markVoid(run.folder);
   }
-  writeFileSync(`${ROOT}/b4.json`, JSON.stringify({ nodes: NODES, pairs, kept }, null, 2));
+  writeFileSync(`${ROOT}/b4.json`, JSON.stringify({ nodes: NODES, gates, pairs, kept }, null, 2));
 }
 log("all pairs done");

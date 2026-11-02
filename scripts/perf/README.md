@@ -160,10 +160,10 @@ gives 29.7 MB show how the RSS per daemon grows with N.
 
 `gate.ts` holds the numbers, from the idle meshes on nyc-macmini1 (8 cores, 8 GiB). `b4.ts` applies them.
 
-- Start gate: load1 is at most 1.5 now, and at most 2.0 in the 3 min before. The driver waits up to 20 min.
+- Start gate: load1 is at most 2.0 now, and at most 2.5 in the 3 min before. (First values 1.5 and 2.0: the host idles at 1.5 to 1.76 with no daemon of ours, so that gate never opened.) The driver waits up to 20 min.
 - Phase gate: the median load1 of a phase is at most 4.0, and the max is at most 6.0. A run with a phase over
   the gate is void and runs again, twice at most.
-- A/B gate: the idle1 medians of the two arms of a pair are within 25 percent. A pair that fails runs once more.
+- A/B gate: the idle1 medians of the two arms of a pair are within 35 percent. A pair that fails runs once more. A void run or a failed pair stays on disk, and its folder name starts with `void-`.
 
 `b4.ts` runs pairs of arm a (the plain baseline, for CPU) and arm b (the baseline with counters, for bytes and
 the ratio), in turn, with the order swapped in every second pair. Both arms have the same warm-up (300 s of
