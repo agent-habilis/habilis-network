@@ -54,7 +54,7 @@ async function runOnce(arm: "plain" | "counters", pair: number, attempt: number)
   const spec = ARMS[arm];
   const label = `b4-${arm}-p${pair}${attempt ? `-r${attempt}` : ""}`;
   const args = [
-    "bun", `${HERE}/bench.ts`, spec.binary, label, "--nodes", String(NODES), "--stagger", "0.5", "--settle", "300",
+    process.execPath, `${HERE}/bench.ts`, spec.binary, label, "--nodes", String(NODES), "--stagger", "0.5", "--settle", "300",
     "--idle", "240", "--loaded", String(spec.loaded), "--min-avail-gib", "1", "--out-root", ROOT,
     ...(spec.record ? ["--record", spec.record] : []),
   ];
@@ -75,7 +75,7 @@ async function runOnce(arm: "plain" | "counters", pair: number, attempt: number)
     if (load1s.length === 0) continue;
     phases[phase.name] = phaseGate(load1s);
   }
-  const summary = Bun.spawnSync(["bun", `${HERE}/summarize.ts`, folder]);
+  const summary = Bun.spawnSync([process.execPath, `${HERE}/summarize.ts`, folder]);
   writeFileSync(`${folder}/summary.txt`, summary.stdout.toString() + summary.stderr.toString());
   const bad = Object.entries(phases).filter(([, gate]) => !gate.ok).map(([name]) => name);
   log(`run ${label} done: ${Object.entries(phases).map(([n, g]) => `${n} median ${g.median.toFixed(2)} max ${g.max.toFixed(2)}`).join("; ")}${bad.length ? `; VOID (${bad.join(",")})` : ""}`);
