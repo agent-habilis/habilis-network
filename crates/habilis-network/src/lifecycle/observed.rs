@@ -960,6 +960,128 @@ mod churn_red {
         });
     }
 
+    /// The roster and the count agree: a peer known only from a frame older than our join is in
+    /// neither, because the app skills list the rows of the roster and a user can pick a row as the
+    /// target of a task. The same peer is in both once its arrival is shown.
+    #[test]
+    #[ignore = "open: roster_snapshot lists every peer; filtering it by surfaced breaks 3 tests of daemon/state.rs whose setup never surfaces its peers"]
+    fn the_roster_and_the_count_agree_on_a_pre_join_ghost() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let peer = Identity::generate();
+            let mut state = fresh_state();
+            state.joined_at = UnixSecs::now();
+            let listed = |held: &EventLoopState| {
+                held.roster_snapshot()
+                    .peers
+                    .iter()
+                    .any(|entry| entry.nickname == who)
+            };
+
+            let backlog = chat(
+                &rig.mesh,
+                &who,
+                &peer,
+                state.joined_at - Duration::from_secs(600),
+            );
+            assert!(
+                receive(&backlog, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert!(
+                !listed(&state),
+                "a pre-join ghost is a row of the roster: {:?}",
+                state.roster_snapshot().peers
+            );
+            let snapshot = state.roster_snapshot();
+            assert_eq!(
+                snapshot.peers.len() + 1,
+                snapshot.count,
+                "the rows of the roster and the count disagree: {:?}",
+                snapshot.peers
+            );
+
+            let fresh = chat(&rig.mesh, &who, &peer, UnixSecs::now());
+            assert!(
+                receive(&fresh, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            let shown = state.roster_snapshot();
+            assert!(listed(&state), "a shown peer is a row of the roster");
+            assert_eq!(
+                shown.peers.len() + 1,
+                shown.count,
+                "the rows of the roster and the count disagree: {:?}",
+                shown.peers
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// The undercount bound. A live peer is known first from old frames that arrive as pre-join
+    /// backlog, so it is in the roster and not shown. It then sends a fresh `joined`, and its next
+    /// `alive` (at most one alive interval later) shows it and counts it.
+    #[test]
+    fn a_live_peer_known_from_backlog_is_counted_within_one_alive_interval() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let peer = Identity::generate();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            let live = LiveCount::default();
+            state.live_count = Some(live.clone());
+            state.joined_at = UnixSecs::now();
+
+            let backlog = chat(
+                &rig.mesh,
+                &who,
+                &peer,
+                state.joined_at - Duration::from_secs(600),
+            );
+            assert!(
+                receive(&backlog, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            let mut joined = Message::new_joined(&rig.mesh, &who);
+            joined.timestamp = UnixSecs::now();
+            let joined = joined.sign(&peer);
+            assert!(
+                !state.mark_seen(&joined),
+                "the frame is new to the seen set"
+            );
+            let observed = observe(&joined, &mut state, &context);
+            handle_presence(
+                PresenceEvent {
+                    message: &joined,
+                    subtype: PresenceSubtype::Joined,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+
+            let beat = alive(&rig.mesh, &who, &peer, UnixSecs::now());
+            assert!(
+                receive(&beat, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert_eq!(
+                live.load(Ordering::Relaxed),
+                2,
+                "the live peer is not counted after its alive: {:?}",
+                rig.sink.lines()
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
     /// The ids of the arrivals this node surfaced for `who`, in order.
     fn arrival_ids(rig: &Rig, who: &str) -> Vec<String> {
         let prefix = format!("presence {who} ");

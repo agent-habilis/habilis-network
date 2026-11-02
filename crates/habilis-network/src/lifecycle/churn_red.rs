@@ -157,9 +157,8 @@ fn a_link_gap_has_no_270_second_cycle() {
         state.starvation_due(first + starved * 2 + Duration::from_secs(1), starved),
         "due 2 x 180 s after the first recovery"
     );
-    assert_ne!(
-        timeout + starved,
-        starved,
-        "the sum 90 + 180 is not a period of the watchdog: it fires at 180, 540, 1260 s"
+    assert!(
+        !state.starvation_due(t0 + timeout + starved, starved),
+        "the sum 90 + 180 is not a period of the watchdog: it is not due at 270 s after a recovery at 181 s"
     );
 }

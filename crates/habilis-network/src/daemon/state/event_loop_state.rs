@@ -258,10 +258,10 @@ pub struct EventLoopState {
     /// arrival (synthetic `joined`, real `Presence::Joined`, or
     /// `peer_return`). Gates departure surfacing so a peer whose
     /// join we never showed never produces a `went quiet` / `has left`
-    /// line — keeps the join-horizon view symmetric. Presentation-only:
-    /// the roster (`peers`) stays complete for
-    /// anti-entropy/membership; `surfaced ⊆ peers` only governs
-    /// what the operator/agent is shown.
+    /// line — keeps the join-horizon view symmetric. The roster (`peers`)
+    /// stays complete for anti-entropy/membership; `surfaced ⊆ peers`
+    /// governs what the operator/agent is shown, and `member_count` counts
+    /// only the peers in `surfaced`.
     pub(crate) surfaced: HashSet<Nickname>,
     /// Last time we broadcast anything. Lets idle daemons suppress
     /// their `Alive` keepalive when they're already chatty.
@@ -673,10 +673,9 @@ impl EventLoopState {
         shown.count() + 1
     }
 
-    /// Write `peer_count = peers.len() + 1` (we add 1
-    /// for self) to the state file, if configured, carrying the current
-    /// `ready` flag, and mirror the count into the advertise counter, if
-    /// present. No-op for neither.
+    /// Write [`Self::member_count`] to the state file, if configured, carrying the current
+    /// `ready` flag, and mirror the count into the advertise counter, if present. No-op for
+    /// neither.
     pub(crate) fn write_peer_count(&self) {
         let count = self.member_count();
         #[cfg(feature = "host")]
