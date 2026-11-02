@@ -278,8 +278,8 @@ pub struct EventLoopState {
     /// line — keeps the join-horizon view symmetric. The roster (`peers`)
     /// stays complete for anti-entropy/membership; `surfaced ⊆ peers`
     /// governs what the operator/agent is shown: the rows of the roster
-    /// snapshot and `member_count` hold only the peers in `surfaced`, plus
-    /// the quiet ones.
+    /// snapshot hold the peers in `surfaced` and the quiet peers, and
+    /// `member_count` counts only the peers in `surfaced`.
     pub(crate) surfaced: HashSet<Nickname>,
     /// Last time we broadcast anything. Lets idle daemons suppress
     /// their `Alive` keepalive when they're already chatty.

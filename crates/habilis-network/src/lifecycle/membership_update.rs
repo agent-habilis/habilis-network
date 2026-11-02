@@ -40,17 +40,18 @@ pub(crate) struct MembershipUpdate {
 /// stamped within the timeout says that its author was alive within the timeout, which is all
 /// that the timeout asks.
 pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
+    if is_live_kind(kind) {
+        return timestamp > UnixSecs::now() - heartbeat::QUIET_TTL;
+    }
     match kind {
         MessageKind::Presence {
             subtype: PresenceSubtype::Left,
         } => false,
         MessageKind::App { .. }
-        | MessageKind::Presence {
-            subtype: PresenceSubtype::Alive | PresenceSubtype::Joined,
-        }
+        | MessageKind::Presence { .. }
         | MessageKind::Ping
-        | MessageKind::Pong { .. } => timestamp > UnixSecs::now() - heartbeat::QUIET_TTL,
-        MessageKind::PeerInfo
+        | MessageKind::Pong { .. }
+        | MessageKind::PeerInfo
         | MessageKind::State
         | MessageKind::Meta
         | MessageKind::Digest
@@ -59,6 +60,20 @@ pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
         | MessageKind::LinkState
         | _ => timestamp > UnixSecs::now() - tuning::alive_timeout(),
     }
+}
+
+/// Whether a frame is of a kind that a peer sends only while it runs: an app message, an
+/// `alive`, a `joined`, a ping or a pong. A `left` is not.
+pub(crate) fn is_live_kind(kind: &MessageKind) -> bool {
+    matches!(
+        kind,
+        MessageKind::App { .. }
+            | MessageKind::Presence {
+                subtype: PresenceSubtype::Alive | PresenceSubtype::Joined,
+            }
+            | MessageKind::Ping
+            | MessageKind::Pong { .. }
+    )
 }
 
 /// Whether a frame stamped `timestamp` is stamped after the newest frame that we heard from the
@@ -90,6 +105,14 @@ fn step_back_spacing() -> Duration {
     ALIVE_INTERVAL / 2
 }
 
+/// A run is dropped when the next frame comes later than this after the one before, on our clock:
+/// a live peer sends a frame every alive interval, so two intervals is the longest gap of a live
+/// stream. A relay that re-sends old frames of a dead peer one by one, minutes apart, never keeps
+/// a run alive.
+fn step_back_window() -> Duration {
+    ALIVE_INTERVAL * 2
+}
+
 /// Count a frame of the quiet `author` that proves presence but is stamped at or below the newest
 /// stamp on record. The clock of the author may have stepped back (a laptop that woke, a clock
 /// that was set right): then its stamps rise from a lower base and never pass the old stamp, which
@@ -109,6 +132,15 @@ fn note_step_back(author: &Nickname, timestamp: UnixSecs, state: &mut EventLoopS
         );
         return false;
     };
+    if now.duration_since(run.at) > step_back_window() {
+        // Frames that come far apart are not the stream of a live peer: start the run again.
+        *run = StepBack {
+            last: timestamp,
+            at: now,
+            count: 1,
+        };
+        return false;
+    }
     let rises = timestamp > run.last;
     let spaced = now.duration_since(run.at) >= step_back_spacing();
     if rises && spaced {
@@ -643,6 +675,34 @@ mod tests {
                 update.stale && !update.returned,
                 "burst frame {index}, with no spacing, returned the peer"
             );
+        }
+    }
+
+    /// A slow series of replays is not a step back. A relay can re-send old frames of a dead peer
+    /// at any time in the quiet hour. Frames that rise but come far apart on our clock are not
+    /// the steady stream of a live peer, so each one starts the run again.
+    #[test]
+    fn a_slow_series_of_replays_does_not_return_a_dead_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, who) = quiet_since_100_secs();
+        let by = Identity::generate();
+        state
+            .peer_stamp
+            .insert(who.clone(), UnixSecs::now() + Duration::from_hours(1));
+        for index in 0..STEP_BACK_FRAMES + 3 {
+            let stamp = UnixSecs::now() + Duration::from_secs(u64::from(index) * 30);
+            let update = compute_observed(&live_frame(&who, &by, stamp), &mut state);
+            assert!(
+                update.stale && !update.returned,
+                "replay {index} of a slow series returned the peer"
+            );
+            if let Some(run) = state.step_back.get_mut(who.as_str()) {
+                // The next replay comes 5 min later on our clock.
+                run.at = run
+                    .at
+                    .checked_sub(Duration::from_mins(5))
+                    .expect("the monotonic clock has run past 5 min since boot");
+            }
         }
     }
 

@@ -37,7 +37,13 @@ pub(crate) fn observe(
     // frame of a durable kind either: it would keep a dead peer from its eviction. A peer that is
     // new to us gets its first entry from any frame, or the sweep could never evict it.
     if !update.stale {
-        let proves = membership_update::proves_presence(&message.kind, message.timestamp);
+        // A frame of a live kind from a peer that is in the roster refreshes it at any stamp: a
+        // peer whose clock runs far behind still talks, and the sweep must not evict it. A
+        // stranger or a quiet peer needs a stamp inside the window of `proves_presence`.
+        let known_and_live = state.peers.contains(message.author.as_str())
+            && membership_update::is_live_kind(&message.kind);
+        let proves =
+            known_and_live || membership_update::proves_presence(&message.kind, message.timestamp);
         match state.last_seen.get_mut(message.author.as_str()) {
             Some(seen) if proves => *seen = Instant::now(),
             Some(_) => {}
@@ -1094,6 +1100,196 @@ mod churn_red {
                 2,
                 "the live peer is not counted after its alive: {:?}",
                 rig.sink.lines()
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// A peer whose clock runs more than the quiet TTL behind stamps every frame outside the window
+    /// in which a live kind proves presence for a stranger. A peer that is already in the roster
+    /// and shown must stay: each live frame of it refreshes its last-heard mark, so the sweep does
+    /// not evict a peer that is talking.
+    #[test]
+    fn a_shown_peer_with_a_clock_2_h_behind_stays_in_the_roster() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let peer = Identity::generate();
+            let mut state = fresh_state();
+            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
+
+            let first = chat(
+                &rig.mesh,
+                &who,
+                &peer,
+                UnixSecs::now() - Duration::from_secs(100),
+            );
+            assert!(
+                receive(&first, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert!(state.surfaced.contains(who.as_str()), "the peer is shown");
+            let silent = Instant::now()
+                .checked_sub(Duration::from_secs(80))
+                .expect("the monotonic clock has run past 80 s since boot");
+            state.last_seen.insert(who.clone(), silent);
+
+            let slow = alive(
+                &rig.mesh,
+                &who,
+                &peer,
+                UnixSecs::now() - Duration::from_hours(2),
+            );
+            assert!(
+                receive(&slow, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            let age = Instant::now().duration_since(state.last_seen[&who]);
+            assert!(
+                age < Duration::from_secs(5),
+                "a live frame of a shown peer did not refresh it: heard {age:?} ago"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// The skew tests on the real path. The newest stamp of a peer is recorded by `observe`, the
+    /// peer goes quiet in the sweep, a copy of its last frame is stale, and its next frame returns
+    /// it. The clock of the peer runs 120 s ahead of ours, or 120 s behind, or a few seconds off.
+    #[test]
+    fn a_skewed_clock_changes_nothing_on_the_real_path() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let clocks = [
+                ("swift-cedar", true, 120),
+                ("lost-heron", false, 120),
+                ("calm-otter", true, 5),
+                ("brave-lynx", false, 5),
+            ];
+            for (name, ahead, secs) in clocks {
+                let who = nick(name);
+                let peer = Identity::generate();
+                let mut state = fresh_state();
+                state.joined_at = UnixSecs::now() - Duration::from_hours(3);
+                let skew = Duration::from_secs(secs);
+                let on_its_clock = |offset: Duration| {
+                    let ours = UnixSecs::now() - offset;
+                    if ahead { ours + skew } else { ours - skew }
+                };
+
+                let last = alive(
+                    &rig.mesh,
+                    &who,
+                    &peer,
+                    on_its_clock(Duration::from_secs(100)),
+                );
+                assert!(
+                    receive(&last, &mut state, &context),
+                    "the frame is new to the seen set"
+                );
+                assert_eq!(
+                    state.peer_stamp.get(who.as_str()),
+                    Some(&last.timestamp),
+                    "{name}: observe did not record the newest stamp"
+                );
+                let gone_quiet = Instant::now()
+                    .checked_sub(alive_timeout() + Duration::from_secs(10))
+                    .expect("the monotonic clock has run past the alive timeout since boot");
+                state.last_seen.insert(who.clone(), gone_quiet);
+                tick_sweep(&mut state, &rig.sink);
+                assert!(
+                    state.quiet.contains(who.as_str()),
+                    "{name}: the peer is quiet"
+                );
+
+                let replay = membership_update::compute_for(&last, &state);
+                assert!(
+                    replay.stale && !replay.returned,
+                    "{name}: a copy of the last frame returned the peer: {replay:?}"
+                );
+                let next = alive(&rig.mesh, &who, &peer, on_its_clock(Duration::ZERO));
+                assert!(
+                    receive(&next, &mut state, &context),
+                    "the frame is new to the seen set"
+                );
+                let lines = rig.sink.lines();
+                let wanted = format!("return {name}");
+                assert!(
+                    lines.contains(&wanted),
+                    "{name}: the next frame did not return the peer: {lines:?}"
+                );
+            }
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// Open (the join horizon). A peer whose clock runs behind our join stamps its frames before
+    /// `joined_at`, so none of them is shown and the peer is never counted, whatever it sends.
+    #[test]
+    #[ignore = "open: the join horizon compares the stamp with our join, so a peer with a slow clock is never shown"]
+    fn a_peer_with_a_clock_behind_our_join_is_counted() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let peer = Identity::generate();
+            let mut state = fresh_state();
+            let live = LiveCount::default();
+            state.live_count = Some(live.clone());
+            state.joined_at = UnixSecs::now();
+
+            let beat = alive(
+                &rig.mesh,
+                &who,
+                &peer,
+                UnixSecs::now() - Duration::from_secs(60),
+            );
+            assert!(
+                receive(&beat, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert_eq!(
+                live.load(Ordering::Relaxed),
+                2,
+                "a live peer whose clock is 60 s behind our join is not counted"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// Open (the join horizon). A quiet peer returns with a frame stamped before our join: the
+    /// return is not shown, so the peer is back in the roster and not counted.
+    #[test]
+    #[ignore = "open: a return stamped before our join is not shown, so the returned peer is not counted"]
+    fn a_return_stamped_before_our_join_is_counted() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let peer = Identity::generate();
+            let mut state = fresh_state();
+            let live = LiveCount::default();
+            state.live_count = Some(live.clone());
+            state.quiet.insert(who.clone());
+            state.joined_at = UnixSecs::now();
+
+            let back = alive(
+                &rig.mesh,
+                &who,
+                &peer,
+                UnixSecs::now() - Duration::from_secs(60),
+            );
+            assert!(
+                receive(&back, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert!(state.peers.contains(who.as_str()), "the peer is back");
+            assert_eq!(
+                live.load(Ordering::Relaxed),
+                2,
+                "a peer that returned with a frame stamped before our join is not counted"
             );
             rig.endpoint.close().await;
         });
