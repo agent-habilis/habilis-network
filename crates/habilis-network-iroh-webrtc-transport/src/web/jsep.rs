@@ -11,26 +11,32 @@
 //! `complete` (which Chromium withholds until every STUN server answered or
 //! timed out).
 
-use wasm_bindgen::JsCast as _;
-use wasm_bindgen::prelude::*;
+use futures::channel::oneshot;
+use wasm_bindgen::prelude::{Closure, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    RtcConfiguration, RtcDataChannel, RtcDataChannelEvent, RtcIceConnectionState,
-    RtcIceGatheringState, RtcPeerConnection, RtcPeerConnectionState, RtcSdpType,
-    RtcSessionDescriptionInit,
+    RtcDataChannel, RtcDataChannelEvent, RtcIceConnectionState, RtcIceGatheringState,
+    RtcPeerConnection, RtcPeerConnectionState, RtcSdpType, RtcSessionDescriptionInit,
 };
 
-use crate::{DATA_CHANNEL_LABEL, SignalEnvelope, accept_ice_uri};
+use crate::{DATA_CHANNEL_LABEL, SignalEnvelope};
 
-use super::transport::BrowserHubTransport;
+use super::ice_servers::IceServers;
+use super::open_peer_connection::OpenPeerConnection;
+use super::pending_answer::PendingAnswer;
+use super::pending_offer::PendingOffer;
+use super::pre_attach_backlog::PreAttachBacklog;
 use iroh_base::EndpointId;
 
+use js_sys::Reflect;
+use std::{cell, fmt, rc};
+use web_sys::console;
 /// How long to wait for the data channel after the answer is applied.
 const CHANNEL_OPEN_DEADLINE_MS: f64 = 60_000.0;
 /// The same deadline for `sleep_ms`, which takes the browser's own `i32`
 /// milliseconds. Written out rather than cast so the two cannot drift and no
 /// truncation is implied.
-const CHANNEL_OPEN_DEADLINE_MS_I32: i32 = 60_000;
+pub(super) const CHANNEL_OPEN_DEADLINE_MS_I32: i32 = 60_000;
 /// How long to let gathering run before settling for the candidates in hand.
 /// This is the ceiling for the no-candidate case only: with a usable set in
 /// hand, [`wait_ice_complete`] exits after [`ICE_QUIET_MS`] instead. Chromium
@@ -45,79 +51,22 @@ const ICE_GATHERING_DEADLINE_MS: f64 = 10_000.0;
 const ICE_QUIET_MS: f64 = 400.0;
 const POLL_MS: i32 = 50;
 
-/// One `RTCIceServer` entry.
-///
-/// No `username`/`credential`: those exist only for TURN, which this crate
-/// refuses (see [`crate::accept_ice_uri`]). Dropping the fields means a
-/// credentialed server cannot be expressed, let alone configured.
-#[derive(Debug, Clone)]
-pub struct IceServer {
-    pub urls: Vec<String>,
-}
-
-/// ICE servers for the browser's own agent.
-#[derive(Debug, Clone)]
-pub struct IceServers(pub Vec<IceServer>);
-
-impl Default for IceServers {
-    fn default() -> Self {
-        // See [`DEFAULT_STUN_HOSTS`](crate::DEFAULT_STUN_HOSTS) for why these
-        // two and no others; the browser wants each as a `stun:` URI.
-        Self(vec![IceServer {
-            urls: crate::DEFAULT_STUN_HOSTS
-                .iter()
-                .map(|host| format!("stun:{host}"))
-                .collect(),
-        }])
-    }
-}
-
-impl IceServers {
-    #[must_use]
-    pub fn host_only() -> Self {
-        Self(Vec::new())
-    }
-
-    fn to_configuration(&self) -> RtcConfiguration {
-        let config = RtcConfiguration::new();
-        let servers = js_sys::Array::new();
-        for server in &self.0 {
-            let entry = js_sys::Object::new();
-            let urls = js_sys::Array::new();
-            // The enforcement point: anything `accept_ice_uri` refuses never
-            // reaches the browser. TURN cannot be configured here even by
-            // mistake, and a query string Safari would throw on is stripped
-            // before it can take down the whole peer connection.
-            for url in server.urls.iter().filter_map(|url| accept_ice_uri(url)) {
-                urls.push(&JsValue::from_str(&url));
-            }
-            if urls.length() == 0 {
-                continue;
-            }
-            let _ = js_sys::Reflect::set(&entry, &JsValue::from_str("urls"), &urls);
-            servers.push(&entry);
-        }
-        config.set_ice_servers(&servers);
-        config
-    }
-}
-
 /// Build an `RTCPeerConnection`, degrading rather than failing when the browser
 /// refuses a server entry.
 ///
 /// The constructor validates every ICE URL and throws on the first bad one, so
-/// a single unusable entry costs the whole connection. [`accept_ice_uri`]
+/// a single unusable entry costs the whole connection. `accept_ice_uri`
 /// filters what we control, but the configuration can still be rejected for a
 /// reason we have not met yet — and a peer connection with no ICE servers still
 /// gathers host candidates, which is strictly better than none at all.
 /// Also reports whether the connection ended up with STUN servers, because
 /// the gathering wait must not hold out for a srflx candidate that can never
 /// arrive — neither on the `host_only()` config nor on this degraded retry.
-fn new_peer_connection(ice: &IceServers) -> Result<(RtcPeerConnection, bool), JsValue> {
+fn create_peer_connection(ice: &IceServers) -> Result<(RtcPeerConnection, bool), JsValue> {
     match RtcPeerConnection::new_with_configuration(&ice.to_configuration()) {
         Ok(peer_connection) => Ok((peer_connection, !ice.0.is_empty())),
         Err(error) => {
-            web_sys::console::warn_1(&JsValue::from_str(&format!(
+            console::warn_1(&JsValue::from_str(&format!(
                 "[habilis-network webrtc] the browser refused the ICE configuration \
                  ({error:?}); retrying with no ICE servers (host candidates only)"
             )));
@@ -128,159 +77,32 @@ fn new_peer_connection(ice: &IceServers) -> Result<(RtcPeerConnection, bool), Js
     }
 }
 
-/// A negotiated browser session attached into a [`BrowserHubTransport`].
-pub struct BrowserSession {
-    pub remote: EndpointId,
-}
-
-impl std::fmt::Debug for BrowserSession {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("BrowserSession")
-            .field("remote", &self.remote)
-            .finish()
-    }
-}
-
-/// An `RTCPeerConnection` that closes itself unless it is released.
-///
-/// Every early return on the way to a session used to drop an open peer
-/// connection without closing it, leaving a live ICE agent — and, when the
-/// public TURN fallback is in play, a live TURN allocation — for as long as the
-/// tab lives. Failures here are routine by design (ICE fails, a peer vanishes
-/// mid-handshake, the offerer never opens its channel), so "routine" was
-/// leaking.
-///
-/// The newtype goes on the *field* rather than the outer struct because `Drop`
-/// and destructuring `let Self { .. } = self` cannot coexist.
-struct OpenPeerConnection {
-    inner: RtcPeerConnection,
-    armed: bool,
-}
-
-impl OpenPeerConnection {
-    fn new(inner: RtcPeerConnection) -> Self {
-        Self { inner, armed: true }
-    }
-
-    /// Hand the connection to whoever owns its lifetime from here — in
-    /// practice the hub, whose session keepalive closes it on drop.
-    fn release(mut self) -> RtcPeerConnection {
-        self.armed = false;
-        self.inner.clone()
-    }
-}
-
-impl std::ops::Deref for OpenPeerConnection {
-    type Target = RtcPeerConnection;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl Drop for OpenPeerConnection {
-    fn drop(&mut self) {
-        if self.armed {
-            self.inner.close();
-        }
-    }
-}
-
-impl std::fmt::Debug for OpenPeerConnection {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("OpenPeerConnection")
-            .field("armed", &self.armed)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Offerer state between producing the offer and applying the answer.
-pub struct PendingOffer {
-    peer_connection: OpenPeerConnection,
-    data_channel: RtcDataChannel,
-    callbacks: Vec<JsValue>,
-}
-
-impl std::fmt::Debug for PendingOffer {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PendingOffer")
-            .finish_non_exhaustive()
-    }
-}
-
-/// Answerer state between sending the answer and the channel opening.
-pub struct PendingAnswer {
-    peer_connection: OpenPeerConnection,
-    /// Filled by `ondatachannel` when the remote opens the channel.
-    channel_rx: futures::channel::oneshot::Receiver<RtcDataChannel>,
-    /// Datagrams that arrived before the hub's handler was installed, in
-    /// arrival order — see the buffering handler in [`answer`].
-    backlog: std::rc::Rc<std::cell::RefCell<PreAttachBacklog>>,
-    callbacks: Vec<JsValue>,
-}
-
-/// The answerer's pre-attach buffer — see the buffering handler in [`answer`].
-///
-/// Bounded at [`IN_QUEUE`](crate::IN_QUEUE), the inbound queue's
-/// own capacity: at handoff the whole buffer is `try_send`-delivered into a
-/// queue of exactly that many slots, so anything held past it could never be
-/// delivered — an unbounded buffer only grew browser memory for as long as
-/// the signal round dawdled, and the excess was dropped at attach anyway.
-/// When full, new datagrams are refused rather than old ones evicted: the
-/// QUIC Initial and handshake flights arrive first, and losing those costs
-/// the connection where losing a later datagram costs a retransmit.
-pub(crate) struct PreAttachBacklog {
-    datagrams: Vec<Vec<u8>>,
-    dropped: usize,
-}
-
-impl PreAttachBacklog {
-    pub(crate) fn new() -> Self {
-        Self {
-            datagrams: Vec::new(),
-            dropped: 0,
-        }
-    }
-
-    pub(crate) fn push(&mut self, bytes: Vec<u8>) {
-        if self.datagrams.len() >= crate::IN_QUEUE {
-            self.dropped += 1;
-            return;
-        }
-        self.datagrams.push(bytes);
-    }
-
-    /// Take everything held, plus how many datagrams were refused over the
-    /// cap. The buffer is empty afterwards, so it cannot deliver twice.
-    pub(crate) fn take(&mut self) -> (Vec<Vec<u8>>, usize) {
-        (
-            std::mem::take(&mut self.datagrams),
-            std::mem::take(&mut self.dropped),
-        )
-    }
-}
-
-impl std::fmt::Debug for PendingAnswer {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PendingAnswer")
-            .finish_non_exhaustive()
-    }
-}
-
 /// Start a negotiation as the offerer.
 ///
 /// # Errors
 /// The peer connection cannot be created, SDP generation fails, or ICE
 /// gathers no candidates.
+///
+/// # Examples
+///
+/// It creates an offer on a browser peer connection, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::{IceServers, browser_offer};
+/// use iroh::EndpointId;
+/// use wasm_bindgen::JsValue;
+///
+/// # async fn demo(local: EndpointId, ice: &IceServers) -> Result<(), JsValue> {
+/// let (_pending, _envelope) = browser_offer(local, ice).await?;
+/// Ok(())
+/// # }
+/// ```
 pub async fn offer(
     local: EndpointId,
     ice: &IceServers,
 ) -> Result<(PendingOffer, SignalEnvelope), JsValue> {
-    let (peer_connection, expects_srflx) = new_peer_connection(ice)?;
+    use wasm_bindgen::JsCast as _;
+    let (peer_connection, expects_srflx) = create_peer_connection(ice)?;
     let peer_connection = OpenPeerConnection::new(peer_connection);
     // Unreliable + unordered: the channel carries QUIC datagrams, and QUIC
     // already owns loss recovery and congestion control. Reliable ordered
@@ -310,7 +132,7 @@ pub async fn offer(
         .sdp();
     require_candidates("offer", &local_sdp)?;
 
-    let envelope = SignalEnvelope::offer(local, local_sdp);
+    let envelope = SignalEnvelope::offer(local, &local_sdp);
     Ok((
         PendingOffer {
             peer_connection,
@@ -321,74 +143,44 @@ pub async fn offer(
     ))
 }
 
-impl PendingOffer {
-    /// Apply the remote answer, wait for the channel, attach into `hub`.
-    ///
-    /// # Errors
-    /// A non-answer envelope, a bad SDP, the channel never opening, or attach.
-    pub async fn complete(
-        self,
-        hub: &BrowserHubTransport,
-        answer: &SignalEnvelope,
-    ) -> Result<BrowserSession, JsValue> {
-        let Self {
-            peer_connection,
-            data_channel,
-            callbacks,
-        } = self;
-
-        let remote = answer
-            .claimed_endpoint()
-            .map_err(|error| any_err("answer endpoint id", error))?;
-        let SignalEnvelope::Answer { sdp, .. } = answer else {
-            return Err(JsValue::from_str("expected an answer envelope"));
-        };
-
-        let answer_init = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
-        answer_init.set_sdp(sdp);
-        JsFuture::from(peer_connection.set_remote_description(&answer_init))
-            .await
-            .map_err(|error| js_err("setRemoteDescription", &error))?;
-
-        // Attach before Open so inbound QUIC Initials are not lost between
-        // the channel opening and the onmessage handler being installed.
-        //
-        // The guard is what makes that early attach safe. If the channel never
-        // opens — ICE failed, or the deadline passed while it was still
-        // Connecting — dropping the guard on the way out removes the session
-        // and closes the handles. Without it the entry stayed forever, because
-        // a channel that never opened never fires `onclose` either: it counted
-        // toward the direct-peer total, answered `has_session` so the pair was
-        // never retried, and told QUIC it was a valid send address.
-        let pc = peer_connection.release();
-        let guard = hub
-            .attach(remote, pc.clone(), data_channel.clone(), callbacks)
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
-        wait_channel_open(&data_channel, &pc).await?;
-        guard.commit();
-        Ok(BrowserSession { remote })
-    }
-}
-
 /// Answer a remote offer.
 ///
 /// # Errors
 /// A non-offer envelope, SDP / peer-connection setup fails, or ICE gathers
 /// no candidates.
+///
+/// # Examples
+///
+/// It creates an answer on a browser peer connection, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::{IceServers, SignalEnvelope, browser_answer};
+/// use iroh::EndpointId;
+/// use wasm_bindgen::JsValue;
+///
+/// # async fn demo(local: EndpointId, offer: &SignalEnvelope, ice: &IceServers) -> Result<(), JsValue> {
+/// let (_pending, _envelope) = browser_answer(local, offer, ice).await?;
+/// Ok(())
+/// # }
+/// ```
 pub async fn answer(
     local: EndpointId,
     offer: &SignalEnvelope,
     ice: &IceServers,
 ) -> Result<(PendingAnswer, SignalEnvelope), JsValue> {
+    use wasm_bindgen::JsCast as _;
     let SignalEnvelope::Offer { sdp, .. } = offer else {
         return Err(JsValue::from_str("expected an offer envelope"));
     };
 
-    let (peer_connection, expects_srflx) = new_peer_connection(ice)?;
+    let (peer_connection, expects_srflx) = create_peer_connection(ice)?;
     let peer_connection = OpenPeerConnection::new(peer_connection);
 
-    let (channel_tx, channel_rx) = futures::channel::oneshot::channel::<RtcDataChannel>();
-    let channel_tx = std::cell::RefCell::new(Some(channel_tx));
+    let (channel_tx, channel_rx): (
+        oneshot::Sender<RtcDataChannel>,
+        oneshot::Receiver<RtcDataChannel>,
+    ) = oneshot::channel();
+    let channel_tx = cell::RefCell::new(Some(channel_tx));
     // Everything that arrives before the hub's own `onmessage` is installed.
     //
     // The offerer has no such gap: it owns the channel from `create_data_channel`
@@ -405,22 +197,23 @@ pub async fn answer(
     // `maxRetransmits: 0`, so SCTP will not resend, and QUIC's own recovery
     // rides the same lane. So the handler goes on immediately and buffers, and
     // `complete` hands the backlog to the hub in arrival order.
-    let backlog = std::rc::Rc::new(std::cell::RefCell::new(PreAttachBacklog::new()));
+    let backlog = rc::Rc::new(cell::RefCell::new(PreAttachBacklog::new()));
     let mut callbacks: Vec<JsValue> = Vec::new();
-    let early = {
-        let backlog = std::rc::Rc::clone(&backlog);
-        Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+    let early: Closure<dyn FnMut(web_sys::MessageEvent)> = {
+        let backlog = rc::Rc::clone(&backlog);
+        Closure::new(move |event: web_sys::MessageEvent| {
             if let Some(bytes) = super::transport::message_bytes(&event) {
                 backlog.borrow_mut().push(bytes);
             }
         })
     };
-    let ondatachannel = {
-        let early = early.as_ref().unchecked_ref::<js_sys::Function>().clone();
-        Closure::<dyn FnMut(RtcDataChannelEvent)>::new(move |event: RtcDataChannelEvent| {
+    let ondatachannel: Closure<dyn FnMut(RtcDataChannelEvent)> = {
+        let early_function: &js_sys::Function = early.as_ref().unchecked_ref();
+        let early_handler = early_function.clone();
+        Closure::new(move |event: RtcDataChannelEvent| {
             let channel = event.channel();
             channel.set_binary_type(web_sys::RtcDataChannelType::Arraybuffer);
-            channel.set_onmessage(Some(&early));
+            channel.set_onmessage(Some(&early_handler));
             if let Some(tx) = channel_tx.borrow_mut().take() {
                 let _ = tx.send(channel);
             }
@@ -452,7 +245,7 @@ pub async fn answer(
         .sdp();
     require_candidates("answer", &local_sdp)?;
 
-    let envelope = SignalEnvelope::answer(local, local_sdp);
+    let envelope = SignalEnvelope::answer(local, &local_sdp);
     callbacks.push(ondatachannel.into_js_value());
     Ok((
         PendingAnswer {
@@ -465,91 +258,34 @@ pub async fn answer(
     ))
 }
 
-impl PendingAnswer {
-    /// Wait for the offerer's data channel, then attach into `hub`.
-    ///
-    /// `remote` is the authenticated peer id (prefer `connection.remote_id()`
-    /// over the envelope claim).
-    ///
-    /// # Errors
-    /// The channel never arrives or attach fails.
-    pub async fn complete(
-        self,
-        hub: &BrowserHubTransport,
-        remote: EndpointId,
-    ) -> Result<BrowserSession, JsValue> {
-        let Self {
-            peer_connection,
-            channel_rx,
-            backlog,
-            callbacks,
-        } = self;
-
-        let data_channel = match futures::future::select(
-            channel_rx,
-            Box::pin(async {
-                sleep_ms(CHANNEL_OPEN_DEADLINE_MS_I32).await;
-            }),
-        )
-        .await
-        {
-            futures::future::Either::Left((Ok(channel), _)) => channel,
-            futures::future::Either::Left((Err(_), _)) => {
-                return Err(JsValue::from_str("data channel sender dropped"));
-            }
-            futures::future::Either::Right(((), _)) => {
-                return Err(JsValue::from_str("timed out waiting for ondatachannel"));
-            }
-        };
-
-        // Attach before Open — same race as the offerer path: the peer may
-        // dial the mount ALPN the instant its channel is open. Same guard, for
-        // the same reason; see `PendingOffer::complete`. `attach` installs the
-        // hub's own `onmessage`, replacing the buffering one.
-        let pc = peer_connection.release();
-        let guard = hub
-            .attach(remote, pc.clone(), data_channel.clone(), callbacks)
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
-        // Hand over what arrived before that handler existed, in arrival order
-        // and before anything the hub receives itself — the channel is
-        // unordered, so this is not a sequencing promise, only a refusal to
-        // reorder what we already hold. Taken (not cloned) so the buffer cannot
-        // be delivered twice if this is ever called again.
-        let (early, over_cap) = backlog.borrow_mut().take();
-        if over_cap > 0 {
-            web_sys::console::warn_1(&JsValue::from_str(&format!(
-                "[habilis-network webrtc] pre-attach backlog refused {over_cap} datagram(s) over its cap for {remote}"
-            )));
-        }
-        if !early.is_empty() {
-            web_sys::console::log_1(&JsValue::from_str(&format!(
-                "[habilis-network webrtc] delivered {} datagram(s) buffered before attach for {remote}",
-                early.len()
-            )));
-            hub.inject_inbound(remote, early);
-        }
-        wait_channel_open(&data_channel, &pc).await?;
-        guard.commit();
-        Ok(BrowserSession { remote })
-    }
-}
-
 /// Log local/remote SDP snippets when a dial fails after envelopes were swapped.
+///
+/// # Examples
+///
+/// It logs the SDP of a live signal, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_iroh_webrtc_transport::{SignalEnvelope, log_signal_sdps};
+///
+/// # fn demo(local: &SignalEnvelope, remote: &SignalEnvelope) {
+/// log_signal_sdps("offer", local, remote);
+/// # }
+/// ```
 pub fn log_signal_sdps(role: &str, local: &SignalEnvelope, remote: &SignalEnvelope) {
     let local_sdp = envelope_sdp(local).unwrap_or("");
     let remote_sdp = envelope_sdp(remote).unwrap_or("");
-    web_sys::console::log_1(&JsValue::from_str(&format!(
+    console::log_1(&JsValue::from_str(&format!(
         "[habilis-network webrtc] {role} local candidates: {}",
         format_candidate_counts(local_sdp)
     )));
-    web_sys::console::log_1(&JsValue::from_str(&format!(
+    console::log_1(&JsValue::from_str(&format!(
         "[habilis-network webrtc] {role} remote candidates: {}",
         format_candidate_counts(remote_sdp)
     )));
-    web_sys::console::log_1(&JsValue::from_str(&format!(
+    console::log_1(&JsValue::from_str(&format!(
         "[habilis-network webrtc] {role} local SDP:\n{local_sdp}"
     )));
-    web_sys::console::log_1(&JsValue::from_str(&format!(
+    console::log_1(&JsValue::from_str(&format!(
         "[habilis-network webrtc] {role} remote SDP:\n{remote_sdp}"
     )));
 }
@@ -561,11 +297,11 @@ fn envelope_sdp(envelope: &SignalEnvelope) -> Option<&str> {
     }
 }
 
-fn js_err(context: &str, error: &JsValue) -> JsValue {
+pub(super) fn js_err(context: &str, error: &JsValue) -> JsValue {
     JsValue::from_str(&format!("{context}: {error:?}"))
 }
 
-fn any_err(context: &str, error: impl std::fmt::Display) -> JsValue {
+pub(super) fn any_err(context: &str, error: impl fmt::Display) -> JsValue {
     JsValue::from_str(&format!("{context}: {error}"))
 }
 
@@ -635,7 +371,7 @@ pub(super) fn now_ms() -> f64 {
 fn require_candidates(role: &str, sdp: &str) -> Result<(), JsValue> {
     let (host, mdns, srflx, relay, other) = count_candidates(sdp);
     let total = host + mdns + srflx + relay + other;
-    web_sys::console::log_1(&JsValue::from_str(&format!(
+    console::log_1(&JsValue::from_str(&format!(
         "[habilis-network webrtc] {role} ICE candidates: host={host} mdns={mdns} srflx={srflx} relay={relay} other={other}"
     )));
     if total == 0 {
@@ -718,7 +454,7 @@ fn channel_state_label(state: web_sys::RtcDataChannelState) -> &'static str {
     }
 }
 
-async fn wait_channel_open(
+pub(super) async fn wait_channel_open(
     data_channel: &RtcDataChannel,
     peer_connection: &RtcPeerConnection,
 ) -> Result<(), JsValue> {
@@ -770,7 +506,7 @@ async fn wait_channel_open(
 /// a single candidate was gathered, so `require_candidates` rejected the answer
 /// ~55 ms in, and the 60 s `ondatachannel` guard lost its race on the first
 /// tick and reported "timed out waiting for ondatachannel". A Node peer could
-/// therefore never complete a WebRTC handshake, in either role.
+/// therefore never complete a `WebRTC` handshake, in either role.
 ///
 /// Resolving immediately is kept only for a global with no `setTimeout` at all,
 /// where hanging really would be worse.
@@ -778,7 +514,7 @@ pub(super) async fn sleep_ms(millis: i32) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         use wasm_bindgen::JsCast as _;
         let global = js_sys::global();
-        match js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout")) {
+        match Reflect::get(&global, &JsValue::from_str("setTimeout")) {
             Ok(set_timeout) if set_timeout.is_function() => {
                 let set_timeout: js_sys::Function = set_timeout.unchecked_into();
                 let _ = set_timeout.call2(&global, &resolve, &JsValue::from(millis));
@@ -794,12 +530,12 @@ pub(super) async fn sleep_ms(millis: i32) {
 #[cfg(test)]
 mod tests {
     use super::{ICE_QUIET_MS, PreAttachBacklog, count_candidates, gathering_settled};
-    use habilis_network_test_tracing::test;
 
     const QUIET: f64 = ICE_QUIET_MS;
 
     #[test]
     fn the_pre_attach_backlog_is_bounded_at_the_inbound_queue() {
+        let _guard = ::habilis_network_test_tracing::init();
         // `inject_inbound` try_sends into a queue of exactly IN_QUEUE slots,
         // so anything held past that could never be delivered: an unbounded
         // buffer only grew browser memory until attach, where the excess was
@@ -827,55 +563,98 @@ mod tests {
             "the earliest datagrams win"
         );
         // Taken means gone: a second take delivers nothing twice.
-        assert_eq!(backlog.take().0.len(), 0);
+        assert_eq!(
+            backlog.take().0.len(),
+            0,
+            "the pre-attach backlog is bounded at the inbound queue"
+        );
     }
 
     #[test]
     fn a_srflx_with_an_mdns_raddr_counts_as_srflx() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Some browsers obfuscate the related address too: `raddr abc.local`
         // on a srflx line. Reading any `.local` as mdns kept srflx at zero,
         // which held `gathering_settled` open for the browser's full
         // gathering ladder on every offer and answer.
         let sdp =
             "a=candidate:1 1 udp 1686052607 1.2.3.4 50000 typ srflx raddr abc.local rport 9\r\n";
-        assert_eq!(count_candidates(sdp), (0, 0, 1, 0, 0));
+        assert_eq!(
+            count_candidates(sdp),
+            (0, 0, 1, 0, 0),
+            "a srflx candidate with an mdns raddr counts as srflx"
+        );
     }
 
     #[test]
     fn an_mdns_obfuscated_host_still_counts_as_mdns() {
+        let _guard = ::habilis_network_test_tracing::init();
         let sdp = "a=candidate:1 1 udp 2113937151 abcd1234.local 54321 typ host generation 0\r\n";
-        assert_eq!(count_candidates(sdp), (0, 1, 0, 0, 0));
+        assert_eq!(
+            count_candidates(sdp),
+            (0, 1, 0, 0, 0),
+            "an mdns obfuscated host still counts as mdns"
+        );
     }
 
     #[test]
     fn no_candidates_never_settles() {
-        assert!(!gathering_settled(0, 0, QUIET * 100.0, true));
-        assert!(!gathering_settled(0, 0, QUIET * 100.0, false));
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            !gathering_settled(0, 0, QUIET * 100.0, true),
+            "no candidates never settles at a long quiet period"
+        );
+        assert!(
+            !gathering_settled(0, 0, QUIET * 100.0, false),
+            "no candidates never settles without a srflx wait"
+        );
     }
 
     #[test]
     fn srflx_is_required_when_stun_servers_are_configured() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Host-only in hand: keep waiting — srflx is the only NAT rung.
-        assert!(!gathering_settled(2, 0, QUIET, true));
-        assert!(gathering_settled(2, 1, QUIET, true));
+        assert!(
+            !gathering_settled(2, 0, QUIET, true),
+            "srflx is required when stun servers are configured"
+        );
+        assert!(
+            gathering_settled(2, 1, QUIET, true),
+            "one srflx candidate settles when stun servers are configured"
+        );
     }
 
     #[test]
     fn srflx_is_waived_without_stun_servers() {
+        let _guard = ::habilis_network_test_tracing::init();
         // host_only() / degraded config: srflx can never arrive.
-        assert!(gathering_settled(1, 0, QUIET, false));
+        assert!(
+            gathering_settled(1, 0, QUIET, false),
+            "srflx is waived without stun servers"
+        );
     }
 
     #[test]
     fn a_fresh_candidate_resets_the_quiet_period() {
-        assert!(!gathering_settled(1, 1, QUIET - 1.0, true));
-        assert!(gathering_settled(1, 1, QUIET, true));
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            !gathering_settled(1, 1, QUIET - 1.0, true),
+            "a fresh candidate resets the quiet period"
+        );
+        assert!(
+            gathering_settled(1, 1, QUIET, true),
+            "a candidate after the quiet period settles"
+        );
     }
 
     #[test]
     fn srflx_alone_is_not_enough() {
+        let _guard = ::habilis_network_test_tracing::init();
         // No host/mdns line yet means gathering only just started; the local
         // candidates are instant, so their absence says "keep waiting".
-        assert!(!gathering_settled(0, 1, QUIET, true));
+        assert!(
+            !gathering_settled(0, 1, QUIET, true),
+            "srflx alone is not enough to settle"
+        );
     }
 }

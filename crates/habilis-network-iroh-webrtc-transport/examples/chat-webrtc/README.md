@@ -44,7 +44,7 @@ needs one).
 cargo run -p chat-native -- host
 
 # 2. the browser half
-./build-wasm.sh
+bun build-wasm.ts
 cd web && bun install && bun run dev
 
 # 3. open the URL the room printed — http://localhost:3000/#<ticket>, on the port dev printed

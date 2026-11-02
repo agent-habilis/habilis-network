@@ -1,7 +1,7 @@
 //! What crosses the wire, and the seam it crosses through.
 //!
 //! The real transport is a habilis-network mesh — that is what this crate is for, and
-//! [`crate::habilis_network_transport`] is the implementation consumers actually use.
+//! `crate::habilis_network_transport` is the implementation consumers actually use.
 //! The trait exists for two reasons: the protocol below has to be testable
 //! against injected packet loss and reordering without standing up a mesh,
 //! and a consumer embedding this somewhere other than habilis-network should not have
@@ -35,7 +35,20 @@ use crate::frame::Frame;
 /// side picks a value when the session starts and ignores anything carrying
 /// a different one, so a straggler from a previous match cannot be mistaken
 /// for live input.
+///
+/// # Examples
+///
+/// A message carries the session nonce, and its body says what the packet is for.
+///
+/// ```
+/// use habilis_network_netplay::Message;
+///
+/// let message: Message<u8> = serde_json::from_str(r#"{"magic":7,"body":{"SyncRequest":{"token":1}}}"#)
+///     .expect("a message");
+/// assert_eq!(message.magic, 7);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Message<I> {
     /// The sender's session nonce.
     pub magic: u32,
@@ -44,7 +57,18 @@ pub struct Message<I> {
 }
 
 /// The packet kinds.
+///
+/// # Examples
+///
+/// A reply and a request with the same token are different packets.
+///
+/// ```
+/// use habilis_network_netplay::Body;
+///
+/// assert_ne!(Body::<u8>::SyncReply { token: 3 }, Body::<u8>::SyncRequest { token: 3 });
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Body<I> {
     /// Handshake, outbound: "echo this back". Repeated a few times so both
     /// sides have evidence the path works in both directions before either
@@ -99,7 +123,21 @@ pub enum Body<I> {
 }
 
 /// A run of consecutive inputs starting at `start_frame`.
+///
+/// # Examples
+///
+/// An input packet carries consecutive inputs from its start frame, with no ack until one arrives.
+///
+/// ```
+/// use habilis_network_netplay::InputPacket;
+///
+/// let packet: InputPacket<u8> = serde_json::from_str(r#"{"start_frame":5,"inputs":[1,2]}"#)
+///     .expect("an input packet");
+/// assert_eq!(packet.inputs, vec![1, 2]);
+/// assert!(packet.ack_frame.is_none());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct InputPacket<I> {
     /// The frame `inputs[0]` belongs to; each subsequent entry is one frame
     /// later.
@@ -117,11 +155,42 @@ pub struct InputPacket<I> {
 /// Non-blocking by contract: [`Self::receive_all`] returns whatever has
 /// arrived and never waits, because it is called from a frame loop that
 /// cannot stall.
+///
+/// # Examples
+///
+/// A transport that delivers nothing returns no packets.
+///
+/// ```
+/// use habilis_network_netplay::Config;
+///
+/// struct Game;
+///
+/// impl Config for Game {
+///     type Input = u8;
+///     type State = u32;
+///     type Address = u8;
+/// }
+///
+/// use habilis_network_netplay::{Message, Transport};
+///
+/// struct Silent;
+///
+/// impl Transport<Game> for Silent {
+///     fn send_to(&mut self, _message: &Message<u8>, _address: &u8) {}
+///
+///     fn receive_all(&mut self) -> Vec<(u8, Message<u8>)> {
+///         Vec::new()
+///     }
+/// }
+///
+/// let mut link = Silent;
+/// assert!(link.receive_all().is_empty());
+/// ```
 pub trait Transport<T: Config> {
     /// Send to one peer. Failure is not reported — this layer treats the
     /// transport as lossy regardless, and a caller that cannot act on the
     /// error would only be able to log it.
-    fn send_to(&mut self, message: &Message<T::Input>, addr: &T::Address);
+    fn send_to(&mut self, message: &Message<T::Input>, address: &T::Address);
 
     /// Everything received since the last call, oldest first.
     fn receive_all(&mut self) -> Vec<(T::Address, Message<T::Input>)>;

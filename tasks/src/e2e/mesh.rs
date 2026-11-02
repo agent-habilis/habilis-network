@@ -5,7 +5,7 @@
 //! (`packages/habilis-network-wasm/harness`), driven cell by cell:
 //!
 //! - **policy** — the mesh's `relay_transport`, on or off;
-//! - **native transports** — everything / WebRTC only / relay only, to force
+//! - **native transports** — everything / `WebRTC` only / relay only, to force
 //!   the punch, the data channel, and the refusal in turn;
 //! - **join mode** — both derive from a topic, the browser joins the id the
 //!   native side minted, or the browser opens the topic first.
@@ -15,17 +15,19 @@
 //! non-linking cell (policy off × native relay-only) must *never* link, and
 //! must say why in the engine's own words (`relay-only path refused`).
 
+use std::{env, fs, io, mem};
+use tokio::time;
+mod bun_server;
+mod native;
+
 use std::fmt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::TaskOutcome;
-use crate::util::cdp;
 use crate::util::page::{rand_token, wait_ready};
-use crate::util::webdriver;
-use crate::util::{output, repo_root, target_dir, wait_for};
+use crate::util::{cdp, output, repo_root, target_dir, wait_for, webdriver};
 
 use habilis_network::membership;
 use habilis_network::protocol::{Lookup, Transport};
@@ -33,7 +35,15 @@ use habilis_network::protocol::{Lookup, Transport};
 use super::page::{Page, call_page, urlencode};
 use super::{Args, Skip, build};
 
-/// A linked pair has to survive the beacon claim (~8 s), a WebRTC
+use habilis_network::net::test_relay;
+use habilis_network::runtime::BROWSER_HAS_NO_PATH;
+use habilis_network::util::tuning;
+use tokio::runtime::Builder;
+use tokio::time::{Instant, Instant as tokio_Instant};
+
+pub(super) use bun_server::BunServer;
+pub(super) use native::Native;
+/// A linked pair has to survive the beacon claim (~8 s), a `WebRTC`
 /// negotiation or a hole punch, and one alive-tick retry.
 pub(super) const LINK_TIMEOUT: Duration = Duration::from_mins(4);
 pub(super) const PAYLOAD_TIMEOUT: Duration = Duration::from_secs(20);
@@ -143,22 +153,22 @@ fn cells(quick: bool) -> Vec<Cell> {
 /// Every tracing line the in-process native peer emits, for grep-shaped
 /// assertions (`relay-only path refused`, the census). One global buffer:
 /// the subscriber is process-wide, and cells run serially.
-fn log_buffer() -> &'static Arc<Mutex<String>> {
-    static BUFFER: OnceLock<Arc<Mutex<String>>> = OnceLock::new();
-    BUFFER.get_or_init(|| Arc::new(Mutex::new(String::new())))
+fn log_buffer() -> &'static Mutex<String> {
+    static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
+    BUFFER.get_or_init(|| Mutex::new(String::new()))
 }
 
 struct BufferWriter;
 
-impl std::io::Write for BufferWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+impl io::Write for BufferWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if let Ok(mut buffer) = log_buffer().lock() {
             buffer.push_str(&String::from_utf8_lossy(buf));
         }
         Ok(buf.len())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
@@ -192,92 +202,11 @@ pub(super) fn logs_contain(needle: &str) -> bool {
 pub(super) fn drain_logs() -> String {
     log_buffer()
         .lock()
-        .map(|mut buffer| std::mem::take(&mut *buffer))
+        .map(|mut buffer| mem::take(&mut *buffer))
         .unwrap_or_default()
 }
 
 // ── the native peer ─────────────────────────────────────────────────────
-
-/// The in-process side of a cell: a live membership plus everything a check
-/// reads — inbound messages, surfaced events, the roster on demand.
-pub(super) struct Native {
-    pub(super) membership: membership::Membership,
-    events: tokio::sync::mpsc::UnboundedReceiver<String>,
-    seen_events: Vec<serde_json::Value>,
-    seen_msgs: Vec<membership::Inbound>,
-}
-
-impl Native {
-    pub(super) async fn open(opts: &membership::Opts) -> Result<Self, Skip> {
-        let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink)
-            .await
-            .map_err(|error| Skip(format!("native peer failed to open: {error:#}")))?;
-        Ok(Self {
-            membership,
-            events,
-            seen_events: Vec::new(),
-            seen_msgs: Vec::new(),
-        })
-    }
-
-    fn pump(&mut self) {
-        while let Ok(json) = self.events.try_recv() {
-            if let Ok(event) = serde_json::from_str(&json) {
-                self.seen_events.push(event);
-            }
-        }
-        while let Ok(msg) = self.membership.inbound.try_recv() {
-            self.seen_msgs.push(msg);
-        }
-    }
-
-    pub(super) fn saw_event(&mut self, kind: &str, nick: &str) -> bool {
-        self.pump();
-        self.seen_events.iter().any(|event| {
-            event.get("kind").and_then(serde_json::Value::as_str) == Some(kind)
-                && event.get("nick").and_then(serde_json::Value::as_str) == Some(nick)
-        })
-    }
-
-    pub(super) fn saw_msg(&mut self, text: &str, directed: bool) -> bool {
-        self.pump();
-        self.seen_msgs
-            .iter()
-            .any(|msg| msg.directed == directed && msg.text == text)
-    }
-
-    pub(super) async fn request<T>(
-        &self,
-        build: impl FnOnce(tokio::sync::oneshot::Sender<T>) -> membership::Request,
-    ) -> Result<T, String> {
-        self.membership.request(build).await
-    }
-
-    pub(super) async fn roster_json(&self) -> String {
-        self.request(|reply| membership::Request::Peers { reply })
-            .await
-            .unwrap_or_default()
-    }
-
-    pub(super) async fn send(&self, to: Option<&str>, text: &str) -> Result<(), String> {
-        let to = membership::parse_to(to).map_err(|error| error.to_string())?;
-        let body = membership::msg_body(text).map_err(|error| error.to_string())?;
-        self.request(|reply| membership::Request::Send { to, body, reply })
-            .await?
-    }
-
-    async fn state_merge(&self, merge: serde_json::Value) -> Result<(), String> {
-        self.request(|reply| membership::Request::StateMerge { merge, reply })
-            .await?
-    }
-
-    async fn state_json(&self) -> String {
-        self.request(|reply| membership::Request::StateJson { reply })
-            .await
-            .unwrap_or_default()
-    }
-}
 
 /// Every payload lane, both directions: broadcast, directed, state merge.
 /// Send from the native side, retrying inside the payload window. The first
@@ -291,15 +220,15 @@ pub(super) async fn native_send_with_retry(
     to: Option<&str>,
     text: &str,
 ) -> Result<(), String> {
-    let deadline = tokio::time::Instant::now() + PAYLOAD_TIMEOUT;
+    let deadline = tokio_Instant::now() + PAYLOAD_TIMEOUT;
     loop {
         let Err(error) = native.send(to, text).await else {
             return Ok(());
         };
-        if tokio::time::Instant::now() >= deadline {
+        if tokio_Instant::now() >= deadline {
             return Err(error);
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -354,63 +283,22 @@ async fn check_payload_lanes(page: &Page, native: &mut Native) -> Result<(), Cel
     if converged.is_none() {
         return Err(fail("the state documents never converged".to_owned()));
     }
-    let deadline = tokio::time::Instant::now() + PAYLOAD_TIMEOUT;
+    let deadline = tokio_Instant::now() + PAYLOAD_TIMEOUT;
     loop {
         let state = native.state_json().await;
         if state.contains("fromNative") && state.contains("fromBrowser") {
             return Ok(());
         }
-        if tokio::time::Instant::now() >= deadline {
+        if tokio_Instant::now() >= deadline {
             return Err(fail(format!(
                 "the native state never converged with the browser's: {state}"
             )));
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
 // ── the served page ─────────────────────────────────────────────────────
-
-/// A Bun dev server (the harness page, the chat page), killed when it goes
-/// out of scope. Stderr is discarded — the old piped-but-never-read handle
-/// could only ever stall the child on a full pipe.
-pub(super) struct BunServer {
-    child: Child,
-    pub(super) url: String,
-}
-
-impl Drop for BunServer {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-impl BunServer {
-    pub(super) fn serve(dir: &std::path::Path, script: &str, what: &str) -> Result<Self, Skip> {
-        let port = free_port()?;
-        let child = Command::new("bun")
-            .arg("run")
-            .arg(script)
-            .arg(port.to_string())
-            .current_dir(dir)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| Skip(format!("could not start bun for {what}: {error}")))?;
-        let server = Self {
-            child,
-            url: format!("http://127.0.0.1:{port}"),
-        };
-        let up = wait_for(Duration::from_secs(30), Duration::from_millis(250), || {
-            crate::util::reachable(&server.url).then_some(())
-        });
-        if up.is_none() {
-            return Err(Skip(format!("the {what} server never came up")));
-        }
-        Ok(server)
-    }
-}
 
 pub(super) use crate::util::webdriver::free_port;
 
@@ -424,8 +312,12 @@ impl fmt::Display for CellFailure {
     }
 }
 
-fn native_opts(cell: &Cell, relay_url: &str, selector: NativeSelector<'_>) -> membership::Opts {
-    let mut opts = membership::Opts::default();
+fn native_opts(
+    cell: &Cell,
+    relay_url: &str,
+    selector: NativeSelector<'_>,
+) -> membership::JoinOptions {
+    let mut opts = membership::JoinOptions::default();
     match selector {
         NativeSelector::Topic(topic) => opts.topic = Some(topic.to_owned()),
         // A topic always uses every lookup; a create names its own, and the
@@ -439,8 +331,8 @@ fn native_opts(cell: &Cell, relay_url: &str, selector: NativeSelector<'_>) -> me
 }
 
 #[derive(Clone, Copy)]
-enum NativeSelector<'a> {
-    Topic(&'a str),
+enum NativeSelector<'topic> {
+    Topic(&'topic str),
     Create,
 }
 
@@ -476,7 +368,7 @@ fn refused_by_the_tab(
         (!failed.is_empty()).then_some(failed)
     })
     .ok_or_else(|| CellFailure("the tab opened a mesh it has no path in".to_owned()))?;
-    if !failed.contains(habilis_network::runtime::BROWSER_HAS_NO_PATH) {
+    if !failed.contains(BROWSER_HAS_NO_PATH) {
         return Err(CellFailure(format!(
             "the tab failed for another reason: {failed}"
         )));
@@ -574,7 +466,7 @@ async fn run_cell(
     // first (`reach: "gossip"`), and their own JSEP round and graft follow
     // on the retry ticks. On a lookup-only mesh a directed frame is *held*
     // until then, so the payload checks below need the `unicast` lane.
-    let deadline = tokio::time::Instant::now() + LINK_TIMEOUT;
+    let deadline = tokio_Instant::now() + LINK_TIMEOUT;
     loop {
         let native_roster = native.roster_json().await;
         if !native_roster.contains("\"browser\"") {
@@ -585,12 +477,12 @@ async fn run_cell(
         if native_roster.contains("\"transport\":\"unicast\"") {
             break;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             return Err(fail(format!(
                 "the pair rostered but never went direct: {native_roster}"
             )));
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
 
     check_payload_lanes(page, &mut native).await?;
@@ -637,13 +529,13 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // the matrix measures the mesh's steady state, and same-id split repair
     // has the engine's own tests. In-process only — the browser side never
     // claims under the stagger, so its defaults stay untouched.
-    habilis_network::util::tuning::init(habilis_network::util::tuning::Tuning {
-        rival_recheck_first: Duration::from_hours(1),
-        rival_recheck: Duration::from_hours(1),
-        rival_recheck_meshed: Duration::from_hours(1),
-        ..habilis_network::util::tuning::Tuning::DEFAULTS
-    });
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    tuning::init(
+        tuning::Tuning::DEFAULTS
+            .rival_recheck_first(Duration::from_hours(1))
+            .rival_recheck(Duration::from_hours(1))
+            .rival_recheck_meshed(Duration::from_hours(1)),
+    );
+    let runtime = Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("no tokio runtime: {error}"))?;
@@ -651,7 +543,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // One relay and one harness server for the whole sweep; topics are
     // random, so cells never meet each other.
     let (relay_url, _relay_server) = runtime
-        .block_on(habilis_network::net::test_relay::spawn_plain())
+        .block_on(test_relay::spawn_plain())
         .map_err(|error| format!("no local relay: {error:#}"))?;
     let harness = BunServer::serve(
         &repo_root().join("packages/habilis-network-wasm"),
@@ -667,7 +559,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     let only = args.page_browser().to_owned();
     // `MESH_CELL=<substring>` narrows the sweep to matching cell labels —
     // for iterating on one failing cell without paying for the rest.
-    let cell_filter = std::env::var("MESH_CELL").ok();
+    let cell_filter = env::var("MESH_CELL").ok();
     let mut failures = 0usize;
     for cell in &cells {
         if let Some(filter) = &cell_filter
@@ -723,7 +615,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
                     "mesh-cell-{}.log",
                     cell.label().replace([' ', '/'], "_")
                 ));
-                let _ = std::fs::write(&dump, format!("{}\n{logs}", browser.join("\n")));
+                let _ = fs::write(&dump, format!("{}\n{logs}", browser.join("\n")));
                 output::detail(&format!("full log: {}", dump.display()));
             }
         }

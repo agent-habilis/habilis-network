@@ -45,6 +45,7 @@
 #![cfg(feature = "host")]
 
 use std::path::{Path, PathBuf};
+use std::process;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -54,20 +55,24 @@ use habilis_network::embed::{
     NodeSink,
 };
 use habilis_network::net::TransportOpts;
-use habilis_network::protocol::message::Authored;
+use habilis_network::protocol::messages::Authored;
 use habilis_network::protocol::{LookupOpts, MeshId, Nickname};
-#[cfg(windows)]
-use habilis_network::runtime::ipc::quit;
-#[cfg(unix)]
-use habilis_network::runtime::ipc::terminate;
 use habilis_network::runtime::ipc::{IpcName, QuitTarget, active_endpoints, send_to_endpoint};
 use habilis_network::runtime::{
-    EventLoopConfig, SetupKind, SetupParams, derive_topic_mesh_with, run, setup_mesh,
+    EventLoopConfig, SetupKind, SetupParams, derive_topic_mesh_with, ipc, run, setup_mesh,
 };
-use habilis_network_test_tracing::test;
 use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::process as tokio_process;
 use tokio::sync::Notify;
 
+#[cfg(windows)]
+use habilis_network_util::win_console;
+#[cfg(windows)]
+use habilis_network_util::win_session;
+#[cfg(windows)]
+use std::io;
+use std::{env, fs, thread};
+use tokio::{runtime, task, time};
 /// The nickname of the test node. A valid Windows file stem too.
 const NICKNAME: &str = "host-test";
 
@@ -95,13 +100,7 @@ struct InfoApp;
 #[habilis_network::async_trait]
 impl NodeApp for InfoApp {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: false,
-            beat: true,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::BEAT.union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -122,16 +121,16 @@ impl NodeDriver for InfoApp {
 
     async fn handle_ipc(
         &mut self,
-        req: IpcRequest<'_, Self::Ipc>,
+        request: IpcRequest<'_, Self::Ipc>,
         _state: &mut EventLoopState,
-        ctx: &HandlerCtx<'_>,
+        context: &HandlerCtx<'_>,
     ) -> bool {
-        let answer = if req.cmd["command"] == "info" {
-            serde_json::json!({ "ok": true, "nickname": NICKNAME, "mesh": ctx.mesh.as_str() })
+        let answer = if request.command["command"] == "info" {
+            serde_json::json!({ "ok": true, "nickname": NICKNAME, "mesh": context.mesh.as_str() })
         } else {
             serde_json::json!({ "ok": false, "error": "unknown command" })
         };
-        let _ = req.resp.send(answer.to_string());
+        let _ = request.response.send(answer.to_string());
         false
     }
 }
@@ -165,19 +164,19 @@ struct TempBase(PathBuf);
 
 impl TempBase {
     fn new(tag: &str) -> Self {
-        let name = format!("hn-{tag}-{}", std::process::id());
+        let name = format!("hn-{tag}-{}", process::id());
         #[cfg(unix)]
         let path = Path::new("/tmp").join(name);
         #[cfg(not(unix))]
-        let path = std::env::temp_dir().join(name);
-        let _ = std::fs::remove_dir_all(&path);
+        let path = env::temp_dir().join(name);
+        let _ = fs::remove_dir_all(&path);
         Self(path)
     }
 }
 
 impl Drop for TempBase {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -186,25 +185,17 @@ impl Drop for TempBase {
 /// the mesh folder.
 async fn cli_config(base: &Path, topic: &str, sink: Arc<dyn NodeSink>) -> EventLoopConfig {
     let mesh = derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("a loopback mesh");
+    let author = Nickname::try_new(NICKNAME).expect("a valid nickname");
+    let params = SetupParams::new(author, sink).max_peers(16).max_direct(0);
+    let params = params
+        .transports(TransportOpts::default())
+        .runtime_base(base.to_path_buf());
     setup_mesh(
         SetupKind::Topic {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author: Nickname::new(NICKNAME).expect("a valid nickname"),
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: Some(base.to_path_buf()),
-            state_file: None,
-            sink,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        params,
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network")
@@ -212,55 +203,57 @@ async fn cli_config(base: &Path, topic: &str, sink: Arc<dyn NodeSink>) -> EventL
 
 /// Each file under `base`, one mesh folder deep, whose name ends with `suffix`.
 fn files_ending_with(base: &Path, suffix: &str) -> Vec<PathBuf> {
-    let Ok(mesh_dirs) = std::fs::read_dir(base) else {
+    let Ok(mesh_dirs) = fs::read_dir(base) else {
         return Vec::new();
     };
-    mesh_dirs
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .flat_map(|dir| std::fs::read_dir(dir).into_iter().flatten().flatten())
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.ends_with(suffix))
-        })
-        .collect()
+    let paths: Vec<PathBuf> = mesh_dirs.flatten().map(|entry| entry.path()).collect();
+    let dirs: Vec<PathBuf> = paths.into_iter().filter(|path| path.is_dir()).collect();
+    let entries_of = |dir: PathBuf| fs::read_dir(dir).into_iter().flatten().flatten();
+    let entries: Vec<fs::DirEntry> = dirs.into_iter().flat_map(entries_of).collect();
+    let files: Vec<PathBuf> = entries.iter().map(fs::DirEntry::path).collect();
+    let ends_with_suffix = |path: &PathBuf| {
+        let name: Option<&str> = path.file_name().and_then(|name| name.to_str());
+        path.is_file() && name.is_some_and(|name| name.ends_with(suffix))
+    };
+    files.into_iter().filter(ends_with_suffix).collect()
 }
 
-#[test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_cli_node_is_found_and_answers_info() {
-    let base = TempBase::new("host");
-    let topic = format!("host-lifecycle-{}", std::process::id());
-    // The child exits with 3 when it reports ready before its endpoint exists.
-    let mut child = ChildNode::spawn(&base.0, &topic, None);
-    let name = match child.endpoint(&base.0).await {
-        Ok((name, _)) => name,
-        Err(what) => child.fail(&what).await,
-    };
+#[test]
+fn a_cli_node_is_found_and_answers_info() {
+    ::habilis_network_test_tracing::run_multi_thread(
+        ::habilis_network_test_tracing::init(),
+        4,
+        async {
+            let base = TempBase::new("host");
+            let topic = format!("host-lifecycle-{}", process::id());
+            // The child exits with 3 when it reports ready before its endpoint exists.
+            let mut child = ChildNode::spawn(&base.0, &topic, None);
+            let name = match child.endpoint(&base.0).await {
+                Ok((name, _)) => name,
+                Err(what) => child.fail(&what).await,
+            };
 
-    let names = active_endpoints(&base.0);
-    assert_eq!(names, vec![name.clone()], "one endpoint under the base");
-    let reply = send_to_endpoint(&name, &serde_json::json!({ "command": "info" }))
-        .await
-        .expect("the Info command answers");
-    let reply: serde_json::Value = serde_json::from_str(&reply).expect("JSON");
-    assert_eq!(reply["ok"], true, "{reply}");
-    assert_eq!(reply["nickname"], NICKNAME, "{reply}");
+            let names: Vec<IpcName> = active_endpoints(&base.0).collect();
+            assert_eq!(names, vec![name.clone()], "one endpoint under the base");
+            let reply = send_to_endpoint(&name, &serde_json::json!({ "command": "info" }))
+                .await
+                .expect("the Info command answers");
+            let reply: serde_json::Value = serde_json::from_str(&reply).expect("JSON");
+            assert_eq!(reply["ok"], true, "{reply}");
+            assert_eq!(reply["nickname"], NICKNAME, "{reply}");
 
-    // In CLI mode the node also writes its state file into the mesh folder.
-    let state_files = files_ending_with(&base.0, &format!("{NICKNAME}.state.json"));
-    assert_eq!(state_files.len(), 1, "one state file: {state_files:?}");
+            // In CLI mode the node also writes its state file into the mesh folder.
+            let state_files = files_ending_with(&base.0, &format!("{NICKNAME}.state.json"));
+            assert_eq!(state_files.len(), 1, "one state file: {state_files:?}");
 
-    if let Ok(Some(status)) = child.process.try_wait() {
-        child
-            .fail(&format!("the child exited during the checks: {status}"))
-            .await;
-    }
-    let _ = child.process.kill().await;
+            if let Ok(Some(status)) = child.process.try_wait() {
+                child
+                    .fail(&format!("the child exited during the checks: {status}"))
+                    .await;
+            }
+            let _ = child.process.kill().await;
+        },
+    );
 }
 
 /// The node of every part, in the child process that [`ChildNode`] starts.
@@ -272,25 +265,25 @@ async fn a_cli_node_is_found_and_answers_info() {
 #[test]
 #[ignore = "the child process of every part"]
 fn child_node() {
-    let Ok(spec) = std::env::var(CHILD_ENV) else {
+    let _guard = ::habilis_network_test_tracing::init();
+    let Ok(spec) = env::var(CHILD_ENV) else {
         return;
     };
     #[cfg(windows)]
-    if std::env::var_os(CTRL_C_ENV).is_some() {
-        habilis_network_util::win_console::allow_ctrl_c().expect("ctrl-c on");
+    if env::var_os(CTRL_C_ENV).is_some() {
+        win_console::allow_ctrl_c().expect("ctrl-c on");
     }
     let mut lines = spec.splitn(3, '\n');
     let base = lines.next().expect("the base");
     let topic = lines.next().expect("the topic");
-    let owner = lines
+    let owner: Option<u32> = lines
         .next()
-        .map(|pid| pid.parse::<u32>().expect("the pid of the owner"));
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .expect("a runtime");
+        .map(|pid| pid.parse().expect("the pid of the owner"));
+    let mut builder = runtime::Builder::new_multi_thread();
+    builder.worker_threads(4).enable_all();
+    let runtime: runtime::Runtime = builder.build().expect("a runtime");
     runtime.block_on(async {
+        // the node reports to it, and the watch below waits on it
         let sink = Arc::new(ReadySink::default());
         // Ready implies the endpoint (part 1): it is there when the node
         // reports ready, with no wait.
@@ -298,16 +291,18 @@ fn child_node() {
         let marker_base = PathBuf::from(base);
         tokio::spawn(async move {
             watched.ready.notified().await;
-            if active_endpoints(&marker_base).is_empty() {
+            if active_endpoints(&marker_base).next().is_none() {
                 eprintln!("the node reported ready before its endpoint existed");
-                std::process::exit(3);
+                process::exit(3);
             }
         });
-        let mut config = cli_config(Path::new(base), topic, sink as Arc<dyn NodeSink>).await;
+        // the node keeps the sink for its whole run
+        let shared: Arc<dyn NodeSink> = sink;
+        let mut config = cli_config(Path::new(base), topic, shared).await;
         if let Some(owner) = owner {
-            config = config.with_owner_pid(owner).expect("a live owner");
+            config = config.set_owner_pid(owner).expect("a live owner");
         }
-        let ran = tokio::time::timeout(
+        let ran = time::timeout(
             Duration::from_mins(1),
             Box::pin(run(config, InfoApp, None, None)),
         )
@@ -321,10 +316,11 @@ fn child_node() {
 #[test]
 #[ignore = "the owner process of part 3"]
 fn owner_process() {
-    if std::env::var_os(OWNER_ENV).is_none() {
+    let _guard = ::habilis_network_test_tracing::init();
+    if env::var_os(OWNER_ENV).is_none() {
         return;
     }
-    std::thread::sleep(Duration::from_mins(2));
+    thread::sleep(Duration::from_mins(2));
 }
 
 /// The sender of part 4, in its own child process, because it leaves its
@@ -336,7 +332,8 @@ fn owner_process() {
 fn console_sender() {
     use habilis_network_util::win_console::{ConsoleEvent, send_console_event};
 
-    let Ok(spec) = std::env::var(SENDER_ENV) else {
+    let _guard = ::habilis_network_test_tracing::init();
+    let Ok(spec) = env::var(SENDER_ENV) else {
         return;
     };
     let (pid, event) = spec.split_once(' ').expect("a pid and an event");
@@ -350,24 +347,23 @@ fn console_sender() {
 
 /// Start the test binary with only `entry` selected. The process is killed on
 /// drop, so a test that fails leaves no child behind.
-fn spawn_entry(entry: &str, env: (&str, &str), stdout: Stdio) -> tokio::process::Command {
+fn spawn_entry(entry: &str, env: (&str, &str), stdout: Stdio) -> tokio_process::Command {
     let mut command =
-        tokio::process::Command::new(std::env::current_exe().expect("the path of the test binary"));
+        tokio_process::Command::new(env::current_exe().expect("the path of the test binary"));
     command
         .args([entry, "--exact", "--ignored", "--nocapture"])
         .env(env.0, env.1)
-        .stdin(Stdio::null())
-        .stdout(stdout)
-        .kill_on_drop(true);
+        .stdin(Stdio::null());
+    command.stdout(stdout).kill_on_drop(true);
     command
 }
 
 /// The child process of every part, with its output read from the start, so
 /// a child that writes much never blocks on a full pipe.
 struct ChildNode {
-    process: tokio::process::Child,
-    stdout: tokio::task::JoinHandle<String>,
-    stderr: tokio::task::JoinHandle<String>,
+    process: tokio_process::Child,
+    stdout: task::JoinHandle<String>,
+    stderr: task::JoinHandle<String>,
 }
 
 impl ChildNode {
@@ -376,7 +372,7 @@ impl ChildNode {
     }
 
     /// The command of the child, before its stderr is piped.
-    fn command(base: &Path, topic: &str, owner: Option<u32>) -> tokio::process::Command {
+    fn command(base: &Path, topic: &str, owner: Option<u32>) -> tokio_process::Command {
         let spec = match owner {
             Some(owner) => format!("{}\n{topic}\n{owner}", base.display()),
             None => format!("{}\n{topic}", base.display()),
@@ -408,7 +404,7 @@ impl ChildNode {
         Self::start(command)
     }
 
-    fn start(mut command: tokio::process::Command) -> Self {
+    fn start(mut command: tokio_process::Command) -> Self {
         let mut process = command
             .stderr(Stdio::piped())
             .spawn()
@@ -434,31 +430,31 @@ impl ChildNode {
     /// endpoint is there once the child has bound it. A slow first start (an
     /// antivirus scan of the binary on Windows) is covered by the 30 s.
     async fn endpoint(&mut self, base: &Path) -> Result<(IpcName, MeshId), String> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = time::Instant::now() + Duration::from_secs(30);
         let name = loop {
-            if let Some(name) = active_endpoints(base).into_iter().next() {
+            if let Some(name) = active_endpoints(base).next() {
                 break name;
             }
             if let Ok(Some(status)) = self.process.try_wait() {
                 return Err(format!("the child exited before its endpoint: {status}"));
             }
-            if tokio::time::Instant::now() >= deadline {
+            if time::Instant::now() >= deadline {
                 return Err("the child bound no endpoint within 30 s".to_owned());
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            time::sleep(Duration::from_millis(50)).await;
         };
         let reply = send_to_endpoint(&name, &serde_json::json!({ "command": "info" }))
             .await
             .map_err(|error| format!("the Info command: {error}"))?;
         let reply: serde_json::Value = serde_json::from_str(&reply).expect("JSON");
-        let mesh = MeshId::new(reply["mesh"].as_str().expect("the mesh in the answer"))
+        let mesh = MeshId::try_new(reply["mesh"].as_str().expect("the mesh in the answer"))
             .expect("a valid mesh id");
         Ok((name, mesh))
     }
 
     /// Wait up to 10 s for the child to exit with 0.
     async fn exits_with_zero(&mut self) -> Result<(), String> {
-        match tokio::time::timeout(Duration::from_secs(10), self.process.wait()).await {
+        match time::timeout(Duration::from_secs(10), self.process.wait()).await {
             Ok(Ok(status)) if status.success() => Ok(()),
             Ok(Ok(status)) => Err(format!("the child exited with {status}, not 0")),
             Ok(Err(error)) => Err(format!("wait for the child: {error}")),
@@ -486,7 +482,7 @@ async fn assert_left_cleanly(base: &Path, name: &IpcName) {
     {
         let markers = files_ending_with(base, ".ipc");
         assert!(markers.is_empty(), "the marker stays: {markers:?}");
-        assert!(active_endpoints(base).is_empty());
+        assert!(active_endpoints(base).next().is_none(), "no endpoint stays");
     }
     assert!(
         send_to_endpoint(name, &serde_json::json!({ "command": "info" }))
@@ -496,60 +492,69 @@ async fn assert_left_cleanly(base: &Path, name: &IpcName) {
     );
 }
 
-#[test(flavor = "multi_thread", worker_threads = 4)]
-async fn quit_stops_a_cli_node_in_a_child_process() {
-    let base = TempBase::new("quit");
-    let topic = format!("host-lifecycle-quit-{}", std::process::id());
-    let mut child = ChildNode::spawn(&base.0, &topic, None);
-    let (name, mesh) = match child.endpoint(&base.0).await {
-        Ok(found) => found,
-        Err(what) => child.fail(&what).await,
-    };
-    let nickname = Nickname::new(NICKNAME).expect("a valid nickname");
+#[test]
+fn quit_stops_a_cli_node_in_a_child_process() {
+    ::habilis_network_test_tracing::run_multi_thread(
+        ::habilis_network_test_tracing::init(),
+        4,
+        async {
+            let base = TempBase::new("quit");
+            let topic = format!("host-lifecycle-quit-{}", process::id());
+            let mut child = ChildNode::spawn(&base.0, &topic, None);
+            let (name, mesh) = match child.endpoint(&base.0).await {
+                Ok(found) => found,
+                Err(what) => child.fail(&what).await,
+            };
+            let nickname = Nickname::try_new(NICKNAME).expect("a valid nickname");
 
-    // On Windows the IPC quit. On Unix the IPC quit does not exist, and
-    // `terminate` sends `SIGTERM`.
-    let target = QuitTarget {
-        base: &base.0,
-        mesh: &mesh,
-        nickname: &nickname,
-    };
-    #[cfg(windows)]
-    let stopped = quit(&target).await.map_err(anyhow::Error::from);
-    #[cfg(unix)]
-    let stopped = terminate(&target, child.process.id().expect("the pid of the child")).await;
-    if let Err(error) = stopped {
-        child.fail(&format!("the stop: {error}")).await;
-    }
-    if let Err(what) = child.exits_with_zero().await {
-        child.fail(&what).await;
-    }
-    assert_left_cleanly(&base.0, &name).await;
+            // On Windows the IPC quit. On Unix the IPC quit does not exist, and
+            // `terminate` sends `SIGTERM`.
+            let target = QuitTarget::new(&base.0, &mesh, &nickname);
+            #[cfg(windows)]
+            let stopped = ipc::quit(&target).await.map_err(io::Error::other);
+            #[cfg(unix)]
+            let stopped =
+                ipc::terminate(&target, child.process.id().expect("the pid of the child")).await;
+            if let Err(error) = stopped {
+                child.fail(&format!("the stop: {error}")).await;
+            }
+            if let Err(what) = child.exits_with_zero().await {
+                child.fail(&what).await;
+            }
+            assert_left_cleanly(&base.0, &name).await;
+        },
+    );
 }
 
-#[test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_owner_watch_stops_a_cli_node_when_its_owner_dies() {
-    let base = TempBase::new("owner");
-    let topic = format!("host-lifecycle-owner-{}", std::process::id());
-    // The owner first: `with_owner_pid` refuses an owner that is not running.
-    let mut owner = spawn_entry("owner_process", (OWNER_ENV, "1"), Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the owner starts");
-    let owner_pid = owner.id().expect("the owner runs");
-    let mut child = ChildNode::spawn(&base.0, &topic, Some(owner_pid));
-    let name = match child.endpoint(&base.0).await {
-        Ok((name, _)) => name,
-        Err(what) => child.fail(&what).await,
-    };
+#[test]
+fn the_owner_watch_stops_a_cli_node_when_its_owner_dies() {
+    ::habilis_network_test_tracing::run_multi_thread(
+        ::habilis_network_test_tracing::init(),
+        4,
+        async {
+            let base = TempBase::new("owner");
+            let topic = format!("host-lifecycle-owner-{}", process::id());
+            // The owner first: `set_owner_pid` refuses an owner that is not running.
+            let mut owner = spawn_entry("owner_process", (OWNER_ENV, "1"), Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("the owner starts");
+            let owner_pid = owner.id().expect("the owner runs");
+            let mut child = ChildNode::spawn(&base.0, &topic, Some(owner_pid));
+            let name = match child.endpoint(&base.0).await {
+                Ok((name, _)) => name,
+                Err(what) => child.fail(&what).await,
+            };
 
-    // `kill` waits for the owner, so the node watches an owner that is gone.
-    // Then one watch interval (1.5 s) and the `Left` delay (500 ms) pass.
-    owner.kill().await.expect("kill the owner");
-    if let Err(what) = child.exits_with_zero().await {
-        child.fail(&what).await;
-    }
-    assert_left_cleanly(&base.0, &name).await;
+            // `kill` waits for the owner, so the node watches an owner that is gone.
+            // Then one watch interval (1.5 s) and the `Left` delay (500 ms) pass.
+            owner.kill().await.expect("kill the owner");
+            if let Err(what) = child.exits_with_zero().await {
+                child.fail(&what).await;
+            }
+            assert_left_cleanly(&base.0, &name).await;
+        },
+    );
 }
 
 /// Part 4: start a node in a console of its own, send it `event` from a third
@@ -557,7 +562,7 @@ async fn the_owner_watch_stops_a_cli_node_when_its_owner_dies() {
 #[cfg(windows)]
 async fn assert_console_event_stops_a_cli_node(tag: &str, event: &str, flags: u32, ctrl_c: bool) {
     let base = TempBase::new(tag);
-    let topic = format!("host-lifecycle-{tag}-{}", std::process::id());
+    let topic = format!("host-lifecycle-{tag}-{}", process::id());
     let mut child = ChildNode::spawn_in_console(&base.0, &topic, flags, ctrl_c);
     let name = match child.endpoint(&base.0).await {
         Ok((name, _)) => name,
@@ -566,16 +571,15 @@ async fn assert_console_event_stops_a_cli_node(tag: &str, event: &str, flags: u3
     let pid = child.process.id().expect("the child runs");
     // `CREATE_NO_WINDOW` shows no window on a runner with no console; the
     // sender leaves that console at once.
-    let sent = spawn_entry(
+    let mut sender = spawn_entry(
         "console_sender",
         (SENDER_ENV, &format!("{pid} {event}")),
         Stdio::piped(),
-    )
-    .stderr(Stdio::piped())
-    .creation_flags(habilis_network_util::win_console::CREATE_NO_WINDOW)
-    .output()
-    .await
-    .expect("the sender runs");
+    );
+    sender
+        .stderr(Stdio::piped())
+        .creation_flags(win_console::CREATE_NO_WINDOW);
+    let sent: process::Output = sender.output().await.expect("the sender runs");
     if !sent.status.success() {
         let output = format!(
             "{}{}",
@@ -595,21 +599,38 @@ async fn assert_console_event_stops_a_cli_node(tag: &str, event: &str, flags: u3
 /// Without the listener of R7, the default handler ends the node with
 /// `STATUS_CONTROL_C_EXIT`, and this test fails.
 #[cfg(windows)]
-#[test(flavor = "multi_thread", worker_threads = 4)]
-async fn ctrl_break_stops_a_cli_node() {
-    use habilis_network_util::win_console::CREATE_NEW_PROCESS_GROUP;
+#[test]
+fn ctrl_break_stops_a_cli_node() {
+    ::habilis_network_test_tracing::run_multi_thread(
+        ::habilis_network_test_tracing::init(),
+        4,
+        async {
+            use habilis_network_util::win_console::CREATE_NEW_PROCESS_GROUP;
 
-    // Ctrl-break goes to a process group, so the node is the root of its own.
-    assert_console_event_stops_a_cli_node("ctrl-break", "break", CREATE_NEW_PROCESS_GROUP, false)
-        .await;
+            // Ctrl-break goes to a process group, so the node is the root of its own.
+            assert_console_event_stops_a_cli_node(
+                "ctrl-break",
+                "break",
+                CREATE_NEW_PROCESS_GROUP,
+                false,
+            )
+            .await;
+        },
+    );
 }
 
 /// A regression test: ctrl-c took the graceful path before R7 too.
 #[cfg(windows)]
-#[test(flavor = "multi_thread", worker_threads = 4)]
-async fn ctrl_c_stops_a_cli_node() {
-    // Not in a new process group: a node in one ignores ctrl-c.
-    assert_console_event_stops_a_cli_node("ctrl-c", "c", 0, true).await;
+#[test]
+fn ctrl_c_stops_a_cli_node() {
+    ::habilis_network_test_tracing::run_multi_thread(
+        ::habilis_network_test_tracing::init(),
+        4,
+        async {
+            // Not in a new process group: a node in one ignores ctrl-c.
+            assert_console_event_stops_a_cli_node("ctrl-c", "c", 0, true).await;
+        },
+    );
 }
 
 /// Part 5: start a node, `send` it a message of the end of the session from a
@@ -618,18 +639,18 @@ async fn ctrl_c_stops_a_cli_node() {
 #[cfg(windows)]
 async fn assert_window_message_stops_a_cli_node(
     tag: &str,
-    send: fn(u32) -> std::io::Result<()>,
+    send: fn(u32) -> io::Result<()>,
     line: &str,
 ) {
     let base = TempBase::new(tag);
-    let topic = format!("host-lifecycle-{tag}-{}", std::process::id());
+    let topic = format!("host-lifecycle-{tag}-{}", process::id());
     let mut child = ChildNode::spawn_with_lifecycle_log(&base.0, &topic);
     let name = match child.endpoint(&base.0).await {
         Ok((name, _)) => name,
         Err(what) => child.fail(&what).await,
     };
     let pid = child.process.id().expect("the child runs");
-    let delivered = tokio::task::spawn_blocking(move || send(pid))
+    let delivered = task::spawn_blocking(move || send(pid))
         .await
         .expect("the send thread");
     if let Err(error) = delivered {
@@ -653,20 +674,36 @@ async fn assert_window_message_stops_a_cli_node(
 /// Without the window of R13, the node has no window to find, and this test
 /// fails.
 #[cfg(windows)]
-#[test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_logoff_stops_a_cli_node() {
-    use habilis_network_util::win_session::send_session_end;
-
-    assert_window_message_stops_a_cli_node("logoff", send_session_end, "session end; leaving")
-        .await;
+#[test]
+fn a_logoff_stops_a_cli_node() {
+    ::habilis_network_test_tracing::run_multi_thread(
+        ::habilis_network_test_tracing::init(),
+        4,
+        async {
+            assert_window_message_stops_a_cli_node(
+                "logoff",
+                win_session::send_session_end,
+                "session end; leaving",
+            )
+            .await;
+        },
+    );
 }
 
 /// `taskkill /PID` without `/F` sends `WM_CLOSE` to the windows of the process.
 #[cfg(windows)]
-#[test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_window_close_stops_a_cli_node() {
-    use habilis_network_util::win_session::post_window_close;
-
-    assert_window_message_stops_a_cli_node("close", post_window_close, "window close; leaving")
-        .await;
+#[test]
+fn a_window_close_stops_a_cli_node() {
+    ::habilis_network_test_tracing::run_multi_thread(
+        ::habilis_network_test_tracing::init(),
+        4,
+        async {
+            assert_window_message_stops_a_cli_node(
+                "close",
+                win_session::post_window_close,
+                "window close; leaving",
+            )
+            .await;
+        },
+    );
 }

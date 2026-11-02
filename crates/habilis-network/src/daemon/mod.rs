@@ -22,7 +22,7 @@
 // browser runs the same event loop as the CLI; it just has fewer inputs to it.
 pub(crate) mod app;
 pub(crate) mod config;
-pub(crate) mod ctx;
+pub(crate) mod handler_ctx;
 pub(crate) mod node;
 // In-memory accounting stores owned by `EventLoopState`. `pub(crate)` so
 // the gossip anti-entropy layer (and its tests) can name `MessageLog` /
@@ -34,6 +34,7 @@ pub(crate) mod params;
 // no longer reads the message log, so log eviction can't break it.
 pub(crate) use crate::reassembly;
 pub(crate) mod setup;
+pub(crate) mod setup_error;
 pub(crate) mod state;
 
 // The session state file the daemon writes for external readers (its
@@ -43,15 +44,16 @@ pub(crate) mod state_file;
 pub(crate) mod timers;
 
 /// Beacon policy: the co-host decision, split out of `event_loop`.
-mod beacon_arm;
+mod cohost_arm;
 pub(crate) mod event_loop;
 /// Mesh healing and resubscribe, split out of `event_loop`.
 mod heal;
 mod probe_backoff;
 /// The graceful-exit path, split out of `event_loop`.
 mod shutdown;
+pub use setup_error::SetupError;
 #[cfg(feature = "host")]
-pub use shutdown::validate_owner_pid;
+pub use shutdown::{OwnerPidError, validate_owner_pid};
 
 // Crate-internal shorthands. The public spelling of all of these is
 // `crate::runtime`, which is what a consumer imports.

@@ -10,9 +10,9 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
-use habilis_network::protocol::message::Authored;
+use habilis_network::protocol::messages::Authored;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
@@ -21,22 +21,18 @@ use habilis_network::iroh::RelayUrl;
 use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, MeshConfig, Nickname, RelayChoice, TransportPolicy};
 use habilis_network::runtime::{
-    Node, SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh,
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config, setup_mesh,
 };
 use tokio::sync::Notify;
 
+use habilis_network::net::test_relay;
+use tokio::time;
 struct Probe;
 
 #[habilis_network::async_trait]
 impl NodeApp for Probe {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: false,
-            beat: true,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::BEAT.union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -64,11 +60,11 @@ struct Joined {
 
 impl NodeSink for Joined {
     fn emit(&self, event: NodeEvent) {
-        if let NodeEvent::Presence { msg, .. } = event {
+        if let NodeEvent::Presence { message, .. } = event {
             self.peers
                 .lock()
                 .expect("no poison")
-                .push(msg.author.clone());
+                .push(message.author.clone());
             self.changed.notify_waiters();
         }
     }
@@ -86,12 +82,12 @@ impl Joined {
                 changed.await;
             }
         };
-        tokio::time::timeout(deadline, wait).await.is_ok() || seen()
+        time::timeout(deadline, wait).await.is_ok() || seen()
     }
 }
 
 async fn wait_for_log(needle: &str, deadline: Duration) -> bool {
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     loop {
         if habilis_network_test_tracing::captured_logs().contains(needle) {
             return true;
@@ -99,15 +95,16 @@ async fn wait_for_log(needle: &str, deadline: Duration) -> bool {
         if started.elapsed() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
 }
 
 fn dump_log_tail() {
     let logs = habilis_network_test_tracing::captured_logs();
-    let tail: Vec<&str> = logs.lines().rev().take(60).collect();
+    let mut tail: Vec<&str> = logs.lines().rev().take(60).collect();
+    tail.reverse();
     eprintln!("--- engine log tail ---");
-    for line in tail.into_iter().rev() {
+    for line in tail {
         eprintln!("{line}");
     }
 }
@@ -116,68 +113,49 @@ async fn spawn_with(
     topic: &str,
     nick: &str,
     relay: &RelayUrl,
+    // each member's sink is shared with the node that writes to it, and the test reads it
     sink: Arc<Joined>,
     transports: TransportOpts,
 ) -> Node<Probe> {
     let mesh = derive_topic_mesh_config(
         topic,
-        MeshConfig {
-            lookups: LookupOpts {
-                mdns: false,
-                dht: false,
-                relay_lookup: RelayChoice::Custom(vec![relay.clone()]),
-            },
-            password: None,
-            issuer_pubkey: None,
-            transport: TransportPolicy {
-                relay_transport: false,
-                ..TransportPolicy::default()
-            },
-        },
+        MeshConfig::new(
+            LookupOpts::new(RelayChoice::Custom(vec![relay.clone()])),
+            None,
+            None,
+            TransportPolicy::default().relay_transport(false),
+        ),
     )
     .expect("derive");
-    let author = Nickname::new(nick).expect("valid nickname");
+    let author = Nickname::try_new(nick).expect("valid nickname");
+    let topic_string = topic.to_owned();
     let config = setup_mesh(
-        SetupKind::Topic {
-            mesh,
-            topic_string: topic.to_owned(),
-        },
-        SetupParams {
-            author,
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports,
-            runtime_base: None,
-            state_file: None,
-            sink,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupKind::Topic { mesh, topic_string },
+        SetupParams::new(author, sink)
+            .max_peers(16)
+            .transports(transports),
     )
     .await
     .expect("setup_mesh");
-    Node::spawn(config, Probe, None, false)
+    Node::spawn(config, Probe, None, SignalHandling::Leave)
 }
 
 #[test]
 fn two_ip_peers_link_through_the_gated_rendezvous() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network=info");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
-        let topic = format!("scratch-link-{}", rand::random::<u64>());
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+        let nonce: u64 = rand::random();
+        let topic = format!("scratch-link-{nonce}");
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let bob_saw = Arc::new(Joined::default());
-        let ip_only = TransportOpts {
-            udp: true,
-            relay: true,
-            webrtc: false,
-            gossip: false,
-        };
+        let ip_only: TransportOpts = TransportOpts::default()
+            .udp(true)
+            .relay(true)
+            .webrtc(false)
+            .gossip(false);
         let alice = spawn_with(&topic, "alice", &relay, Arc::clone(&alice_saw), ip_only).await;
         assert!(
             wait_for_log("beacon role active", Duration::from_mins(1)).await,
@@ -186,8 +164,8 @@ fn two_ip_peers_link_through_the_gated_rendezvous() {
         let bob = spawn_with(&topic, "bob", &relay, Arc::clone(&bob_saw), ip_only).await;
 
         let deadline = Duration::from_secs(75);
-        let alice_nick = Nickname::new("alice").expect("valid");
-        let bob_nick = Nickname::new("bob").expect("valid");
+        let alice_nick = Nickname::try_new("alice").expect("valid");
+        let bob_nick = Nickname::try_new("bob").expect("valid");
         let alice_ok = alice_saw.wait_for(&bob_nick, deadline).await;
         let bob_ok = bob_saw.wait_for(&alice_nick, deadline).await;
         let _ = alice.leave().await;
@@ -209,46 +187,40 @@ fn two_ip_peers_link_through_the_gated_rendezvous() {
 fn a_webrtc_only_peer_links_through_the_beacon_lane() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network=info");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
-        let topic = format!("scratch-lane-{}", rand::random::<u64>());
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+        let nonce: u64 = rand::random();
+        let topic = format!("scratch-lane-{nonce}");
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let alice_saw = Arc::new(Joined::default());
+        // each member's sink is shared with the node that writes to it, and the test reads it
         let bob_saw = Arc::new(Joined::default());
+        let alice_transports: TransportOpts = TransportOpts::default()
+            .udp(true)
+            .relay(true)
+            .webrtc(true)
+            .gossip(false);
         let alice = spawn_with(
             &topic,
             "alice",
             &relay,
             Arc::clone(&alice_saw),
-            TransportOpts {
-                udp: true,
-                relay: true,
-                webrtc: true,
-                gossip: false,
-            },
+            alice_transports,
         )
         .await;
         // Stagger like a real join: the first node claims the beacon, the second
         // finds it held. Simultaneous starts race both into the claim and leave
         // two same-id rendezvous copies shedding each other for the whole test.
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        let bob = spawn_with(
-            &topic,
-            "bob",
-            &relay,
-            Arc::clone(&bob_saw),
-            TransportOpts {
-                udp: false,
-                relay: true,
-                webrtc: true,
-                gossip: false,
-            },
-        )
-        .await;
+        time::sleep(Duration::from_secs(10)).await;
+        let bob_transports: TransportOpts = TransportOpts::default()
+            .udp(false)
+            .relay(true)
+            .webrtc(true)
+            .gossip(false);
+        let bob = spawn_with(&topic, "bob", &relay, Arc::clone(&bob_saw), bob_transports).await;
 
         let deadline = Duration::from_secs(75);
-        let alice_nick = Nickname::new("alice").expect("valid");
-        let bob_nick = Nickname::new("bob").expect("valid");
+        let alice_nick = Nickname::try_new("alice").expect("valid");
+        let bob_nick = Nickname::try_new("bob").expect("valid");
         let alice_ok = alice_saw.wait_for(&bob_nick, deadline).await;
         let bob_ok = bob_saw.wait_for(&alice_nick, deadline).await;
         let _ = alice.leave().await;

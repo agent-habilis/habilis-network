@@ -1,1083 +1,68 @@
-use std::time::Duration;
-
-use anyhow::Result;
-use interprocess::local_socket::{
-    ListenerOptions, Name,
-    tokio::{Listener, Stream, prelude::*},
-};
-use serde::{Serialize, de::DeserializeOwned};
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::sync::mpsc;
-
-use crate::protocol::{MeshId, MessageId, Nickname};
-use crate::util::bounded_read::{LineRead, read_bounded_line};
-use crate::util::clock::millis_saturating;
-use crate::util::consts::{MAX_IPC_COMMAND_BYTES, MAX_IPC_RESPONSE_BYTES};
-#[cfg(windows)]
-use crate::util::file_retry::retry_while_shared;
-use crate::util::tuning::{IPC_ACCEPT_BACKOFF_MAX, IPC_ACCEPT_BACKOFF_MIN, IPC_IO_TIMEOUT};
-use crate::util::{ensure_mesh_runtime_dir, mesh_runtime_dir};
-
-/// The longest marker line that a reader takes. A real name is a socket path
-/// inside the runtime base, or the 49 characters of a pipe name.
-const MAX_IPC_NAME_BYTES: usize = 512;
-
-/// The name of the local control endpoint of one daemon: the path of a unix
-/// socket on Unix, the name of a named pipe (`\\.\pipe\…`) on Windows.
-///
-/// On Unix the name is the socket path in the mesh folder, which a client
-/// derives as the daemon does. On Windows a daemon writes the name in its
-/// marker (`<mesh folder>/<nick>.ipc`), and a client reads it from there, so
-/// discovery does not depend on the endpoint being a file. Not a secret: on
-/// Windows any local account can list pipe names. That is why a Windows name
-/// carries no mesh prefix and no nickname, only `habilis-` and 128 random bits.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct IpcName(String);
-
-impl IpcName {
-    /// Check a raw name, such as a marker line. Not `const`: the field is a
-    /// `String`.
-    ///
-    /// # Errors
-    /// The name is empty, longer than 512 bytes, holds a line break, or is not
-    /// an endpoint of this OS: an absolute path on Unix, a local pipe
-    /// (`\\.\pipe\` and a name) on Windows. A remote pipe (`\\host\pipe\…`) is
-    /// refused.
-    pub fn new(raw: String) -> Result<Self> {
-        anyhow::ensure!(!raw.is_empty(), "an IPC name is empty");
-        anyhow::ensure!(
-            raw.len() <= MAX_IPC_NAME_BYTES,
-            "an IPC name is longer than {MAX_IPC_NAME_BYTES} bytes"
-        );
-        anyhow::ensure!(
-            !raw.contains(['\n', '\r']),
-            "an IPC name holds a line break"
-        );
-        #[cfg(unix)]
-        anyhow::ensure!(
-            std::path::Path::new(&raw).is_absolute(),
-            "the IPC name {raw:?} is not an absolute socket path"
-        );
-        #[cfg(windows)]
-        anyhow::ensure!(
-            raw.strip_prefix(r"\\.\pipe\")
-                .is_some_and(|rest| !rest.is_empty() && !rest.contains('\\')),
-            "the IPC name {raw:?} is not a local named pipe"
-        );
-        Ok(Self(raw))
-    }
-
-    /// The name as text.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// The one conversion into an `interprocess` name, for the server and the
-    /// client alike. `GenericFilePath` takes a socket path on Unix, and on
-    /// Windows a `\\.\pipe\…` path as it is.
-    fn to_name(&self) -> Result<Name<'_>> {
-        use interprocess::local_socket::{GenericFilePath, ToFsName};
-        Ok(self.0.as_str().to_fs_name::<GenericFilePath>()?)
-    }
-}
-
-impl std::fmt::Display for IpcName {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-/// Returns the IPC endpoint identifier for a specific agent on a mesh —
-/// a filesystem socket path (the project targets Unix only). Lives in the
-/// mesh's runtime folder beside its `<nick>.tracing.log` / `<nick>.state.json`.
+mod addressed;
+pub use addressed::Addressed;
+mod bound;
+mod client;
+pub use client::{active_endpoints, send, send_to_endpoint};
 #[cfg(unix)]
-pub(crate) fn socket_path(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -> String {
-    format!(
-        "{}/{nickname}.ipc.sock",
-        mesh_runtime_dir(base, mesh.as_str()).display()
-    )
-}
-
-#[cfg(unix)]
-fn to_name(path: &str) -> Result<Name<'_>> {
-    use interprocess::local_socket::{GenericFilePath, ToFsName};
-    Ok(path.to_fs_name::<GenericFilePath>()?)
-}
-
-/// The path of the marker of `nickname` on `mesh`: `<mesh folder>/<nick>.ipc`.
-/// Windows only: on Unix a client derives the socket path.
+pub use client::{active_socket_paths, send_to_path};
 #[cfg(windows)]
-fn marker_path(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -> std::path::PathBuf {
-    mesh_runtime_dir(base, mesh.as_str()).join(format!("{nickname}.ipc"))
-}
-
-/// Read a marker. `Ok(None)` when there is no marker: no daemon is bound.
-///
-/// # Errors
-/// The marker exists but cannot be read, or its line is no valid [`IpcName`].
+mod engine_control;
 #[cfg(windows)]
-fn read_marker(path: &std::path::Path) -> Result<Option<IpcName>> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => anyhow::bail!("read the IPC marker {}: {error}", path.display()),
-    };
-    // We write LF only; a CRLF from a hand edit is read the same way.
-    let line = text.trim_end_matches(['\r', '\n']);
-    IpcName::new(line.to_owned())
-        .map(Some)
-        .map_err(|error| anyhow::anyhow!("the IPC marker {}: {error}", path.display()))
-}
-
-/// The marker that one daemon wrote, kept on the event-loop state so the
-/// shutdown removes it. Windows only.
+pub(crate) use engine_control::EngineControl;
+mod foreign_endpoint;
+pub use foreign_endpoint::ForeignEndpoint;
+mod ipc_error;
+pub use ipc_error::IpcError;
 #[cfg(windows)]
-#[derive(Debug)]
-pub(crate) struct IpcMarker {
-    path: std::path::PathBuf,
-    name: IpcName,
-}
-
+mod ipc_marker;
 #[cfg(windows)]
-impl IpcMarker {
-    /// Write `name` to the marker at `path`, atomically.
-    fn write(path: std::path::PathBuf, name: IpcName) -> std::io::Result<Self> {
-        let line = format!("{name}\n");
-        crate::daemon::state_file::write_private_atomic(&path, line.as_bytes())?;
-        Ok(Self { path, name })
-    }
-
-    /// Remove the marker only while it still names this daemon. The pipe name
-    /// is per process, so a second daemon with the same nickname on the same
-    /// mesh writes another name over ours, and an unconditional remove at our
-    /// exit would hide that live daemon. The read and the remove are two steps,
-    /// so a write between them is possible: then the marker of the live daemon
-    /// goes, and no client finds it.
-    pub(crate) fn remove_if_ours(&self) {
-        match read_marker(&self.path) {
-            Ok(Some(current)) if current == self.name => {
-                // On Windows a reader without `FILE_SHARE_DELETE` blocks the
-                // remove while it holds the marker (R8 of `docs/windows.md`).
-                if let Err(error) = retry_while_shared(|| std::fs::remove_file(&self.path)) {
-                    tracing::warn!(
-                        target: "habilis_network::lifecycle",
-                        path = %self.path.display(),
-                        %error,
-                        "IPC: could not remove the marker"
-                    );
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// What [`bind`] gives back: the accepting listener, and on Windows the marker
-/// that makes it findable.
-pub(crate) struct Bound {
-    pub(crate) listener: Listener,
-    #[cfg(windows)]
-    pub(crate) marker: IpcMarker,
-}
-
-pub(crate) use super::IpcMessage;
-
-/// A mesh-addressed IPC command. The engine finds the per-mesh endpoint from
-/// the mesh id in [`send`]; `None` means the command is addressed by endpoint
-/// directly (via [`send_to_endpoint`], or `send_to_path` on Unix) and carries
-/// no mesh — the concrete command type is defined app-side, the engine only
-/// needs the address.
-///
-/// On Windows one command name is the engine's own: a JSON object whose
-/// `command` is `"quit"` and whose `mesh` is a valid mesh id is answered by the
-/// engine ([`quit`]) and never reaches the app. On Unix every line reaches the
-/// app.
-pub trait Addressed {
-    fn mesh_id(&self) -> Option<&MeshId>;
-}
-
-/// The commands that the engine answers itself, before the app sees a line.
-/// A line that does not parse as one of them goes to the app as before.
-#[cfg(windows)]
-#[derive(Debug, Serialize, serde::Deserialize)]
-#[serde(tag = "command")]
-enum EngineCommand {
-    /// Stop the daemon by the path of a signal: the state file and the marker
-    /// are removed, then `Left` goes out, then the process exits. `mesh` must be
-    /// the mesh of the daemon, so a stale marker cannot stop another session.
-    #[serde(rename = "quit")]
-    Quit { mesh: MeshId },
-}
-
-#[cfg(windows)]
-impl Addressed for EngineCommand {
-    fn mesh_id(&self) -> Option<&MeshId> {
-        match self {
-            Self::Quit { mesh } => Some(mesh),
-        }
-    }
-}
-
-/// What the accept loop needs to answer the engine's own commands: the mesh of
-/// this session, and the sender of the quit channel that the console events
-/// feed. Windows only.
-#[cfg(windows)]
-pub(crate) struct EngineControl {
-    pub(crate) mesh: MeshId,
-    pub(crate) quit_tx: mpsc::Sender<()>,
-}
-
-/// The start of the error text when a command line does not parse. A daemon
-/// that does not know the engine `quit` answers a quit with it.
-const PARSE_ERROR: &str = "parse error";
-
-/// The error text when a quit names another mesh.
-#[cfg(windows)]
-const QUIT_OF_ANOTHER_MESH: &str = "command mesh id does not match this daemon";
-
-/// Richer `ok` response for the `msg` IPC that also echoes back
-/// the authoritative message record. The echo has the same shape
-/// `poll` returns per entry — `serde_json::to_value(msg)` — so
-/// agents can treat it uniformly with `fetch_messages` results.
-///
-/// A caller that only reads `response["id"]` gets the id; the MCP server
-/// reads the embedded `"message"` field for the full record.
-#[must_use]
-/// # Panics
-/// Panics if an internal invariant is violated.
-pub fn json_ok_msg(id: &MessageId, msg: &crate::protocol::message::Verified) -> String {
-    serde_json::json!({
-        "ok": true,
-        "id": id,
-        "message": serde_json::to_value(msg).expect("Message serialize is infallible"),
-    })
-    .to_string()
-}
-
-/// Lean `{ok, id}` response — used by IPC commands that don't have
-/// a message to echo back (currently test-only).
-#[cfg(test)]
-pub(crate) fn json_ok(id: &str) -> String {
-    serde_json::json!({"ok": true, "id": id}).to_string()
-}
-
-/// Bare `{ok:true}` ack for fire-and-forget IPC commands (`ping`) that
-/// have no id or payload to return.
-#[must_use]
-pub fn json_ack() -> String {
-    serde_json::json!({"ok": true}).to_string()
-}
-
-#[must_use]
-pub fn json_error(error: &str) -> String {
-    serde_json::json!({"ok": false, "error": error}).to_string()
-}
-
-/// Bind the local IPC socket synchronously, returning the listening
-/// socket. Done *before* the daemon marks itself ready so that "ready"
-/// can never precede an accepting socket: a `ready` gate that observes
-/// the readiness flag is then guaranteed a subsequent `connect` succeeds.
-///
-/// # Errors
-/// An invalid socket name, or the OS refusing the bind.
-#[cfg(unix)]
-pub(crate) fn bind(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -> Result<Bound> {
-    let path = socket_path(base, mesh, nickname);
-
-    // The runtime base must exist and be private (0700) before the socket is
-    // created inside it: this control socket has no in-band auth, so the base's
-    // permissions are what keep another local user from reaching it. The choke
-    // point validates the base (fails closed on a squat/symlink) and creates
-    // the mesh folder in one step.
-    ensure_mesh_runtime_dir(base, mesh.as_str())
-        .map_err(|error| anyhow::anyhow!("failed to prepare runtime dir: {error}"))?;
-    // Best-effort cleanup of a stale socket file.
-    let _ = std::fs::remove_file(&path);
-
-    let name = to_name(&path)?;
-    let listener = ListenerOptions::new()
-        .name(name)
-        .create_tokio()
-        .map_err(|error| anyhow::anyhow!("failed to bind IPC socket {path}: {error}"))?;
-    // The socket is a full control plane — inject broadcasts, read and merge
-    // mesh/meta state — with no bearer token (unlike the localhost HTTP TCP
-    // binding). Restrict it to the owner. The 0700 base already blocks other
-    // users; this is defense in depth against a permissive umask on the socket.
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if let Err(error) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-        {
-            tracing::warn!(?path, %error, "IPC socket: could not restrict to 0600");
-        }
-    }
-    tracing::info!(?path, "IPC socket listening");
-    Ok(Bound { listener })
-}
-
-/// Bind the local IPC endpoint synchronously and write its marker, returning
-/// both. Done *before* the daemon marks itself ready so that "ready" can never
-/// precede an accepting endpoint: the listener exists before the marker, and
-/// both before readiness, so a reader that finds the marker can connect.
-///
-/// A failed marker write fails the whole bind: an endpoint with no marker is a
-/// daemon that no client can find.
-///
-/// # Errors
-/// The runtime folder is rejected, the OS refuses the bind, or the marker
-/// cannot be written.
-#[cfg(windows)]
-pub(crate) fn bind(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -> Result<Bound> {
-    ensure_mesh_runtime_dir(base, mesh.as_str())
-        .map_err(|error| anyhow::anyhow!("failed to prepare runtime dir: {error}"))?;
-    let (listener, name) = listen()?;
-    let marker_at = marker_path(base, mesh, nickname);
-    let marker = match IpcMarker::write(marker_at.clone(), name.clone()) {
-        Ok(marker) => marker,
-        Err(error) => {
-            drop(listener);
-            anyhow::bail!(
-                "failed to write the IPC marker {}: {error}",
-                marker_at.display()
-            );
-        }
-    };
-    tracing::info!(
-        target: "habilis_network::lifecycle",
-        name = %name,
-        marker = %marker_at.display(),
-        "IPC listening"
-    );
-    Ok(Bound { listener, marker })
-}
-
-/// The prefix of every pipe name of the engine, before the random part.
-#[cfg(windows)]
-const PIPE_PREFIX: &str = r"\\.\pipe\habilis-";
-
-/// Create the listener of a named pipe (R3 of `docs/windows.md`).
-///
-/// The name is `\\.\pipe\habilis-` and 128 random bits in hex. Pipe names
-/// live in one namespace for the whole machine, and any account can make a pipe
-/// with a free name: a fixed name lets another account make it first, so the
-/// bind fails and clients reach that account. A random name cannot be taken
-/// before it exists. After that it is public (any account lists pipes), so the
-/// security descriptor and the client check of the owner protect it.
-///
-/// The descriptor is `O:<user>D:P(A;;GA;;;<user>)`: the user owns the pipe, also
-/// in an elevated process, and nobody else may open it. With no descriptor, a
-/// pipe gives read access to Everyone. `interprocess` puts the descriptor on
-/// every instance, the first and each one after an accept.
-#[cfg(windows)]
-fn listen() -> Result<(Listener, IpcName)> {
-    use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
-    use interprocess::os::windows::security_descriptor::SecurityDescriptor;
-    use rand::Rng as _;
-
-    let name = IpcName::new(format!(
-        "{PIPE_PREFIX}{:032x}",
-        rand::rng().random::<u128>()
-    ))?;
-    let sddl = crate::util::win_security::user_sddl()
-        .map_err(|error| anyhow::anyhow!("the security descriptor of the IPC pipe: {error}"))?;
-    let sddl = widestring::U16CStr::from_slice(&sddl)
-        .map_err(|error| anyhow::anyhow!("the security descriptor of the IPC pipe: {error}"))?;
-    let descriptor = SecurityDescriptor::deserialize(sddl)
-        .map_err(|error| anyhow::anyhow!("the security descriptor of the IPC pipe: {error}"))?;
-    let listener = ListenerOptions::new()
-        .name(name.to_name()?)
-        .security_descriptor(descriptor)
-        .create_tokio()
-        .map_err(|error| anyhow::anyhow!("failed to bind IPC pipe {name}: {error}"))?;
-    Ok((listener, name))
-}
-
-/// Server-side accept loop over an already-[`bind`]-ed socket: forward
-/// each connection's command to the event loop, or on Windows answer an
-/// engine command with `control`. Spawned after `bind` returns, so by the time
-/// this runs the socket is already accepting.
-pub(crate) async fn serve<C>(
-    listener: Listener,
-    tx: mpsc::Sender<IpcMessage<C>>,
-    #[cfg(windows)] control: EngineControl,
-    sink: std::sync::Arc<dyn crate::gossip::event::NodeSink>,
-) where
-    C: DeserializeOwned + Send + 'static,
-{
-    #[cfg(windows)]
-    let control = std::sync::Arc::new(control);
-    // Accept errors are retried forever: they are almost always
-    // transient (fd exhaustion under load, an aborted handshake), and
-    // the old `break` permanently killed msg/poll for the process
-    // lifetime on the first one — a silent partial outage on a daemon
-    // meant to run for weeks. The backoff keeps a persistently failing
-    // listener from spinning; the operator-facing error event fires
-    // once per failure streak, not once per retry.
-    let mut backoff = IPC_ACCEPT_BACKOFF_MIN;
-    let mut failing = false;
-    loop {
-        match listener.accept().await {
-            Ok(stream) => {
-                backoff = IPC_ACCEPT_BACKOFF_MIN;
-                failing = false;
-                let tx = tx.clone();
-                #[cfg(windows)]
-                let control = std::sync::Arc::clone(&control);
-                tokio::spawn(handle_connection::<C>(
-                    stream,
-                    tx,
-                    #[cfg(windows)]
-                    control,
-                ));
-            }
-            Err(error) => {
-                if !failing {
-                    sink.emit(crate::gossip::event::NodeEvent::Error(format!(
-                        "IPC: accept error (retrying): {error}"
-                    )));
-                    failing = true;
-                }
-                #[cfg(unix)]
-                tracing::warn!(
-                    %error,
-                    backoff_ms = millis_saturating(backoff),
-                    "IPC: accept error; retrying"
-                );
-                #[cfg(windows)]
-                tracing::warn!(
-                    target: "habilis_network::lifecycle",
-                    %error,
-                    backoff_ms = millis_saturating(backoff),
-                    "IPC: accept error; retrying"
-                );
-                tokio::time::sleep(backoff).await;
-                backoff = next_accept_backoff(backoff);
-            }
-        }
-    }
-}
-
-/// Double the accept backoff up to its cap.
-fn next_accept_backoff(current: Duration) -> Duration {
-    current.saturating_mul(2).min(IPC_ACCEPT_BACKOFF_MAX)
-}
-
-async fn handle_connection<C>(
-    stream: Stream,
-    tx: mpsc::Sender<IpcMessage<C>>,
-    #[cfg(windows)] control: std::sync::Arc<EngineControl>,
-) where
-    C: DeserializeOwned + Send + 'static,
-{
-    let (read_half, mut write_half) = tokio::io::split(stream);
-    let mut reader = BufReader::new(read_half);
-
-    // I/O deadline on both legs: a client that connects and goes silent
-    // (or stops draining the response) would otherwise pin this task and
-    // its fd for the daemon's lifetime.
-    let io_deadline = IPC_IO_TIMEOUT;
-    let line = match tokio::time::timeout(
-        io_deadline,
-        read_bounded_line(&mut reader, MAX_IPC_COMMAND_BYTES),
-    )
-    .await
-    {
-        Ok(Ok(LineRead::Line(line))) => line,
-        Ok(Ok(LineRead::TooLong)) => {
-            let error = json_error("command too large");
-            let _ = tokio::time::timeout(
-                io_deadline,
-                write_half.write_all(format!("{error}\n").as_bytes()),
-            )
-            .await;
-            return;
-        }
-        Ok(Ok(LineRead::Eof) | Err(_)) => return,
-        Err(_idle) => {
-            #[cfg(unix)]
-            tracing::debug!("IPC: connection sent nothing within the read deadline; closing");
-            #[cfg(windows)]
-            tracing::debug!(
-                target: "habilis_network::lifecycle",
-                "IPC: connection sent nothing within the read deadline; closing"
-            );
-            return;
-        }
-    };
-
-    // On Windows an engine command first. Any other line, also one that is no
-    // JSON object, goes to the app's own parse, unchanged.
-    #[cfg(windows)]
-    if let Ok(EngineCommand::Quit { mesh }) = serde_json::from_str::<EngineCommand>(line.trim()) {
-        answer_quit(&mesh, &control, &mut write_half).await;
-        return;
-    }
-
-    let response = match serde_json::from_str::<C>(line.trim()) {
-        Err(error) => json_error(&format!("{PARSE_ERROR}: {error}")),
-        Ok(cmd) => {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-            if tx.send((cmd, resp_tx)).await.is_err() {
-                json_error("server channel closed")
-            } else {
-                match resp_rx.await {
-                    Ok(reply) => reply,
-                    Err(_) => json_error("response channel dropped"),
-                }
-            }
-        }
-    };
-
-    let _ = tokio::time::timeout(
-        io_deadline,
-        write_half.write_all(format!("{response}\n").as_bytes()),
-    )
-    .await;
-}
-
-/// Answer a quit, then feed the quit channel. The answer goes first, so the
-/// client has it before the process exits: the shutdown still waits for the
-/// `Left` broadcast before the exit. The channel is fed whatever the write
-/// gave, so a client that does not read cannot keep the daemon up. A full
-/// channel holds a quit already, and a closed one belongs to a loop that has
-/// ended; the answer is right in both cases.
-#[cfg(windows)]
-async fn answer_quit(
-    mesh: &MeshId,
-    control: &EngineControl,
-    write_half: &mut tokio::io::WriteHalf<Stream>,
-) {
-    if *mesh != control.mesh {
-        let error = json_error(QUIT_OF_ANOTHER_MESH);
-        let _ = tokio::time::timeout(
-            IPC_IO_TIMEOUT,
-            write_half.write_all(format!("{error}\n").as_bytes()),
-        )
-        .await;
-        return;
-    }
-    // No mesh id in the line: without an invite, the id is the secret of the mesh.
-    tracing::info!(
-        target: "habilis_network::lifecycle",
-        "IPC: quit requested"
-    );
-    let _ = tokio::time::timeout(
-        IPC_IO_TIMEOUT,
-        write_half.write_all(format!("{}\n", json_ack()).as_bytes()),
-    )
-    .await;
-    let _ = control.quit_tx.try_send(());
-}
-
-/// Nothing is listening on `nickname`'s control socket. Typed rather than a
-/// finished sentence: the remedy is "start one with …", which names a command,
-/// and only the consumer knows what its commands are called. It appends that
-/// half after matching on this.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NoDaemon {
-    pub nickname: Nickname,
-}
-
-impl std::fmt::Display for NoDaemon {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "No active gossip server running for nickname '{}'.",
-            self.nickname
-        )
-    }
-}
-
-impl std::error::Error for NoDaemon {}
-
-/// The endpoint that a client reached is owned by another account: on Windows
-/// the owner of the pipe is not the current user, or its owner cannot be read.
-/// A squat, not an absent daemon, so the remedy "start one" does not fit it. The
-/// client sends nothing to such an endpoint.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ForeignEndpoint {
-    /// The nickname that the client asked for; `None` for [`send_to_endpoint`],
-    /// which addresses the endpoint by name.
-    pub nickname: Option<Nickname>,
-    /// The endpoint that was reached.
-    pub name: IpcName,
-}
-
-impl std::fmt::Display for ForeignEndpoint {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.nickname {
-            Some(nickname) => write!(
-                formatter,
-                "The IPC endpoint for '{nickname}' is held by another user; refusing to talk to it."
-            ),
-            None => write!(
-                formatter,
-                "The IPC endpoint {} is held by another user; refusing to talk to it.",
-                self.name
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ForeignEndpoint {}
-
-/// Why a client could not reach an endpoint.
-enum Unreached {
-    /// Nothing accepts on the name: a stale marker, or a pipe whose DACL leaves
-    /// us out, which is no endpoint of ours either.
-    Absent(std::io::Error),
-    /// The endpoint belongs to another account. Only the Windows connect can
-    /// tell: on Unix the socket sits in the private runtime folder.
-    #[cfg_attr(
-        not(windows),
-        expect(dead_code, reason = "only the Windows connect reads the owner")
-    )]
-    Foreign,
-    /// The name could not be used.
-    Other(anyhow::Error),
-}
-
-/// How long to wait before the next try when every instance of the pipe is busy,
-/// or `None` to give up. `attempt` counts from 0. A new instance follows every
-/// accept and there are 255, so a busy pipe is rare and short.
-#[cfg(any(windows, test))]
-fn pipe_busy_retry(attempt: u32) -> Option<Duration> {
-    const TRIES: u32 = 3;
-    (attempt < TRIES).then_some(Duration::from_millis(50))
-}
-
-/// Connect to `name`. On Unix the socket sits in the private runtime folder, so
-/// a connect is enough. On Windows the client opens the pipe itself with
-/// `SECURITY_IDENTIFICATION`, so the server cannot act as the client, and checks
-/// that `owner` owns the pipe before it sends a byte.
-async fn connect(
-    name: &IpcName,
-    #[cfg(windows)] owner: &crate::util::win_security::Sid,
-) -> std::result::Result<Stream, Unreached> {
-    #[cfg(unix)]
-    {
-        let name_for_os = name.to_name().map_err(Unreached::Other)?;
-        Stream::connect(name_for_os)
-            .await
-            .map_err(Unreached::Absent)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsHandle as _;
-
-        let mut attempt = 0;
-        let handle = loop {
-            match crate::util::win_security::open_pipe_identification(name.as_str()) {
-                Ok(handle) => break handle,
-                Err(error) if crate::util::win_security::is_pipe_busy(&error) => {
-                    let Some(wait) = pipe_busy_retry(attempt) else {
-                        return Err(Unreached::Absent(error));
-                    };
-                    attempt += 1;
-                    tokio::time::sleep(wait).await;
-                }
-                Err(error) => return Err(Unreached::Absent(error)),
-            }
-        };
-        if !crate::util::win_security::handle_owner_is(handle.as_handle(), owner) {
-            tracing::warn!(
-                target: "habilis_network::lifecycle",
-                name = %name,
-                "IPC: the pipe is not owned by this user; refusing it"
-            );
-            return Err(Unreached::Foreign);
-        }
-        let pipe =
-            interprocess::os::windows::named_pipe::local_socket::tokio::Stream::try_from(handle)
-                .map_err(|error| {
-                    Unreached::Other(anyhow::anyhow!("open IPC pipe {name}: {error}"))
-                })?;
-        Ok(Stream::from(pipe))
-    }
-}
-
-/// The owner that a client expects: the current user.
-#[cfg(windows)]
-fn current_owner() -> Result<crate::util::win_security::Sid> {
-    crate::util::win_security::current_user_sid()
-        .map_err(|error| anyhow::anyhow!("read the SID of the current user: {error}"))
-}
-
-/// Client-side: send an IPC command to the running server and return the raw JSON response.
-///
-/// # Panics
-/// If called with a command that carries no mesh id — never: `Info` uses `send_to_path`.
-/// # Errors
-/// [`NoDaemon`] when no server is listening; otherwise an invalid socket name
-/// or a failed request/response round trip.
-#[cfg(unix)]
-pub async fn send<C>(base: &std::path::Path, cmd: &C, nickname: &Nickname) -> Result<String>
-where
-    C: Serialize + Addressed,
-{
-    let mesh = cmd
-        .mesh_id()
-        .expect("send() is only used for mesh-addressed commands; Info uses send_to_path");
-    let path = socket_path(base, mesh, nickname);
-    let name = to_name(&path).map_err(|error| anyhow::anyhow!("invalid socket name: {error}"))?;
-    let stream = Stream::connect(name).await.map_err(|_| NoDaemon {
-        nickname: nickname.clone(),
-    })?;
-    round_trip(stream, cmd).await
-}
-
-/// Client-side: send an IPC command to a specific socket path. `doctor` uses
-/// this to query each live daemon discovered under [`crate::util::runtime_base`] — a
-/// missing/dead socket is a plain `Err` the caller can skip.
-///
-/// # Errors
-/// The path is not valid UTF-8, the socket can't be connected (no live
-/// daemon), or the request/response round trip fails.
-#[cfg(unix)]
-pub async fn send_to_path<C: Serialize>(path: &std::path::Path, cmd: &C) -> Result<String> {
-    use anyhow::Context;
-    let path_str = path.to_str().context("socket path is not valid UTF-8")?;
-    let name =
-        to_name(path_str).map_err(|error| anyhow::anyhow!("invalid socket name: {error}"))?;
-    let stream = Stream::connect(name)
-        .await
-        .map_err(|error| anyhow::anyhow!("connect {path_str}: {error}"))?;
-    round_trip(stream, cmd).await
-}
-
-/// Client-side: send an IPC command to the running server and return the raw JSON response.
-///
-/// The server is found through its marker (`<mesh folder>/<nick>.ipc`).
-/// Windows; on Unix the client derives the socket path.
-///
-/// # Panics
-/// If called with a command that carries no mesh id — never: `Info` uses `send_to_endpoint`.
-/// # Errors
-/// [`NoDaemon`] when no marker exists or nothing accepts on its name;
-/// [`ForeignEndpoint`] when the endpoint belongs to another account; otherwise
-/// an unreadable or invalid marker, or a failed request/response round trip.
-#[cfg(windows)]
-pub async fn send<C>(base: &std::path::Path, cmd: &C, nickname: &Nickname) -> Result<String>
-where
-    C: Serialize + Addressed,
-{
-    let mesh = cmd
-        .mesh_id()
-        .expect("send() is only used for mesh-addressed commands; Info uses send_to_endpoint");
-    let no_daemon = || NoDaemon {
-        nickname: nickname.clone(),
-    };
-    let Some(name) = read_marker(&marker_path(base, mesh, nickname))? else {
-        return Err(no_daemon().into());
-    };
-    let reached = connect(&name, &current_owner()?).await;
-    match reached {
-        Ok(stream) => round_trip(stream, cmd).await,
-        Err(Unreached::Absent(_)) => Err(no_daemon().into()),
-        Err(Unreached::Foreign) => Err(ForeignEndpoint {
-            nickname: Some(nickname.clone()),
-            name,
-        }
-        .into()),
-        Err(Unreached::Other(error)) => Err(error),
-    }
-}
-
-/// Client-side: send an IPC command to the endpoint `name`. `doctor` uses this
-/// to query each live daemon that [`active_endpoints`] found; a stale endpoint
-/// is a plain `Err` that the caller can skip.
-///
-/// # Errors
-/// Nothing accepts on `name` (no live daemon), [`ForeignEndpoint`] when the
-/// endpoint belongs to another account, or the request/response round trip
-/// fails.
-pub async fn send_to_endpoint<C: Serialize>(name: &IpcName, cmd: &C) -> Result<String> {
-    send_to_endpoint_owned_by(
-        name,
-        cmd,
-        #[cfg(windows)]
-        &current_owner()?,
-    )
-    .await
-}
-
-/// [`send_to_endpoint`] with the expected owner as a parameter, so a test can
-/// expect another account and see the refusal.
-async fn send_to_endpoint_owned_by<C: Serialize>(
-    name: &IpcName,
-    cmd: &C,
-    #[cfg(windows)] owner: &crate::util::win_security::Sid,
-) -> Result<String> {
-    let reached = connect(
-        name,
-        #[cfg(windows)]
-        owner,
-    )
-    .await;
-    match reached {
-        Ok(stream) => round_trip(stream, cmd).await,
-        Err(Unreached::Absent(error)) => Err(anyhow::anyhow!("connect {name}: {error}")),
-        Err(Unreached::Foreign) => Err(ForeignEndpoint {
-            nickname: None,
-            name: name.clone(),
-        }
-        .into()),
-        Err(Unreached::Other(error)) => Err(error),
-    }
-}
-
-/// The daemon of one session, at the address that [`send`] takes: the runtime
-/// base, the mesh, and the nickname.
-#[derive(Debug, Clone, Copy)]
-pub struct QuitTarget<'a> {
-    pub base: &'a std::path::Path,
-    pub mesh: &'a MeshId,
-    pub nickname: &'a Nickname,
-}
-
-/// Why [`quit`] did not stop a daemon.
-#[derive(Debug)]
-pub enum QuitError {
-    /// The IPC quit exists only on Windows. On Unix a daemon stops on
-    /// `SIGTERM`, which [`terminate`] sends.
-    Unsupported,
-    /// The quit was not heard: no marker, nothing accepts on the endpoint, an
-    /// endpoint of another account, a failed exchange, or no answer.
-    Unreached(anyhow::Error),
-    /// The daemon answered that it cannot parse the quit: it is of a version
-    /// from before the command. Holds the answer. An app error that starts
-    /// with the same text (`parse error`) reads the same.
-    OldDaemon(String),
-    /// The daemon heard the quit and refused it, for example because the mesh
-    /// is not its own, or answered with something that is no JSON. Holds the
-    /// answer.
-    Refused(String),
-}
-
-impl std::fmt::Display for QuitError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unsupported => {
-                formatter.write_str("the IPC quit is Windows only; on Unix send SIGTERM")
-            }
-            Self::Unreached(error) => write!(formatter, "the quit was not heard: {error}"),
-            Self::OldDaemon(reply) => write!(
-                formatter,
-                "the daemon does not know the quit command: {reply}"
-            ),
-            Self::Refused(reply) => write!(formatter, "the daemon refused the quit: {reply}"),
-        }
-    }
-}
-
-impl std::error::Error for QuitError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Unreached(error) => Some(error.as_ref()),
-            Self::Unsupported | Self::OldDaemon(_) | Self::Refused(_) => None,
-        }
-    }
-}
-
-/// Stop a daemon through its IPC endpoint: the engine's `quit` command. The
-/// daemon answers, then takes the path of a signal: it removes its state file
-/// and its marker, broadcasts `Left`, and exits. `Ok` means that the daemon
-/// accepted the quit, not that it is gone already.
-///
-/// Windows only. On Unix it is [`QuitError::Unsupported`] and opens no
-/// connection: a daemon there stops on `SIGTERM` ([`terminate`]).
-///
-/// # Errors
-/// [`QuitError`]: the quit was not heard, the daemon is too old to know it, or
-/// the daemon refused it; on Unix always `Unsupported`.
-#[cfg(windows)]
-pub async fn quit(target: &QuitTarget<'_>) -> std::result::Result<(), QuitError> {
-    let cmd = EngineCommand::Quit {
-        mesh: target.mesh.clone(),
-    };
-    let reply = send(target.base, &cmd, target.nickname)
-        .await
-        .map_err(QuitError::Unreached)?;
-    quit_outcome(&reply)
-}
-
-/// See the Windows version: on Unix the IPC quit does not exist.
-///
-/// # Errors
-/// Always [`QuitError::Unsupported`].
-#[cfg(unix)]
-pub async fn quit(target: &QuitTarget<'_>) -> std::result::Result<(), QuitError> {
-    let _ = target;
-    Err(QuitError::Unsupported)
-}
-
-/// What the answer to a quit means.
-#[cfg(windows)]
-fn quit_outcome(reply: &str) -> std::result::Result<(), QuitError> {
-    if reply.is_empty() {
-        return Err(QuitError::Unreached(anyhow::anyhow!(
-            "the daemon closed the connection with no answer"
-        )));
-    }
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(reply) else {
-        return Err(QuitError::Refused(reply.to_owned()));
-    };
-    if value["ok"] == true {
-        return Ok(());
-    }
-    let old = value["error"]
-        .as_str()
-        .is_some_and(|error| error.starts_with(PARSE_ERROR));
-    if old {
-        Err(QuitError::OldDaemon(reply.to_owned()))
-    } else {
-        Err(QuitError::Refused(reply.to_owned()))
-    }
-}
-
-/// Stop the daemon of `target`. On Windows it is [`quit`]. On Unix it sends
-/// `SIGTERM` to `pid` ([`crate::util::process::terminate`]) and opens no
-/// connection, as a client did before the port.
-///
-/// Not the same function as `util::process::terminate`: that one only signals
-/// a pid, and on Windows it can do nothing. This one stops a daemon.
-///
-/// On Unix the caller must know that `pid` is the daemon of `target`, for
-/// example from the `pid` of its `Info` answer, or the signal can reach a
-/// process that took over the pid. `pid` is not used on Windows, and `target`
-/// is not used on Unix.
-///
-/// # Errors
-/// On Windows the [`QuitError`] of the quit; on Unix the error of the signal.
-#[cfg(windows)]
-pub async fn terminate(target: &QuitTarget<'_>, pid: u32) -> Result<()> {
-    let _ = pid;
-    quit(target).await.map_err(anyhow::Error::from)
-}
-
-/// See the Windows version.
-///
-/// # Errors
-/// The error of the signal: no such process, or no permission.
-#[cfg(unix)]
-pub async fn terminate(target: &QuitTarget<'_>, pid: u32) -> Result<()> {
-    let _ = target;
-    crate::util::process::terminate(pid)
-        .map_err(|signal| anyhow::Error::from(signal).context(format!("SIGTERM to pid {pid}")))
-}
-
-/// Write `cmd`, half-close, and read back the single-line JSON response.
-/// The shared body of [`send`], [`send_to_endpoint`] and, on Unix,
-/// `send_to_path`.
-async fn round_trip<C: Serialize>(stream: Stream, cmd: &C) -> Result<String> {
-    let (read_half, mut write_half) = tokio::io::split(stream);
-
-    let json = serde_json::to_string(cmd)?;
-    write_half.write_all(format!("{json}\n").as_bytes()).await?;
-    write_half.shutdown().await?;
-
-    let mut reader = BufReader::new(read_half);
-    match read_bounded_line(&mut reader, MAX_IPC_RESPONSE_BYTES).await? {
-        LineRead::Line(line) => Ok(line.trim().to_string()),
-        LineRead::Eof => Ok(String::new()),
-        LineRead::TooLong => anyhow::bail!("IPC response too large"),
-    }
-}
-
-/// Every live daemon's IPC socket on this machine — one `<nick>.ipc.sock`
-/// inside each mesh's folder (`<base>/<mesh-prefix>/`). Best-effort: a missing
-/// base yields an empty list. Drives the consumer's active-mesh discovery, so it
-/// walks the per-mesh subfolders.
-#[cfg(unix)]
-#[must_use]
-pub fn active_socket_paths(base: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let Ok(mesh_dirs) = std::fs::read_dir(base) else {
-        return Vec::new();
-    };
-    mesh_dirs
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .flat_map(|dir| std::fs::read_dir(dir).into_iter().flatten().flatten())
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "sock"))
-        .collect()
-}
-
-/// The endpoint of every daemon under `base`, as [`IpcName`]s. On Unix these
-/// are the sockets of [`active_socket_paths`]; a path that is no valid name,
-/// such as one that is not UTF-8, is skipped. The list is sorted, so its order
-/// is stable.
-#[cfg(unix)]
-#[must_use]
-pub fn active_endpoints(base: &std::path::Path) -> Vec<IpcName> {
-    let mut names: Vec<IpcName> = active_socket_paths(base)
-        .into_iter()
-        .filter_map(|path| path.into_os_string().into_string().ok())
-        .filter_map(|text| IpcName::new(text).ok())
-        .collect();
-    names.sort();
-    names
-}
-
-/// On Windows, the endpoint of every daemon that has a marker under `base`: one
-/// `<nick>.ipc` inside each mesh folder (`<base>/<mesh-prefix>/`). Best-effort:
-/// a missing base gives an empty list, and a marker that cannot be read or holds
-/// no valid name is skipped with a warn. The tmp file of a marker write
-/// (`<nick>.ipc.tmp.<pid>`) has another extension and is not read. A marker of
-/// a daemon that died stays until a client fails to connect to it, as a stale
-/// socket file did. The list is sorted, so its order is stable.
-#[cfg(windows)]
-#[must_use]
-pub fn active_endpoints(base: &std::path::Path) -> Vec<IpcName> {
-    let Ok(mesh_dirs) = std::fs::read_dir(base) else {
-        return Vec::new();
-    };
-    let mut names: Vec<IpcName> = mesh_dirs
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .flat_map(|dir| std::fs::read_dir(dir).into_iter().flatten().flatten())
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "ipc") && path.is_file())
-        .filter_map(|path| match read_marker(&path) {
-            Ok(name) => name,
-            Err(error) => {
-                tracing::warn!(
-                    target: "habilis_network::lifecycle",
-                    %error,
-                    "IPC: skip a marker"
-                );
-                None
-            }
-        })
-        .collect();
-    names.sort();
-    names
-}
+pub(crate) use ipc_marker::IpcMarker;
+mod ipc_name;
+pub use ipc_name::IpcName;
+mod ipc_name_error;
+pub use ipc_name_error::IpcNameError;
+mod json_reply;
+pub use json_reply::{json_ack, json_error, json_ok_msg};
+mod listener;
+pub(crate) use listener::{bind, serve};
+mod no_daemon;
+pub use no_daemon::NoDaemon;
+mod quit;
+pub use quit::{quit, terminate};
+mod quit_error;
+pub use quit_error::QuitError;
+mod quit_target;
+pub use quit_target::QuitTarget;
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use serde::{Deserialize, Serialize};
 
     use super::{
-        Addressed, IpcMessage, IpcName, MeshId, Nickname, NoDaemon, QuitError, QuitTarget,
-        active_endpoints, bind, json_error, json_ok, mpsc, pipe_busy_retry, quit, send, serve,
-        terminate,
+        Addressed, IpcError, IpcName, QuitError, QuitTarget, active_endpoints, client, json_reply,
+        listener, quit, terminate,
     };
     #[cfg(windows)]
-    use super::{
-        EngineCommand, EngineControl, QUIT_OF_ANOTHER_MESH, json_ack, quit_outcome,
-        send_to_endpoint,
-    };
-    #[cfg(windows)]
-    use super::{IpcMarker, marker_path, read_marker};
-    #[cfg(unix)]
-    use super::{active_socket_paths, send_to_path, socket_path};
-    #[cfg(windows)]
-    use crate::util::mesh_runtime_dir;
+    use super::{engine_control, ipc_marker, send_to_endpoint};
+    use crate::protocol::{MeshId, Nickname};
+    use crate::transport::IpcMessage;
+    use tokio::sync::mpsc;
 
+    use crate::gossip::event;
+    use crate::util;
+    use crate::util::tuning;
+    #[cfg(not(unix))]
+    use std::env;
+    use std::time::Duration;
+    use std::{fs, path, process, sync};
+    use tokio::time;
+
+    #[cfg(windows)]
+    use serde::de;
+    #[cfg(windows)]
+    use std::mem;
+    #[cfg(windows)]
+    use tokio::task;
     /// A minimal mesh-addressed command standing in for the app's real
     /// `IpcCommand` (which lives app-side): exercises the engine's generic
     /// socket framing without naming any application type.
@@ -1102,32 +87,55 @@ mod tests {
 
     #[test]
     fn json_ok_is_valid_json() {
-        let json = json_ok("abc-123");
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["ok"], true);
-        assert_eq!(parsed["id"], "abc-123");
+        let _guard = ::habilis_network_test_tracing::init();
+        let json = json_reply::json_ok("abc-123");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("the json the ipc reply writes parses");
+        assert_eq!(
+            parsed["ok"], true,
+            "a json ok reply is an object with ok true"
+        );
+        assert_eq!(parsed["id"], "abc-123", "a json ok reply carries the id");
     }
 
     #[test]
     fn json_error_is_valid_json() {
-        let json = json_error("something broke");
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["ok"], false);
-        assert_eq!(parsed["error"], "something broke");
+        let _guard = ::habilis_network_test_tracing::init();
+        let json = json_reply::json_error("something broke");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("the json the ipc reply writes parses");
+        assert_eq!(
+            parsed["ok"], false,
+            "a json error reply is an object with ok false"
+        );
+        assert_eq!(
+            parsed["error"], "something broke",
+            "a json error reply carries the error text"
+        );
     }
 
     #[test]
     fn json_ok_escapes_special_chars() {
-        let json = json_ok(r#"id"with"quotes"#);
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["id"], r#"id"with"quotes"#);
+        let _guard = ::habilis_network_test_tracing::init();
+        let json = json_reply::json_ok(r#"id"with"quotes"#);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("the json the ipc reply writes parses");
+        assert_eq!(
+            parsed["id"], r#"id"with"quotes"#,
+            "an id with quotes is escaped in a json ok reply"
+        );
     }
 
     #[test]
     fn json_error_escapes_special_chars() {
-        let json = json_error(r#"error: "bad input""#);
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["error"], r#"error: "bad input""#);
+        let _guard = ::habilis_network_test_tracing::init();
+        let json = json_reply::json_error(r#"error: "bad input""#);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("the json the ipc reply writes parses");
+        assert_eq!(
+            parsed["error"], r#"error: "bad input""#,
+            "an error with quotes is escaped in a json error reply"
+        );
     }
 
     /// A runtime base of one test alone, removed when the test ends, also when
@@ -1136,57 +144,59 @@ mod tests {
     /// On Unix it is under `/tmp`, not the temp directory: a socket path must
     /// stay inside the `sun_path` limit (about 104 bytes on macOS), and the macOS
     /// temp directory is long.
-    struct TestBase(std::path::PathBuf);
+    struct TestBase(path::PathBuf);
 
     impl TestBase {
         fn new(tag: &str) -> Self {
-            let name = format!("hn-ipc-{}-{tag}", std::process::id());
+            let name = format!("hn-ipc-{}-{tag}", process::id());
             #[cfg(unix)]
-            let path = std::path::Path::new("/tmp").join(name);
+            let path = path::Path::new("/tmp").join(name);
             #[cfg(not(unix))]
-            let path = std::env::temp_dir().join(name);
-            let _ = std::fs::remove_dir_all(&path);
+            let path = env::temp_dir().join(name);
+            let _ = fs::remove_dir_all(&path);
             Self(path)
         }
 
-        fn path(&self) -> &std::path::Path {
+        fn path(&self) -> &path::Path {
             &self.0
         }
     }
 
     impl Drop for TestBase {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            let _ = fs::remove_dir_all(&self.0);
         }
     }
 
     /// A mesh id whose prefix is this process and `tag`, in the Base58 alphabet.
     fn test_mesh(tag: &str) -> MeshId {
-        let pid_b58 = bs58::encode(std::process::id().to_le_bytes()).into_string();
+        let pid_b58 = bs58::encode(process::id().to_le_bytes()).into_string();
         MeshId::from(format!("{tag}{pid_b58}").as_str())
     }
 
     /// A valid pipe name that no endpoint has.
     #[cfg(windows)]
     fn absent_name(tag: &str) -> IpcName {
-        let raw = format!(r"\\.\pipe\habilis-absent-{}-{tag}", std::process::id());
+        let raw = format!(r"\\.\pipe\habilis-absent-{}-{tag}", process::id());
         IpcName::new(raw).expect("a valid name")
     }
 
     /// The endpoint of a bound test daemon, found as a client finds it: the
     /// socket path on Unix, the marker on Windows.
-    fn endpoint_of(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -> IpcName {
+    fn endpoint_of(base: &path::Path, mesh: &MeshId, nickname: &Nickname) -> IpcName {
         #[cfg(unix)]
-        let name = IpcName::new(socket_path(base, mesh, nickname)).expect("a socket path");
+        let name =
+            IpcName::new(listener::socket_path(base, mesh, nickname)).expect("a socket path");
         #[cfg(windows)]
-        let name = read_marker(&marker_path(base, mesh, nickname))
-            .unwrap()
+        let name = ipc_marker::read_marker(&ipc_marker::marker_path(base, mesh, nickname))
+            .expect("the marker reads")
             .expect("a marker");
         name
     }
 
     #[test]
     fn an_ipc_name_is_an_endpoint_of_this_os() {
+        let _guard = ::habilis_network_test_tracing::init();
         for bad in [
             "",
             "a\nb",
@@ -1199,12 +209,21 @@ mod tests {
         assert!(IpcName::new("/".repeat(513)).is_err(), "too long");
         #[cfg(unix)]
         {
-            assert!(IpcName::new("/tmp/x/nick.ipc.sock".to_owned()).is_ok());
-            assert!(IpcName::new(r"\\.\pipe\habilis-00".to_owned()).is_err());
+            assert!(
+                IpcName::new("/tmp/x/nick.ipc.sock".to_owned()).is_ok(),
+                "an absolute socket path is a name"
+            );
+            assert!(
+                IpcName::new(r"\\.\pipe\habilis-00".to_owned()).is_err(),
+                "a pipe is no name on Unix"
+            );
         }
         #[cfg(windows)]
         {
-            assert!(IpcName::new(r"\\.\pipe\habilis-00ff".to_owned()).is_ok());
+            assert!(
+                IpcName::new(r"\\.\pipe\habilis-00ff".to_owned()).is_ok(),
+                "a local pipe is a name"
+            );
             assert!(
                 IpcName::new(r"\\.\pipe\".to_owned()).is_err(),
                 "no pipe name"
@@ -1213,71 +232,112 @@ mod tests {
                 IpcName::new(r"\\.\pipe\a\b".to_owned()).is_err(),
                 "a backslash"
             );
-            assert!(IpcName::new(r"C:\tmp\nick.ipc.sock".to_owned()).is_err());
+            assert!(
+                IpcName::new(r"C:\tmp\nick.ipc.sock".to_owned()).is_err(),
+                "a file path is no name on Windows"
+            );
         }
     }
 
     #[cfg(unix)]
     #[test]
     fn socket_path_format() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = MeshId::from("abcdefghijkmnpqr");
-        let base = crate::util::runtime_base("habilis-network-ipc-test");
-        let path = socket_path(&base, &mesh, &Nickname::from("my-nick"));
-        assert!(path.starts_with(&*base.to_string_lossy()));
-        assert!(path.ends_with("/my-nick.ipc.sock"));
-        assert!(path.contains(&crate::util::mesh_prefix(mesh.as_str())));
+        let base = util::runtime_base("habilis-network-ipc-test");
+        let path = listener::socket_path(&base, &mesh, &Nickname::from("my-nick"));
+        assert!(
+            path.starts_with(&*base.to_string_lossy()),
+            "the socket path starts in the base directory"
+        );
+        assert!(
+            path.ends_with("/my-nick.ipc.sock"),
+            "the socket path ends with the nickname socket name"
+        );
+        assert!(
+            path.contains(&util::mesh_prefix(mesh.as_str())),
+            "the socket path carries the mesh prefix"
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn a_marker_holds_one_line_and_reads_back() {
+        use std::ffi;
+
+        let _guard = ::habilis_network_test_tracing::init();
         let base = TestBase::new("marker");
         let mesh = test_mesh("marker");
         let nickname = Nickname::from("nick");
-        std::fs::create_dir_all(mesh_runtime_dir(base.path(), mesh.as_str())).unwrap();
-        let path = marker_path(base.path(), &mesh, &nickname);
-        assert_eq!(path.file_name(), Some(std::ffi::OsStr::new("nick.ipc")));
+        fs::create_dir_all(util::mesh_runtime_dir(base.path(), mesh.as_str()))
+            .expect("the mesh folder");
+        let path = ipc_marker::marker_path(base.path(), &mesh, &nickname);
+        assert_eq!(
+            path.file_name(),
+            Some(ffi::OsStr::new("nick.ipc")),
+            "the marker is named for the nickname"
+        );
         let name = absent_name("marker");
-        let marker = IpcMarker::write(path.clone(), name.clone()).expect("write");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{name}\n"));
-        assert_eq!(read_marker(&path).unwrap(), Some(name));
+        let marker = ipc_marker::IpcMarker::write(path.clone(), name.clone()).expect("write");
+        assert_eq!(
+            fs::read_to_string(&path).expect("the marker reads"),
+            format!("{name}\n"),
+            "the marker holds one line"
+        );
+        assert_eq!(
+            ipc_marker::read_marker(&path).expect("the marker reads"),
+            Some(name),
+            "the marker reads back"
+        );
         drop(marker);
         // An invalid line is an error, not "no daemon".
-        std::fs::write(&path, "relative\n").unwrap();
-        assert!(read_marker(&path).is_err());
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(read_marker(&path).unwrap(), None);
+        fs::write(&path, "relative\n").expect("write a bad marker");
+        assert!(
+            ipc_marker::read_marker(&path).is_err(),
+            "an invalid line is an error"
+        );
+        fs::remove_file(&path).expect("remove the marker");
+        assert_eq!(
+            ipc_marker::read_marker(&path).expect("no marker reads"),
+            None,
+            "no marker is no daemon"
+        );
     }
 
     #[test]
-    async fn send_with_no_daemon_is_no_daemon() {
-        let base = TestBase::new("nomarker");
-        let mesh = test_mesh("nomarker");
-        let nickname = Nickname::from("nobody");
-        let cmd = TestCommand::Ping { mesh };
-        let error = send(base.path(), &cmd, &nickname)
-            .await
-            .expect_err("no daemon");
-        assert!(error.downcast_ref::<NoDaemon>().is_some(), "{error}");
+    fn send_with_no_daemon_is_no_daemon() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let base = TestBase::new("nomarker");
+            let mesh = test_mesh("nomarker");
+            let nickname = Nickname::from("nobody");
+            let command = TestCommand::Ping { mesh };
+            let error = client::send(base.path(), &command, &nickname)
+                .await
+                .expect_err("no daemon");
+            assert!(matches!(error, IpcError::NoDaemon(_)), "{error}");
+        });
     }
 
     #[cfg(windows)]
     #[test]
-    async fn send_to_a_stale_marker_is_no_daemon() {
-        let base = TestBase::new("stale");
-        let mesh = test_mesh("stale");
-        let nickname = Nickname::from("ghost");
-        std::fs::create_dir_all(mesh_runtime_dir(base.path(), mesh.as_str())).unwrap();
-        IpcMarker::write(
-            marker_path(base.path(), &mesh, &nickname),
-            absent_name("stale"),
-        )
-        .expect("write");
-        let cmd = TestCommand::Ping { mesh };
-        let error = send(base.path(), &cmd, &nickname)
-            .await
-            .expect_err("no daemon");
-        assert!(error.downcast_ref::<NoDaemon>().is_some(), "{error}");
+    fn send_to_a_stale_marker_is_no_daemon() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let base = TestBase::new("stale");
+            let mesh = test_mesh("stale");
+            let nickname = Nickname::from("ghost");
+            fs::create_dir_all(util::mesh_runtime_dir(base.path(), mesh.as_str()))
+                .expect("the mesh folder");
+            ipc_marker::IpcMarker::write(
+                ipc_marker::marker_path(base.path(), &mesh, &nickname),
+                absent_name("stale"),
+            )
+            .expect("write");
+            let command = TestCommand::Ping { mesh };
+            let error = client::send(base.path(), &command, &nickname)
+                .await
+                .expect_err("no daemon");
+            assert!(matches!(error, IpcError::NoDaemon(_)), "{error}");
+        });
     }
 
     // On Unix discovery lists the sockets, as `active_socket_paths` did before
@@ -1285,63 +345,71 @@ mod tests {
     // names only. A `send_to_path` to a path with no socket is an error.
     #[cfg(unix)]
     #[test]
-    async fn active_endpoints_lists_the_sockets_sorted() {
-        let base = TestBase::new("discover");
-        assert!(active_endpoints(base.path()).is_empty(), "an absent base");
-        let first = base.path().join("meshaaaaaaaaaaaa");
-        let second = base.path().join("meshbbbbbbbbbbbb");
-        std::fs::create_dir_all(&first).unwrap();
-        std::fs::create_dir_all(&second).unwrap();
-        std::fs::write(first.join("zz.ipc.sock"), "").unwrap();
-        std::fs::write(second.join("aa.ipc.sock"), "").unwrap();
-        std::fs::write(first.join("nick.state.json"), "{}").unwrap();
-        let mut paths = active_socket_paths(base.path());
-        paths.sort();
-        assert_eq!(
-            paths,
-            vec![first.join("zz.ipc.sock"), second.join("aa.ipc.sock")]
-        );
-        let names: Vec<String> = active_endpoints(base.path())
-            .into_iter()
-            .map(|name| name.as_str().to_owned())
-            .collect();
-        let mut expected: Vec<String> = paths
-            .iter()
-            .map(|path| path.to_str().unwrap().to_owned())
-            .collect();
-        expected.sort();
-        assert_eq!(names, expected);
-        let cmd = TestCommand::Ping {
-            mesh: test_mesh("discover"),
-        };
-        assert!(send_to_path(&paths[0], &cmd).await.is_err(), "no socket");
+    fn active_endpoints_lists_the_sockets_sorted() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let base = TestBase::new("discover");
+            assert!(
+                active_endpoints(base.path()).next().is_none(),
+                "an absent base"
+            );
+            let first = base.path().join("meshaaaaaaaaaaaa");
+            let second = base.path().join("meshbbbbbbbbbbbb");
+            fs::create_dir_all(&first).expect("the first mesh folder");
+            fs::create_dir_all(&second).expect("the second mesh folder");
+            fs::write(first.join("zz.ipc.sock"), "").expect("a socket stand-in");
+            fs::write(second.join("aa.ipc.sock"), "").expect("a socket stand-in");
+            fs::write(first.join("nick.state.json"), "{}").expect("a state file");
+            let mut paths: Vec<path::PathBuf> = client::active_socket_paths(base.path()).collect();
+            paths.sort();
+            assert_eq!(
+                paths,
+                vec![first.join("zz.ipc.sock"), second.join("aa.ipc.sock")],
+                "the sockets are listed"
+            );
+            let found = active_endpoints(base.path());
+            let names: Vec<String> = found.map(|name| name.as_str().to_owned()).collect();
+            let utf8 = |path: &path::PathBuf| path.to_str().expect("a UTF-8 path");
+            let texts: Vec<&str> = paths.iter().map(utf8).collect();
+            let mut expected: Vec<String> = texts.into_iter().map(str::to_owned).collect();
+            expected.sort();
+            assert_eq!(names, expected, "the endpoints are the sockets, sorted");
+            let command = TestCommand::Ping {
+                mesh: test_mesh("discover"),
+            };
+            assert!(
+                client::send_to_path(&paths[0], &command).await.is_err(),
+                "no socket"
+            );
+        });
     }
 
     #[cfg(windows)]
     #[test]
     fn active_endpoints_reads_the_markers_sorted_and_skips_the_rest() {
+        let guard = ::habilis_network_test_tracing::init();
         // The marker with an invalid line is skipped with a warn.
-        habilis_network_test_tracing::expect_warn(
-            "habilis_network::lifecycle",
-            "IPC: skip a marker",
-        );
+        guard.expect_warn("habilis_network::lifecycle", "IPC: skip a marker");
         let base = TestBase::new("discover");
-        assert!(active_endpoints(base.path()).is_empty(), "an absent base");
+        assert!(
+            active_endpoints(base.path()).next().is_none(),
+            "an absent base"
+        );
         let first = base.path().join("meshaaaaaaaaaaaa");
         let second = base.path().join("meshbbbbbbbbbbbb");
-        std::fs::create_dir_all(&first).unwrap();
-        std::fs::create_dir_all(&second).unwrap();
+        fs::create_dir_all(&first).expect("the first mesh folder");
+        fs::create_dir_all(&second).expect("the second mesh folder");
         let late = absent_name("zz");
         let early = absent_name("aa");
-        IpcMarker::write(first.join("one.ipc"), late.clone()).unwrap();
-        IpcMarker::write(second.join("two.ipc"), early.clone()).unwrap();
+        ipc_marker::IpcMarker::write(first.join("one.ipc"), late.clone()).expect("write");
+        ipc_marker::IpcMarker::write(second.join("two.ipc"), early.clone()).expect("write");
         // Not read: an invalid line, the tmp file of a write, a marker that is
         // a folder, and a marker file at the level of the mesh folders.
-        std::fs::write(first.join("bad.ipc"), "relative\n").unwrap();
-        std::fs::write(first.join("one.ipc.tmp.123"), format!("{early}\n")).unwrap();
-        std::fs::create_dir_all(second.join("dir.ipc")).unwrap();
-        std::fs::write(base.path().join("loose.ipc"), format!("{early}\n")).unwrap();
-        assert_eq!(active_endpoints(base.path()), vec![early, late]);
+        fs::write(first.join("bad.ipc"), "relative\n").expect("a bad marker");
+        fs::write(first.join("one.ipc.tmp.123"), format!("{early}\n")).expect("a tmp file");
+        fs::create_dir_all(second.join("dir.ipc")).expect("a marker folder");
+        fs::write(base.path().join("loose.ipc"), format!("{early}\n")).expect("a loose marker");
+        let found: Vec<IpcName> = active_endpoints(base.path()).collect();
+        assert_eq!(found, vec![early, late], "the markers are read, sorted");
     }
 
     // Two names, as two daemons have on Windows, where the pipe name is per
@@ -1349,12 +417,15 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_marker_is_removed_only_by_the_daemon_that_it_names() {
+        let _guard = ::habilis_network_test_tracing::init();
         let base = TestBase::new("ours");
-        std::fs::create_dir_all(base.path()).unwrap();
+        fs::create_dir_all(base.path()).expect("the base");
         let path = base.path().join("nick.ipc");
-        let first = IpcMarker::write(path.clone(), absent_name("first")).unwrap();
+        let first =
+            ipc_marker::IpcMarker::write(path.clone(), absent_name("first")).expect("write");
         // A second daemon with the same nickname writes over the first.
-        let second = IpcMarker::write(path.clone(), absent_name("second")).unwrap();
+        let second =
+            ipc_marker::IpcMarker::write(path.clone(), absent_name("second")).expect("write");
         first.remove_if_ours();
         assert!(path.exists(), "the marker of the live second daemon stays");
         second.remove_if_ours();
@@ -1370,26 +441,29 @@ mod tests {
     #[test]
     fn a_marker_remove_waits_for_a_reader_without_share_delete() {
         use std::os::windows::fs::OpenOptionsExt as _;
+        use std::thread;
 
         // `FILE_SHARE_READ`, with no `FILE_SHARE_DELETE`. This crate has no
         // `windows-sys`.
         const FILE_SHARE_READ: u32 = 1;
 
+        let _guard = ::habilis_network_test_tracing::init();
         let base = TestBase::new("held");
-        std::fs::create_dir_all(base.path()).unwrap();
+        fs::create_dir_all(base.path()).expect("the base");
         let path = base.path().join("nick.ipc");
-        let marker = IpcMarker::write(path.clone(), absent_name("held")).unwrap();
-        let reader = std::fs::OpenOptions::new()
+        let marker =
+            ipc_marker::IpcMarker::write(path.clone(), absent_name("held")).expect("write");
+        let reader: fs::File = fs::OpenOptions::new()
             .read(true)
             .share_mode(FILE_SHARE_READ)
             .open(&path)
-            .unwrap();
-        let closer = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            .expect("open the marker");
+        let closer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(2));
             drop(reader);
         });
         marker.remove_if_ours();
-        closer.join().unwrap();
+        closer.join().expect("the closer thread ends");
         assert!(
             !path.exists(),
             "the marker is removed after the reader closes"
@@ -1398,61 +472,65 @@ mod tests {
 
     #[test]
     fn a_busy_pipe_is_tried_three_more_times_then_given_up() {
-        let waits: Vec<_> = (0..5).map(pipe_busy_retry).collect();
-        let fifty = Some(std::time::Duration::from_millis(50));
-        assert_eq!(waits, vec![fifty, fifty, fifty, None, None]);
+        let _guard = ::habilis_network_test_tracing::init();
+        let waits: Vec<_> = (0..5).map(client::pipe_busy_retry).collect();
+        let fifty = Some(Duration::from_millis(50));
+        assert_eq!(
+            waits,
+            vec![fifty, fifty, fifty, None, None],
+            "three tries of 50 ms, then none"
+        );
     }
 
     /// On Windows the endpoint is a pipe with a random name, no mesh prefix and
     /// no nickname in it, and a DACL of the user alone.
     #[cfg(windows)]
     #[test]
-    async fn the_windows_endpoint_is_a_random_pipe_of_the_user() {
-        let base = TestBase::new("pipe");
-        let mesh = test_mesh("pipe");
-        let nickname = Nickname::from("piper");
-        let bound = bind(base.path(), &mesh, &nickname).expect("bind");
-        let name = read_marker(&marker_path(base.path(), &mesh, &nickname))
-            .unwrap()
-            .expect("a marker");
-        let random = name
-            .as_str()
-            .strip_prefix(super::PIPE_PREFIX)
-            .expect("the engine prefix");
-        assert_eq!(random.len(), 32, "{name}");
-        assert!(
-            random.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "{name}"
-        );
-        assert!(!name.as_str().contains("piper"), "no nickname in {name}");
+    fn the_windows_endpoint_is_a_random_pipe_of_the_user() {
+        use std::os::windows::io::AsHandle as _;
 
-        // A second bind gets another name.
-        let other = bind(base.path(), &test_mesh("pipe2"), &nickname).expect("bind");
-        let other_name = read_marker(&marker_path(base.path(), &test_mesh("pipe2"), &nickname))
-            .unwrap()
-            .expect("a marker");
-        assert_ne!(name, other_name);
-        drop(other);
+        use crate::util::win_security;
 
-        // The DACL of a client handle of the pipe: one entry, the user. The
-        // trustee can read back as an alias (`LA` when the test runs as the
-        // built-in Administrator), so the test compares the SID.
-        let client =
-            crate::util::win_security::open_pipe_identification(name.as_str()).expect("open");
-        let user = crate::util::win_security::current_user_sid().unwrap();
-        let dacl = crate::util::win_security::dacl_text(std::os::windows::io::AsHandle::as_handle(
-            &client,
-        ))
-        .expect("the DACL");
-        let trustee = dacl
-            .strip_prefix("D:P(A;;FA;;;")
-            .and_then(|rest| rest.strip_suffix(')'))
-            .unwrap_or_else(|| panic!("one entry with all access: {dacl}"));
-        assert_eq!(
-            crate::util::win_security::Sid::from_text(trustee).expect("a SID or an alias"),
-            user
-        );
-        drop(bound);
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let base = TestBase::new("pipe");
+            let mesh = test_mesh("pipe");
+            let nickname = Nickname::from("piper");
+            let bound = listener::bind(base.path(), &mesh, &nickname).expect("bind");
+            let name = endpoint_of(base.path(), &mesh, &nickname);
+            let random = name
+                .as_str()
+                .strip_prefix(listener::PIPE_PREFIX)
+                .expect("the engine prefix");
+            assert_eq!(random.len(), 32, "{name}");
+            assert!(
+                random.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "{name}"
+            );
+            assert!(!name.as_str().contains("piper"), "no nickname in {name}");
+
+            // A second bind gets another name.
+            let other = listener::bind(base.path(), &test_mesh("pipe2"), &nickname).expect("bind");
+            let other_name = endpoint_of(base.path(), &test_mesh("pipe2"), &nickname);
+            assert_ne!(name, other_name, "a second bind gets another name");
+            drop(other);
+
+            // The DACL of a client handle of the pipe: one entry, the user. The
+            // trustee can read back as an alias (`LA` when the test runs as the
+            // built-in Administrator), so the test compares the SID.
+            let client = win_security::open_pipe_identification(name.as_str()).expect("open");
+            let user = win_security::current_user_sid().expect("the user SID");
+            let dacl = win_security::dacl_text(client.as_handle()).expect("the DACL");
+            let trustee: &str = dacl
+                .strip_prefix("D:P(A;;FA;;;")
+                .and_then(|rest| rest.strip_suffix(')'))
+                .unwrap_or_else(|| panic!("one entry with all access: {dacl}"));
+            assert_eq!(
+                win_security::Sid::parse(trustee).expect("a SID or an alias"),
+                user,
+                "the trustee of the DACL is the user"
+            );
+            drop(bound);
+        });
     }
 
     // The client refuses a pipe that another account owns, and sends it
@@ -1460,43 +538,50 @@ mod tests {
     // SYSTEM to own our own pipe, and gets the refusal.
     #[cfg(windows)]
     #[test]
-    async fn a_pipe_of_another_owner_is_refused_as_foreign() {
-        habilis_network_test_tracing::expect_warn(
+    fn a_pipe_of_another_owner_is_refused_as_foreign() {
+        use crate::util::win_security;
+
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn(
             "habilis_network::lifecycle",
             "IPC: the pipe is not owned by this user",
         );
-        let base = TestBase::new("foreign");
-        let mesh = test_mesh("foreign");
-        let nickname = Nickname::from("owner");
-        let bound = bind(base.path(), &mesh, &nickname).expect("bind");
-        let name = read_marker(&marker_path(base.path(), &mesh, &nickname))
-            .unwrap()
-            .expect("a marker");
-        let system = crate::util::win_security::Sid::from_text("S-1-5-18").expect("SYSTEM");
-        let cmd = TestCommand::Ping { mesh };
-        let error = super::send_to_endpoint_owned_by(&name, &cmd, &system)
-            .await
-            .expect_err("a foreign owner");
-        let foreign = error
-            .downcast_ref::<super::ForeignEndpoint>()
-            .expect("a ForeignEndpoint");
-        assert_eq!(foreign.name, name);
-        assert_eq!(foreign.nickname, None);
-        drop(bound);
+        ::habilis_network_test_tracing::run(guard, async {
+            let base = TestBase::new("foreign");
+            let mesh = test_mesh("foreign");
+            let nickname = Nickname::from("owner");
+            let bound = listener::bind(base.path(), &mesh, &nickname).expect("bind");
+            let name = endpoint_of(base.path(), &mesh, &nickname);
+            let system = win_security::Sid::parse("S-1-5-18").expect("SYSTEM");
+            let command = TestCommand::Ping { mesh };
+            let error = client::send_to_endpoint_owned_by(&name, &command, &system)
+                .await
+                .expect_err("a foreign owner");
+            let IpcError::ForeignEndpoint(foreign) = error else {
+                panic!("a ForeignEndpoint: {error}");
+            };
+            assert_eq!(foreign.name, name, "the refusal names the endpoint");
+            assert_eq!(foreign.nickname, None, "the endpoint was asked by name");
+            drop(bound);
+        });
     }
 
     // ── property-based tests ───────────────────────────────────────
 
     mod prop {
-        use crate::util::mesh_prefix;
-        use habilis_network_test_tracing::test;
+        use crate::util;
         use proptest::collection::vec as arb_vec;
-        use proptest::{prop_assert, prop_assert_eq, proptest, strategy::Strategy};
+        use proptest::strategy::Strategy;
+        use proptest::{prop_assert, prop_assert_eq, proptest};
 
-        use super::{MeshId, json_error, json_ok};
+        use crate::protocol::MeshId;
+        use crate::transport::ipc::json_reply;
 
+        use crate::proptest_support;
         fn arb_ascii_body() -> impl Strategy<Value = String> {
-            arb_vec(0x20u8..0x7Eu8, 0..200).prop_map(|bytes| String::from_utf8(bytes).unwrap())
+            arb_vec(0x20u8..0x7eu8, 0..200).prop_map(|bytes| {
+                String::from_utf8(bytes).expect("printable ascii bytes are valid utf-8")
+            })
         }
 
         fn arb_mesh() -> impl Strategy<Value = MeshId> {
@@ -1504,54 +589,60 @@ mod tests {
         }
 
         proptest! {
-            #![proptest_config(crate::proptest_support::config())]
+            #![proptest_config(proptest_support::config())]
             // ── JSON response validity ────────────────────────────
 
             #[test]
             fn prop_json_ok_always_valid(id in arb_ascii_body()) {
-                let json = json_ok(&id);
-                let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                let _guard = ::habilis_network_test_tracing::init();
+                let json = json_reply::json_ok(&id);
+                let parsed: serde_json::Value = serde_json::from_str(&json).expect("the json the ipc reply writes parses");
                 prop_assert!(parsed["ok"] == true);
                 prop_assert_eq!(&parsed["id"], &id as &str);
-            }
+                        }
 
             #[test]
-            fn prop_json_error_always_valid(msg in arb_ascii_body()) {
-                let json = json_error(&msg);
-                let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            fn prop_json_error_always_valid(message in arb_ascii_body()) {
+                let _guard = ::habilis_network_test_tracing::init();
+                let json = json_reply::json_error(&message);
+                let parsed: serde_json::Value = serde_json::from_str(&json).expect("the json the ipc reply writes parses");
                 prop_assert!(parsed["ok"] == false);
-                prop_assert_eq!(&parsed["error"], &msg as &str);
-            }
+                prop_assert_eq!(&parsed["error"], &message as &str);
+                        }
 
             // ── Injection safety ──────────────────────────────────
 
             #[test]
             fn prop_json_ok_injection_safe(id in r#"["\\/\n\r\t]{1,50}"#) {
-                let json = json_ok(&id);
-                let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                let _guard = ::habilis_network_test_tracing::init();
+                let json = json_reply::json_ok(&id);
+                let parsed: serde_json::Value = serde_json::from_str(&json).expect("the json the ipc reply writes parses");
                 prop_assert_eq!(&parsed["id"], &id as &str);
-            }
+                        }
 
             #[test]
-            fn prop_json_error_injection_safe(msg in r#"["\\/\n\r\t]{1,50}"#) {
-                let json = json_error(&msg);
-                let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-                prop_assert_eq!(&parsed["error"], &msg as &str);
-            }
+            fn prop_json_error_injection_safe(message in r#"["\\/\n\r\t]{1,50}"#) {
+                let _guard = ::habilis_network_test_tracing::init();
+                let json = json_reply::json_error(&message);
+                let parsed: serde_json::Value = serde_json::from_str(&json).expect("the json the ipc reply writes parses");
+                prop_assert_eq!(&parsed["error"], &message as &str);
+                        }
 
             // ── Socket prefix ─────────────────────────────────────
 
             #[test]
             fn prop_mesh_prefix_max_16_chars(mesh in arb_mesh()) {
-                let prefix = mesh_prefix(mesh.as_str());
+                let _guard = ::habilis_network_test_tracing::init();
+                let prefix = util::mesh_prefix(mesh.as_str());
                 prop_assert!(prefix.chars().count() <= 16);
-            }
+                        }
 
             #[test]
             fn prop_mesh_prefix_is_prefix_of_input(mesh in arb_mesh()) {
-                let prefix = mesh_prefix(mesh.as_str());
+                let _guard = ::habilis_network_test_tracing::init();
+                let prefix = util::mesh_prefix(mesh.as_str());
                 prop_assert!(mesh.as_str().starts_with(&prefix));
-            }
+                        }
         }
     }
 
@@ -1561,71 +652,90 @@ mod tests {
     /// `ipc_listen_and_send_msg` so the match arms aren't nested inside the
     /// spawned future's `if let`.
     async fn respond_once(mut rx: mpsc::Receiver<IpcMessage<TestCommand>>) {
-        let Some((cmd, resp_tx)) = rx.recv().await else {
+        let Some((command, resp_tx)) = rx.recv().await else {
             return;
         };
-        match cmd {
+        match command {
             TestCommand::Msg { body, .. } => {
-                let _ = resp_tx.send(json_ok(&format!("got: {body}")));
+                let _ = resp_tx.send(json_reply::json_ok(&format!("got: {body}")));
             }
             TestCommand::Ping { .. } => {
-                let _ = resp_tx.send(json_error("unexpected command"));
+                let _ = resp_tx.send(json_reply::json_error("unexpected command"));
             }
         }
     }
 
     #[test]
-    async fn ipc_listen_and_send_msg() {
-        let base = TestBase::new("roundtrip");
-        let mesh = test_mesh("ipctest");
-        let nickname = Nickname::from("test-nick");
+    fn ipc_listen_and_send_msg() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let base = TestBase::new("roundtrip");
+            let mesh = test_mesh("ipctest");
+            let nickname = Nickname::from("test-nick");
 
-        let (tx, rx) = mpsc::channel::<IpcMessage<TestCommand>>(8);
+            let (tx, rx): (
+                mpsc::Sender<IpcMessage<TestCommand>>,
+                mpsc::Receiver<IpcMessage<TestCommand>>,
+            ) = mpsc::channel(8);
 
-        // Bind synchronously (no sleep needed — the socket is accepting the
-        // instant `bind` returns), then spawn the accept loop. The marker
-        // exists the moment `bind` returns, too.
-        let bound = bind(base.path(), &mesh, &nickname).expect("bind IPC socket");
-        #[cfg(windows)]
-        assert!(marker_path(base.path(), &mesh, &nickname).is_file());
-        #[cfg(windows)]
-        let (control, mut quit_rx) = test_control(&mesh);
-        let listener_handle = tokio::spawn(serve(
-            bound.listener,
-            tx,
+            // Bind synchronously (no sleep needed — the socket is accepting the
+            // instant `bind` returns), then spawn the accept loop. The marker
+            // exists the moment `bind` returns, too.
+            let bound = listener::bind(base.path(), &mesh, &nickname).expect("bind IPC socket");
             #[cfg(windows)]
-            control,
-            std::sync::Arc::new(crate::gossip::event::SilentSink),
-        ));
+            assert!(
+                ipc_marker::marker_path(base.path(), &mesh, &nickname).is_file(),
+                "the marker exists when bind returns"
+            );
+            #[cfg(windows)]
+            let (control, mut quit_rx) = test_control(&mesh);
+            let listener_handle = tokio::spawn(listener::serve(
+                bound.listener,
+                tx,
+                #[cfg(windows)]
+                control,
+                // trait object: the setup takes the silent sink as a shared handle
+                sync::Arc::new(event::SilentSink),
+            ));
 
-        // Spawn a handler that responds to messages
-        let handler = tokio::spawn(respond_once(rx));
+            // Spawn a handler that responds to messages
+            let handler = tokio::spawn(respond_once(rx));
 
-        // Send a command
-        let cmd = TestCommand::Msg {
-            mesh: mesh.clone(),
-            body: "test message".to_owned(),
-        };
-        let response = send(base.path(), &cmd, &nickname).await.unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(parsed["ok"], true);
-        assert_eq!(parsed["id"], "got: test message");
-        #[cfg(windows)]
-        assert!(quit_rx.try_recv().is_err(), "an app command is no quit");
+            // Send a command
+            let command = TestCommand::Msg {
+                mesh: mesh.clone(),
+                body: "test message".to_owned(),
+            };
+            let response = client::send(base.path(), &command, &nickname)
+                .await
+                .expect("the client reaches the local ipc listener");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&response).expect("the ipc reply is json");
+            assert_eq!(
+                parsed["ok"], true,
+                "a message sent over ipc gets an ok reply"
+            );
+            assert_eq!(
+                parsed["id"], "got: test message",
+                "the ipc reply carries the echoed message"
+            );
+            #[cfg(windows)]
+            assert!(quit_rx.try_recv().is_err(), "an app command is no quit");
 
-        handler.await.unwrap();
-        listener_handle.abort();
+            handler.await.expect("the ipc handler task finishes");
+            listener_handle.abort();
+        });
     }
 
     #[test]
     fn accept_backoff_doubles_to_cap() {
         use crate::util::tuning::{IPC_ACCEPT_BACKOFF_MAX, IPC_ACCEPT_BACKOFF_MIN};
 
+        let _guard = ::habilis_network_test_tracing::init();
         let cap = IPC_ACCEPT_BACKOFF_MAX;
         let mut backoff = IPC_ACCEPT_BACKOFF_MIN;
         let mut previous = backoff;
         for _ in 0..16 {
-            backoff = super::next_accept_backoff(backoff);
+            backoff = listener::next_accept_backoff(backoff);
             assert!(backoff >= previous, "backoff never shrinks");
             assert!(backoff <= cap, "backoff never exceeds the cap");
             previous = backoff;
@@ -1638,7 +748,7 @@ mod tests {
     /// so the loop body isn't nested inside the spawned future's `while let`.
     async fn respond_healthy_forever(mut rx: mpsc::Receiver<IpcMessage<TestCommand>>) {
         while let Some((_cmd, resp_tx)) = rx.recv().await {
-            let _ = resp_tx.send(json_ok("healthy"));
+            let _ = resp_tx.send(json_reply::json_ok("healthy"));
         }
     }
 
@@ -1647,55 +757,66 @@ mod tests {
     // daemon's lifetime, and the listener must keep serving others
     // throughout. Real-time: waits out `IPC_IO_TIMEOUT` (10s).
     #[test]
-    async fn idle_connection_is_closed_at_the_read_deadline() {
-        use interprocess::local_socket::{tokio::Stream, tokio::prelude::*};
-        use tokio::io::AsyncReadExt;
+    fn idle_connection_is_closed_at_the_read_deadline() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use interprocess::local_socket::tokio::Stream;
+            use interprocess::local_socket::traits::tokio::Stream as _;
+            use tokio::io::AsyncReadExt;
 
-        let base = TestBase::new("idle");
-        let mesh = test_mesh("ipcquiet");
-        let nickname = Nickname::from("idle-nick");
-        let (tx, rx) = mpsc::channel::<IpcMessage<TestCommand>>(8);
-        let bound = bind(base.path(), &mesh, &nickname).expect("bind IPC socket");
-        #[cfg(windows)]
-        let (control, _quit_rx) = test_control(&mesh);
-        let listener_handle = tokio::spawn(serve(
-            bound.listener,
-            tx,
+            let base = TestBase::new("idle");
+            let mesh = test_mesh("ipcquiet");
+            let nickname = Nickname::from("idle-nick");
+            let (tx, rx): (
+                mpsc::Sender<IpcMessage<TestCommand>>,
+                mpsc::Receiver<IpcMessage<TestCommand>>,
+            ) = mpsc::channel(8);
+            let bound = listener::bind(base.path(), &mesh, &nickname).expect("bind IPC socket");
             #[cfg(windows)]
-            control,
-            std::sync::Arc::new(crate::gossip::event::SilentSink),
-        ));
-        // Echo handler so a healthy command still round-trips while the
-        // idle connection is parked.
-        let handler = tokio::spawn(respond_healthy_forever(rx));
+            let (control, _quit_rx) = test_control(&mesh);
+            let listener_handle = tokio::spawn(listener::serve(
+                bound.listener,
+                tx,
+                #[cfg(windows)]
+                control,
+                // trait object: the setup takes the silent sink as a shared handle
+                sync::Arc::new(event::SilentSink),
+            ));
+            // Echo handler so a healthy command still round-trips while the
+            // idle connection is parked.
+            let handler = tokio::spawn(respond_healthy_forever(rx));
 
-        // Park a silent connection, found as a client finds it.
-        let name = endpoint_of(base.path(), &mesh, &nickname);
-        // The parked client uses the plain `interprocess` connect: no SQOS and
-        // no owner check. That is fine here: the server is this test's own
-        // listener, and the test is about the server's read deadline. The user
-        // DACL admits it, because the DACL names who may open, not how.
-        let mut idle = Stream::connect(name.to_name().unwrap()).await.unwrap();
+            // Park a silent connection, found as a client finds it. The parked
+            // client uses the plain `interprocess` connect: no SQOS and no owner
+            // check. That is fine here: the server is this test's own listener,
+            // and the test is about the server's read deadline. The user DACL
+            // admits it, because the DACL names who may open, not how.
+            let name = endpoint_of(base.path(), &mesh, &nickname);
+            let mut idle = Stream::connect(name.to_name().expect("a valid name"))
+                .await
+                .expect("the idle connection reaches the listener");
 
-        // A healthy command still round-trips while the idle one is parked.
-        let cmd = TestCommand::Ping { mesh: mesh.clone() };
-        let response = send(base.path(), &cmd, &nickname).await.unwrap();
-        assert!(response.contains("healthy"), "listener stalled: {response}");
+            // A healthy command still round-trips while the idle one is parked.
+            let command = TestCommand::Ping { mesh: mesh.clone() };
+            let response = client::send(base.path(), &command, &nickname)
+                .await
+                .expect("the healthy command reaches the listener");
+            assert!(response.contains("healthy"), "listener stalled: {response}");
 
-        // The parked connection is closed (EOF) at the deadline, with margin.
-        let mut sink = Vec::new();
-        let read = tokio::time::timeout(
-            crate::util::tuning::IPC_IO_TIMEOUT + std::time::Duration::from_secs(5),
-            idle.read_to_end(&mut sink),
-        )
-        .await;
-        assert!(
-            matches!(read, Ok(Ok(0))),
-            "idle connection was not closed at the read deadline: {read:?}"
-        );
+            // The parked connection is closed (EOF) at the deadline, with margin.
+            let mut sink = Vec::new();
+            let read = time::timeout(
+                tuning::IPC_IO_TIMEOUT + Duration::from_secs(5),
+                idle.read_to_end(&mut sink),
+            )
+            .await;
+            assert!(
+                matches!(read, Ok(Ok(0))),
+                "idle connection was not closed at the read deadline: {read:?}"
+            );
 
-        handler.abort();
-        listener_handle.abort();
+            handler.abort();
+            listener_handle.abort();
+        });
     }
 
     // ── the engine's quit, Windows only ────────────────────────────
@@ -1704,34 +825,36 @@ mod tests {
     // before the port: it opens no connection.
     #[cfg(unix)]
     #[test]
-    async fn on_unix_quit_is_unsupported_and_terminate_sends_sigterm() {
+    fn on_unix_quit_is_unsupported_and_terminate_sends_sigterm() {
+        use rustix::process::Signal;
         use std::os::unix::process::ExitStatusExt as _;
 
-        let base = TestBase::new("termunix");
-        let mesh = test_mesh("termunix");
-        let nickname = Nickname::from("nobody");
-        let target = QuitTarget {
-            base: base.path(),
-            mesh: &mesh,
-            nickname: &nickname,
-        };
-        assert!(matches!(quit(&target).await, Err(QuitError::Unsupported)));
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
-        terminate(&target, child.id()).await.expect("the signal");
-        let status = child.wait().unwrap();
-        assert_eq!(status.signal(), Some(libc::SIGTERM), "{status}");
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let base = TestBase::new("termunix");
+            let mesh = test_mesh("termunix");
+            let nickname = Nickname::from("nobody");
+            let target = QuitTarget::new(base.path(), &mesh, &nickname);
+            assert!(
+                matches!(quit(&target).await, Err(QuitError::Unsupported)),
+                "the IPC quit is unsupported on Unix"
+            );
+            let mut child = process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn a child");
+            terminate(&target, child.id()).await.expect("the signal");
+            let status = child.wait().expect("wait for the child");
+            assert_eq!(status.signal(), Some(Signal::TERM.as_raw()), "{status}");
+        });
     }
 
     /// An engine control for `mesh`, and the receiver of its quit channel. The
     /// channel holds one quit, as the real one does.
     #[cfg(windows)]
-    fn test_control(mesh: &MeshId) -> (EngineControl, mpsc::Receiver<()>) {
+    fn test_control(mesh: &MeshId) -> (engine_control::EngineControl, mpsc::Receiver<()>) {
         let (quit_tx, quit_rx) = mpsc::channel(1);
         (
-            EngineControl {
+            engine_control::EngineControl {
                 mesh: mesh.clone(),
                 quit_tx,
             },
@@ -1742,7 +865,7 @@ mod tests {
     /// Whether the quit channel stays empty for a short time.
     #[cfg(windows)]
     async fn no_quit_within(quit_rx: &mut mpsc::Receiver<()>) -> bool {
-        tokio::time::timeout(std::time::Duration::from_millis(200), quit_rx.recv())
+        time::timeout(Duration::from_millis(200), quit_rx.recv())
             .await
             .is_err()
     }
@@ -1750,29 +873,33 @@ mod tests {
     /// A bound test daemon whose engine control holds `session`, the mesh of
     /// the session; by default the mesh that it is bound under.
     #[cfg(windows)]
-    struct TestServer<C> {
+    struct TestServer<Cmd> {
         base: TestBase,
         mesh: MeshId,
         nickname: Nickname,
-        app_rx: mpsc::Receiver<IpcMessage<C>>,
+        app_rx: mpsc::Receiver<IpcMessage<Cmd>>,
         quit_rx: mpsc::Receiver<()>,
-        accept: tokio::task::JoinHandle<()>,
+        accept: task::JoinHandle<()>,
     }
 
     #[cfg(windows)]
-    impl<C: serde::de::DeserializeOwned + Send + 'static> TestServer<C> {
+    impl<Cmd: de::DeserializeOwned + Send + 'static> TestServer<Cmd> {
         fn start(tag: &str, session: Option<&MeshId>) -> Self {
             let base = TestBase::new(tag);
             let mesh = test_mesh(tag);
             let nickname = Nickname::from("quit-nick");
-            let (tx, app_rx) = mpsc::channel::<IpcMessage<C>>(8);
-            let bound = bind(base.path(), &mesh, &nickname).expect("bind IPC socket");
+            let (tx, app_rx): (
+                mpsc::Sender<IpcMessage<Cmd>>,
+                mpsc::Receiver<IpcMessage<Cmd>>,
+            ) = mpsc::channel(8);
+            let bound = listener::bind(base.path(), &mesh, &nickname).expect("bind IPC socket");
             let (control, quit_rx) = test_control(session.unwrap_or(&mesh));
-            let accept = tokio::spawn(serve(
+            let accept = tokio::spawn(listener::serve(
                 bound.listener,
                 tx,
                 control,
-                std::sync::Arc::new(crate::gossip::event::SilentSink),
+                // trait object: the setup takes the silent sink as a shared handle
+                sync::Arc::new(event::SilentSink),
             ));
             Self {
                 base,
@@ -1785,11 +912,7 @@ mod tests {
         }
 
         fn target(&self) -> QuitTarget<'_> {
-            QuitTarget {
-                base: self.base.path(),
-                mesh: &self.mesh,
-                nickname: &self.nickname,
-            }
+            QuitTarget::new(self.base.path(), &self.mesh, &self.nickname)
         }
 
         fn name(&self) -> IpcName {
@@ -1798,7 +921,7 @@ mod tests {
     }
 
     #[cfg(windows)]
-    impl<C> Drop for TestServer<C> {
+    impl<Cmd> Drop for TestServer<Cmd> {
         fn drop(&mut self) {
             self.accept.abort();
         }
@@ -1807,207 +930,290 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_quit_command_and_its_answer_have_a_fixed_form() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mesh = test_mesh("golden");
-        let line = serde_json::to_string(&EngineCommand::Quit { mesh: mesh.clone() }).unwrap();
+        let line =
+            serde_json::to_string(&engine_control::EngineCommand::Quit { mesh: mesh.clone() })
+                .expect("the quit serializes");
         assert_eq!(
             line,
-            format!(r#"{{"command":"quit","mesh":"{}"}}"#, mesh.as_str())
+            format!(r#"{{"command":"quit","mesh":"{}"}}"#, mesh.as_str()),
+            "the quit line has a fixed form"
         );
-        assert_eq!(json_ack(), r#"{"ok":true}"#);
+        assert_eq!(
+            json_reply::json_ack(),
+            r#"{"ok":true}"#,
+            "the ack has a fixed form"
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn the_answer_to_a_quit_reads_as_its_outcome() {
-        assert!(quit_outcome(&json_ack()).is_ok());
-        assert!(matches!(
-            quit_outcome(&json_error("parse error: unknown variant `quit`")),
-            Err(QuitError::OldDaemon(_))
-        ));
-        assert!(matches!(
-            quit_outcome(&json_error(QUIT_OF_ANOTHER_MESH)),
-            Err(QuitError::Refused(_))
-        ));
-        assert!(matches!(
-            quit_outcome("not json"),
-            Err(QuitError::Refused(_))
-        ));
-        assert!(matches!(quit_outcome(""), Err(QuitError::Unreached(_))));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    async fn a_quit_for_this_mesh_is_answered_then_fed_to_the_quit_channel() {
-        let mut server = TestServer::<TestCommand>::start("quit", None);
-        quit(&server.target()).await.expect("the quit is accepted");
-        let fed = tokio::time::timeout(std::time::Duration::from_secs(5), server.quit_rx.recv())
-            .await
-            .expect("the quit channel is fed");
-        assert_eq!(fed, Some(()));
-        assert!(server.app_rx.try_recv().is_err(), "the app sees no quit");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    async fn a_quit_for_another_mesh_is_refused_and_feeds_nothing() {
-        let mut server = TestServer::<TestCommand>::start("quitother", Some(&test_mesh("other")));
-        let error = quit(&server.target()).await.expect_err("refused");
-        assert!(matches!(error, QuitError::Refused(_)), "{error}");
-        assert!(no_quit_within(&mut server.quit_rx).await);
-        assert!(server.app_rx.try_recv().is_err(), "the app sees no quit");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    async fn a_line_that_is_no_valid_quit_reaches_the_app() {
-        let mut server = TestServer::<serde_json::Value>::start("quitapp", None);
-        let name = server.name();
-        let lines = [
-            serde_json::json!({ "command": "quit" }),
-            serde_json::json!({ "command": "quit", "mesh": "no mesh id" }),
-            serde_json::json!("quit"),
-        ];
-        let mut app_rx = std::mem::replace(&mut server.app_rx, mpsc::channel(1).1);
-        let count = lines.len();
-        let app = tokio::spawn(async move {
-            let mut seen = Vec::new();
-            while seen.len() < count {
-                let Some((cmd, resp)) = app_rx.recv().await else {
-                    break;
-                };
-                let _ = resp.send(json_ok("app"));
-                seen.push(cmd);
-            }
-            seen
-        });
-        for line in &lines {
-            let reply = send_to_endpoint(&name, line).await.unwrap();
-            assert!(reply.contains(r#""id":"app""#), "{line}: {reply}");
-        }
-        assert_eq!(app.await.unwrap(), lines);
-        assert!(no_quit_within(&mut server.quit_rx).await);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    async fn a_quit_with_no_daemon_is_not_heard() {
-        let base = TestBase::new("quitnone");
-        let mesh = test_mesh("quitnone");
-        let nickname = Nickname::from("nobody");
-        let target = QuitTarget {
-            base: base.path(),
-            mesh: &mesh,
-            nickname: &nickname,
-        };
-        let error = quit(&target).await.expect_err("no daemon");
-        assert!(matches!(error, QuitError::Unreached(_)), "{error}");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    async fn a_line_that_is_no_json_gets_the_parse_error_and_feeds_nothing() {
-        use interprocess::local_socket::{tokio::Stream, tokio::prelude::*};
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let mut server = TestServer::<TestCommand>::start("quitraw", None);
-        let mut client = Stream::connect(server.name().to_name().unwrap())
-            .await
-            .unwrap();
-        client.write_all(b"not json\n").await.unwrap();
-        let mut reply = String::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            client.read_to_string(&mut reply),
-        )
-        .await
-        .expect("an answer")
-        .unwrap();
-        let reply: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
-            reply["error"]
-                .as_str()
-                .is_some_and(|error| error.starts_with("parse error")),
-            "{reply}"
+            quit::quit_outcome(&json_reply::json_ack()).is_ok(),
+            "an ack is a quit"
         );
-        assert!(no_quit_within(&mut server.quit_rx).await);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    async fn an_app_that_cannot_parse_a_quit_reads_as_an_old_daemon() {
-        let mut server = TestServer::<TestCommand>::start("quitold", None);
-        // Not an engine quit, so the app parses it, as a daemon from before the
-        // command does with a real quit.
-        let reply = send_to_endpoint(&server.name(), &serde_json::json!({ "command": "quit" }))
-            .await
-            .unwrap();
-        assert!(
-            matches!(quit_outcome(&reply), Err(QuitError::OldDaemon(_))),
-            "{reply}"
-        );
-        assert!(no_quit_within(&mut server.quit_rx).await);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    async fn a_second_quit_is_answered_and_the_channel_holds_one() {
-        let mut server = TestServer::<TestCommand>::start("quittwice", None);
-        quit(&server.target()).await.expect("the first quit");
-        quit(&server.target()).await.expect("the second quit");
-        // The server feeds the channel after its answer, so give both feeds a moment.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_eq!(server.quit_rx.try_recv(), Ok(()));
-        assert!(no_quit_within(&mut server.quit_rx).await);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    async fn a_quit_feeds_the_channel_also_when_the_client_does_not_read() {
-        use interprocess::local_socket::{tokio::Stream, tokio::prelude::*};
-        use tokio::io::AsyncWriteExt;
-
-        let mut server = TestServer::<TestCommand>::start("quitdeaf", None);
-        // The plain `interprocess` connect, as in the idle test: this test is
-        // about the server.
-        let mut client = Stream::connect(server.name().to_name().unwrap())
-            .await
-            .unwrap();
-        let line = serde_json::to_string(&EngineCommand::Quit {
-            mesh: server.mesh.clone(),
-        })
-        .unwrap();
-        client
-            .write_all(format!("{line}\n").as_bytes())
-            .await
-            .unwrap();
-        let fed = tokio::time::timeout(std::time::Duration::from_secs(5), server.quit_rx.recv())
-            .await
-            .expect("the quit channel is fed while the answer is unread");
-        assert_eq!(fed, Some(()));
-        drop(client);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    async fn on_windows_terminate_is_the_quit_alone() {
-        let base = TestBase::new("termwin");
-        let mesh = test_mesh("termwin");
-        let nickname = Nickname::from("nobody");
-        let target = QuitTarget {
-            base: base.path(),
-            mesh: &mesh,
-            nickname: &nickname,
-        };
-        // The pid is not used on Windows, so our own is safe here.
-        let error = terminate(&target, std::process::id())
-            .await
-            .expect_err("no daemon");
         assert!(
             matches!(
-                error.downcast_ref::<QuitError>(),
-                Some(QuitError::Unreached(_))
+                quit::quit_outcome(&json_reply::json_error(
+                    "parse error: unknown variant `quit`"
+                )),
+                Err(QuitError::OldDaemon(_))
             ),
-            "{error}"
+            "a parse error is an old daemon"
+        );
+        assert!(
+            matches!(
+                quit::quit_outcome(&json_reply::json_error(
+                    engine_control::QUIT_OF_ANOTHER_MESH
+                )),
+                Err(QuitError::Refused(_))
+            ),
+            "another mesh is a refusal"
+        );
+        assert!(
+            matches!(quit::quit_outcome("not json"), Err(QuitError::Refused(_))),
+            "no json is a refusal"
+        );
+        assert!(
+            matches!(quit::quit_outcome(""), Err(QuitError::Unreached(_))),
+            "no answer is not heard"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_quit_for_this_mesh_is_answered_then_fed_to_the_quit_channel() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut server: TestServer<TestCommand> = TestServer::start("quit", None);
+            quit(&server.target()).await.expect("the quit is accepted");
+            let fed = time::timeout(Duration::from_secs(5), server.quit_rx.recv())
+                .await
+                .expect("the quit channel is fed");
+            assert_eq!(fed, Some(()), "the quit channel holds the quit");
+            assert!(server.app_rx.try_recv().is_err(), "the app sees no quit");
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_quit_for_another_mesh_is_refused_and_feeds_nothing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut server: TestServer<TestCommand> =
+                TestServer::start("quitother", Some(&test_mesh("other")));
+            let error = quit(&server.target()).await.expect_err("refused");
+            assert!(matches!(error, QuitError::Refused(_)), "{error}");
+            assert!(
+                no_quit_within(&mut server.quit_rx).await,
+                "the quit channel stays empty"
+            );
+            assert!(server.app_rx.try_recv().is_err(), "the app sees no quit");
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_line_that_is_no_valid_quit_reaches_the_app() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut server: TestServer<serde_json::Value> = TestServer::start("quitapp", None);
+            let name = server.name();
+            let lines = [
+                serde_json::json!({ "command": "quit" }),
+                serde_json::json!({ "command": "quit", "mesh": "no mesh id" }),
+                serde_json::json!("quit"),
+            ];
+            let mut app_rx = mem::replace(&mut server.app_rx, mpsc::channel(1).1);
+            let count = lines.len();
+            let app = tokio::spawn(async move {
+                let mut seen = Vec::new();
+                while seen.len() < count {
+                    let Some((command, response)) = app_rx.recv().await else {
+                        break;
+                    };
+                    let _ = response.send(json_reply::json_ok("app"));
+                    seen.push(command);
+                }
+                seen
+            });
+            for line in &lines {
+                let reply = send_to_endpoint(&name, line)
+                    .await
+                    .expect("the line reaches the endpoint");
+                assert!(reply.contains(r#""id":"app""#), "{line}: {reply}");
+            }
+            assert_eq!(
+                app.await.expect("the app task ends"),
+                lines,
+                "the app sees every line"
+            );
+            assert!(
+                no_quit_within(&mut server.quit_rx).await,
+                "the quit channel stays empty"
+            );
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_quit_with_no_daemon_is_not_heard() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let base = TestBase::new("quitnone");
+            let mesh = test_mesh("quitnone");
+            let nickname = Nickname::from("nobody");
+            let target = QuitTarget::new(base.path(), &mesh, &nickname);
+            let error = quit(&target).await.expect_err("no daemon");
+            assert!(matches!(error, QuitError::Unreached(_)), "{error}");
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_line_that_is_no_json_gets_the_parse_error_and_feeds_nothing() {
+        use interprocess::local_socket::tokio::Stream;
+        use interprocess::local_socket::traits::tokio::Stream as _;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut server: TestServer<TestCommand> = TestServer::start("quitraw", None);
+            let name = server.name();
+            let mut client: Stream = Stream::connect(name.to_name().expect("a valid name"))
+                .await
+                .expect("connect");
+            client.write_all(b"not json\n").await.expect("write");
+            let mut reply = String::new();
+            time::timeout(Duration::from_secs(5), client.read_to_string(&mut reply))
+                .await
+                .expect("an answer")
+                .expect("the answer reads");
+            let reply: serde_json::Value =
+                serde_json::from_str(reply.trim()).expect("the answer is json");
+            assert!(
+                reply["error"]
+                    .as_str()
+                    .is_some_and(|error| error.starts_with("parse error")),
+                "{reply}"
+            );
+            assert!(
+                no_quit_within(&mut server.quit_rx).await,
+                "the quit channel stays empty"
+            );
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_app_that_cannot_parse_a_quit_reads_as_an_old_daemon() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut server: TestServer<TestCommand> = TestServer::start("quitold", None);
+            // Not an engine quit, so the app parses it, as a daemon from before the
+            // command does with a real quit.
+            let reply = send_to_endpoint(&server.name(), &serde_json::json!({ "command": "quit" }))
+                .await
+                .expect("the line reaches the endpoint");
+            assert!(
+                matches!(quit::quit_outcome(&reply), Err(QuitError::OldDaemon(_))),
+                "{reply}"
+            );
+            assert!(
+                no_quit_within(&mut server.quit_rx).await,
+                "the quit channel stays empty"
+            );
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_second_quit_is_answered_and_the_channel_holds_one() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut server: TestServer<TestCommand> = TestServer::start("quittwice", None);
+            quit(&server.target()).await.expect("the first quit");
+            quit(&server.target()).await.expect("the second quit");
+            // The server feeds the channel after its answer, so give both feeds a moment.
+            time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                server.quit_rx.try_recv(),
+                Ok(()),
+                "the channel holds a quit"
+            );
+            assert!(
+                no_quit_within(&mut server.quit_rx).await,
+                "the channel holds one quit"
+            );
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_quit_feeds_the_channel_also_when_the_client_does_not_read() {
+        use interprocess::local_socket::tokio::Stream;
+        use interprocess::local_socket::traits::tokio::Stream as _;
+        use tokio::io::AsyncWriteExt;
+
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut server: TestServer<TestCommand> = TestServer::start("quitdeaf", None);
+            // The plain `interprocess` connect, as in the idle test: this test is
+            // about the server.
+            let name = server.name();
+            let mut client: Stream = Stream::connect(name.to_name().expect("a valid name"))
+                .await
+                .expect("connect");
+            let line = serde_json::to_string(&engine_control::EngineCommand::Quit {
+                mesh: server.mesh.clone(),
+            })
+            .expect("the quit serializes");
+            client
+                .write_all(format!("{line}\n").as_bytes())
+                .await
+                .expect("write");
+            let fed = time::timeout(Duration::from_secs(5), server.quit_rx.recv())
+                .await
+                .expect("the quit channel is fed while the answer is unread");
+            assert_eq!(fed, Some(()), "the quit channel holds the quit");
+            drop(client);
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_terminate_is_the_quit_alone() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let base = TestBase::new("termwin");
+            let mesh = test_mesh("termwin");
+            let nickname = Nickname::from("nobody");
+            let target = QuitTarget::new(base.path(), &mesh, &nickname);
+            // The pid is not used on Windows, so our own is safe here.
+            let error = terminate(&target, process::id())
+                .await
+                .expect_err("no daemon");
+            let quit_error: Option<&QuitError> =
+                error.get_ref().and_then(|inner| inner.downcast_ref());
+            assert!(
+                matches!(quit_error, Some(QuitError::Unreached(_))),
+                "{error}"
+            );
+        });
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+
+    use super::IpcError;
+
+    use std::io;
+    use std::io::ErrorKind;
+    #[test]
+    fn an_internal_cause_keeps_its_chain() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let io = io::Error::new(ErrorKind::AddrInUse, "Address already in use");
+        let cause = anyhow::Error::new(io).context("bind the endpoint");
+        let error = anyhow::Error::new(IpcError::internal(cause));
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("Address already in use"),
+            "the io cause of IpcError is lost: {text}"
         );
     }
 }

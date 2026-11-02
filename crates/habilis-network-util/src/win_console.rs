@@ -23,19 +23,8 @@ use windows_sys::Win32::System::Console::{
 };
 pub use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 
-/// The console events that a process can raise.
-///
-/// `GenerateConsoleCtrlEvent` raises only these two. Closing the console, a
-/// logoff and a shutdown come from the system alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConsoleEvent {
-    /// Ctrl+C, to every process of the console of the target.
-    CtrlC,
-    /// Ctrl+Break, to the process group of the target only. The target must be
-    /// the root of its own group ([`CREATE_NEW_PROCESS_GROUP`]), so the id of
-    /// the group is its pid.
-    CtrlBreak,
-}
+mod console_event;
+pub use console_event::ConsoleEvent;
 
 /// Send `event` to the process `pid`, through its console.
 ///
@@ -100,10 +89,9 @@ pub fn allow_ctrl_c() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::io::{BufRead as _, BufReader};
     use std::os::windows::process::CommandExt as _;
-    use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::process::{Child, Command, ExitStatus, Output, Stdio};
     use std::time::{Duration, Instant};
 
     use windows_sys::Win32::Foundation::STATUS_CONTROL_C_EXIT;
@@ -112,6 +100,7 @@ mod tests {
         CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, ConsoleEvent, allow_ctrl_c, send_console_event,
     };
 
+    use std::{env, thread};
     /// The environment that selects the target of [`console_sender`]: its pid
     /// and `c` or `break`.
     const SENDER_ENV: &str = "HABILIS_UTIL_CONSOLE_SENDER";
@@ -133,9 +122,10 @@ mod tests {
     #[test]
     #[ignore = "a process for the console tests, started by them"]
     fn idle_target() {
+        let _guard = ::habilis_network_test_tracing::init();
         allow_ctrl_c().expect("ctrl-c on");
         println!("{TARGET_READY}");
-        std::thread::sleep(TARGET_LIFE);
+        thread::sleep(TARGET_LIFE);
     }
 
     /// Not a test: the sender, a process of its own because it leaves its
@@ -143,7 +133,8 @@ mod tests {
     #[test]
     #[ignore = "a process for the console tests, started by them"]
     fn console_sender() {
-        let spec = std::env::var(SENDER_ENV).expect("the target of the sender");
+        let _guard = ::habilis_network_test_tracing::init();
+        let spec = env::var(SENDER_ENV).expect("the target of the sender");
         let (pid, event) = spec.split_once(' ').expect("a pid and an event");
         let event = match event {
             "c" => ConsoleEvent::CtrlC,
@@ -155,7 +146,7 @@ mod tests {
 
     /// This test binary, with only `entry` selected.
     fn entry(entry: &str) -> Command {
-        let mut command = Command::new(std::env::current_exe().expect("the test binary"));
+        let mut command = Command::new(env::current_exe().expect("the test binary"));
         command.args([
             &format!("win_console::tests::{entry}"),
             "--exact",
@@ -183,15 +174,13 @@ mod tests {
         } else {
             CREATE_NO_WINDOW
         };
-        let mut target = Killed(
-            entry("idle_target")
-                .creation_flags(flags)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("the target"),
-        );
+        let mut command = entry("idle_target");
+        command
+            .creation_flags(flags)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped());
+        command.stderr(Stdio::null());
+        let mut target = Killed(command.spawn().expect("the target"));
         let stdout = target.0.stdout.take().expect("piped");
         let ready = BufReader::new(stdout)
             .lines()
@@ -205,12 +194,12 @@ mod tests {
     /// `CREATE_NO_WINDOW` shows no window on a runner with no console; the
     /// sender leaves that console at once.
     fn run_sender(pid: u32, event: &str) -> (ExitStatus, String) {
-        let output = entry("console_sender")
+        let mut command = entry("console_sender");
+        command
             .env(SENDER_ENV, format!("{pid} {event}"))
             .creation_flags(CREATE_NO_WINDOW)
-            .stdin(Stdio::null())
-            .output()
-            .expect("the sender");
+            .stdin(Stdio::null());
+        let output: Output = command.output().expect("the sender");
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
@@ -226,7 +215,7 @@ mod tests {
             if let Some(status) = child.try_wait().expect("the target status") {
                 return Some(status);
             }
-            std::thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(50));
         }
         None
     }
@@ -245,24 +234,26 @@ mod tests {
 
     #[test]
     fn ctrl_break_stops_a_process_in_its_own_group() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_event_stops_target("break", true);
     }
 
     #[test]
     fn ctrl_c_stops_a_process_of_the_console() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert_event_stops_target("c", false);
     }
 
     #[test]
     fn a_process_that_exited_gives_an_error() {
-        let mut gone = Command::new("cmd")
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut command = Command::new("cmd");
+        command
             .args(["/c", "exit"])
             .creation_flags(CREATE_NO_WINDOW)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("cmd");
+            .stdin(Stdio::null());
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        let mut gone = command.spawn().expect("cmd");
         let pid = gone.id();
         // `gone` holds the handle of the process until the end of the test,
         // and Windows does not reuse a pid while a handle holds it. So the

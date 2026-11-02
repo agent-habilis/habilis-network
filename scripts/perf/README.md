@@ -21,17 +21,17 @@ One run: 48 nodes, 240 s of steady time after the last start, gossip only.
 
 ```bash
 MESH_TRAFFIC=off RUST_LOG="habilis_network=info,iroh_gossip=warn" \
-  scripts/perf/run.sh target/release/examples/mesh_peer_load 48 240 /tmp/perf/n48
-python3 scripts/perf/summarize.py /tmp/perf/n48
+  bun scripts/perf/run.ts target/release/examples/mesh_peer_load 48 240 /tmp/perf/n48
+bun scripts/perf/summarize.ts /tmp/perf/n48
 ```
 
 A series, each run after the host has calmed down (`load1` below 5, at most 15 min of
 waiting), with the uptime of every start and end in `drive.log`:
 
 ```bash
-MESH_TRAFFIC=off scripts/perf/series.sh target/release/examples/mesh_peer_load \
+MESH_TRAFFIC=off bun scripts/perf/series.ts target/release/examples/mesh_peer_load \
   /tmp/perf 240 48:1 48:2 48:3 66:1
-python3 scripts/perf/summarize.py /tmp/perf/N*
+bun scripts/perf/summarize.ts /tmp/perf/N*
 ```
 
 Close builds and other heavy work first. A run of N = 48 takes about 5 min, and N = 66
@@ -52,10 +52,10 @@ full text.
 | `MESH_TRAFFIC_UNTIL_SECS` | the directed messages stop after this many seconds. With `MESH_BLOCK_UDP_AFTER_SECS` and `MESH_TRANSPORTS=udp,webrtc,multihop` this is the run of the idle detach |
 | `MESH_TRAFFIC_BURSTY` | `1`: instead of a message per second to every peer, every 60 to 240 s (random) one message to each of 3 to 5 random peers. A connection then idles, and is needed again |
 | `MESH_FLOOD_PEERS` | K: from second 30 on, messages of 3000 bytes to the first K roster peers as fast as the node accepts them. The RSS against K is the worst case of one connection (with `MESH_TRAFFIC=off`). Read the RSS of the sender and of the receiver: the flood fills the send buffer of the sender as well as the receive window of the receiver |
-| `MESH_FLOOD_SENDERS` | S: with `MESH_FLOOD_PEERS`, only the nodes with index 1 to S flood; the others only receive. `run.sh` sets `MESH_NODE_INDEX` (1 is the creator). Each per-second line then ends with `role sender` or `role receiver`, so the RSS of the two roles can be read apart. Unset: every node floods, and the line has no role |
+| `MESH_FLOOD_SENDERS` | S: with `MESH_FLOOD_PEERS`, only the nodes with index 1 to S flood; the others only receive. `run.ts` sets `MESH_NODE_INDEX` (1 is the creator). Each per-second line then ends with `role sender` or `role receiver`, so the RSS of the two roles can be read apart. Unset: every node floods, and the line has no role |
 | `MESH_BLOCK_UDP_AFTER_SECS` | after this many seconds the node takes IP away from every connection of its process, once |
 | `MESH_UNDERLAY_LEG` | `off`: the multihop underlay holds no WebRTC leg (the control cell) |
-| `STAGGER` | seconds between two node starts (`run.sh`, default 0.3) |
+| `STAGGER` | seconds between two node starts (`run.ts`, default 0.3) |
 
 ## Output
 
@@ -70,13 +70,13 @@ the app endpoint, `underlay` those of the multihop underlay, and `rss_mb` the cu
 resident memory. `qclose`, `pclose` and `sclose` count the closes of every QUIC connection
 (the gossip links too), of the pooled unicast connections that a send used, and of WebRTC
 sessions, and `qredial`, `predial` and `sredial` the closes that were followed by a connection to
-the same peer within 300 s: `python3 scripts/perf/redial_report.py <run folder>` prints them
+the same peer within 300 s: `bun scripts/perf/redial_report.ts <run folder>` prints them
 per node per hour, and the share of closes that were followed by a re-dial. `idle_sessions` counts the WebRTC sessions to members that are not gossip
 neighbors. `phase` is 2 once the node has taken IP away.
 
 A run folder holds `n<i>.out` and `n<i>.err` per node, `summary.txt` (the last census
 line of each node), `host.log` (one line per 10 s), `canary.log` (every pause of the host
-over 0.5 s), `probe.log` and `done`. `summarize.py` prints one line per run: nodes with a
+over 0.5 s), `probe.log` and `done`. `summarize.ts` prints one line per run: nodes with a
 full roster, isolated nodes, stalls, link churn (`up` and `down`), dropped data messages,
 send-queue disconnects, the digest answers, memory and load.
 
@@ -87,10 +87,10 @@ transport list:
 
 ```bash
 export MESH_TRANSPORTS=udp,webrtc,multihop,relay MESH_BLOCK_UDP_AFTER_SECS=60
-scripts/perf/series.sh target/release/examples/mesh_peer_load /tmp/perf/leg-on 240 33:1 33:2 33:3
+bun scripts/perf/series.ts target/release/examples/mesh_peer_load /tmp/perf/leg-on 240 33:1 33:2 33:3
 MESH_UNDERLAY_LEG=off \
-  scripts/perf/series.sh target/release/examples/mesh_peer_load /tmp/perf/leg-off 240 33:1 33:2 33:3
-python3 scripts/perf/underlay_report.py /tmp/perf/leg-on/N* /tmp/perf/leg-off/N*
+  bun scripts/perf/series.ts target/release/examples/mesh_peer_load /tmp/perf/leg-off 240 33:1 33:2 33:3
+bun scripts/perf/underlay_report.ts /tmp/perf/leg-on/N* /tmp/perf/leg-off/N*
 ```
 
 The marginal memory of one session is (the delta with the leg on minus the delta with the
@@ -101,6 +101,6 @@ leg off) divided by the mean number of underlay sessions per node. Each run take
 
 - The nodes are native processes. A browser costs more.
 - The host runs other work. Read `host.log` and `canary.log` before you trust a run, and
-  log the uptime beside the timings (`series.sh` does).
+  log the uptime beside the timings (`series.ts` does).
 - `peak_resident_memory_mb` in the census is a peak: it includes the burst at join time.
   Use `rss_mb` for growth.

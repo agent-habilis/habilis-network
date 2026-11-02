@@ -24,16 +24,16 @@ The IPC of a daemon works on Windows, over a named pipe. A daemon stops graceful
 | Requirement | State |
 |---|---|
 | R1. Compile | Done. `libc` and `windows-sys` come in through `host`, each on its own target. |
-| R2. Runtime base | Done. `runtime_base` returns `<LocalAppData>\<product>\run`, and `ensure_runtime_base` rejects a reparse point at the base (`crates/habilis-network-util/src/lib.rs`). |
-| R3. IPC | Done. On Windows the endpoint is a named pipe with a random name and a DACL of the user, and a client checks the owner of the pipe. On Windows discovery reads a `<nick>.ipc` marker. On Unix a client finds the socket by its path, as on `main` (`crates/habilis-network/src/transport/ipc.rs`). |
+| R2. Runtime base | Done. `runtime_base` returns `<LocalAppData>\<product>\run`, and `ensure_runtime_base` rejects a reparse point at the base (`crates/habilis-network-util/src/runtime_dir.rs`). |
+| R3. IPC | Done. On Windows the endpoint is a named pipe with a random name and a DACL of the user, and a client checks the owner of the pipe. On Windows discovery reads a `<nick>.ipc` marker. On Unix a client finds the socket by its path, as on `main` (`crates/habilis-network/src/transport/ipc/`). |
 | R4. Process helpers | Done. `is_alive`, `live_start_time`, `comm_of` and `parent_of` have Windows versions in `process.rs`. `parent_of` also gives no parent when the creator has exited or is newer than its child. |
-| R5. Graceful stop | Done. On Windows the engine answers an IPC `quit` and takes the path of `SIGTERM`. `runtime::ipc::terminate` stops a daemon on every OS: with the quit on Windows, with `SIGTERM` on Unix, as on `main` (`crates/habilis-network/src/transport/ipc.rs`). |
+| R5. Graceful stop | Done. On Windows the engine answers an IPC `quit` and takes the path of `SIGTERM`. `runtime::ipc::terminate` stops a daemon on every OS: with the quit on Windows, with `SIGTERM` on Unix, as on `main` (`crates/habilis-network/src/transport/ipc/`). |
 | R6. Owner watch | Done. A daemon with `--owner-pid` watches its owner on every OS (`crates/habilis-network/src/daemon/shutdown.rs`). The watch of the parent pid stays Unix only. |
 | R7. Console events | Done. Ctrl-c, ctrl-break, close, logoff and shutdown feed the quit channel (`crates/habilis-network/src/daemon/shutdown.rs`). A logoff and a shutdown do not reach these listeners in a node that loaded `user32.dll`, and a node loads it: a CLI daemon gets them through a window (R13). |
 | R8. State file | Done. The replace and the remove of the state file and of the IPC marker run again for up to 50 ms while a reader blocks them (`crates/habilis-network-util/src/file_retry.rs`). |
 | R9. FFI | Done. On Windows the five calls that returned `long` return `int64_t`, through the `habilis_network_len` of the header, which stays `long` on every other target (`crates/habilis-network-ffi`). The loaders read them as `i64`, koffi as `int64_t` on Windows. `cargo task ffi` reads `habilis_network_ffi.lib` with `llvm-nm.exe` (`tasks/src/ffi.rs`). |
 | R10. Tooling and tests | Done. `cdp.rs` has no `win64` build and says why. Set `$CHROME_FOR_TESTING` to a local Chrome. |
-| R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the six steps of `host_lifecycle.rs` run. `cargo task ffi` and the smoke test of the Bun loader against the release DLL run in the `windows` job (R9). Open: the `e2e.yml` stream job, and the required-check setting of the repository. The Node loader (koffi) runs on no CI job, only in T3. Until the fix of #31 is in `agent-habilis/iroh`, a `[patch]` in the root `Cargo.toml` points the iroh family at that fix: on Windows the test relay logged a client reset as ERROR, which failed loopback tests under the rule of #22. The four loopback tests of #31 run on Windows again. The patch holds only in this workspace. |
+| R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the six steps of `host_lifecycle.rs` run. `cargo task ffi` and the smoke test of the Bun loader against the release DLL run in the `windows` job (R9). Open: the `e2e.yml` stream job, and the required-check setting of the repository. The Node loader (koffi) runs on no CI job, only in T3. Until the fix of #31 is in `agent-habilis/iroh`, a `[patch]` in the root `Cargo.toml` points the iroh family at that fix, on top of `e970dd2`, the rev of the pins: on Windows the test relay logged a client reset as ERROR, which failed loopback tests under the rule of #22. The four loopback tests of #31 run on Windows again. The patch holds only in this workspace. |
 | R12. Runtime base of a Unix client | Partly done. `check_runtime_base` exists. The IPC client does not call it in this port, because the port leaves Unix as it is on `main` ([R14](#r14-unix-as-on-main)). The client check goes to its own change on `main`. See [R12](#r12-runtime-base-of-a-unix-client). |
 | R13. Logoff and shutdown | Done. A CLI daemon has a hidden window, and a logoff, a shutdown, a close by the Restart Manager or a `WM_CLOSE` feeds the quit channel (`crates/habilis-network-util/src/win_session.rs`, `crates/habilis-network/src/daemon/shutdown.rs`). |
 | R14. Unix as on `main` | Done, on Windows and on Linux. The client check of R12 is out of the port. On Unix a client finds a daemon by its socket path again, the engine answers no IPC command, the lines of the daemon are as on `main`, and the C header declares `long`. See [R14](#r14-unix-as-on-main). |
@@ -80,8 +80,8 @@ Open:
 Done (R10):
 
 - `tasks/src/util/webdriver.rs` uses the `which` crate.
-- `crates/habilis-network-chunks/tests/origin.rs` uses `File::set_modified`, not `touch -t`.
-- The path assertions in `crates/habilis-network-util/src/lib.rs` and `crates/habilis-network/src/transport/ipc.rs` are correct on each OS.
+- `crates/habilis-network-chunks/tests/origin/cases.rs` uses `File::set_modified`, not `touch -t`.
+- The path assertions in `crates/habilis-network-util/src/runtime_dir.rs` and `crates/habilis-network/src/transport/ipc.rs` are correct on each OS.
 
 ### 2.4 Toolchain
 
@@ -301,7 +301,7 @@ On Unix the base is `/tmp/<product>-<uid>`, a path that another user can create 
 
 Partly done.
 
-- `check_runtime_base(base)` (`crates/habilis-network-util/src/lib.rs`) has the checks of `ensure_runtime_base`, creates nothing and changes nothing. It returns `RuntimeBaseCheck`: `Private` (a folder of the user with no group or other bits), `Absent`, or `Refused` with the reason. A base at `0755` is refused, not tightened.
+- `check_runtime_base(base)` (`crates/habilis-network-util/src/runtime_dir.rs`) has the checks of `ensure_runtime_base`, creates nothing and changes nothing. It returns `RuntimeBaseCheck`: `Private` (a folder of the user with no group or other bits), `Absent`, or `Refused` with the reason. A base at `0755` is refused, not tightened.
 - The IPC client does not call it. A port commit made `send` and `active_endpoints` refuse a base that is not private, with `UnsafeRuntimeBase`. R14 took that commit out, because it changed the behavior of a Unix client, and the port leaves Unix as it is on `main`.
 - On Windows the base is in the profile, which another user cannot create, so the client needs only the owner check of the pipe.
 

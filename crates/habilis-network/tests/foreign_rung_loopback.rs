@@ -9,39 +9,44 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use habilis_network::iroh::Endpoint;
 use habilis_network::iroh::endpoint::presets;
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{self, Inspect, Membership, Request};
 use habilis_network::protocol::{Mesh, MeshConfig, MeshName, Seed};
 
+use std::{process, thread};
+use tokio::{task, time};
 const MEET_DEADLINE: Duration = Duration::from_secs(90);
 
 /// A seed that differs from run to run, so that the ladder of one run is not the ladder of another
 /// run on the same host.
 fn fresh_seed() -> Seed {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .expect("after the epoch")
         .as_nanos();
     let mut bytes = [0u8; 32];
     for (index, chunk) in bytes.chunks_mut(16).enumerate() {
         let value = nanos.rotate_left(u32::try_from(index * 17).expect("small"))
-            ^ u128::from(std::process::id());
+            ^ u128::from(process::id());
         chunk.copy_from_slice(&value.to_le_bytes());
     }
-    Seed::from_bytes(bytes)
+    Seed::new(bytes)
 }
 
 /// A listener on `port` that serves one ALPN, so it answers a gossip dial with a TLS alert. It is a
 /// plain accept loop: an iroh `Router` would log every failed accept as a warning of its own.
-async fn foreign_on(port: u16) -> (Endpoint, tokio::task::JoinHandle<()>) {
-    let endpoint = Endpoint::builder(presets::Minimal)
+async fn foreign_on(port: u16) -> (Endpoint, task::JoinHandle<()>) {
+    let builder = Endpoint::builder(presets::Minimal)
         .alpns(vec![b"foreign".to_vec()])
-        .clear_ip_transports()
-        .bind_addr(format!("127.0.0.1:{port}").as_str())
-        .expect("a valid address")
+        .clear_ip_transports();
+    let address = format!("127.0.0.1:{port}");
+    let bound = builder
+        .bind_addr(address.as_str())
+        .expect("a valid address");
+    let endpoint: Endpoint = bound
         .bind()
         .await
         .expect("bind the foreign endpoint on the rung");
@@ -58,11 +63,11 @@ async fn foreign_on(port: u16) -> (Endpoint, tokio::task::JoinHandle<()>) {
 
 async fn roster_len(member: &Membership) -> usize {
     let json = member
-        .request(|reply| Request::Peers { reply })
+        .request(|reply| Request::Inspect(Inspect::Peers { reply }))
         .await
         .unwrap_or_default();
-    serde_json::from_str::<serde_json::Value>(&json)
-        .ok()
+    let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+    roster
         .and_then(|roster| roster["peers"].as_array().map(Vec::len))
         .unwrap_or(0)
 }
@@ -75,9 +80,9 @@ async fn meet(foreign_rungs: &[usize]) -> (bool, [u16; 8]) {
     // rungs are in that order puts the foreign listener of rung 0 before the rung that the
     // beacon takes (rung 1, the first one that binds), which is the order that fails every dial.
     let (mesh, ladder) = loop {
-        let mesh = Mesh::new(
+        let mesh = Mesh::try_new(
             fresh_seed(),
-            MeshName::new("foreign-rung".to_owned()).expect("a name"),
+            MeshName::try_new("foreign-rung").expect("a name"),
             config.clone(),
         )
         .expect("a mesh");
@@ -85,7 +90,7 @@ async fn meet(foreign_rungs: &[usize]) -> (bool, [u16; 8]) {
         if ladder[0] < ladder[1] {
             break (mesh, ladder);
         }
-        std::thread::sleep(Duration::from_millis(1));
+        thread::sleep(Duration::from_millis(1));
     };
     let mut foreign = Vec::new();
     for &rung in foreign_rungs {
@@ -93,14 +98,15 @@ async fn meet(foreign_rungs: &[usize]) -> (bool, [u16; 8]) {
     }
 
     let open = |nick: &'static str| {
-        let opts = membership::Opts {
-            mesh: Some(mesh.to_string()),
-            nick: Some(nick.to_owned()),
-            ..membership::Opts::default()
-        };
+        let mesh_text = mesh.to_string();
+        let options = membership::JoinOptions::default()
+            .mesh(Some(mesh_text))
+            .nick(Some(nick.to_owned()));
         async move {
             let (sink, _events) = membership::json_sink();
-            membership::join(&opts, sink).await.expect("open a member")
+            membership::join(&options, sink)
+                .await
+                .expect("open a member")
         }
     };
     let alice = open("alice").await;
@@ -113,7 +119,7 @@ async fn meet(foreign_rungs: &[usize]) -> (bool, [u16; 8]) {
             met = true;
             break;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     let _ = alice.node.leave().await;
     let _ = bob.node.leave().await;

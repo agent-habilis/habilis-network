@@ -11,7 +11,7 @@
 //! arbitrary per-frame lag — and asserts the final states match exactly.
 
 use habilis_network_netplay::{Config, Frame, PlayerHandle, Request, SyncTestSession};
-use proptest::prelude::*;
+use proptest::prelude::{prop, prop_assert_eq, proptest};
 use serde::{Deserialize, Serialize};
 
 // The rollback core is `pub(crate)`, so drive it through the one public
@@ -22,16 +22,24 @@ mod harness;
 
 use harness::{Runner, sim};
 
+/// The input of one player in a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Input(pub i32);
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The game state that every peer must agree on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Copy)]
+#[non_exhaustive]
 pub struct State {
+    /// The sum of every input applied so far.
     pub value: i64,
+    /// The frame that the state belongs to.
     pub frame: Frame,
 }
 
-#[derive(Debug)]
+/// The game under test.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Game;
 
 impl Config for Game {
@@ -69,7 +77,7 @@ proptest! {
 #[test]
 fn a_long_run_stays_stable() {
     let script: Vec<(i32, i32)> = (0..400).map(|frame| (frame % 7, frame % 11)).collect();
-    let mut session = SyncTestSession::<Game>::new(2, 6);
+    let mut session: SyncTestSession<Game> = SyncTestSession::new(2, 6);
     let mut runner = Runner::new();
     for (left, right) in &script {
         session
@@ -85,19 +93,26 @@ fn a_long_run_stays_stable() {
             runner.handle(request);
         }
     }
-    assert_eq!(runner.state.frame, Frame::new(400));
+    assert_eq!(
+        runner.state.frame,
+        Frame::new(400),
+        "the long run reaches frame 400"
+    );
     let expected: i64 = script
         .iter()
         .map(|(left, right)| i64::from(*left) + i64::from(*right))
         .sum();
-    assert_eq!(runner.state.value, expected);
+    assert_eq!(
+        runner.state.value, expected,
+        "the long run keeps the expected state value"
+    );
 }
 
 /// Pins the shape of a rollback cycle: load the state, then re-save and
 /// re-advance each frame being redone.
 #[test]
 fn a_rollback_loads_then_re_saves_and_re_advances() {
-    let mut session = SyncTestSession::<Game>::new(1, 2);
+    let mut session: SyncTestSession<Game> = SyncTestSession::new(1, 2);
     let mut runner = Runner::new();
     let mut seen = Vec::new();
     for frame in 0..6 {
@@ -109,6 +124,7 @@ fn a_rollback_loads_then_re_saves_and_re_advances() {
                 Request::SaveState { .. } => 'S',
                 Request::LoadState { .. } => 'L',
                 Request::AdvanceFrame { .. } => 'A',
+                _ => unreachable!("a request this test does not expect"),
             });
             // Fulfilling is not optional: the next rollback loads a state
             // this must have saved. Collecting without fulfilling is the

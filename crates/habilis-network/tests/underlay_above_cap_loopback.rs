@@ -16,9 +16,11 @@
 
 use std::time::{Duration, Instant};
 
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{self, Inspect, Membership, Request, Routing};
 use habilis_network::protocol::{Lookup, Transport};
 
+use habilis_network::net::test_relay;
+use tokio::time;
 const MEMBERS: usize = 4;
 const CAP: usize = 2;
 const MESH_DEADLINE: Duration = Duration::from_mins(3);
@@ -35,18 +37,18 @@ fn evictions() -> usize {
 
 async fn roster_len(member: &Membership) -> usize {
     let json = member
-        .request(|reply| Request::Peers { reply })
+        .request(|reply| Request::Inspect(Inspect::Peers { reply }))
         .await
         .unwrap_or_default();
-    serde_json::from_str::<serde_json::Value>(&json)
-        .ok()
+    let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+    roster
         .and_then(|roster| roster["peers"].as_array().map(Vec::len))
         .unwrap_or(0)
 }
 
 async fn underlay_sessions(member: &Membership) -> usize {
     member
-        .request(|reply| Request::UnderlaySessions { reply })
+        .request(|reply| Request::Routing(Routing::UnderlaySessions { reply }))
         .await
         .expect("the loop answers")
 }
@@ -65,41 +67,37 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
         "habilis_network=info,habilis_network::transport=debug",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let (first_sink, _first_events) = membership::json_sink();
-        let creator = membership::join(
-            &membership::Opts {
-                nick: Some("m0".to_owned()),
-                lookup: vec![Lookup::Relay],
-                transport: vec![Transport::WebRtc, Transport::Multihop, Transport::Relay],
-                relay_urls: vec![relay.to_string()],
-                max_peers: CAP,
-                ..membership::Opts::default()
-            },
-            first_sink,
-        )
-        .await
-        .expect("open the first member");
+        let options = membership::JoinOptions::default()
+            .nick(Some("m0".to_owned()))
+            .lookup(vec![Lookup::Relay]);
+        let relay_urls = vec![relay.to_string()];
+        let options = options
+            .transport(vec![
+                Transport::WebRtc,
+                Transport::Multihop,
+                Transport::Relay,
+            ])
+            .relay_urls(relay_urls)
+            .max_peers(CAP);
+        let creator: Membership = membership::join(&options, first_sink)
+            .await
+            .expect("open the first member");
         let mesh = creator.node.mesh_id().to_string();
         let mut members = vec![creator];
         let mut sinks = Vec::new();
         for index in 1..MEMBERS {
             let (sink, events) = membership::json_sink();
             sinks.push(events);
+            let member_options: membership::JoinOptions = membership::JoinOptions::default()
+                .nick(Some(format!("m{index}")))
+                .mesh(Some(mesh.clone()))
+                .max_peers(CAP);
             members.push(
-                membership::join(
-                    &membership::Opts {
-                        nick: Some(format!("m{index}")),
-                        mesh: Some(mesh.clone()),
-                        max_peers: CAP,
-                        ..membership::Opts::default()
-                    },
-                    sink,
-                )
-                .await
-                .expect("open a member"),
+                membership::join(&member_options, sink)
+                    .await
+                    .expect("open a member"),
             );
         }
 
@@ -111,26 +109,27 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
                         meshing.elapsed() < MESH_DEADLINE,
                         "the members never saw each other"
                     );
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    time::sleep(Duration::from_millis(500)).await;
                     continue 'mesh;
                 }
             }
             break;
         }
-        tokio::time::sleep(SETTLE).await;
+        time::sleep(SETTLE).await;
 
         let mut per_window = Vec::new();
         let mut totals = Vec::new();
         for window in 0..WINDOWS {
             let before = evictions();
-            tokio::time::sleep(WINDOW).await;
+            time::sleep(WINDOW).await;
             let sessions = sessions_of_all(&members).await;
             let count = evictions() - before;
             eprintln!(
                 "WINDOW {window}: {count} evictions, underlay sessions per member {sessions:?}"
             );
             per_window.push(count);
-            totals.push(sessions.iter().sum::<usize>());
+            let total: usize = sessions.iter().sum();
+            totals.push(total);
         }
         for member in members {
             let _ = member.node.leave().await;

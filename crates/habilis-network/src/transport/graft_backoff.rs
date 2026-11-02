@@ -43,7 +43,7 @@ struct Entry {
     step: Duration,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct GraftBackoff {
     by_peer: HashMap<EndpointId, Entry>,
 }
@@ -121,11 +121,10 @@ impl GraftBackoff {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
-    use super::*;
-    use crate::testing::endpoint_id;
+    use super::{Duration, EndpointId, GRAFT_BACKOFF_MAX, GraftBackoff, Instant};
+    use crate::testing;
 
     fn at(start: Instant, secs: u64) -> Instant {
         start + Duration::from_secs(secs)
@@ -138,7 +137,8 @@ mod tests {
     /// A request that brought no link in 20 s was refused, and the peer is left alone for 60 s.
     #[test]
     fn a_refused_request_blocks_the_peer_for_a_minute() {
-        let (start, peer) = (Instant::now(), endpoint_id(1));
+        let _guard = ::habilis_network_test_tracing::init();
+        let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         let mut backoff = GraftBackoff::default();
         backoff.asked(peer, start);
 
@@ -149,10 +149,16 @@ mod tests {
         );
 
         backoff.settle(at(start, 21), unlinked, 0.0);
-        assert!(backoff.is_blocked(&peer, at(start, 21 + 59)));
-        assert!(!backoff.is_blocked(&peer, at(start, 21 + 61)));
         assert!(
-            !backoff.is_blocked(&endpoint_id(2), at(start, 22)),
+            backoff.is_blocked(&peer, at(start, 21 + 59)),
+            "a refused request blocks the peer for a minute"
+        );
+        assert!(
+            !backoff.is_blocked(&peer, at(start, 21 + 61)),
+            "the block lifts after a minute"
+        );
+        assert!(
+            !backoff.is_blocked(&testing::endpoint_id(2), at(start, 22)),
             "only that peer"
         );
     }
@@ -160,7 +166,8 @@ mod tests {
     /// Each refusal in a row doubles the wait, up to 15 minutes.
     #[test]
     fn each_refusal_in_a_row_doubles_the_wait_up_to_fifteen_minutes() {
-        let (start, peer) = (Instant::now(), endpoint_id(1));
+        let _guard = ::habilis_network_test_tracing::init();
+        let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         let mut backoff = GraftBackoff::default();
         let mut now = start;
         let mut waits = Vec::new();
@@ -175,38 +182,51 @@ mod tests {
             waits.push(wait);
             now = at(now, wait);
         }
-        assert_eq!(waits, [60, 120, 240, 480, 900, 900, 900]);
+        assert_eq!(
+            waits,
+            [60, 120, 240, 480, 900, 900, 900],
+            "each refusal in a row doubles the wait up to fifteen minutes"
+        );
     }
 
     /// A link that comes up, even 15 s after the request, is not a refusal: the wait starts over.
     #[test]
     fn a_link_that_comes_up_after_the_request_is_not_backed_off() {
-        let (start, peer) = (Instant::now(), endpoint_id(1));
+        let _guard = ::habilis_network_test_tracing::init();
+        let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         let mut backoff = GraftBackoff::default();
         backoff.asked(peer, start);
         backoff.reset(peer);
 
         backoff.settle(at(start, 40), unlinked, 0.0);
-        assert!(!backoff.is_blocked(&peer, at(start, 40)));
+        assert!(
+            !backoff.is_blocked(&peer, at(start, 40)),
+            "a link that comes up after the request is not backed off"
+        );
     }
 
     /// A peer that is linked when the answers are read did not refuse, whatever order the events
     /// came in.
     #[test]
     fn a_linked_peer_is_not_read_as_a_refusal() {
-        let (start, peer) = (Instant::now(), endpoint_id(1));
+        let _guard = ::habilis_network_test_tracing::init();
+        let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         let linked: HashSet<EndpointId> = [peer].into();
         let mut backoff = GraftBackoff::default();
         backoff.asked(peer, start);
 
         backoff.settle(at(start, 30), |id| linked.contains(id), 0.0);
-        assert!(!backoff.is_blocked(&peer, at(start, 30)));
+        assert!(
+            !backoff.is_blocked(&peer, at(start, 30)),
+            "a linked peer is not read as a refusal"
+        );
     }
 
     /// The link coming up, or a new address, takes the doubled wait back to a minute.
     #[test]
     fn a_reset_starts_the_wait_over() {
-        let (start, peer) = (Instant::now(), endpoint_id(1));
+        let _guard = ::habilis_network_test_tracing::init();
+        let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         let mut backoff = GraftBackoff::default();
         backoff.asked(peer, start);
         backoff.settle(at(start, 21), unlinked, 0.0);
@@ -218,10 +238,16 @@ mod tests {
         );
 
         backoff.reset(peer);
-        assert!(!backoff.is_blocked(&peer, at(start, 111 + 100)));
+        assert!(
+            !backoff.is_blocked(&peer, at(start, 111 + 100)),
+            "a reset lifts the block at once"
+        );
         backoff.asked(peer, at(start, 300));
         backoff.settle(at(start, 321), unlinked, 0.0);
-        assert!(backoff.is_blocked(&peer, at(start, 321 + 59)));
+        assert!(
+            backoff.is_blocked(&peer, at(start, 321 + 59)),
+            "a reset starts a new wait from its first step"
+        );
         assert!(
             !backoff.is_blocked(&peer, at(start, 321 + 61)),
             "back to 60 s"
@@ -231,7 +257,8 @@ mod tests {
     /// The wait has a jitter of 20 percent either way.
     #[test]
     fn the_wait_has_a_jitter_of_twenty_percent() {
-        let (start, peer) = (Instant::now(), endpoint_id(1));
+        let _guard = ::habilis_network_test_tracing::init();
+        let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         for (spread, secs) in [(-1.0, 48), (1.0, 72)] {
             let mut backoff = GraftBackoff::default();
             backoff.asked(peer, start);
@@ -251,7 +278,8 @@ mod tests {
     /// step, or an unlimited caller would extend the wait it should respect.
     #[test]
     fn an_ask_during_the_wait_does_not_extend_it() {
-        let (start, peer) = (Instant::now(), endpoint_id(1));
+        let _guard = ::habilis_network_test_tracing::init();
+        let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         let mut backoff = GraftBackoff::default();
         backoff.asked(peer, start);
         backoff.settle(at(start, 21), unlinked, 0.0);
@@ -263,13 +291,17 @@ mod tests {
             backoff.is_blocked(&peer, at(start, 21 + 61 + 21 + 100)),
             "the second wait is 120 s"
         );
-        assert!(!backoff.is_blocked(&peer, at(start, 21 + 61 + 21 + 121)));
+        assert!(
+            !backoff.is_blocked(&peer, at(start, 21 + 61 + 21 + 121)),
+            "an ask during the wait does not extend it"
+        );
     }
 
     /// A peer that was quiet for longer than the longest wait starts again at the first wait.
     #[test]
     fn a_step_decays_after_a_quiet_time_longer_than_the_longest_wait() {
-        let (start, peer) = (Instant::now(), endpoint_id(1));
+        let _guard = ::habilis_network_test_tracing::init();
+        let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         let mut backoff = GraftBackoff::default();
         let mut now = start;
         for _ in 0..4 {
@@ -282,19 +314,26 @@ mod tests {
         now += GRAFT_BACKOFF_MAX + Duration::from_secs(1);
         backoff.asked(peer, now);
         backoff.settle(at(now, 21), unlinked, 0.0);
-        assert!(backoff.is_blocked(&peer, at(now, 21 + 59)));
+        assert!(
+            backoff.is_blocked(&peer, at(now, 21 + 59)),
+            "a step decays after a quiet time longer than the longest wait"
+        );
         assert!(!backoff.is_blocked(&peer, at(now, 21 + 61)), "back to 60 s");
     }
 
     /// A refusal is read once: the same silence does not extend the wait.
     #[test]
     fn a_refusal_is_read_once() {
-        let (start, peer) = (Instant::now(), endpoint_id(1));
+        let _guard = ::habilis_network_test_tracing::init();
+        let (start, peer) = (Instant::now(), testing::endpoint_id(1));
         let mut backoff = GraftBackoff::default();
         backoff.asked(peer, start);
         backoff.settle(at(start, 21), unlinked, 0.0);
         backoff.settle(at(start, 40), unlinked, 0.0);
         backoff.settle(at(start, 70), unlinked, 0.0);
-        assert!(!backoff.is_blocked(&peer, at(start, 21 + 61)));
+        assert!(
+            !backoff.is_blocked(&peer, at(start, 21 + 61)),
+            "a refusal is read once"
+        );
     }
 }

@@ -1,11 +1,14 @@
 //! The native cells: iroh endpoints in this process, on loopback.
 //!
 //! Three shapes. Plain iroh on UDP is the ceiling. The engine-shaped endpoint
-//! registers the WebRTC transport beside UDP and lets the path selector pick,
+//! registers the `WebRTC` transport beside `UDP` and lets the path selector pick,
 //! which is what two native habilis-network peers do — and it picks UDP, so that cell
-//! is a check that registering the transport costs nothing, not a WebRTC
+//! is a check that registering the transport costs nothing, not a `WebRTC`
 //! number. The webrtc-only pair is str0m at both ends and the only native cell
 //! that goes through the data channel at all.
+
+use tokio::time;
+mod web_rtc_peer;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -19,7 +22,7 @@ use habilis_network_iroh_webrtc_transport::bench::{
 use habilis_network_iroh_webrtc_transport::iroh::endpoint::{Builder, Connection, Path, presets};
 use habilis_network_iroh_webrtc_transport::iroh::protocol::Router;
 use habilis_network_iroh_webrtc_transport::iroh::{
-    Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey, TransportAddr,
+    Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr,
 };
 use habilis_network_iroh_webrtc_transport::{
     IceConfig, WEBRTC_TRANSPORT_ID, WebRtcHandle, WebRtcTransport, answer_with, custom_addr,
@@ -29,33 +32,11 @@ use habilis_network_iroh_webrtc_transport::{
 use super::Args;
 use super::run::{Measured, Outcome, Rtt, Sample, TRANSFER_TIMEOUT};
 
+use habilis_network::net::test_relay;
+
+pub(crate) use web_rtc_peer::WebRtcPeer;
 /// A JSEP round on loopback is milliseconds; this is the stall bound.
 pub(crate) const JSEP_DEADLINE: Duration = Duration::from_secs(30);
-
-/// A native endpoint whose only transport is WebRTC.
-pub(crate) struct WebRtcPeer {
-    pub(crate) id: EndpointId,
-    pub(crate) transport: Arc<WebRtcTransport>,
-    pub(crate) endpoint: Endpoint,
-}
-
-impl WebRtcPeer {
-    pub(crate) async fn bind() -> Result<Self, String> {
-        let key = SecretKey::generate();
-        let id = key.public();
-        let transport = WebRtcTransport::new(id);
-        let endpoint = Endpoint::builder(transport.preset())
-            .secret_key(key)
-            .bind()
-            .await
-            .map_err(|error| format!("bind failed: {error:#}"))?;
-        Ok(Self {
-            id,
-            transport,
-            endpoint,
-        })
-    }
-}
 
 fn path_of(connection: &Connection) -> String {
     if on_webrtc(connection) {
@@ -95,7 +76,7 @@ pub(super) async fn rounds_on(
     for _ in 0..=args.rounds {
         let path = path(connection);
         let started = Instant::now();
-        let bytes = tokio::time::timeout(
+        let bytes = time::timeout(
             TRANSFER_TIMEOUT,
             exchange(connection, args.direction.protocol(), args.bytes),
         )
@@ -120,24 +101,37 @@ pub(super) const RTT_ROUNDS: usize = 1000;
 
 /// The selected path of `connection`, named the way a cell expects it. The
 /// selected path, not any path: a cell that claims a rung must have used it.
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "`TransportAddr` is non-exhaustive: a rung this runner does not name is `other`"
-)]
 pub(crate) fn selected_path(connection: &Connection) -> String {
     connection
         .paths()
         .iter()
         .find(Path::is_selected)
-        .map_or("other", |path| match path.remote_addr() {
-            TransportAddr::Ip(_) => "ip",
-            TransportAddr::Relay(_) => "relay",
-            TransportAddr::Custom(addr) if addr.id() == WEBRTC_TRANSPORT_ID => "webrtc",
-            TransportAddr::Custom(addr) if addr.id() == MULTIHOP_TRANSPORT_ID => "multihop",
-            TransportAddr::Custom(addr) if addr.id() == GOSSIP_TRANSPORT_ID => "gossip",
-            _ => "other",
+        .map_or("other", |path| {
+            let addr = path.remote_addr();
+            if let TransportAddr::Ip(_) = addr {
+                "ip"
+            } else if let TransportAddr::Relay(_) = addr {
+                "relay"
+            } else if let TransportAddr::Custom(custom) = addr {
+                custom_name(custom.id())
+            } else {
+                "other"
+            }
         })
         .to_owned()
+}
+
+/// The name of a custom transport, or `other` for one this runner does not name.
+fn custom_name(id: u64) -> &'static str {
+    if id == WEBRTC_TRANSPORT_ID {
+        "webrtc"
+    } else if id == MULTIHOP_TRANSPORT_ID {
+        "multihop"
+    } else if id == GOSSIP_TRANSPORT_ID {
+        "gossip"
+    } else {
+        "other"
+    }
 }
 
 /// One ladder cell over one connection from `client` to `server`: the transfer
@@ -153,16 +147,17 @@ pub(super) async fn ladder_measure(
         .await
         .map_err(|error| format!("connect failed: {error:#}"))?;
     let samples = rounds_on(&connection, args, selected_path).await?;
-    let round_trips = tokio::time::timeout(
+    let round_trips = time::timeout(
         TRANSFER_TIMEOUT,
         rtt_samples(&connection, RTT_WARMUP, RTT_ROUNDS),
     )
     .await
     .map_err(|_| format!("the round trips stalled past {TRANSFER_TIMEOUT:?}"))?
     .map_err(|error| format!("round trips failed: {error:#}"))?;
+    let round_trips: Vec<_> = round_trips.collect();
     connection.close(0u32.into(), b"done");
-    let mut measured = Measured::from_samples(negotiate_ms, samples)?;
-    measured.rtt = Rtt::from_samples(&round_trips);
+    let mut measured = Measured::summarize(negotiate_ms, samples)?;
+    measured.rtt = Rtt::summarize(&round_trips);
     Ok(measured)
 }
 
@@ -202,7 +197,7 @@ async fn webrtc_pair() -> Result<(WebRtcPeer, WebRtcPeer, Router, f64), String> 
         }
     };
     let router = Router::builder(server.endpoint.clone())
-        .accept(BENCH_ALPN, Bench)
+        .accept(BENCH_ALPN, Bench::new())
         .spawn();
     match Box::pin(negotiate(&client, &server)).await {
         Ok(negotiate_ms) => Ok((client, server, router, negotiate_ms)),
@@ -274,7 +269,9 @@ async fn bench_between<T, F: Future<Output = Result<T, String>>>(
     addr: EndpointAddr,
     measure: impl FnOnce(Endpoint, EndpointAddr) -> F,
 ) -> Result<T, String> {
-    let router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
+    let router = Router::builder(server)
+        .accept(BENCH_ALPN, Bench::new())
+        .spawn();
     let result = measure(client.clone(), addr).await;
     close_cell(&client, router).await;
     result
@@ -306,7 +303,7 @@ pub(crate) async fn habilis_network_native_native_webrtc(args: &Args) -> Outcome
         let (client, server, router, negotiate_ms) = Box::pin(webrtc_pair()).await?;
         let measured = async {
             let samples = rounds(&client.endpoint, webrtc_addr(&server), args).await?;
-            Measured::from_samples(negotiate_ms, samples)
+            Measured::summarize(negotiate_ms, samples)
         }
         .await;
         close_cell(&client.endpoint, router).await;
@@ -315,7 +312,7 @@ pub(crate) async fn habilis_network_native_native_webrtc(args: &Args) -> Outcome
     Box::pin(run).await.into()
 }
 
-/// The engine's wiring for a native peer: UDP on loopback, the WebRTC
+/// The engine's wiring for a native peer: `UDP` on loopback, the `WebRTC`
 /// transport registered beside it, the selector that prefers direct IP.
 async fn engine_shaped() -> Result<Endpoint, String> {
     let key = SecretKey::generate();
@@ -355,7 +352,7 @@ async fn ip_pair<F: Future<Output = Result<Endpoint, String>>>(
         let (client, server) = bind_two(bind).await?;
         bench_ip(client, server, |client, addr| async move {
             let samples = rounds(&client, addr, args).await?;
-            Measured::from_samples(0.0, samples)
+            Measured::summarize(0.0, samples)
         })
         .await
     };
@@ -391,7 +388,7 @@ pub(crate) async fn ladder_webrtc(args: &Args) -> Outcome {
 /// relay between them, throughput and round trips.
 pub(crate) async fn ladder_relay(args: &Args) -> Outcome {
     let run = async {
-        let (relay_url, _relay) = habilis_network::net::test_relay::spawn_plain()
+        let (relay_url, _relay) = test_relay::spawn_plain()
             .await
             .map_err(|error| format!("the local relay failed: {error:#}"))?;
         let bind = || async {
@@ -420,64 +417,67 @@ mod tests {
     };
     use crate::bench::Direction;
     use habilis_network_iroh_webrtc_transport::bench::MAX_TRANSFER_BYTES;
-    use habilis_network_test_tracing::{expect_warn, test};
 
     /// An upload's throughput is the bulk it sent, not the token it got back.
     #[test]
-    async fn an_upload_sample_counts_the_bulk_it_sent() {
-        let args = Args {
-            only: None,
-            bytes: 64 * 1024,
-            rounds: 1,
-            direction: Direction::Up,
-            list: false,
-            json: None,
-        };
-        let client = vanilla().await.expect("bind the client");
-        let server = vanilla().await.expect("bind the server");
-        let args_ref = &args;
+    fn an_upload_sample_counts_the_bulk_it_sent() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let args = Args {
+                only: None,
+                bytes: 64 * 1024,
+                rounds: 1,
+                direction: Direction::Up,
+                list: false,
+                json: None,
+            };
+            let client = vanilla().await.expect("bind the client");
+            let server = vanilla().await.expect("bind the server");
+            let args_ref = &args;
 
-        let samples = bench_ip(client, server, |client, addr| async move {
-            rounds(&client, addr, args_ref).await
-        })
-        .await
-        .expect("the rounds run");
+            let samples = bench_ip(client, server, |client, addr| async move {
+                rounds(&client, addr, args_ref).await
+            })
+            .await
+            .expect("the rounds run");
 
-        let counted: Vec<usize> = samples.iter().map(|sample| sample.bytes).collect();
-        assert!(
-            counted.iter().all(|&bytes| bytes == args.bytes),
-            "samples counted {counted:?} bytes, the upload sent {}",
-            args.bytes
-        );
+            let counted: Vec<usize> = samples.iter().map(|sample| sample.bytes).collect();
+            assert!(
+                counted.iter().all(|&bytes| bytes == args.bytes),
+                "samples counted {counted:?} bytes, the upload sent {}",
+                args.bytes
+            );
+        });
     }
 
     /// Bulk both ways at once moves twice the bulk, and the rate counts both.
     #[test]
-    async fn a_both_ways_sample_counts_both_directions() {
-        let args = Args {
-            only: None,
-            bytes: 64 * 1024,
-            rounds: 1,
-            direction: Direction::Both,
-            list: false,
-            json: None,
-        };
-        let client = vanilla().await.expect("bind the client");
-        let server = vanilla().await.expect("bind the server");
-        let args_ref = &args;
+    fn a_both_ways_sample_counts_both_directions() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let args = Args {
+                only: None,
+                bytes: 64 * 1024,
+                rounds: 1,
+                direction: Direction::Both,
+                list: false,
+                json: None,
+            };
+            let client = vanilla().await.expect("bind the client");
+            let server = vanilla().await.expect("bind the server");
+            let args_ref = &args;
 
-        let samples = bench_ip(client, server, |client, addr| async move {
-            rounds(&client, addr, args_ref).await
-        })
-        .await
-        .expect("the rounds run");
+            let samples = bench_ip(client, server, |client, addr| async move {
+                rounds(&client, addr, args_ref).await
+            })
+            .await
+            .expect("the rounds run");
 
-        let counted: Vec<usize> = samples.iter().map(|sample| sample.bytes).collect();
-        assert!(
-            counted.iter().all(|&bytes| bytes == 2 * args.bytes),
-            "samples counted {counted:?} bytes, both directions moved {}",
-            2 * args.bytes
-        );
+            let counted: Vec<usize> = samples.iter().map(|sample| sample.bytes).collect();
+            assert!(
+                counted.iter().all(|&bytes| bytes == 2 * args.bytes),
+                "samples counted {counted:?} bytes, both directions moved {}",
+                2 * args.bytes
+            );
+        });
     }
 
     /// The reply bytes a `Bench` server sends for one raw request header.
@@ -512,17 +512,27 @@ mod tests {
     }
 
     #[test]
-    async fn a_bench_server_refuses_an_unknown_mode() {
-        // The server logs each refusal it sends, and this test asks for one.
-        expect_warn("iroh::protocol", "refused request: mode 7");
-        assert_eq!(reply_to(7, 1024).await, 0);
+    fn a_bench_server_refuses_an_unknown_mode() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // The server logs each refusal it sends, and this test asks for one.
+            ::habilis_network_test_tracing::expect_warn(
+                "iroh::protocol",
+                "refused request: mode 7",
+            );
+            assert_eq!(reply_to(7, 1024).await, 0);
+        });
     }
 
     #[test]
-    async fn a_bench_server_refuses_a_reply_past_the_transfer_ceiling() {
-        let past = u32::try_from(MAX_TRANSFER_BYTES + 1).expect("the ceiling fits in u32");
-        expect_warn("iroh::protocol", "refused request: mode 0");
-        assert_eq!(reply_to(0, past).await, 0);
+    fn a_bench_server_refuses_a_reply_past_the_transfer_ceiling() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let past = u32::try_from(MAX_TRANSFER_BYTES + 1).expect("the ceiling fits in u32");
+            ::habilis_network_test_tracing::expect_warn(
+                "iroh::protocol",
+                "refused request: mode 0",
+            );
+            assert_eq!(reply_to(0, past).await, 0);
+        });
     }
 
     fn small_args() -> Args {
@@ -539,36 +549,42 @@ mod tests {
     /// The ladder's UDP cell carries both measurements: the transfer rounds
     /// and the 1000 round trips after 50 warm-up probes, on the IP path.
     #[test]
-    async fn the_ladder_udp_cell_measures_throughput_and_round_trips_on_ip() {
-        let Outcome::Ok(measured) = ladder_udp(&small_args()).await else {
-            panic!("the ladder udp cell did not measure");
-        };
+    fn the_ladder_udp_cell_measures_throughput_and_round_trips_on_ip() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let Outcome::Ok(measured) = ladder_udp(&small_args()).await else {
+                panic!("the ladder udp cell did not measure");
+            };
 
-        assert_eq!(measured.path, "ip");
-        let rtt = measured.rtt.expect("round-trip percentiles");
-        assert!(rtt.p50_ms > 0.0 && rtt.p99_ms >= rtt.p50_ms);
+            assert_eq!(measured.path, "ip");
+            let rtt = measured.rtt.expect("round-trip percentiles");
+            assert!(rtt.p50_ms > 0.0 && rtt.p99_ms >= rtt.p50_ms);
+        });
     }
 
     /// The ladder's `WebRTC` cell is on the data channel, and measures both.
     #[test]
-    async fn the_ladder_webrtc_cell_measures_throughput_and_round_trips_on_webrtc() {
-        let Outcome::Ok(measured) = ladder_webrtc(&small_args()).await else {
-            panic!("the ladder webrtc cell did not measure");
-        };
+    fn the_ladder_webrtc_cell_measures_throughput_and_round_trips_on_webrtc() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let Outcome::Ok(measured) = ladder_webrtc(&small_args()).await else {
+                panic!("the ladder webrtc cell did not measure");
+            };
 
-        assert_eq!(measured.path, "webrtc");
-        assert!(measured.rtt.is_some());
+            assert_eq!(measured.path, "webrtc");
+            assert!(measured.rtt.is_some());
+        });
     }
 
     /// With no IP transport on either side and a local relay between them, the
     /// relay is the only path there is, and the cell says so.
     #[test]
-    async fn the_ladder_relay_cell_is_on_the_relay_path_with_round_trips() {
-        let Outcome::Ok(measured) = ladder_relay(&small_args()).await else {
-            panic!("the ladder relay cell did not measure");
-        };
+    fn the_ladder_relay_cell_is_on_the_relay_path_with_round_trips() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let Outcome::Ok(measured) = ladder_relay(&small_args()).await else {
+                panic!("the ladder relay cell did not measure");
+            };
 
-        assert_eq!(measured.path, "relay");
-        assert!(measured.rtt.is_some());
+            assert_eq!(measured.path, "relay");
+            assert!(measured.rtt.is_some());
+        });
     }
 }

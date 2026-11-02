@@ -25,10 +25,14 @@
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Inbound, Membership, Request};
+use habilis_network::membership::{
+    self, Inbound, Inspect, InspectTest, Membership, Messaging, Request, Routing,
+};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
+use tokio::time;
 const ROSTER_DEADLINE: Duration = Duration::from_mins(2);
 const FRAME_DEADLINE: Duration = Duration::from_mins(2);
 /// How long a lane pair may take from the roster to a frame in both directions. The session is
@@ -43,9 +47,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::Opts) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -59,34 +65,32 @@ impl Member {
         transport: Vec<Transport>,
         max_direct: usize,
     ) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport,
-            relay_urls: vec![relay.to_string()],
-            max_direct,
-            ..membership::Opts::default()
-        })
-        .await
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
+        let options = options
+            .transport(transport)
+            .relay_urls(vec![relay.to_string()]);
+        let options = options.max_direct(max_direct);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
+        Self::open(&options).await
     }
 
     async fn roster_len(&self) -> usize {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
+        let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+        roster
             .and_then(|roster| roster["peers"].as_array().map(Vec::len))
             .unwrap_or(0)
     }
@@ -94,9 +98,11 @@ impl Member {
     /// The rung of the selected path on this member's pooled connection to `peer`.
     async fn rung_to(&self, peer: &str) -> Option<&'static str> {
         self.membership
-            .request(|reply| Request::SelectedRung {
-                peer: peer.to_owned(),
-                reply,
+            .request(|reply| {
+                Request::InspectTest(InspectTest::SelectedRung {
+                    peer: peer.to_owned(),
+                    reply,
+                })
             })
             .await
             .ok()
@@ -105,7 +111,7 @@ impl Member {
 
     async fn direct_units(&self) -> (usize, usize) {
         self.membership
-            .request(|reply| Request::DirectUnits { reply })
+            .request(|reply| Request::Routing(Routing::DirectUnits { reply }))
             .await
             .expect("the loop answers")
     }
@@ -114,16 +120,18 @@ impl Member {
         let to = membership::parse_to(Some(to)).expect("a nickname");
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::Send { to, body, reply })
+            .request(|reply| Request::Messaging(Messaging::Send { to, body, reply }))
             .await
             .expect("the loop answers")
     }
 
     fn saw(&mut self, text: &str) -> bool {
-        while let Ok(msg) = self.membership.inbound.try_recv() {
-            self.seen.push(msg);
+        while let Ok(message) = self.membership.inbound.try_recv() {
+            self.seen.push(message);
         }
-        self.seen.iter().any(|msg| msg.directed && msg.text == text)
+        self.seen
+            .iter()
+            .any(|message| message.directed && message.text == text)
     }
 
     async fn leave(self) {
@@ -144,7 +152,7 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
         if started.elapsed() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -160,7 +168,7 @@ async fn delivered(from: &Member, to: &mut Member, to_nick: &str, text: &str) ->
         if started.elapsed() >= FRAME_DEADLINE {
             return false;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -169,9 +177,7 @@ async fn delivered(from: &Member, to: &mut Member, to_nick: &str, text: &str) ->
 fn a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay, vec![Transport::Udp], 2).await;
         let mut bob = Member::join("bob", &alice).await;
         let mut carol = Member::join("carol", &alice).await;
@@ -208,7 +214,7 @@ fn a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts() {
                 started.elapsed() < Duration::from_secs(30),
                 "alice still counts {units} units ({over} over) 30 s after the last send"
             );
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
 
         for member in [alice, bob, carol, dave] {
@@ -222,9 +228,7 @@ fn a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts() {
 fn a_lane_pair_delivers_a_frame_sent_as_soon_as_the_roster_forms() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let mut alice = Member::create("alice", &relay, vec![Transport::WebRtc], 0).await;
         let mut bob = Member::join("bob", &alice).await;
         assert!(
@@ -258,7 +262,7 @@ fn a_lane_pair_delivers_a_frame_sent_as_soon_as_the_roster_forms() {
             if alice.rung_to("bob").await == Some("webrtc") {
                 first_session = Some(formed.elapsed());
             } else {
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                time::sleep(Duration::from_millis(250)).await;
             }
         }
         eprintln!(

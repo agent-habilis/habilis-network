@@ -3,15 +3,20 @@
 //! (the derivation secret that the bare hash withholds), an expiry (TTL), and
 //! the creator's signature over those fields. Only the creator — who alone
 //! holds the in-memory issuer key — can mint one; any member could package the
-//! root, but not a *valid* (creator-signed) invite. See [`crate::mesh`]
+//! root, but not a *valid* (creator-signed) invite. See [`crate::meshes`]
 //! for the invite-only mesh itself.
 
-mod ticket;
+mod invite_error;
+
+use invite_error as error;
+mod invite_ticket;
+use invite_ticket as ticket;
 
 // `InviteTicket` rides the **public** `JoinTarget::Invite`, so it must be at
 // least as public as that enum (re-exported at the crate root in `lib.rs`); its
 // methods are `pub`, but the ticket exposes no field, so externally it is an
 // opaque join token.
+pub use error::InviteError;
 pub use ticket::InviteTicket;
 // `pub` so the application layer's `invite` command can mint from the retained
 // creator mesh (`EventLoopState::mint_mesh`). `InviteTicket::decode` and

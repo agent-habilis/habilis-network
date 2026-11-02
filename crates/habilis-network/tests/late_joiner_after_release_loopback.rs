@@ -14,9 +14,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{self, Inspect, Membership, Request};
 use habilis_network::protocol::Lookup;
 
+use habilis_network::net::test_relay;
+use tokio::time;
 const OLD_MEMBERS: usize = 6;
 const RELEASE_LINKS: usize = 3;
 const PRECONDITION_DEADLINE: Duration = Duration::from_mins(1);
@@ -28,29 +30,28 @@ fn logs() -> String {
     habilis_network_test_tracing::captured_logs()
 }
 
-async fn open(nick: &str, opts: membership::Opts) -> Membership {
+async fn open(nick: &str, options: membership::JoinOptions) -> Membership {
     let (sink, _events) = membership::json_sink();
-    let opts = membership::Opts {
-        nick: Some(nick.to_owned()),
-        ..opts
-    };
-    membership::join(&opts, sink).await.expect("open a member")
+    let options = options.nick(Some(nick.to_owned()));
+    membership::join(&options, sink)
+        .await
+        .expect("open a member")
 }
 
 /// The nicknames of the live peers in the roster of a member.
 async fn roster(member: &Membership) -> Vec<String> {
     let json = member
-        .request(|reply| Request::Peers { reply })
+        .request(|reply| Request::Inspect(Inspect::Peers { reply }))
         .await
         .unwrap_or_default();
-    serde_json::from_str::<serde_json::Value>(&json)
-        .ok()
+    let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+    roster
         .and_then(|roster| {
             roster["peers"].as_array().map(|peers| {
-                peers
+                let live = peers
                     .iter()
-                    .filter(|peer| peer["quiet"] != serde_json::Value::Bool(true))
-                    .filter_map(|peer| peer["nickname"].as_str().map(str::to_owned))
+                    .filter(|peer| peer["quiet"] != serde_json::Value::Bool(true));
+                live.filter_map(|peer| peer["nickname"].as_str().map(str::to_owned))
                     .collect()
             })
         })
@@ -61,26 +62,31 @@ async fn roster(member: &Membership) -> Vec<String> {
 /// more. A member that releases twice counts once.
 fn members_released_with_enough_links() -> usize {
     let logs = logs();
-    logs.lines()
+    let local_member = |line: &str| -> Option<String> {
+        let field = line.split("local=").nth(1)?;
+        field.split_whitespace().next().map(str::to_owned)
+    };
+    let members: BTreeSet<String> = logs
+        .lines()
         .filter(|line| line.contains("released the rendezvous"))
         .filter(|line| {
-            line.split("links=")
-                .nth(1)
-                .and_then(|rest| rest.split_whitespace().next())
-                .and_then(|count| count.parse::<usize>().ok())
+            let field = line.split("links=").nth(1);
+            let word = field.and_then(|rest| rest.split_whitespace().next());
+            word.and_then(|count| -> Option<usize> { count.parse().ok() })
                 .is_some_and(|count| count >= RELEASE_LINKS)
         })
-        .filter_map(|line| line.split("local=").nth(1)?.split_whitespace().next())
-        .collect::<BTreeSet<_>>()
-        .len()
+        .filter_map(local_member)
+        .collect();
+    members.len()
 }
 
 fn release_lines() -> String {
-    logs()
+    let text = logs();
+    let lines: Vec<_> = text
         .lines()
         .filter(|line| line.contains("rendezvous"))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    lines.join("\n")
 }
 
 #[test]
@@ -89,17 +95,13 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
         "habilis_network=info,habilis_network::transport=debug",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
 
         let creator = open(
             "member-00",
-            membership::Opts {
-                lookup: vec![Lookup::Relay],
-                relay_urls: vec![relay.to_string()],
-                ..membership::Opts::default()
-            },
+            membership::JoinOptions::default()
+                .lookup(vec![Lookup::Relay])
+                .relay_urls(vec![relay.to_string()]),
         )
         .await;
         let beacon_wait = Instant::now();
@@ -108,7 +110,7 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
                 beacon_wait.elapsed() < Duration::from_mins(1),
                 "the creator never claimed the beacon"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         let mesh = creator.node.mesh_id().to_string();
         let mut members = vec![creator];
@@ -116,14 +118,11 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
             members.push(
                 open(
                     &format!("member-{index:02}"),
-                    membership::Opts {
-                        mesh: Some(mesh.clone()),
-                        ..membership::Opts::default()
-                    },
+                    membership::JoinOptions::default().mesh(Some(mesh.clone())),
                 )
                 .await,
             );
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            time::sleep(Duration::from_millis(500)).await;
         }
 
         let formation = Instant::now();
@@ -140,7 +139,7 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
                 "the old mesh never formed\n{}",
                 release_lines()
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
 
         let precondition = Instant::now();
@@ -151,15 +150,12 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
              inside {PRECONDITION_DEADLINE:?}\n{}",
                 release_lines()
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
 
         let late = open(
             "member-late",
-            membership::Opts {
-                mesh: Some(mesh),
-                ..membership::Opts::default()
-            },
+            membership::JoinOptions::default().mesh(Some(mesh)),
         )
         .await;
         let started = Instant::now();
@@ -168,7 +164,8 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
         while started.elapsed() < LATE_JOINER_DEADLINE
             && (old_learned.len() < OLD_MEMBERS || late_learned_all.is_none())
         {
-            for (index, member) in members.iter().enumerate() {
+            let indexed: Vec<(usize, &Membership)> = members.iter().enumerate().collect();
+            for (index, member) in indexed {
                 if !old_learned.contains_key(&index)
                     && roster(member)
                         .await
@@ -181,7 +178,7 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
             if late_learned_all.is_none() && roster(&late).await.len() >= OLD_MEMBERS {
                 late_learned_all = Some(started.elapsed());
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
 
         eprintln!("old members that learned the joiner, after the join: {old_learned:?}");
@@ -198,7 +195,8 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
             "the joiner did not learn all {OLD_MEMBERS} members inside {LATE_JOINER_DEADLINE:?}\n{}",
             release_lines()
         );
-        for member in members.into_iter().chain([late]) {
+        members.push(late);
+        for member in members {
             let _ = member.node.leave().await;
         }
     });

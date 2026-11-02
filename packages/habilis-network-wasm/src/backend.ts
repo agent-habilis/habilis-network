@@ -33,7 +33,7 @@ type WireEvent =
 
 /**
  * Build the [`Opener`] for one membership. `optsJson` is a JSON encoding of
- * `habilis_network::membership::Opts` — the same object the C ABI takes.
+ * `habilis_network::membership::JoinOptions` — the same object the C ABI takes.
  */
 export function openWasm(module: HabilisNetworkWasmModule, optsJson: string): Opener {
   return async (sink: BackendSink): Promise<BackendOpen> => {

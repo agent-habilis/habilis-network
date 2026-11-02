@@ -1,3 +1,12 @@
+use std::io;
+use std::io::ErrorKind;
+
+#[cfg(unix)]
+use rustix::io::Errno;
+#[cfg(unix)]
+use rustix::process::{Pid, Signal, kill_process, test_kill_process};
+#[cfg(target_os = "macos")]
+use std::mem;
 /// Bound on the parent-walk in [`ancestry_contains`]: real process trees are
 /// far shallower, and the bound keeps a pathological ppid cycle (pid reuse
 /// mid-walk) from looping forever.
@@ -7,8 +16,12 @@ const MAX_ANCESTRY_DEPTH: usize = 64;
 #[expect(unsafe_code, reason = "libc::proc_pidinfo FFI; no safe wrapper exists")]
 fn bsdinfo_for(pid: u32) -> Option<libc::proc_bsdinfo> {
     let pid = libc::pid_t::try_from(pid).ok()?;
-    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+    // SAFETY: `proc_bsdinfo` is a plain C struct of integers and byte arrays, so all-zero bytes
+    // are a valid value.
+    let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
     let size = i32::try_from(size_of::<libc::proc_bsdinfo>()).ok()?;
+    // SAFETY: `info` is a live, unique local of exactly `size` bytes, and `size` is the size that
+    // the call gets, so the kernel writes inside the buffer. The kernel checks `pid`.
     let written =
         unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
     // A short read means the pid vanished mid-call or the struct layout
@@ -16,20 +29,40 @@ fn bsdinfo_for(pid: u32) -> Option<libc::proc_bsdinfo> {
     (written == size).then_some(info)
 }
 
+/// The parent pid of `pid`, or `None` if the lookup fails.
+///
+/// # Examples
+///
+/// The parent of a running process is a process too.
+///
+/// ```
+/// use habilis_network_util::process::parent_of;
+///
+/// assert!(parent_of(std::process::id()).is_some());
+/// ```
 #[cfg(target_os = "macos")]
 #[must_use]
 pub fn parent_of(pid: u32) -> Option<u32> {
     Some(bsdinfo_for(pid)?.pbi_ppid)
 }
 
+/// The command name of `pid`, or `None` if the lookup fails or the name is not UTF-8.
+///
+/// # Examples
+///
+/// A running process has a command name.
+///
+/// ```
+/// use habilis_network_util::process::comm_of;
+///
+/// assert!(comm_of(std::process::id()).is_some());
+/// ```
 #[cfg(target_os = "macos")]
 #[must_use]
 pub fn comm_of(pid: u32) -> Option<String> {
     let info = bsdinfo_for(pid)?;
-    let bytes: Vec<u8> = info
-        .pbi_comm
-        .iter()
-        .take_while(|&&byte| byte != 0)
+    let name = info.pbi_comm.iter().take_while(|&&byte| byte != 0);
+    let bytes: Vec<u8> = name
         .map(|&byte| u8::from_ne_bytes(byte.to_ne_bytes()))
         .collect();
     String::from_utf8(bytes).ok()
@@ -38,6 +71,16 @@ pub fn comm_of(pid: u32) -> Option<String> {
 /// The start time of a live process, in microseconds since the epoch. `None`
 /// for a pid with no process, or a zombie: an exited owner that its parent has
 /// not reaped yet is gone for every purpose but `kill(pid, 0)`.
+///
+/// # Examples
+///
+/// A running process has a start time.
+///
+/// ```
+/// use habilis_network_util::process::live_start_time;
+///
+/// assert!(live_start_time(std::process::id()).is_some());
+/// ```
 #[cfg(target_os = "macos")]
 #[must_use]
 pub fn live_start_time(pid: u32) -> Option<u64> {
@@ -46,10 +89,23 @@ pub fn live_start_time(pid: u32) -> Option<u64> {
         .then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
 }
 
+/// The parent pid of `pid`, or `None` if the lookup fails.
+///
+/// # Examples
+///
+/// The parent of a running process is a process too.
+///
+/// ```
+/// use habilis_network_util::process::parent_of;
+///
+/// assert!(parent_of(std::process::id()).is_some());
+/// ```
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn parent_of(pid: u32) -> Option<u32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    use std::fs;
+
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // The comm field is parenthesized and may itself contain spaces and `)`,
     // so fields are only positional after the *last* `)`.
     let after_comm = stat.rsplit_once(')')?.1;
@@ -62,10 +118,22 @@ pub fn parent_of(pid: u32) -> Option<u32> {
 /// 22). `None` for a pid with no process, or a zombie (see the macOS twin). The
 /// units differ from macOS, which is fine: a caller only compares two values
 /// from one host for equality.
+///
+/// # Examples
+///
+/// A running process has a start time.
+///
+/// ```
+/// use habilis_network_util::process::live_start_time;
+///
+/// assert!(live_start_time(std::process::id()).is_some());
+/// ```
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn live_start_time(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    use std::fs;
+
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
     if fields.next()? == "Z" {
         return None;
@@ -74,10 +142,23 @@ pub fn live_start_time(pid: u32) -> Option<u64> {
     fields.nth(18)?.parse().ok()
 }
 
+/// The command name of `pid`, or `None` if the lookup fails or the name is not UTF-8.
+///
+/// # Examples
+///
+/// A running process has a command name.
+///
+/// ```
+/// use habilis_network_util::process::comm_of;
+///
+/// assert!(comm_of(std::process::id()).is_some());
+/// ```
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn comm_of(pid: u32) -> Option<String> {
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    use std::fs;
+
+    let comm = fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
     Some(comm.trim_end().to_string())
 }
 
@@ -100,6 +181,7 @@ mod windows {
         QueryFullProcessImageNameW,
     };
 
+    use std::{io, path};
     /// 100 ns intervals from 1601-01-01 (`FILETIME`) to 1970-01-01.
     const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
 
@@ -110,12 +192,12 @@ mod windows {
     /// The error is read here, next to the call, so no other call can replace
     /// `GetLastError` before the caller looks at it.
     #[expect(unsafe_code, reason = "OpenProcess FFI; no safe std wrapper exists")]
-    fn open(pid: u32) -> std::io::Result<OwnedHandle> {
+    fn open(pid: u32) -> io::Result<OwnedHandle> {
         // SAFETY: the arguments are plain values. The call returns a new handle,
         // or null with the error in `GetLastError`.
         let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
         if raw.is_null() {
-            return Err(std::io::Error::last_os_error());
+            return Err(io::Error::last_os_error());
         }
         // SAFETY: `raw` is a handle that `OpenProcess` just made and nothing else
         // owns or closes.
@@ -215,7 +297,7 @@ mod windows {
         let image = OsString::from_wide(buffer.get(..usize::try_from(length).ok()?)?);
         // The file stem, so `node.exe` and `node` compare equal: the Unix `comm`
         // has no extension.
-        let stem = std::path::Path::new(&image).file_stem()?;
+        let stem = path::Path::new(&image).file_stem()?;
         Some(stem.to_string_lossy().into_owned())
     }
 
@@ -319,18 +401,32 @@ pub fn is_alive(pid: u32) -> bool {
 
 /// Whether a process with this pid exists (regardless of whether we could
 /// signal it: `EPERM` still proves existence).
+///
+/// # Examples
+///
+/// The running test process is alive.
+///
+/// ```
+/// use habilis_network_util::process::is_alive;
+///
+/// assert!(is_alive(std::process::id()));
+/// ```
 #[cfg(unix)]
-#[expect(
-    unsafe_code,
-    reason = "libc::kill(pid, 0) FFI; no safe existence probe exists"
-)]
 #[must_use]
 pub fn is_alive(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
+    let Some(pid) = process_id(pid) else {
         return false;
     };
-    let status = unsafe { libc::kill(pid, 0) };
-    status == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    match test_kill_process(pid) {
+        Ok(()) => true,
+        Err(error) => error == Errno::PERM,
+    }
+}
+
+/// The pid as rustix names it. Zero is refused: `kill(2)` reads it as our own process group.
+#[cfg(unix)]
+fn process_id(pid: u32) -> Option<Pid> {
+    Pid::from_raw(i32::try_from(pid).ok()?)
 }
 
 /// Ask a process to terminate (SIGTERM) — the graceful path: a mesh daemon
@@ -339,19 +435,28 @@ pub fn is_alive(pid: u32) -> bool {
 /// This only signals a pid. To stop a daemon on every OS, use
 /// `runtime::ipc::terminate` of `habilis-network`: on Windows it sends the IPC
 /// `quit`, and on Unix it sends this signal.
-#[cfg(unix)]
-#[expect(unsafe_code, reason = "libc::kill FFI; no safe wrapper")]
+///
 /// # Errors
-/// Propagates the `kill(2)` failure — no such process, or no permission.
-pub fn terminate(pid: u32) -> std::io::Result<()> {
-    let pid = libc::pid_t::try_from(pid)
-        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-    let status = unsafe { libc::kill(pid, libc::SIGTERM) };
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
+/// `InvalidInput` for pid 0, which `kill(2)` reads as our own process group, and for a pid that
+/// does not fit a `pid_t`. Otherwise it propagates the `kill(2)` failure — no such process, or
+/// no permission.
+///
+/// # Examples
+///
+/// It sends a signal that stops a process, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_util::process::terminate;
+///
+/// # fn demo(child_pid: u32) -> std::io::Result<()> {
+/// terminate(child_pid)?;
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(unix)]
+pub fn terminate(pid: u32) -> io::Result<()> {
+    let pid = process_id(pid).ok_or_else(|| io::Error::from(ErrorKind::InvalidInput))?;
+    kill_process(pid, Signal::TERM).map_err(io::Error::from)
 }
 
 /// Windows has no polite signal, and `TerminateProcess` is a hard kill that
@@ -361,9 +466,17 @@ pub fn terminate(pid: u32) -> std::io::Result<()> {
 ///
 /// # Errors
 /// Always [`std::io::ErrorKind::Unsupported`].
+///
+/// # Examples
+///
+/// ```
+/// use habilis_network_util::process::terminate;
+///
+/// assert!(terminate(std::process::id()).is_err());
+/// ```
 #[cfg(windows)]
-pub fn terminate(_pid: u32) -> std::io::Result<()> {
-    Err(std::io::ErrorKind::Unsupported.into())
+pub fn terminate(_pid: u32) -> io::Result<()> {
+    Err(ErrorKind::Unsupported.into())
 }
 
 /// Whether `ancestor` appears in `pid`'s parent chain (proper ancestors
@@ -371,6 +484,19 @@ pub fn terminate(_pid: u32) -> std::io::Result<()> {
 /// session iff the session's process is one of its ancestors. Never relax
 /// this to "shares an ancestor" — every process shares init/launchd, and
 /// two sessions in one terminal share the login shell.
+///
+/// # Examples
+///
+/// A process has its parent in its ancestry.
+///
+/// ```
+/// use habilis_network_util::process::{ancestry_contains, parent_of};
+///
+/// let pid = std::process::id();
+/// if let Some(parent) = parent_of(pid) {
+///     assert!(ancestry_contains(pid, parent));
+/// }
+/// ```
 #[must_use]
 pub fn ancestry_contains(pid: u32, ancestor: u32) -> bool {
     let mut current = pid;
@@ -392,15 +518,44 @@ pub fn ancestry_contains(pid: u32, ancestor: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{ancestry_contains, comm_of, is_alive, live_start_time, parent_of, terminate};
-    use habilis_network_test_tracing::test;
+    #[cfg(unix)]
+    use rustix::process::getppid;
 
+    #[cfg(unix)]
+    use std::io::ErrorKind;
+    use std::process;
+    #[cfg(windows)]
+    use std::thread;
     fn self_pid() -> u32 {
-        std::process::id()
+        process::id()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_refuses_pid_zero() {
+        let _guard = ::habilis_network_test_tracing::init();
+        // `kill(0, SIGTERM)` would signal every process of our own group, the test run included.
+        let error = terminate(0).expect_err("pid 0 must be refused");
+        assert_eq!(
+            error.kind(),
+            ErrorKind::InvalidInput,
+            "terminating pid zero is refused as invalid input"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pid_zero_is_no_process() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            !is_alive(0),
+            "pid 0 names our process group, which is no process"
+        );
     }
 
     /// A child that lives long enough for a test to look at it, and that the
     /// test must `kill` and `wait`. Each OS has its own idle command.
-    fn idle_child() -> std::process::Child {
+    fn idle_child() -> process::Child {
         use std::process::{Command, Stdio};
         #[cfg(unix)]
         let mut command = {
@@ -417,18 +572,22 @@ mod tests {
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn an idle child")
+            .stderr(Stdio::null());
+        command.spawn().expect("spawn an idle child")
     }
 
     #[test]
     fn parent_of_a_child_is_this_process() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut child = idle_child();
         let parent = parent_of(child.id());
         child.kill().expect("kill the child");
         child.wait().expect("wait for the child");
-        assert_eq!(parent, Some(self_pid()));
+        assert_eq!(
+            parent,
+            Some(self_pid()),
+            "the parent of a child is this process"
+        );
     }
 
     /// The rule of the guard of `parent_of`, without a process: the parent is
@@ -437,10 +596,19 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_parent_created_after_its_child_is_rejected() {
-        use super::windows::accepts_parent;
-        assert!(accepts_parent(100, 200));
-        assert!(accepts_parent(200, 200));
-        assert!(!accepts_parent(201, 200));
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            super::windows::accepts_parent(100, 200),
+            "an older parent is accepted"
+        );
+        assert!(
+            super::windows::accepts_parent(200, 200),
+            "a parent of the same age is accepted"
+        );
+        assert!(
+            !super::windows::accepts_parent(201, 200),
+            "a newer parent is rejected"
+        );
     }
 
     /// A launcher starts a child and exits, so the child's creator is gone. The
@@ -452,13 +620,14 @@ mod tests {
         use std::process::{Command, Stdio};
         use std::time::{Duration, Instant};
 
-        let mut launcher = Command::new("cmd")
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut command = Command::new("cmd");
+        command
             .args(["/C", "start /B ping -n 10 127.0.0.1"])
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn the launcher");
+            .stdout(Stdio::null());
+        command.stderr(Stdio::null());
+        let mut launcher = command.spawn().expect("spawn the launcher");
         let launcher_pid = launcher.id();
         launcher.wait().expect("wait for the launcher");
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -473,11 +642,11 @@ mod tests {
                 Instant::now() < deadline,
                 "the launcher's child is not there"
             );
-            std::thread::sleep(Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(20));
         };
         // Not vacuous: the child is a live process, and only its creator is gone.
-        assert!(is_alive(orphan));
-        assert_eq!(parent_of(orphan), None);
+        assert!(is_alive(orphan), "the orphan is alive");
+        assert_eq!(parent_of(orphan), None, "an orphan has no parent");
         drop(launcher);
     }
 
@@ -487,16 +656,21 @@ mod tests {
     /// child, and no process has the pid.
     #[test]
     fn an_exited_child_has_no_live_start_time() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut child = idle_child();
         let pid = child.id();
         assert!(live_start_time(pid).is_some(), "the child is live");
         child.kill().expect("kill the child");
         child.wait().expect("wait for the child");
-        assert_eq!(live_start_time(pid), None);
+        assert_eq!(
+            live_start_time(pid),
+            None,
+            "an exited child has no live start time"
+        );
         // Only here is the pid sure to be unused by another process: the handle
         // of `child` is still open.
         #[cfg(windows)]
-        assert!(!is_alive(pid));
+        assert!(!is_alive(pid), "an exited child is not alive");
         drop(child);
     }
 
@@ -507,6 +681,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_zombie_child_is_alive_but_has_no_live_start_time() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut child = idle_child();
         let pid = child.id();
         child.kill().expect("kill the child");
@@ -527,43 +702,73 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn parent_of_self_is_our_ppid() {
-        #[expect(unsafe_code, reason = "libc::getppid FFI; always succeeds")]
-        let ppid = unsafe { libc::getppid() };
-        assert_eq!(parent_of(self_pid()), u32::try_from(ppid).ok());
+        let _guard = ::habilis_network_test_tracing::init();
+        let ppid = getppid().map(|pid| pid.as_raw_nonzero().get());
+        assert_eq!(
+            parent_of(self_pid()),
+            ppid.and_then(|ppid| u32::try_from(ppid).ok()),
+            "the parent of this process is its ppid"
+        );
     }
 
     #[test]
     fn ancestry_contains_own_parent() {
+        let _guard = ::habilis_network_test_tracing::init();
         let parent = parent_of(self_pid()).expect("self has a parent");
-        assert!(ancestry_contains(self_pid(), parent));
+        assert!(
+            ancestry_contains(self_pid(), parent),
+            "the ancestry of this process contains its parent"
+        );
     }
 
     #[test]
     fn ancestry_excludes_self() {
-        assert!(!ancestry_contains(self_pid(), self_pid()));
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            !ancestry_contains(self_pid(), self_pid()),
+            "the ancestry excludes this process itself"
+        );
     }
 
     #[test]
     fn is_alive_self_true_absurd_false() {
-        assert!(is_alive(self_pid()));
-        assert!(!is_alive(u32::MAX - 1));
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(is_alive(self_pid()), "this process is alive");
+        assert!(!is_alive(u32::MAX - 1), "an absurd pid is not alive");
     }
 
     #[test]
     fn comm_of_self_names_the_test_binary() {
+        let _guard = ::habilis_network_test_tracing::init();
         let comm = comm_of(self_pid()).expect("self has a comm");
-        assert!(!comm.is_empty());
+        assert!(
+            !comm.is_empty(),
+            "the command name of this process is not empty"
+        );
     }
 
     #[test]
     fn live_start_time_is_stable_for_self_and_absent_for_a_dead_pid() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = live_start_time(self_pid()).expect("self is live");
-        assert_eq!(live_start_time(self_pid()), Some(start));
-        assert_eq!(live_start_time(u32::MAX - 1), None);
+        assert_eq!(
+            live_start_time(self_pid()),
+            Some(start),
+            "the live start time of this process is stable"
+        );
+        assert_eq!(
+            live_start_time(u32::MAX - 1),
+            None,
+            "a dead pid has no live start time"
+        );
     }
 
     #[test]
     fn terminate_rejects_a_dead_pid() {
-        assert!(terminate(u32::MAX - 1).is_err());
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            terminate(u32::MAX - 1).is_err(),
+            "terminating a dead pid is an error"
+        );
     }
 }

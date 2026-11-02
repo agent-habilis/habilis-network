@@ -35,7 +35,7 @@ export async function wasmAsset(): Promise<WasmAsset> {
   if (!(await file.exists())) {
     throw new Error(
       `no wasm at ${WASM_SOURCE}\n` +
-        'run ../build-wasm.sh first — the web app is a view onto a Rust build, not a build of its own',
+        'run ../build-wasm.ts first — the web app is a view onto a Rust build, not a build of its own',
     )
   }
   const bytes = new Uint8Array(await file.arrayBuffer())

@@ -1,39 +1,15 @@
-use std::net::SocketAddr;
+use tokio::time;
+mod network_capability;
+
 use std::time::Duration;
 
 use anyhow::Result;
 use iroh::Watcher;
-use serde::Serialize;
 
-use crate::protocol::mesh::LookupOpts;
-use crate::util::clock::millis_saturating;
+use crate::protocol::meshes::LookupOpts;
+use crate::util::clock;
 
-use super::build_peer_endpoint;
-
-/// This machine's network capability, read from iroh's net-report — the data
-/// behind `doctor`'s Network section and its hole-punch verdict. The
-/// net-report fields are `Option` because the endpoint can bind locally even
-/// when no report completes (offline / slow): then only `node_id` /
-/// `local_addrs` are known and the rest stay `None`.
-#[derive(Debug, Serialize)]
-pub struct NetworkCapability {
-    pub node_id: String,
-    pub local_addrs: Vec<SocketAddr>,
-    /// `false` ⇒ no net-report finished within the probe budget; the fields
-    /// below are then all `None` (we can't distinguish "unknown" from "no").
-    pub report_obtained: bool,
-    pub udp_v4: Option<bool>,
-    pub udp_v6: Option<bool>,
-    /// The hole-punch signal: `Some(false)` ⇒ endpoint-independent NAT (direct
-    /// hole punching works); `Some(true)` ⇒ address-dependent (symmetric) NAT
-    /// (direct punch unlikely, traffic relays); `None` ⇒ insufficient probes.
-    pub mapping_varies_by_dest: Option<bool>,
-    pub public_v4: Option<String>,
-    pub public_v6: Option<String>,
-    pub preferred_relay: Option<String>,
-    pub preferred_relay_latency_ms: Option<u64>,
-    pub captive_portal: Option<bool>,
-}
+pub use network_capability::NetworkCapability;
 
 /// Build a public peer endpoint and read iroh's net-report, bounded by
 /// `timeout`. Bind failure is the only hard error; a net-report that never
@@ -42,8 +18,14 @@ pub struct NetworkCapability {
 ///
 /// # Errors
 /// The endpoint fails to bind (the local network stack is broken).
-pub async fn probe(timeout: Duration) -> Result<NetworkCapability> {
-    let endpoint = build_peer_endpoint(&LookupOpts::public_preset()).await?;
+pub async fn probe(timeout: Duration) -> Result<NetworkCapability, super::EndpointError> {
+    probe_checked(timeout)
+        .await
+        .map_err(super::EndpointError::internal)
+}
+
+async fn probe_checked(timeout: Duration) -> Result<NetworkCapability> {
+    let endpoint = super::build_peer_endpoint(&LookupOpts::public_preset()).await?;
     let node_id = endpoint.id().to_string();
     let local_addrs = endpoint.bound_sockets();
 
@@ -51,32 +33,33 @@ pub async fn probe(timeout: Duration) -> Result<NetworkCapability> {
     // the first completed report. Offline, it never resolves → we time out and
     // report only the local bind.
     let mut watcher = endpoint.net_report();
-    let report = tokio::time::timeout(timeout, watcher.initialized())
-        .await
-        .ok();
+    let report = time::timeout(timeout, watcher.initialized()).await.ok();
 
     let capability = match report {
         Some(report) => {
-            let preferred = report.preferred_relay.clone();
-            let preferred_relay_latency_ms = preferred.as_ref().and_then(|url| {
-                report
+            let mapping_varies_by_dest = report.mapping_varies_by_dest();
+            let public_v4 = report.global_v4.map(|address| address.to_string());
+            let public_v6 = report.global_v6.map(|address| address.to_string());
+            let preferred = report.preferred_relay;
+            let preferred_relay_latency_ms: Option<u64> = preferred.as_ref().and_then(|url| {
+                let latencies = report
                     .relay_latency
                     .iter()
                     .filter(|(_, relay, _)| *relay == url)
-                    .map(|(_, _, latency)| latency)
-                    .min()
-                    .map(millis_saturating)
+                    .map(|(_, _, latency)| latency);
+                latencies.min().map(clock::millis_saturating)
             });
+            let preferred_relay = preferred.map(|url| url.to_string());
             NetworkCapability {
                 node_id,
                 local_addrs,
                 report_obtained: true,
                 udp_v4: Some(report.udp_v4),
                 udp_v6: Some(report.udp_v6),
-                mapping_varies_by_dest: report.mapping_varies_by_dest(),
-                public_v4: report.global_v4.map(|addr| addr.to_string()),
-                public_v6: report.global_v6.map(|addr| addr.to_string()),
-                preferred_relay: preferred.map(|url| url.to_string()),
+                mapping_varies_by_dest,
+                public_v4,
+                public_v6,
+                preferred_relay,
                 preferred_relay_latency_ms,
                 captive_portal: report.captive_portal,
             }

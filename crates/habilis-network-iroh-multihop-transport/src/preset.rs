@@ -12,9 +12,12 @@ use crate::MultihopHandle;
 
 impl Preset for MultihopHandle {
     fn apply(self, builder: Builder) -> Builder {
+        let transport = self.custom_transport();
+        let lookup = self.address_lookup();
+        let selector = self.path_selector();
         builder
-            .add_custom_transport(self.custom_transport())
-            .address_lookup(self.address_lookup())
-            .path_selector(self.path_selector())
+            .add_custom_transport(transport)
+            .address_lookup(lookup)
+            .path_selector(selector)
     }
 }

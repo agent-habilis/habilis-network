@@ -22,14 +22,26 @@ use std::fmt;
 use anyhow::Result;
 use iroh_base::{PublicKey, SecretKey, Signature};
 use rand::RngCore;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 
 use crate::{AuthorKey, DedupKey, SymmetricKey};
 
 /// A per-peer signing identity — just the secret key. The nickname
 /// it speaks under is carried by the message `author` field and bound to
 /// this key trust-on-first-use by receivers, so it is not stored here.
-#[derive(Debug)]
+///
+/// # Examples
+///
+/// A fresh identity has a public key, and the key encodes to 64 hex characters.
+///
+/// ```
+/// use habilis_network_protocol::identity::{Identity, encode_pubkey};
+///
+/// let identity = Identity::generate();
+/// let text = encode_pubkey(&identity.public());
+/// assert_eq!(text.len(), 64);
+/// ```
+#[derive(Debug, Clone)]
 pub struct Identity {
     secret: SecretKey,
 }
@@ -46,6 +58,7 @@ impl Identity {
         }
     }
 
+    /// The public half of the key.
     #[must_use]
     pub fn public(&self) -> PublicKey {
         self.secret.public()
@@ -57,7 +70,7 @@ impl Identity {
     /// [`Message::sign`]: crate::Message::sign
     #[must_use]
     pub fn author_key(&self) -> AuthorKey {
-        AuthorKey::from_bytes(*self.public().as_bytes())
+        AuthorKey::from(*self.public().as_bytes())
     }
 
     /// Sign `bytes` (the message's canonical bytes) with our secret.
@@ -74,8 +87,7 @@ impl Identity {
         // Two bare arrays on the stack are not wiped, and we do not control either: the one that
         // iroh's `to_bytes()` returns, and the one that `StaticSecret::from` takes by value below.
         // Between them the bytes sit in a buffer that wipes itself on drop.
-        let identity_seed =
-            SymmetricKey::from_zeroizing(zeroize::Zeroizing::new(self.secret.to_bytes()));
+        let identity_seed = SymmetricKey::from(zeroize::Zeroizing::new(self.secret.to_bytes()));
         x25519_dalek::StaticSecret::from(*identity_seed.derive(SEAL_ENC_LABEL).as_bytes())
     }
 
@@ -107,6 +119,7 @@ pub(crate) fn verify(pubkey: &PublicKey, bytes: &[u8], signature: &Signature) ->
 /// key ⇒ not falsely deduped).
 #[must_use]
 pub(crate) fn dedup_key16(author: Option<&AuthorKey>, id_bytes: &[u8; 16]) -> DedupKey {
+    use sha2::Digest;
     let mut hasher = Sha256::new();
     // The hex text of the key, as the signed bytes carry it; nothing for an unsigned message.
     if let Some(author) = author {
@@ -116,7 +129,7 @@ pub(crate) fn dedup_key16(author: Option<&AuthorKey>, id_bytes: &[u8; 16]) -> De
     let digest = hasher.finalize();
     let mut key = [0u8; 16];
     key.copy_from_slice(&digest[..16]);
-    DedupKey::from_bytes(key)
+    DedupKey::from(key)
 }
 
 // ── wire encoding ──────────────────────────────────────────────────────
@@ -125,6 +138,16 @@ pub(crate) fn dedup_key16(author: Option<&AuthorKey>, id_bytes: &[u8; 16]) -> De
 // hex strings in the JSON envelope, so the `--output json` wire stays
 // inspectable and does not depend on iroh's serde representation.
 
+/// The public key as lowercase hex, 64 characters.
+///
+/// # Examples
+///
+/// ```
+/// use habilis_network_protocol::identity::{Identity, encode_pubkey};
+///
+/// let identity = Identity::generate();
+/// assert_eq!(encode_pubkey(&identity.public()).len(), 64);
+/// ```
 #[must_use]
 pub fn encode_pubkey(pubkey: &PublicKey) -> String {
     to_hex(pubkey.as_bytes())
@@ -132,13 +155,21 @@ pub fn encode_pubkey(pubkey: &PublicKey) -> String {
 
 /// Parse a hex Ed25519 signature (64 bytes) from the wire.
 pub(crate) fn decode_sig(hex: &str) -> Result<Signature> {
-    let bytes: [u8; 64] = from_hex(hex)?
+    let bytes: [u8; 64] = parse_hex(hex)?
         .try_into()
         .map_err(|_| anyhow::anyhow!("signature must be 64 bytes"))?;
     Ok(Signature::from_bytes(&bytes))
 }
 
 /// Lowercase hex of `bytes`, the spelling the wire uses for keys and signatures.
+///
+/// # Examples
+///
+/// ```
+/// use habilis_network_protocol::identity::encode_hex;
+///
+/// assert_eq!(encode_hex(&[0x0a, 0xff]), "0aff");
+/// ```
 #[must_use]
 pub fn encode_hex(bytes: &[u8]) -> String {
     to_hex(bytes)
@@ -149,6 +180,26 @@ pub fn encode_hex(bytes: &[u8]) -> String {
 ///
 /// # Errors
 /// The formatter fails.
+///
+/// # Examples
+///
+/// A caller writes the hex of bytes into any formatter, such as a Display impl.
+///
+/// ```
+/// use std::fmt;
+///
+/// use habilis_network_protocol::identity::write_hex;
+///
+/// struct Hex<'bytes>(&'bytes [u8]);
+///
+/// impl fmt::Display for Hex<'_> {
+///     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+///         write_hex(formatter, self.0)
+///     }
+/// }
+///
+/// assert_eq!(Hex(&[0x0a, 0xff]).to_string(), "0aff");
+/// ```
 pub fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
     for byte in bytes {
         write!(formatter, "{byte:02x}")?;
@@ -187,9 +238,20 @@ pub(crate) fn encode_lower_hex_32(bytes: &[u8; 32]) -> [u8; 64] {
 
 /// The bytes of a hex string, either case; `None` for odd length or a non-hex
 /// digit.
+///
+/// # Examples
+///
+/// A text that is not hex decodes to None.
+///
+/// ```
+/// use habilis_network_protocol::identity::decode_hex;
+///
+/// assert_eq!(decode_hex("0aff"), Some(vec![0x0a, 0xff]));
+/// assert_eq!(decode_hex("zz"), None);
+/// ```
 #[must_use]
 pub fn decode_hex(hex: &str) -> Option<Vec<u8>> {
-    from_hex(hex).ok()
+    parse_hex(hex).ok()
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -201,7 +263,7 @@ fn to_hex(bytes: &[u8]) -> String {
     out
 }
 
-fn from_hex(hex: &str) -> Result<Vec<u8>> {
+fn parse_hex(hex: &str) -> Result<Vec<u8>> {
     // Operate on raw bytes, not `&str` slices: an attacker-controlled
     // `pubkey`/`sig` is arbitrary UTF-8, and byte-indexing a `&str`
     // (`&hex[i..i+2]`) panics if `i` lands inside a multibyte char. Decoding
@@ -231,64 +293,94 @@ fn hex_nibble(byte: u8) -> Result<u8> {
 mod tests {
     use super::{Identity, decode_sig, dedup_key16, encode_hex, encode_pubkey, verify};
     use crate::AuthorKey;
-    use habilis_network_test_tracing::test;
 
+    use crate::crypto;
+    use std::fmt;
     #[test]
     fn sign_verify_round_trip() {
+        let _guard = ::habilis_network_test_tracing::init();
         let identity = Identity::generate();
         let bytes = b"canonical message bytes";
-        let sig = identity.sign(bytes);
-        assert!(verify(&identity.public(), bytes, &sig));
+        let signature = identity.sign(bytes);
+        assert!(
+            verify(&identity.public(), bytes, &signature),
+            "a signature verifies with its key"
+        );
     }
 
     #[test]
     fn tampered_bytes_fail_verification() {
+        let _guard = ::habilis_network_test_tracing::init();
         let identity = Identity::generate();
-        let sig = identity.sign(b"original");
-        assert!(!verify(&identity.public(), b"tampered", &sig));
+        let signature = identity.sign(b"original");
+        assert!(
+            !verify(&identity.public(), b"tampered", &signature),
+            "tampered bytes fail verification"
+        );
     }
 
     #[test]
     fn wrong_key_fails_verification() {
+        let _guard = ::habilis_network_test_tracing::init();
         let signer = Identity::generate();
         let other = Identity::generate();
         let bytes = b"hello";
-        let sig = signer.sign(bytes);
-        assert!(!verify(&other.public(), bytes, &sig));
+        let signature = signer.sign(bytes);
+        assert!(
+            !verify(&other.public(), bytes, &signature),
+            "a wrong key fails verification"
+        );
     }
 
     #[test]
     fn pubkey_hex_round_trip() {
+        let _guard = ::habilis_network_test_tracing::init();
         let identity = Identity::generate();
         let hex = encode_pubkey(&identity.public());
-        assert_eq!(hex.len(), 64);
-        let key = AuthorKey::from_hex(&hex).unwrap();
-        assert_eq!(key.public_key(), Some(identity.public()));
+        assert_eq!(hex.len(), 64, "a public key hex is 64 characters");
+        let key =
+            AuthorKey::decode_hex(&hex).expect("the fixture hex is a valid author key encoding");
+        assert_eq!(
+            key.public_key(),
+            Some(identity.public()),
+            "the public key survives a hex round trip"
+        );
     }
 
     #[test]
     fn sig_hex_round_trip() {
+        let _guard = ::habilis_network_test_tracing::init();
         let identity = Identity::generate();
-        let sig = identity.sign(b"x");
-        let hex = encode_hex(&sig.to_bytes());
-        assert_eq!(hex.len(), 128);
-        assert!(verify(&identity.public(), b"x", &decode_sig(&hex).unwrap()));
+        let signature = identity.sign(b"x");
+        let hex = encode_hex(&signature.to_bytes());
+        assert_eq!(hex.len(), 128, "a signature hex is 128 characters");
+        assert!(
+            verify(
+                &identity.public(),
+                b"x",
+                &decode_sig(&hex).expect("the fixture hex is a valid signature encoding")
+            ),
+            "the signature survives a hex round trip"
+        );
     }
 
     /// Golden: the key is `SHA-256(pubkey text ‖ id bytes)[..16]`. The unsigned form hashes an
     /// empty pubkey text. The values were captured at the base commit.
     #[test]
     fn dedup_key16_is_pinned_for_a_fixed_pubkey_and_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let pubkey = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
         let mut id = [0u8; 16];
         id[15] = 1;
         assert_eq!(
-            encode_hex(dedup_key16(AuthorKey::from_hex(pubkey).as_ref(), &id).as_bytes()),
-            "c7ba26a2ed0d21f0e8913dd8b4456086"
+            encode_hex(dedup_key16(AuthorKey::decode_hex(pubkey).as_ref(), &id).as_bytes()),
+            "c7ba26a2ed0d21f0e8913dd8b4456086",
+            "the dedup key is pinned for a fixed key and id"
         );
         assert_eq!(
             encode_hex(dedup_key16(None, &id).as_bytes()),
-            "7c3ccd10bb7ec37b46d37926ae627426"
+            "7c3ccd10bb7ec37b46d37926ae627426",
+            "the dedup key without a key is pinned"
         );
     }
 
@@ -296,48 +388,83 @@ mod tests {
     /// derivation of the plain bytes under the same label.
     #[test]
     fn the_seal_secret_is_the_derivation_of_the_identity_seed() {
+        let _guard = ::habilis_network_test_tracing::init();
         let identity = Identity::generate();
-        let by_hand = x25519_dalek::StaticSecret::from(*crate::crypto::derive_secret(
+        let by_hand = x25519_dalek::StaticSecret::from(*crypto::derive_secret(
             &identity.secret.to_bytes(),
             super::SEAL_ENC_LABEL,
         ));
-        assert_eq!(identity.seal_secret().to_bytes(), by_hand.to_bytes());
+        assert_eq!(
+            identity.seal_secret().to_bytes(),
+            by_hand.to_bytes(),
+            "the seal secret is the derivation of the identity seed"
+        );
         assert_eq!(
             identity.seal_public(),
-            x25519_dalek::PublicKey::from(&by_hand)
+            x25519_dalek::PublicKey::from(&by_hand),
+            "the seal public key matches the seal secret"
         );
     }
 
     #[test]
     fn write_hex_writes_the_same_text_as_encode_hex() {
-        struct Hex<'a>(&'a [u8]);
-        impl std::fmt::Display for Hex<'_> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        struct Hex<'bytes>(&'bytes [u8]);
+        impl fmt::Display for Hex<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 super::write_hex(f, self.0)
             }
         }
+        let _guard = ::habilis_network_test_tracing::init();
         let bytes = [0x00, 0x0f, 0xa5, 0xff];
-        assert_eq!(Hex(&bytes).to_string(), "000fa5ff");
-        assert_eq!(Hex(&bytes).to_string(), encode_hex(&bytes));
+        assert_eq!(
+            Hex(&bytes).to_string(),
+            "000fa5ff",
+            "bytes are formatted as lowercase hex"
+        );
+        assert_eq!(
+            Hex(&bytes).to_string(),
+            encode_hex(&bytes),
+            "the hex formatter matches encode_hex"
+        );
     }
 
     #[test]
     fn decode_rejects_bad_hex() {
-        assert!(AuthorKey::from_hex("zz").is_none());
-        assert!(AuthorKey::from_hex("abc").is_none()); // odd length
-        assert!(decode_sig("00").is_err()); // wrong length
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            AuthorKey::decode_hex("zz").is_none(),
+            "a hex string with non-hex characters is refused as an author key"
+        );
+        assert!(
+            AuthorKey::decode_hex("abc").is_none(),
+            "an odd-length hex string is refused as an author key"
+        ); // odd length
+        assert!(
+            decode_sig("00").is_err(),
+            "a short signature hex is refused"
+        ); // wrong length
     }
 
     #[test]
     fn decode_rejects_non_ascii_hex_without_panicking() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Regression: an inbound `pubkey`/`sig` is arbitrary UTF-8. A
         // multibyte char of even *byte* length (here `aéa` = 0x61 C3 A9 0x61,
         // 4 bytes) positioned so a 2-byte slice splits it used to panic on a
         // non-char-boundary slice — a one-message remote DoS reachable from
         // `verify_signature`. It must now decode byte-wise and return `Err`.
-        assert!(AuthorKey::from_hex("aéa").is_none());
-        assert!(decode_sig("aéa").is_err());
+        assert!(
+            AuthorKey::decode_hex("aéa").is_none(),
+            "a non-ascii author hex is refused without a panic"
+        );
+        assert!(
+            decode_sig("aéa").is_err(),
+            "a non-ascii signature hex is refused without a panic"
+        );
         // Pure multibyte input of even byte length, too.
-        assert!(AuthorKey::from_hex("€€").is_none()); // 6 bytes, all continuation/non-hex
+        assert!(
+            AuthorKey::decode_hex("€€").is_none(),
+            "a multi-byte author hex is refused without a panic"
+        ); // 6 bytes, all continuation/non-hex
     }
 }

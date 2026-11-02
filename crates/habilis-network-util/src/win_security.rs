@@ -7,7 +7,6 @@
 //! have one home. The callers in `habilis-network` only see safe functions.
 
 use std::io;
-use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::io::{
     AsRawHandle as _, BorrowedHandle, FromRawHandle as _, OwnedHandle, RawHandle,
 };
@@ -16,12 +15,12 @@ use windows_sys::Win32::Foundation::{
     ERROR_PIPE_BUSY, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
-    ConvertStringSidToSidW, GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
+    ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
+    SE_KERNEL_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    CopySid, DACL_SECURITY_INFORMATION, EqualSid, GetLengthSid, GetTokenInformation, IsValidSid,
-    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    DACL_SECURITY_INFORMATION, EqualSid, GetTokenInformation, OWNER_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -29,105 +28,11 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-/// A security identifier, held as its own bytes.
-///
-/// The words are `u32` because a `SID` is 4-byte aligned: a `Vec<u8>` would not
-/// promise that to the calls that read it. A SID is 8 bytes plus 4 per
-/// sub-authority, so the words hold the SID bytes exactly, and the derived
-/// equality is the same comparison that `EqualSid` makes.
-#[derive(PartialEq, Eq)]
-pub struct Sid {
-    words: Vec<u32>,
-}
+use std::{ffi, iter, ptr, slice};
+use windows_sys::core;
 
-impl Sid {
-    /// Copy the SID at `psid` into an owned value.
-    #[expect(unsafe_code, reason = "IsValidSid, GetLengthSid and CopySid FFI")]
-    fn copy_from(psid: PSID) -> io::Result<Self> {
-        // SAFETY: `IsValidSid` only reads the SID header at `psid`, which the
-        // caller got from a successful Win32 call.
-        if psid.is_null() || unsafe { IsValidSid(psid) } == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "not a valid SID",
-            ));
-        }
-        // SAFETY: the SID is valid, as checked above.
-        let length = unsafe { GetLengthSid(psid) };
-        let mut words = vec![0_u32; usize::try_from(length).unwrap_or(0).div_ceil(4)];
-        // SAFETY: `words` holds at least `length` bytes, is 4-byte aligned, and
-        // does not overlap the source.
-        if unsafe { CopySid(length, words.as_mut_ptr().cast(), psid) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self { words })
-    }
-
-    /// Parse the text form, such as `S-1-5-18`.
-    ///
-    /// # Errors
-    /// The text is not a SID.
-    #[expect(unsafe_code, reason = "ConvertStringSidToSidW and LocalFree FFI")]
-    pub fn from_text(text: &str) -> io::Result<Self> {
-        let wide = wide_nul(text);
-        let mut psid: PSID = std::ptr::null_mut();
-        // SAFETY: `wide` is a NUL-terminated UTF-16 string that lives for the
-        // call, and `psid` is a valid pointer to one `PSID`.
-        if unsafe { ConvertStringSidToSidW(wide.as_ptr(), &raw mut psid) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let sid = Self::copy_from(psid);
-        // SAFETY: the call allocated `psid` with `LocalAlloc`, and nothing reads
-        // it after the copy above.
-        unsafe {
-            LocalFree(psid);
-        }
-        sid
-    }
-
-    /// The text form, such as `S-1-5-21-…-1001`.
-    ///
-    /// # Errors
-    /// The conversion fails, which happens only when memory runs out.
-    #[expect(unsafe_code, reason = "ConvertSidToStringSidW and LocalFree FFI")]
-    pub fn to_text(&self) -> io::Result<String> {
-        let mut raw: windows_sys::core::PWSTR = std::ptr::null_mut();
-        // SAFETY: `self.psid()` is a valid SID that lives for the call, and `raw`
-        // is a valid pointer to one `PWSTR`.
-        if unsafe { ConvertSidToStringSidW(self.psid(), &raw mut raw) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: on success `raw` is a NUL-terminated UTF-16 string. The scan
-        // stops at the NUL, and the text is copied before the free below.
-        let text = unsafe {
-            let mut len = 0;
-            while *raw.add(len) != 0 {
-                len += 1;
-            }
-            String::from_utf16_lossy(std::slice::from_raw_parts(raw, len))
-        };
-        // SAFETY: the call allocated `raw` with `LocalAlloc`, and nothing reads
-        // it after the copy above.
-        unsafe {
-            LocalFree(raw.cast());
-        }
-        Ok(text)
-    }
-
-    /// The pointer that the Win32 calls take. The calls only read through it.
-    fn psid(&self) -> PSID {
-        self.words.as_ptr().cast_mut().cast()
-    }
-}
-
-impl std::fmt::Debug for Sid {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.to_text() {
-            Ok(text) => formatter.write_str(&text),
-            Err(_) => formatter.write_str("Sid(?)"),
-        }
-    }
-}
+mod sid;
+pub use sid::Sid;
 
 /// The user SID of the token of this process. It is `TokenUser`, not
 /// `TokenOwner`: in an elevated token the owner is the Administrators group,
@@ -140,7 +45,7 @@ impl std::fmt::Debug for Sid {
     reason = "OpenProcessToken and GetTokenInformation FFI; no safe std wrapper"
 )]
 pub fn current_user_sid() -> io::Result<Sid> {
-    let mut raw: RawHandle = std::ptr::null_mut();
+    let mut raw: RawHandle = ptr::null_mut();
     // SAFETY: the pseudo-handle of this process needs no close, and `raw` is a
     // valid pointer to one handle.
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut raw) } == 0 {
@@ -159,7 +64,7 @@ pub fn current_user_sid() -> io::Result<Sid> {
         GetTokenInformation(
             token.as_raw_handle(),
             TokenUser,
-            std::ptr::null_mut(),
+            ptr::null_mut(),
             0,
             &raw mut needed,
         );
@@ -185,7 +90,9 @@ pub fn current_user_sid() -> io::Result<Sid> {
     }
     // SAFETY: on success the buffer starts with a `TOKEN_USER`, and the SID that
     // it points to lies inside the same buffer, which lives until the copy.
-    let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    let user_pointer: *const TOKEN_USER = buffer.as_ptr().cast();
+    // SAFETY: as above.
+    let user = unsafe { &*user_pointer };
     Sid::copy_from(user.User.Sid)
 }
 
@@ -202,9 +109,9 @@ pub fn current_user_sid() -> io::Result<Sid> {
 ///
 /// # Errors
 /// The user SID cannot be read or written as text.
-pub fn user_sddl() -> io::Result<Vec<u16>> {
+pub fn user_sddl() -> io::Result<Box<[u16]>> {
     let user = current_user_sid()?.to_text()?;
-    Ok(wide_nul(&format!("O:{user}D:P(A;;GA;;;{user})")))
+    Ok(wide_nul(&format!("O:{user}D:P(A;;GA;;;{user})")).into_boxed_slice())
 }
 
 /// Whether the owner of the kernel object behind `handle` is `expected`.
@@ -216,8 +123,8 @@ pub fn user_sddl() -> io::Result<Vec<u16>> {
 #[must_use]
 #[expect(unsafe_code, reason = "GetSecurityInfo and LocalFree FFI")]
 pub fn handle_owner_is(handle: BorrowedHandle<'_>, expected: &Sid) -> bool {
-    let mut owner: PSID = std::ptr::null_mut();
-    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let mut owner: PSID = ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
     // SAFETY: `handle` is open for the call. The two out pointers are valid,
     // and the three that are null ask for nothing.
     let status = unsafe {
@@ -226,9 +133,9 @@ pub fn handle_owner_is(handle: BorrowedHandle<'_>, expected: &Sid) -> bool {
             SE_KERNEL_OBJECT,
             OWNER_SECURITY_INFORMATION,
             &raw mut owner,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
             &raw mut descriptor,
         )
     };
@@ -249,7 +156,7 @@ pub fn handle_owner_is(handle: BorrowedHandle<'_>, expected: &Sid) -> bool {
 /// `D:P(A;;FA;;;S-1-5-21-…)`. The access mask is the specific one: a generic
 /// right such as `GA` reads back as the right of the object type, `FA` for a
 /// pipe. A well-known SID reads back as its SDDL alias, such as `LA` for the
-/// built-in Administrator, so compare a trustee with [`Sid::from_text`], not as
+/// built-in Administrator, so compare a trustee with [`Sid::parse`], not as
 /// text. For a check or a diagnosis of the IPC pipe.
 ///
 /// # Errors
@@ -259,7 +166,7 @@ pub fn handle_owner_is(handle: BorrowedHandle<'_>, expected: &Sid) -> bool {
     reason = "GetSecurityInfo, ConvertSecurityDescriptorToStringSecurityDescriptorW and LocalFree FFI"
 )]
 pub fn dacl_text(handle: BorrowedHandle<'_>) -> io::Result<String> {
-    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
     // SAFETY: `handle` is open for the call. The descriptor out pointer is
     // valid, and the four that are null ask for nothing.
     let status = unsafe {
@@ -267,10 +174,10 @@ pub fn dacl_text(handle: BorrowedHandle<'_>) -> io::Result<String> {
             handle.as_raw_handle(),
             SE_KERNEL_OBJECT,
             DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
             &raw mut descriptor,
         )
     };
@@ -279,7 +186,7 @@ pub fn dacl_text(handle: BorrowedHandle<'_>) -> io::Result<String> {
             i32::try_from(status).unwrap_or(i32::MAX),
         ));
     }
-    let mut raw: windows_sys::core::PWSTR = std::ptr::null_mut();
+    let mut raw: core::PWSTR = ptr::null_mut();
     // SAFETY: `descriptor` is the valid descriptor that the call just gave, and
     // `raw` is a valid pointer to one `PWSTR`; the length pointer may be null.
     let converted = unsafe {
@@ -288,7 +195,7 @@ pub fn dacl_text(handle: BorrowedHandle<'_>) -> io::Result<String> {
             SDDL_REVISION_1,
             DACL_SECURITY_INFORMATION,
             &raw mut raw,
-            std::ptr::null_mut(),
+            ptr::null_mut(),
         )
     };
     let text = if converted == 0 {
@@ -301,7 +208,7 @@ pub fn dacl_text(handle: BorrowedHandle<'_>) -> io::Result<String> {
             while *raw.add(len) != 0 {
                 len += 1;
             }
-            String::from_utf16_lossy(std::slice::from_raw_parts(raw, len))
+            String::from_utf16_lossy(slice::from_raw_parts(raw, len))
         };
         // SAFETY: the conversion allocated `raw` with `LocalAlloc`, and nothing
         // reads it after the copy above.
@@ -339,10 +246,10 @@ pub fn open_pipe_identification(name: &str) -> io::Result<OwnedHandle> {
             wide.as_ptr(),
             GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
-            std::ptr::null(),
+            ptr::null(),
             OPEN_EXISTING,
             FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
-            std::ptr::null_mut(),
+            ptr::null_mut(),
         )
     };
     if raw == INVALID_HANDLE_VALUE {
@@ -361,15 +268,16 @@ pub fn is_pipe_busy(error: &io::Error) -> bool {
 
 /// `text` as UTF-16 with a trailing NUL, the form that the `W` calls take.
 fn wide_nul(text: &str) -> Vec<u16> {
-    std::ffi::OsStr::new(text)
+    use std::os::windows::ffi::OsStrExt as _;
+
+    ffi::OsStr::new(text)
         .encode_wide()
-        .chain(std::iter::once(0))
+        .chain(iter::once(0))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::os::windows::io::{AsHandle as _, FromRawHandle as _, OwnedHandle};
 
     use windows_sys::Win32::Foundation::{
@@ -387,9 +295,10 @@ mod tests {
         wide_nul,
     };
 
+    use std::{fs, io, process, ptr};
     /// A pipe name of this test run alone.
     fn pipe_name(tag: &str) -> String {
-        format!(r"\\.\pipe\hn-util-test-{}-{tag}", std::process::id())
+        format!(r"\\.\pipe\hn-util-test-{}-{tag}", process::id())
     }
 
     /// The server end of a byte pipe with the descriptor of [`user_sddl`], made
@@ -401,7 +310,7 @@ mod tests {
     /// The server end of a byte pipe with the descriptor `sddl` (UTF-16, NUL).
     #[expect(unsafe_code, reason = "the test builds a pipe with raw Win32 calls")]
     fn serve_pipe_with(name: &str, sddl: &[u16]) -> OwnedHandle {
-        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
         // SAFETY: `sddl` is NUL-terminated and lives for the call, and
         // `descriptor` is a valid out pointer; the size pointer may be null.
         let converted = unsafe {
@@ -409,10 +318,10 @@ mod tests {
                 sddl.as_ptr(),
                 SDDL_REVISION_1,
                 &raw mut descriptor,
-                std::ptr::null_mut(),
+                ptr::null_mut(),
             )
         };
-        assert_ne!(converted, 0, "{}", std::io::Error::last_os_error());
+        assert_ne!(converted, 0, "{}", io::Error::last_os_error());
         let attributes = SECURITY_ATTRIBUTES {
             nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).expect("a small struct"),
             lpSecurityDescriptor: descriptor,
@@ -437,18 +346,14 @@ mod tests {
         unsafe {
             LocalFree(descriptor);
         }
-        assert_ne!(
-            raw,
-            INVALID_HANDLE_VALUE,
-            "{}",
-            std::io::Error::last_os_error()
-        );
+        assert_ne!(raw, INVALID_HANDLE_VALUE, "{}", io::Error::last_os_error());
         // SAFETY: `raw` is the new pipe handle, owned by nothing else.
         unsafe { OwnedHandle::from_raw_handle(raw) }
     }
 
     #[test]
     fn the_user_sid_is_a_user_or_service_sid() {
+        let _guard = ::habilis_network_test_tracing::init();
         let text = current_user_sid()
             .expect("the user SID")
             .to_text()
@@ -458,19 +363,28 @@ mod tests {
 
     #[test]
     fn a_sid_survives_the_text_round_trip() {
+        let _guard = ::habilis_network_test_tracing::init();
         let user = current_user_sid().expect("the user SID");
-        let again = Sid::from_text(&user.to_text().expect("text")).expect("parse");
-        assert_eq!(user, again);
-        let system = Sid::from_text("S-1-5-18").expect("the SYSTEM SID");
-        assert_ne!(user, system);
-        assert!(Sid::from_text("not a sid").is_err());
+        let again = Sid::parse(&user.to_text().expect("text")).expect("parse");
+        assert_eq!(user, again, "the text form parses back to the same SID");
+        let system = Sid::parse("S-1-5-18").expect("the SYSTEM SID");
+        assert_ne!(user, system, "the test does not run as SYSTEM");
+        assert!(
+            Sid::parse("not a sid").is_err(),
+            "a text that is no SID is refused"
+        );
         // An SDDL alias parses too: `LA` is the built-in Administrator, RID 500.
-        let admin = Sid::from_text("LA").expect("the LA alias");
-        assert!(admin.to_text().expect("text").ends_with("-500"));
+        let admin = Sid::parse("LA").expect("the LA alias");
+        let admin_text = admin.to_text().expect("text");
+        assert!(
+            admin_text.ends_with("-500"),
+            "the LA alias is the built-in Administrator: {admin_text}"
+        );
     }
 
     #[test]
     fn the_sddl_names_the_user_as_owner_and_as_the_one_entry() {
+        let _guard = ::habilis_network_test_tracing::init();
         let user = current_user_sid()
             .expect("the user SID")
             .to_text()
@@ -478,7 +392,11 @@ mod tests {
         let sddl = user_sddl().expect("the SDDL");
         assert_eq!(sddl.last(), Some(&0), "NUL-terminated");
         let text = String::from_utf16(&sddl[..sddl.len() - 1]).expect("UTF-16");
-        assert_eq!(text, format!("O:{user}D:P(A;;GA;;;{user})"));
+        assert_eq!(
+            text,
+            format!("O:{user}D:P(A;;GA;;;{user})"),
+            "the user owns the pipe and alone may open it"
+        );
     }
 
     // The owner is the user even when the test runs elevated, because the SDDL
@@ -486,29 +404,44 @@ mod tests {
     // the pipe of another account.
     #[test]
     fn a_pipe_made_with_the_user_sddl_is_owned_by_the_user() {
+        let _guard = ::habilis_network_test_tracing::init();
         let server = serve_pipe(&pipe_name("owner"));
         let user = current_user_sid().expect("the user SID");
-        let system = Sid::from_text("S-1-5-18").expect("the SYSTEM SID");
-        assert!(handle_owner_is(server.as_handle(), &user));
-        assert!(!handle_owner_is(server.as_handle(), &system));
+        let system = Sid::parse("S-1-5-18").expect("the SYSTEM SID");
+        assert!(
+            handle_owner_is(server.as_handle(), &user),
+            "the pipe that we made is ours"
+        );
+        assert!(
+            !handle_owner_is(server.as_handle(), &system),
+            "SYSTEM does not own our pipe"
+        );
         // The DACL has one entry, all access for the user. The trustee can read
         // back as an alias (`LA` when the test runs as the built-in
         // Administrator), so the test compares the SID.
         let dacl = dacl_text(server.as_handle()).expect("the DACL");
-        let trustee = dacl
+        let trustee: &str = dacl
             .strip_prefix("D:P(A;;FA;;;")
             .and_then(|rest| rest.strip_suffix(')'))
             .unwrap_or_else(|| panic!("one entry with all access: {dacl}"));
-        assert_eq!(Sid::from_text(trustee).expect("a SID or an alias"), user);
+        assert_eq!(
+            Sid::parse(trustee).expect("a SID or an alias"),
+            user,
+            "the one trustee of the DACL is the user"
+        );
     }
 
     #[test]
     fn the_identification_open_reaches_the_pipe_and_sees_its_owner() {
+        let _guard = ::habilis_network_test_tracing::init();
         let name = pipe_name("open");
         let _server = serve_pipe(&name);
         let client = open_pipe_identification(&name).expect("the client end opens");
         let user = current_user_sid().expect("the user SID");
-        assert!(handle_owner_is(client.as_handle(), &user));
+        assert!(
+            handle_owner_is(client.as_handle(), &user),
+            "a client handle reads the owner of the pipe"
+        );
     }
 
     /// The property that `open_pipe_identification` exists for: a server that
@@ -532,21 +465,22 @@ mod tests {
         use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
         use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
+        let _guard = ::habilis_network_test_tracing::init();
         let name = pipe_name("identify");
         let server = serve_pipe(&name);
         let client = open_pipe_identification(&name).expect("the client end opens");
         // `std::fs::File` waits for the overlapped write of the client handle.
-        std::fs::File::from(client)
+        fs::File::from(client)
             .write_all(b"x")
             .expect("the client writes");
-        let mut server = std::fs::File::from(server);
+        let mut server = fs::File::from(server);
         let mut byte = [0_u8; 1];
         server.read_exact(&mut byte).expect("the server reads");
 
         // SAFETY: `server` is the open server end of a pipe that has data read.
         let impersonated = unsafe { ImpersonateNamedPipeClient(server.as_raw_handle()) };
-        assert_ne!(impersonated, 0, "{}", std::io::Error::last_os_error());
-        let mut raw: RawHandle = std::ptr::null_mut();
+        assert_ne!(impersonated, 0, "{}", io::Error::last_os_error());
+        let mut raw: RawHandle = ptr::null_mut();
         // SAFETY: the pseudo-handle of this thread needs no close. `OpenAsSelf`
         // is true, because an identification token cannot open objects, and
         // `raw` is a valid pointer to one handle.
@@ -572,8 +506,12 @@ mod tests {
         // SAFETY: the thread impersonates the client; this returns it to the
         // token of the process before any assert can unwind.
         let reverted = unsafe { RevertToSelf() };
-        assert_ne!(reverted, 0, "{}", std::io::Error::last_os_error());
-        assert_eq!(level.flatten(), Some(SecurityIdentification));
+        assert_ne!(reverted, 0, "{}", io::Error::last_os_error());
+        assert_eq!(
+            level.flatten(),
+            Some(SecurityIdentification),
+            "the server may identify the client, not act as it"
+        );
     }
 
     // A pipe whose DACL leaves us out refuses the open with ERROR_ACCESS_DENIED,
@@ -581,6 +519,7 @@ mod tests {
     // protected DACL refuses even the owner the read and write rights.
     #[test]
     fn the_identification_open_of_a_pipe_that_leaves_us_out_is_access_denied() {
+        let _guard = ::habilis_network_test_tracing::init();
         let name = pipe_name("denied");
         let user = current_user_sid()
             .expect("the user SID")
@@ -593,7 +532,10 @@ mod tests {
             i32::try_from(ERROR_ACCESS_DENIED).ok(),
             "{error}"
         );
-        assert!(!super::is_pipe_busy(&error));
+        assert!(
+            !super::is_pipe_busy(&error),
+            "a refused open is no busy pipe: {error}"
+        );
     }
 
     // A well-known SID reads back from `dacl_text` as its SDDL alias, on every
@@ -603,6 +545,7 @@ mod tests {
     // READ_CONTROL on its own object.
     #[test]
     fn a_well_known_trustee_reads_back_as_its_alias_and_parses_to_its_sid() {
+        let _guard = ::habilis_network_test_tracing::init();
         let user = current_user_sid()
             .expect("the user SID")
             .to_text()
@@ -612,13 +555,18 @@ mod tests {
             &wide_nul(&format!("O:{user}D:P(A;;GA;;;S-1-5-18)")),
         );
         let dacl = dacl_text(server.as_handle()).expect("the DACL");
-        assert_eq!(dacl, "D:P(A;;FA;;;SY)");
-        let system = Sid::from_text("S-1-5-18").expect("the SYSTEM SID");
-        assert_eq!(Sid::from_text("SY").expect("the SY alias"), system);
+        assert_eq!(dacl, "D:P(A;;FA;;;SY)", "the DACL names SYSTEM alone");
+        let system = Sid::parse("S-1-5-18").expect("the SYSTEM SID");
+        assert_eq!(
+            Sid::parse("SY").expect("the SY alias"),
+            system,
+            "the SY alias is SYSTEM"
+        );
     }
 
     #[test]
     fn the_identification_open_of_a_missing_pipe_is_file_not_found() {
+        let _guard = ::habilis_network_test_tracing::init();
         let error = open_pipe_identification(&pipe_name("missing")).expect_err("no such pipe");
         assert_eq!(
             error.raw_os_error(),

@@ -49,18 +49,15 @@ pub fn windows_file_stem_problem(stem: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
-
-    use super::windows_file_stem_problem;
-
     #[test]
     fn the_names_that_windows_refuses_are_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         for stem in [
             "con", "CON", "Con.txt", "nul", "aux.x.y", "prn", "com0", "COM9", "lpt9", "com¹",
             "LPT³", "conin$", "CONOUT$", "a:b", "a*", "why?", "say\"hi", "pipe|d", "dot.",
         ] {
             assert!(
-                windows_file_stem_problem(stem).is_some(),
+                super::windows_file_stem_problem(stem).is_some(),
                 "{stem:?} must be refused"
             );
         }
@@ -68,6 +65,7 @@ mod tests {
 
     #[test]
     fn names_that_only_look_like_a_device_are_accepted() {
+        let _guard = ::habilis_network_test_tracing::init();
         for stem in [
             "con-x",
             "console",
@@ -81,7 +79,7 @@ mod tests {
             "日本",
         ] {
             assert_eq!(
-                windows_file_stem_problem(stem),
+                super::windows_file_stem_problem(stem),
                 None,
                 "{stem:?} must be accepted"
             );

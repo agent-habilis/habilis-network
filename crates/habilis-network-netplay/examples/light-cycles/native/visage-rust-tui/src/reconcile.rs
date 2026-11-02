@@ -19,70 +19,18 @@
 //! A reordered list therefore remounts rather than moves — correct, not
 //! optimal, fine for a grid + HUD whose structure is mostly static.
 
-use std::collections::HashSet;
-use std::ops::Coroutine;
-use std::rc::Rc;
-
-use crate::component::{Instance, Yield};
+use crate::component::{Component, Instance};
+use crate::component_mount::ComponentMount;
 use crate::host::Host;
-use crate::reactive::SubscriberId;
-use crate::view::{BoxProps, ComponentView, View};
-
-/// One mounted component: its own running [`Instance`], and the subtree
-/// its own last render produced. Components introduce no host node of
-/// their own — `child` is what actually occupies this position in the
-/// tree, exactly as `visage-dom`'s `comp` fiber is transparent and
-/// `domOf` walks straight through to its child.
-pub struct ComponentMount<N> {
-    id: SubscriberId,
-    type_key: usize,
-    instance: Instance,
-    child: Box<Mounted<N>>,
-}
-
-// Hand-written rather than derived: deriving would require `N: Debug`, a
-// bound this type otherwise has no reason to carry (a `Host::Node` like
-// `NodeId` happens to implement it, but nothing here should depend on
-// that).
-impl<N> std::fmt::Debug for ComponentMount<N> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ComponentMount")
-            .field("id", &self.id)
-            .finish_non_exhaustive()
-    }
-}
-
-/// The host-tree shadow of a [`View`], remembered so the next render knows
-/// what shape (and, for `Component`, *which* instance) produced each
-/// node — the minimum a non-keyed reconciler needs to decide "patch in
-/// place" vs "replace".
-pub enum Mounted<N> {
-    Text(N, Rc<str>),
-    Box(N, BoxProps, Vec<Mounted<N>>),
-    Hole(N),
-    Component(ComponentMount<N>),
-}
-
-// Hand-written for the same reason as `ComponentMount`'s: no need to
-// require `N: Debug` just for a trace.
-impl<N> std::fmt::Debug for Mounted<N> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Mounted::Text(_, text) => f.debug_tuple("Text").field(text).finish(),
-            Mounted::Box(_, props, children) => f
-                .debug_tuple("Box")
-                .field(props)
-                .field(&children.len())
-                .finish(),
-            Mounted::Hole(_) => write!(f, "Hole"),
-            Mounted::Component(c) => f.debug_tuple("Component").field(c).finish(),
-        }
-    }
-}
+use crate::mounted::Mounted;
+use crate::subscriber_id::SubscriberId;
+use crate::view::{ComponentView, View};
+use std::collections::HashSet;
+use std::hash::BuildHasher;
 
 /// The host node a `Mounted` subtree actually starts at — for `Component`,
 /// its child's, recursively, since a component is transparent.
-fn node_of<N: Copy>(mounted: &Mounted<N>) -> N {
+pub(crate) fn node_of<Handle: Copy>(mounted: &Mounted<Handle>) -> Handle {
     match mounted {
         Mounted::Text(n, _) | Mounted::Box(n, _, _) | Mounted::Hole(n) => *n,
         Mounted::Component(c) => node_of(&c.child),
@@ -90,12 +38,12 @@ fn node_of<N: Copy>(mounted: &Mounted<N>) -> N {
 }
 
 /// Mounts `view` fresh under `parent`, immediately before `before`.
-pub fn mount<H: Host>(
-    host: &mut H,
-    parent: H::Node,
-    before: Option<H::Node>,
+pub fn mount<Backend: Host>(
+    host: &mut Backend,
+    parent: Backend::Node,
+    before: Option<Backend::Node>,
     view: View,
-) -> Mounted<H::Node> {
+) -> Mounted<Backend::Node> {
     match view {
         View::Text(text) => {
             let node = host.create_text(&text);
@@ -122,12 +70,12 @@ pub fn mount<H: Host>(
 
 /// Constructs and mounts a nested component from an owned [`ComponentView`]
 /// — the one path that actually calls its builder.
-fn mount_component<H: Host>(
-    host: &mut H,
-    parent: H::Node,
-    before: Option<H::Node>,
+pub(crate) fn mount_component<Backend: Host>(
+    host: &mut Backend,
+    parent: Backend::Node,
+    before: Option<Backend::Node>,
     comp: ComponentView,
-) -> Mounted<H::Node> {
+) -> Mounted<Backend::Node> {
     let ComponentView { type_key, build } = comp;
     let mut instance = Instance::boxed(build());
     let id = instance.subscriber_id();
@@ -141,7 +89,7 @@ fn mount_component<H: Host>(
     })
 }
 
-/// Mounts the tree's root component directly from a coroutine, with no
+/// Mounts the tree's root component directly, with no
 /// parent to ever compare identity against — unlike a nested
 /// [`ComponentView`] (built via [`View::component`]), the root is never
 /// re-mounted-vs-reused by a `patch` call, so it needs no `type_key` and
@@ -151,19 +99,19 @@ fn mount_component<H: Host>(
 ///
 /// # Panics
 ///
-/// If the root component's coroutine completes instead of yielding on its
-/// very first resume — every real component loops forever, so this would
-/// indicate a broken coroutine body, not a normal outcome.
-pub fn mount_root<H: Host>(
-    host: &mut H,
-    root: H::Node,
-    coro: impl Coroutine<(), Yield = Yield, Return = ()> + 'static,
-) -> Mounted<H::Node> {
-    let mut instance = Instance::new(coro);
+/// If the root component finishes instead of producing a step on its very
+/// first render — every real component loops forever, so this would indicate
+/// a broken component, not a normal outcome.
+pub fn mount_root<Backend: Host>(
+    host: &mut Backend,
+    root: Backend::Node,
+    component: impl Component + 'static,
+) -> Mounted<Backend::Node> {
+    let mut instance = Instance::new(component);
     let id = instance.subscriber_id();
     let view = instance
         .mount()
-        .expect("the root component must yield a view on mount");
+        .expect("the root component must produce a view on mount");
     let child = Box::new(mount(host, root, None, view));
     Mounted::Component(ComponentMount {
         id,
@@ -177,7 +125,7 @@ pub fn mount_root<H: Host>(
 /// `Instance` (via `ComponentMount`'s own field, once this whole value is
 /// dropped) is what approximates `gen.return()`'s cleanup role — see
 /// `component.rs`'s module doc.
-pub fn unmount<H: Host>(host: &mut H, mounted: &Mounted<H::Node>) {
+pub fn unmount<Backend: Host>(host: &mut Backend, mounted: &Mounted<Backend::Node>) {
     match mounted {
         Mounted::Component(c) => unmount(host, &c.child),
         Mounted::Text(..) | Mounted::Box(..) | Mounted::Hole(_) => host.remove(node_of(mounted)),
@@ -192,12 +140,12 @@ pub fn unmount<H: Host>(host: &mut H, mounted: &Mounted<H::Node>) {
 /// running instance and its own state exactly as it was, not feeding it
 /// anything from this render (v1 has no live-props channel — see the
 /// crate's port-report notes).
-pub fn patch<H: Host>(
-    host: &mut H,
-    parent: H::Node,
-    old: Mounted<H::Node>,
+pub fn patch<Backend: Host>(
+    host: &mut Backend,
+    parent: Backend::Node,
+    old: Mounted<Backend::Node>,
     view: View,
-) -> Mounted<H::Node> {
+) -> Mounted<Backend::Node> {
     match (old, view) {
         (Mounted::Text(node, prev_text), View::Text(next_text)) => {
             if prev_text.as_ref() != next_text.as_ref() {
@@ -230,12 +178,12 @@ pub fn patch<H: Host>(
     }
 }
 
-fn patch_children<H: Host>(
-    host: &mut H,
-    parent: H::Node,
-    old_children: Vec<Mounted<H::Node>>,
+pub(crate) fn patch_children<Backend: Host>(
+    host: &mut Backend,
+    parent: Backend::Node,
+    old_children: Vec<Mounted<Backend::Node>>,
     new_children: Vec<View>,
-) -> Vec<Mounted<H::Node>> {
+) -> Vec<Mounted<Backend::Node>> {
     let mut old_iter = old_children.into_iter();
     let mut result = Vec::with_capacity(new_children.len());
     for view in new_children {
@@ -262,12 +210,12 @@ fn patch_children<H: Host>(
 /// tick. `dirty` membership is what keeps the *work* (calling `render()`)
 /// proportional to what actually changed, which is the property that
 /// matters.
-pub fn patch_dirty<H: Host>(
-    host: &mut H,
-    parent: H::Node,
-    mounted: Mounted<H::Node>,
-    dirty: &HashSet<SubscriberId>,
-) -> Mounted<H::Node> {
+pub fn patch_dirty<Backend: Host, S: BuildHasher>(
+    host: &mut Backend,
+    parent: Backend::Node,
+    mounted: Mounted<Backend::Node>,
+    dirty: &HashSet<SubscriberId, S>,
+) -> Mounted<Backend::Node> {
     match mounted {
         Mounted::Component(mut comp) => {
             if dirty.contains(&comp.id)
@@ -304,21 +252,26 @@ pub fn patch_dirty<H: Host>(
 #[cfg(test)]
 mod tests {
     use super::{Mounted, mount, patch};
-    use crate::tui::host_impl::TuiHost;
+    use crate::tui::tui_host::TuiHost;
     use crate::view::{BoxProps, View};
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn mounting_a_text_view_creates_one_text_node() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
         let mounted = mount(&mut host, root, None, View::text("hi"));
-        assert_eq!(host.arena.children(root).count(), 1);
+        assert_eq!(
+            host.arena.children(root).count(),
+            1,
+            "mounting a text view creates one text node"
+        );
         let _ = mounted;
     }
 
     #[test]
     fn patching_the_same_shape_reuses_the_node_and_updates_content() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
         let mounted = mount(&mut host, root, None, View::text("first"));
@@ -327,18 +280,30 @@ mod tests {
         let mounted = patch(&mut host, root, mounted, View::text("second"));
         let after_ids: Vec<_> = host.arena.children(root).collect();
 
-        assert_eq!(before_ids, after_ids); // same node reused
+        assert_eq!(
+            before_ids, after_ids,
+            "patching the same shape reuses the node"
+        ); // same node reused
         let text_node = after_ids[0];
-        assert_eq!(host.arena.get(text_node).text.as_deref(), Some("second"));
+        assert_eq!(
+            host.arena.get(text_node).text.as_deref(),
+            Some("second"),
+            "patching the same shape updates the text content"
+        );
         let _ = mounted;
     }
 
     #[test]
     fn patching_a_different_shape_replaces_the_node() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
         let mounted = mount(&mut host, root, None, View::text("hi"));
-        let text_node = host.arena.children(root).next().unwrap();
+        let text_node = host
+            .arena
+            .children(root)
+            .next()
+            .expect("the mounted root has a text child");
 
         let mounted = patch(
             &mut host,
@@ -346,14 +311,22 @@ mod tests {
             mounted,
             View::boxed(BoxProps::default(), vec![]),
         );
-        let box_node = host.arena.children(root).next().unwrap();
+        let box_node = host
+            .arena
+            .children(root)
+            .next()
+            .expect("the mounted root has a box child");
 
-        assert_ne!(text_node, box_node);
+        assert_ne!(
+            text_node, box_node,
+            "patching a different shape replaces the node"
+        );
         let _ = mounted;
     }
 
     #[test]
     fn a_shorter_child_list_unmounts_the_tail() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
         let view = View::boxed(
@@ -368,11 +341,16 @@ mod tests {
         let Mounted::Box(box_node, _, _) = &mounted else {
             panic!("expected a box");
         };
-        assert_eq!(host.arena.children(*box_node).count(), 1);
+        assert_eq!(
+            host.arena.children(*box_node).count(),
+            1,
+            "a shorter child list unmounts the tail"
+        );
     }
 
     #[test]
     fn a_longer_child_list_mounts_the_extra_tail() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
         let view = View::boxed(BoxProps::default(), vec![View::text("a")]);
@@ -384,7 +362,11 @@ mod tests {
         let Mounted::Box(box_node, _, _) = &mounted else {
             panic!("expected a box");
         };
-        assert_eq!(host.arena.children(*box_node).count(), 2);
+        assert_eq!(
+            host.arena.children(*box_node).count(),
+            2,
+            "a longer child list mounts the extra tail"
+        );
     }
 
     #[test]
@@ -393,18 +375,22 @@ mod tests {
         // which has a real reactive loop to drive) — just confirms
         // `mount`/`patch` don't hit the old borrowed-`View` split's
         // unreachable panic when a Component sits inside a Box's children.
-        use crate::component::Yield;
-        use std::pin::Pin;
+        use crate::component::{Component, ComponentBox, Step};
 
-        fn child() -> Pin<Box<crate::component::ComponentCoroutine>> {
-            Box::pin(
-                #[coroutine]
-                || {
-                    yield Yield::View(View::text("child"));
-                },
-            )
+        #[derive(Clone)]
+        struct Child;
+
+        impl Component for Child {
+            fn step(&mut self) -> Option<Step> {
+                Some(Step::View(View::text("child")))
+            }
         }
 
+        fn child() -> ComponentBox {
+            Box::new(Child)
+        }
+
+        let _guard = ::habilis_network_test_tracing::init();
         let mut host = TuiHost::new();
         let root = host.create_root();
         let view = View::boxed(BoxProps::default(), vec![View::component(|()| child(), ())]);
@@ -412,6 +398,10 @@ mod tests {
         let Mounted::Box(box_node, _, _) = &mounted else {
             panic!("expected a box");
         };
-        assert_eq!(host.arena.children(*box_node).count(), 1);
+        assert_eq!(
+            host.arena.children(*box_node).count(),
+            1,
+            "the box keeps one child"
+        );
     }
 }

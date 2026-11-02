@@ -7,18 +7,19 @@
 //! (last-writer-wins per origin). Every node folds the freshest vector from each
 //! origin into one metric-weighted graph and runs Dijkstra locally.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use iroh::{EndpointAddr, SecretKey};
 use iroh_base::Signature;
 use n0_future::time::{Duration, Instant, SystemTime};
 use serde::{Deserialize, Serialize};
 
-use crate::addr::{Route, RouteHop};
+use crate::app_id::{AppId, UnderlayId};
 use crate::graph::{Graph, Leg, Link};
-use crate::metric::LinkMetric;
-use crate::role::{AppId, UnderlayId};
+use crate::link_metric::LinkMetric;
+use crate::route::{Route, RouteHop};
 
+use crate::graph;
 /// How long a vector stays without a newer one, unless the handle says otherwise.
 pub(crate) const DEFAULT_VECTOR_MAX_AGE: Duration = Duration::from_secs(45);
 
@@ -44,6 +45,19 @@ const LINK_VECTOR_DOMAIN: &[u8] = b"habilis-network-iroh-multihop-transport link
 /// Signed by the origin's own key. The `origin` field is the verifying key, so
 /// the proof needs nothing else: a node cannot advertise an underlay address, or
 /// a link, in another peer's name.
+///
+/// # Examples
+///
+/// A link vector is signed by its origin, and its origin is the key that signed it.
+///
+/// ```
+/// use habilis_network_iroh_multihop_transport::{AppId, LinkVector};
+/// use iroh_base::{EndpointAddr, SecretKey};
+///
+/// let secret = SecretKey::from_bytes(&[1u8; 32]);
+/// let vector = LinkVector::signed(&secret, 1, EndpointAddr::new(secret.public()), Vec::new());
+/// assert_eq!(vector.origin(), AppId::new(secret.public()));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkVector {
     pub(crate) origin: AppId,
@@ -54,7 +68,8 @@ pub struct LinkVector {
     pub(crate) underlay: EndpointAddr,
     pub(crate) links: Vec<(AppId, LinkMetric)>,
     /// The origin's signature over every field above.
-    pub(crate) sig: Signature,
+    #[serde(rename = "sig")]
+    pub(crate) signature: Signature,
 }
 
 fn signing_bytes(
@@ -87,13 +102,13 @@ impl LinkVector {
             .into_iter()
             .map(|(id, cost)| (id, LinkMetric::new(cost)))
             .collect();
-        let sig = secret.sign(&signing_bytes(&origin, seq, &underlay, &links));
+        let signature = secret.sign(&signing_bytes(&origin, seq, &underlay, &links));
         Self {
             origin,
             seq,
             underlay,
             links,
-            sig,
+            signature,
         }
     }
 
@@ -106,12 +121,28 @@ impl LinkVector {
     /// Whether the origin signed exactly these fields.
     fn is_signed_by_origin(&self) -> bool {
         let bytes = signing_bytes(&self.origin, self.seq, &self.underlay, &self.links);
-        self.origin.get().verify(&bytes, &self.sig).is_ok()
+        self.origin.get().verify(&bytes, &self.signature).is_ok()
     }
 }
 
 /// The received link-vectors, kept freshest-per-origin — the routing table's raw
 /// material. [`route_to`](Topology::route_to) folds them into the graph on demand.
+///
+/// # Examples
+///
+/// A topology accepts a signed link vector from a member.
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use habilis_network_iroh_multihop_transport::{LinkVector, Topology};
+/// use iroh_base::{EndpointAddr, SecretKey};
+///
+/// let secret = SecretKey::from_bytes(&[1u8; 32]);
+/// let vector = LinkVector::signed(&secret, 1, EndpointAddr::new(secret.public()), Vec::new());
+/// let mut topology = Topology::with_max_age(Duration::from_secs(60));
+/// assert!(topology.ingest_at(vector, tokio::time::Instant::now(), 1));
+/// ```
 #[derive(Debug)]
 pub struct Topology {
     vectors: HashMap<AppId, Held>,
@@ -256,12 +287,11 @@ impl Topology {
     /// Returns how many vectors were dropped.
     pub fn expire_older_than(&mut self, now: Instant) -> usize {
         let max_age = self.max_age;
-        let expired: Vec<AppId> = self
+        let stale = self
             .vectors
             .iter()
-            .filter(|(_, held)| now.saturating_duration_since(held.received) > max_age)
-            .map(|(origin, _)| *origin)
-            .collect();
+            .filter(|(_, held)| now.saturating_duration_since(held.received) > max_age);
+        let expired: Vec<AppId> = stale.map(|(origin, _)| *origin).collect();
         for origin in &expired {
             self.remove_at(*origin, now);
         }
@@ -279,9 +309,8 @@ impl Topology {
 
     /// The application ids that `origin` linked to in the vector that we hold of it.
     pub(crate) fn links_of(&self, origin: AppId) -> Option<Vec<AppId>> {
-        self.vectors
-            .get(&origin)
-            .map(|held| held.vector.links.iter().map(|(id, _)| *id).collect())
+        let held = self.vectors.get(&origin)?;
+        Some(held.vector.links.iter().map(|(id, _)| *id).collect())
     }
 
     /// The underlay address an origin advertised, for dialing a hop through it.
@@ -306,13 +335,9 @@ impl Topology {
     /// if any hop hasn't advertised its underlay address yet (we can't dial a hop
     /// we can't reach), so the returned list may be shorter than `max_paths` or
     /// empty.
-    #[must_use]
-    pub fn route_to(&self, leg: Leg, max_paths: usize) -> Vec<Route> {
-        self.graph()
-            .disjoint_paths(leg, max_paths)
-            .iter()
-            .filter_map(|path| self.route_of(path))
-            .collect()
+    pub fn route_to(&self, leg: Leg, max_paths: usize) -> impl Iterator<Item = Route> + use<'_> {
+        let paths = self.graph().disjoint_paths(leg, max_paths);
+        paths.into_iter().filter_map(|path| self.route_of(&path))
     }
 
     /// The shortest [`Route`] from `src` to `dst` that does not start with a hop in
@@ -322,7 +347,7 @@ impl Topology {
     pub(crate) fn route_to_avoiding_first_hops(
         &self,
         leg: Leg,
-        refused: &std::collections::HashSet<AppId>,
+        refused: &HashSet<AppId>,
     ) -> Option<Route> {
         let path = self
             .graph()
@@ -332,8 +357,8 @@ impl Topology {
 
     /// `path` as a dialable [`Route`], or `None` if a hop has not advertised its
     /// underlay address yet (we can't dial a hop we can't reach).
-    fn route_of(&self, path: &crate::graph::Path) -> Option<Route> {
-        let hops = path
+    fn route_of(&self, path: &graph::Path) -> Option<Route> {
+        let hops: Option<Vec<RouteHop>> = path
             .hops
             .iter()
             .map(|hop| {
@@ -342,8 +367,8 @@ impl Topology {
                     underlay_id: UnderlayId::new(underlay.id),
                 })
             })
-            .collect::<Option<Vec<_>>>()?;
-        Route::new(hops)
+            .collect();
+        Route::try_new(hops?)
     }
 
     /// A JSON-serializable snapshot of the routing graph from `self_id`'s point
@@ -351,7 +376,7 @@ impl Topology {
     /// which node is "us". Backs the `topology` IPC query.
     #[must_use]
     pub fn view(&self, self_id: AppId) -> TopologyView {
-        let edges = self
+        let edges: Vec<TopologyEdge> = self
             .vectors
             .values()
             .map(|held| &held.vector)
@@ -388,30 +413,65 @@ impl Topology {
 
 /// A node's-eye view of the routing graph, ready to serialize to JSON for the
 /// `topology` IPC query.
-#[derive(Debug, serde::Serialize)]
+///
+/// # Examples
+///
+/// A view of the topology serializes for a caller that prints it.
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use habilis_network_iroh_multihop_transport::{AppId, Topology};
+/// use iroh_base::SecretKey;
+///
+/// let topology = Topology::with_max_age(Duration::from_secs(60));
+/// let view = topology.view(AppId::new(SecretKey::from_bytes(&[1u8; 32]).public()));
+/// fn assert_serialize<T: serde::Serialize>(_: &T) {}
+/// assert_serialize(&view);
+/// ```
+#[derive(Debug, Clone, serde::Serialize)]
+#[non_exhaustive]
 pub struct TopologyView {
     /// This node's own endpoint id (hex) — the graph's "you".
     pub self_id: String,
+    /// The links of the graph, one per edge.
     pub edges: Vec<TopologyEdge>,
 }
 
 /// One directed, metric-labelled edge in a [`TopologyView`].
-#[derive(Debug, serde::Serialize)]
+///
+/// # Examples
+///
+/// The topology view builds an edge, and a caller outside the crate has no other way to make one, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_iroh_multihop_transport::TopologyEdge;
+///
+/// # fn demo(edge: &TopologyEdge) -> TopologyEdge {
+/// edge.clone()
+/// # }
+/// ```
+#[derive(Debug, Clone, serde::Serialize)]
+#[non_exhaustive]
 pub struct TopologyEdge {
+    /// The endpoint id at one end, in hex.
     pub from: String,
+    /// The endpoint id at the other end, in hex.
     pub to: String,
+    /// The routing cost of the link.
     pub metric: u32,
 }
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::{expect_warn, test};
     use n0_future::time::{Duration, Instant};
 
     use super::{Leg, LinkVector, Topology};
-    use crate::role::{AppId, UnderlayId};
+    use crate::app_id::{AppId, UnderlayId};
     use iroh::{EndpointAddr, SecretKey};
 
+    use crate::link_metric;
+    use std::net;
     fn eid(seed: u8) -> AppId {
         AppId::new(SecretKey::from_bytes(&[seed; 32]).public())
     }
@@ -445,6 +505,7 @@ mod tests {
 
     #[test]
     fn a_vector_that_claims_another_origin_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Mallory broadcasts a vector as the victim and points the victim's
         // underlay at her own address: every route through the victim would
         // then go to her.
@@ -457,27 +518,38 @@ mod tests {
             !ingest(&mut store, forged),
             "a vector the origin did not sign is refused"
         );
-        assert!(store.view(other).edges.is_empty());
+        assert!(
+            store.view(other).edges.is_empty(),
+            "a vector that claims another origin leaves the view empty"
+        );
     }
 
     #[test]
     fn a_vector_changed_after_signing_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc) = (eid(1), eid(2), eid(3));
         let mut store = Topology::default();
         let mut tampered = vector(na, 1, &[(nb, 10)]);
-        tampered.links.push((nc, crate::metric::LinkMetric::new(1)));
-        assert!(!ingest(&mut store, tampered));
+        tampered.links.push((nc, link_metric::LinkMetric::new(1)));
+        assert!(
+            !ingest(&mut store, tampered),
+            "a tampered vector is refused"
+        );
         let mut moved = vector(na, 1, &[(nb, 10)]);
         moved.underlay = EndpointAddr::new(nc.get());
         assert!(
             !ingest(&mut store, moved),
             "the underlay address is signed too"
         );
-        assert!(ingest(&mut store, vector(na, 1, &[(nb, 10)])));
+        assert!(
+            ingest(&mut store, vector(na, 1, &[(nb, 10)])),
+            "the untampered vector is accepted"
+        );
     }
 
     #[test]
     fn a_vector_refused_for_its_age_is_reported_once_per_max_age() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut store = Topology::default();
         let start = Instant::now();
         assert!(store.should_report_skew(start), "the first is reported");
@@ -499,15 +571,25 @@ mod tests {
 
     #[test]
     fn a_stale_vector_ages_out() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb) = (eid(1), eid(2));
         let start = Instant::now();
         let mut store = Topology::default();
-        assert!(store.ingest_at(vector(na, 1_000, &[(nb, 1)]), start, 1_000));
-        assert!(store.ingest_at(vector(nb, 1_000, &[(na, 1)]), start, 1_000));
+        assert!(
+            store.ingest_at(vector(na, 1_000, &[(nb, 1)]), start, 1_000),
+            "a stale vector is accepted at its time"
+        );
+        assert!(
+            store.ingest_at(vector(nb, 1_000, &[(na, 1)]), start, 1_000),
+            "the second stale vector is accepted at its time"
+        );
         // `na` speaks again, `nb` has crashed and says nothing.
         let later = start + secs(46);
-        assert!(store.ingest_at(vector(na, 41_000, &[(nb, 1)]), start + secs(40), 41_000));
-        assert_eq!(store.expire_older_than(later), 1);
+        assert!(
+            store.ingest_at(vector(na, 41_000, &[(nb, 1)]), start + secs(40), 41_000),
+            "a newer vector is accepted after the stale ones"
+        );
+        assert_eq!(store.expire_older_than(later), 1, "one old vector expires");
         assert!(
             store
                 .view(na)
@@ -516,47 +598,69 @@ mod tests {
                 .all(|edge| edge.from == na.to_string()),
             "no edge of the crashed peer is left"
         );
-        assert!(
-            store.route_to(Leg { src: na, dst: nb }, 1).is_empty(),
-            "its underlay is gone too"
-        );
+        let routes: Vec<_> = store.route_to(Leg { src: na, dst: nb }, 1).collect();
+        assert!(routes.is_empty(), "its underlay is gone too");
     }
 
     #[test]
     fn a_copy_of_an_old_vector_does_not_keep_a_gone_peer_alive() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb) = (eid(1), eid(2));
         let start = Instant::now();
         let mut store = Topology::default();
-        assert!(store.ingest_at(vector(na, 7_000, &[(nb, 1)]), start, 7_000));
+        assert!(
+            store.ingest_at(vector(na, 7_000, &[(nb, 1)]), start, 7_000),
+            "a copy of an old vector is accepted"
+        );
         assert!(
             !store.ingest_at(vector(na, 7_000, &[(nb, 1)]), start + secs(46), 7_000),
             "same seq is not fresh"
         );
-        assert_eq!(store.expire_older_than(start + secs(46)), 1);
+        assert_eq!(
+            store.expire_older_than(start + secs(46)),
+            1,
+            "a copy of an old vector expires nothing new"
+        );
     }
 
     #[test]
     fn a_vector_that_was_expired_does_not_come_back() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The peer's last vector arrives again after the age-out, through
         // anti-entropy: it must not read as new.
         let (na, nb) = (eid(1), eid(2));
         let start = Instant::now();
         let mut store = Topology::default();
-        assert!(store.ingest_at(vector(nb, 7_000, &[(na, 1)]), start, 7_000));
-        assert_eq!(store.expire_older_than(start + secs(46)), 1);
+        assert!(
+            store.ingest_at(vector(nb, 7_000, &[(na, 1)]), start, 7_000),
+            "an expired vector is accepted again when it returns"
+        );
+        assert_eq!(
+            store.expire_older_than(start + secs(46)),
+            1,
+            "the returned vector expires nothing at the first window"
+        );
         assert!(
             !store.ingest_at(vector(nb, 7_000, &[(na, 1)]), start + secs(46), 30_000),
             "the same vector again is refused"
         );
         // Tombstones are kept for one max age, then forgotten.
-        assert_eq!(store.expire_older_than(start + secs(92)), 0);
+        assert_eq!(
+            store.expire_older_than(start + secs(92)),
+            0,
+            "the returned vector expires at the second window"
+        );
     }
 
     #[test]
     fn a_vector_of_a_peer_that_left_does_not_come_back() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb) = (eid(1), eid(2));
         let mut store = Topology::default();
-        assert!(ingest(&mut store, vector(nb, 7_000, &[(na, 1)])));
+        assert!(
+            ingest(&mut store, vector(nb, 7_000, &[(na, 1)])),
+            "a vector of a peer that left is accepted again"
+        );
         assert!(store.remove(nb), "Left removes the vector");
         assert!(
             !ingest(&mut store, vector(nb, 7_000, &[(na, 1)])),
@@ -570,20 +674,36 @@ mod tests {
 
     #[test]
     fn a_node_whose_vector_expired_returns_with_its_next_one() {
+        let _guard = ::habilis_network_test_tracing::init();
         // A node that missed ticks under load is expired by every peer. Its
         // next vector must bring it back, not be held off by the tombstone.
         let (na, nb) = (eid(1), eid(2));
         let start = Instant::now();
         let mut store = Topology::default();
-        assert!(store.ingest_at(vector(nb, 1_000, &[(na, 1)]), start, 1_000));
-        assert_eq!(store.expire_older_than(start + secs(46)), 1);
-        assert!(store.ingest_at(vector(nb, 47_000, &[(na, 1)]), start + secs(47), 47_000));
-        assert_eq!(store.view(na).edges.len(), 1);
+        assert!(
+            store.ingest_at(vector(nb, 1_000, &[(na, 1)]), start, 1_000),
+            "a node whose vector expired is accepted with its next vector"
+        );
+        assert_eq!(
+            store.expire_older_than(start + secs(46)),
+            1,
+            "the expired vector is counted once"
+        );
+        assert!(
+            store.ingest_at(vector(nb, 47_000, &[(na, 1)]), start + secs(47), 47_000),
+            "the next vector from the node is accepted"
+        );
+        assert_eq!(
+            store.view(na).edges.len(),
+            1,
+            "the node has one edge after its next vector"
+        );
     }
 
     #[test]
     fn a_vector_older_than_the_max_age_is_refused() {
-        expect_warn(
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
             "habilis_network_iroh_multihop_transport::topology",
             "link-state refused: the sender's clock is behind ours",
         );
@@ -591,89 +711,120 @@ mod tests {
         // against a late joiner.
         let (na, nb) = (eid(1), eid(2));
         let mut store = Topology::default();
-        assert!(!store.ingest_at(
-            vector(nb, 1_000, &[(na, 1)]),
-            Instant::now(),
-            1_000 + 45_001
-        ));
-        assert!(store.ingest_at(
-            vector(nb, 1_000, &[(na, 1)]),
-            Instant::now(),
-            1_000 + 45_000
-        ));
+        assert!(
+            !store.ingest_at(
+                vector(nb, 1_000, &[(na, 1)]),
+                Instant::now(),
+                1_000 + 45_001
+            ),
+            "a vector older than the max age is refused"
+        );
+        assert!(
+            store.ingest_at(
+                vector(nb, 1_000, &[(na, 1)]),
+                Instant::now(),
+                1_000 + 45_000
+            ),
+            "a vector older than the max age is refused at its time"
+        );
     }
 
     #[test]
     fn after_a_restart_the_first_new_vector_wins() {
+        let _guard = ::habilis_network_test_tracing::init();
         // seq is wall-clock milliseconds, so a node that restarts with the same
         // key does not start again at 1 and lose to what it sent before.
         let (na, nb) = (eid(1), eid(2));
         let mut store = Topology::default();
-        assert!(ingest(&mut store, vector(nb, 100_000, &[(na, 1)])));
+        assert!(
+            ingest(&mut store, vector(nb, 100_000, &[(na, 1)])),
+            "after a restart the first new vector wins"
+        );
         assert!(
             ingest(&mut store, vector(nb, 100_050, &[(na, 5)])),
             "the first vector after the restart is above the last one before it"
         );
-        assert_eq!(store.view(na).edges[0].metric, 5);
+        assert_eq!(
+            store.view(na).edges[0].metric,
+            5,
+            "after a restart the edge keeps the new metric"
+        );
     }
 
     #[test]
     fn newer_vector_supersedes_older() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb) = (eid(1), eid(2));
         let mut store = Topology::default();
-        assert!(ingest(&mut store, vector(na, 2_000, &[(nb, 10)])));
-        assert!(!ingest(&mut store, vector(na, 1_000, &[(nb, 1)])));
-        assert!(ingest(&mut store, vector(na, 3_000, &[(nb, 1)])));
+        assert!(
+            ingest(&mut store, vector(na, 2_000, &[(nb, 10)])),
+            "a newer vector supersedes the older one"
+        );
+        assert!(
+            !ingest(&mut store, vector(na, 1_000, &[(nb, 1)])),
+            "an older vector is refused once a newer one is held"
+        );
+        assert!(
+            ingest(&mut store, vector(na, 3_000, &[(nb, 1)])),
+            "a newer-still vector supersedes the held one"
+        );
     }
 
-    /// iroh names a path by the bytes of its address, so two spellings of one route are two
+    /// Iroh names a path by the bytes of its address, so two spellings of one route are two
     /// paths. Two ends hold different versions of a vector for a while (a relay switch, a new
     /// IP), so the bytes of a route must depend on the ids of its hops and on nothing else.
     #[test]
     fn the_locator_of_a_route_does_not_depend_on_the_addresses_a_vector_carries() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc) = (eid(1), eid(2), eid(3));
         let mut store = Topology::default();
         ingest(&mut store, vector(na, 1, &[(nb, 1)]));
         ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
         ingest(&mut store, vector(nc, 1, &[]));
-        let before = store.route_to(Leg { src: na, dst: nc }, 1)[0].encode();
+        let before_routes: Vec<_> = store.route_to(Leg { src: na, dst: nc }, 1).collect();
+        let before = before_routes[0].encode();
 
         let relay: iroh::RelayUrl = "http://127.0.0.1:1/".parse().expect("a relay url");
-        let moved = EndpointAddr::new(nc.get())
+        let ip_addr: net::SocketAddr = "10.0.0.7:4000".parse().expect("an address");
+        let moved: EndpointAddr = EndpointAddr::new(nc.get())
             .with_relay_url(relay)
-            .with_ip_addr("10.0.0.7:4000".parse().expect("an address"));
-        assert!(ingest(
-            &mut store,
-            LinkVector::signed(&secret_of(nc), 2, moved, Vec::new())
-        ));
-        let after = store.route_to(Leg { src: na, dst: nc }, 1)[0].encode();
+            .with_ip_addr(ip_addr);
+        assert!(
+            ingest(
+                &mut store,
+                LinkVector::signed(&secret_of(nc), 2, moved, Vec::new())
+            ),
+            "the locator of a route ignores the addresses a vector carries"
+        );
+        let after_routes: Vec<_> = store.route_to(Leg { src: na, dst: nc }, 1).collect();
+        let after = after_routes[0].encode();
         assert_eq!(before, after, "the same route, the same bytes");
     }
 
     #[test]
     fn route_traces_the_chain_and_carries_underlay_addrs() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc, nd) = (eid(1), eid(2), eid(3), eid(4));
         let mut store = Topology::default();
         ingest(&mut store, vector(na, 1, &[(nb, 1)]));
         ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
         ingest(&mut store, vector(nc, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nd, 1, &[]));
-        let routes = store.route_to(Leg { src: na, dst: nd }, 3);
-        assert_eq!(routes.len(), 1);
-        assert_eq!(
-            routes[0]
-                .hops()
-                .iter()
-                .map(|hop| hop.app_id)
-                .collect::<Vec<_>>(),
-            vec![nb, nc, nd]
-        );
+        let routes: Vec<_> = store.route_to(Leg { src: na, dst: nd }, 3).collect();
+        assert_eq!(routes.len(), 1, "a route traces the chain of two hops");
+        let hops: Vec<_> = routes[0].hops().iter().map(|hop| hop.app_id).collect();
+        assert_eq!(hops, vec![nb, nc, nd], "the chain hops are b, c and d");
         // Every hop names the underlay endpoint of that node.
-        assert_eq!(routes[0].hops()[0].underlay_id, UnderlayId::new(nb.get()));
+        assert_eq!(
+            routes[0].hops()[0].underlay_id,
+            UnderlayId::new(nb.get()),
+            "the first hop carries its underlay id"
+        );
     }
 
     #[test]
     fn a_known_underlay_maps_to_its_app_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (alice, bob) = (eid(1), eid(2));
         let (alice_underlay, bob_underlay) = (eid(101), eid(102));
         let mut store = Topology::default();
@@ -687,8 +838,16 @@ mod tests {
             ingest(&mut store, signed);
         }
         let underlay = |id: AppId| UnderlayId::new(id.get());
-        assert_eq!(store.app_id_of(underlay(bob_underlay)), Some(bob));
-        assert_eq!(store.app_id_of(underlay(alice_underlay)), Some(alice));
+        assert_eq!(
+            store.app_id_of(underlay(bob_underlay)),
+            Some(bob),
+            "a known underlay maps to bob's app id"
+        );
+        assert_eq!(
+            store.app_id_of(underlay(alice_underlay)),
+            Some(alice),
+            "a known underlay maps to alice's app id"
+        );
         assert_eq!(
             store.app_id_of(underlay(eid(103))),
             None,
@@ -703,52 +862,51 @@ mod tests {
 
     #[test]
     fn a_hop_without_an_underlay_addr_drops_the_route() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc) = (eid(1), eid(2), eid(3));
         let mut store = Topology::default();
         ingest(&mut store, vector(na, 1, &[(nb, 1)]));
         ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
         // nc never advertised its own vector, so its underlay addr is unknown.
-        assert!(
-            store.route_to(Leg { src: na, dst: nc }, 3).is_empty(),
-            "missing hop underlay ⇒ no usable route"
-        );
+        let routes: Vec<_> = store.route_to(Leg { src: na, dst: nc }, 3).collect();
+        assert!(routes.is_empty(), "missing hop underlay ⇒ no usable route");
     }
 
     #[test]
     fn prefers_the_cheaper_direct_over_the_chain() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc, nd) = (eid(1), eid(2), eid(3), eid(4));
         let mut store = Topology::default();
         ingest(&mut store, vector(na, 1, &[(nb, 1), (nd, 1)]));
         ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
         ingest(&mut store, vector(nc, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nd, 1, &[]));
-        let routes = store.route_to(Leg { src: na, dst: nd }, 3);
+        let routes: Vec<_> = store.route_to(Leg { src: na, dst: nd }, 3).collect();
         assert_eq!(
             routes.len(),
             1,
             "the interior-less direct route ends the search"
         );
-        assert_eq!(
-            routes[0]
-                .hops()
-                .iter()
-                .map(|hop| hop.app_id)
-                .collect::<Vec<_>>(),
-            vec![nd]
-        );
+        let hops: Vec<_> = routes[0].hops().iter().map(|hop| hop.app_id).collect();
+        assert_eq!(hops, vec![nd], "the cheaper direct hop wins over the chain");
     }
 
     #[test]
     fn returns_disjoint_alternates() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc, nd) = (eid(1), eid(2), eid(3), eid(4));
         let mut store = Topology::default();
         ingest(&mut store, vector(na, 1, &[(nb, 1), (nc, 1)]));
         ingest(&mut store, vector(nb, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nc, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nd, 1, &[]));
-        let routes = store.route_to(Leg { src: na, dst: nd }, 3);
+        let routes: Vec<_> = store.route_to(Leg { src: na, dst: nd }, 3).collect();
         assert_eq!(routes.len(), 2, "both diamond arms");
-        assert_ne!(routes[0].hops()[0].app_id, routes[1].hops()[0].app_id);
+        assert_ne!(
+            routes[0].hops()[0].app_id,
+            routes[1].hops()[0].app_id,
+            "the alternate routes are disjoint at the first hop"
+        );
     }
 
     /// What a link costs to a native node, and what a browser advertises for its own links
@@ -761,10 +919,12 @@ mod tests {
 
     /// The application ids of the hops of the best route from `src` to `dst`.
     fn best_route(store: &Topology, src: AppId, dst: AppId) -> Option<Vec<AppId>> {
-        store
-            .route_to(Leg { src, dst }, 1)
-            .first()
-            .map(|route| route.hops().iter().map(|hop| hop.app_id).collect())
+        let routes: Vec<_> = store.route_to(Leg { src, dst }, 1).collect();
+        let hops_of = |route: &crate::Route| -> Vec<AppId> {
+            let hops = route.hops();
+            hops.iter().map(|hop| hop.app_id).collect()
+        };
+        routes.first().map(hops_of)
     }
 
     /// The cost of the cheapest path from `src` to `dst`.
@@ -787,27 +947,48 @@ mod tests {
             (tab, vec![(dst, tab_cost)]),
             (dst, vec![]),
         ] {
-            assert!(ingest(&mut store, vector(origin, 1, &links)));
+            assert!(
+                ingest(&mut store, vector(origin, 1, &links)),
+                "a native and a browser vector are accepted together"
+            );
         }
         (store, [src, n1, n2, dst, tab])
     }
 
     #[test]
     fn a_three_hop_native_path_beats_a_one_hop_browser_path() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (store, [src, n1, n2, dst, tab]) = native_and_browser_routes(BROWSER_COST);
-        assert_eq!(best_route(&store, src, dst), Some(vec![n1, n2, dst]));
-        assert_eq!(best_cost(&store, src, dst), Some(3 * NATIVE_COST));
-        let both = store.route_to(Leg { src, dst }, 2);
+        assert_eq!(
+            best_route(&store, src, dst),
+            Some(vec![n1, n2, dst]),
+            "a three-hop native path beats a one-hop browser path"
+        );
+        assert_eq!(
+            best_cost(&store, src, dst),
+            Some(3 * NATIVE_COST),
+            "the best cost is the native path's cost"
+        );
+        let both: Vec<_> = store.route_to(Leg { src, dst }, 2).collect();
         assert_eq!(both.len(), 2, "the browser route is still a route");
-        assert_eq!(both[1].hops()[0].app_id, tab);
+        assert_eq!(
+            both[1].hops()[0].app_id,
+            tab,
+            "the browser route comes second among the two routes"
+        );
 
         // The cost is what decides: a tab that advertises the native cost wins by its length.
         let (cheap_tab, [from, _, _, to, cheap]) = native_and_browser_routes(NATIVE_COST);
-        assert_eq!(best_route(&cheap_tab, from, to), Some(vec![cheap, to]));
+        assert_eq!(
+            best_route(&cheap_tab, from, to),
+            Some(vec![cheap, to]),
+            "the cheap tab route is the best route"
+        );
     }
 
     #[test]
     fn without_the_native_route_the_route_goes_through_the_browser() {
+        let _guard = ::habilis_network_test_tracing::init();
         let [alice, bob, carol, tab] = [1, 2, 3, 4].map(eid);
         let mut store = Topology::default();
         for (origin, links) in [
@@ -816,12 +997,23 @@ mod tests {
             (tab, vec![(bob, BROWSER_COST)]),
             (bob, vec![]),
         ] {
-            assert!(ingest(&mut store, vector(origin, 1, &links)));
+            assert!(
+                ingest(&mut store, vector(origin, 1, &links)),
+                "without the native route the route goes through the browser"
+            );
         }
-        assert_eq!(best_route(&store, alice, bob), Some(vec![carol, bob]));
+        assert_eq!(
+            best_route(&store, alice, bob),
+            Some(vec![carol, bob]),
+            "the route from alice to the browser is found"
+        );
 
         assert!(store.remove(carol), "carol leaves: her vector is gone");
-        assert_eq!(best_route(&store, alice, bob), Some(vec![tab, bob]));
+        assert_eq!(
+            best_route(&store, alice, bob),
+            Some(vec![tab, bob]),
+            "the route through the browser has the browser's hop"
+        );
         assert_eq!(
             best_cost(&store, alice, bob),
             Some(NATIVE_COST + BROWSER_COST),
@@ -831,6 +1023,7 @@ mod tests {
 
     #[test]
     fn a_browser_pays_nothing_as_a_destination() {
+        let _guard = ::habilis_network_test_tracing::init();
         let [src, dst] = [1, 2].map(eid);
         // The last edge into it is advertised by its predecessor.
         for (name, last_cost) in [("native", NATIVE_COST), ("browser", BROWSER_COST)] {
@@ -839,7 +1032,10 @@ mod tests {
                 (src, vec![(dst, NATIVE_COST)]),
                 (dst, vec![(src, last_cost)]),
             ] {
-                assert!(ingest(&mut store, vector(origin, 1, &links)));
+                assert!(
+                    ingest(&mut store, vector(origin, 1, &links)),
+                    "a browser pays nothing as a destination"
+                );
             }
             assert_eq!(
                 best_cost(&store, src, dst),
@@ -851,6 +1047,7 @@ mod tests {
 
     #[test]
     fn the_cost_of_a_source_changes_no_choice() {
+        let _guard = ::habilis_network_test_tracing::init();
         let [src, hop, dst, other] = [1, 2, 3, 4].map(eid);
         // Every route starts with one of the edges of the source, so the choice is the same
         // whatever those edges cost.
@@ -862,7 +1059,10 @@ mod tests {
                 (other, vec![(hop, NATIVE_COST), (dst, 3 * NATIVE_COST)]),
                 (dst, vec![]),
             ] {
-                assert!(ingest(&mut store, vector(origin, 1, &links)));
+                assert!(
+                    ingest(&mut store, vector(origin, 1, &links)),
+                    "the cost of a source changes no choice"
+                );
             }
             assert_eq!(
                 best_route(&store, src, dst),
@@ -876,14 +1076,18 @@ mod tests {
     /// look native, nor a native look like a browser.
     #[test]
     fn a_changed_cost_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
         let [tab, dst] = [1, 2].map(eid);
         let mut store = Topology::default();
         let mut cheaper = vector(tab, 1, &[(dst, BROWSER_COST)]);
-        cheaper.links[0].1 = crate::metric::LinkMetric::new(NATIVE_COST);
+        cheaper.links[0].1 = link_metric::LinkMetric::new(NATIVE_COST);
         assert!(!ingest(&mut store, cheaper), "a lowered cost");
         let mut dearer = vector(tab, 1, &[(dst, NATIVE_COST)]);
-        dearer.links[0].1 = crate::metric::LinkMetric::new(BROWSER_COST);
+        dearer.links[0].1 = link_metric::LinkMetric::new(BROWSER_COST);
         assert!(!ingest(&mut store, dearer), "a raised cost");
-        assert!(ingest(&mut store, vector(tab, 1, &[(dst, BROWSER_COST)])));
+        assert!(
+            ingest(&mut store, vector(tab, 1, &[(dst, BROWSER_COST)])),
+            "a changed browser cost is refused"
+        );
     }
 }

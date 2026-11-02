@@ -13,7 +13,7 @@
 //! escape sequence, not one per cell.
 
 use crate::tui::color::{DEFAULT_COLOR, push_attrs, push_bg, push_fg};
-use crate::tui::paint::ScreenBuffer;
+use crate::tui::screen_buffer::ScreenBuffer;
 
 const ESC: &str = "\u{1b}[";
 const CLEAR_LINE: &str = "\u{1b}[0K";
@@ -45,13 +45,12 @@ fn is_default(pen: Pen) -> bool {
     pen.fg == DEFAULT_COLOR && pen.bg == DEFAULT_COLOR && pen.attrs == 0
 }
 
-/// Diffs `prev` (`None` on the very first frame) against `next`, returning
+/// Diffs `previous` (`None` on the very first frame) against `next`, returning
 /// the ANSI bytes that repaint the terminal from one to the other. Empty
 /// when nothing changed.
 #[must_use]
-#[allow(clippy::too_many_lines)]
-pub fn diff(prev: Option<&ScreenBuffer>, next: &ScreenBuffer) -> String {
-    let full = prev.is_none_or(|p| p.width != next.width || p.height != next.height);
+pub fn diff(previous: Option<&ScreenBuffer>, next: &ScreenBuffer) -> String {
+    let full = previous.is_none_or(|p| p.width != next.width || p.height != next.height);
     let mut out = String::new();
     let mut pen = DEFAULT_PEN;
     if full {
@@ -66,7 +65,12 @@ pub fn diff(prev: Option<&ScreenBuffer>, next: &ScreenBuffer) -> String {
         let mut left = 0i32;
         let mut right = width - 1;
         while left <= right
-            && unchanged(prev, next, base + usize::try_from(left).unwrap_or(0), full)
+            && unchanged(
+                previous,
+                next,
+                base + usize::try_from(left).unwrap_or(0),
+                full,
+            )
         {
             left += 1;
         }
@@ -74,7 +78,12 @@ pub fn diff(prev: Option<&ScreenBuffer>, next: &ScreenBuffer) -> String {
             continue; // whole row unchanged: emit nothing
         }
         while right > left
-            && unchanged(prev, next, base + usize::try_from(right).unwrap_or(0), full)
+            && unchanged(
+                previous,
+                next,
+                base + usize::try_from(right).unwrap_or(0),
+                full,
+            )
         {
             right -= 1;
         }
@@ -134,18 +143,18 @@ pub fn diff(prev: Option<&ScreenBuffer>, next: &ScreenBuffer) -> String {
     out
 }
 
-fn unchanged(prev: Option<&ScreenBuffer>, next: &ScreenBuffer, i: usize, full: bool) -> bool {
-    let Some(prev) = (if full { None } else { prev }) else {
+fn unchanged(previous: Option<&ScreenBuffer>, next: &ScreenBuffer, i: usize, full: bool) -> bool {
+    let Some(previous) = (if full { None } else { previous }) else {
         // On a full repaint the screen has just been erased, so "unchanged"
         // collapses to "is blank in the default colors" — this is what
         // unifies the first frame with every other one instead of giving
         // it its own code path.
         return blank(next, i);
     };
-    prev.chars[i] == next.chars[i]
-        && prev.fg[i] == next.fg[i]
-        && prev.bg[i] == next.bg[i]
-        && prev.attrs[i] == next.attrs[i]
+    previous.chars[i] == next.chars[i]
+        && previous.fg[i] == next.fg[i]
+        && previous.bg[i] == next.bg[i]
+        && previous.attrs[i] == next.attrs[i]
 }
 
 fn blank(buffer: &ScreenBuffer, i: usize) -> bool {
@@ -188,9 +197,8 @@ fn style(out: &mut String, pen: &mut Pen, fg: i32, bg: i32, attrs: u8) {
 #[cfg(test)]
 mod tests {
     use super::{CLEAR_LINE, RESET, diff};
-    use crate::tui::color::palette;
-    use crate::tui::paint::ScreenBuffer;
-    use habilis_network_test_tracing::test;
+    use crate::tui::color;
+    use crate::tui::screen_buffer::ScreenBuffer;
 
     fn set(buffer: &mut ScreenBuffer, x: i32, y: i32, s: &str) {
         let i =
@@ -200,31 +208,46 @@ mod tests {
 
     #[test]
     fn a_blank_first_frame_is_just_reset_plus_clear_screen() {
+        let _guard = ::habilis_network_test_tracing::init();
         let buffer = ScreenBuffer::new(10, 3);
         let out = diff(None, &buffer);
-        assert_eq!(out, format!("{RESET}{ESC}H{ESC}2J", ESC = "\u{1b}["));
+        assert_eq!(
+            out,
+            format!("{RESET}{ESC}H{ESC}2J", ESC = "\u{1b}["),
+            "a blank first frame is a reset plus clear screen"
+        );
     }
 
     #[test]
     fn two_identical_frames_produce_zero_bytes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut a = ScreenBuffer::new(5, 1);
         set(&mut a, 0, 0, "x");
         let b = a.clone();
-        assert_eq!(diff(Some(&a), &b), "");
+        assert_eq!(
+            diff(Some(&a), &b),
+            "",
+            "two identical frames produce no bytes"
+        );
     }
 
     #[test]
     fn a_changed_row_moves_the_cursor_absolutely_then_writes_the_span() {
+        let _guard = ::habilis_network_test_tracing::init();
         let a = ScreenBuffer::new(5, 1);
         let mut b = ScreenBuffer::new(5, 1);
         set(&mut b, 2, 0, "x");
         let out = diff(Some(&a), &b);
-        assert!(out.starts_with("\u{1b}[1;3H")); // row 1, col 3 (1-based)
-        assert!(out.contains('x'));
+        assert!(
+            out.starts_with("\u{1b}[1;3H"),
+            "a changed row moves the cursor absolutely"
+        ); // row 1, col 3 (1-based)
+        assert!(out.contains('x'), "a changed row writes its changed cell");
     }
 
     #[test]
     fn a_shortened_line_erases_the_tail_instead_of_overwriting_with_spaces() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut a = ScreenBuffer::new(5, 1);
         set(&mut a, 0, 0, "h");
         set(&mut a, 1, 0, "e");
@@ -237,13 +260,20 @@ mod tests {
         // Cells 2..5 are blank in `b`: the tail scan should cover them
         // with one `EL0` instead of three literal space-overwrites.
         let out = diff(Some(&a), &b);
-        assert!(out.contains("xy"));
-        assert!(out.contains(CLEAR_LINE));
-        assert!(!out.contains('l')); // never emitted as a replacement write
+        assert!(out.contains("xy"), "a shortened line writes its new tail");
+        assert!(
+            out.contains(CLEAR_LINE),
+            "a shortened line erases the tail with clear line"
+        );
+        assert!(
+            !out.contains('l'),
+            "a shortened line does not write the old tail"
+        ); // never emitted as a replacement write
     }
 
     #[test]
     fn an_unchanged_prefix_is_not_re_emitted_even_when_the_row_changes() {
+        let _guard = ::habilis_network_test_tracing::init();
         // Only the character at column 1 differs; column 0 already reads
         // "h" on screen and must not be rewritten — this is the whole
         // reason the algorithm scans in from both ends instead of
@@ -255,30 +285,46 @@ mod tests {
         set(&mut b, 0, 0, "h");
         set(&mut b, 1, 0, "o");
         let out = diff(Some(&a), &b);
-        assert!(out.contains('o'));
-        assert!(!out.contains('h')); // unchanged cell, never rewritten
+        assert!(out.contains('o'), "an unchanged prefix is not re-emitted");
+        assert!(
+            !out.contains('h'),
+            "an unchanged prefix does not write the old head"
+        ); // unchanged cell, never rewritten
     }
 
     #[test]
     fn a_run_of_same_styled_cells_emits_one_sgr_sequence() {
+        let _guard = ::habilis_network_test_tracing::init();
         let a = ScreenBuffer::new(3, 1);
         let mut b = ScreenBuffer::new(3, 1);
         for i in 0..3 {
             b.chars[i] = "x".to_string();
-            b.fg[i] = palette(1);
+            b.fg[i] = color::palette(1);
         }
         let out = diff(Some(&a), &b);
         // Exactly one `38...m`-shaped SGR sequence, i.e. one occurrence of
         // the palette-1 foreground code, even though three cells changed.
-        assert_eq!(out.matches("31m").count(), 1);
-        assert_eq!(out.matches('x').count(), 3);
+        assert_eq!(
+            out.matches("31m").count(),
+            1,
+            "a run of same-styled cells emits one sgr sequence"
+        );
+        assert_eq!(
+            out.matches('x').count(),
+            3,
+            "a run of same-styled cells writes three cells"
+        );
     }
 
     #[test]
     fn a_resize_forces_a_full_repaint_even_if_content_matches() {
+        let _guard = ::habilis_network_test_tracing::init();
         let a = ScreenBuffer::new(5, 1);
         let b = ScreenBuffer::new(6, 1); // wider — same logical content, different size
         let out = diff(Some(&a), &b);
-        assert!(out.starts_with(&format!("{RESET}\u{1b}[H\u{1b}[2J")));
+        assert!(
+            out.starts_with(&format!("{RESET}\u{1b}[H\u{1b}[2J")),
+            "a resize forces a full repaint"
+        );
     }
 }

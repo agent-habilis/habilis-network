@@ -3,18 +3,22 @@
 //! A producer [`create`](StreamNode::create)s a stream and hands its
 //! [`StreamHash`] to one consumer, which [`open`](StreamNode::open)s it. The
 //! bytes ride one QUIC stream on a direct path by default — hole-punched UDP,
-//! or a WebRTC data channel when a browser is on either end — on the relay
+//! or a `WebRTC` data channel when a browser is on either end — on the relay
 //! only when the stream's `transport` allows it, and never through gossip. QUIC
 //! keeps them in order and paces the producer to the consumer.
 //!
 //! A stream is 1-1: its hash admits exactly one consumer, and a second one is
 //! [`Refused::Taken`]. What goes over it is up to the producer.
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
+mod error;
 mod hash;
 mod node;
 mod produce;
 mod read;
 
+pub use error::{HashError, StreamError};
 pub use hash::{ID_LEN, SECRET_LEN, StreamHash, StreamId, StreamSecret};
 pub use node::{StreamNode, StreamOpts};
 pub use produce::Producer;

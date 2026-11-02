@@ -17,11 +17,25 @@ use std::sync::{Arc, Mutex};
 use crate::config::Config;
 use crate::frame::{Frame, InputStatus};
 
+use std::fmt;
 /// A slot the game saves a frame's state into, and the session loads it back
 /// out of.
 ///
 /// Cheap to clone — it is a handle to one shared slot, not a copy of the
 /// state.
+///
+/// # Examples
+///
+/// A cell keeps the state that a save request stored, with its frame.
+///
+/// ```
+/// use habilis_network_netplay::{Frame, StateCell};
+///
+/// let cell: StateCell<u32> = StateCell::default();
+/// cell.save(Frame::new(1), 7, Some(9));
+/// assert_eq!(cell.frame(), Frame::new(1));
+/// assert_eq!(cell.load(), Some(7));
+/// ```
 pub struct StateCell<S>(Arc<Mutex<CellInner<S>>>);
 
 struct CellInner<S> {
@@ -38,6 +52,7 @@ impl<S> Clone for StateCell<S> {
 
 impl<S> Default for StateCell<S> {
     fn default() -> Self {
+        // each clone of the cell shares this state
         Self(Arc::new(Mutex::new(CellInner {
             frame: Frame::NULL,
             state: None,
@@ -46,15 +61,14 @@ impl<S> Default for StateCell<S> {
     }
 }
 
-impl<S> std::fmt::Debug for StateCell<S> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let inner = self.0.lock().map_err(|_| std::fmt::Error)?;
-        formatter
-            .debug_struct("StateCell")
+impl<S> fmt::Debug for StateCell<S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let inner = self.0.lock().map_err(|_| fmt::Error)?;
+        let mut debug = formatter.debug_struct("StateCell");
+        debug
             .field("frame", &inner.frame)
-            .field("has_state", &inner.state.is_some())
-            .field("checksum", &inner.checksum)
-            .finish()
+            .field("has_state", &inner.state.is_some());
+        debug.field("checksum", &inner.checksum).finish()
     }
 }
 
@@ -117,6 +131,36 @@ impl<S: Clone> StateCell<S> {
 /// One instruction from the session to the game.
 ///
 /// See the module docs: fulfil in order, fulfil all of them.
+///
+/// # Examples
+///
+/// The session asks for a save, which the caller fulfils, and then it advances.
+///
+/// ```
+/// use habilis_network_netplay::{Frame, PlayerHandle, Request, SyncTestSession};
+///
+/// use habilis_network_netplay::Config;
+///
+/// struct Game;
+///
+/// impl Config for Game {
+///     type Input = u8;
+///     type State = u32;
+///     type Address = u8;
+/// }
+///
+/// let mut session = SyncTestSession::<Game>::new(2, 1);
+/// session.add_input(PlayerHandle::new(0), 1).expect("player 0 exists");
+/// session.add_input(PlayerHandle::new(1), 2).expect("player 1 exists");
+/// for request in session.advance_frame().expect("no desync") {
+///     if let Request::SaveState { cell, frame } = request {
+///         cell.save(frame, 0, Some(0));
+///     }
+/// }
+/// assert_eq!(session.current_frame(), Frame::new(1));
+/// ```
+#[non_exhaustive]
+#[derive(Clone)]
 pub enum Request<T: Config> {
     /// Save the current state into `cell`, tagged with `frame`.
     ///
@@ -143,8 +187,8 @@ pub enum Request<T: Config> {
     },
 }
 
-impl<T: Config> std::fmt::Debug for Request<T> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<T: Config> fmt::Debug for Request<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SaveState { frame, .. } => formatter
                 .debug_struct("SaveState")

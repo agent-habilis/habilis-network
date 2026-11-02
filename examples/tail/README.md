@@ -14,7 +14,7 @@ twice and hand out two hashes.
 ```sh
 cargo build -p habilis-network-stream-cli                   # the habilis-network-stream binary
 export HABILIS_NETWORK_STREAM=$PWD/target/debug/habilis-network-stream
-examples/tail/tail.sh app.log
+bun examples/tail/tail.ts app.log
 ```
 
 The script prints a hash on stderr and waits for the reader. Read the stream
@@ -29,7 +29,7 @@ Or read it in a browser. Serve the stream page, then give the script its URL:
 ```sh
 cargo task build-wasm                              # once
 bun run --cwd packages/habilis-network-stream-web serve     # 3020, or the next free port
-examples/tail/tail.sh app.log --web-url http://127.0.0.1:3020/
+bun examples/tail/tail.ts app.log --web-url http://127.0.0.1:3020/
 ```
 
 The script prints `open http://127.0.0.1:3020/#<hash>`. Open that URL.
@@ -40,7 +40,7 @@ There are two ways to stop:
 
 - Ctrl-C reaches `habilis-network-stream` too, so the reader usually gets an error:
   "the producer abandoned the stream".
-- `kill <pid of tail.sh>` stops `tail` only. The input ends, and the reader
+- `kill <pid of tail.ts>` stops `tail` only. The input ends, and the reader
   gets the end of the stream. With no reader attached yet, the script stops
   `habilis-network-stream` too after 10 s, and exits 143.
 

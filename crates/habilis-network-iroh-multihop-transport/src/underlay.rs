@@ -16,24 +16,32 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use habilis_network_iroh_transport_util::{Rung, custom_rung, is_blocked_to, remote_id_of};
 use iroh::endpoint::Connection;
 use iroh::endpoint::transports::Addr;
-use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
-use iroh_base::CustomAddr;
 use n0_future::time::{Duration, Instant, MissedTickBehavior};
-#[cfg(not(target_arch = "wasm32"))]
-use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
-use crate::addr::{Route, RouteHop};
-use crate::role::{AppId, UnderlayId};
-use crate::topology::Topology;
-use crate::wire::{Cell, read_cell, write_cell};
+use crate::app_id::{AppId, UnderlayId};
+use crate::cell::{Cell, write_cell};
+
+use n0_future::time as n0future_time;
+use std::mem;
+use tokio::sync;
+mod delivered;
+mod forward_acceptor;
+mod forwarder;
+
+pub(crate) use delivered::Delivered;
+pub(crate) use forward_acceptor::ForwardAcceptor;
+pub(crate) use forwarder::Forwarder;
+
+/// The log target of the forwarder, kept apart from the module path so that moving code does not rename it.
+pub(super) const LOG_TARGET: &str = "habilis_network_iroh_multihop_transport::underlay";
 
 /// ALPN for the multihop underlay's hop-to-hop forwarding protocol.
 pub(crate) const FORWARD_ALPN: &[u8] = b"iroh-multihop/forward/1";
@@ -71,27 +79,17 @@ struct HeardHops {
 /// Dial attempts before a writer task gives up on an unreachable next hop.
 const DIAL_ATTEMPTS: usize = 4;
 
-/// A packet that reached its destination on this node, ready for the local
-/// transport's `poll_recv` to surface to iroh.
-#[derive(Debug)]
-pub(crate) struct Delivered {
-    /// The sender's return address (a reversed route), reported to iroh as the
-    /// remote of this packet so replies route back.
-    pub(crate) remote: CustomAddr,
-    pub(crate) packet: Vec<u8>,
-}
-
 /// How long a reading of a connection's paths stands. The path moves
 /// rarely, and asking for it on every cell would cost more than the cell.
 const PATH_RECHECK: Duration = Duration::from_millis(250);
 
 /// The open paths of a connection, each with whether it is the selected one.
 fn paths_of(connection: &Connection) -> Vec<(TransportAddr, bool)> {
-    connection
-        .paths()
-        .iter()
-        .map(|path| (path.remote_addr().clone(), path.is_selected()))
-        .collect()
+    let mut out = Vec::new();
+    for path in connection.paths().iter() {
+        out.push((path.remote_addr().clone(), path.is_selected()));
+    }
+    out
 }
 
 /// Whether a writer sends on a selected path that is not the relay.
@@ -100,7 +98,7 @@ fn paths_of(connection: &Connection) -> Vec<(TransportAddr, bool)> {
 fn direct_for_writer<'a>(paths: impl IntoIterator<Item = &'a (TransportAddr, bool)>) -> bool {
     paths
         .into_iter()
-        .any(|(addr, selected)| *selected && !matches!(addr, TransportAddr::Relay(_)))
+        .any(|(address, selected)| *selected && !matches!(address, TransportAddr::Relay(_)))
 }
 
 /// Whether a connection that we accepted has an open path that is not the relay.
@@ -114,7 +112,7 @@ fn direct_for_writer<'a>(paths: impl IntoIterator<Item = &'a (TransportAddr, boo
 fn direct_for_inbound<'a>(paths: impl IntoIterator<Item = &'a (TransportAddr, bool)>) -> bool {
     paths
         .into_iter()
-        .any(|(addr, _)| !matches!(addr, TransportAddr::Relay(_)))
+        .any(|(address, _)| !matches!(address, TransportAddr::Relay(_)))
 }
 
 /// The paths that a test has not taken from this node: `blocked` names the ones it took.
@@ -159,11 +157,11 @@ enum GateRole {
 
 /// The paths of a connection as text, a star on the selected one.
 fn path_list(paths: impl IntoIterator<Item = (TransportAddr, bool)>) -> String {
-    paths
+    let parts: Vec<String> = paths
         .into_iter()
-        .map(|(addr, selected)| format!("{addr:?}{}", if selected { "*" } else { "" }))
-        .collect::<Vec<_>>()
-        .join(" ")
+        .map(|(address, selected)| format!("{address:?}{}", if selected { "*" } else { "" }))
+        .collect();
+    parts.join(" ")
 }
 
 /// What the relay may do for cells, set by the mesh policy.
@@ -258,7 +256,7 @@ impl RelayGate {
 /// `forget`, which clears a stuck mark too. A hop that is still on the relay is
 /// then advertised again until its next writer has been refused for the
 /// deadline: one retry each time a writer dies, not a loop.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct HopHealth {
     /// The hop's application id: what a link-vector names.
     app_id: AppId,
@@ -285,7 +283,7 @@ struct WriterPool {
     health: Mutex<HashMap<UnderlayId, HopHealth>>,
     /// Woken when the gate starts to refuse a hop, and when it admits one that it
     /// refused: the moments at which the best first hop to a peer can change.
-    route_wake: Arc<tokio::sync::Notify>,
+    route_wake: Arc<sync::Notify>,
     /// The connection of each live writer, keyed like `writers`, for a test that reads its paths.
     #[cfg(feature = "test-hooks")]
     connections: Mutex<HashMap<UnderlayId, Connection>>,
@@ -362,7 +360,7 @@ impl WriterPool {
         if hop.refused_since.take().is_some() {
             self.route_wake.notify_one();
         }
-        if std::mem::take(&mut hop.stuck) {
+        if mem::take(&mut hop.stuck) {
             tracing::info!(
                 hop = %underlay.fmt_short(),
                 app_id = %hop.app_id.fmt_short(),
@@ -373,443 +371,15 @@ impl WriterPool {
 
     /// The hops that the gate refuses now, stuck or not.
     fn refusing_app_ids(&self) -> Vec<AppId> {
-        self.health
-            .lock()
-            .expect("health mutex poisoned")
-            .values()
-            .filter(|hop| hop.refused_since.is_some())
-            .map(|hop| hop.app_id)
-            .collect()
+        let health = self.health.lock().expect("health mutex poisoned");
+        let refusing = health.values().filter(|hop| hop.refused_since.is_some());
+        refusing.map(|hop| hop.app_id).collect()
     }
 
     fn stuck_app_ids(&self) -> Vec<AppId> {
-        self.health
-            .lock()
-            .expect("health mutex poisoned")
-            .values()
-            .filter(|hop| hop.stuck)
-            .map(|hop| hop.app_id)
-            .collect()
-    }
-}
-
-/// Routes cells outbound to next hops and delivers terminal cells locally.
-#[derive(Debug)]
-pub(crate) struct Forwarder {
-    underlay: Endpoint,
-    /// This node's application-layer id, the other half of the identity a cell's
-    /// current hop must name.
-    self_app_id: AppId,
-    /// The runtime that spawns the writers. `enqueue` runs inside `poll_send`, which
-    /// iroh calls from the socket's send path (`Transports::poll_send` in iroh's
-    /// `socket/transports.rs`). It is kept so that a native spawn never depends on
-    /// that caller being inside the runtime; nothing here shows that it is ever
-    /// outside. A browser has no runtime and spawns on its one thread.
-    #[cfg(not(target_arch = "wasm32"))]
-    runtime: Handle,
-    pool: Arc<WriterPool>,
-    /// Terminal deliveries destined for the local application endpoint.
-    inbound: mpsc::Sender<Delivered>,
-    /// Cells refused by the gates in [`Forwarder::handle_cell`] or by a budget.
-    dropped: AtomicU64,
-    /// Cells passed on to a next hop for other nodes. Our own sends are not counted.
-    forwarded: AtomicU64,
-    /// Cells that ended here and went into the inbox of the local transport.
-    delivered: AtomicU64,
-    /// What the relay may do for cells.
-    rule: RelayRule,
-    /// Where the dial address of a next hop comes from: a route names a hop by two ids,
-    /// and the address is the one that the hop signed in its link vector.
-    topology: Arc<RwLock<Topology>>,
-    /// Hops that a writer was spawned for with no vector in the topology: a hop without a vector.
-    unresolved_hops: AtomicU64,
-    /// The hops that got a log line, and whether it was a warning: see [`UNRESOLVED_SEEN_CAP`].
-    unresolved_seen: Mutex<HashMap<UnderlayId, bool>>,
-    /// The hops that named a cell this node delivered: the sender and the hops of its route. A
-    /// reply goes back along that route reversed, so these are the hops that can lack a vector
-    /// for a normal reason: see [`HEARD_HOPS_CAP`].
-    heard_hops: Mutex<HeardHops>,
-}
-
-impl Forwarder {
-    pub(crate) fn new(
-        underlay: Endpoint,
-        self_app_id: AppId,
-        inbound: mpsc::Sender<Delivered>,
-        allow_relay: bool,
-        stuck_after: Duration,
-        topology: Arc<RwLock<Topology>>,
-    ) -> Self {
-        Self {
-            underlay,
-            self_app_id,
-            #[cfg(not(target_arch = "wasm32"))]
-            runtime: Handle::current(),
-            pool: Arc::new(WriterPool::default()),
-            inbound,
-            dropped: AtomicU64::new(0),
-            forwarded: AtomicU64::new(0),
-            delivered: AtomicU64::new(0),
-            rule: RelayRule {
-                allow_relay,
-                stuck_after,
-            },
-            topology,
-            unresolved_hops: AtomicU64::new(0),
-            unresolved_seen: Mutex::new(HashMap::new()),
-            heard_hops: Mutex::new(HeardHops::default()),
-        }
-    }
-
-    /// How many writers were spawned for a hop without a vector in the topology.
-    #[cfg(test)]
-    pub(crate) fn unresolved_hops(&self) -> u64 {
-        self.unresolved_hops.load(Ordering::Relaxed)
-    }
-
-    /// The address to dial for `hop`: the one that its node signed in its link vector, if the
-    /// vector names the same underlay endpoint as the hop. A hop without a vector is dialed
-    /// by its id alone, never at an address that a cell carries, and counted: it may still be reachable by what iroh
-    /// knows of the id, and if it is not, the cells are lost like any other.
-    ///
-    /// Logged at debug when the hop is explained. A cell that this node delivered named it: a
-    /// reply goes back along the reversed route of a cell, and the sender's first link-vector
-    /// arrives some 15 s after it starts. Or it is a link of this node: the origin of a route
-    /// saw the vector of a new neighbor before this node did, and the link reaches it. Or this
-    /// node held the vector and removed it, because the peer left or the vector expired: the
-    /// cells in flight to the peer still name it, and the origin of the route is behind. Any
-    /// other hop without a vector is a warning.
-    fn dial_addr(&self, hop: &RouteHop) -> EndpointAddr {
-        let (known, gone) = {
-            let topology = self.topology.read().expect("topology lock poisoned");
-            let known = topology
-                .underlay_of(hop.app_id)
-                .filter(|addr| UnderlayId::new(addr.id) == hop.underlay_id);
-            (known, topology.is_gone(hop.app_id))
-        };
-        known.unwrap_or_else(|| {
-            let total = self.unresolved_hops.fetch_add(1, Ordering::Relaxed) + 1;
-            let explained =
-                gone || self.heard_hop(hop.underlay_id) || self.is_link_of_ours(hop.app_id);
-            if self.line_is_due(hop.underlay_id, total, explained) {
-                if gone {
-                    tracing::debug!(
-                        total,
-                        hop = %hop.underlay_id.fmt_short(),
-                        app_id = %hop.app_id.fmt_short(),
-                        "multihop forwarder: hop whose vector is gone, dialing it by id"
-                    );
-                } else if explained {
-                    tracing::debug!(
-                        total,
-                        hop = %hop.underlay_id.fmt_short(),
-                        app_id = %hop.app_id.fmt_short(),
-                        "multihop forwarder: hop without a vector, dialing it by id"
-                    );
-                } else {
-                    tracing::warn!(
-                        total,
-                        hop = %hop.underlay_id.fmt_short(),
-                        app_id = %hop.app_id.fmt_short(),
-                        "multihop forwarder: hop without a vector that no delivered cell named, dialing it by id"
-                    );
-                }
-            }
-            EndpointAddr::new(hop.underlay_id.get())
-        })
-    }
-
-    /// Whether `app_id` is a link in the vector that this node published of itself.
-    fn is_link_of_ours(&self, app_id: AppId) -> bool {
-        self.topology
-            .read()
-            .expect("topology lock poisoned")
-            .links_of(self.self_app_id)
-            .is_some_and(|links| links.contains(&app_id))
-    }
-
-    /// Whether a cell that this node delivered named the hop `underlay_id`.
-    fn heard_hop(&self, underlay_id: UnderlayId) -> bool {
-        self.heard_hops
-            .lock()
-            .expect("heard hops poisoned")
-            .set
-            .contains(&underlay_id)
-    }
-
-    /// Remember the hops of the reply route of a delivered cell. Past [`HEARD_HOPS_CAP`] hops
-    /// the oldest is forgotten.
-    fn note_heard(&self, reply_route: &Route) {
-        let mut heard = self.heard_hops.lock().expect("heard hops poisoned");
-        for hop in reply_route.hops() {
-            if !heard.set.insert(hop.underlay_id) {
-                continue;
-            }
-            heard.order.push_back(hop.underlay_id);
-            if heard.order.len() > HEARD_HOPS_CAP
-                && let Some(oldest) = heard.order.pop_front()
-            {
-                heard.set.remove(&oldest);
-            }
-        }
-    }
-
-    /// Whether a log line is due for the hop `underlay_id`, found without a vector for the
-    /// `total`-th time, `explained` or not: one line per distinct hop, and one warning per hop,
-    /// which a hop that was explained the first time still gets when it is not any more. The ids
-    /// come off the wire, so the map that remembers them is bounded; past [`UNRESOLVED_SEEN_CAP`]
-    /// hops the rule is one line in 256.
-    fn line_is_due(&self, underlay_id: UnderlayId, total: u64, explained: bool) -> bool {
-        let mut seen = self
-            .unresolved_seen
-            .lock()
-            .expect("unresolved set poisoned");
-        if let Some(warned) = seen.get_mut(&underlay_id) {
-            if *warned || explained {
-                return false;
-            }
-            *warned = true;
-            return true;
-        }
-        if seen.len() < UNRESOLVED_SEEN_CAP {
-            seen.insert(underlay_id, !explained);
-            return true;
-        }
-        total.is_multiple_of(256)
-    }
-
-    /// How many cells this node passed on for other nodes.
-    pub(crate) fn forwarded_cells(&self) -> u64 {
-        self.forwarded.load(Ordering::Relaxed)
-    }
-
-    /// The counters of the data path: what was passed on, refused, dropped and delivered.
-    pub(crate) fn counters(&self) -> crate::MultihopCounters {
-        crate::MultihopCounters {
-            forwarded: self.forwarded.load(Ordering::Relaxed),
-            dropped: self.dropped.load(Ordering::Relaxed),
-            refused_on_relay: self.pool.refused_on_relay.load(Ordering::Relaxed),
-            delivered: self.delivered.load(Ordering::Relaxed),
-        }
-    }
-
-    /// The local transport dropped a packet that did not fit the buffer that iroh handed it.
-    pub(crate) fn note_oversized(&self, len: usize, capacity: usize) {
-        if let Some(total) = self.count_drop() {
-            tracing::warn!(
-                total,
-                len,
-                capacity,
-                reason = "packet larger than the receive buffer",
-                "multihop transport dropping packets"
-            );
-        }
-    }
-
-    /// The application ids of the hops stuck on the relay past the deadline.
-    pub(crate) fn stuck_hops(&self) -> Vec<AppId> {
-        self.pool.stuck_app_ids()
-    }
-
-    /// Woken when the gate starts to refuse a hop, and when it admits one that it
-    /// refused.
-    pub(crate) fn route_wake(&self) -> Arc<tokio::sync::Notify> {
-        Arc::clone(&self.pool.route_wake)
-    }
-
-    /// The application ids of the hops that the gate refuses now, stuck or not.
-    pub(crate) fn refusing_hops(&self) -> Vec<AppId> {
-        self.pool.refusing_app_ids()
-    }
-
-    /// Mark a hop as refused now, without the deadline having passed, as a test of
-    /// the choice of a route needs it.
-    #[cfg(any(test, feature = "test-hooks"))]
-    pub(crate) fn refuse_hop_for_test(&self, underlay: UnderlayId, app_id: AppId) {
-        self.pool.track(underlay, app_id);
-        self.pool.note_refused(underlay, Duration::from_mins(1));
-    }
-
-    /// The open paths of the connection that our writer holds toward the underlay `hop`, now,
-    /// each with whether it is the selected one: the reading that the gate takes.
-    #[cfg(feature = "test-hooks")]
-    pub(crate) fn writer_paths(&self, hop: UnderlayId) -> Option<Vec<(TransportAddr, bool)>> {
-        let connection = self
-            .pool
-            .connections
-            .lock()
-            .expect("connections mutex poisoned")
-            .get(&hop)
-            .cloned()?;
-        Some(paths_of(&connection))
-    }
-
-    /// Rate-limited visibility for a refused cell. Whoever is sending them sets
-    /// the rate, so logging every one hands them a second amplifier.
-    fn note_drop(&self, reason: &str) {
-        if let Some(total) = self.count_drop() {
-            tracing::warn!(total, reason, "multihop forwarder refusing cells");
-        }
-    }
-
-    /// The refusal of a cell that came in over `connection` from `hop`, with what
-    /// the log needs to tell whose path it was: the hop, this node, and the paths.
-    fn note_inbound_refusal(&self, hop: UnderlayId, connection: &Connection) {
-        if let Some(total) = self.count_drop() {
-            tracing::warn!(
-                total,
-                reason = "cell arrived over the relay",
-                hop = %hop.fmt_short(),
-                node = %self.underlay.id().fmt_short(),
-                paths = %path_list(paths_of(connection)),
-                "multihop forwarder refusing cells"
-            );
-        }
-    }
-
-    /// Count a refused cell. The total when it is to be logged: the first, then
-    /// every 256th.
-    fn count_drop(&self) -> Option<u64> {
-        let total = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-        (total == 1 || total.is_multiple_of(256)).then_some(total)
-    }
-
-    /// Hand a cell to the writer for `hop`, spawning one if none is live. Never
-    /// blocks: a full or dead queue drops the cell (QUIC recovers).
-    pub(crate) fn enqueue(&self, hop: &RouteHop, cell: Cell) {
-        let cost = cell.packet.len();
-        if self.pool.queued_bytes.fetch_add(cost, Ordering::Relaxed) + cost > FORWARD_QUEUE_BYTES {
-            self.pool.release(cost);
-            self.note_drop("forwarding byte budget exhausted");
-            return;
-        }
-        let key = hop.underlay_id;
-        // First attempt on any existing writer.
-        if let Some(sender) = self.writer_for(key)
-            && sender.try_send(cell.clone()).is_ok()
-        {
-            return;
-        }
-        // Stale or absent: (re)spawn a writer, then try once more.
-        let Some(sender) = self.spawn_writer(hop) else {
-            self.pool.release(cost);
-            return;
-        };
-        if sender.try_send(cell).is_err() {
-            self.pool.release(cost);
-        }
-    }
-
-    /// Deliver a cell that terminated here to the local transport.
-    fn deliver(&self, cell: Cell) {
-        let Some(route) = Route::reverse_from(cell.path.hops(), cell.source) else {
-            self.note_drop("return route is not a legal route");
-            return;
-        };
-        self.note_heard(&route);
-        let delivered = Delivered {
-            remote: route.encode(),
-            packet: cell.packet,
-        };
-        // A full inbox drops the packet, as a saturated NIC would. It is counted and the first
-        // drop is logged: an inbox that nobody drains is a silent black hole otherwise.
-        if self.inbound.try_send(delivered).is_ok() {
-            self.delivered.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.note_drop("inbox of the local transport is full");
-        }
-    }
-
-    /// Whether `hop` is this node — both identities, since the two endpoints
-    /// carry different keys and a cell should not be able to pair our underlay
-    /// with somebody else's application id.
-    fn is_self(&self, hop: &RouteHop) -> bool {
-        hop.underlay_id == UnderlayId::new(self.underlay.id()) && hop.app_id == self.self_app_id
-    }
-
-    /// The hop that should have sent us this cell: our predecessor on the route,
-    /// or the original sender when we are the first hop.
-    fn expected_upstream(cell: &Cell) -> Option<&RouteHop> {
-        match cell.pos.checked_sub(1) {
-            None => Some(&cell.source),
-            Some(previous) => cell.path.hop_at(previous as usize),
-        }
-    }
-
-    /// Process one received cell: forward to the next hop, or deliver if we are
-    /// the destination.
-    ///
-    /// `from` is the authenticated id of the connection the cell arrived on.
-    /// Requiring it to be the route's preceding hop is what stops a stranger
-    /// injecting a cell at a position it does not occupy — the structural
-    /// invariants on [`Route`] bound what a route may look like, but only this
-    /// binds a cell to the path it claims to be travelling.
-    pub(crate) fn handle_cell(&self, cell: Cell, from: UnderlayId) {
-        let Some(here) = cell.current_hop() else {
-            self.note_drop("position past the end of the route");
-            return;
-        };
-        if !self.is_self(here) {
-            self.note_drop("position does not name this node");
-            return;
-        }
-        let is_expected_upstream =
-            Self::expected_upstream(&cell).is_some_and(|hop| hop.underlay_id == from);
-        if !is_expected_upstream {
-            self.note_drop("cell did not arrive from its preceding hop");
-            return;
-        }
-        match cell.next_hop() {
-            Some(next) => {
-                let next = next.clone();
-                self.forwarded.fetch_add(1, Ordering::Relaxed);
-                self.enqueue(&next, cell.advanced());
-            }
-            None => self.deliver(cell),
-        }
-    }
-
-    fn writer_for(&self, key: UnderlayId) -> Option<mpsc::Sender<Cell>> {
-        let writers = self.pool.writers.lock().expect("writers mutex poisoned");
-        writers.get(&key).cloned()
-    }
-
-    /// Insert and spawn a fresh writer task for `dst`, replacing any dead entry.
-    /// `None` once [`MAX_WRITERS`] are live.
-    ///
-    /// Refusing rather than evicting is deliberate: the next-hop id comes off the
-    /// wire, so evicting would let a flood of invented hops walk the real
-    /// neighbours out of the map. A refused flood instead clears itself, because
-    /// each spawned writer gives up after [`DIAL_ATTEMPTS`] and removes its own
-    /// entry on the way out.
-    fn spawn_writer(&self, hop: &RouteHop) -> Option<mpsc::Sender<Cell>> {
-        let dst = self.dial_addr(hop);
-        let key = UnderlayId::new(dst.id);
-        let app_id = hop.app_id;
-        let (tx, rx) = mpsc::channel(WRITER_QUEUE);
-        {
-            let mut writers = self.pool.writers.lock().expect("writers mutex poisoned");
-            if writers.len() >= MAX_WRITERS && !writers.contains_key(&key) {
-                drop(writers);
-                self.note_drop("next-hop writer ceiling reached");
-                return None;
-            }
-            writers.insert(key, tx.clone());
-        }
-        self.pool.track(key, app_id);
-        let writer = writer_task(
-            self.underlay.clone(),
-            dst,
-            rx,
-            tx.clone(),
-            Arc::clone(&self.pool),
-            self.rule,
-        );
-        #[cfg(not(target_arch = "wasm32"))]
-        self.runtime.spawn(writer);
-        #[cfg(target_arch = "wasm32")]
-        n0_future::task::spawn(writer);
-        Some(tx)
+        let health = self.health.lock().expect("health mutex poisoned");
+        let stuck = health.values().filter(|hop| hop.stuck);
+        stuck.map(|hop| hop.app_id).collect()
     }
 }
 
@@ -822,6 +392,7 @@ async fn writer_task(
     dst: EndpointAddr,
     mut rx: mpsc::Receiver<Cell>,
     handle: mpsc::Sender<Cell>,
+    // the writer pool is shared by the forwarder and its accept loops
     pool: Arc<WriterPool>,
     rule: RelayRule,
 ) {
@@ -846,20 +417,23 @@ async fn drain_to_hop(
     pool: &WriterPool,
     rule: RelayRule,
 ) -> anyhow::Result<()> {
-    let conn = dial_with_retry(underlay, dst)
+    let connection = dial_with_retry(underlay, dst)
         .await
         .context("underlay dial gave up")?;
     #[cfg(feature = "test-hooks")]
     pool.connections
         .lock()
         .expect("connections mutex poisoned")
-        .insert(UnderlayId::new(dst.id), conn.clone());
-    let mut send = conn.open_uni().await.context("open underlay uni-stream")?;
+        .insert(UnderlayId::new(dst.id), connection.clone());
+    let mut send = connection
+        .open_uni()
+        .await
+        .context("open underlay uni-stream")?;
     let mut gate = RelayGate::new(rule.allow_relay, underlay.id(), GateRole::Writer);
     // Looks at the path once a second even when no cell comes, so a hop that was
     // withdrawn for staying on the relay (and so carries no cells) is a link
     // again once a direct path opens.
-    let mut recheck = n0_future::time::interval(Duration::from_secs(1));
+    let mut recheck = n0future_time::interval(Duration::from_secs(1));
     recheck.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
@@ -867,13 +441,13 @@ async fn drain_to_hop(
             // dead connection with no cell in flight is read by the tick below as
             // a connection with no direct path: the hop would be marked stuck and
             // the writer would never retire.
-            reason = conn.closed() => {
+            reason = connection.closed() => {
                 anyhow::bail!("underlay connection closed: {reason}");
             }
             next = rx.recv() => {
                 let Some(cell) = next else { break };
                 let cost = cell.packet.len();
-                if gate.admits(&conn) {
+                if gate.admits(&connection) {
                     pool.note_admitted(UnderlayId::new(dst.id));
                 } else {
                     // Dropped like any other loss: QUIC above retransmits, and a
@@ -888,7 +462,7 @@ async fn drain_to_hop(
                 written.context("underlay write failed")?;
             }
             _ = recheck.tick(), if !rule.allow_relay => {
-                if gate.admits(&conn) {
+                if gate.admits(&connection) {
                     pool.note_admitted(UnderlayId::new(dst.id));
                 } else {
                     pool.note_refused(UnderlayId::new(dst.id), rule.stuck_after);
@@ -903,92 +477,40 @@ async fn drain_to_hop(
 async fn dial_with_retry(underlay: &Endpoint, dst: &EndpointAddr) -> Option<Connection> {
     for attempt in 0..DIAL_ATTEMPTS {
         match underlay.connect(dst.clone(), FORWARD_ALPN).await {
-            Ok(conn) => return Some(conn),
+            Ok(connection) => return Some(connection),
             Err(error) => {
                 tracing::trace!(hop = %dst.id.fmt_short(), attempt, %error, "underlay dial attempt failed");
                 // Linear backoff; adjacent hops that are momentarily busy settle fast.
-                n0_future::time::sleep(Duration::from_millis(100 * (attempt as u64 + 1))).await;
+                n0future_time::sleep(Duration::from_millis(100 * (attempt as u64 + 1))).await;
             }
         }
     }
     None
 }
 
-/// The `FORWARD_ALPN` accept side: read cells off each incoming uni-stream and
-/// hand them to the [`Forwarder`].
-#[derive(Debug, Clone)]
-pub(crate) struct ForwardAcceptor {
-    forwarder: Arc<Forwarder>,
-}
-
-impl ForwardAcceptor {
-    pub(crate) fn new(forwarder: Arc<Forwarder>) -> Self {
-        Self { forwarder }
-    }
-
-    async fn read_loop(
-        self,
-        upstream: UnderlayId,
-        connection: Connection,
-        gate: Arc<Mutex<RelayGate>>,
-        mut recv: iroh::endpoint::RecvStream,
-    ) {
-        while let Ok(cell) = read_cell(&mut recv).await {
-            let admitted = gate
-                .lock()
-                .expect("relay gate poisoned")
-                .admits(&connection);
-            if admitted {
-                self.forwarder.handle_cell(cell, upstream);
-            } else {
-                self.forwarder.note_inbound_refusal(upstream, &connection);
-            }
-        }
-    }
-}
-
-impl ProtocolHandler for ForwardAcceptor {
-    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        // The peer's QUIC-TLS identity: the one thing about a cell's origin its
-        // sender cannot choose, and constant across every stream on this
-        // connection. Every cell that arrives here is checked against it.
-        let upstream = UnderlayId::new(connection.remote_id());
-        let gate = Arc::new(Mutex::new(RelayGate::new(
-            self.forwarder.rule.allow_relay,
-            self.forwarder.underlay.id(),
-            GateRole::Inbound,
-        )));
-        // Loop ends when the upstream hop closes the connection: normal teardown.
-        while let Ok(recv) = connection.accept_uni().await {
-            n0_future::task::spawn(self.clone().read_loop(
-                upstream,
-                connection.clone(),
-                Arc::clone(&gate),
-                recv,
-            ));
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        Arc, AtomicUsize, Delivered, Duration, Forwarder, MAX_WRITERS, Ordering, RwLock,
-        TransportAddr, UNRESOLVED_SEEN_CAP,
+        Arc, AtomicUsize, Delivered, Duration, Forwarder, MAX_WRITERS, Ordering, TransportAddr,
+        UNRESOLVED_SEEN_CAP,
     };
-    use crate::addr::{Route, RouteHop};
-    use crate::role::{AppId, UnderlayId};
-    use crate::test_support::relay_server;
+    use crate::app_id::{AppId, UnderlayId};
+    use crate::cell::Cell;
+    use crate::route::{Route, RouteHop};
+    use crate::test_support;
     use crate::topology::{LinkVector, Topology};
-    use crate::wire::Cell;
-    use habilis_network_test_tracing::{expect_warn, test};
     use iroh::endpoint::presets;
     use iroh::endpoint::transports::{PathSelection, PathSelectionContext, PathSelector};
     use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey};
     use std::net::SocketAddr;
+    use std::sync::RwLock;
     use tokio::sync::mpsc;
 
+    use crate::topology;
+    use iroh::protocol;
+    use std::time::Instant as std_Instant;
+    use tokio::{sync, time, time as tokio_time};
+    use tracing::{span, subscriber};
     fn stranger(seed: u8) -> RouteHop {
         let id: EndpointId = SecretKey::from_bytes(&[seed; 32]).public();
         RouteHop {
@@ -1008,13 +530,9 @@ mod tests {
     /// as it is in production.
     async fn forwarder() -> (Forwarder, AppId, mpsc::Receiver<Delivered>) {
         let loopback: SocketAddr = "127.0.0.1:0".parse().expect("loopback addr");
-        let underlay = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Disabled)
-            .bind_addr(loopback)
-            .expect("valid bind addr")
-            .bind()
-            .await
-            .expect("bind underlay endpoint");
+        let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
+        let bound = builder.bind_addr(loopback).expect("valid bind addr");
+        let underlay: Endpoint = bound.bind().await.expect("bind underlay endpoint");
         close_at_end(&underlay);
         let app_id = AppId::new(SecretKey::from_bytes(&[99; 32]).public());
         let (inbound, received) = mpsc::channel(4);
@@ -1025,6 +543,7 @@ mod tests {
                 inbound,
                 false,
                 Duration::from_secs(20),
+                // the topology is shared by the forwarder and the handle
                 Arc::new(RwLock::new(Topology::default())),
             ),
             app_id,
@@ -1040,10 +559,10 @@ mod tests {
         }
     }
 
-    fn cell(hops: Vec<RouteHop>, pos: u16, source: RouteHop) -> Cell {
+    fn cell(hops: Vec<RouteHop>, position: u16, source: RouteHop) -> Cell {
         Cell {
-            path: Route::new(hops).expect("legal route"),
-            pos,
+            path: Route::try_new(hops).expect("legal route"),
+            position,
             source,
             packet: vec![1, 2, 3],
         }
@@ -1059,145 +578,201 @@ mod tests {
     }
 
     #[test]
-    async fn a_cell_that_ends_at_us_is_delivered_locally() {
-        // The happy path the refusals below are measured against.
-        let (forwarder, _app, mut received) = forwarder().await;
-        let source = stranger(1);
-        let subject = cell(vec![self_hop(&forwarder)], 0, source.clone());
-        forwarder.handle_cell(subject, source.underlay_id);
-        assert!(received.try_recv().is_ok());
-        assert_eq!(
-            forwarder.forwarded_cells(),
-            0,
-            "a delivery is not a forward"
-        );
-    }
-
-    #[test]
-    async fn a_cell_that_ends_at_us_is_counted_as_delivered() {
-        let (forwarder, _app, _received) = forwarder().await;
-        let source = stranger(1);
-        let subject = cell(vec![self_hop(&forwarder)], 0, source.clone());
-        forwarder.handle_cell(subject, source.underlay_id);
-        let counters = forwarder.counters();
-        assert_eq!(
-            (counters.delivered, counters.dropped, counters.forwarded),
-            (1, 0, 0)
-        );
-    }
-
-    #[test]
-    async fn a_full_inbox_drops_the_cell_and_counts_it() {
-        expect_warn(
-            "habilis_network_iroh_multihop_transport::underlay",
-            "reason=\"inbox of the local transport is full\"",
-        );
-        // The inbox of the fixture holds 4 cells and nothing drains it, as on a transport
-        // that is never polled: the fifth and sixth cell are lost, and the counters say so.
-        let (forwarder, _app, _received) = forwarder().await;
-        let source = stranger(1);
-        for _ in 0..6 {
-            let subject = cell(vec![self_hop(&forwarder)], 0, source.clone());
+    fn a_cell_that_ends_at_us_is_delivered_locally() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // The happy path the refusals below are measured against.
+            let (forwarder, _app, mut received) = forwarder().await;
+            let source = stranger(1);
+            let subject = cell(vec![self_hop(&forwarder)], 0, source);
             forwarder.handle_cell(subject, source.underlay_id);
-        }
-        let counters = forwarder.counters();
-        assert_eq!((counters.delivered, counters.dropped), (4, 2));
+            assert!(
+                received.try_recv().is_ok(),
+                "a cell that ends at us is delivered locally"
+            );
+            assert_eq!(
+                forwarder.forwarded_cells(),
+                0,
+                "a delivery is not a forward"
+            );
+        });
     }
 
     #[test]
-    async fn a_packet_that_does_not_fit_the_buffer_is_counted_as_dropped() {
-        expect_warn(
-            "habilis_network_iroh_multihop_transport::underlay",
-            "multihop transport dropping packets",
-        );
-        let (forwarder, _app, _received) = forwarder().await;
-        forwarder.note_oversized(2000, 1500);
-        assert_eq!(forwarder.counters().dropped, 1);
+    fn a_cell_that_ends_at_us_is_counted_as_delivered() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (forwarder, _app, _received) = forwarder().await;
+            let source = stranger(1);
+            let subject = cell(vec![self_hop(&forwarder)], 0, source);
+            forwarder.handle_cell(subject, source.underlay_id);
+            let counters = forwarder.counters();
+            assert_eq!(
+                (counters.delivered, counters.dropped, counters.forwarded),
+                (1, 0, 0),
+                "a cell that ends at us is counted as delivered"
+            );
+        });
     }
 
     #[test]
-    async fn a_cell_naming_another_node_is_neither_delivered_nor_forwarded() {
-        expect_warn(
-            "habilis_network_iroh_multihop_transport::underlay",
-            "reason=\"position does not name this node\"",
-        );
-        // The reflector proper: we are nowhere on this route, so relaying it
-        // would spend our bandwidth on a stranger's behalf.
-        let (forwarder, _app, mut received) = forwarder().await;
-        let source = stranger(1);
-        let subject = cell(vec![stranger(2), stranger(3)], 0, source.clone());
-        forwarder.handle_cell(subject, source.underlay_id);
-        assert!(received.try_recv().is_err());
-        assert_eq!(live_writers(&forwarder), 0, "no writer, no dial, no bytes");
+    fn a_full_inbox_drops_the_cell_and_counts_it() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "reason=\"inbox of the local transport is full\"",
+            );
+            // The inbox of the fixture holds 4 cells and nothing drains it, as on a transport
+            // that is never polled: the fifth and sixth cell are lost, and the counters say so.
+            let (forwarder, _app, _received) = forwarder().await;
+            let source = stranger(1);
+            for _ in 0..6 {
+                let subject = cell(vec![self_hop(&forwarder)], 0, source);
+                forwarder.handle_cell(subject, source.underlay_id);
+            }
+            let counters = forwarder.counters();
+            assert_eq!(
+                (counters.delivered, counters.dropped),
+                (4, 2),
+                "a full inbox drops the cell and counts it"
+            );
+        });
     }
 
     #[test]
-    async fn a_cell_from_the_wrong_upstream_is_refused() {
-        expect_warn(
-            "habilis_network_iroh_multihop_transport::underlay",
-            "reason=\"cell did not arrive from its preceding hop\"",
-        );
-        // A hostile downstream hop bouncing a structurally valid cell back at
-        // us. Every hop on this route is real and we genuinely occupy `pos`, so
-        // only the authenticated sender id catches it.
-        let (forwarder, _app, mut received) = forwarder().await;
-        let source = stranger(1);
-        let downstream = stranger(4);
-        let subject = cell(
-            vec![stranger(2), self_hop(&forwarder), downstream.clone()],
-            1,
-            source,
-        );
-        forwarder.handle_cell(subject, downstream.underlay_id);
-        assert!(received.try_recv().is_err());
-        assert_eq!(live_writers(&forwarder), 0);
+    fn a_packet_that_does_not_fit_the_buffer_is_counted_as_dropped() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "multihop transport dropping packets",
+            );
+            let (forwarder, _app, _received) = forwarder().await;
+            forwarder.note_oversized(2000, 1500);
+            assert_eq!(
+                forwarder.counters().dropped,
+                1,
+                "a packet that does not fit the buffer is counted as dropped"
+            );
+        });
     }
 
     #[test]
-    async fn a_cell_positioned_past_the_end_is_not_delivered() {
-        expect_warn(
-            "habilis_network_iroh_multihop_transport::underlay",
-            "reason=\"position past the end of the route\"",
-        );
-        let (forwarder, _app, mut received) = forwarder().await;
-        let source = stranger(1);
-        let subject = cell(vec![self_hop(&forwarder)], 7, source.clone());
-        forwarder.handle_cell(subject, source.underlay_id);
-        assert!(received.try_recv().is_err());
+    fn a_cell_naming_another_node_is_neither_delivered_nor_forwarded() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "reason=\"position does not name this node\"",
+            );
+            // The reflector proper: we are nowhere on this route, so relaying it
+            // would spend our bandwidth on a stranger's behalf.
+            let (forwarder, _app, mut received) = forwarder().await;
+            let source = stranger(1);
+            let subject = cell(vec![stranger(2), stranger(3)], 0, source);
+            forwarder.handle_cell(subject, source.underlay_id);
+            assert!(
+                received.try_recv().is_err(),
+                "a cell naming another node is neither delivered nor forwarded"
+            );
+            assert_eq!(live_writers(&forwarder), 0, "no writer, no dial, no bytes");
+        });
     }
 
     #[test]
-    async fn a_cell_passing_through_us_is_queued_for_the_next_hop() {
-        expect_warn(
-            "habilis_network_iroh_multihop_transport::underlay",
-            "multihop forwarder: hop without a vector that no delivered cell named",
-        );
-        let (forwarder, _app, mut received) = forwarder().await;
-        let source = stranger(1);
-        let next = stranger(5);
-        let subject = cell(vec![self_hop(&forwarder), next.clone()], 0, source.clone());
-        forwarder.handle_cell(subject, source.underlay_id);
-        assert!(received.try_recv().is_err(), "not ours to deliver");
-        assert_eq!(live_writers(&forwarder), 1);
-        assert_eq!(forwarder.forwarded_cells(), 1);
+    fn a_cell_from_the_wrong_upstream_is_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "reason=\"cell did not arrive from its preceding hop\"",
+            );
+            // A hostile downstream hop bouncing a structurally valid cell back at
+            // us. Every hop on this route is real and we genuinely occupy `pos`, so
+            // only the authenticated sender id catches it.
+            let (forwarder, _app, mut received) = forwarder().await;
+            let source = stranger(1);
+            let downstream = stranger(4);
+            let subject = cell(
+                vec![stranger(2), self_hop(&forwarder), downstream],
+                1,
+                source,
+            );
+            forwarder.handle_cell(subject, downstream.underlay_id);
+            assert!(
+                received.try_recv().is_err(),
+                "a cell from the wrong upstream is refused"
+            );
+            assert_eq!(
+                live_writers(&forwarder),
+                0,
+                "a refused cell leaves no live writer"
+            );
+        });
     }
 
     #[test]
-    async fn a_refused_cell_is_not_counted_as_forwarded() {
-        expect_warn(
-            "habilis_network_iroh_multihop_transport::underlay",
-            "reason=\"position does not name this node\"",
-        );
-        let (forwarder, _app, _received) = forwarder().await;
-        let source = stranger(1);
-        let subject = cell(vec![stranger(2), stranger(3)], 0, source.clone());
-        forwarder.handle_cell(subject, source.underlay_id);
-        assert_eq!(forwarder.forwarded_cells(), 0);
+    fn a_cell_positioned_past_the_end_is_not_delivered() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "reason=\"position past the end of the route\"",
+            );
+            let (forwarder, _app, mut received) = forwarder().await;
+            let source = stranger(1);
+            let subject = cell(vec![self_hop(&forwarder)], 7, source);
+            forwarder.handle_cell(subject, source.underlay_id);
+            assert!(
+                received.try_recv().is_err(),
+                "a cell positioned past the end is not delivered"
+            );
+        });
+    }
+
+    #[test]
+    fn a_cell_passing_through_us_is_queued_for_the_next_hop() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "multihop forwarder: hop without a vector that no delivered cell named",
+            );
+            let (forwarder, _app, mut received) = forwarder().await;
+            let source = stranger(1);
+            let next = stranger(5);
+            let subject = cell(vec![self_hop(&forwarder), next], 0, source);
+            forwarder.handle_cell(subject, source.underlay_id);
+            assert!(received.try_recv().is_err(), "not ours to deliver");
+            assert_eq!(
+                live_writers(&forwarder),
+                1,
+                "a cell passing through us is queued for the next hop"
+            );
+            assert_eq!(
+                forwarder.forwarded_cells(),
+                1,
+                "one cell is forwarded to the next hop"
+            );
+        });
+    }
+
+    #[test]
+    fn a_refused_cell_is_not_counted_as_forwarded() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "reason=\"position does not name this node\"",
+            );
+            let (forwarder, _app, _received) = forwarder().await;
+            let source = stranger(1);
+            let subject = cell(vec![stranger(2), stranger(3)], 0, source);
+            forwarder.handle_cell(subject, source.underlay_id);
+            assert_eq!(
+                forwarder.forwarded_cells(),
+                0,
+                "a refused cell is not counted as forwarded"
+            );
+        });
     }
 
     /// A node whose underlay can only use the relay, as a forwarder with its
     /// accept side running.
     struct RelayNode {
+        // the test harness shares the forwarder with its writers
         forwarder: Arc<Forwarder>,
         hop: RouteHop,
         /// The key of the application endpoint, which signs the link vector of the node.
@@ -1205,7 +780,7 @@ mod tests {
         /// The address that the node would advertise for its underlay.
         underlay_addr: EndpointAddr,
         received: mpsc::Receiver<Delivered>,
-        _router: iroh::protocol::Router,
+        _router: protocol::Router,
     }
 
     impl RelayNode {
@@ -1215,7 +790,7 @@ mod tests {
         fn learns(&self, other: &RelayNode) {
             let vector = LinkVector::signed(
                 &other.app_secret,
-                crate::topology::wall_clock_ms(),
+                topology::wall_clock_ms(),
                 other.underlay_addr.clone(),
                 Vec::new(),
             );
@@ -1228,29 +803,32 @@ mod tests {
     }
 
     async fn relay_node(seed: u8, url: &iroh::RelayUrl, allow_relay: bool) -> RelayNode {
-        let underlay = Endpoint::builder(presets::Minimal)
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(SecretKey::from_bytes(&[seed; 32]))
-            .relay_mode(RelayMode::custom([url.clone()]))
+            .relay_mode(RelayMode::custom([url.clone()]));
+        let underlay = builder
             .clear_ip_transports()
             .bind()
             .await
             .expect("bind a relay-only underlay");
         close_at_end(&underlay);
-        tokio::time::timeout(Duration::from_secs(10), underlay.online())
+        tokio_time::timeout(Duration::from_secs(10), underlay.online())
             .await
             .expect("the underlay reaches the relay");
         let app_secret = SecretKey::from_bytes(&[seed.wrapping_add(100); 32]);
         let app_id = AppId::new(app_secret.public());
         let (inbound, received) = mpsc::channel(8);
+        // the forwarder is shared with the accept loop the test runs
         let forwarder = Arc::new(Forwarder::new(
             underlay.clone(),
             app_id,
             inbound,
             allow_relay,
             Duration::from_millis(300),
+            // the topology is shared with the forwarder
             Arc::new(RwLock::new(Topology::default())),
         ));
-        let router = iroh::protocol::Router::builder(underlay.clone())
+        let router = protocol::Router::builder(underlay.clone())
             .accept(
                 super::FORWARD_ALPN,
                 super::ForwardAcceptor::new(Arc::clone(&forwarder)),
@@ -1275,15 +853,15 @@ mod tests {
     async fn cell_arrives(from: &RelayNode, to: &mut RelayNode) -> bool {
         from.learns(to);
         let subject = Cell {
-            path: Route::new(vec![to.hop.clone()]).expect("legal route"),
-            pos: 0,
-            source: from.hop.clone(),
+            path: Route::try_new(vec![to.hop]).expect("legal route"),
+            position: 0,
+            source: from.hop,
             packet: vec![7, 7, 7],
         };
         // Retried: the first attempts can find the connection still being set up.
         for _ in 0..6 {
             from.forwarder.enqueue(&to.hop, subject.clone());
-            if tokio::time::timeout(Duration::from_millis(500), to.received.recv())
+            if tokio_time::timeout(Duration::from_millis(500), to.received.recv())
                 .await
                 .is_ok_and(|delivered| delivered.is_some())
             {
@@ -1294,71 +872,90 @@ mod tests {
     }
 
     #[test]
-    async fn the_relay_carries_cells_when_the_mesh_lets_it() {
-        let (url, _server) = relay_server().await;
-        let from = relay_node(1, &url, true).await;
-        let mut to = relay_node(2, &url, true).await;
-        assert!(
-            cell_arrives(&from, &mut to).await,
-            "relay payload is allowed"
-        );
+    fn the_relay_carries_cells_when_the_mesh_lets_it() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (url, _server) = test_support::relay_server().await;
+            let from = relay_node(1, &url, true).await;
+            let mut to = relay_node(2, &url, true).await;
+            assert!(
+                cell_arrives(&from, &mut to).await,
+                "relay payload is allowed"
+            );
+        });
     }
 
     #[test]
-    async fn a_cell_is_not_sent_on_a_relay_selected_path() {
-        expect_warn(
-            "habilis_network_iroh_multihop_transport::underlay",
-            "multihop underlay stays on the relay: this hop is not advertised as a link",
-        );
-        let (url, _server) = relay_server().await;
-        let from = relay_node(3, &url, false).await;
-        let mut to = relay_node(4, &url, true).await;
-        assert!(
-            !cell_arrives(&from, &mut to).await,
-            "the sender refuses the relay"
-        );
-        assert!(
-            from.forwarder.pool.refused_on_relay.load(Ordering::Relaxed) > 0,
-            "and counts what it refused"
-        );
+    fn a_cell_is_not_sent_on_a_relay_selected_path() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "multihop underlay stays on the relay: this hop is not advertised as a link",
+            );
+            let (url, _server) = test_support::relay_server().await;
+            let from = relay_node(3, &url, false).await;
+            let mut to = relay_node(4, &url, true).await;
+            assert!(
+                !cell_arrives(&from, &mut to).await,
+                "the sender refuses the relay"
+            );
+            assert!(
+                from.forwarder.pool.refused_on_relay.load(Ordering::Relaxed) > 0,
+                "and counts what it refused"
+            );
+        });
     }
 
     #[test]
-    async fn a_cell_that_arrives_on_a_relay_selected_path_is_dropped() {
-        expect_warn(
-            "habilis_network_iroh_multihop_transport::underlay",
-            "reason=\"cell arrived over the relay\"",
-        );
-        let (url, _server) = relay_server().await;
-        let from = relay_node(5, &url, true).await;
-        let mut to = relay_node(6, &url, false).await;
-        assert!(
-            !cell_arrives(&from, &mut to).await,
-            "the receiver refuses the relay"
-        );
-        assert!(to.forwarder.dropped.load(Ordering::Relaxed) > 0);
+    fn a_cell_that_arrives_on_a_relay_selected_path_is_dropped() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "reason=\"cell arrived over the relay\"",
+            );
+            let (url, _server) = test_support::relay_server().await;
+            let from = relay_node(5, &url, true).await;
+            let mut to = relay_node(6, &url, false).await;
+            assert!(
+                !cell_arrives(&from, &mut to).await,
+                "the receiver refuses the relay"
+            );
+            assert!(
+                to.forwarder.dropped.load(Ordering::Relaxed) > 0,
+                "a cell on a relay-selected path is dropped"
+            );
+        });
     }
 
     #[test]
-    async fn a_hop_that_stays_on_the_relay_becomes_stuck() {
-        expect_warn(
-            "habilis_network_iroh_multihop_transport::underlay",
-            "multihop underlay stays on the relay: this hop is not advertised as a link",
-        );
-        let (url, _server) = relay_server().await;
-        let from = relay_node(7, &url, false).await;
-        let mut to = relay_node(8, &url, true).await;
-        assert!(!cell_arrives(&from, &mut to).await);
-        // Refused for longer than the deadline: no longer a link.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while from.forwarder.stuck_hops().is_empty() && std::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        assert_eq!(from.forwarder.stuck_hops(), vec![to.hop.app_id]);
+    fn a_hop_that_stays_on_the_relay_becomes_stuck() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "multihop underlay stays on the relay: this hop is not advertised as a link",
+            );
+            let (url, _server) = test_support::relay_server().await;
+            let from = relay_node(7, &url, false).await;
+            let mut to = relay_node(8, &url, true).await;
+            assert!(
+                !cell_arrives(&from, &mut to).await,
+                "a hop that stays on the relay becomes stuck"
+            );
+            // Refused for longer than the deadline: no longer a link.
+            let deadline = std_Instant::now() + Duration::from_secs(5);
+            while from.forwarder.stuck_hops().is_empty() && std_Instant::now() < deadline {
+                tokio_time::sleep(Duration::from_millis(100)).await;
+            }
+            assert_eq!(
+                from.forwarder.stuck_hops(),
+                vec![to.hop.app_id],
+                "the stuck hop is the one that stayed on the relay"
+            );
+        });
     }
 
     #[test]
     fn the_path_list_marks_the_selected_path_with_a_star() {
+        let _guard = ::habilis_network_test_tracing::init();
         let ip = TransportAddr::Ip("127.0.0.1:9".parse().expect("an address"));
         let relay = TransportAddr::Relay("http://127.0.0.1:1".parse().expect("a relay url"));
         let list = super::path_list([(relay, true), (ip, false)]);
@@ -1367,8 +964,8 @@ mod tests {
     }
 
     /// Whether `wake` holds a wake-up now.
-    async fn woke(wake: &tokio::sync::Notify) -> bool {
-        tokio::time::timeout(Duration::from_millis(20), wake.notified())
+    async fn woke(wake: &sync::Notify) -> bool {
+        tokio_time::timeout(Duration::from_millis(20), wake.notified())
             .await
             .is_ok()
     }
@@ -1388,7 +985,7 @@ mod tests {
             .expect("topology lock poisoned")
             .ingest(LinkVector::signed(
                 &app,
-                crate::topology::wall_clock_ms(),
+                topology::wall_clock_ms(),
                 advertised.clone(),
                 Vec::new(),
             ));
@@ -1399,30 +996,46 @@ mod tests {
     }
 
     #[test]
-    async fn a_hop_is_dialed_at_the_address_that_its_vector_signed() {
-        let (forwarder, _app, _received) = forwarder().await;
-        let underlay_id = SecretKey::from_bytes(&[121; 32]).public();
-        let signed = EndpointAddr::new(underlay_id)
-            .with_ip_addr("10.0.0.9:4000".parse().expect("an address"));
-        let hop = hop_with_vector(&forwarder, 120, &signed, underlay_id);
-        assert_eq!(forwarder.dial_addr(&hop), signed);
-        assert_eq!(forwarder.unresolved_hops(), 0);
+    fn a_hop_is_dialed_at_the_address_that_its_vector_signed() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (forwarder, _app, _received) = forwarder().await;
+            let underlay_id = SecretKey::from_bytes(&[121; 32]).public();
+            let signed = EndpointAddr::new(underlay_id)
+                .with_ip_addr("10.0.0.9:4000".parse().expect("an address"));
+            let hop = hop_with_vector(&forwarder, 120, &signed, underlay_id);
+            assert_eq!(
+                forwarder.dial_addr(&hop),
+                signed,
+                "a hop is dialed at the address its vector signed"
+            );
+            assert_eq!(
+                forwarder.unresolved_hops(),
+                0,
+                "no hop is unresolved when its vector is known"
+            );
+        });
     }
 
     #[test]
-    async fn a_hop_that_the_topology_does_not_know_is_dialed_by_id_and_counted() {
-        expect_warn(
-            "habilis_network_iroh_multihop_transport::underlay",
-            "multihop forwarder: hop without a vector that no delivered cell named",
-        );
-        let (forwarder, _app, _received) = forwarder().await;
-        let hop = stranger(122);
-        assert_eq!(
-            forwarder.dial_addr(&hop),
-            EndpointAddr::new(hop.underlay_id.get()),
-            "no address is made up"
-        );
-        assert_eq!(forwarder.unresolved_hops(), 1);
+    fn a_hop_that_the_topology_does_not_know_is_dialed_by_id_and_counted() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "multihop forwarder: hop without a vector that no delivered cell named",
+            );
+            let (forwarder, _app, _received) = forwarder().await;
+            let hop = stranger(122);
+            assert_eq!(
+                forwarder.dial_addr(&hop),
+                EndpointAddr::new(hop.underlay_id.get()),
+                "no address is made up"
+            );
+            assert_eq!(
+                forwarder.unresolved_hops(),
+                1,
+                "a hop the topology does not know is dialed by id and counted"
+            );
+        });
     }
 
     /// Counts the WARN and ERROR events of the thread that installs it. The tests of this module
@@ -1434,264 +1047,297 @@ mod tests {
         fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
             true
         }
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
+        fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
         }
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+        fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
         fn event(&self, event: &tracing::Event<'_>) {
             if *event.metadata().level() <= tracing::Level::WARN {
                 self.0.fetch_add(1, Ordering::Relaxed);
             }
         }
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
+        fn enter(&self, _: &span::Id) {}
+        fn exit(&self, _: &span::Id) {}
     }
 
     /// A reply goes back along the reversed route of a cell that this node delivered, so its first
     /// hop is the sender, whose link-vector may not have arrived yet: that case is normal.
     #[test]
-    async fn a_hop_without_a_vector_is_not_a_warning() {
-        let (forwarder, _app, _received) = forwarder().await;
-        let sender = stranger(140);
-        let delivered = cell(vec![self_hop(&forwarder)], 0, sender.clone());
-        forwarder.handle_cell(delivered, sender.underlay_id);
-        assert_eq!(forwarder.counters().delivered, 1, "the cell was delivered");
-        let warnings = Arc::new(AtomicUsize::new(0));
-        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
-            forwarder.dial_addr(&sender);
+    fn a_hop_without_a_vector_is_not_a_warning() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (forwarder, _app, _received) = forwarder().await;
+            let sender = stranger(140);
+            let delivered = cell(vec![self_hop(&forwarder)], 0, sender);
+            forwarder.handle_cell(delivered, sender.underlay_id);
+            assert_eq!(forwarder.counters().delivered, 1, "the cell was delivered");
+            // the test counts warnings from the code under test and reads the count after
+            let warnings = Arc::new(AtomicUsize::new(0));
+            subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+                forwarder.dial_addr(&sender);
+            });
+            assert_eq!(
+                warnings.load(Ordering::Relaxed),
+                0,
+                "a hop without a vector is not a warning"
+            );
+            assert_eq!(forwarder.unresolved_hops(), 1, "the hop was counted");
+            forwarder.underlay.close().await;
         });
-        assert_eq!(warnings.load(Ordering::Relaxed), 0);
-        assert_eq!(forwarder.unresolved_hops(), 1, "the hop was counted");
-        forwarder.underlay.close().await;
     }
 
     /// A neighbor that this node links to is a hop whose own vector has not arrived yet: the
     /// origin of a route saw it first. This node reaches the neighbor by the link it holds.
     #[test]
-    async fn a_hop_without_a_vector_that_is_a_link_of_ours_is_not_a_warning() {
-        let (forwarder, _app, _received) = forwarder().await;
-        let neighbor = stranger(142);
-        let own_key = SecretKey::from_bytes(&[99; 32]);
-        let own_vector = LinkVector::signed(
-            &own_key,
-            crate::topology::wall_clock_ms(),
-            EndpointAddr::new(forwarder.underlay.id()),
-            vec![(neighbor.app_id, 1)],
-        );
-        assert!(
-            forwarder
-                .topology
-                .write()
-                .expect("topology lock poisoned")
-                .ingest(own_vector),
-            "the vector of this node is accepted"
-        );
-        let warnings = Arc::new(AtomicUsize::new(0));
-        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
-            forwarder.dial_addr(&neighbor);
-            forwarder.dial_addr(&stranger(143));
+    fn a_hop_without_a_vector_that_is_a_link_of_ours_is_not_a_warning() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (forwarder, _app, _received) = forwarder().await;
+            let neighbor = stranger(142);
+            let own_key = SecretKey::from_bytes(&[99; 32]);
+            let own_vector = LinkVector::signed(
+                &own_key,
+                topology::wall_clock_ms(),
+                EndpointAddr::new(forwarder.underlay.id()),
+                vec![(neighbor.app_id, 1)],
+            );
+            assert!(
+                forwarder
+                    .topology
+                    .write()
+                    .expect("topology lock poisoned")
+                    .ingest(own_vector),
+                "the vector of this node is accepted"
+            );
+            // the test counts warnings from the code under test and reads the count after
+            let warnings = Arc::new(AtomicUsize::new(0));
+            subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+                forwarder.dial_addr(&neighbor);
+                forwarder.dial_addr(&stranger(143));
+            });
+            assert_eq!(
+                warnings.load(Ordering::Relaxed),
+                1,
+                "the hop that is no link of ours is the only warning"
+            );
+            forwarder.underlay.close().await;
         });
-        assert_eq!(
-            warnings.load(Ordering::Relaxed),
-            1,
-            "the hop that is no link of ours is the only warning"
-        );
-        forwarder.underlay.close().await;
     }
 
     /// A hop that no delivered cell named, and that has no vector, is not explained by a reply on
     /// a reversed route: it is a warning, once.
     #[test]
-    async fn a_hop_without_a_vector_that_no_delivered_cell_named_is_a_warning() {
-        let (forwarder, _app, _received) = forwarder().await;
-        let warnings = Arc::new(AtomicUsize::new(0));
-        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
-            forwarder.dial_addr(&stranger(141));
-            forwarder.dial_addr(&stranger(141));
+    fn a_hop_without_a_vector_that_no_delivered_cell_named_is_a_warning() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (forwarder, _app, _received) = forwarder().await;
+            // the test counts warnings from the code under test and reads the count after
+            let warnings = Arc::new(AtomicUsize::new(0));
+            subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+                forwarder.dial_addr(&stranger(141));
+                forwarder.dial_addr(&stranger(141));
+            });
+            assert_eq!(warnings.load(Ordering::Relaxed), 1, "one line per hop");
+            assert_eq!(forwarder.unresolved_hops(), 2, "both lookups were counted");
+            forwarder.underlay.close().await;
         });
-        assert_eq!(warnings.load(Ordering::Relaxed), 1, "one line per hop");
-        assert_eq!(forwarder.unresolved_hops(), 2, "both lookups were counted");
-        forwarder.underlay.close().await;
     }
 
     #[test]
-    async fn a_hop_without_a_vector_is_logged_once_each() {
-        let (forwarder, _app, _received) = forwarder().await;
-        let (one, other) = (stranger(130).underlay_id, stranger(131).underlay_id);
-        assert!(forwarder.line_is_due(one, 1, false), "the first hop");
-        assert!(!forwarder.line_is_due(one, 2, false), "the same hop again");
-        assert!(forwarder.line_is_due(other, 3, false), "another hop");
-        // Past the ceiling the rule is one line in 256.
-        for seed in 0..u8::try_from(UNRESOLVED_SEEN_CAP).expect("fits") {
-            let id = SecretKey::from_bytes(&[seed.wrapping_add(1); 32]).public();
-            forwarder.line_is_due(UnderlayId::new(id), 4, false);
-        }
-        let beyond = stranger(200).underlay_id;
-        assert!(!forwarder.line_is_due(beyond, 5, false), "past the ceiling");
-        assert!(forwarder.line_is_due(beyond, 256, false), "one in 256");
+    fn a_hop_without_a_vector_is_logged_once_each() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (forwarder, _app, _received) = forwarder().await;
+            let (one, other) = (stranger(130).underlay_id, stranger(131).underlay_id);
+            assert!(forwarder.line_is_due(one, 1, false), "the first hop");
+            assert!(!forwarder.line_is_due(one, 2, false), "the same hop again");
+            assert!(forwarder.line_is_due(other, 3, false), "another hop");
+            // Past the ceiling the rule is one line in 256.
+            for seed in 0..u8::try_from(UNRESOLVED_SEEN_CAP).expect("fits") {
+                let id = SecretKey::from_bytes(&[seed.wrapping_add(1); 32]).public();
+                forwarder.line_is_due(UnderlayId::new(id), 4, false);
+            }
+            let beyond = stranger(200).underlay_id;
+            assert!(!forwarder.line_is_due(beyond, 5, false), "past the ceiling");
+            assert!(forwarder.line_is_due(beyond, 256, false), "one in 256");
+        });
     }
 
     /// A hop that was explained once, by a link of this node, is warned about when the link is
     /// gone and nothing else explains it: the line at debug does not spend the warning of the hop.
     #[test]
-    async fn a_hop_explained_by_a_link_that_is_gone_is_warned_about() {
-        let (forwarder, _app, _received) = forwarder().await;
-        let neighbor = stranger(144);
-        let own_key = SecretKey::from_bytes(&[99; 32]);
-        let own_vector = LinkVector::signed(
-            &own_key,
-            crate::topology::wall_clock_ms(),
-            EndpointAddr::new(forwarder.underlay.id()),
-            vec![(neighbor.app_id, 1)],
-        );
-        assert!(
-            forwarder
-                .topology
-                .write()
-                .expect("topology lock poisoned")
-                .ingest(own_vector),
-            "the vector of this node is accepted"
-        );
-        let warnings = Arc::new(AtomicUsize::new(0));
-        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
-            forwarder.dial_addr(&neighbor);
-        });
-        assert_eq!(warnings.load(Ordering::Relaxed), 0, "a link of ours");
+    fn a_hop_explained_by_a_link_that_is_gone_is_warned_about() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (forwarder, _app, _received) = forwarder().await;
+            let neighbor = stranger(144);
+            let own_key = SecretKey::from_bytes(&[99; 32]);
+            let own_vector = LinkVector::signed(
+                &own_key,
+                topology::wall_clock_ms(),
+                EndpointAddr::new(forwarder.underlay.id()),
+                vec![(neighbor.app_id, 1)],
+            );
+            assert!(
+                forwarder
+                    .topology
+                    .write()
+                    .expect("topology lock poisoned")
+                    .ingest(own_vector),
+                "the vector of this node is accepted"
+            );
+            // the test counts warnings from the code under test and reads the count after
+            let warnings = Arc::new(AtomicUsize::new(0));
+            subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+                forwarder.dial_addr(&neighbor);
+            });
+            assert_eq!(warnings.load(Ordering::Relaxed), 0, "a link of ours");
 
-        assert!(
-            forwarder
-                .topology
-                .write()
-                .expect("topology lock poisoned")
-                .remove(forwarder.self_app_id),
-            "the vector of this node is removed"
-        );
-        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
-            forwarder.dial_addr(&neighbor);
-            forwarder.dial_addr(&neighbor);
+            assert!(
+                forwarder
+                    .topology
+                    .write()
+                    .expect("topology lock poisoned")
+                    .remove(forwarder.self_app_id),
+                "the vector of this node is removed"
+            );
+            subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+                forwarder.dial_addr(&neighbor);
+                forwarder.dial_addr(&neighbor);
+            });
+            assert_eq!(
+                warnings.load(Ordering::Relaxed),
+                1,
+                "warned once, after the link is gone"
+            );
+            forwarder.underlay.close().await;
         });
-        assert_eq!(
-            warnings.load(Ordering::Relaxed),
-            1,
-            "warned once, after the link is gone"
-        );
-        forwarder.underlay.close().await;
     }
 
     /// A hop whose vector this node held and removed, because the peer left or its vector
     /// expired, is still named by the cells in flight to it: the origin of the route is behind,
     /// and the hop is no warning. A hop that this node never knew stays one.
     #[test]
-    async fn a_hop_whose_vector_is_gone_is_not_a_warning() {
-        let (forwarder, _app, _received) = forwarder().await;
-        let gone_key = SecretKey::from_bytes(&[145; 32]);
-        let gone = RouteHop {
-            app_id: AppId::new(gone_key.public()),
-            underlay_id: UnderlayId::new(gone_key.public()),
-        };
-        let vector = LinkVector::signed(
-            &gone_key,
-            crate::topology::wall_clock_ms(),
-            EndpointAddr::new(gone.underlay_id.get()),
-            vec![],
-        );
-        {
-            let mut topology = forwarder.topology.write().expect("topology lock poisoned");
-            assert!(topology.ingest(vector), "the vector is accepted");
-            assert!(topology.remove(gone.app_id), "the vector is removed");
-        }
-        let warnings = Arc::new(AtomicUsize::new(0));
-        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
-            forwarder.dial_addr(&gone);
-            forwarder.dial_addr(&stranger(146));
+    fn a_hop_whose_vector_is_gone_is_not_a_warning() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (forwarder, _app, _received) = forwarder().await;
+            let gone_key = SecretKey::from_bytes(&[145; 32]);
+            let gone = RouteHop {
+                app_id: AppId::new(gone_key.public()),
+                underlay_id: UnderlayId::new(gone_key.public()),
+            };
+            let vector = LinkVector::signed(
+                &gone_key,
+                topology::wall_clock_ms(),
+                EndpointAddr::new(gone.underlay_id.get()),
+                vec![],
+            );
+            {
+                let mut topology = forwarder.topology.write().expect("topology lock poisoned");
+                assert!(topology.ingest(vector), "the vector is accepted");
+                assert!(topology.remove(gone.app_id), "the vector is removed");
+            }
+            // the test counts warnings from the code under test and reads the count after
+            let warnings = Arc::new(AtomicUsize::new(0));
+            subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+                forwarder.dial_addr(&gone);
+                forwarder.dial_addr(&stranger(146));
+            });
+            assert_eq!(
+                warnings.load(Ordering::Relaxed),
+                1,
+                "the hop that was never known is the only warning"
+            );
+            assert_eq!(forwarder.unresolved_hops(), 2, "both hops were counted");
+            forwarder.underlay.close().await;
         });
-        assert_eq!(
-            warnings.load(Ordering::Relaxed),
-            1,
-            "the hop that was never known is the only warning"
-        );
-        assert_eq!(forwarder.unresolved_hops(), 2, "both hops were counted");
-        forwarder.underlay.close().await;
     }
 
     /// The hops that delivered cells named are remembered past [`HEARD_HOPS_CAP`]: the oldest
     /// hop is forgotten, and a reply to the newest cell is explained.
     #[test]
-    async fn a_hop_named_by_a_cell_past_the_heard_cap_is_not_a_warning() {
-        let (forwarder, _app, mut received) = forwarder().await;
-        let hop = |seed: u16| {
-            let mut bytes = [0u8; 32];
-            bytes[..2].copy_from_slice(&seed.to_be_bytes());
-            bytes[2] = 7;
-            let id = SecretKey::from_bytes(&bytes).public();
-            RouteHop {
-                app_id: AppId::new(id),
-                underlay_id: UnderlayId::new(id),
+    fn a_hop_named_by_a_cell_past_the_heard_cap_is_not_a_warning() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (forwarder, _app, mut received) = forwarder().await;
+            let hop = |seed: u16| {
+                let mut bytes = [0u8; 32];
+                bytes[..2].copy_from_slice(&seed.to_be_bytes());
+                bytes[2] = 7;
+                let id = SecretKey::from_bytes(&bytes).public();
+                RouteHop {
+                    app_id: AppId::new(id),
+                    underlay_id: UnderlayId::new(id),
+                }
+            };
+            let cap = u16::try_from(super::HEARD_HOPS_CAP).expect("fits");
+            for seed in 0..=cap {
+                let sender = hop(seed);
+                let delivered = cell(vec![self_hop(&forwarder)], 0, sender);
+                forwarder.handle_cell(delivered, sender.underlay_id);
+                received.try_recv().expect("delivered");
             }
-        };
-        let cap = u16::try_from(super::HEARD_HOPS_CAP).expect("fits");
-        for seed in 0..=cap {
-            let sender = hop(seed);
-            let delivered = cell(vec![self_hop(&forwarder)], 0, sender.clone());
-            forwarder.handle_cell(delivered, sender.underlay_id);
-            received.try_recv().expect("delivered");
-        }
-        let newest = hop(cap);
-        let warnings = Arc::new(AtomicUsize::new(0));
-        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
-            forwarder.dial_addr(&newest);
+            let newest = hop(cap);
+            // the test counts warnings from the code under test and reads the count after
+            let warnings = Arc::new(AtomicUsize::new(0));
+            subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+                forwarder.dial_addr(&newest);
+            });
+            assert_eq!(
+                warnings.load(Ordering::Relaxed),
+                0,
+                "the newest delivered cell named the hop"
+            );
+            forwarder.underlay.close().await;
         });
-        assert_eq!(
-            warnings.load(Ordering::Relaxed),
-            0,
-            "the newest delivered cell named the hop"
-        );
-        forwarder.underlay.close().await;
     }
 
     #[test]
-    async fn a_vector_that_names_another_underlay_does_not_resolve_the_hop() {
-        expect_warn(
-            "habilis_network_iroh_multihop_transport::underlay",
-            "multihop forwarder: hop without a vector that no delivered cell named",
-        );
-        // The route says the underlay of this node is `named`; the node signed another.
-        // The address of the vector is not the address of the hop.
-        let (forwarder, _app, _received) = forwarder().await;
-        let signed = EndpointAddr::new(SecretKey::from_bytes(&[124; 32]).public())
-            .with_ip_addr("10.0.0.9:4000".parse().expect("an address"));
-        let named = SecretKey::from_bytes(&[125; 32]).public();
-        let hop = hop_with_vector(&forwarder, 123, &signed, named);
-        assert_eq!(forwarder.dial_addr(&hop), EndpointAddr::new(named));
-        assert_eq!(forwarder.unresolved_hops(), 1);
+    fn a_vector_that_names_another_underlay_does_not_resolve_the_hop() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "multihop forwarder: hop without a vector that no delivered cell named",
+            );
+            // The route says the underlay of this node is `named`; the node signed another.
+            // The address of the vector is not the address of the hop.
+            let (forwarder, _app, _received) = forwarder().await;
+            let signed = EndpointAddr::new(SecretKey::from_bytes(&[124; 32]).public())
+                .with_ip_addr("10.0.0.9:4000".parse().expect("an address"));
+            let named = SecretKey::from_bytes(&[125; 32]).public();
+            let hop = hop_with_vector(&forwarder, 123, &signed, named);
+            assert_eq!(
+                forwarder.dial_addr(&hop),
+                EndpointAddr::new(named),
+                "a vector naming another underlay does not resolve the hop"
+            );
+            assert_eq!(forwarder.unresolved_hops(), 1, "that hop stays unresolved");
+        });
     }
 
     #[test]
-    async fn the_pool_wakes_at_the_first_refusal_of_a_hop_and_at_its_recovery() {
-        let (hop, app) = (stranger(13).underlay_id, stranger(14).app_id);
-        let pool = super::WriterPool::default();
-        let wake = Arc::clone(&pool.route_wake);
-        pool.track(hop, app);
-        assert!(!woke(&wake).await, "a hop that was never refused");
-        pool.note_admitted(hop);
-        assert!(!woke(&wake).await, "an admitted hop that was not refused");
+    fn the_pool_wakes_at_the_first_refusal_of_a_hop_and_at_its_recovery() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (hop, app) = (stranger(13).underlay_id, stranger(14).app_id);
+            let pool = super::WriterPool::default();
+            let wake = Arc::clone(&pool.route_wake);
+            pool.track(hop, app);
+            assert!(!woke(&wake).await, "a hop that was never refused");
+            pool.note_admitted(hop);
+            assert!(!woke(&wake).await, "an admitted hop that was not refused");
 
-        pool.note_refused(hop, Duration::from_mins(1));
-        assert!(woke(&wake).await, "the first refusal");
-        pool.note_refused(hop, Duration::from_mins(1));
-        pool.note_refused(hop, Duration::from_mins(1));
-        assert!(!woke(&wake).await, "a refusal that goes on is not news");
+            pool.note_refused(hop, Duration::from_mins(1));
+            assert!(woke(&wake).await, "the first refusal");
+            pool.note_refused(hop, Duration::from_mins(1));
+            pool.note_refused(hop, Duration::from_mins(1));
+            assert!(!woke(&wake).await, "a refusal that goes on is not news");
 
-        pool.note_admitted(hop);
-        assert!(woke(&wake).await, "the recovery of a refused hop");
-        pool.note_admitted(hop);
-        assert!(!woke(&wake).await, "an admitted hop that stays admitted");
+            pool.note_admitted(hop);
+            assert!(woke(&wake).await, "the recovery of a refused hop");
+            pool.note_admitted(hop);
+            assert!(!woke(&wake).await, "an admitted hop that stays admitted");
+        });
     }
 
     #[test]
     fn a_stuck_hop_is_a_link_again_once_it_is_admitted() {
-        expect_warn(
+        let _guard = ::habilis_network_test_tracing::init();
+        ::habilis_network_test_tracing::expect_warn(
             "habilis_network_iroh_multihop_transport::underlay",
             "multihop underlay stays on the relay: this hop is not advertised as a link",
         );
@@ -1719,6 +1365,7 @@ mod tests {
     async fn loopback_node_with(
         seed: u8,
         stuck_after: Duration,
+        // trait object: the selector is chosen per test
         selector: Option<Arc<dyn PathSelector>>,
     ) -> RelayNode {
         let loopback: SocketAddr = "127.0.0.1:0".parse().expect("loopback addr");
@@ -1735,15 +1382,17 @@ mod tests {
         let app_secret = SecretKey::from_bytes(&[seed.wrapping_add(100); 32]);
         let app_id = AppId::new(app_secret.public());
         let (inbound, received) = mpsc::channel(8);
+        // the forwarder is shared with the accept loop the test runs
         let forwarder = Arc::new(Forwarder::new(
             underlay.clone(),
             app_id,
             inbound,
             false,
             stuck_after,
+            // the topology is shared with the forwarder
             Arc::new(RwLock::new(Topology::default())),
         ));
-        let router = iroh::protocol::Router::builder(underlay.clone())
+        let router = protocol::Router::builder(underlay.clone())
             .accept(
                 super::FORWARD_ALPN,
                 super::ForwardAcceptor::new(Arc::clone(&forwarder)),
@@ -1785,11 +1434,15 @@ mod tests {
     #[test]
     fn an_accepted_connection_is_direct_when_any_open_path_is_not_the_relay() {
         use super::{direct_for_inbound, direct_for_writer};
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(
             direct_for_inbound(&[(ip(9), false), (relay(), false)]),
             "an IP path in backup beside the relay in backup"
         );
-        assert!(direct_for_inbound(&[(ip(9), true), (relay(), false)]));
+        assert!(
+            direct_for_inbound(&[(ip(9), true), (relay(), false)]),
+            "an accepted connection is direct when any open path is not the relay"
+        );
         assert!(
             !direct_for_inbound(&[(relay(), false)]),
             "only the relay is open"
@@ -1800,8 +1453,14 @@ mod tests {
         );
         assert!(!direct_for_inbound(&[]), "no path is open");
         // The writer keeps the stricter rule: it sends on the selected path.
-        assert!(!direct_for_writer(&[(ip(9), false), (relay(), false)]));
-        assert!(direct_for_writer(&[(ip(9), true), (relay(), false)]));
+        assert!(
+            !direct_for_writer(&[(ip(9), false), (relay(), false)]),
+            "a writer with only relay paths is not direct"
+        );
+        assert!(
+            direct_for_writer(&[(ip(9), true), (relay(), false)]),
+            "a writer with one open direct path is direct"
+        );
     }
 
     /// A test cut takes a path away from the selector, and iroh does not select again for a
@@ -1810,6 +1469,7 @@ mod tests {
     #[test]
     fn a_selected_direct_path_that_a_test_blocked_is_not_a_direct_path() {
         use super::{direct_for_writer, unblocked};
+        let _guard = ::habilis_network_test_tracing::init();
         let paths = vec![(ip(9), true), (relay(), false)];
         assert!(
             direct_for_writer(&paths),
@@ -1828,8 +1488,12 @@ mod tests {
     #[test]
     fn the_accepting_end_gives_up_a_path_that_a_test_blocked_too() {
         use super::{direct_for_inbound, unblocked};
+        let _guard = ::habilis_network_test_tracing::init();
         let paths = vec![(ip(9), false), (relay(), false)];
-        assert!(direct_for_inbound(&paths));
+        assert!(
+            direct_for_inbound(&paths),
+            "the accepting end keeps a path that is direct"
+        );
         assert!(
             !direct_for_inbound(unblocked(&paths, |path| matches!(
                 path,
@@ -1841,34 +1505,34 @@ mod tests {
 
     #[test]
     fn a_path_that_no_test_blocked_is_kept() {
-        use super::unblocked;
+        let _guard = ::habilis_network_test_tracing::init();
         let paths = vec![(ip(9), true), (relay(), false)];
-        assert_eq!(
-            unblocked(&paths, |_| false).cloned().collect::<Vec<_>>(),
-            paths
-        );
+        let kept: Vec<_> = super::unblocked(&paths, |_| false).cloned().collect();
+        assert_eq!(kept, paths, "a path that no test blocked is kept");
     }
 
     #[test]
     fn an_ip_path_that_a_test_blocked_for_this_node_is_blocked() {
-        use super::blocked_by_test;
-        use habilis_network_iroh_transport_util::block_ip_to;
+        let _guard = ::habilis_network_test_tracing::init();
         let local = SecretKey::from_bytes(&[141; 32]).public();
         let other = SecretKey::from_bytes(&[142; 32]).public();
-        block_ip_to(local, [9]);
-        assert!(blocked_by_test(local, &ip(9)), "the blocked port");
-        assert!(!blocked_by_test(local, &ip(10)), "another port");
-        assert!(!blocked_by_test(local, &relay()), "the relay");
-        assert!(!blocked_by_test(other, &ip(9)), "another node");
-        block_ip_to(local, []);
-        assert!(!blocked_by_test(local, &ip(9)), "an empty set clears");
+        habilis_network_iroh_transport_util::block_ip_to(local, [9]);
+        assert!(super::blocked_by_test(local, &ip(9)), "the blocked port");
+        assert!(!super::blocked_by_test(local, &ip(10)), "another port");
+        assert!(!super::blocked_by_test(local, &relay()), "the relay");
+        assert!(!super::blocked_by_test(other, &ip(9)), "another node");
+        habilis_network_iroh_transport_util::block_ip_to(local, []);
+        assert!(
+            !super::blocked_by_test(local, &ip(9)),
+            "an empty set clears"
+        );
     }
 
     #[test]
     fn a_webrtc_path_that_a_test_blocked_toward_one_remote_is_blocked() {
-        use super::blocked_by_test;
         use habilis_network_iroh_transport_util::{Rung, WEBRTC_TRANSPORT_ID, block_rung_to};
         use iroh_base::CustomAddr;
+        let _guard = ::habilis_network_test_tracing::init();
         let local = SecretKey::from_bytes(&[143; 32]).public();
         let cut = SecretKey::from_bytes(&[144; 32]).public();
         let kept = SecretKey::from_bytes(&[145; 32]).public();
@@ -1879,114 +1543,136 @@ mod tests {
             ))
         };
         block_rung_to(local, Rung::WebRtc, cut, true);
-        assert!(blocked_by_test(local, &webrtc(cut)), "the cut remote");
-        assert!(!blocked_by_test(local, &webrtc(kept)), "another remote");
-        assert!(!blocked_by_test(local, &ip(9)), "another rung");
+        assert!(
+            super::blocked_by_test(local, &webrtc(cut)),
+            "the cut remote"
+        );
+        assert!(
+            !super::blocked_by_test(local, &webrtc(kept)),
+            "another remote"
+        );
+        assert!(!super::blocked_by_test(local, &ip(9)), "another rung");
         block_rung_to(local, Rung::WebRtc, cut, false);
-        assert!(!blocked_by_test(local, &webrtc(cut)), "cleared");
+        assert!(!super::blocked_by_test(local, &webrtc(cut)), "cleared");
     }
 
     #[test]
-    async fn a_cell_arrives_when_the_accepting_end_selected_no_path() {
-        // The dialling end sends on a selected IP path. The accepting end opened no
-        // path of its own and selects none, but its connection has the IP path open.
-        let stuck_after = Duration::from_millis(300);
-        let from = loopback_node(31, stuck_after).await;
-        let mut to = loopback_node_with(32, stuck_after, Some(Arc::new(NeverSelects))).await;
-        assert!(
-            cell_arrives(&from, &mut to).await,
-            "a cell that came over IP is not a cell over the relay"
-        );
-        assert_eq!(to.forwarder.dropped.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            from.forwarder.pool.refused_on_relay.load(Ordering::Relaxed),
-            0,
-            "and the writer did not refuse the relay on the way"
-        );
+    fn a_cell_arrives_when_the_accepting_end_selected_no_path() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // The dialling end sends on a selected IP path. The accepting end opened no
+            // path of its own and selects none, but its connection has the IP path open.
+            let stuck_after = Duration::from_millis(300);
+            let from = loopback_node(31, stuck_after).await;
+            // trait object: the test passes a selector that never selects
+            let mut to = loopback_node_with(32, stuck_after, Some(Arc::new(NeverSelects))).await;
+            assert!(
+                cell_arrives(&from, &mut to).await,
+                "a cell that came over IP is not a cell over the relay"
+            );
+            assert_eq!(
+                to.forwarder.dropped.load(Ordering::Relaxed),
+                0,
+                "the accepting end drops the cell it selected no path for"
+            );
+            assert_eq!(
+                from.forwarder.pool.refused_on_relay.load(Ordering::Relaxed),
+                0,
+                "and the writer did not refuse the relay on the way"
+            );
+        });
     }
 
     #[test]
-    async fn a_writer_retires_when_its_connection_closes_under_it() {
-        // A direct hop, then the far underlay goes away while no cell is in
-        // flight. The writer must see the close: a dead connection read as one
-        // with no direct path would mark the hop stuck and never end the writer.
-        let stuck_after = Duration::from_millis(300);
-        let from = loopback_node(21, stuck_after).await;
-        let mut to = loopback_node(22, stuck_after).await;
-        assert!(cell_arrives(&from, &mut to).await, "the hop is direct");
-        assert_eq!(live_writers(&from.forwarder), 1, "a writer carries it");
+    fn a_writer_retires_when_its_connection_closes_under_it() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // A direct hop, then the far underlay goes away while no cell is in
+            // flight. The writer must see the close: a dead connection read as one
+            // with no direct path would mark the hop stuck and never end the writer.
+            let stuck_after = Duration::from_millis(300);
+            let from = loopback_node(21, stuck_after).await;
+            let mut to = loopback_node(22, stuck_after).await;
+            assert!(cell_arrives(&from, &mut to).await, "the hop is direct");
+            assert_eq!(live_writers(&from.forwarder), 1, "a writer carries it");
 
-        to.forwarder.underlay.close().await;
+            to.forwarder.underlay.close().await;
 
-        // Longer than the deadline and the one-second tick, twice over.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while live_writers(&from.forwarder) > 0 && std::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        assert_eq!(
-            live_writers(&from.forwarder),
-            0,
-            "the writer retires with its connection"
-        );
-        assert!(
-            from.forwarder.stuck_hops().is_empty(),
-            "a hop whose connection closed is not stuck on the relay"
-        );
-    }
-
-    #[test]
-    async fn a_writer_retires_itself_and_releases_its_bytes_when_it_gives_up() {
-        expect_warn(
-            "habilis_network_iroh_multihop_transport::underlay",
-            "multihop forwarder: hop without a vector that no delivered cell named",
-        );
-        // The unpruned-map leak: every next-hop id a peer ever names used to
-        // leave an entry behind, and its queued bytes charged, for the life of
-        // the process. The hop here is unreachable, so the writer gives up after
-        // its dial backoff and must clean up after itself.
-        let (forwarder, _app, _received) = forwarder().await;
-        let source = stranger(1);
-        let next = stranger(7);
-        forwarder.enqueue(&next, cell(vec![next.clone()], 0, source));
-        assert_eq!(live_writers(&forwarder), 1, "writer spawned");
-
-        // DIAL_ATTEMPTS with linear backoff is ~1s; allow margin.
-        for _ in 0..40 {
-            if live_writers(&forwarder) == 0 {
-                break;
+            // Longer than the deadline and the one-second tick, twice over.
+            let deadline = std_Instant::now() + Duration::from_secs(5);
+            while live_writers(&from.forwarder) > 0 && std_Instant::now() < deadline {
+                tokio_time::sleep(Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        assert_eq!(live_writers(&forwarder), 0, "writer retired its own entry");
-        assert_eq!(
-            forwarder.pool.queued_bytes.load(Ordering::Relaxed),
-            0,
-            "a dead hop must not hold the shared byte budget"
-        );
+            assert_eq!(
+                live_writers(&from.forwarder),
+                0,
+                "the writer retires with its connection"
+            );
+            assert!(
+                from.forwarder.stuck_hops().is_empty(),
+                "a hop whose connection closed is not stuck on the relay"
+            );
+        });
     }
 
     #[test]
-    async fn writer_spawns_stop_at_the_ceiling() {
-        expect_warn(
-            "habilis_network_iroh_multihop_transport::underlay",
-            "multihop forwarder: hop without a vector that no delivered cell named",
-        );
-        expect_warn(
-            "habilis_network_iroh_multihop_transport::underlay",
-            "reason=\"next-hop writer ceiling reached\"",
-        );
-        // Each cell names a fresh next hop, which is how a remote peer turns an
-        // unpruned writer map into unbounded tasks and dials.
-        let (forwarder, _app, _received) = forwarder().await;
-        let source = stranger(1);
-        for seed in 0..u8::try_from(MAX_WRITERS + 8).expect("fits") {
-            let next = stranger(seed.wrapping_add(100));
-            if next.underlay_id == UnderlayId::new(forwarder.underlay.id()) {
-                continue;
+    fn a_writer_retires_itself_and_releases_its_bytes_when_it_gives_up() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "multihop forwarder: hop without a vector that no delivered cell named",
+            );
+            // The unpruned-map leak: every next-hop id a peer ever names used to
+            // leave an entry behind, and its queued bytes charged, for the life of
+            // the process. The hop here is unreachable, so the writer gives up after
+            // its dial backoff and must clean up after itself.
+            let (forwarder, _app, _received) = forwarder().await;
+            let source = stranger(1);
+            let next = stranger(7);
+            forwarder.enqueue(&next, cell(vec![next], 0, source));
+            assert_eq!(live_writers(&forwarder), 1, "writer spawned");
+
+            // DIAL_ATTEMPTS with linear backoff is ~1s; allow margin.
+            for _ in 0..40 {
+                if live_writers(&forwarder) == 0 {
+                    break;
+                }
+                time::sleep(Duration::from_millis(100)).await;
             }
-            forwarder.enqueue(&next, cell(vec![next.clone()], 0, source.clone()));
-        }
-        assert!(live_writers(&forwarder) <= MAX_WRITERS);
+            assert_eq!(live_writers(&forwarder), 0, "writer retired its own entry");
+            assert_eq!(
+                forwarder.pool.queued_bytes.load(Ordering::Relaxed),
+                0,
+                "a dead hop must not hold the shared byte budget"
+            );
+        });
+    }
+
+    #[test]
+    fn writer_spawns_stop_at_the_ceiling() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "multihop forwarder: hop without a vector that no delivered cell named",
+            );
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "reason=\"next-hop writer ceiling reached\"",
+            );
+            // Each cell names a fresh next hop, which is how a remote peer turns an
+            // unpruned writer map into unbounded tasks and dials.
+            let (forwarder, _app, _received) = forwarder().await;
+            let source = stranger(1);
+            for seed in 0..u8::try_from(MAX_WRITERS + 8).expect("fits") {
+                let next = stranger(seed.wrapping_add(100));
+                if next.underlay_id == UnderlayId::new(forwarder.underlay.id()) {
+                    continue;
+                }
+                forwarder.enqueue(&next, cell(vec![next], 0, source));
+            }
+            assert!(
+                live_writers(&forwarder) <= MAX_WRITERS,
+                "the writers stop at the ceiling"
+            );
+        });
     }
 
     /// A test cut reaches a gate at once. The reading of the paths stands for `PATH_RECHECK`,
@@ -1997,6 +1683,7 @@ mod tests {
         use super::{GateRole, RelayGate};
         use habilis_network_iroh_transport_util::{Rung, block_rung};
 
+        let _guard = ::habilis_network_test_tracing::init();
         let local: EndpointId = SecretKey::from_bytes(&[41; 32]).public();
         let relay: iroh::RelayUrl = "http://127.0.0.1:1".parse().expect("relay url");
         let ip: SocketAddr = "127.0.0.1:2".parse().expect("ip addr");

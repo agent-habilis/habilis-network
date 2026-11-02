@@ -1,11 +1,9 @@
 //! An event of a thread that no test owns goes to every live test, and the failure
 //! text names them all.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Barrier};
 use std::thread;
-
-use habilis_network_test_tracing::init;
 
 fn named<T: Send + 'static>(
     name: &str,
@@ -19,20 +17,25 @@ fn named<T: Send + 'static>(
 
 #[test]
 fn an_event_of_a_worker_thread_names_every_live_sync_test() {
+    // the barrier is shared by the three threads
     let live = Arc::new(Barrier::new(3));
+    // the second barrier is shared by the three threads
     let emitted = Arc::new(Barrier::new(3));
     let tests: Vec<_> = ["sync_a", "sync_b"]
         .into_iter()
         .map(|name| {
             let (live, emitted) = (Arc::clone(&live), Arc::clone(&emitted));
             named(name, move || {
-                catch_unwind(AssertUnwindSafe(|| {
-                    let _guard = init();
+                habilis_network_test_tracing::catch_panic(AssertUnwindSafe(|| {
+                    let _guard = habilis_network_test_tracing::init();
                     live.wait();
                     emitted.wait();
                 }))
                 .err()
-                .and_then(|err| err.downcast_ref::<String>().cloned())
+                .and_then(|err| {
+                    let text: Option<&String> = err.downcast_ref();
+                    text.cloned()
+                })
             })
         })
         .collect();

@@ -4,15 +4,22 @@
 //! `tests/` integration tests can drive `Game` directly — for a
 //! binary-only crate, an integration test would have no way to reach any
 //! of this at all.
-//!
-//! The unstable-feature gate lives here, not in `main.rs`: only `ui.rs`
-//! writes components with the bare `yield` keyword, and that code lives
-//! in this library. See `native/rust-toolchain.toml` for why `native/` is
-//! pinned to a specific nightly.
-#![feature(coroutines, yield_expr)]
 
-pub mod app;
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
+pub mod cycle;
+pub mod dir;
+pub mod game;
 pub mod grid;
+pub mod input;
+pub mod light_cycles;
+pub mod outcome;
 pub mod round;
+pub mod round_descriptor;
 pub mod sim;
+pub mod snapshot;
+pub mod spawn;
+pub mod split_mix64;
 pub mod ui;
+pub mod ui_component;
+pub mod world;

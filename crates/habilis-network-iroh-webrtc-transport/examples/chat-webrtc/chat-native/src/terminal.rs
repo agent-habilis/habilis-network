@@ -16,12 +16,13 @@ use tokio::sync::mpsc;
 
 use crate::room::Membership;
 
+use tokio::io;
 const CHANNEL_CAPACITY: usize = 64;
 
 /// One line of a transcript.
 #[must_use]
-pub fn render(msg: &ServerMsg) -> String {
-    match msg {
+pub fn render(message: &ServerMsg) -> String {
+    match message {
         ServerMsg::Welcome { you, roster } => {
             format!("* you are \"{you}\" — in the room: {}", roster.join(", "))
         }
@@ -40,7 +41,7 @@ pub fn render(msg: &ServerMsg) -> String {
 pub fn lines() -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
     tokio::spawn(async move {
-        let mut stdin = BufReader::new(tokio::io::stdin()).lines();
+        let mut stdin = BufReader::new(io::stdin()).lines();
         while let Ok(Some(line)) = stdin.next_line().await {
             if tx.send(line).await.is_err() {
                 break;
@@ -55,11 +56,11 @@ pub fn lines() -> mpsc::Receiver<String> {
 /// The task owns the membership, so the member stays in the roster exactly as
 /// long as this channel is alive and leaves when it is dropped.
 #[must_use]
-pub fn from_membership(mut membership: Membership) -> mpsc::Receiver<ServerMsg> {
+pub fn membership_events(mut membership: Membership) -> mpsc::Receiver<ServerMsg> {
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
     tokio::spawn(async move {
         while let Some(fanout) = membership.next_broadcast().await {
-            if tx.send(fanout.msg).await.is_err() {
+            if tx.send(fanout.message).await.is_err() {
                 break;
             }
         }
@@ -94,8 +95,8 @@ where
                 say(text).await?;
             }
             received = incoming.recv() => {
-                let Some(msg) = received else { return Ok(()) };
-                println!("{}", render(&msg));
+                let Some(message) = received else { return Ok(()) };
+                println!("{}", render(&message));
             }
         }
     }

@@ -42,7 +42,7 @@ mesh.
 ```
 crates/habilis-network-netplay/          # the rollback session, lobby and mesh transport — used by both clients
 └── examples/light-cycles/
-    ├── native/                 # terminal client — own cargo workspace, pinned to nightly
+    ├── native/                 # terminal client — own cargo workspace, needs a nightly feature
     │   ├── game/               #   CLI (create/join), game logic, the habilis-network embedding
     │   └── visage-rust-tui/    #   a first-draft Rust port of visage-dom + visage-tui's terminal diffing
     └── web/                    # browser client — own cargo workspace + Bun frontend
@@ -98,7 +98,7 @@ and on macOS `brew install llvm` (Apple's clang has no wasm backend, and
 
 ```sh
 cd crates/habilis-network-netplay/examples/light-cycles/web
-./build-wasm.sh
+bun build-wasm.ts
 bun install
 bun run dev
 # open the URL dev printed (3000, or the next free port) — "create game" or paste a room code to join

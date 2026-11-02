@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use habilis_network::membership::{Membership, Request, UnknownPeer};
 use tokio::sync::oneshot;
 
+use tokio::time;
 /// How long a node may take to learn a member from its `PeerInfo`. It is the time the test waits for
 /// a fact, not a sleep of a guessed length: the request is sent again every 250 ms and the wait
 /// ends at the first answer that applied.
@@ -26,7 +27,7 @@ pub(crate) async fn until_peer_known(
         match membership.request(&build).await.expect("the loop answers") {
             Ok(()) => return,
             Err(_) if Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                time::sleep(Duration::from_millis(250)).await;
             }
             Err(unknown) => panic!(
                 "{unknown} after {PEER_KNOWN_DEADLINE:?}: the request on {peer:?} did not apply"

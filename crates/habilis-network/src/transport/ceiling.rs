@@ -49,7 +49,7 @@ pub(crate) const EVICTED_JITTER: f64 = 0.2;
 
 /// The peers that evicted us, each until when proactive dials to it wait. A send is never
 /// held by this: a node that has something to say dials at once.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct EvictionBackoff {
     until: HashMap<EndpointId, Instant>,
 }
@@ -67,7 +67,7 @@ impl EvictionBackoff {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Copy)]
 struct Entry {
     opened_at: Option<Instant>,
     last_use: Option<Instant>,
@@ -85,7 +85,7 @@ impl Entry {
 }
 
 /// A peer that an admission may evict, in the order of rule 3.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 struct Candidate {
     /// 0: old enough and idle; 1: old enough; 2: younger than [`MIN_AGE`].
     class: u8,
@@ -94,7 +94,7 @@ struct Candidate {
 }
 
 /// What an admission did to the ceiling.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub(crate) struct Admission {
     /// The peers to evict now: close their connections and detach their sessions.
     pub(crate) evict: Vec<EndpointId>,
@@ -104,7 +104,7 @@ pub(crate) struct Admission {
 }
 
 /// The ledger of the direct connections of a node, and the ceiling `C`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Ceiling {
     cap: usize,
     /// Whether an admission above the cap evicts the least recently used peer. The cache of the
@@ -335,14 +335,12 @@ impl Ceiling {
         if batch_due {
             let target = (self.cap * 9).div_ceil(10);
             let extra = units.saturating_sub(evict.len()).saturating_sub(target);
-            evict.extend(
-                candidates
-                    .iter()
-                    .skip(evict.len())
-                    .take_while(|candidate| candidate.class == 0)
-                    .take(extra)
-                    .map(|candidate| candidate.peer),
-            );
+            let already = evict.len();
+            let remaining = candidates.iter().skip(already);
+            let victims = remaining
+                .take_while(|candidate| candidate.class == 0)
+                .take(extra);
+            evict.extend(victims.map(|candidate| candidate.peer));
             self.last_batch = Some(now);
         }
         // The victims leave the count: a registered peer is still registered until the caller
@@ -350,12 +348,10 @@ impl Ceiling {
         if evict.len() < need {
             tracing::debug!(target: super::LOG_TARGET, units, cap = self.cap, "every other peer is busy: over the ceiling");
         }
-        if let Some(young) = candidates
+        let young_candidates = candidates
             .iter()
-            .filter(|candidate| candidate.class == 2 && evict.contains(&candidate.peer))
-            .map(|candidate| candidate.peer)
-            .next()
-        {
+            .filter(|candidate| candidate.class == 2 && evict.contains(&candidate.peer));
+        if let Some(young) = young_candidates.map(|candidate| candidate.peer).next() {
             tracing::info!(target: super::LOG_TARGET, peer = %young.fmt_short(), "evicting a peer younger than the minimum age: the ceiling holds");
         }
         Admission {
@@ -367,14 +363,14 @@ impl Ceiling {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::testing::endpoint_id;
-    use habilis_network_test_tracing::test;
+    use super::{Admission, Ceiling, Duration, EvictionBackoff, HashSet, Instant};
+    use crate::testing;
 
     #[test]
     fn an_eviction_holds_proactive_dials_for_a_minute_within_the_jitter() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
-        let peer = endpoint_id(1);
+        let peer = testing::endpoint_id(1);
         for (spread, secs) in [(-1.0, 48), (0.0, 60), (1.0, 72)] {
             let mut backoff = EvictionBackoff::default();
             assert!(
@@ -382,10 +378,16 @@ mod tests {
                 "nothing is held before an eviction"
             );
             backoff.note(peer, start, spread);
-            assert!(backoff.holds(&peer, at(start, secs - 1)));
-            assert!(!backoff.holds(&peer, at(start, secs + 1)));
             assert!(
-                !backoff.holds(&endpoint_id(2), start),
+                backoff.holds(&peer, at(start, secs - 1)),
+                "an eviction holds proactive dials for a minute within the jitter"
+            );
+            assert!(
+                !backoff.holds(&peer, at(start, secs + 1)),
+                "the eviction hold ends after the jitter window"
+            );
+            assert!(
+                !backoff.holds(&testing::endpoint_id(2), start),
                 "only that peer is held"
             );
         }
@@ -393,11 +395,16 @@ mod tests {
 
     #[test]
     fn a_noted_eviction_forgets_the_expired_ones() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut backoff = EvictionBackoff::default();
-        backoff.note(endpoint_id(1), start, 0.0);
-        backoff.note(endpoint_id(2), at(start, 100), 0.0);
-        assert_eq!(backoff.until.len(), 1);
+        backoff.note(testing::endpoint_id(1), start, 0.0);
+        backoff.note(testing::endpoint_id(2), at(start, 100), 0.0);
+        assert_eq!(
+            backoff.until.len(),
+            1,
+            "a noted eviction forgets the expired ones and keeps one"
+        );
     }
 
     fn at(start: Instant, secs: u64) -> Instant {
@@ -408,10 +415,21 @@ mod tests {
     fn full(cap: usize, start: Instant) -> Ceiling {
         let mut ceiling = Ceiling::new(cap);
         for index in 0..cap {
-            let peer = endpoint_id(u8::try_from(index).unwrap());
-            assert!(ceiling.register_quic(peer, start).evict.is_empty());
+            let peer = testing::endpoint_id(
+                u8::try_from(index).expect("the test caps are at most 10, so the index fits a u8"),
+            );
+            assert!(
+                ceiling.register_quic(peer, start).evict.is_empty(),
+                "a full ceiling evicts nobody for the first quic peer"
+            );
             // The lower the index, the older the last use.
-            ceiling.touch(peer, at(start, 10 + u64::try_from(index).unwrap()));
+            ceiling.touch(
+                peer,
+                at(
+                    start,
+                    10 + u64::try_from(index).expect("an index fits a u64"),
+                ),
+            );
         }
         ceiling
     }
@@ -424,45 +442,59 @@ mod tests {
 
     #[test]
     fn the_newcomer_past_the_ceiling_evicts_the_least_recently_used_idle_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = full(4, start);
         let now = at(start, 200);
-        let admission = ceiling.register_quic(endpoint_id(100), now);
+        let admission = ceiling.register_quic(testing::endpoint_id(100), now);
         assert_eq!(
             admission.evict.first(),
-            Some(&endpoint_id(0)),
+            Some(&testing::endpoint_id(0)),
             "the LRU goes first"
         );
         apply(&mut ceiling, &admission);
-        assert!(ceiling.units() <= 4);
-        assert_eq!(admission.over_ceiling, 0);
+        assert!(
+            ceiling.units() <= 4,
+            "the ceiling holds at most four units after the newcomer"
+        );
+        assert_eq!(
+            admission.over_ceiling, 0,
+            "no unit is over the ceiling after the eviction"
+        );
     }
 
     #[test]
     fn a_peer_under_the_ceiling_evicts_nobody() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::new(4);
         for index in 0..4u8 {
             assert!(
                 ceiling
-                    .register_quic(endpoint_id(index), start)
+                    .register_quic(testing::endpoint_id(index), start)
                     .evict
-                    .is_empty()
+                    .is_empty(),
+                "a peer under the ceiling evicts nobody"
             );
         }
-        assert_eq!(ceiling.units(), 4);
+        assert_eq!(
+            ceiling.units(),
+            4,
+            "the ceiling holds four units when no one is evicted"
+        );
     }
 
     #[test]
     fn a_peer_younger_than_a_minute_is_kept_while_an_older_one_can_go() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::new(2);
-        let (old, young) = (endpoint_id(1), endpoint_id(2));
+        let (old, young) = (testing::endpoint_id(1), testing::endpoint_id(2));
         ceiling.register_quic(old, start);
         ceiling.register_quic(young, at(start, 95));
         ceiling.touch(old, at(start, 99));
         ceiling.touch(young, at(start, 96));
-        let admission = ceiling.register_quic(endpoint_id(3), at(start, 100));
+        let admission = ceiling.register_quic(testing::endpoint_id(3), at(start, 100));
         assert_eq!(
             admission.evict.first(),
             Some(&old),
@@ -472,46 +504,64 @@ mod tests {
 
     #[test]
     fn when_every_peer_is_young_the_least_recently_used_goes_anyway() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::new(2);
-        ceiling.register_quic(endpoint_id(1), start);
-        ceiling.register_quic(endpoint_id(2), at(start, 1));
-        ceiling.touch(endpoint_id(2), at(start, 5));
-        let admission = ceiling.register_quic(endpoint_id(3), at(start, 10));
-        assert_eq!(admission.evict.first(), Some(&endpoint_id(1)));
+        ceiling.register_quic(testing::endpoint_id(1), start);
+        ceiling.register_quic(testing::endpoint_id(2), at(start, 1));
+        ceiling.touch(testing::endpoint_id(2), at(start, 5));
+        let admission = ceiling.register_quic(testing::endpoint_id(3), at(start, 10));
+        assert_eq!(
+            admission.evict.first(),
+            Some(&testing::endpoint_id(1)),
+            "the least recently used young peer is the one evicted"
+        );
         assert_eq!(admission.over_ceiling, 0, "the ceiling holds");
     }
 
     #[test]
     fn a_busy_peer_is_never_evicted_and_a_ceiling_of_busy_peers_is_overrun_by_the_newcomer() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = full(2, start);
-        ceiling.busy_begin(endpoint_id(0));
-        ceiling.busy_begin(endpoint_id(1));
-        let admission = ceiling.register_quic(endpoint_id(9), at(start, 200));
+        ceiling.busy_begin(testing::endpoint_id(0));
+        ceiling.busy_begin(testing::endpoint_id(1));
+        let admission = ceiling.register_quic(testing::endpoint_id(9), at(start, 200));
         assert!(admission.evict.is_empty(), "nobody is idle");
-        assert_eq!(admission.over_ceiling, 1);
-        assert_eq!(ceiling.over_ceiling(), 1);
+        assert_eq!(admission.over_ceiling, 1, "a busy peer is never evicted");
+        assert_eq!(
+            ceiling.over_ceiling(),
+            1,
+            "the newcomer overruns a ceiling of busy peers by one"
+        );
         // The sends end: the next admission evicts down.
-        ceiling.busy_end(endpoint_id(0), at(start, 201));
-        ceiling.busy_end(endpoint_id(1), at(start, 201));
-        let later = ceiling.register_quic(endpoint_id(10), at(start, 400));
-        assert!(!later.evict.is_empty());
+        ceiling.busy_end(testing::endpoint_id(0), at(start, 201));
+        ceiling.busy_end(testing::endpoint_id(1), at(start, 201));
+        let later = ceiling.register_quic(testing::endpoint_id(10), at(start, 400));
+        assert!(
+            !later.evict.is_empty(),
+            "the later newcomer evicts nobody once the ceiling is overrun"
+        );
     }
 
     #[test]
     fn a_batch_evicts_down_to_ninety_percent_once_per_five_seconds() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = full(10, start);
-        let first = ceiling.register_quic(endpoint_id(100), at(start, 200));
+        let first = ceiling.register_quic(testing::endpoint_id(100), at(start, 200));
         // 10 + 1 - 9 = 2 victims: one that is needed, one for the batch.
-        assert_eq!(first.evict.len(), 2);
+        assert_eq!(
+            first.evict.len(),
+            2,
+            "the first batch evicts two peers down to ninety percent"
+        );
         apply(&mut ceiling, &first);
-        assert_eq!(ceiling.units(), 9);
+        assert_eq!(ceiling.units(), 9, "nine units remain after the batch");
         // Two seconds later: only what is needed.
-        let second = ceiling.register_quic(endpoint_id(101), at(start, 202));
+        let second = ceiling.register_quic(testing::endpoint_id(101), at(start, 202));
         assert!(second.evict.is_empty(), "9 + 1 fits");
-        let third = ceiling.register_quic(endpoint_id(102), at(start, 203));
+        let third = ceiling.register_quic(testing::endpoint_id(102), at(start, 203));
         assert_eq!(
             third.evict.len(),
             1,
@@ -519,12 +569,17 @@ mod tests {
         );
         apply(&mut ceiling, &third);
         // Five seconds after the first batch: a batch again.
-        let fourth = ceiling.register_quic(endpoint_id(103), at(start, 206));
-        assert_eq!(fourth.evict.len(), 2);
+        let fourth = ceiling.register_quic(testing::endpoint_id(103), at(start, 206));
+        assert_eq!(
+            fourth.evict.len(),
+            2,
+            "the next batch waits out its five seconds and evicts two more"
+        );
     }
 
     #[test]
     fn the_count_never_exceeds_the_ceiling_over_a_long_run_of_admissions() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::new(8);
         let mut state = 12345_u64;
@@ -532,7 +587,9 @@ mod tests {
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);
-            let peer = endpoint_id(u8::try_from(state >> 56).unwrap());
+            let peer = testing::endpoint_id(
+                u8::try_from(state >> 56).expect("a u64 shifted right by 56 fits a u8"),
+            );
             let now = at(start, step * 3);
             let admission = ceiling.register_quic(peer, now);
             apply(&mut ceiling, &admission);
@@ -547,37 +604,52 @@ mod tests {
 
     #[test]
     fn a_refusing_ceiling_evicts_nobody_above_its_cap() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::refusing(2);
         for byte in 1..=4 {
-            let admission = ceiling.register_session(endpoint_id(byte), start);
+            let admission = ceiling.register_session(testing::endpoint_id(byte), start);
             assert!(
                 admission.evict.is_empty(),
                 "peer {byte}: nothing is evicted"
             );
         }
         assert_eq!(ceiling.units(), 4, "the count passes the cap, no victim");
-        assert!(ceiling.refuses());
-        assert!(ceiling.holds(endpoint_id(1)));
-        assert!(!ceiling.holds(endpoint_id(9)));
+        assert!(
+            ceiling.refuses(),
+            "a refusing ceiling refuses newcomers above its cap"
+        );
+        assert!(
+            ceiling.holds(testing::endpoint_id(1)),
+            "peer 1 is still held by the refusing ceiling"
+        );
+        assert!(
+            !ceiling.holds(testing::endpoint_id(9)),
+            "peer 9 is not held by the refusing ceiling"
+        );
         let mut cache = Ceiling::new(2);
-        cache.register_session(endpoint_id(1), start);
-        cache.register_session(endpoint_id(2), start);
-        let admission = cache.register_session(endpoint_id(3), start);
+        cache.register_session(testing::endpoint_id(1), start);
+        cache.register_session(testing::endpoint_id(2), start);
+        let admission = cache.register_session(testing::endpoint_id(3), start);
         assert_eq!(admission.evict.len(), 1, "the cache evicts, as before");
     }
 
     #[test]
     fn a_session_to_a_neighbor_does_not_count_until_the_peer_stops_being_one() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::new(2);
-        let neighbor = endpoint_id(1);
+        let neighbor = testing::endpoint_id(1);
         ceiling.set_neighbors(&HashSet::from([neighbor]), start);
         ceiling.register_session(neighbor, start);
         assert_eq!(ceiling.units(), 0, "a gossip link is outside the ceiling");
-        ceiling.register_quic(endpoint_id(2), start);
-        ceiling.register_quic(endpoint_id(3), start);
-        assert_eq!(ceiling.units(), 2);
+        ceiling.register_quic(testing::endpoint_id(2), start);
+        ceiling.register_quic(testing::endpoint_id(3), start);
+        assert_eq!(
+            ceiling.units(),
+            2,
+            "a session to a neighbor does not count until the peer stops being one"
+        );
         // It stops being a neighbor: its session counts from now on, and the ceiling holds.
         let admission = ceiling.set_neighbors(&HashSet::new(), at(start, 200));
         assert_eq!(admission.evict.len(), 1, "one for the ceiling");
@@ -589,40 +661,59 @@ mod tests {
 
     #[test]
     fn two_peers_at_a_ceiling_of_two_and_a_newcomer_evict_exactly_one_then_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::new(2);
-        ceiling.register_quic(endpoint_id(1), start);
-        ceiling.register_quic(endpoint_id(2), start);
-        let admission = ceiling.register_quic(endpoint_id(3), at(start, 100));
-        assert_eq!(admission.evict.len(), 1);
+        ceiling.register_quic(testing::endpoint_id(1), start);
+        ceiling.register_quic(testing::endpoint_id(2), start);
+        let admission = ceiling.register_quic(testing::endpoint_id(3), at(start, 100));
+        assert_eq!(
+            admission.evict.len(),
+            1,
+            "the newcomer evicts exactly one peer at a ceiling of two"
+        );
         apply(&mut ceiling, &admission);
         // Touching, a second look at a held peer, a close: no eviction.
-        ceiling.touch(endpoint_id(3), at(start, 101));
+        ceiling.touch(testing::endpoint_id(3), at(start, 101));
         assert!(
             ceiling
-                .register_quic(endpoint_id(3), at(start, 102))
+                .register_quic(testing::endpoint_id(3), at(start, 102))
                 .evict
-                .is_empty()
+                .is_empty(),
+            "the next newcomer evicts nobody after the eviction"
         );
-        let survivor = if admission.evict[0] == endpoint_id(1) {
-            endpoint_id(2)
+        let survivor = if admission.evict[0] == testing::endpoint_id(1) {
+            testing::endpoint_id(2)
         } else {
-            endpoint_id(1)
+            testing::endpoint_id(1)
         };
         ceiling.unregister_quic(survivor);
-        assert_eq!(ceiling.units(), 1);
+        assert_eq!(
+            ceiling.units(),
+            1,
+            "one unit remains after the second eviction"
+        );
     }
 
     #[test]
     fn a_session_and_its_connection_are_one_unit() {
+        let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::new(1);
-        ceiling.register_session(endpoint_id(1), start);
-        ceiling.register_quic(endpoint_id(1), at(start, 1));
-        assert_eq!(ceiling.units(), 1);
-        ceiling.unregister_session(endpoint_id(1));
+        ceiling.register_session(testing::endpoint_id(1), start);
+        ceiling.register_quic(testing::endpoint_id(1), at(start, 1));
+        assert_eq!(
+            ceiling.units(),
+            1,
+            "a session and its connection count as one unit"
+        );
+        ceiling.unregister_session(testing::endpoint_id(1));
         assert_eq!(ceiling.units(), 1, "the connection still counts");
-        ceiling.unregister_quic(endpoint_id(1));
-        assert_eq!(ceiling.units(), 0);
+        ceiling.unregister_quic(testing::endpoint_id(1));
+        assert_eq!(
+            ceiling.units(),
+            0,
+            "no unit remains after the session and its connection close"
+        );
     }
 }

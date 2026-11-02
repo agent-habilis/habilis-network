@@ -11,6 +11,7 @@ use crate::gate::{self, Kind};
 use crate::scope::Scope;
 use crate::util::output;
 
+use crate::wasm;
 pub(crate) fn fmt(sh: &Shell, scope: &Scope, check: bool) -> TaskOutcome {
     // No `--workspace`: `cargo fmt` already covers every member of a virtual
     // workspace, and does not accept the flag.
@@ -64,7 +65,7 @@ pub(crate) fn ci(sh: &Shell, scope: &Scope) -> TaskOutcome {
     lint(sh, scope)?;
     doc(sh, scope)?;
     check(sh, scope)?;
-    crate::wasm::run(sh, scope)?;
+    wasm::run(sh, scope)?;
     test(sh, scope)?;
     output::status("Finished", "the gate is green");
     Ok(())

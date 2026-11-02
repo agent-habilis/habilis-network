@@ -8,29 +8,34 @@
 //! into the engine's file layout, which then could not be rearranged without
 //! churning every one of them.
 
+#![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
+
 mod author_key;
-pub mod base58check;
+pub mod base58_error;
+pub use base58_error as base58check;
 mod content_hash;
 pub mod crypto;
 mod dedup_key;
 pub mod directory;
-mod ident;
+mod identifier;
 mod newtype;
-mod topic;
+mod topic_id;
+use topic_id as topic;
 
 pub mod identity;
 /// Creator-minted invites to an invite-only mesh. Lives here rather than in
 /// the engine because `InviteTicket` is part of the join vocabulary a
 /// consumer speaks, and `resolver::JoinTarget` is defined in terms of it.
 pub mod invite;
-pub mod mesh;
-pub mod message;
-pub mod nickname;
-pub mod peer_addr;
+pub mod meshes;
+pub mod messages;
+/// Nicknames: display labels for members. A nickname is not an identity.
+pub mod nickname_error;
+pub mod peer_addr_error;
 pub mod reassembly;
 /// A join token: a literal mesh id, or a creator-minted invite ticket.
 pub mod resolver;
-pub mod seal;
+pub mod seal_error;
 mod wordlist;
 
 /// The forked `iroh-base` this crate's types are built on, re-exported whole.
@@ -52,21 +57,21 @@ pub use author_key::AuthorKey;
 pub use content_hash::ContentHash;
 pub use crypto::{Password, Seed, SymmetricKey, TicketAuth, TicketSecret, ct_eq};
 pub use dedup_key::DedupKey;
-pub use habilis_network_util::clock::UnixSecs;
+pub use habilis_network_util::unix_secs::UnixSecs;
 pub use identity::{Identity, encode_pubkey};
-pub use mesh::{
-    AdvertiseRequiresReachable, ChoiceError, DEFAULT_DIRECTORY, DirectorySelection, LockedMesh,
-    Lookup, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName, NameError,
-    OptFlag, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport,
+pub use meshes::{
+    AdvertiseRequiresReachable, ChoiceError, ConfigError, DEFAULT_DIRECTORY, DirectorySelection,
+    LockedMesh, Lookup, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName,
+    NameError, OptFlag, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport,
     TransportPolicy, UnlockError, resolve_lookups, validate_advertise,
 };
-pub use message::{
-    AppFrameParams, AppTag, Authored, BodyError, Channel, CorrId, IdError, Message, MessageBody,
-    MessageId, MessageKind, PresenceSubtype, Proof, Shard, ShardGroup, Signer, Verified,
-    sole_addressee,
+pub use messages::{
+    AppFrameParams, AppTag, AppTagError, Authored, BodyError, Channel, CorrId, CorrIdError,
+    IdError, Message, MessageBody, MessageError, MessageId, MessageKind, PresenceSubtype, Proof,
+    Shard, ShardGroup, Signer, Verified, sole_addressee,
 };
-pub use nickname::{Nickname, NicknameError};
-pub use seal::seal_to_body;
+pub use nickname_error::{Nickname, NicknameError};
+pub use seal_error::{SealError, seal_to_body};
 pub use topic::TopicId;
 
 /// The invite token itself. Minting lives in
@@ -78,7 +83,7 @@ pub use crate::resolver::{JoinTarget, JoinTargetError};
 // Gate matches the definitions' (`any(test, feature)`): a narrower gate here
 // leaves them `pub` but unreachable under a plain `cargo test`.
 #[cfg(any(test, feature = "test-fixtures"))]
-pub use message::{BuildMsgParams, ChainCtx, build_msg_bytes};
+pub use messages::{BuildMsgParams, ChainCtx, build_msg_bytes};
 
 // Shared config for this crate's `proptest!` blocks: regression seeds land in
 // `tests/proptest-regressions` rather than at the crate root. Every block opts

@@ -4,26 +4,47 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A copy of the counters at one moment.
+///
+/// # Examples
+///
+/// A new set of counters starts at zero.
+///
+/// ```
+/// use habilis_network_iroh_gossip_transport::Stats;
+///
+/// let stats = Stats::default();
+/// assert_eq!(stats.frames_out, 0);
+/// assert_eq!(stats.dropped_no_sink, 0);
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Stats {
     /// Frames this member put on the topic, and their bytes (header included).
     pub frames_out: u64,
+    /// Bytes of the frames sent.
     pub bytes_out: u64,
     /// Frames that arrived from the topic, for any member, and their bytes. This
     /// is the flood volume that this member pays for.
     pub frames_in: u64,
+    /// Bytes of the frames taken off the topic.
     pub bytes_in: u64,
     /// Of `frames_in`: queued for iroh, for another member, not a frame this
     /// build reads, and refused because iroh was not reading fast enough.
     pub queued: u64,
+    /// Frames not addressed to this member.
     pub not_for_us: u64,
+    /// Frames that did not parse.
     pub malformed: u64,
+    /// Frames refused because the send queue was full.
     pub queue_full: u64,
     /// Datagrams that were not sent: no sink was attached, it did not fit a
     /// frame, it was empty, or the sink refused the frame.
     pub dropped_no_sink: u64,
+    /// Frames dropped because they were too large.
     pub dropped_too_large: u64,
+    /// Frames dropped because they were empty.
     pub dropped_empty: u64,
+    /// Frames dropped because the sink refused them.
     pub dropped_sink_refused: u64,
     /// Datagrams to a destination that the engine does not allow: a higher rung
     /// carries that pair.

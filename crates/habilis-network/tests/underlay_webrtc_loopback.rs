@@ -14,11 +14,15 @@ mod until_known;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Inbound, Membership, Request, Rung};
+use habilis_network::membership::{
+    self, Blocking, Inbound, Inspect, InspectHost, InspectTest, Membership, Messaging, Request,
+    Routing, Rung,
+};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
-use until_known::until_peer_known;
 
+use habilis_network::net;
+use tokio::time;
 /// Long enough for an ICE round on the application pair, then for the alive tick
 /// that offers the underlay session, then for a second ICE round.
 const STEP_DEADLINE: Duration = Duration::from_mins(3);
@@ -33,9 +37,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::Opts) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -58,33 +64,33 @@ impl Member {
     }
 
     async fn create_with(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport,
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
-        .await
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
+        let options = options
+            .transport(transport)
+            .relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
+        let mesh = creator.membership.node.mesh_id().to_string();
+        Self::open(
+            &membership::JoinOptions::default()
+                .nick(Some(nick.to_owned()))
+                .mesh(Some(mesh)),
+        )
         .await
     }
 
     async fn roster_len(&self) -> usize {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
+        let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+        roster
             .and_then(|roster| roster["peers"].as_array().map(Vec::len))
             .unwrap_or(0)
     }
@@ -95,9 +101,11 @@ impl Member {
 
     async fn block_ip_to(&self, ports: Vec<u16>) {
         self.membership
-            .request(|reply| Request::BlockIpTo {
-                remote_ports: ports,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockIpTo {
+                    remote_ports: ports,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
@@ -106,9 +114,11 @@ impl Member {
     /// The rung of the selected path on this member's pooled connection to `peer`.
     async fn rung_to(&self, peer: &str) -> Option<&'static str> {
         self.membership
-            .request(|reply| Request::SelectedRung {
-                peer: peer.to_owned(),
-                reply,
+            .request(|reply| {
+                Request::InspectTest(InspectTest::SelectedRung {
+                    peer: peer.to_owned(),
+                    reply,
+                })
             })
             .await
             .ok()
@@ -116,18 +126,20 @@ impl Member {
     }
 
     async fn block_rung_to(&self, rung: Rung, peer: &str, blocked: bool) {
-        until_peer_known(&self.membership, peer, |reply| Request::BlockRungTo {
-            rung,
-            peer: peer.to_owned(),
-            blocked,
-            reply,
+        until_known::until_peer_known(&self.membership, peer, |reply| {
+            Request::Blocking(Blocking::BlockRungTo {
+                rung,
+                peer: peer.to_owned(),
+                blocked,
+                reply,
+            })
         })
         .await;
     }
 
     async fn forwarded_cells(&self) -> u64 {
         self.membership
-            .request(|reply| Request::ForwardedCells { reply })
+            .request(|reply| Request::Routing(Routing::ForwardedCells { reply }))
             .await
             .expect("the loop answers")
     }
@@ -143,9 +155,11 @@ impl Member {
     /// Whether this member's multihop topology has a route to `peer` now.
     async fn has_route(&self, peer: &str) -> bool {
         self.membership
-            .request(|reply| Request::HasRoute {
-                peer: peer.to_owned(),
-                reply,
+            .request(|reply| {
+                Request::InspectHost(InspectHost::HasRoute {
+                    peer: peer.to_owned(),
+                    reply,
+                })
             })
             .await
             .expect("the loop answers")
@@ -154,7 +168,7 @@ impl Member {
     /// How many `WebRTC` sessions the underlay of this member holds.
     async fn underlay_sessions(&self) -> usize {
         self.membership
-            .request(|reply| Request::UnderlaySessions { reply })
+            .request(|reply| Request::Routing(Routing::UnderlaySessions { reply }))
             .await
             .expect("the loop answers")
     }
@@ -164,19 +178,19 @@ impl Member {
         let to = membership::parse_to(Some(to)).expect("a nickname");
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::Send { to, body, reply })
+            .request(|reply| Request::Messaging(Messaging::Send { to, body, reply }))
             .await
             .expect("the loop answers")
     }
 
     /// Whether a directed message with this text has arrived at this member.
     fn saw_msg(&mut self, text: &str) -> bool {
-        while let Ok(msg) = self.membership.inbound.try_recv() {
-            self.seen_msgs.push(msg);
+        while let Ok(message) = self.membership.inbound.try_recv() {
+            self.seen_msgs.push(message);
         }
         self.seen_msgs
             .iter()
-            .any(|msg| msg.directed && msg.text == text)
+            .any(|message| message.directed && message.text == text)
     }
 
     /// Wait until the selected rung to `peer` is `expected`. A probe goes out each
@@ -204,7 +218,7 @@ impl Member {
             if seen == Some(expected) {
                 return;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
         panic!(
             "{step}: expected the rung {expected}, the last rung read was {seen:?} \
@@ -221,7 +235,7 @@ impl Member {
             if self.underlay_sessions().await >= 1 {
                 return;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
         panic!("{step}: the underlay never opened a WebRTC session");
     }
@@ -240,7 +254,7 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
         if started.elapsed() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -248,9 +262,7 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
 fn the_underlay_opens_a_webrtc_session_to_a_neighbor_that_has_no_ip_path() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
         let bob = Member::join("bob", &alice).await;
         assert!(
@@ -309,9 +321,9 @@ async fn three_members(relay: &RelayUrl) -> (Member, Member, Member) {
 /// IP: alice to carol and alice to bob, on the application endpoint of each
 /// member. Carol and bob keep it.
 async fn cut_application_ip_from_alice(alice: &Member, bob: &Member, carol: &Member) {
-    alice
-        .block_ip_to(bob.ports().into_iter().chain(carol.ports()).collect())
-        .await;
+    let mut blocked = bob.ports();
+    blocked.extend(carol.ports());
+    alice.block_ip_to(blocked).await;
     bob.block_ip_to(alice.ports()).await;
     carol.block_ip_to(alice.ports()).await;
 }
@@ -359,9 +371,7 @@ async fn cut_webrtc_between_alice_and_bob(alice: &Member, bob: &Member) {
 fn the_underlay_opens_a_session_to_carol_when_only_the_application_ip_is_cut() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let (alice, bob, carol) = three_members(&relay).await;
         cut_application_ip_from_alice(&alice, &bob, &carol).await;
         alice
@@ -387,9 +397,7 @@ fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member() {
     let guard = habilis_network_test_tracing::init();
     guard.expect_warn(STAYS_ON_RELAY.0, STAYS_ON_RELAY.1);
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let (alice, mut bob, carol) = three_members(&relay).await;
         let run_started = Instant::now();
 
@@ -440,7 +448,7 @@ fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member() {
             );
             probes += 1;
             let _ = alice.send("bob", &format!("forward probe {probes}")).await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
 
         // A payload cell goes from alice to bob over the hop: the message arrives, and
@@ -457,7 +465,7 @@ fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member() {
                 sent_at.elapsed() < PAYLOAD_DEADLINE,
                 "the message never reached bob over the hop"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         assert!(
             carol.forwarded_cells().await > before,
@@ -472,7 +480,7 @@ fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member() {
                 warned_after.elapsed() < Duration::from_secs(45),
                 "the underlay never logged that it stays on the relay"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
 
         for member in [alice, bob, carol] {

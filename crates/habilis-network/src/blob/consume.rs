@@ -9,16 +9,19 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use iroh::Endpoint;
 use iroh::endpoint::Connection;
-use sha2::{Digest, Sha256};
-use tokio::io::{AsyncWrite, AsyncWriteExt as _};
+use sha2::Sha256;
+use tokio::io::AsyncWrite;
 
 use crate::lookup::{add_peer_addr, address_book, build_peer_endpoint};
 use crate::protocol::crypto::{Password, TicketAuth, TicketSecret};
 use crate::util::consts::MAX_BLOB_BYTES;
 
+use super::error::BlobError;
 use super::ticket::BlobTicket;
 use super::{BLOB_ALPN, HASH_LEN, SECRET_LEN};
 
+use crate::transport;
+use tokio::time;
 /// How long the first dial keeps retrying while the producer's address
 /// propagates through the lookups (mirrors the application's bridge ticket).
 const DISCOVERY_DEADLINE: Duration = Duration::from_secs(90);
@@ -34,40 +37,72 @@ const CHUNK: usize = 64 * 1024;
 /// A password mismatch with the ticket, dial/handshake failure, the producer
 /// refusing (bad secret / unknown blob), a size disagreement, a truncated
 /// stream, or a final digest that does not match the ticket.
-pub async fn fetch<W>(ticket: &BlobTicket, out: &mut W, password: Option<Password>) -> Result<()>
+///
+/// # Examples
+///
+/// It fetches a blob from its ticket and writes its bytes to the output. The doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network::ops::blob::{BlobTicket, fetch};
+/// use tokio::io::AsyncWrite;
+///
+/// # async fn demo<Writer: AsyncWrite + Unpin>(ticket: &BlobTicket, out: &mut Writer) {
+/// let _ = fetch(ticket, out, None).await;
+/// # }
+/// ```
+pub async fn fetch<Writer>(
+    ticket: &BlobTicket,
+    out: &mut Writer,
+    password: Option<Password>,
+) -> Result<(), BlobError>
 where
-    W: AsyncWrite + Unpin,
+    Writer: AsyncWrite + Unpin,
 {
     let token = auth_token(ticket, password.as_ref())?;
+    fetch_with_token(ticket, out, &token)
+        .await
+        .map_err(BlobError::internal)
+}
+
+async fn fetch_with_token<Writer>(
+    ticket: &BlobTicket,
+    out: &mut Writer,
+    token: &TicketSecret,
+) -> Result<()>
+where
+    Writer: AsyncWrite + Unpin,
+{
     let endpoint = build_peer_endpoint(&ticket.lookups).await?;
-    add_peer_addr(&address_book(&endpoint), ticket.addr.clone());
-    let result = fetch_over(&endpoint, ticket, &token, out).await;
+    add_peer_addr(&address_book(&endpoint), ticket.address.clone());
+    let result = fetch_over(&endpoint, ticket, token, out).await;
     endpoint.close().await;
     result
 }
 
-async fn fetch_over<W>(
+async fn fetch_over<Writer>(
     endpoint: &Endpoint,
     ticket: &BlobTicket,
     token: &TicketSecret,
-    out: &mut W,
+    out: &mut Writer,
 ) -> Result<()>
 where
-    W: AsyncWrite + Unpin,
+    Writer: AsyncWrite + Unpin,
 {
-    let conn = dial(endpoint, ticket).await?;
+    use sha2::Digest;
+    use tokio::io::AsyncWriteExt as _;
+    let connection = dial(endpoint, ticket).await?;
     // A fresh connection to a peer behind NAT starts on the relay and punches
     // inside it, so this waits rather than refusing at once. The producer
     // waits too; refusing here first spares the round trip and names the
     // cause.
-    crate::transport::refuse_relayed(
-        &conn,
+    transport::refuse_relayed(
+        &connection,
         ticket.relay_transport,
-        crate::transport::PROBE_DEADLINE,
+        transport::PROBE_DEADLINE,
         super::RELAY_REFUSED_CODE,
     )
     .await?;
-    let (mut send, mut recv) = conn.open_bi().await?;
+    let (mut send, mut recv) = connection.open_bi().await?;
 
     // Request: sha256 ‖ secret, then done sending.
     send.write_all(ticket.sha256.as_bytes()).await?;
@@ -78,7 +113,7 @@ where
     // coded reason before the size arrives.
     let mut size_buf = [0u8; 8];
     if recv.read_exact(&mut size_buf).await.is_err() {
-        return Err(refusal(&conn));
+        return Err(refusal(&connection));
     }
     let size = u64::from_le_bytes(size_buf);
     if size != ticket.size {
@@ -93,15 +128,16 @@ where
 
     let mut hasher = Sha256::new();
     let mut remaining = size;
-    let mut buf = vec![0u8; CHUNK];
+    let mut buffer = vec![0u8; CHUNK];
     while remaining > 0 {
-        let want = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
-        let read = match recv.read(&mut buf[..want]).await? {
+        let capacity = buffer.len();
+        let want = usize::try_from(remaining.min(capacity as u64)).unwrap_or(capacity);
+        let read = match recv.read(&mut buffer[..want]).await? {
             Some(read) if read > 0 => read,
             _ => bail!("blob stream ended {remaining} bytes early"),
         };
-        hasher.update(&buf[..read]);
-        out.write_all(&buf[..read]).await?;
+        hasher.update(&buffer[..read]);
+        out.write_all(&buffer[..read]).await?;
         remaining -= read as u64;
     }
     out.flush().await?;
@@ -115,11 +151,11 @@ where
 
 /// The 32-byte auth token opening the fetch stream: the raw secret, or its
 /// Argon2id stretch when the ticket is password-protected.
-fn auth_token(ticket: &BlobTicket, password: Option<&Password>) -> Result<TicketSecret> {
+fn auth_token(ticket: &BlobTicket, password: Option<&Password>) -> Result<TicketSecret, BlobError> {
     match (ticket.password, password) {
         (true, Some(pw)) => Ok(TicketAuth::blob(&ticket.secret, Some(pw)).token),
-        (true, None) => bail!("this blob ticket is password-protected — pass --password"),
-        (false, Some(_)) => bail!("this blob ticket has no password — drop --password"),
+        (true, None) => Err(BlobError::PasswordRequired),
+        (false, Some(_)) => Err(BlobError::PasswordNotNeeded),
         (false, None) => Ok(ticket.secret.clone()),
     }
 }
@@ -129,11 +165,11 @@ fn auth_token(ticket: &BlobTicket, password: Option<&Password>) -> Result<Ticket
 async fn dial(endpoint: &Endpoint, ticket: &BlobTicket) -> Result<Connection> {
     let started = Instant::now();
     loop {
-        match endpoint.connect(ticket.addr.clone(), BLOB_ALPN).await {
-            Ok(conn) => return Ok(conn),
+        match endpoint.connect(ticket.address.clone(), BLOB_ALPN).await {
+            Ok(connection) => return Ok(connection),
             Err(error) if started.elapsed() < DISCOVERY_DEADLINE => {
                 tracing::debug!(%error, "blob dial retrying while the address propagates");
-                tokio::time::sleep(RETRY_DELAY).await;
+                time::sleep(RETRY_DELAY).await;
             }
             Err(error) => bail!("connecting to the blob producer failed: {error}"),
         }
@@ -142,8 +178,8 @@ async fn dial(endpoint: &Endpoint, ticket: &BlobTicket) -> Result<Connection> {
 
 /// Turn a producer-side connection close into a readable error — the coded
 /// close (`bad secret` / `unknown blob`) is surfaced to the user.
-fn refusal(conn: &Connection) -> anyhow::Error {
-    match conn.close_reason() {
+fn refusal(connection: &Connection) -> anyhow::Error {
+    match connection.close_reason() {
         Some(reason) => anyhow!("the blob producer refused the fetch: {reason}"),
         None => anyhow!("the blob fetch ended before any data arrived"),
     }
@@ -151,4 +187,7 @@ fn refusal(conn: &Connection) -> anyhow::Error {
 
 /// Assert at compile time that the request header the producer reads
 /// (`HASH_LEN + SECRET_LEN`) matches what this side writes.
-const _: () = assert!(HASH_LEN + SECRET_LEN == 64);
+const _: () = assert!(
+    HASH_LEN + SECRET_LEN == 64,
+    "the hash and the secret fill exactly 64 bytes"
+);

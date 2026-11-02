@@ -10,117 +10,10 @@
 //!
 //! Elimination is *derived* here, never announced over the wire.
 
-use crate::grid::{Dir, GRID_H, GRID_W, Input, ROUND_MAX_TICKS};
-use crate::round::RoundDescriptor;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
-    InProgress,
-    /// Roster index of the sole survivor.
-    Winner(usize),
-    Draw,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Cycle {
-    pub x: i16,
-    pub y: i16,
-    pub dir: Dir,
-    pub alive: bool,
-}
-
-/// `PartialEq` (and, transitively, on [`crate::ui::Snapshot`]) is what
-/// lets `Signal::set` skip a render when a UI-tick snapshot is unchanged
-/// from the last one — `World`'s own `PartialEq` derive already does the
-/// right thing (deep-compares `grid` and `cycles`), no manual impl needed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct World {
-    pub tick: u16,
-    /// Row-major, `GRID_W * GRID_H`. `0` = empty, else roster index + 1.
-    pub grid: Vec<u8>,
-    pub cycles: Vec<Cycle>,
-}
-
-/// An empty arena with nobody in it — what the client shows while it is
-/// still waiting for a match to start.
-impl Default for World {
-    fn default() -> Self {
-        Self {
-            tick: 0,
-            grid: vec![0; usize::from(GRID_W) * usize::from(GRID_H)],
-            cycles: Vec::new(),
-        }
-    }
-}
-
-impl World {
-    /// The world at tick 0: everyone on their spawn, facing outward from
-    /// it, with that first cell already claimed.
-    #[must_use]
-    pub fn spawn(desc: &RoundDescriptor) -> Self {
-        let cycles = desc
-            .spawns
-            .iter()
-            .map(|s| Cycle {
-                x: i16::from(s.x),
-                y: i16::from(s.y),
-                dir: s.dir,
-                alive: true,
-            })
-            .collect();
-        let mut world = World {
-            tick: 0,
-            grid: vec![0; usize::from(GRID_W) * usize::from(GRID_H)],
-            cycles,
-        };
-        for (i, s) in desc.spawns.iter().enumerate() {
-            world.mark(s.x, s.y, i);
-        }
-        world
-    }
-
-    /// A cheap state checksum for the session's desync detection. Order-
-    /// dependent and position-dependent, which is the point: two peers
-    /// whose worlds differ anywhere must differ here.
-    #[must_use]
-    pub fn checksum(&self) -> u128 {
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut eat = |byte: u8| {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
-        };
-        for byte in &self.grid {
-            eat(*byte);
-        }
-        for cycle in &self.cycles {
-            for byte in cycle.x.to_le_bytes() {
-                eat(byte);
-            }
-            for byte in cycle.y.to_le_bytes() {
-                eat(byte);
-            }
-            eat(cycle.dir as u8);
-            eat(u8::from(cycle.alive));
-        }
-        u128::from(hash) | (u128::from(self.tick) << 64)
-    }
-
-    fn mark(&mut self, x: u8, y: u8, player: usize) {
-        let idx = usize::from(y) * usize::from(GRID_W) + usize::from(x);
-        self.grid[idx] = u8::try_from(player + 1).unwrap_or(u8::MAX);
-    }
-
-    /// Out-of-bounds counts as occupied — a wall behaves exactly like a
-    /// trail for collision purposes.
-    fn occupied(&self, x: i16, y: i16) -> bool {
-        if x < 0 || y < 0 || x >= i16::from(GRID_W) || y >= i16::from(GRID_H) {
-            return true;
-        }
-        let idx =
-            usize::try_from(y).unwrap_or(0) * usize::from(GRID_W) + usize::try_from(x).unwrap_or(0);
-        self.grid[idx] != 0
-    }
-}
+use crate::grid::ROUND_MAX_TICKS;
+use crate::input::Input;
+use crate::outcome::Outcome;
+use crate::world::World;
 
 /// Advances `world` by one tick. `inputs[i]` is player `i`'s input, in
 /// roster order.
@@ -170,8 +63,8 @@ pub fn step(world: &mut World, inputs: &[Input]) {
         next.push(Some((cycle.x + dx, cycle.y + dy)));
     }
 
-    for (i, slot) in next.iter().enumerate() {
-        let Some((nx, ny)) = *slot else { continue };
+    for i in 0..n {
+        let Some((nx, ny)) = next[i] else { continue };
         let head_on = next
             .iter()
             .enumerate()
@@ -218,10 +111,13 @@ pub fn outcome(world: &World) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::{Outcome, World, outcome, step};
-    use crate::grid::{Dir, Input};
-    use crate::round::RoundDescriptor;
-    use habilis_network_test_tracing::test;
-    use proptest::prelude::*;
+    use crate::cycle::Cycle;
+    use crate::dir::Dir;
+    use crate::input::Input;
+    use crate::round_descriptor::RoundDescriptor;
+    use proptest::prelude::{
+        Arbitrary, Just, Strategy, prop, prop_assert_eq, prop_oneof, proptest,
+    };
 
     /// Runs `count` ticks with nobody steering.
     fn coast(desc: &RoundDescriptor, count: u16) -> World {
@@ -238,18 +134,29 @@ mod tests {
 
     #[test]
     fn two_players_driving_straight_at_each_other_end_in_a_draw_or_a_winner() {
+        let _guard = ::habilis_network_test_tracing::init();
         let desc = RoundDescriptor::derive(7, vec!["a".into(), "b".into()]);
-        assert_ne!(outcome(&coast(&desc, 200)), Outcome::InProgress);
+        assert_ne!(
+            outcome(&coast(&desc, 200)),
+            Outcome::InProgress,
+            "the head-on round reaches an outcome"
+        );
     }
 
     #[test]
     fn a_solo_round_never_ends_by_elimination() {
+        let _guard = ::habilis_network_test_tracing::init();
         let desc = RoundDescriptor::derive(7, vec!["solo".into()]);
-        assert_eq!(outcome(&coast(&desc, 50)), Outcome::InProgress);
+        assert_eq!(
+            outcome(&coast(&desc, 50)),
+            Outcome::InProgress,
+            "a solo round never ends by elimination"
+        );
     }
 
     #[test]
     fn a_reversal_is_refused_and_the_cycle_holds_course() {
+        let _guard = ::habilis_network_test_tracing::init();
         let desc = RoundDescriptor::derive(7, vec!["a".into(), "b".into()]);
         let mut world = World::spawn(&desc);
         let facing = world.cycles[0].dir;
@@ -276,6 +183,7 @@ mod tests {
 
     #[test]
     fn stepping_never_un_draws_a_trail_or_revives_a_cycle() {
+        let _guard = ::habilis_network_test_tracing::init();
         let desc = RoundDescriptor::derive(7, vec!["a".into(), "b".into(), "c".into()]);
         let short = coast(&desc, 5);
         let long = coast(&desc, 20);
@@ -283,7 +191,8 @@ mod tests {
             long.tick > short.tick,
             "the longer run must advance further"
         );
-        for (index, owner) in short.grid.iter().enumerate() {
+        let indexed_cells: Vec<(usize, &u8)> = short.grid.iter().enumerate().collect();
+        for (index, owner) in indexed_cells {
             if *owner != 0 {
                 assert_eq!(
                     long.grid[index], *owner,
@@ -291,7 +200,8 @@ mod tests {
                 );
             }
         }
-        for (a, b) in short.cycles.iter().zip(long.cycles.iter()) {
+        let paired: Vec<(&Cycle, &Cycle)> = short.cycles.iter().zip(long.cycles.iter()).collect();
+        for (a, b) in paired {
             assert!(a.alive || !b.alive, "a dead cycle came back to life");
         }
     }
@@ -311,13 +221,14 @@ mod tests {
         /// uses to detect desync.
         #[test]
         fn stepping_is_a_pure_function_of_its_inputs(
-            seed in any::<u64>(),
+            seed in u64::arbitrary(),
             player_count in 2usize..5,
             script in prop::collection::vec(
                 prop::collection::vec(prop::option::of(arbitrary_dir()), 2..5),
                 1..80,
             ),
         ) {
+            let _guard = ::habilis_network_test_tracing::init();
             let roster: Vec<String> = (0..player_count).map(|i| format!("p{i}")).collect();
             let desc = RoundDescriptor::derive(seed, roster);
 
@@ -332,13 +243,14 @@ mod tests {
                 world
             };
             prop_assert_eq!(run().checksum(), run().checksum());
-        }
+                }
 
         #[test]
         fn a_finished_outcome_never_reverts_to_in_progress(
-            seed in any::<u64>(),
+            seed in u64::arbitrary(),
             player_count in 2usize..5,
         ) {
+            let _guard = ::habilis_network_test_tracing::init();
             let roster: Vec<String> = (0..player_count).map(|i| format!("p{i}")).collect();
             let desc = RoundDescriptor::derive(seed, roster);
 
@@ -346,6 +258,6 @@ mod tests {
             if outcome(&at_100) != Outcome::InProgress {
                 prop_assert_eq!(outcome(&at_100), outcome(&coast(&desc, 200)));
             }
-        }
+                }
     }
 }

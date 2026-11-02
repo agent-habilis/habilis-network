@@ -18,10 +18,13 @@
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{self, Blocking, Inspect, Membership, Request};
 use habilis_network::protocol::Lookup;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
+use std::net;
+use tokio::time;
 /// The address that the member adds: a documentation range (RFC 5737), so no
 /// real interface carries it and no other log line names it.
 const NEW_ADDR: &str = "192.0.2.77:4000";
@@ -35,10 +38,12 @@ fn logs() -> String {
 
 /// How many log lines of `message` name `NEW_ADDR`.
 fn lines_naming_new_addr(message: &str) -> usize {
-    logs()
-        .lines()
-        .filter(|line| line.contains(message) && line.contains(NEW_ADDR))
-        .count()
+    let text = logs();
+    let lines = text.lines().filter(|line| {
+        let mentions_message = line.contains(message);
+        mentions_message && line.contains(NEW_ADDR)
+    });
+    lines.count()
 }
 
 async fn eventually(deadline: Duration, mut done: impl FnMut() -> bool) -> bool {
@@ -47,7 +52,7 @@ async fn eventually(deadline: Duration, mut done: impl FnMut() -> bool) -> bool 
         if done() {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        time::sleep(Duration::from_millis(250)).await;
     }
     done()
 }
@@ -58,9 +63,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::Opts) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -68,39 +75,36 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
-        .await
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
+        let options = options.relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
+        Self::open(&options).await
     }
 
     async fn roster_len(&self) -> usize {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&json)
-            .ok()
+        let roster: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+        roster
             .and_then(|roster| roster["peers"].as_array().map(Vec::len))
             .unwrap_or(0)
     }
 
-    async fn add_external_addr(&self, addr: std::net::SocketAddr) {
+    async fn add_external_addr(&self, address: net::SocketAddr) {
         self.membership
-            .request(|reply| Request::AddExternalAddr { addr, reply })
+            .request(|reply| Request::Blocking(Blocking::AddExternalAddr { address, reply }))
             .await
             .expect("the loop answers");
     }
@@ -112,9 +116,7 @@ fn a_member_that_changes_its_own_address_floods_it_again() {
         "habilis_network=info,habilis_network::gossip=debug",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
         let bob = Member::join("bob", &alice).await;
 
@@ -125,7 +127,7 @@ fn a_member_that_changes_its_own_address_floods_it_again() {
                 "the pair never linked\n{}",
                 trace()
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         assert_eq!(
             lines_naming_new_addr("peerinfo flooded"),
@@ -155,9 +157,11 @@ fn a_member_that_changes_its_own_address_floods_it_again() {
 
 /// The lines about `PeerInfo` floods and receipts, to read a failure by.
 fn trace() -> String {
-    logs()
-        .lines()
-        .filter(|line| line.contains("peerinfo flooded") || line.contains("peerinfo received"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let text = logs();
+    let lines = text.lines().filter(|line| {
+        let flooded = line.contains("peerinfo flooded");
+        flooded || line.contains("peerinfo received")
+    });
+    let lines: Vec<_> = lines.collect();
+    lines.join("\n")
 }

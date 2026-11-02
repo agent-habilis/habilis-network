@@ -16,7 +16,22 @@ use crate::clock::Instant;
 /// A set of keys each "on cooldown" until `window` after its last [`note`].
 ///
 /// [`note`]: Cooldown::note
-#[derive(Debug)]
+///
+/// # Examples
+///
+/// A key that was noted stays on cooldown for the whole window.
+///
+/// ```
+/// use std::time::{Duration, Instant};
+///
+/// use habilis_network_util::cooldown::Cooldown;
+///
+/// let mut cooldown = Cooldown::new(Duration::from_secs(5));
+/// let now = Instant::now();
+/// cooldown.note("peer", now);
+/// assert!(cooldown.on_cooldown(&"peer", now));
+/// ```
+#[derive(Debug, Clone)]
 pub struct Cooldown<K> {
     seen: HashMap<K, Instant>,
     window: Duration,
@@ -85,7 +100,6 @@ impl<K: Eq + Hash + Clone> Cooldown<K> {
 #[cfg(test)]
 mod tests {
     use crate::clock::Instant;
-    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::Cooldown;
@@ -94,6 +108,7 @@ mod tests {
 
     #[test]
     fn note_then_on_cooldown_within_window() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut cooldown: Cooldown<u8> = Cooldown::new(WINDOW);
         let start = Instant::now();
         assert!(
@@ -101,30 +116,50 @@ mod tests {
             "unseen key is never on cooldown"
         );
         cooldown.note(1, start);
-        assert!(cooldown.on_cooldown(&1, start));
+        assert!(
+            cooldown.on_cooldown(&1, start),
+            "a noted key is on cooldown within the window"
+        );
         // Past the window the key is free again (no permanent lockout).
-        assert!(!cooldown.on_cooldown(&1, start + WINDOW + Duration::from_secs(1)));
+        assert!(
+            !cooldown.on_cooldown(&1, start + WINDOW + Duration::from_secs(1)),
+            "a noted key is off cooldown after the window"
+        );
     }
 
     #[test]
     fn clear_drops_every_active_cooldown() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut cooldown: Cooldown<u8> = Cooldown::new(WINDOW);
         let start = Instant::now();
         cooldown.note(1, start);
         cooldown.note(2, start);
-        assert!(cooldown.on_cooldown(&1, start));
+        assert!(
+            cooldown.on_cooldown(&1, start),
+            "a noted key is on cooldown before the clear"
+        );
         cooldown.clear();
         // A starvation recovery must be able to re-announce immediately.
-        assert!(!cooldown.on_cooldown(&1, start));
-        assert!(!cooldown.on_cooldown(&2, start));
+        assert!(
+            !cooldown.on_cooldown(&1, start),
+            "a clear drops the cooldown of the key"
+        );
+        assert!(
+            !cooldown.on_cooldown(&2, start),
+            "a clear drops every cooldown"
+        );
     }
 
     #[test]
     fn is_per_key() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut cooldown: Cooldown<u8> = Cooldown::new(WINDOW);
         let start = Instant::now();
         cooldown.note(1, start);
-        assert!(cooldown.on_cooldown(&1, start));
+        assert!(
+            cooldown.on_cooldown(&1, start),
+            "one key's cooldown does not hold another key"
+        );
         assert!(
             !cooldown.on_cooldown(&2, start),
             "one key's cooldown never gates another"
@@ -133,6 +168,7 @@ mod tests {
 
     #[test]
     fn note_self_prunes_expired_entries() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut cooldown: Cooldown<u8> = Cooldown::new(WINDOW);
         let start = Instant::now();
         // Many distinct keys spread across more than a full window: each `note`
@@ -141,7 +177,10 @@ mod tests {
             cooldown.note(seed, start + Duration::from_secs(u64::from(seed)));
         }
         assert!(
-            cooldown.len() <= usize::try_from(WINDOW.as_secs()).unwrap() + 1,
+            cooldown.len()
+                <= usize::try_from(WINDOW.as_secs())
+                    .expect("the test window is a few seconds, which fits in usize")
+                    + 1,
             "expired entries pruned: {}",
             cooldown.len()
         );

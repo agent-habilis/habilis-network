@@ -8,39 +8,20 @@
 # on every configurable lint even though their lint sets match, and code that
 # passes in one fails in the other.
 #
-# One deliberate divergence: agent-share also sets
-# `warn-on-all-wildcard-imports = true`. That cannot hold here. `habilis-network`'s
-# `protocol` and `util` facades are `pub use habilis_network_protocol::*` /
-# `pub use habilis_network_util::*`, which is the whole mechanism by which the split
-# crates keep their old module paths; enumerating those names by hand would
-# drift on every new public item in a leaf crate.
+# Wildcard imports are flagged. Clippy exempts `pub use ...::*` facades and `use super::*` in
+# test modules, so the crate facades and the test modules stay as they are.
+warn-on-all-wildcard-imports = true
 
-# Flag single-character identifiers; keep idiomatic generics and loop vars.
+# Flag single-character identifiers. No name is allowed: a generic is a word, and a loop variable is named.
 min-ident-chars-threshold = 1
-allowed-idents-below-min-chars = ["_", "T", "E", "K", "V", "R", "S", "i", "j"]
+allowed-idents-below-min-chars = []
 
 # Complexity ceilings (favor small, readable functions).
 cognitive-complexity-threshold = 20
 too-many-lines-threshold = 120
 
-# Domain terms that must not trip clippy::doc_markdown (extends the default
-# allow-list rather than replacing it).
-doc-valid-idents = [
-    "iroh",
-    "QUIC",
-    "WebRTC",
-    "HyParView",
-    "Plumtree",
-    "Base58Check",
-    "Ed25519",
-    "TopicId",
-    "EndpointId",
-    "JSON-RPC",
-    # The two host languages `packages/` targets. They are prose, not items, and
-    # backticking them would claim they name something in the code.
-    "JavaScript",
-    "TypeScript",
-]
+# Domain terms that must not trip clippy::doc_markdown. Empty: a name in prose is backticked.
+doc-valid-idents = []
 
 # Calls that panic in a browser, where there is no Tokio runtime and `std::time` has no clock. The
 # lint is off in the workspace (see `Cargo.toml`); every wasm32 clippy row passes
@@ -61,4 +42,64 @@ disallowed-methods = [
     { path = "tokio::time::timeout_at", reason = "panics in a browser: use n0_future::time::timeout" },
     { path = "tokio::time::interval", reason = "panics in a browser: use n0_future::time::interval" },
     { path = "tokio::time::interval_at", reason = "panics in a browser: use n0_future::time::interval" },
+]
+
+# Google Rust Style Guide (issue #29): a test may call `unwrap`, because a failed `unwrap` fails the
+# test with a line number. `clippy::unwrap_used` is on for all other code (Cargo.toml).
+allow-unwrap-in-tests = false
+
+# Duplicate crate versions the owner accepted (PR 30). The lint is on, so any new duplicate fails
+# CI; each name below is one this repo cannot unify today. Each group names what forces it.
+allowed-duplicate-crates = [
+    # dimpl 0.7 via str0m 0.21 (habilis-network-iroh-webrtc-transport); str0m 0.24.1 pins the same
+    # dimpl 0.7 line, so no newer str0m clears these.
+    "base16ct",
+    "const-oid",
+    "der",
+    "nom",
+    "pem-rfc7468",
+    "pkcs8",
+    "rand",
+    "signature",
+    "spki",
+    # automerge 0.10 (habilis-network-doc) pulls the rand 0.10 line; automerge 0.12 keeps it.
+    "chacha20",
+    "rand_core",
+    "smol_str",
+    # the iroh fork's noq-proto pins aes-gcm 0.10 (aead 0.5, crypto-common 0.1, aes 0.8 with cpufeatures 0.2,
+    # rand_core 0.6, getrandom 0.2); our chacha20poly1305 0.10 keeps chacha20 0.9 until that moves.
+    "crypto-common",
+    "cpufeatures",
+    "getrandom",
+    # cpufeatures 0.3 comes from argon2 0.6 (ours) and crypto-common 0.2 from sha2 0.11 (ours); the
+    # noq fork keeps the 0.2 and 0.1 lines alongside them.
+    # rand_core 0.9 and getrandom 0.3 come from rand 0.9 (dimpl); r-efi is the UEFI target of getrandom.
+    "r-efi",
+    # iroh's TLS and DNS stack: ring 0.17 and aws-lc-rs 1.17 pin untrusted 0.9 and 0.7; system-configuration
+    # 0.7 (hickory-resolver) and rustls-platform-verifier 0.7 pin core-foundation 0.9 and 0.10; dashmap
+    # 6.2.1 (iroh-relay) and indexmap 2.14 pin hashbrown 0.14 and 0.17. The windows-* crates follow from
+    # ring 0.17 (windows-sys 0.52) and the Windows-only netdev, if-addrs and anstyle-query chains.
+    "core-foundation",
+    "hashbrown",
+    "untrusted",
+    "windows-sys",
+    "windows-targets",
+    "windows_aarch64_gnullvm",
+    "windows_aarch64_msvc",
+    "windows_i686_gnu",
+    "windows_i686_msvc",
+    "windows_x86_64_gnu",
+    "windows_x86_64_gnullvm",
+    "windows_x86_64_msvc",
+    # jni 0.21 (netdev, netwatch) and jni 0.22 (hickory-net) pin jni-sys and thiserror 1.
+    "jni",
+    "jni-sys",
+    "thiserror",
+    "thiserror-impl",
+    # asn1-rs 0.7 (x509-parser 0.18.1, pulled through iroh) pins nom 7 and thiserror 2.
+    # acto 0.8.2 and swarm-discovery (our fork) pin smol_str 0.1; automerge keeps 0.3.
+    # futures-buffered 0.2 (n0-future, iroh) pins spin 0.10; heapless 0.7 (postcard, dev) pins spin 0.9.
+    "spin",
+    # embedded-io: the lock keeps two lines and the lint counts both; no graph we build reaches them.
+    "embedded-io",
 ]

@@ -14,18 +14,20 @@ use iroh::endpoint::{Connection, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId, RelayMode, SecretKey, TransportAddr};
 
+use tokio::sync::mpsc;
+use tokio::{io, time};
 const ECHO_ALPN: &[u8] = b"multihop-test/echo/1";
 
 /// Uniform link cost; the exact value is irrelevant when there is one route.
 const COST: u32 = 10;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Echo;
 
 impl ProtocolHandler for Echo {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let (mut send, mut recv) = connection.accept_bi().await?;
-        tokio::io::copy(&mut recv, &mut send).await?;
+        io::copy(&mut recv, &mut send).await?;
         send.finish()?;
         connection.closed().await;
         Ok(())
@@ -35,12 +37,12 @@ impl ProtocolHandler for Echo {
 /// Echoes like [`Echo`], then reports how many multihop custom paths its end of the connection
 /// holds, so that a test can read the server side of a connection.
 #[derive(Debug, Clone)]
-struct EchoCountingPaths(tokio::sync::mpsc::UnboundedSender<usize>);
+struct EchoCountingPaths(mpsc::UnboundedSender<usize>);
 
 impl ProtocolHandler for EchoCountingPaths {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let (mut send, mut recv) = connection.accept_bi().await?;
-        tokio::io::copy(&mut recv, &mut send).await?;
+        io::copy(&mut recv, &mut send).await?;
         send.finish()?;
         let _ = self.0.send(multihop_paths(&connection));
         connection.closed().await;
@@ -49,11 +51,11 @@ impl ProtocolHandler for EchoCountingPaths {
 }
 
 /// How many multihop custom paths `conn` holds open, selected or not.
-fn multihop_paths(conn: &Connection) -> usize {
-    conn.paths()
+fn multihop_paths(connection: &Connection) -> usize {
+    connection.paths()
         .iter()
         .filter(|path| {
-            matches!(path.remote_addr(), TransportAddr::Custom(addr) if addr.id() == MULTIHOP_TRANSPORT_ID)
+            matches!(path.remote_addr(), TransportAddr::Custom(address) if address.id() == MULTIHOP_TRANSPORT_ID)
         })
         .count()
 }
@@ -62,14 +64,11 @@ fn multihop_paths(conn: &Connection) -> usize {
 /// on the key derived from the peer's own.
 async fn underlay_endpoint(peer: &SecretKey) -> Endpoint {
     let loopback: SocketAddr = "127.0.0.1:0".parse().expect("loopback addr");
-    Endpoint::builder(presets::Minimal)
+    let builder = Endpoint::builder(presets::Minimal)
         .secret_key(underlay_secret(peer))
-        .relay_mode(RelayMode::Disabled)
-        .bind_addr(loopback)
-        .expect("valid bind addr")
-        .bind()
-        .await
-        .expect("bind underlay endpoint")
+        .relay_mode(RelayMode::Disabled);
+    let bound = builder.bind_addr(loopback).expect("valid bind addr");
+    bound.bind().await.expect("bind underlay endpoint")
 }
 
 /// A node that participates in the end-to-end connection: an application endpoint
@@ -84,15 +83,12 @@ async fn make_node(secret: SecretKey) -> Node {
     let underlay = underlay_endpoint(&secret).await;
     let handle = MultihopHandle::new(&secret, underlay, HandleConfig::default())
         .expect("underlay on the derived key");
-    let app = Endpoint::builder(presets::Minimal)
+    let builder = Endpoint::builder(presets::Minimal)
         .secret_key(secret.clone())
-        .relay_mode(RelayMode::Disabled)
-        .preset(handle.clone())
-        .clear_ip_transports()
-        .clear_relay_transports()
-        .bind()
-        .await
-        .expect("bind app endpoint");
+        .relay_mode(RelayMode::Disabled);
+    let preset = builder.preset(handle.clone());
+    let configured = preset.clear_ip_transports().clear_relay_transports();
+    let app: Endpoint = configured.bind().await.expect("bind app endpoint");
     Node {
         app,
         handle,
@@ -111,14 +107,17 @@ async fn make_dual_node(
     let webrtc = habilis_network_iroh_webrtc_transport::WebRtcHandle::new(
         habilis_network_iroh_webrtc_transport::WebRtcTransport::new(secret.public()),
     );
-    let app = Endpoint::builder(presets::Minimal)
+    let builder = Endpoint::builder(presets::Minimal)
         .secret_key(secret.clone())
-        .relay_mode(RelayMode::Disabled)
-        .preset(handle.clone())
-        .add_custom_transport(webrtc.transport())
-        .path_selector(webrtc.path_selector())
-        .clear_ip_transports()
-        .clear_relay_transports()
+        .relay_mode(RelayMode::Disabled);
+    let transport = webrtc.transport();
+    let selector = webrtc.path_selector();
+    let preset = builder.preset(handle.clone());
+    let configured = preset
+        .add_custom_transport(transport)
+        .path_selector(selector);
+    let configured = configured.clear_ip_transports().clear_relay_transports();
+    let app: Endpoint = configured
         .bind()
         .await
         .expect("bind app endpoint with both custom transports");
@@ -151,7 +150,7 @@ fn gossip_all(nodes: &[(&MultihopHandle, Vec<(EndpointId, u32)>)]) {
         .collect();
     for (handle, _) in nodes {
         for vector in &vectors {
-            handle.feed_topology(vector.clone());
+            let _ = handle.feed_topology(vector.clone());
         }
     }
 }
@@ -162,10 +161,10 @@ fn secret(seed: u8) -> SecretKey {
 
 /// Assert the connection's selected path is our multihop custom transport — i.e.
 /// the bytes really travelled over the relays, not some direct shortcut.
-fn assert_multihop_selected(conn: &Connection) {
-    let selected_is_multihop = conn.paths().iter().any(|path| {
+fn assert_multihop_selected(connection: &Connection) {
+    let selected_is_multihop: bool = connection.paths().iter().any(|path| {
         path.is_selected()
-            && matches!(path.remote_addr(), TransportAddr::Custom(addr) if addr.id() == MULTIHOP_TRANSPORT_ID)
+            && matches!(path.remote_addr(), TransportAddr::Custom(address) if address.id() == MULTIHOP_TRANSPORT_ID)
     });
     assert!(
         selected_is_multihop,
@@ -173,12 +172,12 @@ fn assert_multihop_selected(conn: &Connection) {
     );
 }
 
-async fn echo_roundtrip(conn: &Connection, msg: &[u8]) {
-    let (mut send, mut recv) = conn.open_bi().await.expect("open bi stream");
-    send.write_all(msg).await.expect("write");
+async fn echo_roundtrip(connection: &Connection, message: &[u8]) {
+    let (mut send, mut recv) = connection.open_bi().await.expect("open bi stream");
+    send.write_all(message).await.expect("write");
     send.finish().expect("finish");
     let echoed = recv.read_to_end(64).await.expect("read echo");
-    assert_eq!(echoed, msg, "echo mismatch over multihop");
+    assert_eq!(echoed, message, "echo mismatch over multihop");
 }
 
 #[test]
@@ -204,7 +203,7 @@ fn connects_end_to_end_through_one_relay() {
             .accept(ECHO_ALPN, Echo)
             .spawn();
 
-        let conn = tokio::time::timeout(
+        let connection = time::timeout(
             Duration::from_secs(30),
             alice.app.connect(bob.id, ECHO_ALPN),
         )
@@ -212,10 +211,10 @@ fn connects_end_to_end_through_one_relay() {
         .expect("connect timed out")
         .expect("connect over one relay");
 
-        assert_multihop_selected(&conn);
-        echo_roundtrip(&conn, b"hello over one hop").await;
+        assert_multihop_selected(&connection);
+        echo_roundtrip(&connection, b"hello over one hop").await;
 
-        conn.close(0u32.into(), b"done");
+        connection.close(0u32.into(), b"done");
         echo.shutdown().await.expect("shutdown echo router");
         alice.app.close().await;
         alice.handle.close().await;
@@ -243,28 +242,28 @@ fn a_route_is_one_custom_path_at_each_end_of_the_connection() {
             (&relay, vec![(alice.id, COST), (bob.id, COST)]),
             (&bob.handle, vec![(relay_id, COST)]),
         ]);
-        let (counted, mut server_side) = tokio::sync::mpsc::unbounded_channel();
+        let (counted, mut server_side) = mpsc::unbounded_channel();
         let echo = Router::builder(bob.app.clone())
             .accept(ECHO_ALPN, EchoCountingPaths(counted))
             .spawn();
 
-        let conn = tokio::time::timeout(
+        let connection = time::timeout(
             Duration::from_secs(30),
             alice.app.connect(bob.id, ECHO_ALPN),
         )
         .await
         .expect("connect timed out")
         .expect("connect over one relay");
-        echo_roundtrip(&conn, b"cells both ways").await;
+        echo_roundtrip(&connection, b"cells both ways").await;
 
-        let at_bob = tokio::time::timeout(Duration::from_secs(10), server_side.recv())
+        let at_bob = time::timeout(Duration::from_secs(10), server_side.recv())
             .await
             .expect("bob reports his paths")
             .expect("the handler is alive");
-        assert_eq!(multihop_paths(&conn), 1, "alice's end");
+        assert_eq!(multihop_paths(&connection), 1, "alice's end");
         assert_eq!(at_bob, 1, "bob's end");
 
-        conn.close(0u32.into(), b"done");
+        connection.close(0u32.into(), b"done");
         echo.shutdown().await.expect("shutdown echo router");
         alice.app.close().await;
         alice.handle.close().await;
@@ -297,7 +296,7 @@ fn connects_end_to_end_through_two_relays() {
             .accept(ECHO_ALPN, Echo)
             .spawn();
 
-        let conn = tokio::time::timeout(
+        let connection = time::timeout(
             Duration::from_secs(30),
             alice.app.connect(bob.id, ECHO_ALPN),
         )
@@ -305,10 +304,10 @@ fn connects_end_to_end_through_two_relays() {
         .expect("connect timed out")
         .expect("connect over two relays");
 
-        assert_multihop_selected(&conn);
-        echo_roundtrip(&conn, b"hello across two hops").await;
+        assert_multihop_selected(&connection);
+        echo_roundtrip(&connection, b"hello across two hops").await;
 
-        conn.close(0u32.into(), b"done");
+        connection.close(0u32.into(), b"done");
         echo.shutdown().await.expect("shutdown echo router");
         alice.app.close().await;
         alice.handle.close().await;
@@ -352,7 +351,7 @@ fn connects_through_one_relay_with_webrtc_on_the_same_endpoint() {
             .accept(ECHO_ALPN, Echo)
             .spawn();
 
-        let conn = tokio::time::timeout(
+        let connection = time::timeout(
             Duration::from_secs(30),
             alice.app.connect(bob.id, ECHO_ALPN),
         )
@@ -360,12 +359,20 @@ fn connects_through_one_relay_with_webrtc_on_the_same_endpoint() {
         .expect("connect timed out")
         .expect("connect over one relay with WebRTC registered");
 
-        assert_multihop_selected(&conn);
-        echo_roundtrip(&conn, b"hello with both transports").await;
-        assert_eq!(alice_webrtc.session_count(), 0);
-        assert_eq!(bob_webrtc.session_count(), 0);
+        assert_multihop_selected(&connection);
+        echo_roundtrip(&connection, b"hello with both transports").await;
+        assert_eq!(
+            alice_webrtc.session_count(),
+            0,
+            "alice has one webrtc session on the shared endpoint"
+        );
+        assert_eq!(
+            bob_webrtc.session_count(),
+            0,
+            "bob has one webrtc session on the shared endpoint"
+        );
 
-        conn.close(0u32.into(), b"done");
+        connection.close(0u32.into(), b"done");
         echo.shutdown().await.expect("shutdown echo router");
         alice.app.close().await;
         alice.handle.close().await;

@@ -10,9 +10,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use habilis_network_iroh_gossip_transport::hub::Hub;
 use habilis_network_iroh_gossip_transport::iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use habilis_network_iroh_gossip_transport::iroh_gossip::proto::TopicId;
-use habilis_network_iroh_gossip_transport::memory::MemoryHub;
 use habilis_network_iroh_gossip_transport::{
     GOSSIP_TRANSPORT_ID, GossipHandle, ReceiveLoop, Stats, gossip_addr, spawn_receive_loop,
 };
@@ -30,6 +30,8 @@ use super::Args;
 use super::native::{RTT_ROUNDS, RTT_WARMUP, rounds_on, selected_path};
 use super::run::{Measured, Outcome, Rtt, Sample, TRANSFER_TIMEOUT};
 
+use std::net;
+use tokio::time;
 /// Group sizes of a real run, and the time one group idles. A test uses one small
 /// group and a short idle: the idle is the wait, not the work.
 fn group_sizes() -> &'static [usize] {
@@ -70,7 +72,7 @@ pub(crate) async fn ladder_gossip_backup(args: &Args) -> Outcome {
             }));
         }
         let samples = first_samples.ok_or("no group ran")?;
-        let mut measured = Measured::from_samples(0.0, samples)?;
+        let mut measured = Measured::summarize(0.0, samples)?;
         measured.extra = Some(json!({ "groups": groups }));
         Ok(measured)
     };
@@ -82,15 +84,13 @@ pub(crate) async fn ladder_gossip_backup(args: &Args) -> Outcome {
 #[derive(Debug, Clone)]
 struct Tap {
     inner: Bench,
+    // The router clones this handler into each accept, and the bench reads the slot through its own handle.
     served: Arc<Mutex<Option<Connection>>>,
 }
 
 impl ProtocolHandler for Tap {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        *self
-            .served
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(connection.clone());
+        *self.served.lock().expect("served slot poisoned") = Some(connection.clone());
         self.inner.accept(connection).await
     }
 }
@@ -100,7 +100,7 @@ impl Tap {
     fn lost_packets(&self) -> u64 {
         self.served
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("served slot poisoned")
             .as_ref()
             .map_or(0, |connection| connection.stats().lost_packets)
     }
@@ -110,7 +110,7 @@ impl Tap {
 /// to each other, carried by the real gossip flood through B. Throughput and round
 /// trips on the selected path, and what the flood costs each member.
 pub(crate) async fn ladder_gossip(args: &Args) -> Outcome {
-    if std::net::UdpSocket::bind("[::1]:0").is_err() {
+    if net::UdpSocket::bind("[::1]:0").is_err() {
         return Outcome::Skipped(
             "the IPv6 loopback cannot be bound: A and C need it to have no IP path to each other"
                 .to_owned(),
@@ -161,7 +161,7 @@ async fn start_flood() -> Result<Flood, String> {
             .collect(),
         endpoints: Vec::new(),
         tap: Tap {
-            inner: Bench,
+            inner: Bench::new(),
             served: Arc::default(),
         },
         routers: Vec::new(),
@@ -235,7 +235,7 @@ async fn fill_flood(flood: &mut Flood, keys: &[SecretKey]) -> Result<(), String>
         let joined = if index == 1 {
             gossips[1].subscribe(topic, vec![]).await
         } else {
-            tokio::time::timeout(
+            time::timeout(
                 Duration::from_secs(20),
                 gossips[index].subscribe_and_join(topic, vec![endpoints[1].id()]),
             )
@@ -266,7 +266,7 @@ async fn measure_flood(flood: &Flood, args: &Args) -> Result<Measured, String> {
         endpoints[2].id(),
         [TransportAddr::Custom(gossip_addr(endpoints[2].id()))],
     );
-    let connection = tokio::time::timeout(
+    let connection = time::timeout(
         Duration::from_secs(30),
         endpoints[0].connect(to_carol, BENCH_ALPN),
     )
@@ -280,13 +280,14 @@ async fn measure_flood(flood: &Flood, args: &Args) -> Result<Measured, String> {
     let client_lost_before = connection.stats().lost_packets;
     let server_lost_before = tap.lost_packets();
     let samples = rounds_on(&connection, args, selected_path).await?;
-    let round_trips = tokio::time::timeout(
+    let round_trips = time::timeout(
         TRANSFER_TIMEOUT,
         rtt_samples(&connection, RTT_WARMUP, RTT_ROUNDS),
     )
     .await
     .map_err(|_| format!("the round trips stalled past {TRANSFER_TIMEOUT:?}"))?
     .map_err(|error| format!("round trips failed: {error:#}"))?;
+    let round_trips: Vec<_> = round_trips.collect();
     let after = all(handles);
     let lost_packets_a = connection
         .stats()
@@ -320,8 +321,8 @@ async fn measure_flood(flood: &Flood, args: &Args) -> Result<Measured, String> {
             "forward_dropped": now.forward_dropped - then.forward_dropped,
         })
     };
-    let mut measured = Measured::from_samples(0.0, samples)?;
-    measured.rtt = Rtt::from_samples(&round_trips);
+    let mut measured = Measured::summarize(0.0, samples)?;
+    measured.rtt = Rtt::summarize(&round_trips);
     measured.extra = Some(json!({
         "members": { "a": member(0), "b": member(1), "c": member(2) },
         "frames_originated": originated,
@@ -369,12 +370,8 @@ fn gossip_path(connection: &Connection) -> Option<(u64, u64, u64)> {
 }
 
 /// A count as a float. Counts of frames and bytes in a minute are far below 2^52.
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "a count in one run is below 2^52"
-)]
 fn float(count: u64) -> f64 {
-    count as f64
+    f64::from(u32::try_from(count).unwrap_or(u32::MAX))
 }
 
 /// Per-second rates of one member over `secs`.
@@ -417,7 +414,7 @@ async fn run_group(
     with_gossip_path: bool,
     args: &Args,
 ) -> Result<(Value, Vec<Sample>), String> {
-    let hub = MemoryHub::new();
+    let hub = Hub::new();
     let keys: Vec<SecretKey> = (0..members).map(|_| SecretKey::generate()).collect();
     let handles: Vec<GossipHandle> = keys
         .iter()
@@ -435,7 +432,7 @@ async fn run_group(
         }
     };
     let tap = Tap {
-        inner: Bench,
+        inner: Bench::new(),
         served: Arc::default(),
     };
     let router = Router::builder(bob.clone())
@@ -471,12 +468,12 @@ async fn measure_group(
         .connect(EndpointAddr::from_parts(bob.id(), addrs), BENCH_ALPN)
         .await
         .map_err(|error| format!("connect failed: {error:#}"))?;
-    tokio::time::sleep(settle()).await;
+    time::sleep(settle()).await;
 
     let all =
         |list: &[GossipHandle]| -> Vec<Stats> { list.iter().map(GossipHandle::stats).collect() };
     let (idle_before, path_before) = (all(handles), gossip_path(&connection));
-    tokio::time::sleep(idle()).await;
+    time::sleep(idle()).await;
     let (idle_after, path_after) = (all(handles), gossip_path(&connection));
     let secs = idle().as_secs_f64();
     let selected_idle = selected_path(&connection);
@@ -523,7 +520,6 @@ async fn measure_group(
 mod tests {
     use super::{Args, Outcome, ladder_gossip, ladder_gossip_backup};
     use crate::bench::Direction;
-    use habilis_network_test_tracing::test;
 
     fn small_args() -> Args {
         Args {
@@ -538,61 +534,73 @@ mod tests {
 
     /// The cell keeps IP selected, reports the flood of both runs, and the run with
     /// no gossip address puts nothing on the topic.
-    #[test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_backup_path_cell_reports_the_flood_under_ip_and_a_control_with_none() {
-        let Outcome::Ok(measured) = ladder_gossip_backup(&small_args()).await else {
-            panic!("the backup-path cell did not measure");
-        };
+    #[test]
+    fn the_backup_path_cell_reports_the_flood_under_ip_and_a_control_with_none() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let Outcome::Ok(measured) = ladder_gossip_backup(&small_args()).await else {
+                    panic!("the backup-path cell did not measure");
+                };
 
-        assert_eq!(measured.path, "ip", "IP is the selected path");
-        let extra = measured.extra.expect("the flood numbers");
-        let group = &extra["groups"][0];
-        assert_eq!(group["members"], 4);
-        let with_path = &group["with_gossip_path"];
-        let control = &group["ip_only_control"];
-        assert_eq!(with_path["selected_path"], "ip");
-        assert_eq!(control["selected_path"], "ip");
-        assert_eq!(control["gossip_path_open"], false);
-        assert_eq!(control["flood_frames_idle"], 0);
-        assert!(with_path["flood_frames_idle"].is_u64(), "{with_path}");
-        assert!(with_path["idle"]["bystander_mean"]["frames_in_per_s"].is_f64());
-        // Both ends of the inner connection report their lost packets in the bulk.
-        assert!(with_path["bulk"]["lost_packets_a"].is_u64(), "{with_path}");
-        assert!(with_path["bulk"]["lost_packets_b"].is_u64(), "{with_path}");
+                assert_eq!(measured.path, "ip", "IP is the selected path");
+                let extra = measured.extra.expect("the flood numbers");
+                let group = &extra["groups"][0];
+                assert_eq!(group["members"], 4);
+                let with_path = &group["with_gossip_path"];
+                let control = &group["ip_only_control"];
+                assert_eq!(with_path["selected_path"], "ip");
+                assert_eq!(control["selected_path"], "ip");
+                assert_eq!(control["gossip_path_open"], false);
+                assert_eq!(control["flood_frames_idle"], 0);
+                assert!(with_path["flood_frames_idle"].is_u64(), "{with_path}");
+                assert!(with_path["idle"]["bystander_mean"]["frames_in_per_s"].is_f64());
+                // Both ends of the inner connection report their lost packets in the bulk.
+                assert!(with_path["bulk"]["lost_packets_a"].is_u64(), "{with_path}");
+                assert!(with_path["bulk"]["lost_packets_b"].is_u64(), "{with_path}");
+            },
+        );
     }
 
     /// The gossip cell: a transfer and the round trips over the real flood, on the
     /// gossip path, and the cost of the flood at the member between the two ends.
     /// Skipped, with a log line, where the `IPv6` loopback cannot bind.
-    #[test(flavor = "multi_thread", worker_threads = 4)]
-    async fn the_gossip_cell_measures_a_quic_transfer_over_the_real_flood() {
-        let measured = match ladder_gossip(&small_args()).await {
-            Outcome::Ok(measured) => measured,
-            Outcome::Skipped(reason) => {
-                eprintln!("SKIPPED: {reason}");
-                return;
-            }
-            Outcome::Failed(reason) => panic!("the gossip cell failed: {reason}"),
-        };
+    #[test]
+    fn the_gossip_cell_measures_a_quic_transfer_over_the_real_flood() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            4,
+            async {
+                let measured = match ladder_gossip(&small_args()).await {
+                    Outcome::Ok(measured) => measured,
+                    Outcome::Skipped(reason) => {
+                        eprintln!("SKIPPED: {reason}");
+                        return;
+                    }
+                    Outcome::Failed(reason) => panic!("the gossip cell failed: {reason}"),
+                };
 
-        assert_eq!(measured.path, "gossip", "the selected path");
-        assert!(measured.rtt.is_some(), "round trips over gossip");
-        let extra = measured.extra.expect("the flood numbers");
-        assert!(
-            extra["members"]["b"]["frames_in"].as_u64().unwrap_or(0) > 0,
-            "the member between the ends read the flood: {extra}"
+                assert_eq!(measured.path, "gossip", "the selected path");
+                assert!(measured.rtt.is_some(), "round trips over gossip");
+                let extra = measured.extra.expect("the flood numbers");
+                assert!(
+                    extra["members"]["b"]["frames_in"].as_u64().unwrap_or(0) > 0,
+                    "the member between the ends read the flood: {extra}"
+                );
+                assert!(extra["flood_amplification"].is_f64(), "{extra}");
+                // Where a frame can be lost: the sink queue, and the topic's own queue.
+                for member in ["a", "b", "c"] {
+                    let counts = &extra["members"][member];
+                    assert!(
+                        counts["dropped_sink_refused"].is_u64(),
+                        "{member}: {counts}"
+                    );
+                    assert!(counts["topic_lagged"].is_u64(), "{member}: {counts}");
+                    assert!(counts["forward_dropped"].is_u64(), "{member}: {counts}");
+                }
+                assert!(extra["lost_packets_a"].is_u64() && extra["lost_packets_c"].is_u64());
+            },
         );
-        assert!(extra["flood_amplification"].is_f64(), "{extra}");
-        // Where a frame can be lost: the sink queue, and the topic's own queue.
-        for member in ["a", "b", "c"] {
-            let counts = &extra["members"][member];
-            assert!(
-                counts["dropped_sink_refused"].is_u64(),
-                "{member}: {counts}"
-            );
-            assert!(counts["topic_lagged"].is_u64(), "{member}: {counts}");
-            assert!(counts["forward_dropped"].is_u64(), "{member}: {counts}");
-        }
-        assert!(extra["lost_packets_a"].is_u64() && extra["lost_packets_c"].is_u64());
     }
 }

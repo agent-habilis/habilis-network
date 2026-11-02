@@ -13,7 +13,24 @@
 
 use std::collections::VecDeque;
 
-#[derive(Debug)]
+use std::mem;
+/// A first-in, first-out queue of at most `capacity` items. It keeps duplicates, and a push is
+/// rejected when the queue is full.
+///
+/// # Examples
+///
+/// A full queue refuses a new item until its items are taken.
+///
+/// ```
+/// use habilis_network_util::bounded_queue::BoundedQueue;
+///
+/// let mut queue = BoundedQueue::new(1);
+/// assert!(queue.push(1));
+/// assert!(!queue.push(2));
+/// assert_eq!(queue.take().len(), 1);
+/// assert!(queue.is_empty());
+/// ```
+#[derive(Debug, Clone)]
 pub struct BoundedQueue<T> {
     capacity: usize,
     queue: VecDeque<T>,
@@ -21,6 +38,7 @@ pub struct BoundedQueue<T> {
 
 impl<T> BoundedQueue<T> {
     #[must_use]
+    /// An empty queue that holds at most `capacity` items.
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
@@ -42,10 +60,11 @@ impl<T> BoundedQueue<T> {
 
     /// Take everything in FIFO order, leaving the queue empty.
     pub fn take(&mut self) -> VecDeque<T> {
-        std::mem::take(&mut self.queue)
+        mem::take(&mut self.queue)
     }
 
     #[must_use]
+    /// Whether the queue holds no items.
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }
@@ -62,16 +81,17 @@ impl<T> BoundedQueue<T> {
 #[cfg(test)]
 mod tests {
     use super::BoundedQueue;
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn push_rejects_newest_when_full() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = BoundedQueue::new(2);
-        assert!(queue.push(1u32));
-        assert!(queue.push(2));
+        assert!(queue.push(1u32), "a push into an empty queue is accepted");
+        assert!(queue.push(2), "a push past capacity is rejected");
         assert!(!queue.push(3), "rejected when full — nothing evicted");
+        let taken: Vec<_> = queue.take().into_iter().collect();
         assert_eq!(
-            queue.take().into_iter().collect::<Vec<_>>(),
+            taken,
             vec![1, 2],
             "the oldest-first prefix is retained intact",
         );
@@ -79,15 +99,18 @@ mod tests {
 
     #[test]
     fn take_empties_in_fifo_order() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = BoundedQueue::new(8);
-        assert!(queue.push("a"));
-        assert!(queue.push("b"));
-        assert_eq!(queue.take().into_iter().collect::<Vec<_>>(), vec!["a", "b"]);
+        assert!(queue.push("a"), "a push of a is accepted");
+        assert!(queue.push("b"), "a push of b is accepted");
+        let taken: Vec<_> = queue.take().into_iter().collect();
+        assert_eq!(taken, vec!["a", "b"], "the queue drains in fifo order");
         assert!(queue.take().is_empty(), "second take is empty");
     }
 
     #[test]
     fn stays_capped_under_churn() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut queue = BoundedQueue::new(10);
         let mut stored = 0;
         for value in 0..1000u32 {

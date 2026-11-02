@@ -70,18 +70,18 @@ const SGR_ON: [(u8, u8); 6] = [
     (STRIKE, 9),
 ];
 
-/// Appends SGR codes turning attribute bits on/off to move from `prev` to
+/// Appends SGR codes turning attribute bits on/off to move from `previous` to
 /// `next`, returning `true` if it emitted SGR `0` (which also resets
 /// colors — the caller must re-emit fg/bg after). Individual "attribute
 /// off" codes are avoided entirely: SGR 21 is "double underline" on some
 /// terminals and "bold off" on others, and 22 clears bold and dim
 /// together, so any bit going off resets everything and re-applies what
 /// should stay on.
-pub fn push_attrs(out: &mut Vec<String>, prev: u8, next: u8) -> bool {
-    if prev == next {
+pub fn push_attrs(out: &mut Vec<String>, previous: u8, next: u8) -> bool {
+    if previous == next {
         return false;
     }
-    if prev & !next != 0 {
+    if previous & !next != 0 {
         out.push("0".to_string());
         for (bit, code) in SGR_ON {
             if next & bit != 0 {
@@ -91,7 +91,7 @@ pub fn push_attrs(out: &mut Vec<String>, prev: u8, next: u8) -> bool {
         return true;
     }
     for (bit, code) in SGR_ON {
-        if next & bit != 0 && prev & bit == 0 {
+        if next & bit != 0 && previous & bit == 0 {
             out.push(code.to_string());
         }
     }
@@ -103,68 +103,105 @@ mod tests {
     use super::{
         DEFAULT_COLOR, INVERSE, UNDERLINE, palette, push_attrs, push_bg, push_fg, truecolor,
     };
-    use habilis_network_test_tracing::test;
 
     #[test]
     fn default_color_pushes_the_reset_code() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut out = Vec::new();
         push_fg(&mut out, DEFAULT_COLOR);
-        assert_eq!(out, vec!["39"]);
+        assert_eq!(
+            out,
+            vec!["39"],
+            "the default foreground pushes the reset code 39"
+        );
         let mut out = Vec::new();
         push_bg(&mut out, DEFAULT_COLOR);
-        assert_eq!(out, vec!["49"]);
+        assert_eq!(
+            out,
+            vec!["49"],
+            "the default background pushes the reset code 49"
+        );
     }
 
     #[test]
     fn low_palette_indices_use_the_classic_codes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut out = Vec::new();
         push_fg(&mut out, palette(1)); // red
-        assert_eq!(out, vec!["31"]);
+        assert_eq!(
+            out,
+            vec!["31"],
+            "a low palette index uses the classic code 31"
+        );
     }
 
     #[test]
     fn bright_palette_indices_use_9x_and_10x() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut out = Vec::new();
         push_fg(&mut out, palette(9)); // bright red: 30 + 60 + (9-8) = 91
-        assert_eq!(out, vec!["91"]);
+        assert_eq!(out, vec!["91"], "a bright palette index uses code 91");
         let mut out = Vec::new();
         push_bg(&mut out, palette(9)); // 40 + 60 + (9-8) = 101
-        assert_eq!(out, vec!["101"]);
+        assert_eq!(out, vec!["101"], "a bright background index uses code 101");
     }
 
     #[test]
     fn high_palette_indices_use_extended_syntax() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut out = Vec::new();
         push_fg(&mut out, palette(200));
-        assert_eq!(out, vec!["38;5;200"]);
+        assert_eq!(
+            out,
+            vec!["38;5;200"],
+            "a high palette index uses the extended syntax"
+        );
     }
 
     #[test]
     fn truecolor_uses_the_24_bit_syntax() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut out = Vec::new();
         push_fg(&mut out, truecolor(0x0000_ff80));
-        assert_eq!(out, vec!["38;2;0;255;128"]);
+        assert_eq!(
+            out,
+            vec!["38;2;0;255;128"],
+            "truecolor uses the 24-bit syntax"
+        );
     }
 
     #[test]
     fn identical_attrs_emit_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut out = Vec::new();
-        assert!(!push_attrs(&mut out, UNDERLINE, UNDERLINE));
-        assert!(out.is_empty());
+        assert!(
+            !push_attrs(&mut out, UNDERLINE, UNDERLINE),
+            "identical attributes emit no change"
+        );
+        assert!(out.is_empty(), "identical attributes write nothing");
     }
 
     #[test]
     fn turning_a_bit_on_emits_only_that_code() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut out = Vec::new();
-        assert!(!push_attrs(&mut out, 0, UNDERLINE));
-        assert_eq!(out, vec!["4"]);
+        assert!(
+            !push_attrs(&mut out, 0, UNDERLINE),
+            "turning a bit on emits only its code"
+        );
+        assert_eq!(out, vec!["4"], "turning a bit on writes code 4 alone");
     }
 
     #[test]
     fn turning_a_bit_off_resets_everything_and_reapplies_the_rest() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut out = Vec::new();
         let reset = push_attrs(&mut out, UNDERLINE | INVERSE, INVERSE);
-        assert!(reset);
-        assert_eq!(out, vec!["0", "7"]); // SGR 0, then re-apply inverse (7)
+        assert!(reset, "turning a bit off resets and reapplies the rest");
+        assert_eq!(
+            out,
+            vec!["0", "7"],
+            "turning a bit off writes reset then the rest"
+        ); // SGR 0, then re-apply inverse (7)
     }
 }

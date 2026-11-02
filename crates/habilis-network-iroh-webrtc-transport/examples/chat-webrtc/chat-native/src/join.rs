@@ -1,12 +1,12 @@
-//! `chat-native join` — a terminal peer, optionally over WebRTC.
+//! `chat-native join` — a terminal peer, optionally over `WebRTC`.
 //!
 //! Two modes, and the contrast between them is half the demo:
 //!
 //! - **default** — dial the room over iroh's own transports. This is what a
-//!   native peer should normally do, and what the WebRTC path is measured
+//!   native peer should normally do, and what the `WebRTC` path is measured
 //!   against.
 //! - **`--webrtc`** — do exactly what a browser tab does: swap JSEP over the
-//!   relay, then dial the room on an address that names only the WebRTC
+//!   relay, then dial the room on an address that names only the `WebRTC`
 //!   transport. It exists so the transport can be exercised end to end with no
 //!   browser in the loop.
 
@@ -22,15 +22,23 @@ use habilis_network_iroh_webrtc_transport::iroh::{
 use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport, custom_addr};
 use tokio::sync::mpsc;
 
-use crate::{ice_config, path, signal, terminal, wire};
+use crate::{ice_config, path, signal_acceptor, terminal, wire};
 
+use tokio::{sync, time};
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How many unrendered messages to buffer between the reader task and the
 /// terminal loop.
 const INBOX_CAPACITY: usize = 64;
 
-pub async fn run(ticket: &str, nick: &str, webrtc: bool, host_ice: bool) -> Result<()> {
+pub async fn run(
+    ticket: &str,
+    nick: &str,
+    // `true` joins as a browser tab does, over WebRTC (JSEP); `false` uses the iroh path.
+    webrtc: bool,
+    // `true` gathers host candidates only; `false` uses the default ICE set.
+    host_ice: bool,
+) -> Result<()> {
     let ticket = Ticket::decode(ticket).context("decode the ticket")?;
     let relay_mode = match ticket.relay.clone() {
         Some(url) => RelayMode::custom([url]),
@@ -56,13 +64,14 @@ pub async fn run(ticket: &str, nick: &str, webrtc: bool, host_ice: bool) -> Resu
 
         // The signalling endpoint: relay on, WebRTC absent. Its only job is to
         // reach the room and swap one envelope each way.
-        let signalling = Endpoint::builder(presets::Minimal)
+        let builder = Endpoint::builder(presets::Minimal)
             .secret_key(key.clone())
-            .relay_mode(relay_mode)
+            .relay_mode(relay_mode);
+        let signalling = builder
             .bind()
             .await
             .context("bind the signalling endpoint")?;
-        if tokio::time::timeout(ONLINE_TIMEOUT, signalling.online())
+        if time::timeout(ONLINE_TIMEOUT, signalling.online())
             .await
             .is_err()
         {
@@ -72,7 +81,7 @@ pub async fn run(ticket: &str, nick: &str, webrtc: bool, host_ice: bool) -> Resu
         println!("* negotiating a data channel over the relay…");
         // Boxed for the same reason the answering side is: the str0m state this
         // future carries is large enough that clippy asks for the heap.
-        Box::pin(signal::dial(
+        Box::pin(signal_acceptor::dial(
             &signalling,
             room_addr,
             id,
@@ -95,8 +104,8 @@ pub async fn run(ticket: &str, nick: &str, webrtc: bool, host_ice: bool) -> Resu
         // and never move. Giving the chat an endpoint with no other path to
         // lose to is what makes `webrtc` the answer rather than a coin flip —
         // and it is the same reason a browser tab needs two endpoints.
-        let chat = Endpoint::builder(transport.preset())
-            .secret_key(key)
+        let chat_builder = Endpoint::builder(transport.preset()).secret_key(key);
+        let chat = chat_builder
             .bind()
             .await
             .context("bind the chat endpoint")?;
@@ -108,13 +117,11 @@ pub async fn run(ticket: &str, nick: &str, webrtc: bool, host_ice: bool) -> Resu
             EndpointAddr::from_parts(ticket.id, [TransportAddr::Custom(custom_addr(ticket.id))]);
         (chat, target)
     } else {
-        let endpoint = Endpoint::builder(presets::Minimal)
+        let endpoint_builder = Endpoint::builder(presets::Minimal)
             .secret_key(key)
-            .relay_mode(relay_mode)
-            .bind()
-            .await
-            .context("bind the endpoint")?;
-        if tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online())
+            .relay_mode(relay_mode);
+        let endpoint = endpoint_builder.bind().await.context("bind the endpoint")?;
+        if time::timeout(ONLINE_TIMEOUT, endpoint.online())
             .await
             .is_err()
         {
@@ -165,10 +172,11 @@ async fn chat(connection: &Connection, nick: &str) -> Result<()> {
 
     // The reader owns the stream in a task of its own; `wire::read_msg` is two
     // reads and must never be cancelled between them.
-    let (tx, incoming) = mpsc::channel::<ServerMsg>(INBOX_CAPACITY);
+    let (tx, incoming): (mpsc::Sender<ServerMsg>, mpsc::Receiver<ServerMsg>) =
+        mpsc::channel(INBOX_CAPACITY);
     tokio::spawn(async move {
-        while let Ok(msg) = wire::read_msg::<ServerMsg>(&mut recv).await {
-            if tx.send(msg).await.is_err() {
+        while let Ok(message) = wire::read_msg(&mut recv).await {
+            if tx.send(message).await.is_err() {
                 break;
             }
         }
@@ -177,7 +185,7 @@ async fn chat(connection: &Connection, nick: &str) -> Result<()> {
     // Behind a mutex only so the closure can hand an owned guard to each
     // future: `participate` awaits every `say` before reading the next line, so
     // there is never real contention.
-    let send = Arc::new(tokio::sync::Mutex::new(send));
+    let send = Arc::new(sync::Mutex::new(send));
     terminal::participate(incoming, move |text| {
         let send = Arc::clone(&send);
         async move {

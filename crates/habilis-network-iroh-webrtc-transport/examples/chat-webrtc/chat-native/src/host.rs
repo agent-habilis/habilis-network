@@ -11,12 +11,12 @@ use habilis_network_iroh_webrtc_transport::iroh::{Endpoint, RelayMode, SecretKey
 use habilis_network_iroh_webrtc_transport::iroh_base::RelayUrl;
 use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
 
-use crate::ice_config;
+use crate::chat_acceptor::ChatAcceptor;
 use crate::room::Room;
-use crate::serve::ChatAcceptor;
-use crate::signal::SignalAcceptor;
+use crate::signal_acceptor::SignalAcceptor;
 use crate::terminal;
 
+use tokio::time;
 /// How long to wait for a relay before printing a ticket anyway.
 ///
 /// A ticket with no relay in it is still useful — a peer on the same LAN can be
@@ -27,7 +27,12 @@ const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often to re-read the census. Only printed when it changes.
 const CENSUS_INTERVAL: Duration = Duration::from_secs(1);
 
-pub async fn run(nick: &str, relay: Option<RelayUrl>, host_ice: bool) -> Result<()> {
+pub async fn run(
+    nick: &str,
+    relay: Option<RelayUrl>,
+    // `true` gathers host candidates only; `false` uses the default ICE set.
+    host_ice: bool,
+) -> Result<()> {
     let key = SecretKey::generate();
     let id = key.public();
 
@@ -39,28 +44,31 @@ pub async fn run(nick: &str, relay: Option<RelayUrl>, host_ice: bool) -> Result<
         None => RelayMode::Default,
     };
 
-    let endpoint = Endpoint::builder(presets::Minimal)
+    let transport = handle.transport();
+    let builder = Endpoint::builder(presets::Minimal)
         .secret_key(key)
         .relay_mode(relay_mode)
         // Additive — deliberately *not* `transport.preset()`, which would make
         // WebRTC this endpoint's only transport. That is right for a browser
         // and wrong for the room: a native peer joining without `--webrtc`
         // reaches it over iroh's own transports, and should.
-        .add_custom_transport(handle.transport())
-        // Registering the transport is not enough on its own. iroh's default
-        // selector skips paths it has no RTT sample for yet, which is every
-        // freshly attached WebRTC path — so a connection would settle on the
-        // relay and stay there for its whole life. This selector ranks
-        // ip > webrtc > relay, which is to say: the relay is a rendezvous, not
-        // a data path.
-        .path_selector(handle.path_selector())
+        .add_custom_transport(transport);
+    // Registering the transport is not enough on its own. iroh's default
+    // selector skips paths it has no RTT sample for yet, which is every
+    // freshly attached WebRTC path — so a connection would settle on the
+    // relay and stay there for its whole life. This selector ranks
+    // ip > webrtc > relay, which is to say: the relay is a rendezvous, not
+    // a data path.
+    let selector = handle.path_selector();
+    let endpoint = builder
+        .path_selector(selector)
         .bind()
         .await
         .context("bind the room's endpoint")?;
 
     // The ticket needs a relay in it, and `addr()` only carries one once the
     // endpoint has actually reached a relay server.
-    if tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online())
+    if time::timeout(ONLINE_TIMEOUT, endpoint.online())
         .await
         .is_err()
     {
@@ -68,15 +76,18 @@ pub async fn run(nick: &str, relay: Option<RelayUrl>, host_ice: bool) -> Result<
     }
 
     let room = Room::new();
-    let ice = ice_config(host_ice);
-    let router = Router::builder(endpoint.clone())
-        .accept(SIGNAL_ALPN, SignalAcceptor::new(handle.clone(), id, ice))
-        .accept(CHAT_ALPN, ChatAcceptor::new(room.clone(), handle.clone()))
-        .spawn();
+    let ice = crate::ice_config(host_ice);
+    let signal = SignalAcceptor::new(handle.clone(), id, ice);
+    let chat = ChatAcceptor::new(room.clone(), handle.clone());
+    let accepting = Router::builder(endpoint.clone())
+        .accept(SIGNAL_ALPN, signal)
+        .accept(CHAT_ALPN, chat);
+    let router = accepting.spawn();
 
+    let endpoint_addr = endpoint.addr();
     let ticket = Ticket {
         id,
-        relay: endpoint.addr().relay_urls().next().cloned(),
+        relay: endpoint_addr.relay_urls().next().cloned(),
     };
     banner(&ticket);
 
@@ -89,7 +100,7 @@ pub async fn run(nick: &str, relay: Option<RelayUrl>, host_ice: bool) -> Result<
     // Taken before the membership moves into the drain task: `say` needs the id
     // to tag the host's own lines, which is what keeps them from echoing back.
     let host_id = membership.id;
-    let incoming = terminal::from_membership(membership);
+    let incoming = terminal::membership_events(membership);
     let outcome = terminal::participate(incoming, |text| {
         let room = room.clone();
         async move {
@@ -112,7 +123,7 @@ fn spawn_census(room: Room, handle: WebRtcHandle) {
     tokio::spawn(async move {
         let mut last = None;
         loop {
-            tokio::time::sleep(CENSUS_INTERVAL).await;
+            time::sleep(CENSUS_INTERVAL).await;
             let now = (room.len(), handle.session_count());
             if last != Some(now) {
                 let (members, sessions) = now;

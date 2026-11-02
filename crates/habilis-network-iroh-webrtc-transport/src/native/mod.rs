@@ -4,15 +4,26 @@
 //! The protocol types this shares with the browser backend live at the crate
 //! root, not here.
 
+mod channel_ready_target;
 mod driver;
-mod endpoint;
-mod jsep;
-mod sender;
-mod session;
+mod ice_config;
+mod inbound_packet;
+mod jsep_error;
+mod negotiated_session;
+mod negotiating;
+mod note_dropped;
+mod pending_answer;
+mod pending_offer;
+mod session_handle;
+mod session_registry;
 pub mod stun;
-mod transport;
+mod web_rtc_endpoint;
+mod web_rtc_sender;
+mod web_rtc_transport;
 
-pub use driver::NegotiatedSession;
-pub use jsep::{PendingAnswer, PendingOffer, answer, answer_with, offer, offer_with};
-pub use stun::IceConfig;
-pub use transport::WebRtcTransport;
+pub use ice_config::IceConfig;
+pub use jsep_error::JsepError;
+pub use negotiated_session::NegotiatedSession;
+pub use pending_answer::{PendingAnswer, answer, answer_with};
+pub use pending_offer::{PendingOffer, offer, offer_with};
+pub use web_rtc_transport::WebRtcTransport;

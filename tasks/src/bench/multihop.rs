@@ -128,15 +128,15 @@ async fn direct(args: &Args, open: &mut Open) -> Result<Measured, String> {
     let run = async {
         let alice = node(open, secret(1)).await?;
         let bob = node(open, secret(2)).await?;
-        alice
+        let _ = alice
             .handle
             .feed_topology(alice.handle.link_vector(vec![(AppId::new(bob.id), COST)]));
-        alice
+        let _ = alice
             .handle
             .feed_topology(bob.handle.link_vector(vec![(AppId::new(alice.id), COST)]));
         open.routers.push(
             Router::builder(bob.app.clone())
-                .accept(BENCH_ALPN, Bench)
+                .accept(BENCH_ALPN, Bench::new())
                 .spawn(),
         );
         ladder_measure(&alice.app, EndpointAddr::from(bob.id), args, 0.0).await
@@ -170,12 +170,12 @@ async fn third(args: &Args, open: &mut Open) -> Result<Measured, String> {
         ];
         for handle in [&alice.handle, &third, &bob.handle] {
             for vector in &vectors {
-                handle.feed_topology(vector.clone());
+                let _ = handle.feed_topology(vector.clone());
             }
         }
         open.routers.push(
             Router::builder(bob.app.clone())
-                .accept(BENCH_ALPN, Bench)
+                .accept(BENCH_ALPN, Bench::new())
                 .spawn(),
         );
         let measured = ladder_measure(&alice.app, EndpointAddr::from(bob.id), args, 0.0).await?;
@@ -189,7 +189,6 @@ async fn third(args: &Args, open: &mut Open) -> Result<Measured, String> {
 mod tests {
     use super::{Args, Outcome, ladder_multihop_direct, ladder_multihop_third, require_forwarded};
     use crate::bench::Direction;
-    use habilis_network_test_tracing::test;
 
     fn small_args() -> Args {
         Args {
@@ -203,29 +202,34 @@ mod tests {
     }
 
     #[test]
-    async fn the_direct_multihop_cell_is_on_the_multihop_path_with_round_trips() {
-        let Outcome::Ok(measured) = ladder_multihop_direct(&small_args()).await else {
-            panic!("the direct multihop cell did not measure");
-        };
+    fn the_direct_multihop_cell_is_on_the_multihop_path_with_round_trips() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let Outcome::Ok(measured) = ladder_multihop_direct(&small_args()).await else {
+                panic!("the direct multihop cell did not measure");
+            };
 
-        assert_eq!(measured.path, "multihop");
-        assert!(measured.rtt.is_some());
+            assert_eq!(measured.path, "multihop");
+            assert!(measured.rtt.is_some());
+        });
     }
 
     #[test]
-    async fn the_third_member_cell_is_on_the_multihop_path_through_the_third() {
-        let Outcome::Ok(measured) = ladder_multihop_third(&small_args()).await else {
-            panic!("the third-member multihop cell did not measure");
-        };
+    fn the_third_member_cell_is_on_the_multihop_path_through_the_third() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let Outcome::Ok(measured) = ladder_multihop_third(&small_args()).await else {
+                panic!("the third-member multihop cell did not measure");
+            };
 
-        assert_eq!(measured.path, "multihop");
-        assert!(measured.rtt.is_some());
+            assert_eq!(measured.path, "multihop");
+            assert!(measured.rtt.is_some());
+        });
     }
 
     /// A "via a third member" number from a run where the third forwarded
     /// nothing would be a direct number with the wrong name.
     #[test]
     fn a_third_member_that_forwarded_nothing_is_an_error() {
+        let _guard = ::habilis_network_test_tracing::init();
         assert!(require_forwarded(0).is_err());
         assert!(require_forwarded(1).is_ok());
     }

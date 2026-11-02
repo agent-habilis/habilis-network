@@ -13,6 +13,7 @@ use xshell::{Shell, cmd};
 use crate::TaskOutcome;
 use crate::util::{metadata, output, repo_root};
 
+use std::{env, fs, path};
 /// Relative to the target directory, which cargo owns. MSVC names a staticlib
 /// `<crate>.lib`, with no `lib` prefix. The `habilis_network_ffi.dll.lib` beside it
 /// is the import library of the cdylib, not the archive.
@@ -34,7 +35,7 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
         return Err(format!("{} was not produced", archive.display()).into());
     }
 
-    let declared = declared(&std::fs::read_to_string(repo_root().join(HEADER))?);
+    let declared = declared(&fs::read_to_string(repo_root().join(HEADER))?);
     let (reader, flags) = symbol_reader(sh)?;
     // Non-zero status and a warning for every archive member with no symbols,
     // and a rust staticlib has plenty. The symbols it did print are still the
@@ -113,11 +114,11 @@ fn bundled_nm(sh: &Shell) -> Option<String> {
         .read()
         .ok()?;
     let triple = host_triple(sh)?;
-    let path = std::path::Path::new(sysroot.trim())
+    let path = path::Path::new(sysroot.trim())
         .join("lib/rustlib")
         .join(triple)
         .join("bin")
-        .join(format!("llvm-nm{}", std::env::consts::EXE_SUFFIX));
+        .join(format!("llvm-nm{}", env::consts::EXE_SUFFIX));
     path.exists().then(|| path.display().to_string())
 }
 
@@ -176,7 +177,6 @@ fn exported(nm: &str) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::exported;
-    use habilis_network_test_tracing::test;
 
     /// The C entry points of a sample, and nothing else.
     fn names(nm: &str) -> Vec<String> {
@@ -185,6 +185,7 @@ mod tests {
 
     #[test]
     fn exported_reads_elf() {
+        let _guard = ::habilis_network_test_tracing::init();
         let nm = "\
 habilis_network_ffi-1f2e3d4c5b6a7980.habilis_network_ffi.abc123-cgu.0.rcgu.o:
 0000000000001230 T habilis_network_mesh_open
@@ -199,6 +200,7 @@ habilis_network_ffi-1f2e3d4c5b6a7980.habilis_network_ffi.abc123-cgu.0.rcgu.o:
 
     #[test]
     fn exported_reads_mach_o_without_its_underscore() {
+        let _guard = ::habilis_network_test_tracing::init();
         let nm = "\
 habilis_network_ffi-1f2e3d4c5b6a7980.habilis_network_ffi.abc123-cgu.0.rcgu.o:
 0000000000001230 T _habilis_network_mesh_open
@@ -215,6 +217,7 @@ habilis_network_ffi-1f2e3d4c5b6a7980.habilis_network_ffi.abc123-cgu.0.rcgu.o:
     /// member header that is no symbol.
     #[test]
     fn exported_reads_coff() {
+        let _guard = ::habilis_network_test_tracing::init();
         let nm = "\
 habilis_network_ffi.habilis_network_ffi.87d421e0072b2311-cgu.10.rcgu.o:
 00000000 T _ZN19habilis_network_ffi4mesh4Mesh4recv28_$u7b$$u7b$closure$u7d$$u7d$17h525413074163e98dE.llvm.5446166027588183135

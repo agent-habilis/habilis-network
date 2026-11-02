@@ -13,10 +13,14 @@
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{
+    self, Blocking, Inspect, InspectTest, Linking, Membership, MessagingTest, Request,
+};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
+use tokio::time;
 const FORMATION: Duration = Duration::from_mins(1);
 /// The local request goes out this long after the send, so that the send is already in the loop.
 const ASK_AFTER: Duration = Duration::from_millis(200);
@@ -37,9 +41,11 @@ struct Member {
 }
 
 impl Member {
-    async fn open(opts: &membership::Opts) -> Self {
+    async fn open(options: &membership::JoinOptions) -> Self {
         let (sink, events) = membership::json_sink();
-        let membership = membership::join(opts, sink).await.expect("open a member");
+        let membership = membership::join(options, sink)
+            .await
+            .expect("open a member");
         Self {
             membership,
             _events: events,
@@ -47,29 +53,27 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport: vec![Transport::Udp],
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
-        .await
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .lookup(vec![Lookup::Relay]);
+        let options = options
+            .transport(vec![Transport::Udp])
+            .relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
-        .await
+        let mesh = creator.membership.node.mesh_id().to_string();
+        let options = membership::JoinOptions::default()
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
+        Self::open(&options).await
     }
 
     async fn knows(&self, nick: &str) -> bool {
         let json = self
             .membership
-            .request(|reply| Request::Peers { reply })
+            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
             .await
             .unwrap_or_default();
         json.contains(&format!("\"{nick}\""))
@@ -77,20 +81,22 @@ impl Member {
 
     async fn block_ip_to(&self, ports: Vec<u16>) {
         self.membership
-            .request(|reply| Request::BlockIpTo {
-                remote_ports: ports,
-                reply,
+            .request(|reply| {
+                Request::Blocking(Blocking::BlockIpTo {
+                    remote_ports: ports,
+                    reply,
+                })
             })
             .await
             .expect("the loop answers");
     }
 
-    /// A directed send that never takes the warm fast path: see [`Request::SendCold`].
+    /// A directed send that never takes the warm fast path: see [`MessagingTest::SendCold`].
     async fn send_cold(&self, to: &str, text: &str) -> Result<(), String> {
         let to = membership::parse_to(Some(to)).expect("a nickname");
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::SendCold { to, body, reply })
+            .request(|reply| Request::MessagingTest(MessagingTest::SendCold { to, body, reply }))
             .await
             .expect("the loop answers")
     }
@@ -99,9 +105,11 @@ impl Member {
     /// on. `None` while no path is selected.
     async fn selected_rung(&self, peer: &str) -> Option<&'static str> {
         self.membership
-            .request(|reply| Request::SelectedRung {
-                peer: peer.to_owned(),
-                reply,
+            .request(|reply| {
+                Request::InspectTest(InspectTest::SelectedRung {
+                    peer: peer.to_owned(),
+                    reply,
+                })
             })
             .await
             .expect("the loop answers")
@@ -110,9 +118,11 @@ impl Member {
     /// Whether a unicast connection to `peer` was pooled, and is forgotten now.
     async fn forget_unicast(&self, peer: &str) -> bool {
         self.membership
-            .request(|reply| Request::ForgetUnicast {
-                peer: peer.to_owned(),
-                reply,
+            .request(|reply| {
+                Request::Linking(Linking::ForgetUnicast {
+                    peer: peer.to_owned(),
+                    reply,
+                })
             })
             .await
             .expect("the loop answers")
@@ -121,7 +131,7 @@ impl Member {
 
     async fn message_log_len(&self) -> usize {
         self.membership
-            .request(|reply| Request::MessageLogLen { reply })
+            .request(|reply| Request::InspectTest(InspectTest::MessageLogLen { reply }))
             .await
             .expect("the loop answers")
     }
@@ -131,9 +141,7 @@ impl Member {
 fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
         let bob = Member::join("bob", &alice).await;
 
@@ -143,7 +151,7 @@ fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
                 Instant::now() < formation_ends,
                 "alice did not learn bob within {FORMATION:?}"
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            time::sleep(Duration::from_millis(250)).await;
         }
         alice
             .block_ip_to(bob.membership.node.bound_ports().to_vec())
@@ -157,7 +165,7 @@ fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
                 Instant::now() < block_ends,
                 "the path of alice to bob did not leave UDP within {BLOCK_TAKES_EFFECT:?}"
             );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            time::sleep(Duration::from_millis(100)).await;
         }
 
         // Forget the connection to bob, so that the send dials in the common case. A probe of the direct
@@ -175,7 +183,7 @@ fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
             (verdict, started.elapsed())
         };
         let local = async {
-            tokio::time::sleep(ASK_AFTER).await;
+            time::sleep(ASK_AFTER).await;
             let _ = alice.message_log_len().await;
             started.elapsed()
         };

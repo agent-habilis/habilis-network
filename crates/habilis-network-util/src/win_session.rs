@@ -25,51 +25,19 @@ use std::time::Duration;
 use windows_sys::Win32::Foundation::{ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, ENDSESSION_CLOSEAPP, ENDSESSION_LOGOFF,
-    GetMessageW, MSG, RegisterClassW, WM_CLOSE, WM_ENDSESSION, WM_QUERYENDSESSION, WNDCLASSW,
-    WS_OVERLAPPED,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, MSG, RegisterClassW, WM_CLOSE,
+    WM_ENDSESSION, WM_QUERYENDSESSION, WNDCLASSW, WS_OVERLAPPED,
 };
+
+use std::{ptr, thread};
+
+mod session_end;
+pub use session_end::SessionEnd;
+mod session_event;
+pub use session_event::SessionEvent;
 
 /// The class of the window. A test finds the window of a process by it.
 const CLASS: &str = "habilis-network-session";
-
-/// What the window of [`watch_session_end`] reports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionEvent {
-    /// `WM_ENDSESSION` with `TRUE`: the session ends, and Windows ends the
-    /// process when the window procedure returns.
-    End(SessionEnd),
-    /// `WM_CLOSE`: a request to close, with no deadline.
-    Close,
-}
-
-/// Why the session ends, from the bits of the `lParam` of `WM_ENDSESSION`.
-///
-/// A forced end (`ENDSESSION_CRITICAL`) is one of these too: the bit only says
-/// that the process cannot refuse it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionEnd {
-    /// The user logs off (`ENDSESSION_LOGOFF`).
-    Logoff,
-    /// The system shuts down or restarts (no bit).
-    Shutdown,
-    /// The Restart Manager closes the process (`ENDSESSION_CLOSEAPP`), for
-    /// example an installer that replaces its file.
-    CloseApp,
-}
-
-impl SessionEnd {
-    fn from_lparam(lparam: LPARAM) -> Self {
-        let bits = lparam.cast_unsigned();
-        if bits & ENDSESSION_CLOSEAPP as usize != 0 {
-            Self::CloseApp
-        } else if bits & ENDSESSION_LOGOFF as usize != 0 {
-            Self::Logoff
-        } else {
-            Self::Shutdown
-        }
-    }
-}
 
 /// The `lParam` that carries the bits `flags`, as Windows sends it: the bits
 /// themselves, not a sign-extended number.
@@ -118,7 +86,7 @@ pub fn watch_session_end(on_event: impl FnMut(SessionEvent) + Send + 'static) ->
 /// [`watch_session_end`], which gives the window to the tests as its address.
 fn spawn_window(on_event: Box<dyn FnMut(SessionEvent) + Send>) -> io::Result<usize> {
     let (made_tx, made_rx) = mpsc::channel();
-    std::thread::Builder::new()
+    thread::Builder::new()
         .name("session-end".to_owned())
         .spawn(move || {
             ON_EVENT.set(Some(on_event));
@@ -150,17 +118,17 @@ fn class_name() -> Vec<u16> {
 fn make_window() -> io::Result<HWND> {
     let class = class_name();
     // SAFETY: a null name gives the module of the process.
-    let module = unsafe { GetModuleHandleW(std::ptr::null()) };
+    let module = unsafe { GetModuleHandleW(ptr::null()) };
     let window_class = WNDCLASSW {
         style: 0,
         lpfnWndProc: Some(window_procedure),
         cbClsExtra: 0,
         cbWndExtra: 0,
         hInstance: module,
-        hIcon: std::ptr::null_mut(),
-        hCursor: std::ptr::null_mut(),
-        hbrBackground: std::ptr::null_mut(),
-        lpszMenuName: std::ptr::null(),
+        hIcon: ptr::null_mut(),
+        hCursor: ptr::null_mut(),
+        hbrBackground: ptr::null_mut(),
+        lpszMenuName: ptr::null(),
         lpszClassName: class.as_ptr(),
     };
     // SAFETY: the struct and the name it points to live across the call. A
@@ -184,10 +152,10 @@ fn make_window() -> io::Result<HWND> {
             0,
             0,
             0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
             module,
-            std::ptr::null(),
+            ptr::null(),
         )
     };
     if window.is_null() {
@@ -203,7 +171,7 @@ fn pump_messages() {
     let mut message = MSG::default();
     // SAFETY: `message` lives across each call. A null window takes the
     // messages of every window of this thread.
-    while unsafe { GetMessageW(&raw mut message, std::ptr::null_mut(), 0, 0) } > 0 {
+    while unsafe { GetMessageW(&raw mut message, ptr::null_mut(), 0, 0) } > 0 {
         // SAFETY: `message` is the one that `GetMessageW` filled.
         unsafe {
             DispatchMessageW(&raw const message);
@@ -235,7 +203,7 @@ unsafe extern "system" fn window_procedure(
         WM_QUERYENDSESSION => 1,
         WM_ENDSESSION => {
             if wparam != 0 {
-                report(SessionEvent::End(SessionEnd::from_lparam(lparam)));
+                report(SessionEvent::End(SessionEnd::parse_lparam(lparam)));
             }
             0
         }
@@ -269,6 +237,7 @@ mod fixtures {
 
     use super::{CLASS, lparam_of, timeout_ms};
 
+    use std::ptr;
     /// How long `WM_QUERYENDSESSION` may take. The window answers at once.
     const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -389,12 +358,12 @@ mod fixtures {
         unsafe_code,
         reason = "an EnumWindows callback, GetWindowThreadProcessId and GetClassNameW FFI"
     )]
-    unsafe extern "system" fn each_window(window: HWND, search: LPARAM) -> BOOL {
+    unsafe extern "system" fn each_window(window: HWND, search_address: LPARAM) -> BOOL {
+        let search_pointer: *mut Search =
+            ptr::with_exposed_provenance_mut(search_address.cast_unsigned());
         // SAFETY: `windows_of` passes a pointer to a `Search` that lives
         // across `EnumWindows`, and nothing else reads it meanwhile.
-        let search = unsafe {
-            &mut *std::ptr::with_exposed_provenance_mut::<Search>(search.cast_unsigned())
-        };
+        let search = unsafe { &mut *search_pointer };
         let mut owner = 0;
         // SAFETY: `owner` lives across the call.
         unsafe {
@@ -416,7 +385,6 @@ mod fixtures {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_test_tracing::test;
     use std::sync::mpsc::{self, Receiver};
     use std::time::Duration;
 
@@ -428,6 +396,9 @@ mod tests {
 
     use super::{SessionEnd, SessionEvent, lparam_of, spawn_window, timeout_ms};
 
+    #[cfg(feature = "test-fixtures")]
+    use std::process;
+    use std::{io, ptr};
     /// A window of its own, and the events that its `on_event` got.
     fn window() -> (HWND, Receiver<SessionEvent>) {
         let (events_tx, events_rx) = mpsc::channel();
@@ -435,7 +406,7 @@ mod tests {
             let _ = events_tx.send(event);
         }))
         .expect("the window");
-        (std::ptr::with_exposed_provenance_mut(window), events_rx)
+        (ptr::with_exposed_provenance_mut(window), events_rx)
     }
 
     /// Send `message` to `window` and give its answer.
@@ -454,12 +425,7 @@ mod tests {
                 &raw mut answer,
             )
         };
-        assert_ne!(
-            sent,
-            0,
-            "the send failed: {}",
-            std::io::Error::last_os_error()
-        );
+        assert_ne!(sent, 0, "the send failed: {}", io::Error::last_os_error());
         answer
     }
 
@@ -471,13 +437,19 @@ mod tests {
 
     #[test]
     fn the_window_lets_the_session_end_and_reports_no_event_for_the_query() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (window, events) = window();
-        assert_eq!(send(window, WM_QUERYENDSESSION, 0, 0), 1);
-        assert_eq!(next(&events), None);
+        assert_eq!(
+            send(window, WM_QUERYENDSESSION, 0, 0),
+            1,
+            "the window lets the session end"
+        );
+        assert_eq!(next(&events), None, "a query is no end of the session");
     }
 
     #[test]
     fn the_end_of_the_session_reports_its_kind() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (window, events) = window();
         for (bits, kind) in [
             (ENDSESSION_LOGOFF, SessionEnd::Logoff),
@@ -486,7 +458,11 @@ mod tests {
             (ENDSESSION_CRITICAL, SessionEnd::Shutdown),
             (ENDSESSION_CRITICAL | ENDSESSION_LOGOFF, SessionEnd::Logoff),
         ] {
-            assert_eq!(send(window, WM_ENDSESSION, 1, lparam_of(bits)), 0);
+            assert_eq!(
+                send(window, WM_ENDSESSION, 1, lparam_of(bits)),
+                0,
+                "WM_ENDSESSION is handled"
+            );
             assert_eq!(
                 next(&events),
                 Some(SessionEvent::End(kind)),
@@ -497,37 +473,61 @@ mod tests {
 
     #[test]
     fn a_cancelled_end_of_the_session_reports_no_event() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (window, events) = window();
         send(window, WM_ENDSESSION, 0, lparam_of(ENDSESSION_LOGOFF));
-        assert_eq!(next(&events), None);
+        assert_eq!(
+            next(&events),
+            None,
+            "a cancelled end of the session ends nothing"
+        );
     }
 
     #[test]
     #[expect(unsafe_code, reason = "IsWindow FFI")]
     fn a_close_is_reported_and_the_window_stays() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (window, events) = window();
-        assert_eq!(send(window, WM_CLOSE, 0, 0), 0);
-        assert_eq!(next(&events), Some(SessionEvent::Close));
-        // SAFETY: a plain value argument.
-        assert_ne!(
-            unsafe { IsWindow(window) },
-            0,
-            "the close destroyed the window"
+        assert_eq!(send(window, WM_CLOSE, 0, 0), 0, "WM_CLOSE is handled");
+        assert_eq!(
+            next(&events),
+            Some(SessionEvent::Close),
+            "a close is reported"
         );
+        // SAFETY: a plain value argument.
+        let alive = unsafe { IsWindow(window) };
+        assert_ne!(alive, 0, "the close destroyed the window");
         // The window still gets the end of the session.
         send(window, WM_ENDSESSION, 1, lparam_of(ENDSESSION_LOGOFF));
-        assert_eq!(next(&events), Some(SessionEvent::End(SessionEnd::Logoff)));
+        assert_eq!(
+            next(&events),
+            Some(SessionEvent::End(SessionEnd::Logoff)),
+            "the window still hears the end of the session"
+        );
     }
 
     #[test]
     fn two_windows_of_one_process_report_to_their_own_handler() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (first, first_events) = window();
         let (second, second_events) = window();
         send(second, WM_CLOSE, 0, 0);
-        assert_eq!(next(&second_events), Some(SessionEvent::Close));
-        assert_eq!(next(&first_events), None);
+        assert_eq!(
+            next(&second_events),
+            Some(SessionEvent::Close),
+            "the second handler hears its close"
+        );
+        assert_eq!(
+            next(&first_events),
+            None,
+            "the first handler hears no close of the second"
+        );
         send(first, WM_CLOSE, 0, 0);
-        assert_eq!(next(&first_events), Some(SessionEvent::Close));
+        assert_eq!(
+            next(&first_events),
+            Some(SessionEvent::Close),
+            "the first handler hears its close"
+        );
     }
 
     /// Only the lookup: a send to the windows of this process would reach the
@@ -535,8 +535,9 @@ mod tests {
     #[cfg(feature = "test-fixtures")]
     #[test]
     fn the_lookup_finds_the_window_of_this_process() {
+        let _guard = ::habilis_network_test_tracing::init();
         let (window, _events) = window();
-        let found = super::fixtures::windows_of(std::process::id()).expect("a window");
+        let found = super::fixtures::windows_of(process::id()).expect("a window");
         assert!(
             found.contains(&window),
             "{found:?} does not hold {window:?}"

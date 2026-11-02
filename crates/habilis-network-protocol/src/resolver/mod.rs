@@ -1,115 +1,33 @@
-use std::fmt;
-use std::str::FromStr;
+//! Resolving a join target: a mesh id, or an invite to an invite-only mesh.
 
-use anyhow::{Result, anyhow, bail};
+mod join_target;
+mod join_target_error;
+mod resolve;
+mod resolve_error;
 
-use crate::MeshId;
-use crate::invite::InviteTicket;
-use crate::mesh::{LockedMesh, MeshIdError};
-
-/// What a join accepts: a bare base58 mesh id, or a creator-minted bare
-/// base58 invite to an invite-only mesh. A shared *string* is not a join
-/// target — it derives its own mesh through the topic path. Classified and
-/// validated **once**, at the boundary (clap `FromStr` / MCP entry), so
-/// `resolve` matches the variant instead of re-sniffing a `String`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum JoinTarget {
-    /// A bare base58 mesh id — resolves with no I/O.
-    Mesh(MeshId),
-    /// A bare base58 invite to an invite-only mesh — redeemed (signature +
-    /// expiry checked, root unwrapped) in `JoinParams`, which holds the
-    /// password.
-    Invite(InviteTicket),
-}
-
-/// Why a string is not a join target. A *classification*, not a rendered
-/// remedy: the engine has no commands to point at, so a consumer matches the
-/// variant and appends its own "use … instead" hint. [`Unrecognized`] carries
-/// the trimmed input for exactly that.
-///
-/// [`Unrecognized`]: JoinTargetError::Unrecognized
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum JoinTargetError {
-    /// Looked like a mesh id (base58) but failed checksum/payload validation.
-    MalformedMeshId(MeshIdError),
-    /// Not a token at all — wrong length or outside the Base58 charset.
-    /// Carries the trimmed input to echo back.
-    Unrecognized(String),
-}
-
-impl fmt::Display for JoinTargetError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            JoinTargetError::MalformedMeshId(error) => error.fmt(formatter),
-            JoinTargetError::Unrecognized(input) => write!(
-                formatter,
-                "`{input}` is not a mesh id or invite (expected a base58 mesh id or invite ticket)"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for JoinTargetError {}
-
-impl FromStr for JoinTarget {
-    type Err = JoinTargetError;
-
-    fn from_str(input: &str) -> Result<Self, Self::Err> {
-        let trimmed = input.trim();
-        // Neither token is branded, so classification is try-decode. The
-        // invite goes first because it is the more specific parse: its payload
-        // carries a kind byte, and its checksum makes a false positive on a
-        // mesh id a ~2^-32 event. Only then does the id decoder see the input.
-        if let Ok(invite) = InviteTicket::decode(trimmed) {
-            return Ok(JoinTarget::Invite(invite));
-        }
-        match trimmed.parse::<MeshId>() {
-            Ok(id) => Ok(JoinTarget::Mesh(id)),
-            // Wrong length or wrong charset means it was never a token; a
-            // payload that decodes far enough to fail on its *contents* is a
-            // real id the user mistyped, and keeps its specific reason.
-            Err(MeshIdError::Length(_) | MeshIdError::Charset(_)) => {
-                Err(JoinTargetError::Unrecognized(trimmed.to_owned()))
-            }
-            Err(other) => Err(JoinTargetError::MalformedMeshId(other)),
-        }
-    }
-}
-
-/// # Errors
-/// The mesh id fails to decode, or the invite ticket fails to redeem.
-pub fn resolve(target: &JoinTarget) -> Result<LockedMesh> {
-    match target {
-        JoinTarget::Mesh(id) => {
-            // Refusing an invite-only id is `LockedMesh::unlock`'s job, the one
-            // place a bare hash can become a joinable mesh.
-            id.as_str()
-                .parse::<LockedMesh>()
-                .map_err(|error| anyhow!("invalid mesh id: {error}"))
-        }
-        // An invite carries the join key and needs the password to unwrap it, so
-        // it is redeemed in `JoinParams::resolve`; `resolve` never sees it alone.
-        JoinTarget::Invite(_) => {
-            bail!("internal: an invite target must be redeemed via JoinParams")
-        }
-    }
-}
+pub use join_target::JoinTarget;
+pub use join_target_error::JoinTargetError;
+pub use resolve::resolve;
+pub use resolve_error::ResolveError;
 
 #[cfg(test)]
 mod tests {
     use super::{JoinTarget, JoinTargetError, resolve};
-    use habilis_network_test_tracing::test;
 
     // The consumer builds its own "use the topic command instead" hint off this
     // variant, so the trimmed input has to survive classification verbatim.
+    use crate::{crypto, invite, meshes};
+    use std::time;
     #[test]
     fn a_non_token_string_is_unrecognized_and_echoes_its_input() {
-        let error = "  github.com/alice/proj "
-            .parse::<JoinTarget>()
-            .unwrap_err();
+        let _guard = ::habilis_network_test_tracing::init();
+        let parsed: Result<JoinTarget, _> = "  github.com/alice/proj ".parse();
+        let error = parsed
+            .expect_err("the input in this test is not a valid parsed id, so parsing refuses it");
         assert_eq!(
             error,
-            JoinTargetError::Unrecognized("github.com/alice/proj".to_owned())
+            JoinTargetError::Unrecognized("github.com/alice/proj".to_owned()),
+            "a non-token string is unrecognized and echoes its input"
         );
         assert!(
             error.to_string().contains("github.com/alice/proj"),
@@ -118,76 +36,92 @@ mod tests {
     }
 
     fn known_mesh_id() -> String {
-        use crate::mesh::{Mesh, MeshConfig, MeshName};
-        Mesh::new(
-            crate::crypto::Seed::from_bytes([1u8; 32]),
-            MeshName::new("test").unwrap(),
+        use crate::meshes::{Mesh, MeshConfig, MeshName};
+        Mesh::try_new(
+            crypto::Seed::new([1u8; 32]),
+            MeshName::try_new("test").expect("the literal \"test\" is a valid mesh name"),
             MeshConfig::loopback(),
         )
-        .unwrap()
+        .expect("the fixture seed, name and config form a valid mesh")
         .to_string()
     }
 
     #[test]
     fn resolve_passthrough_for_valid_mesh_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id = known_mesh_id();
-        let target: JoinTarget = id.parse().unwrap();
-        let mesh = resolve(&target).unwrap();
-        assert_eq!(mesh.to_string(), id);
+        let target: JoinTarget = id.parse().expect("the id text in this test is a valid id");
+        let mesh = resolve(&target).expect("the target in this test is a valid resolvable id");
+        assert_eq!(mesh.to_string(), id, "a valid mesh id resolves to itself");
     }
 
     #[test]
     fn mistyped_mesh_id_reports_an_invalid_gossip_hash() {
+        let _guard = ::habilis_network_test_tracing::init();
         let mut mistyped = known_mesh_id();
         let replacement = if mistyped.ends_with('1') { "2" } else { "1" };
         mistyped.replace_range(mistyped.len() - 1.., replacement);
-        let error = mistyped.parse::<JoinTarget>().unwrap_err();
-        assert_eq!(error.to_string(), "invalid gossip hash");
+        let parsed: Result<JoinTarget, _> = mistyped.parse();
+        let error = parsed
+            .expect_err("the input in this test is not a valid parsed id, so parsing refuses it");
+        assert_eq!(
+            error.to_string(),
+            "invalid gossip hash",
+            "a mistyped mesh id reports an invalid gossip hash"
+        );
     }
 
     #[test]
     fn join_target_classifies_valid_id() {
+        let _guard = ::habilis_network_test_tracing::init();
         let id = known_mesh_id();
-        assert!(matches!(id.parse::<JoinTarget>(), Ok(JoinTarget::Mesh(_))));
+        let parsed: Result<JoinTarget, _> = id.parse();
+        assert!(
+            matches!(parsed, Ok(JoinTarget::Mesh(_))),
+            "a valid id classifies as a mesh target"
+        );
     }
 
-    fn invite_only_mesh() -> crate::mesh::Mesh {
-        use crate::mesh::{Mesh, MeshConfig, MeshName};
-        let mut mesh = Mesh::new(
-            crate::crypto::Seed::from_bytes([5u8; 32]),
-            MeshName::new("t").unwrap(),
+    fn invite_only_mesh() -> meshes::Mesh {
+        use crate::meshes::{Mesh, MeshConfig, MeshName};
+        let mut mesh = Mesh::try_new(
+            crypto::Seed::new([5u8; 32]),
+            MeshName::try_new("t").expect("the literal \"t\" is a valid mesh name"),
             MeshConfig::loopback(),
         )
-        .unwrap();
+        .expect("the fixture seed, name and config form a valid mesh");
         mesh.set_invite();
         mesh
     }
 
     #[test]
     fn a_bare_invite_only_hash_is_refused_at_unlock_with_a_pointer() {
+        let _guard = ::habilis_network_test_tracing::init();
         // The attack: skip the invite and join with the raw hash. `unlock` must
         // refuse, so no mesh is ever derived without its root.
         let id = invite_only_mesh().to_string();
-        let target: JoinTarget = id.parse().unwrap();
-        let error = resolve(&target)
-            .unwrap()
+        let target: JoinTarget = id.parse().expect("the id text in this test is a valid id");
+        let error: String = resolve(&target)
+            .expect("the target in this test is a valid resolvable id")
             .unlock(None)
-            .unwrap_err()
+            .expect_err("unlock refuses a password-protected mesh given no password")
             .to_string();
         assert!(error.contains("invite-only"), "got: {error}");
     }
 
     #[test]
     fn a_minted_invite_classifies_as_invite() {
-        let token = crate::invite::mint(
+        let _guard = ::habilis_network_test_tracing::init();
+        let token = invite::mint(
             &invite_only_mesh(),
-            Some(std::time::Duration::from_hours(1)),
+            Some(time::Duration::from_hours(1)),
             None,
         )
-        .unwrap();
-        assert!(matches!(
-            token.parse::<JoinTarget>(),
-            Ok(JoinTarget::Invite(_))
-        ));
+        .expect("the fixture mesh is invite-only, so minting a ticket succeeds");
+        let parsed: Result<JoinTarget, _> = token.parse();
+        assert!(
+            matches!(parsed, Ok(JoinTarget::Invite(_))),
+            "a minted invite classifies as an invite target"
+        );
     }
 }

@@ -1,38 +1,41 @@
 //! Ties [`reactive`], [`component`], [`reconcile`], and a [`Host`]
 //! together into a running app. The root is mounted the same way any
 //! nested [`crate::view::View::component`] is — a
-//! [`reconcile::ComponentMount`] — so [`Runtime::tick`]'s dirty-set walk
+//! [`component_mount::ComponentMount`] — so [`Runtime::tick`]'s dirty-set walk
 //! treats the whole tree uniformly: whichever instance's own signal
 //! changed is the one that re-renders, root or nested, ancestor or leaf.
 
-use std::collections::HashSet;
-use std::ops::Coroutine;
-
-use crate::component::Yield;
+use crate::component::Component;
 use crate::host::Host;
-use crate::reactive::{self, SubscriberId};
-use crate::reconcile::{self, Mounted};
-use crate::tui;
+use crate::mounted::Mounted;
+use crate::subscriber_id::SubscriberId;
+use crate::{reactive, reconcile, tui};
+use std::collections::HashSet;
+
+use std::{fmt, mem};
 
 /// A running app.
-// No `Debug` derive: it would force a `H: Debug` bound onto every `Host`
-// backend for a trace nobody's asked for yet. Add one (manual, printing
-// the instance and node count) if a debugging need actually shows up.
-#[allow(missing_debug_implementations)]
-pub struct Runtime<H: Host> {
-    host: H,
-    root: H::Node,
-    mounted: Mounted<H::Node>,
+pub struct Runtime<Backend: Host> {
+    host: Backend,
+    root: Backend::Node,
+    mounted: Mounted<Backend::Node>,
 }
 
-impl<H: Host> Runtime<H> {
-    /// Mounts `coro` as the root component and does the first render.
+// Manual, so a `Host` backend need not implement `Debug` to make a `Runtime` printable.
+impl<Backend: Host> fmt::Debug for Runtime<Backend> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Runtime").finish_non_exhaustive()
+    }
+}
+
+impl<Backend: Host> Runtime<Backend> {
+    /// Mounts `component` as the root component and does the first render.
     pub fn new(
-        mut host: H,
-        root: H::Node,
-        coro: impl Coroutine<(), Yield = Yield, Return = ()> + 'static,
+        mut host: Backend,
+        root: Backend::Node,
+        component: impl Component + 'static,
     ) -> Self {
-        let mounted = reconcile::mount_root(&mut host, root, coro);
+        let mounted = reconcile::mount_root(&mut host, root, component);
         Self {
             host,
             root,
@@ -41,11 +44,11 @@ impl<H: Host> Runtime<H> {
     }
 
     #[must_use]
-    pub fn host(&self) -> &H {
+    pub fn host(&self) -> &Backend {
         &self.host
     }
 
-    pub fn host_mut(&mut self) -> &mut H {
+    pub fn host_mut(&mut self) -> &mut Backend {
         &mut self.host
     }
 
@@ -54,7 +57,7 @@ impl<H: Host> Runtime<H> {
     /// doc. Returns whether anything was queued at all, i.e. whether a
     /// repaint might be needed.
     pub fn tick(&mut self) -> bool {
-        let dirty: HashSet<SubscriberId> = reactive::take_queue().into_iter().collect();
+        let dirty: HashSet<SubscriberId> = reactive::take_queue().collect();
         if dirty.is_empty() {
             return false;
         }
@@ -63,22 +66,22 @@ impl<H: Host> Runtime<H> {
         true
     }
 
-    fn take_mounted(&mut self) -> Mounted<H::Node> {
+    fn take_mounted(&mut self) -> Mounted<Backend::Node> {
         // `Mounted` has no `Default`/empty state to swap in temporarily,
         // so this exists to move it out of `&mut self` for `patch_dirty`'s
         // by-value signature without a placeholder allocation.
-        std::mem::replace(&mut self.mounted, Mounted::Hole(self.root))
+        mem::replace(&mut self.mounted, Mounted::Hole(self.root))
     }
 }
 
-impl Runtime<tui::host_impl::TuiHost> {
+impl Runtime<tui::tui_host::TuiHost> {
     /// Convenience for the terminal backend: builds a `TuiHost`, creates
-    /// its root node, and mounts `coro` — the one-liner a real terminal
+    /// its root node, and mounts `component` — the one-liner a real terminal
     /// app calls.
-    pub fn terminal(coro: impl Coroutine<(), Yield = Yield, Return = ()> + 'static) -> Self {
-        let mut host = tui::host_impl::TuiHost::new();
+    pub fn terminal(component: impl Component + 'static) -> Self {
+        let mut host = tui::tui_host::TuiHost::new();
         let root = host.create_root();
-        Self::new(host, root, coro)
+        Self::new(host, root, component)
     }
 }
 
@@ -90,15 +93,15 @@ impl Runtime<tui::host_impl::TuiHost> {
 /// — a method taking `&mut self` throughout would over-borrow for no
 /// reason paint actually needs.
 pub fn render_frame(
-    runtime: &mut Runtime<tui::host_impl::TuiHost>,
-    layout_state: &mut tui::layout::LayoutState,
-    previous: Option<&tui::paint::ScreenBuffer>,
+    runtime: &mut Runtime<tui::tui_host::TuiHost>,
+    layout_state: &mut tui::layout_state::LayoutState,
+    previous: Option<&tui::screen_buffer::ScreenBuffer>,
     width: i32,
     height: i32,
-) -> (String, tui::paint::ScreenBuffer) {
+) -> (String, tui::screen_buffer::ScreenBuffer) {
     let root = runtime.root;
     layout_state.layout(&mut runtime.host_mut().arena, root, width, height);
-    let mut buffer = tui::paint::ScreenBuffer::new(width, height);
+    let mut buffer = tui::screen_buffer::ScreenBuffer::new(width, height);
     tui::paint::paint(&mut buffer, &runtime.host().arena, root);
     let bytes = tui::diff::diff(previous, &buffer);
     (bytes, buffer)
@@ -106,50 +109,88 @@ pub fn render_frame(
 
 #[cfg(test)]
 mod tests {
-    use super::render_frame;
-    use crate::component::Yield;
-    use crate::reactive::Signal;
+    use crate::component::{Component, Step};
     use crate::runtime::Runtime;
-    use crate::tui::layout::LayoutState;
+    use crate::signal::Signal;
+    use crate::tui::layout_state::LayoutState;
     use crate::view::{BoxProps, View};
-    use habilis_network_test_tracing::test;
+
+    use crate::component;
+    use crate::tui::screen_buffer;
+    use std::{cell, rc};
+    #[derive(Clone)]
+    struct Counter(Signal<i32>);
+
+    impl Component for Counter {
+        fn step(&mut self) -> Option<Step> {
+            let n = self.0.get();
+            Some(Step::View(View::boxed(
+                BoxProps::default(),
+                vec![View::text(&format!("count is {n}"))],
+            )))
+        }
+    }
 
     #[test]
     fn a_running_app_repaints_only_after_a_signal_changes() {
+        let _guard = ::habilis_network_test_tracing::init();
         let count = Signal::new(0);
-        let count_in_component = count.clone();
-        let mut app = Runtime::terminal(
-            #[coroutine]
-            move || {
-                loop {
-                    let n = count_in_component.get();
-                    yield Yield::View(View::boxed(
-                        BoxProps::default(),
-                        vec![View::text(format!("count is {n}"))],
-                    ));
-                }
-            },
-        );
+        let mut app = Runtime::terminal(Counter(count.clone()));
 
         let mut layout_state = LayoutState::new();
-        let (first_bytes, first_buffer) = render_frame(&mut app, &mut layout_state, None, 20, 1);
-        assert!(first_bytes.contains("count is 0"));
-        assert_eq!(row_text(&first_buffer).trim_end(), "count is 0");
+        let (first_bytes, first_buffer) =
+            super::render_frame(&mut app, &mut layout_state, None, 20, 1);
+        assert!(
+            first_bytes.contains("count is 0"),
+            "the first frame shows the initial count"
+        );
+        assert_eq!(
+            row_text(&first_buffer).trim_end(),
+            "count is 0",
+            "the first buffer reads count is 0"
+        );
 
         // No signal change: tick reports nothing to repaint.
-        assert!(!app.tick());
+        assert!(!app.tick(), "no repaint happens before a signal changes");
 
         count.set(9);
-        assert!(app.tick());
+        assert!(app.tick(), "a repaint happens after a signal changes");
         // The diff against `first_buffer` is deliberately minimal — only
         // the changed digit is re-emitted, not the whole string — so the
         // real assertion is against the freshly painted buffer, not the
         // diff bytes.
         let (second_bytes, second_buffer) =
-            render_frame(&mut app, &mut layout_state, Some(&first_buffer), 20, 1);
-        assert!(second_bytes.contains('9'));
-        assert!(!second_bytes.contains("count is 9")); // the unchanged prefix is not re-emitted
-        assert_eq!(row_text(&second_buffer).trim_end(), "count is 9");
+            super::render_frame(&mut app, &mut layout_state, Some(&first_buffer), 20, 1);
+        assert!(
+            second_bytes.contains('9'),
+            "the second frame shows the changed digit"
+        );
+        assert!(
+            !second_bytes.contains("count is 9"),
+            "the second frame does not show the old count"
+        ); // the unchanged prefix is not re-emitted
+        assert_eq!(
+            row_text(&second_buffer).trim_end(),
+            "count is 9",
+            "the second buffer reads the new count"
+        );
+    }
+
+    #[derive(Clone)]
+    struct Parent {
+        renders: rc::Rc<cell::RefCell<i32>>,
+        child_count: Signal<i32>,
+    }
+
+    impl Component for Parent {
+        fn step(&mut self) -> Option<Step> {
+            *self.renders.borrow_mut() += 1;
+            let child_count = self.child_count.clone();
+            Some(Step::View(View::boxed(
+                BoxProps::default(),
+                vec![View::component(child_component, child_count)],
+            )))
+        }
     }
 
     #[test]
@@ -157,59 +198,64 @@ mod tests {
         use std::cell::RefCell;
         use std::rc::Rc;
 
+        let _guard = ::habilis_network_test_tracing::init();
         let parent_renders = Rc::new(RefCell::new(0));
         let child_count = Signal::new(0);
 
-        let parent_renders_in_component = Rc::clone(&parent_renders);
-        let child_count_for_child = child_count.clone();
-        let mut app = Runtime::terminal(
-            #[coroutine]
-            move || {
-                loop {
-                    *parent_renders_in_component.borrow_mut() += 1;
-                    let child_count_for_child = child_count_for_child.clone();
-                    yield Yield::View(View::boxed(
-                        BoxProps::default(),
-                        vec![View::component(child_component, child_count_for_child)],
-                    ));
-                }
-            },
-        );
+        let mut app = Runtime::terminal(Parent {
+            renders: Rc::clone(&parent_renders),
+            child_count: child_count.clone(),
+        });
 
         let mut layout_state = LayoutState::new();
-        let (_bytes, buffer) = render_frame(&mut app, &mut layout_state, None, 20, 1);
-        assert_eq!(*parent_renders.borrow(), 1);
-        assert_eq!(row_text(&buffer).trim_end(), "child sees 0");
+        let (_bytes, buffer) = super::render_frame(&mut app, &mut layout_state, None, 20, 1);
+        assert_eq!(
+            *parent_renders.borrow(),
+            1,
+            "the parent renders only on the first frame"
+        );
+        assert_eq!(
+            row_text(&buffer).trim_end(),
+            "child sees 0",
+            "the nested buffer shows the updated child text"
+        );
 
-        // The CHILD's own signal changes — the parent's coroutine must
-        // not be resumed again; only the child re-renders.
+        // The CHILD's own signal changes — the parent must not be stepped
+        // again; only the child re-renders.
         child_count.set(7);
-        assert!(app.tick());
+        assert!(app.tick(), "the tick after the child change repaints");
         assert_eq!(
             *parent_renders.borrow(),
             1,
             "parent re-rendered when only the child's signal changed"
         );
 
-        let (_bytes, new_buffer) = render_frame(&mut app, &mut layout_state, Some(&buffer), 20, 1);
-        assert_eq!(row_text(&new_buffer).trim_end(), "child sees 7");
+        let (_bytes, new_buffer) =
+            super::render_frame(&mut app, &mut layout_state, Some(&buffer), 20, 1);
+        assert_eq!(
+            row_text(&new_buffer).trim_end(),
+            "child sees 7",
+            "the new buffer shows the updated text"
+        );
     }
 
-    fn child_component(
-        count: Signal<i32>,
-    ) -> std::pin::Pin<Box<crate::component::ComponentCoroutine>> {
-        Box::pin(
-            #[coroutine]
-            move || {
-                loop {
-                    let n = count.get();
-                    yield Yield::View(View::text(format!("child sees {n}")));
-                }
-            },
-        )
+    #[derive(Clone)]
+    struct Child(Signal<i32>);
+
+    impl Component for Child {
+        fn step(&mut self) -> Option<Step> {
+            Some(Step::View(View::text(&format!(
+                "child sees {}",
+                self.0.get()
+            ))))
+        }
     }
 
-    fn row_text(buffer: &crate::tui::paint::ScreenBuffer) -> String {
+    fn child_component(count: Signal<i32>) -> component::ComponentBox {
+        Box::new(Child(count))
+    }
+
+    fn row_text(buffer: &screen_buffer::ScreenBuffer) -> String {
         buffer
             .chars
             .iter()
