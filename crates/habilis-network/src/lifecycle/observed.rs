@@ -870,6 +870,51 @@ mod churn_red {
         });
     }
 
+    /// The same replay with a frame of a live kind. The relay holds an old `alive`, app message,
+    /// ping, pong or `joined` of a peer that died long ago, and the quiet TTL has passed, so
+    /// nothing remembers the peer. The stamp is 2 h old: older than any clock skew that this node
+    /// accepts. It is no arrival.
+    #[test]
+    #[ignore = "open: a live kind proves presence at any stamp. The rule: a live kind proves presence only if stamped within QUIET_TTL. Three pinned tests stamp a live frame with 0 and would need UnixSecs::now()"]
+    fn a_replayed_live_frame_after_the_quiet_ttl_is_no_arrival() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let peer = Identity::generate();
+            let mut state = fresh_state();
+            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
+            let old = UnixSecs::now() - Duration::from_hours(2);
+            let probe = Message::new_ping(&rig.mesh, &who);
+            let sign_at = |mut message: Message| {
+                message.timestamp = old;
+                message.sign(&peer)
+            };
+            let replays = [
+                ("alive", alive(&rig.mesh, &who, &peer, old)),
+                ("app", chat(&rig.mesh, &who, &peer, old)),
+                ("joined", sign_at(Message::new_joined(&rig.mesh, &who))),
+                ("ping", sign_at(probe.clone())),
+                (
+                    "pong",
+                    sign_at(Message::new_pong(&rig.mesh, &who, nick("calm-fern"), &probe.id)),
+                ),
+            ];
+            for (name, replay) in &replays {
+                assert!(
+                    receive(replay, &mut state, &context),
+                    "the {name} frame is new to the seen set"
+                );
+                assert!(
+                    rig.sink.lines().is_empty() && !state.peers.contains(who.as_str()),
+                    "an old {name} frame made an arrival: {:?}",
+                    rig.sink.lines()
+                );
+            }
+            rig.endpoint.close().await;
+        });
+    }
+
     /// The ids of the arrivals this node surfaced for `who`, in order.
     fn arrival_ids(rig: &Rig, who: &str) -> Vec<String> {
         rig.sink

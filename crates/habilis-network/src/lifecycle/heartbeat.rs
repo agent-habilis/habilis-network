@@ -247,6 +247,58 @@ mod tests {
     }
 
     #[test]
+    fn a_peer_that_died_before_two_stalls_in_a_row_is_evicted_one_timeout_after_the_last() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let timeout = tuning::alive_timeout();
+        let ago = |span: Duration| {
+            Instant::now()
+                .checked_sub(span)
+                .expect("the monotonic clock has run past the span since boot")
+        };
+        for name in ["swift-cedar", "lost-heron"] {
+            state.last_seen.insert(nick(name), ago(timeout * 3));
+            state.peers.insert(nick(name));
+            state.surfaced.insert(nick(name));
+        }
+
+        // First stall: both peers are forgiven.
+        forgive_stall(&mut state, timeout * 2);
+        tick_sweep(&mut state, &SilentSink);
+        assert_eq!(state.peers.len(), 2, "the first stall is forgiven");
+
+        // The loop runs for 100 s, then stalls again. Only swift-cedar spoke in between.
+        state
+            .last_seen
+            .insert(nick("swift-cedar"), ago(Duration::from_secs(5)));
+        state
+            .last_seen
+            .insert(nick("lost-heron"), ago(Duration::from_secs(100)));
+        forgive_stall(&mut state, timeout * 2);
+        tick_sweep(&mut state, &SilentSink);
+        assert_eq!(
+            state.peers.len(),
+            2,
+            "the second stall is forgiven, as the first one was"
+        );
+
+        // One timeout after the last stall the dead peer goes and the live one stays.
+        state
+            .last_seen
+            .insert(nick("swift-cedar"), ago(Duration::from_secs(5)));
+        state
+            .last_seen
+            .insert(nick("lost-heron"), ago(timeout + Duration::from_secs(1)));
+        tick_sweep(&mut state, &SilentSink);
+        assert!(
+            state.peers.contains("swift-cedar") && !state.peers.contains("lost-heron"),
+            "the dead peer goes one timeout after the last stall: {:?}",
+            state.peers
+        );
+        assert!(state.quiet.contains("lost-heron"), "and it is quiet");
+    }
+
+    #[test]
     fn the_holder_keys_follow_the_roster() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
