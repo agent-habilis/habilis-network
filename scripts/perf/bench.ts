@@ -18,8 +18,9 @@
 
 import { spawn } from "node:child_process";
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir, loadavg, cpus, hostname, freemem, platform } from "node:os";
+import { homedir, loadavg, cpus, hostname, platform } from "node:os";
 import path from "node:path";
+import { availableBytes } from "./avail.ts";
 import { chooseNodes } from "./choose-n.ts";
 
 const flags = new Map<string, string>();
@@ -159,18 +160,6 @@ function collectLogs(): void {
     const log = `${dir}/${nick(i)}.tracing.log`;
     if (existsSync(log)) copyFileSync(log, `${OUT}/n${i}.err`);
   }
-}
-
-// Memory that a new process can use, in bytes. os.freemem() is only the free pages, which is far too low on macOS.
-function availableBytes(): number {
-  if (platform() === "linux") {
-    const kb = readFileSync("/proc/meminfo", "utf8").match(/MemAvailable:\s+(\d+) kB/)?.[1];
-    return Number(kb ?? 0) * 1024;
-  }
-  const text = Bun.spawnSync(["vm_stat"]).stdout.toString();
-  const pageSize = Number(text.match(/page size of (\d+) bytes/)?.[1] ?? 16384);
-  const pages = (name: string) => Number(text.match(new RegExp(`Pages ${name}:\\s+(\\d+)`))?.[1] ?? 0);
-  return (pages("free") + pages("inactive") + pages("speculative")) * pageSize || freemem();
 }
 
 function openFiles(): number {

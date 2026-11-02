@@ -169,6 +169,19 @@ gives 29.7 MB show how the RSS per daemon grows with N.
 the ratio), in turn, with the order swapped in every second pair. Both arms have the same warm-up (300 s of
 settle). Arm a has no loaded phase: it has no wire counters, so it gives no ratio. Run it after `ulimit -n 10240`.
 
+## Ratio test
+
+`ratio.test.ts` holds the goal: at N = 16 the frame-layer metadata bytes per delivered data byte are at most half of
+the baseline (`baseline-ratio.json`: 78.9, from pairs 2 and 3 of B4 on nyc-macmini1). A second test is the regression
+budget: at most the `head_value` of that file plus 10 percent. Both tests run `bench.ts` for about 20 min on the
+binary in `RATIO_BIN` (a build with the wire counters), so run them on a quiet host:
+
+```bash
+RATIO_BIN=<binary> bun test scripts/perf/ratio.test.ts
+```
+
+A host with too little memory for N = 16 fails the host tests and prints `SKIPPED`. `RATIO_ALLOW_SKIP=1` lets it skip.
+
 ## What it does not do
 
 - The nodes are native processes. A browser costs more.
