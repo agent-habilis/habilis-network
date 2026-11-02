@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // One benchmark run of the app binary: N real daemons in a private mesh on one host.
 //
-// usage: bun scripts/perf/bench.ts <app binary> <arm> [--nodes 64] [--seed 1] [--stagger 0.5]
+// usage: bun scripts/perf/bench.ts <app binary> <arm> [--nodes <N>] [--seed 1] [--stagger 0.5]
 //          [--settle 480] [--idle 600] [--loaded 600] [--lookup <list>] [--min-avail-gib 2] [--out-root ~/bench-results]
 //          [--record ~/bench-results/baseline/<arm>.json]
 //
@@ -20,6 +20,7 @@ import { spawn } from "node:child_process";
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, loadavg, cpus, hostname, freemem, platform } from "node:os";
 import path from "node:path";
+import { chooseNodes } from "./choose-n.ts";
 
 const flags = new Map<string, string>();
 const positional: string[] = [];
@@ -35,7 +36,11 @@ if (!BIN || !ARM) {
   process.exit(2);
 }
 const num = (name: string, fallback: number) => Number(flags.get(name) ?? fallback);
-const NODES = num("nodes", 64);
+// No --nodes: the largest N that fits the memory of the host (see choose-n.ts). The host of a run is 8 GiB,
+// so 64 daemons do not fit; the run says what it chose and why.
+const chosen = chooseNodes(availableBytes());
+const NODES = flags.has("nodes") ? num("nodes", 0) : chosen.nodes;
+if (!flags.has("nodes")) console.log(chosen.why);
 const SEED = num("seed", 1);
 const STAGGER = num("stagger", 0.5);
 const SETTLE = num("settle", 480);
@@ -88,6 +93,7 @@ const result: Record<string, unknown> = {
   cores: cpus().length,
   seed: SEED,
   nodes: NODES,
+  nodes_choice: flags.has("nodes") ? "flag" : chosen.why,
   lookup: LOOKUP,
   phases: [] as { name: string; start_ms: number; end_ms: number }[],
   load: [] as { ts: number; load1: number }[],
