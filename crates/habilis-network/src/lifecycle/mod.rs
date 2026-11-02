@@ -7,15 +7,15 @@
 //! roster directly — that separation is the layer split documented in
 //! the Concept Glossary (AGENTS.md).
 
+#[cfg(test)]
+mod churn_red;
+#[cfg(all(test, feature = "host"))]
+mod churn_wire;
 pub(crate) mod heartbeat;
 mod logs;
 pub(crate) mod membership_update;
 mod observed;
 mod presence_event;
-#[cfg(test)]
-mod churn_red;
-#[cfg(all(test, feature = "host"))]
-mod churn_wire;
 pub(crate) use logs::{log_leaving, log_ready};
 pub(crate) use observed::observe;
 pub(crate) use presence_event::{PresenceEvent, handle_presence};

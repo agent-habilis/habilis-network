@@ -65,6 +65,7 @@ pub(crate) fn observe(
 
     if update.returned && surfaceable {
         state.surfaced.insert(message.author.clone());
+        state.write_peer_count();
         context.sink.emit(NodeEvent::PeerReturn {
             nickname: message.author.clone(),
         });
@@ -101,6 +102,7 @@ pub(crate) fn observe(
         )
     {
         state.surfaced.insert(message.author.clone());
+        state.write_peer_count();
         context
             .sink
             .emit(synthetic_arrival(context.mesh, context.identity, message));
@@ -154,6 +156,7 @@ fn arrival_id(key: AuthorKey, stamp: UnixSecs) -> MessageId {
 #[cfg(all(test, feature = "host"))]
 mod churn_red {
     use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use iroh_gossip::net::Gossip;
@@ -161,6 +164,7 @@ mod churn_red {
 
     use super::{observe, synthetic_arrival};
     use crate::daemon::handler_ctx::HandlerCtx;
+    use crate::daemon::setup::LiveCount;
     use crate::daemon::state::EventLoopState;
     use crate::gossip::antientropy;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
@@ -907,6 +911,51 @@ mod churn_red {
                     "an old {name} frame made an arrival: {lines:?}"
                 );
             }
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// The live count follows the arrivals that were shown: a peer known only from a frame older
+    /// than our join is not counted, and the same peer is counted when its next live frame
+    /// arrives.
+    #[test]
+    fn the_live_count_follows_the_shown_arrivals() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let peer = Identity::generate();
+            let mut state = fresh_state();
+            let live = LiveCount::default();
+            state.live_count = Some(live.clone());
+            state.joined_at = UnixSecs::now();
+
+            let backlog = chat(
+                &rig.mesh,
+                &who,
+                &peer,
+                state.joined_at - Duration::from_secs(600),
+            );
+            assert!(
+                receive(&backlog, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert_eq!(
+                live.load(Ordering::Relaxed),
+                1,
+                "a pre-join backlog frame must not count the peer: this node only"
+            );
+
+            let fresh = chat(&rig.mesh, &who, &peer, UnixSecs::now());
+            assert!(
+                receive(&fresh, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert_eq!(
+                live.load(Ordering::Relaxed),
+                2,
+                "the peer is shown, so it counts with this node"
+            );
             rig.endpoint.close().await;
         });
     }

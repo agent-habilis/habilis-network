@@ -11,8 +11,7 @@ use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::gossip::app::{AppClass, InboundApp, NodeApp};
 use crate::gossip::event::SilentSink;
-use crate::lifecycle::heartbeat::tick_alive;
-use crate::lifecycle::{PresenceEvent, handle_presence, observe};
+use crate::lifecycle::{PresenceEvent, handle_presence, heartbeat, observe};
 use crate::lookup::{TransportOpts, build_peer_multihop};
 use crate::protocol::identity::Identity;
 use crate::protocol::meshes::LookupOpts;
@@ -134,7 +133,7 @@ fn wire_cost_of_one_minute_with_5_peers() {
                 .checked_sub(Duration::from_secs(since_send))
                 .expect("the monotonic clock has run past 60 s since boot");
             let before = sender.broadcast_frames().len();
-            tick_alive(&mut state, &sender, &mesh, &us).await;
+            heartbeat::tick_alive(&mut state, &sender, &mesh, &us).await;
             if sender.broadcast_frames().len() > before {
                 since_send = 0;
             }

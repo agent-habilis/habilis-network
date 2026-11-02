@@ -5,9 +5,9 @@
 use std::time::Duration;
 
 use crate::daemon::setup::LiveCount;
-use crate::daemon::state::Standing;
+use crate::daemon::state::{EventLoopState, Standing};
 use crate::gossip::event::SilentSink;
-use crate::lifecycle::heartbeat::tick_sweep;
+use crate::lifecycle::heartbeat;
 use crate::lifecycle::membership_update::{apply, compute_for};
 use crate::protocol::identity::Identity;
 use crate::protocol::{AppFrameParams, AppTag, MeshId, Message, MessageBody, UnixSecs, Verified};
@@ -38,7 +38,6 @@ fn chat(author: &str, by: &Identity, at: UnixSecs) -> Verified {
 /// join of this node, from a peer that left before, must not count as a member: this node would
 /// show a count that is too high until the sweep evicts the ghost, and the ghost never surfaced.
 #[test]
-#[ignore = "open: an app frame older than the join still counts as a member (joined_new ignores the join horizon)"]
 fn h5_a_pre_join_backlog_frame_adds_no_ghost_to_the_count() {
     let _guard = ::habilis_network_test_tracing::init();
     let mut state = fresh_state();
@@ -77,10 +76,9 @@ fn h6_a_peer_that_left_leaves_the_roster_after_an_hour() {
     state.last_seen.insert(who.clone(), silent);
     state.peers.insert(who.clone());
     state.surfaced.insert(who.clone());
-    tick_sweep(&mut state, &SilentSink);
-    let listed = |state: &crate::daemon::state::EventLoopState| {
-        state
-            .roster_snapshot()
+    heartbeat::tick_sweep(&mut state, &SilentSink);
+    let listed = |held: &EventLoopState| {
+        held.roster_snapshot()
             .peers
             .iter()
             .any(|entry| entry.nickname == who)
@@ -89,10 +87,10 @@ fn h6_a_peer_that_left_leaves_the_roster_after_an_hour() {
 
     // An hour and a minute pass: the last frame of the peer is that old.
     let long_ago = Instant::now()
-        .checked_sub(Duration::from_secs(3660))
+        .checked_sub(Duration::from_mins(61))
         .expect("the monotonic clock has run past one hour since boot");
     state.quiet_since.insert(who.clone(), long_ago);
-    tick_sweep(&mut state, &SilentSink);
+    heartbeat::tick_sweep(&mut state, &SilentSink);
 
     assert!(
         !listed(&state),
@@ -132,12 +130,12 @@ fn a_link_gap_has_no_270_second_cycle() {
             .checked_sub(timeout + Duration::from_secs(5))
             .expect("the monotonic clock has run past the alive timeout since boot"),
     );
-    tick_sweep(&mut state, &SilentSink);
+    heartbeat::tick_sweep(&mut state, &SilentSink);
     assert!(state.quiet.contains(who.as_str()), "timeout at about 90 s");
 
     // The starvation watchdog reads the same last inbound, not the eviction: it is due at 180 s.
     assert!(
-        !state.starvation_due(t0 + starved - Duration::from_secs(1), starved),
+        !state.starvation_due(t0 + starved.saturating_sub(Duration::from_secs(1)), starved),
         "not due before 180 s"
     );
     let first = t0 + starved + Duration::from_secs(1);
@@ -149,10 +147,16 @@ fn a_link_gap_has_no_270_second_cycle() {
     // After a recovery the backoff doubles: the next one is 360 s later, then 720 s.
     state.note_recovery(first);
     assert!(
-        !state.starvation_due(first + starved * 2 - Duration::from_secs(1), starved),
+        !state.starvation_due(
+            first + (starved * 2).saturating_sub(Duration::from_secs(1)),
+            starved
+        ),
         "the second recovery waits 2 x 180 s"
     );
-    assert!(state.starvation_due(first + starved * 2 + Duration::from_secs(1), starved));
+    assert!(
+        state.starvation_due(first + starved * 2 + Duration::from_secs(1), starved),
+        "due 2 x 180 s after the first recovery"
+    );
     assert_ne!(
         timeout + starved,
         starved,

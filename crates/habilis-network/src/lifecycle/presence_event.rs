@@ -110,6 +110,7 @@ pub(crate) async fn handle_presence(
             // our own join (relayed backlog).
             // Gated on `surfaced` too: a synthetic arrival may have shown this peer already.
             if surfaceable && !update.returned && state.surfaced.insert(message.author.clone()) {
+                state.write_peer_count();
                 context.sink.emit(NodeEvent::Presence {
                     message: Box::new(message.authored()),
                     peer: message.key(),

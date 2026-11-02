@@ -660,11 +660,17 @@ impl EventLoopState {
         .key(key)
     }
 
-    /// The number of members of the mesh as this node counts them: the roster and this node. Every
+    /// The number of members of the mesh as this node counts them: the peers whose arrival was
+    /// shown, and this node. A peer known only from a frame older than our join is in the roster
+    /// for anti-entropy, but it is not counted: it can be a ghost that never surfaced. Every
     /// surface that shows a count (the state file, the live counter, the roster snapshot) reads it
     /// here.
     pub(crate) fn member_count(&self) -> usize {
-        self.peers.len() + 1
+        let shown = self
+            .peers
+            .iter()
+            .filter(|peer| self.surfaced.contains(*peer));
+        shown.count() + 1
     }
 
     /// Write `peer_count = peers.len() + 1` (we add 1
