@@ -1688,11 +1688,11 @@ mod tests {
         .expect("a digest serializes")
     }
 
-    /// The unicast form is off by default: the const says so, and the switch of a fresh state follows it.
+    /// The unicast form is on by default: the const says so, and the switch of a fresh state follows it.
     #[test]
-    fn the_unicast_form_is_off_by_default() {
-        assert!(!black_box(tuning::UNICAST_DIGESTS), "the const is off");
-        assert!(!fresh_state().state_digest_serves.unicast.enabled);
+    fn the_unicast_form_is_on_by_default() {
+        assert!(black_box(tuning::UNICAST_DIGESTS), "the const is on");
+        assert!(fresh_state().state_digest_serves.unicast.enabled);
     }
 
     /// A state with a log of `count` messages, a peer `asker` known by its key and proven at

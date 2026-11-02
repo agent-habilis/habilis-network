@@ -1064,7 +1064,7 @@ pub const FAST_ROUND_RETRY: Duration = Duration::from_millis(400);
 /// as they were signed (no new nonce, no re-broadcast), and a digest that arrives broadcast
 /// (an older peer) is answered by unicast too. The first-link pull, the new-peer pull and the fast
 /// rounds are not changed. Where no unicast path can start, the answer goes as it did, on gossip.
-pub const UNICAST_DIGESTS: bool = false;
+pub const UNICAST_DIGESTS: bool = true;
 
 /// The retries of a chat digest that a full answer calls for, at most, after one tick's ask: the
 /// ask is repeated while each answer is full (the log grew by the resend cap), so a long gap does
