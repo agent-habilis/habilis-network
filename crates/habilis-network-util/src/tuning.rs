@@ -1076,7 +1076,7 @@ pub const CHAT_RETRIES_MAX: u32 = 16;
 /// cap, so a peer that advertises heads we can never hold costs one small digest per cap, not
 /// 2.5 per second. A retry after progress, or a new digest with other heads, starts again at
 /// [`FAST_ROUND_RETRY`]. Zero is off: every retry waits [`FAST_ROUND_RETRY`], as before.
-pub const FAST_ROUND_STALL_BACKOFF_CAP: Duration = Duration::ZERO;
+pub const FAST_ROUND_STALL_BACKOFF_CAP: Duration = Duration::from_secs(16);
 
 /// How many peers a node remembers as ahead of it, per channel.
 pub const FAST_ROUND_AHEAD_MAX: usize = 16;

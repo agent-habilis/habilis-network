@@ -1213,7 +1213,15 @@ mod budget_tests {
         assert_eq!(picks.len(), 151, "one ask each 400 ms for 60 s");
     }
 
-    /// The cap is off by default: zero keeps the timing of before.
+    /// A daemon runs with the cap that the const gives, so a stalled retry costs 9 asks in 60 s.
+    #[test]
+    fn the_const_backs_off_a_stalled_retry() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let picks = retry_picks(crate::util::tuning::FAST_ROUND_STALL_BACKOFF_CAP, false);
+        assert_eq!(picks.len(), 9, "9 asks in 60 s, not 151");
+    }
+
+    /// With the cap off, zero keeps the timing of before.
     #[test]
     fn with_the_cap_off_a_stalled_retry_keeps_its_pace() {
         let _guard = ::habilis_network_test_tracing::init();
