@@ -22,6 +22,8 @@ mod habilis_network_stream_opts;
 mod habilis_network_streams;
 
 use std::cell::RefCell;
+#[cfg(not(windows))]
+use std::ffi;
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::panic::AssertUnwindSafe;
 use std::sync::OnceLock;
@@ -42,7 +44,7 @@ pub use habilis_network_streams::HabilisNetworkStreams;
 /// a count or a length. `c_long` on every target but Windows, as before the
 /// port; `i64` on Windows, where `c_long` is 32 bits.
 #[cfg(not(windows))]
-type CLen = std::ffi::c_long;
+type CLen = ffi::c_long;
 #[cfg(windows)]
 type CLen = i64;
 
