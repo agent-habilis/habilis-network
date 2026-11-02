@@ -149,6 +149,13 @@ A mesh of 2 daemons. The runner sends one broadcast of 200 bytes and one `msg` o
 200 + 200 = 400. If the wire bytes are 1000, the metadata bytes are 600, and the ratio
 is 1.5.
 
+### Memory by N
+
+`summarize.ts` also reads `host.jsonl` of the run folder, which the runner writes every 10 s. The sample with
+the largest RSS sum gives `rss_n` (the daemon count), `rss_mean_mb_per_daemon`, `rss_max_mb` (the largest
+daemon in the run) and `rss_sum_mb`. A run of 16 daemons that gives 52.6 MB per daemon and a run of 8 that
+gives 29.7 MB show how the RSS per daemon grows with N.
+
 ## What it does not do
 
 - The nodes are native processes. A browser costs more.

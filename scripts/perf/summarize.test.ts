@@ -93,3 +93,14 @@ test("the wire fields are read from a separate wire census line", () => {
   expect(out).toContain("frame_meta_per_data=4.00");
   expect(out).toContain("idle1_meta_bps_per_daemon=50.0");
 });
+
+test("the host samples give the resident memory per daemon at the peak, with the daemon count", () => {
+  const dir = fixture([1200, 800]);
+  const sample = (daemons: number, sum: number, max: number) =>
+    JSON.stringify({ ts: T0, load1: 1, avail_bytes: 0, open_files: 0, daemons, rss_kb_sum: sum, rss_kb_max: max });
+  writeFileSync(`${dir}/host.jsonl`, [sample(1, 20000, 20000), sample(2, 50000, 30000), sample(2, 40000, 25000)].join("\n") + "\n");
+  const out = run(dir).stdout.toString();
+  // The peak sum is 50000 kB with 2 daemons: mean 25000 kB = 24.4 MB. The peak max is 30000 kB = 29.3 MB.
+  // The peak sum is 50000 / 1024 = 48.8 MB.
+  expect(out).toContain("rss_n=2 rss_mean_mb_per_daemon=24.4 rss_max_mb=29.3 rss_sum_mb=48.8");
+});

@@ -379,9 +379,23 @@ function phaseReport(run: string): string {
   return fields.join(" ");
 }
 
+// The resident memory of the daemons, from the host samples of the runner (`host.jsonl`). It is read at the
+// sample with the largest sum, so it is the peak of the run. `rss_n` is the daemon count of that sample:
+// compare runs of different N by this column.
+function rssReport(run: string): string {
+  if (!existsSync(`${run}/host.jsonl`)) return "";
+  const samples: { daemons: number; rss_kb_sum: number; rss_kb_max: number }[] = lines(readFileSync(`${run}/host.jsonl`, "utf8")).map((line) => JSON.parse(line));
+  const peak = samples.reduce((best, now) => (now.rss_kb_sum > best.rss_kb_sum ? now : best), { daemons: 0, rss_kb_sum: 0, rss_kb_max: 0 });
+  if (peak.daemons === 0) return "";
+  const mb = (kb: number) => (kb / 1024).toFixed(1);
+  const biggest = Math.max(...samples.map((sample) => sample.rss_kb_max));
+  return `rss_n=${peak.daemons} rss_mean_mb_per_daemon=${mb(peak.rss_kb_sum / peak.daemons)} rss_max_mb=${mb(biggest)} rss_sum_mb=${mb(peak.rss_kb_sum)}`;
+}
+
 for (const run of process.argv.slice(2).map((r) => r.replace(/\/+$/, ""))) {
   try {
-    console.log(`${summarize(run)} | ${phaseReport(run)}`);
+    const rss = rssReport(run);
+    console.log(`${summarize(run)} | ${phaseReport(run)}${rss ? ` | ${rss}` : ""}`);
   } catch (error) {
     console.error(`${path.basename(run)}: ${(error as Error).message}`);
     process.exitCode = 1;
