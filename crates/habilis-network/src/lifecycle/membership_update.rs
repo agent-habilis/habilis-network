@@ -40,18 +40,17 @@ pub(crate) struct MembershipUpdate {
 /// stamped within the timeout says that its author was alive within the timeout, which is all
 /// that the timeout asks.
 pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
-    if is_live_kind(kind) {
-        return timestamp > UnixSecs::now() - heartbeat::QUIET_TTL;
-    }
     match kind {
         MessageKind::Presence {
             subtype: PresenceSubtype::Left,
         } => false,
         MessageKind::App { .. }
-        | MessageKind::Presence { .. }
+        | MessageKind::Presence {
+            subtype: PresenceSubtype::Alive | PresenceSubtype::Joined,
+        }
         | MessageKind::Ping
-        | MessageKind::Pong { .. }
-        | MessageKind::PeerInfo
+        | MessageKind::Pong { .. } => timestamp > UnixSecs::now() - heartbeat::QUIET_TTL,
+        MessageKind::PeerInfo
         | MessageKind::State
         | MessageKind::Meta
         | MessageKind::Digest
@@ -65,15 +64,25 @@ pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
 /// Whether a frame is of a kind that a peer sends only while it runs: an app message, an
 /// `alive`, a `joined`, a ping or a pong. A `left` is not.
 pub(crate) fn is_live_kind(kind: &MessageKind) -> bool {
-    matches!(
-        kind,
+    match kind {
         MessageKind::App { .. }
-            | MessageKind::Presence {
-                subtype: PresenceSubtype::Alive | PresenceSubtype::Joined,
-            }
-            | MessageKind::Ping
-            | MessageKind::Pong { .. }
-    )
+        | MessageKind::Presence {
+            subtype: PresenceSubtype::Alive | PresenceSubtype::Joined,
+        }
+        | MessageKind::Ping
+        | MessageKind::Pong { .. } => true,
+        MessageKind::Presence {
+            subtype: PresenceSubtype::Left,
+        }
+        | MessageKind::PeerInfo
+        | MessageKind::State
+        | MessageKind::Meta
+        | MessageKind::Digest
+        | MessageKind::StateDigest
+        | MessageKind::MetaDigest
+        | MessageKind::LinkState
+        | _ => false,
+    }
 }
 
 /// Whether a frame stamped `timestamp` is stamped after the newest frame that we heard from the
@@ -106,11 +115,11 @@ fn step_back_spacing() -> Duration {
 }
 
 /// A run is dropped when the next frame comes later than this after the one before, on our clock:
-/// a live peer sends a frame every alive interval, so two intervals is the longest gap of a live
-/// stream. A relay that re-sends old frames of a dead peer one by one, minutes apart, never keeps
+/// a live peer sends a frame every alive interval, so three intervals leave room for one lost
+/// frame. A relay that re-sends old frames of a dead peer one by one, minutes apart, never keeps
 /// a run alive.
 fn step_back_window() -> Duration {
-    ALIVE_INTERVAL * 2
+    ALIVE_INTERVAL * 3
 }
 
 /// Count a frame of the quiet `author` that proves presence but is stamped at or below the newest
@@ -568,6 +577,27 @@ mod tests {
             .insert(who.clone(), heard_at + Duration::from_secs(120));
         let replay = compute(&alive, &who, heard_at + Duration::from_secs(120), &state);
         assert!(replay.stale && !replay.returned, "{replay:?}");
+    }
+
+    /// Known limit. A peer that sends only a durable frame (a meta change, a peer info) from a clock
+    /// more than one alive timeout behind never proves life against our clock, so such a frame does
+    /// not return it. The peer returns on its next `alive`, at most 30 s later.
+    #[test]
+    #[ignore = "known limit: a durable frame from a clock more than 90 s behind does not prove life; the peer returns on its next alive"]
+    fn a_meta_change_from_a_clock_120_secs_behind_returns_a_quiet_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, who) = quiet_since_100_secs();
+        state.peer_stamp.insert(
+            who.clone(),
+            UnixSecs::now() - Duration::from_secs(100) - Duration::from_secs(120),
+        );
+        let update = compute(
+            &MessageKind::Meta,
+            &who,
+            UnixSecs::now() - Duration::from_secs(120),
+            &state,
+        );
+        assert!(update.returned && !update.stale, "{update:?}");
     }
 
     /// A sender whose clock runs 120 s behind stamps every frame 120 s old on our clock. A live

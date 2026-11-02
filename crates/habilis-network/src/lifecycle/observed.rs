@@ -37,15 +37,15 @@ pub(crate) fn observe(
     // frame of a durable kind either: it would keep a dead peer from its eviction. A peer that is
     // new to us gets its first entry from any frame, or the sweep could never evict it.
     if !update.stale {
+        let proves = membership_update::proves_presence(&message.kind, message.timestamp);
         // A frame of a live kind from a peer that is in the roster refreshes it at any stamp: a
-        // peer whose clock runs far behind still talks, and the sweep must not evict it. A
-        // stranger or a quiet peer needs a stamp inside the window of `proves_presence`.
+        // peer whose clock runs far behind still talks, and the sweep must not evict it. Only a
+        // frame that proves presence does more (the holder of the nickname, the newest stamp):
+        // an old frame of a killed run must not take the nickname from the live run.
         let known_and_live = state.peers.contains(message.author.as_str())
             && membership_update::is_live_kind(&message.kind);
-        let proves =
-            known_and_live || membership_update::proves_presence(&message.kind, message.timestamp);
         match state.last_seen.get_mut(message.author.as_str()) {
-            Some(seen) if proves => *seen = Instant::now(),
+            Some(seen) if proves || known_and_live => *seen = Instant::now(),
             Some(_) => {}
             None => {
                 state
@@ -1473,6 +1473,65 @@ mod churn_red {
             assert!(
                 state.surfaced.contains(who.as_str()),
                 "the late left of the old run un-surfaced the new run"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// A live frame of a peer in the roster refreshes it at any stamp, but only a frame that
+    /// proves presence changes who holds the nickname. An old frame of a killed run, re-sent by a
+    /// relay, must not make the dead key the holder: the `left` of the live run would then be read
+    /// as the goodbye of an older run and ignored.
+    #[test]
+    fn an_old_frame_of_a_killed_run_does_not_take_the_nickname() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let killed_run = Identity::generate();
+            let live_run = Identity::generate();
+            let mut state = fresh_state();
+            let mut app = Inert;
+            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
+            let hello = chat(&rig.mesh, &who, &live_run, UnixSecs::now());
+            assert!(
+                receive(&hello, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            let relayed = alive(
+                &rig.mesh,
+                &who,
+                &killed_run,
+                UnixSecs::now() - Duration::from_hours(2),
+            );
+            assert!(
+                receive(&relayed, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert_eq!(
+                state.peer_keys.get(who.as_str()),
+                Some(&live_run.author_key()),
+                "an old frame of the killed run took the nickname"
+            );
+
+            let left = Message::new_left(&rig.mesh, &who).sign(&live_run);
+            assert!(!state.mark_seen(&left), "the frame is new to the seen set");
+            let observed = observe(&left, &mut state, &context);
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+            assert!(
+                !state.peers.contains(who.as_str()),
+                "the goodbye of the live run was ignored: the peer stays until the alive timeout"
             );
             rig.endpoint.close().await;
         });

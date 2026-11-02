@@ -1,6 +1,9 @@
 //! Evidence for issue 75 (peer churn): H5 (ghosts are counted), H6 (a peer that left stays listed),
 //! and the claim that a link gap makes a 4.5 min cycle. Tests only. They use no API that is new in
-//! PR 47, so the same file runs on the unfixed rev f7cd9bb (red) and on the fixed rev (green).
+//! PR 47. The H5 and H6 tests were run on the unfixed rev f7cd9bb (red) and on the fixed rev
+//! (green). The link-gap test was run on both revs as sable-chase delivered it; its last assertion
+//! was replaced afterwards (e03803e2, an always-true `assert_ne!`) and the new one was run on the
+//! fixed rev only.
 
 use std::time::Duration;
 
