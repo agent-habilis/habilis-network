@@ -123,12 +123,11 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         }
     }
     // A quiet peer that did not come back within the TTL is gone for good.
-    let gone: Vec<Nickname> = state
+    let too_old = state
         .quiet_since
         .iter()
-        .filter(|(_, heard)| now.duration_since(**heard) > QUIET_TTL)
-        .map(|(nick, _)| nick.clone())
-        .collect();
+        .filter(|(_, heard)| now.duration_since(**heard) > QUIET_TTL);
+    let gone: Vec<Nickname> = too_old.map(|(nick, _)| nick.clone()).collect();
     for nick in gone {
         state.quiet.remove(nick.as_str());
         state.quiet_since.remove(nick.as_str());
@@ -143,9 +142,11 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         .retain(|nick, _| quiet.contains(nick.as_str()));
     // The holder keys follow the roster too: a nickname that is neither a peer nor quiet drops its key.
     let (roster, evicted) = (&state.peers, &state.quiet);
+    let is_peer = |nick: &Nickname| roster.contains(nick.as_str());
+    let is_quiet = |nick: &Nickname| evicted.contains(nick.as_str());
     state
         .peer_keys
-        .retain(|nick, _| roster.contains(nick.as_str()) || evicted.contains(nick.as_str()));
+        .retain(|nick, _| is_peer(nick) || is_quiet(nick));
     // Same bound for the endpoint dial hints: an entry lives as long as its
     // nick is an active peer or a returnable quiet evictee, so the map
     // is capped at |peers| + QUIET_CAP even under nickname churn.

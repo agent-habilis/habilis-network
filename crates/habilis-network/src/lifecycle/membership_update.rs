@@ -7,7 +7,7 @@
 use crate::daemon::state::EventLoopState;
 use crate::protocol::{MessageKind, Nickname, PresenceSubtype, UnixSecs, Verified};
 use crate::util::clock::Instant;
-use crate::util::tuning::alive_timeout;
+use crate::util::tuning;
 
 /// Summary of how a newly received message changes our view of the
 /// sender's membership. Computed from the message kind + current state
@@ -51,7 +51,7 @@ pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
         | MessageKind::StateDigest
         | MessageKind::MetaDigest
         | MessageKind::LinkState
-        | _ => timestamp > UnixSecs::now() - alive_timeout(),
+        | _ => timestamp > UnixSecs::now() - tuning::alive_timeout(),
     }
 }
 
@@ -63,7 +63,7 @@ pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
 fn sent_before_silence(author: &Nickname, timestamp: UnixSecs, state: &EventLoopState) -> bool {
     state.quiet_since.get(author).is_some_and(|heard| {
         let heard_at = UnixSecs::now() - Instant::now().duration_since(*heard);
-        timestamp <= heard_at + alive_timeout() / 3
+        timestamp <= heard_at + tuning::alive_timeout() / 3
     })
 }
 

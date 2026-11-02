@@ -162,14 +162,12 @@ mod churn_red {
     use super::{observe, synthetic_arrival};
     use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::EventLoopState;
-    use crate::gossip::antientropy::handle_state_digest;
+    use crate::gossip::antientropy;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
-    use crate::gossip::broadcast_msg;
     use crate::gossip::event::{NodeEvent, NodeSink};
     use crate::lifecycle::heartbeat::{tick_alive, tick_sweep};
     use crate::lifecycle::{PresenceEvent, handle_presence, membership_update};
     use crate::lookup::{TransportOpts, build_peer_multihop};
-    use crate::protocol;
     use crate::protocol::identity::Identity;
     use crate::protocol::meshes::LookupOpts;
     use crate::protocol::messages::Authored;
@@ -180,6 +178,7 @@ mod churn_red {
     use crate::transport::{MeshSender, PayloadPath};
     use crate::util::clock::Instant;
     use crate::util::tuning::{SEEN_IDS_CAP, alive_timeout};
+    use crate::{gossip, protocol};
 
     struct Inert;
 
@@ -549,7 +548,10 @@ mod churn_red {
                 let mut joined = Message::new_joined(&rig.mesh, &who);
                 joined.timestamp = UnixSecs::now();
                 let joined = joined.sign(&peer);
-                assert!(!state.mark_seen(&joined));
+                assert!(
+                    !state.mark_seen(&joined),
+                    "the frame is new to the seen set"
+                );
                 let observed = observe(&joined, &mut state, &context);
                 handle_presence(
                     PresenceEvent {
@@ -564,12 +566,7 @@ mod churn_red {
                 )
                 .await;
             }
-            let arrivals = rig
-                .sink
-                .lines()
-                .iter()
-                .filter(|line| line.starts_with("presence swift-cedar"))
-                .count();
+            let arrivals = arrival_ids(&rig, "swift-cedar").len();
             assert_eq!(
                 arrivals, 1,
                 "four joined of one key are {arrivals} arrivals"
@@ -636,7 +633,7 @@ mod churn_red {
                 .await;
             }
             for _ in 0..5 {
-                broadcast_msg(&rig.sender, &data_frame(&rig, 512)).await;
+                gossip::broadcast_msg(&rig.sender, &data_frame(&rig, 512)).await;
             }
             let counter = WireCounter::of(&sent_frames(&rig, &state));
             eprintln!("WIRE join burst: {counter}");
@@ -733,10 +730,7 @@ mod churn_red {
             )
             .await;
             let lines = rig.sink.lines();
-            let arrivals = lines
-                .iter()
-                .filter(|line| line.starts_with("presence swift-cedar"))
-                .count();
+            let arrivals = arrival_ids(&rig, "swift-cedar").len();
             assert_eq!(arrivals, 1, "one peer, {arrivals} arrivals: {lines:?}");
             rig.endpoint.close().await;
         });
@@ -819,13 +813,10 @@ mod churn_red {
                 receive(&change, &mut state, &context),
                 "the frame is new to the seen set"
             );
+            let lines = rig.sink.lines();
             assert!(
-                rig.sink
-                    .lines()
-                    .iter()
-                    .any(|line| line == "return swift-cedar"),
-                "a fresh meta change did not return the quiet peer: {:?}",
-                rig.sink.lines()
+                lines.iter().any(|line| line == "return swift-cedar"),
+                "a fresh meta change did not return the quiet peer: {lines:?}"
             );
             rig.endpoint.close().await;
         });
@@ -851,10 +842,10 @@ mod churn_red {
                     "the frame is new to the seen set"
                 );
             }
+            let lines = rig.sink.lines();
             assert!(
-                rig.sink.lines().is_empty() && !state.peers.contains(who.as_str()),
-                "an old durable frame made an arrival: {:?}",
-                rig.sink.lines()
+                lines.is_empty() && !state.peers.contains(who.as_str()),
+                "an old durable frame made an arrival: {lines:?}"
             );
 
             let fresh = peer_info(&rig.mesh, &who, &peer, UnixSecs::now());
@@ -910,10 +901,10 @@ mod churn_red {
                     receive(replay, &mut state, &context),
                     "the {name} frame is new to the seen set"
                 );
+                let lines = rig.sink.lines();
                 assert!(
-                    rig.sink.lines().is_empty() && !state.peers.contains(who.as_str()),
-                    "an old {name} frame made an arrival: {:?}",
-                    rig.sink.lines()
+                    lines.is_empty() && !state.peers.contains(who.as_str()),
+                    "an old {name} frame made an arrival: {lines:?}"
                 );
             }
             rig.endpoint.close().await;
@@ -922,12 +913,11 @@ mod churn_red {
 
     /// The ids of the arrivals this node surfaced for `who`, in order.
     fn arrival_ids(rig: &Rig, who: &str) -> Vec<String> {
-        rig.sink
-            .lines()
-            .iter()
-            .filter(|line| line.starts_with(&format!("presence {who} ")))
-            .filter_map(|line| line.split("id=").nth(1).map(str::to_owned))
-            .collect()
+        let prefix = format!("presence {who} ");
+        let lines = rig.sink.lines();
+        let own = lines.iter().filter(|line| line.starts_with(&prefix));
+        let ids = own.filter_map(|line| line.split("id=").nth(1));
+        ids.map(str::to_owned).collect()
     }
 
     /// The app drops a frame whose (key, id) it saw lately. A key that this node forgot (it went
@@ -1078,7 +1068,7 @@ mod churn_red {
             );
 
             let left = Message::new_left(&rig.mesh, &who).sign(&old_run);
-            assert!(!state.mark_seen(&left));
+            assert!(!state.mark_seen(&left), "the frame is new to the seen set");
             let observed = observe(&left, &mut state, &context);
             handle_presence(
                 PresenceEvent {
@@ -1142,11 +1132,11 @@ mod churn_red {
             // The dead peer wrote one meta change, signed with its key.
             let writer = fresh_state();
             let seed = *writer.identity.public().as_bytes();
-            let change = writer
+            let merged = writer
                 .doc(Channel::Meta)
                 .build_change(&serde_json::json!({ "status": "busy" }), &seed)
-                .expect("a JSON object merges")
-                .expect("a non-empty merge yields a change");
+                .expect("a JSON object merges");
+            let change = merged.expect("a non-empty merge yields a change");
             let (wire, _plain) = writer
                 .doc(Channel::Meta)
                 .compose_wire_body(&change, None)
@@ -1202,7 +1192,9 @@ mod churn_red {
                 Channel::Meta,
             )
             .sign(&joiner);
-            let answered = handle_state_digest(Channel::Meta, &digest, &mut holder, &context).await;
+            let answered =
+                antientropy::handle_state_digest(Channel::Meta, &digest, &mut holder, &context)
+                    .await;
             assert!(
                 answered.broadcast + answered.unicast > 0,
                 "precondition: the holder answers the digest with the frame of the dead peer"

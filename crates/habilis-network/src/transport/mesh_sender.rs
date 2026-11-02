@@ -34,7 +34,7 @@ pub struct MeshSender {
     /// The bytes of every broadcast frame, in order, so a test can count what a node puts on the
     /// wire.
     #[cfg(test)]
-    tap: Arc<Mutex<Vec<Vec<u8>>>>,
+    tap: Arc<Mutex<Vec<Vec<u8>>>>, // shared with every clone of the sender, so a test counts them all
 }
 
 impl MeshSender {
