@@ -870,7 +870,6 @@ mod churn_red {
     /// nothing remembers the peer. The stamp is 2 h old: older than any clock skew that this node
     /// accepts. It is no arrival.
     #[test]
-    #[ignore = "open: a live kind proves presence at any stamp. The rule: a live kind proves presence only if stamped within QUIET_TTL. Three pinned tests stamp a live frame with 0 and would need UnixSecs::now()"]
     fn a_replayed_live_frame_after_the_quiet_ttl_is_no_arrival() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let rig = Rig::new().await;
@@ -964,7 +963,6 @@ mod churn_red {
     /// neither, because the app skills list the rows of the roster and a user can pick a row as the
     /// target of a task. The same peer is in both once its arrival is shown.
     #[test]
-    #[ignore = "open: roster_snapshot lists every peer; filtering it by surfaced breaks 3 tests of daemon/state.rs whose setup never surfaces its peers"]
     fn the_roster_and_the_count_agree_on_a_pre_join_ghost() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let rig = Rig::new().await;
@@ -1274,7 +1272,7 @@ mod churn_red {
         let who = nick("swift-cedar");
         let old_run = Identity::generate();
         let new_run = Identity::generate();
-        let at = UnixSecs::from(1_000);
+        let at = UnixSecs::now();
         let mut state = fresh_state();
         state.note_left(old_run.author_key());
 

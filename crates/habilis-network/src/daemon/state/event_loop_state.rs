@@ -260,8 +260,9 @@ pub struct EventLoopState {
     /// join we never showed never produces a `went quiet` / `has left`
     /// line — keeps the join-horizon view symmetric. The roster (`peers`)
     /// stays complete for anti-entropy/membership; `surfaced ⊆ peers`
-    /// governs what the operator/agent is shown, and `member_count` counts
-    /// only the peers in `surfaced`.
+    /// governs what the operator/agent is shown: the rows of the roster
+    /// snapshot and `member_count` hold only the peers in `surfaced`, plus
+    /// the quiet ones.
     pub(crate) surfaced: HashSet<Nickname>,
     /// Last time we broadcast anything. Lets idle daemons suppress
     /// their `Alive` keepalive when they're already chatty.
@@ -695,9 +696,11 @@ impl EventLoopState {
     pub fn roster_snapshot(&self) -> RosterSnapshot {
         let now = Instant::now();
         let secs_since = |seen: &Instant| now.duration_since(*seen).as_secs();
-        let mut peers: Vec<RosterEntry> = self
+        let shown = self
             .peers
             .iter()
+            .filter(|nick| self.surfaced.contains(*nick));
+        let mut peers: Vec<RosterEntry> = shown
             .map(|nick| RosterEntry {
                 nickname: nick.clone(),
                 // Active peers: their live `last_seen`.

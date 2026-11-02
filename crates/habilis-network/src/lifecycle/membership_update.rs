@@ -5,6 +5,7 @@
 //! Glossary in AGENTS.md for the layer split.
 
 use crate::daemon::state::EventLoopState;
+use crate::lifecycle::heartbeat;
 use crate::protocol::{MessageKind, Nickname, PresenceSubtype, UnixSecs, Verified};
 use crate::util::clock::Instant;
 use crate::util::tuning;
@@ -28,11 +29,15 @@ pub(crate) struct MembershipUpdate {
     pub stale: bool,
 }
 
-/// Whether a frame proves that its author is alive now. A `left` never does. A frame of a live kind does. A frame of
-/// any other kind (peer info, the durable state and meta changes, the digests) does only when it
-/// was stamped within one alive timeout: a relay or an anti-entropy answer re-sends stored frames
-/// of any author, a dead one too, and those are old. A frame stamped within the timeout says that
-/// its author was alive within the timeout, which is all that the timeout asks.
+/// Whether a frame proves that its author is alive now. A `left` never does. A frame of a live
+/// kind does when it was stamped within the quiet TTL: after that time nothing remembers a silent
+/// peer, so a relay can re-send its last frame as if it were news, and that frame is older than
+/// the TTL. The bound is wide on purpose: a new peer with a slow clock still arrives on its first
+/// live frame. A frame of any other kind (peer info, the durable state and meta changes, the
+/// digests) does only when it was stamped within one alive timeout: a relay or an anti-entropy
+/// answer re-sends stored frames of any author, a dead one too, and those are old. A frame
+/// stamped within the timeout says that its author was alive within the timeout, which is all
+/// that the timeout asks.
 pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
     match kind {
         MessageKind::Presence {
@@ -43,7 +48,7 @@ pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
             subtype: PresenceSubtype::Alive | PresenceSubtype::Joined,
         }
         | MessageKind::Ping
-        | MessageKind::Pong { .. } => true,
+        | MessageKind::Pong { .. } => timestamp > UnixSecs::now() - heartbeat::QUIET_TTL,
         MessageKind::PeerInfo
         | MessageKind::State
         | MessageKind::Meta
@@ -190,7 +195,7 @@ mod tests {
         let update = compute(
             &MessageKind::app_broadcast("app_msg"),
             &nick("swift-cedar"),
-            UnixSecs::from(0),
+            UnixSecs::now(),
             &state,
         );
         assert!(
@@ -241,7 +246,7 @@ mod tests {
         let update = compute(
             &MessageKind::app_broadcast("app_msg"),
             &nick("swift-cedar"),
-            UnixSecs::from(0),
+            UnixSecs::now(),
             &state,
         );
         assert!(
@@ -264,7 +269,7 @@ mod tests {
                 subtype: PresenceSubtype::Alive,
             },
             &nick("swift-cedar"),
-            UnixSecs::from(0),
+            UnixSecs::now(),
             &state,
         );
         assert!(
@@ -504,7 +509,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let mesh = MeshId::from("test");
         let who = nick("swift-cedar");
-        let at = UnixSecs::from(1_000);
+        let at = UnixSecs::now();
         let mut state = fresh_state();
         state.note_left(Identity::generate().author_key());
 

@@ -1482,17 +1482,20 @@ mod tests {
         let stale_ep = endpoint_id(2);
         // A peer whose advertised endpoint is a live link → direct.
         state.peers.insert(nick("linked"));
+        state.surfaced.insert(nick("linked"));
         state
             .peer_endpoints
             .insert(nick("linked"), iroh::EndpointAddr::new(linked_ep));
         state.linked_endpoints.insert(linked_ep);
         // Advertised, but the endpoint is not (any longer) a live link → gossip.
         state.peers.insert(nick("unlinked"));
+        state.surfaced.insert(nick("unlinked"));
         state
             .peer_endpoints
             .insert(nick("unlinked"), iroh::EndpointAddr::new(stale_ep));
         // No PeerInfo seen yet → no binding → gossip.
         state.peers.insert(nick("unknown"));
+        state.surfaced.insert(nick("unknown"));
         // Quiet evictees are never live-linked → gossip.
         state.quiet.insert(nick("quiet"));
 
@@ -1623,6 +1626,7 @@ mod tests {
         let rendezvous_ep = endpoint_id(7);
         state.rendezvous_id = Some(rendezvous_ep);
         state.peers.insert(nick("beacon"));
+        state.surfaced.insert(nick("beacon"));
         state
             .peer_endpoints
             .insert(nick("beacon"), iroh::EndpointAddr::new(rendezvous_ep));
@@ -1651,12 +1655,14 @@ mod tests {
         state.standing.insert(Standing::Meshed);
         // Known endpoint while meshed → unicast (the send path would dial it).
         state.peers.insert(nick("dialable"));
+        state.surfaced.insert(nick("dialable"));
         state
             .peer_endpoints
             .insert(nick("dialable"), iroh::EndpointAddr::new(endpoint_id(1)));
         state.direct.insert(endpoint_id(1), DirectState::Direct);
         // No PeerInfo yet → nothing to dial → unreachable for directed frames.
         state.peers.insert(nick("unknown"));
+        state.surfaced.insert(nick("unknown"));
 
         let lane = |current: &EventLoopState, name: &str| {
             let roster = current.roster_snapshot();

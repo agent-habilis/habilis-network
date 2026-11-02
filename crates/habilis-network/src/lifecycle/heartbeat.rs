@@ -16,7 +16,7 @@ use crate::util::tuning::{ALIVE_INTERVAL, alive_timeout};
 /// How long a quiet peer stays in `quiet` and in the roster snapshot. A peer that has not come back
 /// after this long is gone: it would only take a slot of the bounded `quiet` set from a peer that
 /// can still return.
-const QUIET_TTL: Duration = Duration::from_hours(1);
+pub(crate) const QUIET_TTL: Duration = Duration::from_hours(1);
 
 /// Emit an `Alive` keepalive if we haven't broadcast anything
 /// recently. Chatty daemons pay zero heartbeat cost.
