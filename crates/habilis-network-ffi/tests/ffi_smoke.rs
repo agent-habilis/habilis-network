@@ -8,12 +8,14 @@
     reason = "the surface under test is `unsafe extern \"C\"`; calling it is the test"
 )]
 
+#[cfg(not(windows))]
+use std::ffi;
 use std::ffi::{CStr, CString, c_char};
 
 /// `habilis_network_len` of the header: `c_long` on every target but Windows,
 /// `i64` on Windows.
 #[cfg(not(windows))]
-type CLen = std::ffi::c_long;
+type CLen = ffi::c_long;
 #[cfg(windows)]
 type CLen = i64;
 use std::thread;
