@@ -632,6 +632,13 @@ fn validated_mesh_config(kind: &SetupKind) -> Result<&MeshConfig> {
 /// The local nickname is the stem of every per-member file (state, log, IPC marker), so on
 /// Windows it must also be a valid file stem. Only the local name: a peer's name never becomes a
 /// file, and the wire rule of `Nickname` stays the same everywhere. Nothing to refuse elsewhere.
+#[cfg_attr(
+    not(windows),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the Windows version can refuse; one signature for every OS"
+    )
+)]
 fn refuse_a_local_nickname_this_os_cannot_store(author: &Nickname) -> Result<()> {
     #[cfg(windows)]
     if let Some(problem) = file_name::windows_file_stem_problem(author.as_str()) {

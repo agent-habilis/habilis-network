@@ -514,7 +514,9 @@ pub fn ensure_mesh_runtime_dir(base: &path::Path, mesh_id: &str) -> io::Result<p
 #[cfg(all(test, feature = "host"))]
 mod tests {
     #[cfg(unix)]
-    use std::path::Path;
+    use std::os::unix::fs as unix_fs;
+    #[cfg(unix)]
+    use std::path::{Path, PathBuf};
     #[cfg(unix)]
     use std::{env, fs, io, process};
 
@@ -562,7 +564,7 @@ mod tests {
     /// A private test folder under the temp dir, removed also when an
     /// assertion fails.
     #[cfg(unix)]
-    struct TempRoot(std::path::PathBuf);
+    struct TempRoot(PathBuf);
 
     #[cfg(unix)]
     impl TempRoot {
@@ -658,7 +660,7 @@ mod tests {
         let target = root.0.join("target");
         super::ensure_runtime_base(&target).expect("make a private folder");
         let link = root.0.join("link");
-        std::os::unix::fs::symlink(&target, &link).expect("make the link");
+        unix_fs::symlink(&target, &link).expect("make the link");
         let file = root.0.join("file");
         fs::write(&file, b"").expect("make the file");
 

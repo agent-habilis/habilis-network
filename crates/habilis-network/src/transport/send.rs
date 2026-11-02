@@ -643,7 +643,7 @@ mod tests {
             };
             assert_eq!(
                 error.to_string(),
-                crate::transport::RELAY_REFUSED,
+                transport::RELAY_REFUSED,
                 "the bare refusal"
             );
             assert!(!pair.bob_read_a_frame().await, "the refused frame arrived");

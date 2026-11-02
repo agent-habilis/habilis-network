@@ -523,9 +523,7 @@ mod tests {
 
     #[cfg(unix)]
     use std::io::ErrorKind;
-    use std::process;
-    #[cfg(windows)]
-    use std::thread;
+    use std::{process, thread};
     fn self_pid() -> u32 {
         process::id()
     }
@@ -681,18 +679,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_zombie_child_is_alive_but_has_no_live_start_time() {
+        use std::time::{Duration, Instant};
+
         let _guard = ::habilis_network_test_tracing::init();
         let mut child = idle_child();
         let pid = child.id();
         child.kill().expect("kill the child");
         // SIGKILL is asynchronous: wait for the child to become a zombie.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(10);
         while live_start_time(pid).is_some() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the child did not die"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            assert!(Instant::now() < deadline, "the child did not die");
+            thread::sleep(Duration::from_millis(10));
         }
         let alive = is_alive(pid);
         child.wait().expect("wait for the child");

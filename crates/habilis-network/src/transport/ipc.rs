@@ -368,8 +368,8 @@ mod tests {
             );
             let found = active_endpoints(base.path());
             let names: Vec<String> = found.map(|name| name.as_str().to_owned()).collect();
-            let utf8 = |path: &path::PathBuf| path.to_str().expect("a UTF-8 path");
-            let texts: Vec<&str> = paths.iter().map(utf8).collect();
+            let texts: Vec<&str> = paths.iter().filter_map(|path| path.to_str()).collect();
+            assert_eq!(texts.len(), paths.len(), "every socket path is UTF-8");
             let mut expected: Vec<String> = texts.into_iter().map(str::to_owned).collect();
             expected.sort();
             assert_eq!(names, expected, "the endpoints are the sockets, sorted");

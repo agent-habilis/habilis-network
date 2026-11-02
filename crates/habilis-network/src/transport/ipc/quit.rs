@@ -10,6 +10,8 @@ use super::engine_control::EngineCommand;
 use super::listener::PARSE_ERROR;
 use super::quit_error::QuitError;
 use super::quit_target::QuitTarget;
+#[cfg(unix)]
+use crate::util::process;
 
 /// Stop a daemon through its IPC endpoint: the engine's `quit` command. The
 /// daemon answers, then takes the path of a signal: it removes its state file
@@ -140,6 +142,6 @@ pub async fn terminate(target: &QuitTarget<'_>, pid: u32) -> io::Result<()> {
 #[cfg(unix)]
 pub async fn terminate(target: &QuitTarget<'_>, pid: u32) -> io::Result<()> {
     let _ = target;
-    crate::util::process::terminate(pid)
+    process::terminate(pid)
         .map_err(|signal| io::Error::new(signal.kind(), format!("SIGTERM to pid {pid}: {signal}")))
 }
