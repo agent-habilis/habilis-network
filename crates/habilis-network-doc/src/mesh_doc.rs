@@ -383,23 +383,34 @@ impl MeshDoc {
     /// per-peer map and encodes the whole document, which costs CPU in proportion to the
     /// document, so a caller asks for it only now and then.
     #[must_use]
-    pub fn census(&mut self, heavy: bool) -> DocCensus {
+    pub fn census(
+        &mut self,
+        // True also hydrates the JSON and encodes the whole document.
+        heavy: bool,
+    ) -> DocCensus {
         let json = heavy.then(|| doc_json(&self.doc));
+        let save_bytes = heavy.then(|| self.doc.save().len());
+        let json_bytes: Option<usize> = json
+            .as_ref()
+            .map(|json| serde_json::to_vec(json).map_or(0, |bytes| bytes.len()));
+        let peer_nicks = json.as_ref().map(|json| self.gated_nicks(json));
         DocCensus {
             changes: self.applied.len(),
             frames: self.frames.len(),
             frame_bytes: self.frame_bytes,
-            save_bytes: heavy.then(|| self.doc.save().len()),
-            json_bytes: json
-                .as_ref()
-                .map(|json| serde_json::to_vec(json).map_or(0, |bytes| bytes.len())),
-            peer_nicks: json.as_ref().map(|json| {
-                self.gate
-                    .as_ref()
-                    .map(|gate| gated_entries(json, gate).keys().cloned().collect())
-                    .unwrap_or_default()
-            }),
+            save_bytes,
+            json_bytes,
+            peer_nicks,
         }
+    }
+
+    /// The nicknames with an entry in the gated map of `json`. Empty for a document with no gate.
+    fn gated_nicks(&self, json: &Value) -> Vec<String> {
+        let Some(gate) = self.gate.as_ref() else {
+            return Vec::new();
+        };
+        let entries = gated_entries(json, gate);
+        entries.keys().cloned().collect()
     }
 
     /// How many changes this document holds, the internal genesis included.
@@ -1106,7 +1117,8 @@ mod tests {
     /// backslash.
     fn hand_counted_wire_len(frame: &Verified) -> usize {
         let body = frame.body.as_str();
-        403 + frame.author.as_str().len() + body.len() + body.matches('"').count()
+        let quotes = body.matches('"').count();
+        403 + frame.author.as_str().len() + body.len() + quotes
     }
 
     /// The census counts what the document keeps: the changes with the genesis, the frames

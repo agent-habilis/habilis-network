@@ -43,34 +43,37 @@ impl CollectionSizes {
         let (message_log, message_log_bytes) = state.message_log.size();
         let (reassembly, reassembly_bytes) = state.reassembly.size();
         let (shard_cache, shard_cache_bytes) = state.shard_cache.size();
-        Self {
-            seen: state.seen.len(),
-            known_endpoints: state.known_endpoints.len(),
-            quiet: state.quiet.len(),
-            left: state.left.len(),
-            left_keys: state.left_keys.len(),
-            reassembled_groups: state.reassembled_groups.len(),
-            pending_outbound: state.pending_outbound.len(),
+        // One assignment per gauge: a literal of `len` calls reads as one long chain.
+        let mut sizes = Self {
             message_log,
             message_log_bytes,
             reassembly,
             reassembly_bytes,
             shard_cache,
             shard_cache_bytes,
-            author_seqs: state.author_seqs.len(),
-            author_seq_entries: state.author_seqs.values().map(HashMap::len).sum(),
-            forked: state.forked.len(),
-            by_hash: state.by_hash.len(),
-            dag_heads: state.dag_heads.len(),
-            peers: state.peers.len(),
-            last_seen: state.last_seen.len(),
-            peer_endpoints: state.peer_endpoints.len(),
-            left_at: state.left_at.len(),
-            quiet_since: state.quiet_since.len(),
-            surfaced: state.surfaced.len(),
-            direct: state.direct.len(),
-            linked_endpoints: state.linked_endpoints.len(),
-        }
+            ..Self::default()
+        };
+        sizes.seen = state.seen.len();
+        sizes.known_endpoints = state.known_endpoints.len();
+        sizes.quiet = state.quiet.len();
+        sizes.left = state.left.len();
+        sizes.left_keys = state.left_keys.len();
+        sizes.reassembled_groups = state.reassembled_groups.len();
+        sizes.pending_outbound = state.pending_outbound.len();
+        sizes.author_seqs = state.author_seqs.len();
+        sizes.author_seq_entries = state.author_seqs.values().map(HashMap::len).sum();
+        sizes.forked = state.forked.len();
+        sizes.by_hash = state.by_hash.len();
+        sizes.dag_heads = state.dag_heads.len();
+        sizes.peers = state.peers.len();
+        sizes.last_seen = state.last_seen.len();
+        sizes.peer_endpoints = state.peer_endpoints.len();
+        sizes.left_at = state.left_at.len();
+        sizes.quiet_since = state.quiet_since.len();
+        sizes.surfaced = state.surfaced.len();
+        sizes.direct = state.direct.len();
+        sizes.linked_endpoints = state.linked_endpoints.len();
+        sizes
     }
 }
 
@@ -83,7 +86,8 @@ mod tests {
     fn a_new_node_holds_nothing_in_any_collection() {
         assert_eq!(
             CollectionSizes::read(&fresh_state()),
-            CollectionSizes::default()
+            CollectionSizes::default(),
+            "a new node holds nothing in any collection",
         );
     }
 
@@ -105,7 +109,8 @@ mod tests {
                 surfaced: 1,
                 forked: 1,
                 ..CollectionSizes::default()
-            }
+            },
+            "only the collections that got items read above 0",
         );
     }
 }

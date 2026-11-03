@@ -13,7 +13,7 @@ use super::gossip_msgs::GossipMsgs;
 use super::socket_bytes::{GossipPathBytes, SocketBytes};
 use super::wire_tally::{WireIn, WireOut, WireOutTally};
 use crate::protocol::Nickname;
-use crate::util::process_usage::cpu_time;
+use crate::util::process_usage;
 
 /// The most requesters that `resent_by` names in one interval. The census line names 3, so 32 is
 /// ample, and a map of 32 nicknames stays small. A requester past it is refused.
@@ -148,7 +148,7 @@ impl ExternalArms {
 
     /// The sum of every arm: the census field `idle_external`.
     #[must_use]
-    pub(crate) const fn total(&self) -> u64 {
+    pub(crate) fn total(&self) -> u64 {
         self.gossip_rx
             + self.neighbor_up
             + self.neighbor_down
@@ -187,7 +187,7 @@ impl IdleCounters {
     /// interval's own work rather than a running total a reader has to
     /// difference (and that a rotated log would corrupt).
     pub(crate) fn take(&mut self) -> IdleReading {
-        let cpu_now = cpu_time();
+        let cpu_now = process_usage::cpu_time();
         let mark = self.cpu_mark;
         let mut loop_arms = mem::take(self);
         self.cpu_mark = cpu_now.unwrap_or(mark);
@@ -222,28 +222,28 @@ pub(crate) fn top_requesters(resent_by: &HashMap<Nickname, u64>) -> String {
         .map(|(nick, count)| (nick, *count))
         .collect();
     rows.sort_unstable_by(|(left_nick, left_count), (right_nick, right_count)| {
-        right_count
-            .cmp(left_count)
-            .then_with(|| left_nick.as_str().cmp(right_nick.as_str()))
+        let by_nick = left_nick.as_str().cmp(right_nick.as_str());
+        right_count.cmp(left_count).then(by_nick)
     });
-    rows.iter()
+    let top: Vec<String> = rows
+        .iter()
         .take(3)
         .map(|(nick, count)| format!("{nick}:{count}"))
-        .collect::<Vec<_>>()
-        .join(",")
+        .collect();
+    top.join(",")
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::hint::black_box;
-    use std::sync::{Mutex, PoisonError};
+    use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
     use iroh_gossip::api::Event;
 
     use super::{IdleCounters, MAX_REQUESTERS, note_ppid_wake, note_sampler_wake, top_requesters};
-    use crate::testing::nick;
+    use crate::testing;
 
     /// `take` drains process-wide statics, so the tests that call it run one at a time.
     static TAKES: Mutex<()> = Mutex::new(());
@@ -253,26 +253,31 @@ mod tests {
         let mut counters = IdleCounters::default();
 
         for index in 0..10 * MAX_REQUESTERS {
-            counters.note_resend_for(&nick(&format!("peer-{index}")));
+            counters.note_resend_for(&testing::nick(&format!("peer-{index}")));
         }
-        counters.note_resend_for(&nick("peer-0"));
+        counters.note_resend_for(&testing::nick("peer-0"));
 
-        assert_eq!(counters.resent_by.len(), MAX_REQUESTERS);
         assert_eq!(
-            counters.resent_by[&nick("peer-0")],
+            counters.resent_by.len(),
+            MAX_REQUESTERS,
+            "a requester past the cap is not named"
+        );
+        assert_eq!(
+            counters.resent_by[&testing::nick("peer-0")],
             2,
             "a requester that is named keeps counting"
         );
         assert!(
             !counters
                 .resent_by
-                .contains_key(&nick(&format!("peer-{MAX_REQUESTERS}")))
+                .contains_key(&testing::nick(&format!("peer-{MAX_REQUESTERS}"))),
+            "the requester past the cap is not counted",
         );
     }
 
     #[test]
     fn two_loops_take_only_the_frames_that_their_own_senders_sent() {
-        let _one_at_a_time = TAKES.lock().unwrap_or_else(PoisonError::into_inner);
+        let _one_at_a_time = TAKES.lock().expect("another census test panicked");
         let (mut first, mut second) = (IdleCounters::default(), IdleCounters::default());
         let frame = br#"{"v":"12.0","id":"i","type":"app","tag":"t","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{}}"#;
         let handle_of_first = first.wire_out.clone();
@@ -285,8 +290,15 @@ mod tests {
             second_reading.wire_out.frames, 0,
             "the other loop took nothing"
         );
-        assert_eq!(first_reading.wire_out.frames, 1);
-        assert_eq!(first_reading.wire_out.wire, frame.len() as u64);
+        assert_eq!(
+            first_reading.wire_out.frames, 1,
+            "one frame was handed to the transport"
+        );
+        assert_eq!(
+            first_reading.wire_out.wire,
+            frame.len() as u64,
+            "the wire bytes are the length of the frame"
+        );
 
         handle_of_first.note(frame);
 
@@ -299,7 +311,7 @@ mod tests {
 
     #[test]
     fn take_zeroes_the_arms_and_sums_the_external_split() {
-        let _drain = TAKES.lock().unwrap_or_else(PoisonError::into_inner);
+        let _drain = TAKES.lock().expect("another census test panicked");
         let mut counters = IdleCounters {
             reclaim: 3,
             duplicates: 4,
@@ -316,24 +328,65 @@ mod tests {
         counters.ext.note_gossip(None);
         counters.ext.unicast += 2;
         counters.ext.deadlines += 1;
-        counters.note_resend_for(&nick("ant-bee"));
+        counters.note_resend_for(&testing::nick("ant-bee"));
         counters.wire_in.frames = 5;
 
         let reading = counters.take();
-        assert_eq!(reading.loop_arms.reclaim, 3);
-        assert_eq!(reading.loop_arms.duplicates, 4);
-        assert_eq!(reading.loop_arms.fresh, 6);
-        assert_eq!(reading.loop_arms.fr_asks, 7);
-        assert_eq!(reading.loop_arms.fr_retries, 2);
-        assert_eq!(reading.loop_arms.state_answers, 3);
-        assert_eq!(reading.loop_arms.state_frames_unicast, 5);
-        assert_eq!(reading.loop_arms.state_frames_broadcast, 9);
-        assert_eq!(reading.loop_arms.state_rejected, 1);
-        assert_eq!(reading.loop_arms.ext.lagged, 1);
-        assert_eq!(reading.loop_arms.ext.gossip_end, 1);
-        assert_eq!(reading.loop_arms.ext.total(), 5);
-        assert_eq!(reading.loop_arms.resent_by.len(), 1);
-        assert_eq!(reading.loop_arms.wire_in.frames, 5);
+        assert_eq!(
+            reading.loop_arms.reclaim, 3,
+            "reclaim is read as it was set"
+        );
+        assert_eq!(
+            reading.loop_arms.duplicates, 4,
+            "duplicates is read as it was set"
+        );
+        assert_eq!(reading.loop_arms.fresh, 6, "fresh is read as it was set");
+        assert_eq!(
+            reading.loop_arms.fr_asks, 7,
+            "fr_asks is read as it was set"
+        );
+        assert_eq!(
+            reading.loop_arms.fr_retries, 2,
+            "fr_retries is read as it was set"
+        );
+        assert_eq!(
+            reading.loop_arms.state_answers, 3,
+            "state_answers is read as it was set"
+        );
+        assert_eq!(
+            reading.loop_arms.state_frames_unicast, 5,
+            "state_frames_unicast is read as it was set"
+        );
+        assert_eq!(
+            reading.loop_arms.state_frames_broadcast, 9,
+            "state_frames_broadcast is read as it was set"
+        );
+        assert_eq!(
+            reading.loop_arms.state_rejected, 1,
+            "state_rejected is read as it was set"
+        );
+        assert_eq!(
+            reading.loop_arms.ext.lagged, 1,
+            "ext lagged is read as it was set"
+        );
+        assert_eq!(
+            reading.loop_arms.ext.gossip_end, 1,
+            "ext gossip_end is read as it was set"
+        );
+        assert_eq!(
+            reading.loop_arms.ext.total(),
+            5,
+            "ext total is read as it was set"
+        );
+        assert_eq!(
+            reading.loop_arms.resent_by.len(),
+            1,
+            "resent_by len is read as it was set"
+        );
+        assert_eq!(
+            reading.loop_arms.wire_in.frames, 5,
+            "wire_in frames is read as it was set"
+        );
 
         let next = counters.take();
         assert_eq!(next.loop_arms.reclaim, 0, "take resets the arms");
@@ -370,33 +423,34 @@ mod tests {
             ("gnu-hen", 1),
         ] {
             for _ in 0..count {
-                counters.note_resend_for(&nick(name));
+                counters.note_resend_for(&testing::nick(name));
             }
         }
         assert_eq!(
             top_requesters(&counters.resent_by),
-            "cat-dog:5,ant-bee:2,elk-fox:2"
+            "cat-dog:5,ant-bee:2,elk-fox:2",
+            "the 3 largest counts, and a tie goes by nickname",
         );
-        assert_eq!(top_requesters(&HashMap::new()), "");
+        assert_eq!(top_requesters(&HashMap::new()), "", "no requester, no text");
     }
 
     #[test]
     fn take_drains_the_off_loop_wakes() {
-        let _drain = TAKES.lock().unwrap_or_else(PoisonError::into_inner);
+        let _drain = TAKES.lock().expect("another census test panicked");
         let mut counters = IdleCounters::default();
         note_ppid_wake();
         note_sampler_wake();
         note_sampler_wake();
         // Other tests can bump the same statics in parallel, so only a lower bound holds.
         let reading = counters.take();
-        assert!(reading.ppid >= 1);
-        assert!(reading.sampler >= 2);
+        assert!(reading.ppid >= 1, "the parent-process ticker woke once");
+        assert!(reading.sampler >= 2, "the sampler ticker woke twice");
     }
 
     #[cfg(all(unix, feature = "host"))]
     #[test]
     fn take_reports_the_cpu_time_of_the_interval() {
-        let _drain = TAKES.lock().unwrap_or_else(PoisonError::into_inner);
+        let _drain = TAKES.lock().expect("another census test panicked");
         let mut counters = IdleCounters::default();
         let first = counters
             .take()
@@ -417,6 +471,10 @@ mod tests {
             "the interval holds the busy loop: {second:?}"
         );
         // Deltas add up to the last mark; totals would count the first interval twice.
-        assert_eq!(first + second, counters.cpu_mark);
+        assert_eq!(
+            first + second,
+            counters.cpu_mark,
+            "the deltas add up to the last mark, so no interval counts twice"
+        );
     }
 }

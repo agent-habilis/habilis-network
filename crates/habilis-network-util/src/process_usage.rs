@@ -29,16 +29,17 @@ pub fn cpu_time() -> Option<Duration> {
 /// No reading off a unix host.
 #[cfg(not(all(unix, feature = "host")))]
 #[must_use]
-pub const fn cpu_time() -> Option<Duration> {
+pub fn cpu_time() -> Option<Duration> {
     None
 }
 
 #[cfg(all(test, unix, feature = "host"))]
 mod tests {
-    use super::cpu_time;
-
     #[test]
     fn the_reading_exists_on_a_unix_host() {
-        assert!(cpu_time().is_some());
+        assert!(
+            super::cpu_time().is_some(),
+            "the CPU clock is readable on a unix host"
+        );
     }
 }

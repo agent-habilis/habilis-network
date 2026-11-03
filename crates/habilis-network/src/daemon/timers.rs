@@ -133,18 +133,21 @@ pub(crate) async fn tick_state_refresh(
     // which is far too often to afford a line each. Deltas, not totals: a
     // reader needs no arithmetic, and a rotated log cannot corrupt the series.
     let meshed = state.standing.contains(&Standing::Meshed);
+    let relay_transport = state.relay_transport.relay_allowed();
+    let direct_units = state.webrtc_admission.direct_units();
+    let over_ceiling = state.webrtc_admission.over_ceiling();
     tracing::info!(
         target: "habilis_network::lifecycle",
         roster_len,
         link_len,
         meshed,
-        relay_transport = state.relay_transport.relay_allowed(),
+        relay_transport,
         links_direct = links.direct,
         links_relay_only = links.relay_only,
         links_pending = links.pending,
         peak_resident_memory_mb = resident_memory::peak_resident_memory_mb().unwrap_or(0),
-        direct_units = state.webrtc_admission.direct_units(),
-        over_ceiling = state.webrtc_admission.over_ceiling(),
+        direct_units,
+        over_ceiling,
         idle_wakeups = idle.wakeups,
         idle_prune = idle.prune,
         idle_alive = idle.alive,
@@ -361,6 +364,7 @@ pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &Nickname) {
     let shared = state.doc_mut(Channel::State).census(heavy);
     let peer_nicks = meta.peer_nicks.as_deref().unwrap_or_default();
     let absent = absent_entries(peer_nicks, &state.peers, me);
+    let peer_entries = peer_nicks.len();
     tracing::info!(
         target: "habilis_network::lifecycle",
         doc_meta_changes = meta.changes,
@@ -368,7 +372,7 @@ pub(crate) fn tick_doc_census(state: &mut EventLoopState, me: &Nickname) {
         doc_meta_frame_bytes = meta.frame_bytes,
         doc_meta_save_bytes = meta.save_bytes.unwrap_or(0),
         doc_meta_json_bytes = meta.json_bytes.unwrap_or(0),
-        doc_meta_peer_entries = peer_nicks.len(),
+        doc_meta_peer_entries = peer_entries,
         doc_meta_absent_entries = absent,
         doc_state_changes = shared.changes,
         doc_state_frames = shared.frames,
@@ -533,7 +537,11 @@ mod tests {
     fn the_heavy_doc_census_runs_once_in_fifteen_ticks() {
         let heavy: Vec<u64> = (0..31).filter(|run| super::is_heavy_run(*run)).collect();
 
-        assert_eq!(heavy, [0, 15, 30]);
+        assert_eq!(
+            heavy,
+            [0, 15, 30],
+            "the heavy census runs on the first call and then every 15th"
+        );
     }
 
     // The warn-only resident-memory leak signal: a threshold the live process

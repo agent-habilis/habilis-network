@@ -1480,10 +1480,8 @@ mod tests {
                     .await
                     .expect("bob reads the answer in time")
                     .expect("reader task");
-            let expected: Vec<Vec<u8>> = frames
-                .iter()
-                .map(|frame| frame.as_bytes().to_vec())
-                .collect();
+            let bytes_of = |frame: &WireFrame| frame.as_bytes().to_vec();
+            let expected: Vec<Vec<u8>> = frames.iter().map(bytes_of).collect();
             assert_eq!(
                 got[..3],
                 expected[..],
@@ -1510,16 +1508,18 @@ mod tests {
                 .collect();
             state.peers.extend(members.iter().cloned());
             let asker = Identity::generate();
-            let skipped = (0..200)
-                .map(|_| digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker))
-                .find(|digest| {
-                    !antientropy::answers_digest(
-                        &net.author,
-                        &nick("bob"),
-                        digest.id.as_str(),
-                        members.iter(),
-                    )
-                })
+            let mut digests =
+                (0..200).map(|_| digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker));
+            let leaves_holder_out = |digest: &Verified| {
+                !antientropy::answers_digest(
+                    &net.author,
+                    &nick("bob"),
+                    digest.id.as_str(),
+                    members.iter(),
+                )
+            };
+            let skipped = digests
+                .find(leaves_holder_out)
                 .expect("a digest id that skips the holder among 30 members");
 
             let answered = antientropy::handle_state_digest(
@@ -1609,7 +1609,10 @@ mod tests {
             antientropy::tick_digests(&mut state, &net.context()).await;
 
             assert!(state.idle.broadcasts >= 1, "the digests are broadcast");
-            assert!(state.state_digest_serves.unicast.chat_ask.is_none());
+            assert!(
+                state.state_digest_serves.unicast.chat_ask.is_none(),
+                "a digest that went by gossip leaves no pending chat ask"
+            );
             bob_endpoint.close().await;
             net.endpoint.close().await;
         });

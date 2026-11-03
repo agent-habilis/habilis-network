@@ -31,7 +31,6 @@ mod serve_budget;
 mod unicast_digests;
 
 use iroh::EndpointId;
-use rand::seq::IndexedRandom as _;
 
 use std::collections::HashSet;
 use std::hash::{Hash as _, Hasher as _};
@@ -800,6 +799,8 @@ pub(crate) async fn tick_digests(state: &mut EventLoopState, context: &HandlerCt
 }
 
 async fn digests_to_one_peer(state: &mut EventLoopState, context: &HandlerCtx<'_>) -> bool {
+    use rand::seq::IndexedRandom as _;
+
     let peers: Vec<EndpointId> = transport::unicast_peers(state).collect();
     let Some(peer) = peers.choose(&mut rand::rng()).copied() else {
         return false;
@@ -828,14 +829,12 @@ async fn send_digests(
     };
     let chat = chat_digest(state, context.mesh, context.author);
     let asks_for_chat = chat.is_some();
-    let mut frames: Vec<WireFrame> = chat
-        .iter()
-        .filter_map(|digest| digest.serialize().ok())
-        .collect();
+    let serialize = |digest: &Verified| digest.serialize().ok();
+    let mut frames: Vec<WireFrame> = chat.iter().filter_map(serialize).collect();
     if set == DigestSet::All {
         for channel in [Channel::State, Channel::Meta] {
             let digest = state_digest(state, origin, channel);
-            frames.extend(digest.iter().filter_map(|digest| digest.serialize().ok()));
+            frames.extend(digest.iter().filter_map(serialize));
         }
     }
     if frames.is_empty() {
@@ -1251,7 +1250,10 @@ mod budget_tests {
         let retry =
             |fast: &mut FastRounds, at| fast.retry_target(state, at, 1, |_| false, |_| true);
         note(&mut rounds, "a", t0);
-        assert!(retry(&mut rounds, t0).is_some());
+        assert!(
+            retry(&mut rounds, t0).is_some(),
+            "the first retry is due once a head is known"
+        );
         rounds.note_asked(author_of("alice"), state, 1, 0, t0);
         assert!(
             retry(&mut rounds, t0 + ms(400)).is_some(),
@@ -1693,7 +1695,10 @@ mod tests {
     #[test]
     fn the_unicast_form_is_on_by_default() {
         assert!(black_box(tuning::UNICAST_DIGESTS), "the const is on");
-        assert!(fresh_state().state_digest_serves.unicast.enabled);
+        assert!(
+            fresh_state().state_digest_serves.unicast.enabled,
+            "a fresh state has the unicast form on"
+        );
     }
 
     /// A state with a log of `count` messages, a peer `asker` known by its key and proven at
@@ -1774,7 +1779,7 @@ mod tests {
         super::handle_digest(&digest, &mut state, &nick("holder"));
 
         let answers = drained(&mut resends);
-        assert_eq!(answers.len(), 3);
+        assert_eq!(answers.len(), 3, "3 frames are resent");
         assert!(
             answers
                 .iter()
@@ -1796,14 +1801,15 @@ mod tests {
         let members: Vec<_> = (0..30)
             .map(|index| nick(&format!("member-{index}")))
             .collect();
-        let skipped = (0..200)
-            .map(|_| {
-                Message::new_digest(&MeshId::from("test"), &nick("asker"), empty_digest_body())
-                    .sign(&asker_identity)
-            })
-            .find(|digest| {
-                !super::answers_digest(&me, &nick("asker"), digest.id.as_str(), members.iter())
-            })
+        let mut digests = (0..200).map(|_| {
+            Message::new_digest(&MeshId::from("test"), &nick("asker"), empty_digest_body())
+                .sign(&asker_identity)
+        });
+        let leaves_me_out = |digest: &Verified| {
+            !super::answers_digest(&me, &nick("asker"), digest.id.as_str(), members.iter())
+        };
+        let skipped = digests
+            .find(leaves_me_out)
             .expect("a digest id that skips this node among 30 members");
         for (unicast, answered) in [(true, true), (false, false)] {
             let (mut state, mut resends) = holder_for_unicast(2, &asker_identity, asker_endpoint);
@@ -1840,7 +1846,7 @@ mod tests {
                 .all(|answer| matches!(answer, Resend::Unicast(to, _) if *to == asker_endpoint)),
             "a proven linked asker is answered by unicast: {answers:?}"
         );
-        assert_eq!(answers.len(), 2);
+        assert_eq!(answers.len(), 2, "2 frames are resent");
 
         let (mut unlinked, mut unlinked_resends) =
             holder_for_unicast(2, &asker_identity, asker_endpoint);

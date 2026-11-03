@@ -66,7 +66,7 @@ impl FrameClass {
     ];
 
     /// The name of the class in the census line.
-    pub(crate) const fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::App => "app",
             Self::Presence => "presence",
@@ -220,9 +220,10 @@ impl TagBytes {
 
 /// `class:bytes` for each class with bytes, joined by `,`, or `-`.
 pub(crate) fn by_class(bytes: &[u64; CLASS_COUNT]) -> String {
-    let named: Vec<String> = FrameClass::ALL
+    let held = FrameClass::ALL
         .iter()
-        .filter(|class| bytes[class.index()] > 0)
+        .filter(|class| bytes[class.index()] > 0);
+    let named: Vec<String> = held
         .map(|class| format!("{}:{}", class.name(), bytes[class.index()]))
         .collect();
     if named.is_empty() {
@@ -318,6 +319,7 @@ impl WireOut {
 /// `&mut` state, so each loop hands a clone of this handle to its senders and reads the tally with
 /// `take`. Two loops in one process do not share a tally.
 #[derive(Clone, Default, Debug)]
+// Shared: the loop and each of its senders hold a clone of one tally.
 pub(crate) struct WireOutTally(Arc<Mutex<WireOut>>);
 
 impl WireOutTally {
@@ -339,11 +341,10 @@ impl WireOutTally {
     /// The bytes sent so far under `tag`, read without ending the interval.
     #[cfg(test)]
     pub(crate) fn tag_bytes(&self, tag: &str) -> u64 {
-        self.0
-            .lock()
-            .ok()
-            .and_then(|out| out.tags.0.get(tag).copied())
-            .unwrap_or(0)
+        let Ok(out) = self.0.lock() else {
+            return 0;
+        };
+        out.tags.0.get(tag).copied().unwrap_or(0)
     }
 }
 
@@ -361,18 +362,30 @@ mod tests {
     use super::{CLASS_COUNT, FrameClass, FrameShape, TagBytes, WireIn, WireOut, by_class};
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::{AppFrameParams, AppTag};
-    use crate::protocol::{Channel, MeshId, Message};
-    use crate::testing::nick;
+    use crate::protocol::{Channel, MeshId, Message, MessageBody};
+    use crate::testing;
 
     const APP: &[u8] = br#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca","seq":3,"ext":{}}"#;
 
     #[test]
     fn an_app_frame_has_its_tag_its_body_and_its_wire_size() {
         let shape = FrameShape::of(APP);
-        assert_eq!(shape.class, FrameClass::App);
-        assert_eq!(shape.tag, Some("app_msg"));
-        assert_eq!(shape.body, "hello, golden".len());
-        assert_eq!(shape.wire, APP.len());
+        assert_eq!(
+            shape.class,
+            FrameClass::App,
+            "the golden frame is an app frame"
+        );
+        assert_eq!(
+            shape.tag,
+            Some("app_msg"),
+            "the tag of the golden frame is read"
+        );
+        assert_eq!(
+            shape.body,
+            "hello, golden".len(),
+            "the body of the golden frame is its text"
+        );
+        assert_eq!(shape.wire, APP.len(), "the wire size is the whole frame");
     }
 
     /// The reader and the serializer must agree, or the census reads every frame as `other`: the
@@ -380,38 +393,48 @@ mod tests {
     #[test]
     fn frames_from_the_real_serializer_are_read_by_kind_tag_and_body() {
         let mesh = MeshId::from("test");
-        let author = nick("alice");
+        let author = testing::nick("alice");
         let tag = AppTag::try_new("app_msg").expect("a valid tag");
         let app = AppFrameParams::new(tag, None, None, "say \"hi\"".into());
-        let frames = [
+        let frames: [(Message, FrameClass); 10] = [
             (Message::new_app(&mesh, &author, app), FrameClass::App),
             (Message::new_joined(&mesh, &author), FrameClass::Presence),
             (
-                Message::new_peer_info(&mesh, &author, "addr".into()),
+                Message::new_peer_info(&mesh, &author, MessageBody::from("addr")),
                 FrameClass::PeerInfo,
             ),
             (
-                Message::new_digest(&mesh, &author, "[]".into()),
+                Message::new_digest(&mesh, &author, MessageBody::from("[]")),
                 FrameClass::Digest,
             ),
             (
-                Message::new_state_digest(&mesh, &author, "{}".into()),
+                Message::new_state_digest(&mesh, &author, MessageBody::from("{}")),
                 FrameClass::StateDigest,
             ),
             (
-                Message::new_channel_digest(&mesh, &author, "{}".into(), Channel::Meta),
+                Message::new_channel_digest(&mesh, &author, MessageBody::from("{}"), Channel::Meta),
                 FrameClass::MetaDigest,
             ),
             (
-                Message::new_channel_event(&mesh, &author, "{\"k\":1}".into(), Channel::State),
+                Message::new_channel_event(
+                    &mesh,
+                    &author,
+                    MessageBody::from("{\"k\":1}"),
+                    Channel::State,
+                ),
                 FrameClass::State,
             ),
             (
-                Message::new_channel_event(&mesh, &author, "{\"k\":1}".into(), Channel::Meta),
+                Message::new_channel_event(
+                    &mesh,
+                    &author,
+                    MessageBody::from("{\"k\":1}"),
+                    Channel::Meta,
+                ),
                 FrameClass::Meta,
             ),
             (
-                Message::new_link_state(&mesh, &author, "{}".into()),
+                Message::new_link_state(&mesh, &author, MessageBody::from("{}")),
                 FrameClass::LinkState,
             ),
             (Message::new_ping(&mesh, &author), FrameClass::PingPong),
@@ -426,10 +449,14 @@ mod tests {
             let shape = FrameShape::of(wire.as_bytes());
             let json_body = serde_json::to_string(&written).expect("a string encodes");
             assert_eq!(shape.class, class, "{written}");
-            assert_eq!(shape.wire, wire.len());
+            assert_eq!(
+                shape.wire,
+                wire.len(),
+                "the wire size is the size of the frame that the serializer made"
+            );
             assert_eq!(shape.body, json_body.len() - 2, "the body of {class:?}");
             if class == FrameClass::App {
-                assert_eq!(shape.tag, Some("app_msg"));
+                assert_eq!(shape.tag, Some("app_msg"), "an app frame carries its tag");
             }
         }
     }
@@ -438,8 +465,16 @@ mod tests {
     fn a_quoted_body_does_not_end_the_body_early() {
         let frame = br#"{"v":"12.0","id":"i","type":"state","mesh":"m","author":"a","ts":1,"body":"say \",\"pubkey\":\" now","pubkey":"ab","sig":"cd","ext":{}}"#;
         let shape = FrameShape::of(frame);
-        assert_eq!(shape.class, FrameClass::State);
-        assert_eq!(shape.body, r#"say \",\"pubkey\":\" now"#.len());
+        assert_eq!(
+            shape.class,
+            FrameClass::State,
+            "a body that holds quotes and key names is still a state frame"
+        );
+        assert_eq!(
+            shape.body,
+            r#"say \",\"pubkey\":\" now"#.len(),
+            "the escaped body is read to its real end"
+        );
     }
 
     #[test]
@@ -466,16 +501,28 @@ mod tests {
     #[test]
     fn a_frame_with_a_shard_header_is_a_shard() {
         let frame = br#"{"v":"12.0","id":"i","type":"app","tag":"t","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","shard":{"group":"g","idx":0,"total":2},"ext":{}}"#;
-        assert_eq!(FrameShape::of(frame).class, FrameClass::Shard);
+        assert_eq!(
+            FrameShape::of(frame).class,
+            FrameClass::Shard,
+            "a shard header makes the frame a shard"
+        );
     }
 
     #[test]
     fn bytes_that_are_no_frame_are_other_with_their_wire_size() {
         let junk: &[u8] = b"\xff not a frame";
         let shape = FrameShape::of(junk);
-        assert_eq!(shape.class, FrameClass::Other);
-        assert_eq!(shape.wire, junk.len());
-        assert_eq!(shape.body, 0);
+        assert_eq!(
+            shape.class,
+            FrameClass::Other,
+            "bytes that are no frame are other"
+        );
+        assert_eq!(
+            shape.wire,
+            junk.len(),
+            "the wire size of junk is its length"
+        );
+        assert_eq!(shape.body, 0, "junk has no body");
     }
 
     #[test]
@@ -488,12 +535,32 @@ mod tests {
         received.note_fresh(&app);
         received.note_dup(&app);
         received.note_dup(&app);
-        assert_eq!(received.frames, 3);
-        assert_eq!(received.wire, 3 * APP.len() as u64);
-        assert_eq!(received.body, 3 * "hello, golden".len() as u64);
-        assert_eq!(by_class(&received.fresh), format!("app:{}", APP.len()));
-        assert_eq!(by_class(&received.dup), format!("app:{}", 2 * APP.len()));
-        assert_eq!(received.tags.top(), format!("app_msg:{}", 3 * APP.len()));
+        assert_eq!(received.frames, 3, "3 frames were received");
+        assert_eq!(
+            received.wire,
+            3 * APP.len() as u64,
+            "the wire bytes are 3 frames"
+        );
+        assert_eq!(
+            received.body,
+            3 * "hello, golden".len() as u64,
+            "the body bytes are 3 bodies"
+        );
+        assert_eq!(
+            by_class(&received.fresh),
+            format!("app:{}", APP.len()),
+            "the first sighting is counted once"
+        );
+        assert_eq!(
+            by_class(&received.dup),
+            format!("app:{}", 2 * APP.len()),
+            "the 2 repeats are counted as repeats"
+        );
+        assert_eq!(
+            received.tags.top(),
+            format!("app_msg:{}", 3 * APP.len()),
+            "the tag bytes cover the 3 frames"
+        );
     }
 
     #[test]
@@ -512,7 +579,11 @@ mod tests {
             format!("app:{}", APP.len()),
             "once per frame"
         );
-        assert_eq!(by_class(&received.fresh), format!("app:{}", APP.len()));
+        assert_eq!(
+            by_class(&received.fresh),
+            format!("app:{}", APP.len()),
+            "the content that came back counts as fresh by content"
+        );
     }
 
     #[test]
@@ -520,9 +591,17 @@ mod tests {
         let mut sent = WireOut::default();
         sent.note(APP);
         sent.note(b"junk");
-        assert_eq!(sent.frames, 2);
-        assert_eq!(sent.wire, APP.len() as u64 + 4);
-        assert_eq!(by_class(&sent.bytes), format!("app:{},other:4", APP.len()));
+        assert_eq!(sent.frames, 2, "2 frames were sent");
+        assert_eq!(
+            sent.wire,
+            APP.len() as u64 + 4,
+            "the wire bytes are the app frame and 4 bytes of junk"
+        );
+        assert_eq!(
+            by_class(&sent.bytes),
+            format!("app:{},other:4", APP.len()),
+            "the bytes are split by class"
+        );
     }
 
     #[test]
@@ -537,18 +616,22 @@ mod tests {
 
         assert_eq!(tags.0["tag-0"], 11, "a kept tag adds up");
         assert_eq!(tags.0[super::OTHER_TAGS], 5, "a new tag goes to the rest");
-        assert!(!tags.0.contains_key("a-new-tag"));
+        assert!(
+            !tags.0.contains_key("a-new-tag"),
+            "a tag past the cap is not kept"
+        );
     }
 
     #[test]
     fn an_empty_tally_prints_a_dash_and_the_tags_stay_bounded() {
-        assert_eq!(by_class(&[0; CLASS_COUNT]), "-");
-        assert_eq!(TagBytes::default().top(), "-");
+        assert_eq!(by_class(&[0; CLASS_COUNT]), "-", "no bytes, no text");
+        assert_eq!(TagBytes::default().top(), "-", "no tags, no text");
         let mut tags = TagBytes::default();
         for index in 0..100 {
             tags.add(&format!("tag-{index}"), 1);
         }
         assert!(tags.0.len() <= super::MAX_TAGS + 1, "{} tags", tags.0.len());
-        assert_eq!(tags.0.values().sum::<u64>(), 100, "no byte is lost");
+        let total: u64 = tags.0.values().sum();
+        assert_eq!(total, 100, "no byte is lost");
     }
 }

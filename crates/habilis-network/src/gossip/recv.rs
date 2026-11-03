@@ -4002,8 +4002,8 @@ mod dedup_counter_tests {
     /// A signed frame of the writer that carries `{"key": 1}` as one change.
     fn change_body(writer: &EventLoopState) -> MessageBody {
         let seed = *writer.identity.public().as_bytes();
-        let change = writer
-            .doc(Channel::State)
+        let doc = writer.doc(Channel::State);
+        let change = doc
             .build_change(&json!({ "key": 1 }), &seed)
             .expect("a JSON object merges")
             .expect("a non-empty merge yields a change");
@@ -4079,16 +4079,25 @@ mod dedup_counter_tests {
         let body = change_body(&writer);
         // The body is a JSON string in the frame: its text, and 1 more byte for the backslash of
         // each of its quotes. Counted from the text, not with the reader that is under test.
-        let body_on_the_wire = (body.as_str().len() + body.as_str().matches('"').count()) as u64;
+        let quotes = body.as_str().matches('"').count();
+        let body_on_the_wire = (body.as_str().len() + quotes) as u64;
         let frame = state_frame(&writer, body);
         let reader = reader_after(&[&frame, &frame, &frame]);
         let one = wire(&frame);
 
         let received = &reader.idle.wire_in;
         assert_eq!(received.frames, 3, "every frame that reached ingest");
-        assert_eq!(received.wire, 3 * one);
-        assert_eq!(by_class(&received.fresh), format!("state:{one}"));
-        assert_eq!(by_class(&received.dup), format!("state:{}", 2 * one));
+        assert_eq!(received.wire, 3 * one, "the wire bytes are 3 frames");
+        assert_eq!(
+            by_class(&received.fresh),
+            format!("state:{one}"),
+            "the first sighting is counted once"
+        );
+        assert_eq!(
+            by_class(&received.dup),
+            format!("state:{}", 2 * one),
+            "the 2 repeats are counted as repeats"
+        );
         assert_eq!(
             received.body,
             3 * body_on_the_wire,

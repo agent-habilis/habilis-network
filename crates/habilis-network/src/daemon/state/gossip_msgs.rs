@@ -37,69 +37,64 @@ pub(crate) struct GossipMsgs {
 impl GossipMsgs {
     /// The counters of `metrics` now.
     pub(crate) fn read(metrics: &Metrics) -> Self {
-        Self {
-            sent: [
-                metrics.msgs_join_sent.get(),
-                metrics.msgs_forward_join_sent.get(),
-                metrics.msgs_shuffle_sent.get(),
-                metrics.msgs_shuffle_reply_sent.get(),
-                metrics.msgs_neighbor_sent.get(),
-                metrics.msgs_disconnect_sent.get(),
-                metrics.msgs_gossip_sent.get(),
-                metrics.msgs_ihave_sent.get(),
-                metrics.msgs_graft_sent.get(),
-                metrics.msgs_prune_sent.get(),
-            ],
-            sent_bytes: [
-                metrics.msgs_join_sent_size.get(),
-                metrics.msgs_forward_join_sent_size.get(),
-                metrics.msgs_shuffle_sent_size.get(),
-                metrics.msgs_shuffle_reply_sent_size.get(),
-                metrics.msgs_neighbor_sent_size.get(),
-                metrics.msgs_disconnect_sent_size.get(),
-                metrics.msgs_gossip_sent_size.get(),
-                metrics.msgs_ihave_sent_size.get(),
-                metrics.msgs_graft_sent_size.get(),
-                metrics.msgs_prune_sent_size.get(),
-            ],
-            recv: [
-                metrics.msgs_join_recv.get(),
-                metrics.msgs_forward_join_recv.get(),
-                metrics.msgs_shuffle_recv.get(),
-                metrics.msgs_shuffle_reply_recv.get(),
-                metrics.msgs_neighbor_recv.get(),
-                metrics.msgs_disconnect_recv.get(),
-                metrics.msgs_gossip_recv.get(),
-                metrics.msgs_ihave_recv.get(),
-                metrics.msgs_graft_recv.get(),
-                metrics.msgs_prune_recv.get(),
-            ],
-            recv_bytes: [
-                metrics.msgs_join_recv_size.get(),
-                metrics.msgs_forward_join_recv_size.get(),
-                metrics.msgs_shuffle_recv_size.get(),
-                metrics.msgs_shuffle_reply_recv_size.get(),
-                metrics.msgs_neighbor_recv_size.get(),
-                metrics.msgs_disconnect_recv_size.get(),
-                metrics.msgs_gossip_recv_size.get(),
-                metrics.msgs_ihave_recv_size.get(),
-                metrics.msgs_graft_recv_size.get(),
-                metrics.msgs_prune_recv_size.get(),
-            ],
+        // One assignment per counter, in the order of `VARIANTS`: an array literal of `get` calls
+        // reads as one long chain.
+        let mut msgs = Self {
             ctrl_out: metrics.msgs_ctrl_sent_size.get(),
             data_out: metrics.msgs_data_sent_size.get(),
             ctrl_in: metrics.msgs_ctrl_recv_size.get(),
-            data_in: metrics.msgs_data_recv_size.get(),
-        }
+            ..Self::default()
+        };
+        msgs.data_in = metrics.msgs_data_recv_size.get();
+        msgs.sent[0] = metrics.msgs_join_sent.get();
+        msgs.sent[1] = metrics.msgs_forward_join_sent.get();
+        msgs.sent[2] = metrics.msgs_shuffle_sent.get();
+        msgs.sent[3] = metrics.msgs_shuffle_reply_sent.get();
+        msgs.sent[4] = metrics.msgs_neighbor_sent.get();
+        msgs.sent[5] = metrics.msgs_disconnect_sent.get();
+        msgs.sent[6] = metrics.msgs_gossip_sent.get();
+        msgs.sent[7] = metrics.msgs_ihave_sent.get();
+        msgs.sent[8] = metrics.msgs_graft_sent.get();
+        msgs.sent[9] = metrics.msgs_prune_sent.get();
+        msgs.sent_bytes[0] = metrics.msgs_join_sent_size.get();
+        msgs.sent_bytes[1] = metrics.msgs_forward_join_sent_size.get();
+        msgs.sent_bytes[2] = metrics.msgs_shuffle_sent_size.get();
+        msgs.sent_bytes[3] = metrics.msgs_shuffle_reply_sent_size.get();
+        msgs.sent_bytes[4] = metrics.msgs_neighbor_sent_size.get();
+        msgs.sent_bytes[5] = metrics.msgs_disconnect_sent_size.get();
+        msgs.sent_bytes[6] = metrics.msgs_gossip_sent_size.get();
+        msgs.sent_bytes[7] = metrics.msgs_ihave_sent_size.get();
+        msgs.sent_bytes[8] = metrics.msgs_graft_sent_size.get();
+        msgs.sent_bytes[9] = metrics.msgs_prune_sent_size.get();
+        msgs.recv[0] = metrics.msgs_join_recv.get();
+        msgs.recv[1] = metrics.msgs_forward_join_recv.get();
+        msgs.recv[2] = metrics.msgs_shuffle_recv.get();
+        msgs.recv[3] = metrics.msgs_shuffle_reply_recv.get();
+        msgs.recv[4] = metrics.msgs_neighbor_recv.get();
+        msgs.recv[5] = metrics.msgs_disconnect_recv.get();
+        msgs.recv[6] = metrics.msgs_gossip_recv.get();
+        msgs.recv[7] = metrics.msgs_ihave_recv.get();
+        msgs.recv[8] = metrics.msgs_graft_recv.get();
+        msgs.recv[9] = metrics.msgs_prune_recv.get();
+        msgs.recv_bytes[0] = metrics.msgs_join_recv_size.get();
+        msgs.recv_bytes[1] = metrics.msgs_forward_join_recv_size.get();
+        msgs.recv_bytes[2] = metrics.msgs_shuffle_recv_size.get();
+        msgs.recv_bytes[3] = metrics.msgs_shuffle_reply_recv_size.get();
+        msgs.recv_bytes[4] = metrics.msgs_neighbor_recv_size.get();
+        msgs.recv_bytes[5] = metrics.msgs_disconnect_recv_size.get();
+        msgs.recv_bytes[6] = metrics.msgs_gossip_recv_size.get();
+        msgs.recv_bytes[7] = metrics.msgs_ihave_recv_size.get();
+        msgs.recv_bytes[8] = metrics.msgs_graft_recv_size.get();
+        msgs.recv_bytes[9] = metrics.msgs_prune_recv_size.get();
+        msgs
     }
 
     /// The counts since `earlier`, field by field. Zero, not a wrap, if a field went back.
     pub(crate) fn since(self, earlier: Self) -> Self {
         let minus = |current: [u64; 10], previous: [u64; 10]| {
             let mut out = [0u64; 10];
-            for (slot, (new_count, old_count)) in
-                out.iter_mut().zip(current.into_iter().zip(previous))
-            {
+            let pairs = current.into_iter().zip(previous);
+            for (slot, (new_count, old_count)) in out.iter_mut().zip(pairs) {
                 *slot = new_count.saturating_sub(old_count);
             }
             out
@@ -119,9 +114,8 @@ impl GossipMsgs {
 
 /// `variant:value` for each variant with a value, joined by `,`, or `-`.
 pub(crate) fn by_variant(values: &[u64; 10]) -> String {
-    let named: Vec<String> = VARIANTS
-        .iter()
-        .zip(values)
+    let pairs = VARIANTS.iter().zip(values);
+    let named: Vec<String> = pairs
         .filter(|(_, value)| **value > 0)
         .map(|(name, value)| format!("{name}:{value}"))
         .collect();
@@ -159,11 +153,19 @@ mod tests {
 
     #[test]
     fn the_variants_are_named_and_the_empty_reads_a_dash() {
-        assert_eq!(by_variant(&[0; 10]), "-");
+        assert_eq!(
+            by_variant(&[0; 10]),
+            "-",
+            "no variant has a count, so the line is a dash"
+        );
         let mut counts = [0u64; 10];
         counts[0] = 3;
         counts[6] = 90;
-        assert_eq!(by_variant(&counts), "join:3,gossip:90");
+        assert_eq!(
+            by_variant(&counts),
+            "join:3,gossip:90",
+            "each variant with a count is named, in the order of VARIANTS"
+        );
         let mut later = counts;
         later[6] = 120;
         let delta = GossipMsgs {
@@ -201,10 +203,10 @@ mod tests {
                     Gossip::builder().spawn(first.clone()),
                     Gossip::builder().spawn(second.clone()),
                 );
-                let router_first = Router::builder(first.clone())
-                    .accept(GOSSIP_ALPN, go_first.clone())
-                    .spawn();
-                let router_second = Router::builder(second.clone())
+                let builder_first = Router::builder(first.clone());
+                let router_first = builder_first.accept(GOSSIP_ALPN, go_first.clone()).spawn();
+                let builder_second = Router::builder(second.clone());
+                let router_second = builder_second
                     .accept(GOSSIP_ALPN, go_second.clone())
                     .spawn();
                 lookup::add_peer_addr(&lookup::address_book(&second), first.addr());
@@ -222,7 +224,10 @@ mod tests {
                 time::timeout(Duration::from_secs(10), async {
                     while let Some(event) = second_topic.next().await {
                         if let Ok(Event::Received(message)) = event {
-                            assert_eq!(message.content, payload);
+                            assert_eq!(
+                                message.content, payload,
+                                "the receiver got the bytes that were broadcast"
+                            );
                             return;
                         }
                     }
@@ -242,7 +247,11 @@ mod tests {
                     sent.data_out
                 );
                 assert!(got.recv[6] >= 1, "the receiver read it: {got:?}");
-                assert!(got.data_in >= 304);
+                assert!(
+                    got.data_in >= 304,
+                    "the data bytes in cover the payload: {}",
+                    got.data_in
+                );
                 assert!(got.ctrl_out > 0, "the joiner sent control messages");
                 assert!(sent.ctrl_in > 0, "and the first node read them");
                 let _ = Arc::clone(go_first.metrics());

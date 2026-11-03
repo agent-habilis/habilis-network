@@ -1848,7 +1848,11 @@ impl EventLoopState {
     /// Tests only: switch the unicast form of the anti-entropy digests, which the const
     /// `UNICAST_DIGESTS` sets for a real run.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-    pub fn set_unicast_digests(&mut self, enabled: bool) {
+    pub fn set_unicast_digests(
+        &mut self,
+        // True switches the unicast form on.
+        enabled: bool,
+    ) {
         self.state_digest_serves.unicast.enabled = enabled;
     }
 

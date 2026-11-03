@@ -413,9 +413,10 @@ fn a_dropped_state_change_is_repaired(unicast: bool) {
             eprintln!("state digest answer: {line}");
         }
         if unicast {
+            let any_unicast = answers.iter().any(|line| !line.contains("unicast=0"));
+            let none_on_gossip = answers.iter().all(|line| line.contains("broadcast=0"));
             assert!(
-                answers.iter().any(|line| !line.contains("unicast=0"))
-                    && answers.iter().all(|line| line.contains("broadcast=0")),
+                any_unicast && none_on_gossip,
                 "the unicast form answers to the connection of the digest, never on gossip\n{}",
                 lines_since(before)
             );

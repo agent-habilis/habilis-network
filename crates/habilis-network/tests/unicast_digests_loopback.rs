@@ -44,9 +44,12 @@ enum Request {
     Unicast(oneshot::Sender<()>),
 }
 
+// Shared: the node owns the app, so the test reads the frames through this handle.
+type Read = Arc<Mutex<Vec<String>>>;
+
 /// An app that keeps every frame it reads.
 struct Chat {
-    read: Arc<Mutex<Vec<String>>>,
+    read: Read,
 }
 
 #[habilis_network::async_trait]
@@ -132,7 +135,8 @@ fn nick(name: &str) -> Nickname {
     Nickname::try_new(name).expect("valid nickname")
 }
 
-async fn spawn(topic: &str, name: &str, unicast: bool) -> (Node<Chat>, Arc<Mutex<Vec<String>>>) {
+async fn spawn(topic: &str, name: &str, unicast: bool) -> (Node<Chat>, Read) {
+    // The same handle goes to the app and comes back to the caller.
     let read = Arc::new(Mutex::new(Vec::new()));
     let mesh =
         derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("derive a loopback mesh");
@@ -176,7 +180,7 @@ async fn merge(node: &Node<Chat>, merge: serde_json::Value) {
     ask(node, |done| Request::Merge(merge, done)).await;
 }
 
-fn has_read(read: &Arc<Mutex<Vec<String>>>, text: &str) -> bool {
+fn has_read(read: &Read, text: &str) -> bool {
     read.lock()
         .expect("no poison")
         .iter()
@@ -207,11 +211,7 @@ async fn waits(deadline: Duration, mut done: impl AsyncFnMut() -> bool) -> bool 
 async fn trio(
     topic: &str,
     unicast: bool,
-) -> (
-    (Node<Chat>, Arc<Mutex<Vec<String>>>),
-    (Node<Chat>, Arc<Mutex<Vec<String>>>),
-    (Node<Chat>, Arc<Mutex<Vec<String>>>),
-) {
+) -> ((Node<Chat>, Read), (Node<Chat>, Read), (Node<Chat>, Read)) {
     let alice = spawn(topic, "alice", unicast).await;
     let bob = spawn(topic, "bob", unicast).await;
     let carol = spawn(topic, "carol", unicast).await;

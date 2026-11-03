@@ -52,28 +52,31 @@ impl SocketBytes {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn read(endpoint: &Endpoint) -> Self {
         let socket = &endpoint.metrics().socket;
-        Self {
-            send_ip: socket
-                .send_ipv4
-                .get()
-                .saturating_add(socket.send_ipv6.get()),
+        // One assignment per counter: a literal of `get` calls reads as one long chain.
+        let mut now = Self {
             send_relay: socket.send_relay.get(),
-            recv_ip: socket
-                .recv_data_ipv4
-                .get()
-                .saturating_add(socket.recv_data_ipv6.get()),
             recv_ipv6: socket.recv_data_ipv6.get(),
             recv_relay: socket.recv_data_relay.get(),
-            recv_custom: socket.recv_data_custom.get(),
-            recv_datagrams: socket.recv_datagrams.get(),
-            paths_custom: socket.paths_custom.get(),
-            ip_paths_added: socket.transport_ip_paths_added.get(),
-            ip_paths_removed: socket.transport_ip_paths_removed.get(),
-            relay_paths_added: socket.transport_relay_paths_added.get(),
-            relay_paths_removed: socket.transport_relay_paths_removed.get(),
-            custom_paths_added: socket.transport_custom_paths_added.get(),
-            custom_paths_removed: socket.transport_custom_paths_removed.get(),
-        }
+            ..Self::default()
+        };
+        now.send_ip = socket
+            .send_ipv4
+            .get()
+            .saturating_add(socket.send_ipv6.get());
+        now.recv_ip = socket
+            .recv_data_ipv4
+            .get()
+            .saturating_add(socket.recv_data_ipv6.get());
+        now.recv_custom = socket.recv_data_custom.get();
+        now.recv_datagrams = socket.recv_datagrams.get();
+        now.paths_custom = socket.paths_custom.get();
+        now.ip_paths_added = socket.transport_ip_paths_added.get();
+        now.ip_paths_removed = socket.transport_ip_paths_removed.get();
+        now.relay_paths_added = socket.transport_relay_paths_added.get();
+        now.relay_paths_removed = socket.transport_relay_paths_removed.get();
+        now.custom_paths_added = socket.transport_custom_paths_added.get();
+        now.custom_paths_removed = socket.transport_custom_paths_removed.get();
+        now
     }
 
     /// iroh has no endpoint metrics on wasm32, so every counter reads zero.
@@ -85,30 +88,32 @@ impl SocketBytes {
     /// The bytes since `earlier`, field by field. Zero, not a wrap, if a field went back.
     pub(crate) fn since(self, earlier: Self) -> Self {
         Self {
-            send_ip: self.send_ip.saturating_sub(earlier.send_ip),
-            send_relay: self.send_relay.saturating_sub(earlier.send_relay),
-            recv_ip: self.recv_ip.saturating_sub(earlier.recv_ip),
-            recv_ipv6: self.recv_ipv6.saturating_sub(earlier.recv_ipv6),
-            recv_relay: self.recv_relay.saturating_sub(earlier.recv_relay),
-            recv_custom: self.recv_custom.saturating_sub(earlier.recv_custom),
-            recv_datagrams: self.recv_datagrams.saturating_sub(earlier.recv_datagrams),
-            paths_custom: self.paths_custom.saturating_sub(earlier.paths_custom),
-            ip_paths_added: self.ip_paths_added.saturating_sub(earlier.ip_paths_added),
-            ip_paths_removed: self
-                .ip_paths_removed
-                .saturating_sub(earlier.ip_paths_removed),
-            relay_paths_added: self
-                .relay_paths_added
-                .saturating_sub(earlier.relay_paths_added),
-            relay_paths_removed: self
-                .relay_paths_removed
-                .saturating_sub(earlier.relay_paths_removed),
-            custom_paths_added: self
-                .custom_paths_added
-                .saturating_sub(earlier.custom_paths_added),
-            custom_paths_removed: self
-                .custom_paths_removed
-                .saturating_sub(earlier.custom_paths_removed),
+            send_ip: u64::saturating_sub(self.send_ip, earlier.send_ip),
+            send_relay: u64::saturating_sub(self.send_relay, earlier.send_relay),
+            recv_ip: u64::saturating_sub(self.recv_ip, earlier.recv_ip),
+            recv_ipv6: u64::saturating_sub(self.recv_ipv6, earlier.recv_ipv6),
+            recv_relay: u64::saturating_sub(self.recv_relay, earlier.recv_relay),
+            recv_custom: u64::saturating_sub(self.recv_custom, earlier.recv_custom),
+            recv_datagrams: u64::saturating_sub(self.recv_datagrams, earlier.recv_datagrams),
+            paths_custom: u64::saturating_sub(self.paths_custom, earlier.paths_custom),
+            ip_paths_added: u64::saturating_sub(self.ip_paths_added, earlier.ip_paths_added),
+            ip_paths_removed: u64::saturating_sub(self.ip_paths_removed, earlier.ip_paths_removed),
+            relay_paths_added: u64::saturating_sub(
+                self.relay_paths_added,
+                earlier.relay_paths_added,
+            ),
+            relay_paths_removed: u64::saturating_sub(
+                self.relay_paths_removed,
+                earlier.relay_paths_removed,
+            ),
+            custom_paths_added: u64::saturating_sub(
+                self.custom_paths_added,
+                earlier.custom_paths_added,
+            ),
+            custom_paths_removed: u64::saturating_sub(
+                self.custom_paths_removed,
+                earlier.custom_paths_removed,
+            ),
         }
     }
 
@@ -175,12 +180,12 @@ impl GossipPathBytes {
     /// The counts since `earlier`, field by field. Zero, not a wrap, if a field went back.
     pub(crate) fn since(self, earlier: Self) -> Self {
         Self {
-            frames_out: self.frames_out.saturating_sub(earlier.frames_out),
-            bytes_out: self.bytes_out.saturating_sub(earlier.bytes_out),
-            frames_in: self.frames_in.saturating_sub(earlier.frames_in),
-            bytes_in: self.bytes_in.saturating_sub(earlier.bytes_in),
-            not_for_us: self.not_for_us.saturating_sub(earlier.not_for_us),
-            dropped: self.dropped.saturating_sub(earlier.dropped),
+            frames_out: u64::saturating_sub(self.frames_out, earlier.frames_out),
+            bytes_out: u64::saturating_sub(self.bytes_out, earlier.bytes_out),
+            frames_in: u64::saturating_sub(self.frames_in, earlier.frames_in),
+            bytes_in: u64::saturating_sub(self.bytes_in, earlier.bytes_in),
+            not_for_us: u64::saturating_sub(self.not_for_us, earlier.not_for_us),
+            dropped: u64::saturating_sub(self.dropped, earlier.dropped),
         }
     }
 }
@@ -224,7 +229,7 @@ mod tests {
             ..SocketBytes::default()
         };
         let delta = later.since(earlier);
-        assert_eq!(delta.send_ip, 15);
+        assert_eq!(delta.send_ip, 15, "the delta is 25 less 10");
         assert_eq!(delta.recv_datagrams, 0, "a field that went back reads zero");
     }
 
@@ -265,12 +270,19 @@ mod tests {
         stats.dropped_empty = 3;
         let reading = GossipPathBytes::from_stats(stats);
         assert_eq!(reading.dropped, 6, "every kind of drop is in the sum");
-        assert_eq!(reading.bytes_in, 9_000);
+        assert_eq!(
+            reading.bytes_in, 9_000,
+            "the bytes in are read as they were set"
+        );
 
         stats.frames_out = 7;
         stats.bytes_out = 5_500;
         let later = GossipPathBytes::from_stats(stats).since(reading);
-        assert_eq!((later.frames_out, later.bytes_out), (3, 1_500));
+        assert_eq!(
+            (later.frames_out, later.bytes_out),
+            (3, 1_500),
+            "the second reading is 3 frames and 1500 bytes above the first"
+        );
         assert_eq!(later.frames_in, 0, "nothing came in since");
         assert_eq!(
             GossipPathBytes::default().since(reading).bytes_in,
@@ -349,7 +361,10 @@ mod tests {
                     "the server received {} bytes over IP for {sent}",
                     received_by_server.recv_ip
                 );
-                assert!(received_by_server.recv_datagrams > 0);
+                assert!(
+                    received_by_server.recv_datagrams > 0,
+                    "the server counted the datagrams that carried the bytes"
+                );
                 assert_eq!(sent_by_client.send_relay, 0, "no relay on loopback");
                 let paths = SocketBytes::read(&client).since(client_before);
                 assert!(
