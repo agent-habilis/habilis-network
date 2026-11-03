@@ -1533,11 +1533,13 @@ async fn handle_peer_info(
     // tell its rendezvous link belongs to the beacon's nickname.
     // The hint belongs to the key that holds the nickname: a `PeerInfo` of another key (a frame of
     // the same second that lost the nickname) binds nothing, or a directed send reaches a node
-    // that does not hold it. A nickname with no holder takes the first hint.
-    let may_bind = state
+    // that does not hold it. A nickname with no holder takes the first hint, unless the key
+    // already said goodbye: that frame is a replay.
+    let holds_or_free = state
         .peer_keys
         .get(&message.author)
         .is_none_or(|held| *held == message.key());
+    let may_bind = holds_or_free && !state.key_said_goodbye(message.key());
     let changed = may_bind && state.peer_endpoints.get(&message.author) != Some(&peer_addr);
     if may_bind {
         state.bind_peer_endpoint(message.author.clone(), peer_addr.clone());
@@ -3164,6 +3166,34 @@ mod first_contact_tests {
                 state.peer_endpoints.get("bob"),
                 Some(&restarted),
                 "the holder could not rebind its hint"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A `PeerInfo` of a key that said goodbye is a replay: the goodbye removed the nickname and
+    /// its dial hint, and the replay must not bring the hint back.
+    #[test]
+    fn a_replayed_peer_info_of_a_key_that_said_goodbye_binds_no_endpoint() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let departed = Identity::generate();
+            let address = iroh::EndpointAddr::new(iroh::SecretKey::generate().public())
+                .with_ip_addr(test_ip());
+            state.note_left(departed.author_key());
+
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &address, &departed),
+                &mut state,
+                &context,
+            )
+            .await;
+
+            assert!(
+                !state.peer_endpoints.contains_key("bob"),
+                "a replayed PeerInfo of a departed key restored the dial hint"
             );
             node.endpoint.close().await;
         });

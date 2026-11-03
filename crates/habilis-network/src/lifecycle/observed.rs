@@ -2406,6 +2406,11 @@ mod churn_red {
                 Some(&new_run.author_key()),
                 "a peer in the roster has no holder: its own goodbye would remove nothing"
             );
+            say_goodbye(&new_run, &who, &rig, &mut state, &mut Inert).await;
+            assert!(
+                !state.peers.contains(who.as_str()),
+                "the goodbye of the replacement run did not remove the peer"
+            );
             rig.endpoint.close().await;
         });
     }

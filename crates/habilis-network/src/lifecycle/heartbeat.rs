@@ -283,16 +283,52 @@ fn prune_dial_hints(state: &mut EventLoopState) {
         .values()
         .map(|address| address.id)
         .collect();
-    for endpoint in pruned {
-        if !kept_ids.contains(&endpoint) && !state.linked_endpoints.contains(&endpoint) {
-            state.forget_endpoint_state(endpoint);
-        }
-    }
+    forget_pruned_endpoints(state, pruned, &kept_ids);
+    drop_orphaned_endpoint_state(state, &kept_ids);
     let lapsed_names = &state.clock_evidence.lapsed_quiet;
     state
         .clock_evidence
         .lapsed_keys
         .retain(|nick, _| lapsed_names.contains(nick.as_str()));
+}
+
+/// Drop the state of each pruned endpoint that no kept nickname binds. A linked endpoint keeps its
+/// proof, direct path and backoff for the regraft after the link loss, and a later sweep drops them.
+fn forget_pruned_endpoints(
+    state: &mut EventLoopState,
+    pruned: Vec<EndpointId>,
+    kept_ids: &HashSet<EndpointId>,
+) {
+    for endpoint in pruned {
+        if kept_ids.contains(&endpoint) {
+            continue;
+        }
+        if state.linked_endpoints.contains(&endpoint) {
+            // The proof, the direct path and the backoff stay for the regraft after the link
+            // loss. The path watch goes: nothing names this endpoint, and a stale entry nudges it
+            // on each tick. A later sweep drops the rest.
+            state.path_kinds.remove(&endpoint);
+            state.path_watchers.remove(&endpoint);
+            state.orphaned_endpoints.insert(endpoint);
+        } else {
+            state.forget_endpoint_state(endpoint);
+        }
+    }
+}
+
+/// Drop the state of each orphaned endpoint whose link has ended. An endpoint that a nickname
+/// binds again keeps its state, and so does one that is still linked.
+fn drop_orphaned_endpoint_state(state: &mut EventLoopState, kept_ids: &HashSet<EndpointId>) {
+    let orphans: Vec<EndpointId> = state.orphaned_endpoints.iter().copied().collect();
+    for endpoint in orphans {
+        if state.linked_endpoints.contains(&endpoint) {
+            continue;
+        }
+        state.orphaned_endpoints.remove(&endpoint);
+        if !kept_ids.contains(&endpoint) {
+            state.forget_endpoint_state(endpoint);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -677,9 +713,10 @@ mod tests {
         );
     }
 
-    /// A live link keeps its state whatever the roster says about the nickname that bound it.
+    /// A live link keeps its proof, its direct path and its backoff whatever the roster says about
+    /// the nickname that bound it. The path watch goes: it would nudge a link that no hint names.
     #[test]
-    fn pruning_a_dial_hint_keeps_the_state_of_a_linked_endpoint() {
+    fn pruning_a_dial_hint_drops_the_path_watch_of_a_linked_endpoint_and_keeps_the_rest() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let endpoint = iroh::SecretKey::from_bytes(&[8; 32]).public();
@@ -688,13 +725,73 @@ mod tests {
             .insert(nick("gone-fern"), iroh::EndpointAddr::new(endpoint));
         state.linked_endpoints.insert(endpoint);
         state.path_kinds.insert(endpoint, PathKind::WebRtc);
+        state.path_watchers.insert(endpoint, None);
         state.direct.insert(endpoint, DirectState::Direct);
 
         tick_sweep(&mut state, &SilentSink);
 
         assert!(
-            state.path_kinds.contains_key(&endpoint) && state.direct.contains_key(&endpoint),
-            "the state of a linked endpoint went with the pruned dial hint"
+            state.direct.contains_key(&endpoint),
+            "the direct path of a linked endpoint went with the pruned dial hint"
+        );
+        assert!(
+            !state.path_kinds.contains_key(&endpoint)
+                && !state.path_watchers.contains_key(&endpoint),
+            "the path watch of a pruned linked endpoint stays and nudges it on each tick"
+        );
+    }
+
+    /// The link ends after the hint is pruned: no nickname names the endpoint, so a later sweep
+    /// must still drop its state. `unlink` keeps the state on purpose (the regraft reads it).
+    #[test]
+    fn a_later_sweep_drops_the_state_of_a_pruned_endpoint_whose_link_ended() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let endpoint = iroh::SecretKey::from_bytes(&[8; 32]).public();
+        state
+            .peer_endpoints
+            .insert(nick("gone-fern"), iroh::EndpointAddr::new(endpoint));
+        state.linked_endpoints.insert(endpoint);
+        state.direct.insert(endpoint, DirectState::Direct);
+        tick_sweep(&mut state, &SilentSink);
+        state.unlink(endpoint);
+        assert!(
+            state.direct.contains_key(&endpoint),
+            "the sweep that ran before the unlink dropped the direct state of a linked endpoint"
+        );
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            !state.direct.contains_key(&endpoint),
+            "the state of an endpoint with no link and no nickname stays after a later sweep"
+        );
+    }
+
+    /// A nickname that binds the endpoint again after the prune keeps the state when the link ends.
+    #[test]
+    fn a_later_sweep_keeps_the_state_of_an_endpoint_that_a_nickname_binds_again() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let endpoint = iroh::SecretKey::from_bytes(&[8; 32]).public();
+        state
+            .peer_endpoints
+            .insert(nick("gone-fern"), iroh::EndpointAddr::new(endpoint));
+        state.linked_endpoints.insert(endpoint);
+        state.direct.insert(endpoint, DirectState::Direct);
+        tick_sweep(&mut state, &SilentSink);
+        state.unlink(endpoint);
+        state
+            .peer_endpoints
+            .insert(nick("back-fern"), iroh::EndpointAddr::new(endpoint));
+        state.peers.insert(nick("back-fern"));
+        state.last_seen.insert(nick("back-fern"), Instant::now());
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.direct.contains_key(&endpoint),
+            "the state of an endpoint that a kept nickname binds went with the old link"
         );
     }
 

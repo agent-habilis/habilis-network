@@ -2263,6 +2263,34 @@ mod tests {
         );
     }
 
+    /// Two nicknames can bind one endpoint (a node that restarted under a new name). The goodbye
+    /// of one must leave the state of the endpoint to the other.
+    #[test]
+    fn forgetting_one_of_two_nicknames_that_bind_an_endpoint_keeps_its_state() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let shared = endpoint_id(1);
+        state
+            .peer_endpoints
+            .insert(nick("old-bob"), iroh::EndpointAddr::new(shared));
+        state
+            .peer_endpoints
+            .insert(nick("new-bob"), iroh::EndpointAddr::new(shared));
+        state.direct.insert(shared, DirectState::Direct);
+
+        state.forget_peer_endpoint("old-bob");
+        assert!(
+            state.direct.contains_key(&shared) && state.endpoint_is_bound(shared),
+            "the goodbye of one nickname dropped the state of an endpoint that another binds"
+        );
+
+        state.forget_peer_endpoint("new-bob");
+        assert!(
+            state.direct.is_empty() && !state.endpoint_is_bound(shared),
+            "the last nickname that binds an endpoint left its state behind"
+        );
+    }
+
     // After a failover the rendezvous keeps its id, but a refusal from the old
     // holder says nothing about the new one: the wait starts over.
     #[test]

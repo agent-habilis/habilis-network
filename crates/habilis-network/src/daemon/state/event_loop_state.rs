@@ -168,6 +168,11 @@ pub struct EventLoopState {
     /// Distinct from `peers` — links are asymmetric and node-id
     /// keyed; the roster is symmetric and nickname keyed.
     pub(crate) linked_endpoints: HashSet<EndpointId>,
+    /// Endpoints whose dial hint the sweep pruned while they still had a link. The state of such
+    /// an endpoint stays for the regraft that follows the link loss. A later sweep drops it once
+    /// the link is gone and no nickname binds the endpoint. Bounded by `linked_endpoints`: an entry
+    /// leaves at the first sweep that sees no link.
+    pub(crate) orphaned_endpoints: HashSet<EndpointId>,
     /// When `linked_endpoints` last became empty, `None` while it holds a link. The census warns
     /// of a silent partition only when this gap outlasts a heal: see
     /// [`Self::silent_partition_due`].
@@ -618,14 +623,12 @@ impl EventLoopState {
         } = init.secrets;
         let (resend_outbox, resend_receiver) =
             transport::ResendOutbox::new(tuning::RESEND_OUTBOX_CAP);
-        // Per-channel encryption keys, domain-separated from each other and from
-        // every other seed-derived secret. `None` (passwordless) ⇒ the docs and
-        // broadcast chat stay plaintext, exactly as before.
-        let state_key = mesh_key.as_ref().map(|key| key.derive(b"state-doc"));
-        let meta_key = mesh_key.as_ref().map(|key| key.derive(b"meta-doc"));
-        let broadcast_key = mesh_key.as_ref().map(|key| key.derive(b"broadcast"));
+        // Per-channel keys, domain-separated from each other and from every other seed-derived
+        // secret. `None` (passwordless): the docs and the broadcast chat stay plaintext.
+        let [state_key, meta_key, broadcast_key] = Self::channel_keys(mesh_key.as_ref());
         Self {
             linked_endpoints: HashSet::new(),
+            orphaned_endpoints: HashSet::new(),
             zero_links_since: None,
             direct: HashMap::new(),
             relay_transport: transport::PayloadPath::DirectOnly,
@@ -735,6 +738,12 @@ impl EventLoopState {
             broadcast_key,
             idle: IdleCounters::default(),
         }
+    }
+
+    /// The keys of the `state` channel, the `meta` channel and the broadcast chat.
+    fn channel_keys(mesh_key: Option<&SymmetricKey>) -> [Option<SymmetricKey>; 3] {
+        [b"state-doc".as_slice(), b"meta-doc", b"broadcast"]
+            .map(|label| mesh_key.map(|key| key.derive(label)))
     }
 
     /// The `meta` channel: gated by the application's per-peer map when it keeps one, free-form otherwise.
@@ -1076,8 +1085,18 @@ impl EventLoopState {
     /// connection, which outlives a gossip link but not the peer.
     pub(crate) fn forget_peer_endpoint(&mut self, nick: &str) -> Option<EndpointAddr> {
         let address = self.peer_endpoints.remove(nick)?;
-        self.forget_endpoint_state(address.id);
+        // Another nickname can bind the same endpoint (a node that restarted under a new name).
+        if !self.endpoint_is_bound(address.id) {
+            self.forget_endpoint_state(address.id);
+        }
         Some(address)
+    }
+
+    /// Whether a dial hint of any nickname names `endpoint`.
+    pub(crate) fn endpoint_is_bound(&self, endpoint: EndpointId) -> bool {
+        self.peer_endpoints
+            .values()
+            .any(|address| address.id == endpoint)
     }
 
     /// Drop every state that is keyed by `endpoint`: the backoff, the proof, the rival flag, the
