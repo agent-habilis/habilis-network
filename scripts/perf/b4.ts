@@ -4,6 +4,9 @@
 //
 // usage: bun scripts/perf/b4.ts --plain <binary> --counters <binary> [--plain-record <json>]
 //          [--counters-record <json>] [--plain-loaded 0] [--pairs 3] [--nodes 16] [--out-root ~/bench-results/b4]
+//          [--plain-max-peers <N>] [--counters-max-peers <N>] [--join-time 1]
+// --*-max-peers sets the cap on direct links of the daemons of that arm, to compare two caps with one binary.
+// --join-time 1 makes every run write join_ms to result.json (see bench.ts).
 // A pair of two builds with the wire counters, to compare their ratio: --plain-loaded 300 gives arm a a loaded phase too.
 //
 // Every run waits for the start gate, then runs bench.ts with the same warm-up (the settle phase). A run whose
@@ -21,8 +24,8 @@ const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i += 2) flags.set((argv[i] ?? "").replace(/^--/, ""), argv[i + 1] ?? "");
 const need = (name: string) => flags.get(name) ?? (console.error(`missing --${name}`), process.exit(2));
 const ARMS = {
-  plain: { binary: need("plain"), record: flags.get("plain-record"), loaded: Number(flags.get("plain-loaded") ?? 0) },
-  counters: { binary: need("counters"), record: flags.get("counters-record"), loaded: 300 },
+  plain: { binary: need("plain"), record: flags.get("plain-record"), loaded: Number(flags.get("plain-loaded") ?? 0), maxPeers: flags.get("plain-max-peers") },
+  counters: { binary: need("counters"), record: flags.get("counters-record"), loaded: 300, maxPeers: flags.get("counters-max-peers") },
 };
 const PAIRS = Number(flags.get("pairs") ?? 3);
 const NODES = Number(flags.get("nodes") ?? 16);
@@ -60,6 +63,8 @@ async function runOnce(arm: "plain" | "counters", pair: number, attempt: number,
     process.execPath, `${HERE}/bench.ts`, spec.binary, label, "--nodes", String(nodes), "--stagger", "0.5", "--settle", "300",
     "--idle", "240", "--loaded", String(spec.loaded), "--min-avail-gib", "1", "--out-root", ROOT,
     ...(spec.record ? ["--record", spec.record] : []),
+    ...(spec.maxPeers ? ["--max-peers", spec.maxPeers] : []),
+    ...(flags.get("join-time") ? ["--join-time", flags.get("join-time")!] : []),
   ];
   log(`run ${label}: ${args.slice(2).join(" ")}`);
   const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });

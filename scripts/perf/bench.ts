@@ -3,11 +3,15 @@
 //
 // usage: bun scripts/perf/bench.ts <app binary> <arm> [--nodes <N>] [--seed 1] [--stagger 0.5]
 //          [--settle 480] [--idle 600] [--loaded 600] [--lookup <list>] [--min-avail-gib 2] [--out-root ~/bench-results]
-//          [--record ~/bench-results/baseline/<arm>.json]
+//          [--record ~/bench-results/baseline/<arm>.json] [--max-peers <N>] [--join-time 1]
 //
 // --record names the JSON that build-arm.ts wrote. The runner copies it into result.json as `build`.
 // Use it for the sha and the dirty flag: the version text of a binary built with an engine override
 // can say dirty:true, because cargo rewrites Cargo.lock before the build script runs.
+//
+// --max-peers is passed to `create` and `join`: the cap on direct links of each daemon. Without it the daemon
+// uses its own default. --join-time 1 polls the rosters during the settle phase and writes join_ms to
+// result.json: the time from the last join until every daemon lists the other N-1 members.
 //
 // Phases: join, settle, idle, loaded, idle. In the loaded phase every daemon sends, every 30 s, one
 // broadcast of 200 bytes, one directed msg of 200 bytes to a random peer, and one task. The runner
@@ -50,6 +54,8 @@ const LOADED = num("loaded", 600);
 // No --lookup flag: `create` then uses the loopback ladder, so the 64 daemons meet over 127.0.0.1 and
 // need no network. Name a lookup (mdns, dht, relay) only to test that lookup.
 const LOOKUP = flags.get("lookup") ?? "";
+const MAX_PEERS = flags.get("max-peers") ?? "";
+const maxPeers = MAX_PEERS ? ["--max-peers", MAX_PEERS] : [];
 const PERIOD = num("period", 30);
 const PAYLOAD = "x".repeat(200);
 
@@ -96,6 +102,7 @@ const result: Record<string, unknown> = {
   nodes: NODES,
   nodes_choice: flags.has("nodes") ? "flag" : chosen.why,
   lookup: LOOKUP,
+  max_peers: MAX_PEERS || null,
   phases: [] as { name: string; start_ms: number; end_ms: number }[],
   load: [] as { ts: number; load1: number }[],
 };
@@ -133,14 +140,17 @@ async function allAlive(where: string): Promise<void> {
   if (dead.length > 0) await abort(`${where}: daemons not alive: ${dead.join(",")}`);
 }
 
-// Every daemon must see the other N-1 members before the idle phase starts.
-async function checkMesh(): Promise<void> {
-  const seen = await Promise.all(
+const rosterSizes = () =>
+  Promise.all(
     Array.from({ length: NODES }, async (_, k) => {
       const peers = JSON.parse((await cli(["peers", "--gossip", gossip, "--nickname", nick(k + 1)])).out || "{}").peers ?? [];
       return peers.filter((peer: { quiet: boolean }) => !peer.quiet).length;
     }),
   );
+
+// Every daemon must see the other N-1 members before the idle phase starts.
+async function checkMesh(): Promise<void> {
+  const seen = await rosterSizes();
   result.roster = seen;
   saveResult();
   const short = seen.flatMap((count, k) => (count < NODES - 1 ? [`${nick(k + 1)} sees ${count} of ${NODES - 1}`] : []));
@@ -221,7 +231,7 @@ const sampler = setInterval(() => {
 // Join.
 const owner = String(process.pid);
 const created = await cli([
-  "create", "--name", `bench-${stamp}`, "--nickname", nick(1), ...(LOOKUP ? ["--lookup", LOOKUP] : []),
+  "create", "--name", `bench-${stamp}`, "--nickname", nick(1), ...(LOOKUP ? ["--lookup", LOOKUP] : []), ...maxPeers,
   "--owner-pid", owner, "--state-file", stateFile(1),
 ]);
 if (created.code !== 0) await abort(`create failed: ${created.err.trim()}`);
@@ -231,7 +241,7 @@ if (!gossip) await abort(`no gossip id: ${ready.out.trim()} ${ready.err.trim()}`
 for (let i = 2; i <= NODES; i++) {
   const limit = overLimit(sample());
   if (limit) await abort(`start-up stopped before ${nick(i)}: ${limit}`);
-  const joined = await cli(["join", gossip, "--nickname", nick(i), "--owner-pid", owner, "--state-file", stateFile(i)]);
+  const joined = await cli(["join", gossip, "--nickname", nick(i), "--owner-pid", owner, "--state-file", stateFile(i), ...maxPeers]);
   if (joined.code !== 0) await abort(`join ${nick(i)} failed: ${joined.err.trim()}`);
   await sleep(STAGGER);
 }
@@ -314,7 +324,18 @@ async function phase(name: string, seconds: number, work?: () => Promise<void>):
 }
 
 for (let i = 1; i <= NODES; i++) void listen(i);
-await sleep(SETTLE);
+if (num("join-time", 0)) {
+  const joinedAt = Date.now();
+  while (Date.now() - joinedAt < SETTLE * 1000) {
+    if ((await rosterSizes()).every((count) => count >= NODES - 1)) {
+      result.join_ms = Date.now() - joinedAt;
+      saveResult();
+      break;
+    }
+    await sleep(2);
+  }
+  await sleep(Math.max(0, SETTLE - (Date.now() - joinedAt) / 1000));
+} else await sleep(SETTLE);
 await checkMesh();
 await phase("idle1", IDLE);
 await phase("loaded", LOADED, async () => {

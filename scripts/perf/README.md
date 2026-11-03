@@ -173,6 +173,11 @@ To compare two builds that both have the wire counters, give arm a a loaded phas
 arms then give a ratio, and the step measure of the unicast digests used it: arm a was the build before the change and
 arm b the build with it, 3 pairs at N = 16.
 
+To compare two settings of one build, give each arm its own cap on direct links with `--plain-max-peers` and
+`--counters-max-peers`. `bench.ts` passes `--max-peers` to `create` and `join`, and writes it to `result.json`.
+`--join-time 1` polls the rosters in the settle phase and writes `join_ms`: the time from the end of the last join
+until every daemon lists the other N-1 members.
+
 ## Ratio test
 
 `ratio.test.ts` holds the goal: at N = 16 the frame-layer metadata bytes per delivered data byte are at most half of
