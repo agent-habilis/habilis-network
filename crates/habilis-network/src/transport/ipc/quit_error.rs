@@ -2,7 +2,7 @@
 
 use std::{error, fmt};
 
-/// Why [`quit`](super::quit) did not stop a daemon.
+/// Why [`quit`](super::quit()) did not stop a daemon.
 ///
 /// # Examples
 ///

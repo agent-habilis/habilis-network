@@ -116,10 +116,10 @@ pub(super) async fn announce_departure<Driver: NodeDriver>(
     quit.exit_on_quit && !cfg!(feature = "dhat-heap")
 }
 /// Spawn ctrl-c (all platforms) plus SIGTERM/SIGHUP/SIGQUIT (unix) or the
-/// console events (Windows, [`spawn_console_event_tasks`]) listener tasks,
+/// console events (Windows, `spawn_console_event_tasks`) listener tasks,
 /// and for the CLI daemon the owner or parent watch
 /// ([`spawn_orphan_watch`]) and on Windows the window of the end of the
-/// session ([`spawn_session_end_watch`]), all feeding a single internal quit
+/// session (`spawn_session_end_watch`), all feeding a single internal quit
 /// channel.
 /// On Windows it returns both ends: the sender also goes to the IPC accept
 /// loop, whose `quit` feeds the same channel. On Unix it returns the receiver,
@@ -351,7 +351,7 @@ fn owner_start(pid: u32) -> Result<u64, OwnerPidError> {
 /// that broadcasts `left` and exits cleanly.
 ///
 /// With an [`Owner`], every OS watches the owner. Without one, Unix watches
-/// the parent ([`spawn_parent_watch`]), and Windows watches nothing: it does
+/// the parent (`spawn_parent_watch`), and Windows watches nothing: it does
 /// not reparent an orphan, and the pid of a dead parent can be reused, so
 /// there is nothing to compare. A Windows launcher passes `--owner-pid`.
 #[cfg(feature = "host")]
