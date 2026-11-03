@@ -170,6 +170,10 @@ Arrival and departure are surfaced once each, as `joined` and `left`, keyed by n
 
 Each lookup bootstraps a mesh and runs it with no other lookup present. An added lookup adds reliability and never a feature.
 
+## Compatibility
+
+Until version 1.0, we do not care about backward compatibility. Before 1.0, break compatibility when it gives a better design, better performance, or better reliability. Do not keep a shim, an alias, or a fallback only for old versions.
+
 ## Logging
 
 Developer logs use `tracing`. Message bodies are redacted by default.
