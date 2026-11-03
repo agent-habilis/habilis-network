@@ -558,14 +558,14 @@ fn four_peers_converge(public: bool) {
             // SAFETY: each handle came from habilis_network_mesh_open and is still open.
             counts[index] = unsafe { habilis_network_mesh_peer_count(handle) };
         }
-        if counts.iter().all(|&count| count >= 4) {
+        if counts.iter().all(|&count| count == 4) {
             break;
         }
         thread::sleep(Duration::from_millis(200));
     }
 
     assert!(
-        counts.iter().all(|&count| count >= 4),
+        counts.iter().all(|&count| count == 4),
         "expected every member to count 4 members (itself and 3 others) within 45s (public={public}); peer_counts={counts:?}"
     );
 

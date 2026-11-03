@@ -9,6 +9,7 @@ use crate::daemon::state::EventLoopState;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::{MeshId, Message, Nickname, UnixSecs};
 use crate::util::clock::Instant;
+use iroh::EndpointId;
 use std::time::Duration;
 
 use crate::util::tuning::{ALIVE_INTERVAL, alive_timeout};
@@ -78,7 +79,7 @@ pub(crate) fn note_suspend(state: &mut EventLoopState, missed: Duration) {
     let pending = match state.clock_evidence.suspend {
         Some(before) if now.duration_since(before.at) <= alive_timeout() => PendingSuspend {
             missed: before.missed.saturating_add(missed),
-            at: now,
+            at: before.at,
         },
         _ => PendingSuspend { missed, at: now },
     };
@@ -89,7 +90,9 @@ pub(crate) fn note_suspend(state: &mut EventLoopState, missed: Duration) {
 /// the clock of a peer that sends now. After a suspend the clock is right, so the stretch that
 /// [`note_suspend`] holds is real and the quiet peers age by it. After a forward step our clock
 /// runs ahead of every peer, so no frame agrees and the stretch lapses one alive timeout after the
-/// sweep noted it. The error is bounded by that timeout and by the skew of the clock of the peer.
+/// sweep noted it. The error is bounded by that timeout and by the skew of the clock of the peer,
+/// unless the clock of that peer took the same forward step: a peer on this host shares the step
+/// and agrees with it, and the quiet peers then age by time that did not pass.
 ///
 /// Limit: with no live peer after a wake, nothing vouches, and a quiet peer stays past one hour of
 /// real silence until the monotonic clock has run that hour (at most `QUIET_CAP` stay).
@@ -199,6 +202,13 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
     for nick in gone {
         state.quiet.remove(nick.as_str());
         state.quiet_since.remove(nick.as_str());
+        // The hint belongs to the key that made it: keep the key beside the name.
+        if let Some(holder) = state.peer_keys.get(nick.as_str()).copied() {
+            state
+                .clock_evidence
+                .lapsed_keys
+                .insert(nick.clone(), holder);
+        }
         state.clock_evidence.lapsed_quiet.insert(nick);
     }
     // Keep `quiet_since` bounded to current `quiet` membership: peers that
@@ -222,21 +232,24 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         .clock_evidence
         .step_back
         .retain(|nick, _| is_peer(nick) || is_quiet(nick));
-    state
-        .clock_evidence
-        .live_run
-        .retain(|nick, _| is_peer(nick) || is_quiet(nick));
-    state.clock_evidence.heard.retain(|nick, _| is_peer(nick));
-    state
-        .clock_evidence
-        .returned_unshown
-        .retain(|nick| is_peer(nick));
     // A goodbye older than the quiet TTL guards nothing: no live frame that old proves presence.
     let oldest_live = UnixSecs::now() - QUIET_TTL;
     state
         .clock_evidence
         .goodbye_stamp
         .retain(|_, said| *said > oldest_live);
+    // A nickname with a goodbye keeps its run: the replacement of a gone run proves itself over
+    // several sweeps.
+    let goodbyes = &state.clock_evidence.goodbye_stamp;
+    state
+        .clock_evidence
+        .live_run
+        .retain(|nick, _| is_peer(nick) || is_quiet(nick) || goodbyes.contains_key(nick));
+    state.clock_evidence.heard.retain(|nick, _| is_peer(nick));
+    state
+        .clock_evidence
+        .returned_unshown
+        .retain(|nick| is_peer(nick));
     // Same bound for the endpoint dial hints: an entry lives as long as its nick is an active
     // peer, a quiet evictee, or one of the last `QUIET_CAP` that outlived the quiet TTL, so the
     // map is capped at |peers| + 2 * QUIET_CAP even under nickname churn.
@@ -244,19 +257,39 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
     // before `handle_peer_info`, so a recorded endpoint's author is already a
     // peer.)
     let (peers, lapsed) = (&state.peers, &state.clock_evidence.lapsed_quiet);
-    state.peer_endpoints.retain(|nick, _| {
-        let returnable: bool = quiet.contains(nick.as_str()) || lapsed.contains(nick.as_str());
-        peers.contains(nick) || returnable
-    });
+    let is_quiet_name = |nick: &Nickname| quiet.contains(nick.as_str());
+    let is_lapsed_name = |nick: &Nickname| lapsed.contains(nick.as_str());
+    let is_kept =
+        |nick: &Nickname| peers.contains(nick) || is_quiet_name(nick) || is_lapsed_name(nick);
+    let pruned: Vec<EndpointId> = state
+        .peer_endpoints
+        .iter()
+        .filter(|(nick, _)| !is_kept(nick))
+        .map(|(_, address)| address.id)
+        .collect();
+    state.peer_endpoints.retain(|nick, _| is_kept(nick));
+    // The path state of a pruned endpoint goes with it. The proof and the direct path stay with
+    // the binding that a lapsed nickname keeps, so the pruning does not call
+    // `forget_peer_endpoint`.
+    for endpoint in pruned {
+        state.path_kinds.remove(&endpoint);
+        state.path_watchers.remove(&endpoint);
+    }
+    let lapsed_names = &state.clock_evidence.lapsed_quiet;
+    state
+        .clock_evidence
+        .lapsed_keys
+        .retain(|nick, _| lapsed_names.contains(nick.as_str()));
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::daemon::state::{EventLoopState, RendezvousFlag, StepBack};
+    use crate::daemon::state::{EventLoopState, PendingSuspend, RendezvousFlag, StepBack};
     use crate::testing::{fresh_state, nick};
+    use crate::transport::probe::PathKind;
     use std::collections::HashSet;
 
-    use super::{Instant, Nickname, QUIET_TTL, forgive_stall, tick_sweep};
+    use super::{Instant, Nickname, QUIET_TTL, forgive_stall, note_suspend, tick_sweep};
     use crate::gossip::event::SilentSink;
     use crate::util::tuning;
     use std::time::Duration;
@@ -511,6 +544,55 @@ mod tests {
             state.peer_endpoints.get("swift-cedar"),
             Some(&iroh::EndpointAddr::new(endpoint)),
             "the quiet TTL dropped the dial hint of a peer that can still come back"
+        );
+    }
+
+    /// Two suspends noted inside one confirmation window keep the time of the first one: the
+    /// window is one alive timeout from the first gap, so a second gap cannot extend it.
+    #[test]
+    fn a_second_suspend_does_not_extend_the_confirmation_window() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let first_gap_at = Instant::now()
+            .checked_sub(Duration::from_secs(80))
+            .expect("the monotonic clock has run past 80 s since boot");
+        state.clock_evidence.suspend = Some(PendingSuspend {
+            missed: Duration::from_hours(1),
+            at: first_gap_at,
+        });
+
+        note_suspend(&mut state, Duration::from_hours(1));
+
+        let pending = state
+            .clock_evidence
+            .suspend
+            .expect("the second gap is noted");
+        assert_eq!(pending.missed, Duration::from_hours(2), "both gaps add up");
+        assert_eq!(
+            pending.at, first_gap_at,
+            "the second gap moved the start of the window"
+        );
+    }
+
+    /// The path state of an endpoint goes with its dial hint: a pruned binding that leaves a
+    /// `WebRtc` path kind behind keeps the alive tick dialing a peer that is gone.
+    #[test]
+    fn pruning_a_dial_hint_drops_the_path_state_of_its_endpoint() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let endpoint = iroh::SecretKey::from_bytes(&[8; 32]).public();
+        state
+            .peer_endpoints
+            .insert(nick("gone-fern"), iroh::EndpointAddr::new(endpoint));
+        state.path_kinds.insert(endpoint, PathKind::WebRtc);
+        state.path_watchers.insert(endpoint, None);
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            !state.path_kinds.contains_key(&endpoint)
+                && !state.path_watchers.contains_key(&endpoint),
+            "the path state of a pruned endpoint stays"
         );
     }
 

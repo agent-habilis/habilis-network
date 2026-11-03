@@ -249,9 +249,10 @@ pub(crate) fn compute_for(message: &Verified, state: &EventLoopState) -> Members
 }
 
 /// Whether `message` is a frame of an older run of a nickname that said goodbye and is gone: it
-/// is stamped before that goodbye, and nobody holds the nickname now. A frame of a killed run
-/// that a relay still holds is not an arrival. A new run stamps its frames at or after the goodbye
-/// of the old one.
+/// is stamped at or before that goodbye, and nobody holds the nickname now. A frame of a killed
+/// run that a relay still holds is not an arrival. A stamp is whole seconds, so a frame in the
+/// second of the goodbye cannot be told from one before it. A new run that starts in that second,
+/// or with a clock behind the goodbye, proves itself by a run of frames (see [`note_live_run`]).
 fn is_replay_after_goodbye(message: &Verified, state: &EventLoopState) -> bool {
     let author = message.author.as_str();
     let gone = !state.peers.contains(author) && !state.quiet.contains(author);
@@ -259,7 +260,7 @@ fn is_replay_after_goodbye(message: &Verified, state: &EventLoopState) -> bool {
         .clock_evidence
         .goodbye_stamp
         .get(&message.author)
-        .is_some_and(|said| message.timestamp < *said)
+        .is_some_and(|said| message.timestamp <= *said)
 }
 
 /// How far the stamps of a run may drift from our clock, from one counted frame to the next. The
@@ -334,6 +335,9 @@ pub(crate) fn compute_observed(message: &Verified, state: &mut EventLoopState) -
         && note_live_run(message, state)
     {
         state.clock_evidence.goodbye_stamp.remove(&message.author);
+        // The new run is behind the stamps of the old one: those no longer hold it back, and its
+        // next frame takes the nickname.
+        state.peer_stamp.remove(&message.author);
         return compute_for(message, state);
     }
     let steps_back: bool = update.stale

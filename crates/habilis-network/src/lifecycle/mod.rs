@@ -142,8 +142,9 @@ mod departed_tests {
             let mut state = fresh_state();
             let mut app = Inert;
 
-            // The first run leaves.
+            // The first run leaves. A peer in the roster has a holder: its frames proved it alive.
             state.peers.insert(who.clone());
+            state.peer_keys.insert(who.clone(), first_run.author_key());
             let update = membership_update::compute_for(&left, &state);
             handle_presence(
                 PresenceEvent {
@@ -161,6 +162,9 @@ mod departed_tests {
 
             // A second run takes the nickname, then a copy of the first run's goodbye lands.
             state.peers.insert(who.clone());
+            state
+                .peer_keys
+                .insert(who.clone(), Identity::generate().author_key());
             state.surfaced.insert(who.clone());
             let replay = membership_update::compute_for(&left, &state);
             handle_presence(

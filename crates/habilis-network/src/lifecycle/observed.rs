@@ -37,19 +37,19 @@ pub(crate) fn observe(
         // The key of the newest frame that proved the peer alive holds the nickname. A frame
         // that proves presence but is older than the newest one is an unseen copy of a killed
         // run (a relay holds it): it holds nothing.
+        // At an equal stamp (whole seconds) only the holder, or a nickname with no holder, keeps
+        // the nickname: the stamp cannot tell which of two frames of one second came last.
+        let holder = state.peer_keys.get(&message.author).copied();
+        let newest_before: Option<UnixSecs> = state.peer_stamp.get(&message.author).copied();
+        let ties_to_holder: bool = holder.is_none_or(|held| held == message.key());
         let is_newest = proves
-            && state
-                .peer_stamp
-                .get(&message.author)
-                .is_none_or(|newest| message.timestamp >= *newest);
+            && newest_before.is_none_or(|newest| {
+                message.timestamp > newest || (message.timestamp == newest && ties_to_holder)
+            });
         // Only the holder, or a frame that takes the nickname, moves the last-heard mark. A copy of
         // a frame of a killed run must not keep the live run in the roster. A nickname with no
         // holder on record (a peer whose clock is far behind never proved presence) takes any key.
-        let from_holder = is_newest
-            || state
-                .peer_keys
-                .get(&message.author)
-                .is_none_or(|holder| *holder == message.key());
+        let from_holder = is_newest || holder.is_none_or(|held| held == message.key());
         // A frame of a live kind from a peer that is in the roster refreshes it at any stamp: a
         // peer whose clock runs far behind still talks, and the sweep must not evict it. Only a
         // frame that proves presence does more (the holder of the nickname, the newest stamp).
@@ -80,6 +80,13 @@ pub(crate) fn observe(
         }
         if proves {
             if is_newest {
+                // The dial hint was made by the key that held the nickname. Another key that takes
+                // it does not inherit the hint: a directed send would reach the old node.
+                let lapsed = state.clock_evidence.lapsed_keys.remove(&message.author);
+                let before = holder.or(lapsed);
+                if before.is_some_and(|held| held != message.key()) {
+                    state.forget_peer_endpoint(message.author.as_str());
+                }
                 state
                     .peer_keys
                     .insert(message.author.clone(), message.key());
@@ -247,7 +254,7 @@ mod churn_red {
     use iroh_gossip::net::Gossip;
     use iroh_gossip::proto;
 
-    use super::{observe, synthetic_arrival};
+    use super::{heartbeat, observe, synthetic_arrival};
     use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::setup::LiveCount;
     use crate::daemon::state::{EventLoopState, LiveRun};
@@ -1738,6 +1745,288 @@ mod churn_red {
         });
     }
 
+    /// The goodbye of the live run and a frame of an older run stamped in the same second: the
+    /// stamp cannot say which came first, so the frame is a replay. A new run proves itself by a
+    /// run of frames, not by one stamp.
+    #[test]
+    fn an_older_run_frame_in_the_second_of_a_goodbye_is_no_arrival() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let live_run = Identity::generate();
+            let killed_run = Identity::generate();
+            let mut state = fresh_state();
+            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
+            let hello = chat(&rig.mesh, &who, &live_run, UnixSecs::now());
+            assert!(
+                receive(&hello, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            say_goodbye(&live_run, &who, &rig, &mut state, &mut Inert).await;
+            let said = state.clock_evidence.goodbye_stamp[&who];
+
+            let relayed = alive(&rig.mesh, &who, &killed_run, said);
+            assert!(
+                receive(&relayed, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert!(
+                !state.peers.contains(who.as_str()),
+                "a frame of an older run in the second of the goodbye put a gone peer back"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// The run of a replacement is kept across the sweep: the sweep runs every 10 s, and the
+    /// nickname of a goodbye is in no roster set, so a sweep that drops its run restarts the
+    /// count at each pass and the run never completes.
+    #[test]
+    fn a_replacement_run_survives_the_sweep() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let old_run = Identity::generate();
+            let new_run = Identity::generate();
+            let mut state = fresh_state();
+            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
+            let hello = chat(&rig.mesh, &who, &old_run, UnixSecs::now());
+            assert!(
+                receive(&hello, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            say_goodbye(&old_run, &who, &rig, &mut state, &mut Inert).await;
+
+            for step in 0..3 {
+                let frame = alive(
+                    &rig.mesh,
+                    &who,
+                    &new_run,
+                    UnixSecs::now() - Duration::from_secs(300 - 30 * step),
+                );
+                assert!(
+                    receive(&frame, &mut state, &context),
+                    "the frame is new to the seen set"
+                );
+                heard_ago(&mut state, &who, Duration::from_secs(30));
+                tick_sweep(&mut state, &rig.sink);
+            }
+            assert!(
+                state.peers.contains(who.as_str()),
+                "the sweep dropped the run of a replacement"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// A signed `Left` of any key must not remove a roster peer that has no recorded holder. The
+    /// peer stays until its own silence or its own goodbye.
+    #[test]
+    fn a_left_with_no_recorded_holder_removes_no_roster_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let who = nick("swift-cedar");
+            let mut state = fresh_state();
+            state.peers.insert(who.clone());
+            state.surfaced.insert(who.clone());
+
+            say_goodbye(&Identity::generate(), &who, &rig, &mut state, &mut Inert).await;
+
+            assert!(
+                state.peers.contains(who.as_str()),
+                "a goodbye of a stranger key removed a peer that has no holder"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// Two frames of one second under two keys are not told apart by the stamp. The holder keeps
+    /// the nickname, so its own goodbye still removes the peer.
+    #[test]
+    fn an_equal_second_frame_of_another_key_does_not_take_the_holder() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let holder = Identity::generate();
+            let other = Identity::generate();
+            let mut state = fresh_state();
+            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
+            let stamp = UnixSecs::now();
+            let first = alive(&rig.mesh, &who, &holder, stamp);
+            assert!(
+                receive(&first, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            let copy = chat(&rig.mesh, &who, &other, stamp);
+            assert!(
+                receive(&copy, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert_eq!(
+                state.peer_keys.get(who.as_str()),
+                Some(&holder.author_key()),
+                "a frame of the same second under another key took the nickname"
+            );
+            say_goodbye(&holder, &who, &rig, &mut state, &mut Inert).await;
+            assert!(
+                !state.peers.contains(who.as_str()),
+                "the goodbye of the holder did not remove the peer"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// A peer comes back with the same key after the quiet TTL: it keeps the dial hint. Another
+    /// key under the same nickname does not inherit it, or a directed send would go to the node
+    /// of the old holder.
+    #[test]
+    fn a_dial_hint_goes_with_the_key_that_made_it() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let holder = Identity::generate();
+            let stranger = Identity::generate();
+            let endpoint = iroh::SecretKey::from_bytes(&[3; 32]).public();
+            for returns_as in [&holder, &stranger] {
+                let mut state = fresh_state();
+                state.joined_at = UnixSecs::now() - Duration::from_hours(3);
+                let hello = alive(&rig.mesh, &who, &holder, UnixSecs::now());
+                assert!(
+                    receive(&hello, &mut state, &context),
+                    "the frame is new to the seen set"
+                );
+                state
+                    .peer_endpoints
+                    .insert(who.clone(), iroh::EndpointAddr::new(endpoint));
+                state.last_seen.insert(
+                    who.clone(),
+                    Instant::now()
+                        .checked_sub(alive_timeout() + Duration::from_secs(5))
+                        .expect("the monotonic clock has run past the alive timeout since boot"),
+                );
+                tick_sweep(&mut state, &rig.sink);
+                state.quiet_since.insert(
+                    who.clone(),
+                    Instant::now()
+                        .checked_sub(Duration::from_hours(2))
+                        .expect("the monotonic clock has run past 2 h since boot"),
+                );
+                tick_sweep(&mut state, &rig.sink);
+                assert!(
+                    state.peer_endpoints.contains_key(who.as_str()),
+                    "the hint did not outlive the quiet TTL"
+                );
+
+                let back = alive(
+                    &rig.mesh,
+                    &who,
+                    returns_as,
+                    UnixSecs::now() + Duration::from_secs(1),
+                );
+                assert!(
+                    receive(&back, &mut state, &context),
+                    "the frame is new to the seen set"
+                );
+                let kept = state.peer_endpoints.contains_key(who.as_str());
+                let same_key = returns_as.author_key() == holder.author_key();
+                assert_eq!(
+                    kept, same_key,
+                    "the dial hint after a return (same key: {same_key}) is wrong"
+                );
+            }
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// The same holds inside the quiet window: another key that takes the nickname of a quiet
+    /// peer does not inherit its dial hint.
+    #[test]
+    fn a_quiet_peers_dial_hint_does_not_go_to_another_key() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let who = nick("swift-cedar");
+            let holder = Identity::generate();
+            let stranger = Identity::generate();
+            let endpoint = iroh::SecretKey::from_bytes(&[3; 32]).public();
+            let mut state = fresh_state();
+            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
+            let hello = alive(&rig.mesh, &who, &holder, UnixSecs::now());
+            assert!(
+                receive(&hello, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            state
+                .peer_endpoints
+                .insert(who.clone(), iroh::EndpointAddr::new(endpoint));
+            state.last_seen.insert(
+                who.clone(),
+                Instant::now()
+                    .checked_sub(alive_timeout() + Duration::from_secs(5))
+                    .expect("the monotonic clock has run past the alive timeout since boot"),
+            );
+            tick_sweep(&mut state, &rig.sink);
+            assert!(state.quiet.contains(who.as_str()), "the peer is quiet");
+
+            let back = alive(
+                &rig.mesh,
+                &who,
+                &stranger,
+                UnixSecs::now() + Duration::from_secs(1),
+            );
+            assert!(
+                receive(&back, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            assert!(
+                !state.peer_endpoints.contains_key(who.as_str()),
+                "another key inherited the dial hint of a quiet peer"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
+    /// The receive path confirms a noted suspend: a live frame that reaches `observe` with a stamp
+    /// near our wall clock vouches for it, and the next sweep removes the quiet peer. Without the
+    /// call in `observe`, nothing but a direct call of `confirm_suspend` would age it.
+    #[test]
+    fn a_live_frame_on_the_receive_path_confirms_a_suspend() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rig = Rig::new().await;
+            let context = rig.context();
+            let mut state = fresh_state();
+            state.joined_at = UnixSecs::now() - Duration::from_hours(3);
+            let half_hour_ago = Instant::now()
+                .checked_sub(Duration::from_mins(30))
+                .expect("the monotonic clock has run past 30 min since boot");
+            state.quiet.insert(nick("lost-heron"));
+            state.quiet_since.insert(nick("lost-heron"), half_hour_ago);
+            heartbeat::note_suspend(&mut state, Duration::from_mins(40));
+
+            let live = alive(
+                &rig.mesh,
+                &nick("swift-cedar"),
+                &Identity::generate(),
+                UnixSecs::now(),
+            );
+            assert!(
+                receive(&live, &mut state, &context),
+                "the frame is new to the seen set"
+            );
+            tick_sweep(&mut state, &rig.sink);
+
+            assert!(
+                !state.quiet.contains("lost-heron"),
+                "a live frame on the receive path did not vouch for the suspend"
+            );
+            rig.endpoint.close().await;
+        });
+    }
+
     /// The records of the join horizon and of the goodbyes stay bounded: the sweep drops the
     /// record of a nickname that left the roster and a goodbye older than the quiet TTL, and the
     /// goodbyes never pass `QUIET_CAP`.
@@ -1949,6 +2238,10 @@ mod churn_red {
                 );
                 let shown = state.surfaced.contains(who.as_str());
                 let in_roster = state.peers.contains(who.as_str());
+                assert!(
+                    !shown,
+                    "{name}: a durable frame of an unseen peer showed an arrival"
+                );
                 assert_eq!(
                     shown,
                     in_roster,
@@ -2238,7 +2531,12 @@ mod churn_red {
             let mut app = Inert;
             assert!(
                 receive(
-                    &chat(&rig.mesh, &who, &old_run, UnixSecs::now()),
+                    &chat(
+                        &rig.mesh,
+                        &who,
+                        &old_run,
+                        UnixSecs::now() - Duration::from_secs(2)
+                    ),
                     &mut state,
                     &context
                 ),
@@ -2466,7 +2764,12 @@ mod churn_red {
 
             // A new run that starts after the goodbye is an arrival.
             let next_run = Identity::generate();
-            let fresh = alive(&rig.mesh, &who, &next_run, UnixSecs::now());
+            let fresh = alive(
+                &rig.mesh,
+                &who,
+                &next_run,
+                UnixSecs::now() + Duration::from_secs(2),
+            );
             assert!(
                 receive(&fresh, &mut state, &context),
                 "the frame is new to the seen set"

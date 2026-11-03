@@ -112,6 +112,9 @@ pub(crate) struct ClockEvidence {
     /// not change. Bounded FIFO (cap `QUIET_CAP`), so the hints of one-shot nicknames cannot grow
     /// the map. The sweep drops the hint of the oldest entry that the cap pushes out.
     pub(crate) lapsed_quiet: BoundedFifoSet<Nickname>,
+    /// The key that held each nickname of `lapsed_quiet`, as far as the sweep knew it. A frame of
+    /// another key under that nickname does not inherit the dial hint.
+    pub(crate) lapsed_keys: HashMap<Nickname, AuthorKey>,
 }
 
 impl Default for ClockEvidence {
@@ -124,6 +127,7 @@ impl Default for ClockEvidence {
             heard: HashMap::new(),
             suspend: None,
             lapsed_quiet: BoundedFifoSet::new(QUIET_CAP),
+            lapsed_keys: HashMap::new(),
         }
     }
 }

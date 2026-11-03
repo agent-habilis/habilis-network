@@ -51,12 +51,10 @@ pub(crate) async fn handle_presence(
         if holder.is_some_and(|held| held != message.key()) {
             return;
         }
-        // A goodbye for a nickname with no holder on record and no roster entry authorizes no
-        // clean-up: any key can sign a goodbye under any nickname, and there is nothing of that
-        // nickname to release.
-        let is_peer = state.peers.contains(message.author.as_str());
-        let is_quiet = state.quiet.contains(message.author.as_str());
-        if holder.is_none() && !is_peer && !is_quiet {
+        // A goodbye for a nickname with no holder on record authorizes no clean-up: any key can
+        // sign a goodbye under any nickname, and with no holder nothing says that this key owns
+        // the roster entry. The entry leaves with its own silence.
+        if holder.is_none() {
             return;
         }
         state.peer_keys.remove(&message.author);

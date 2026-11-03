@@ -3561,6 +3561,11 @@ mod left_tests {
             state.multihop = Some(handle.clone());
             let leaver = nick("leaver");
             state.peers.insert(leaver.clone());
+            // A peer in the roster has a holder: its frames proved it alive under a key.
+            let leaver_run = Identity::generate();
+            state
+                .peer_keys
+                .insert(leaver.clone(), leaver_run.author_key());
             state.note_peer_endpoint(
                 leaver.clone(),
                 EndpointAddr::new(leaver_handle.app_id().get()),
@@ -3590,7 +3595,7 @@ mod left_tests {
                 external_msg_tx: None,
                 sink: &sink,
             };
-            let message = Message::new_left(&mesh, &leaver).sign(&Identity::generate());
+            let message = Message::new_left(&mesh, &leaver).sign(&leaver_run);
             let update = MembershipUpdate {
                 returned: false,
                 joined_new: false,

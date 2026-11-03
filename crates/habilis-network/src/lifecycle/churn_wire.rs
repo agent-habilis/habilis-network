@@ -142,6 +142,13 @@ fn wire_cost_of_one_minute_with_5_peers() {
         let mut frames = sender.broadcast_frames();
         frames.extend(state.unicast_pool.sent_frames());
         let counter = WireCounter::of(&frames);
+        let parsed = frames
+            .iter()
+            .filter_map(|bytes| Message::parse_wire(bytes).ok());
+        let data = parsed.filter(|(message, _)| FrameClass::of(&message.kind) == FrameClass::Data);
+        let data_bodies: Vec<usize> = data
+            .map(|(message, _)| message.body.as_str().len())
+            .collect();
         eprintln!("WIRE one minute, 5 peers: {counter}");
         assert_eq!(
             counter.frames(FrameClass::Joined),
@@ -157,6 +164,11 @@ fn wire_cost_of_one_minute_with_5_peers() {
             counter.frames(FrameClass::Data),
             5,
             "the 5 data frames of the workload were not all counted: {counter}"
+        );
+        assert_eq!(
+            data_bodies,
+            vec![512; 5],
+            "a data frame of the workload does not carry a 512-byte body: {counter}"
         );
         endpoint.close().await;
     });

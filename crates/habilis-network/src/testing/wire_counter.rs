@@ -26,7 +26,7 @@ pub(crate) enum FrameClass {
 }
 
 impl FrameClass {
-    fn of(kind: &MessageKind) -> Self {
+    pub(crate) fn of(kind: &MessageKind) -> Self {
         match kind {
             MessageKind::App { .. } => Self::Data,
             MessageKind::Presence {
