@@ -1372,6 +1372,7 @@ dependencies = [
  "habilis-network-util",
  "iroh",
  "iroh-gossip",
+ "memchr",
  "n0-future",
  "parking_lot",
  "rand 0.9.5",
@@ -2047,7 +2048,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.102.0"
-source = "git+https://github.com/agent-habilis/iroh-gossip?rev=4e2c14efcbda65fa1f4713b21fb0c8e09f3fcc28#4e2c14efcbda65fa1f4713b21fb0c8e09f3fcc28"
+source = "git+https://github.com/agent-habilis/iroh-gossip?rev=810fc0fdd5541e7bd337fc6212a61cb6e18ac264#810fc0fdd5541e7bd337fc6212a61cb6e18ac264"
 dependencies = [
  "blake3",
  "bytes",

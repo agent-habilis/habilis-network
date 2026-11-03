@@ -49,6 +49,7 @@ pub(crate) struct SocketBytes {
 
 impl SocketBytes {
     /// The counters of `endpoint` now.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn read(endpoint: &Endpoint) -> Self {
         let socket = &endpoint.metrics().socket;
         Self {
@@ -73,6 +74,12 @@ impl SocketBytes {
             custom_paths_added: socket.transport_custom_paths_added.get(),
             custom_paths_removed: socket.transport_custom_paths_removed.get(),
         }
+    }
+
+    /// iroh has no endpoint metrics on wasm32, so every counter reads zero.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn read(_endpoint: &Endpoint) -> Self {
+        Self::default()
     }
 
     /// The bytes since `earlier`, field by field. Zero, not a wrap, if a field went back.
