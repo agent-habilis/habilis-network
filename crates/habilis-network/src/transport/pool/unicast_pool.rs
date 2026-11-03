@@ -182,12 +182,14 @@ impl UnicastPool {
         connection: &Connection,
         bytes: &[u8],
     ) -> Result<()> {
+        let busy = self.inner.admission.get().map(|table| table.busy(eid));
+        send_one(connection, bytes, busy).await?;
+        // The tap holds only the frames that were written, or a redial counts a frame twice.
         #[cfg(test)]
         if let Ok(mut tap) = self.inner.tap.lock() {
             tap.push(bytes.to_vec());
         }
-        let busy = self.inner.admission.get().map(|table| table.busy(eid));
-        send_one(connection, bytes, busy).await
+        Ok(())
     }
 
     /// The frames written to pooled connections so far, as they went on the wire.

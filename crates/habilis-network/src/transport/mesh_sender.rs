@@ -66,10 +66,14 @@ impl MeshSender {
     pub async fn broadcast(&self, message: WireFrame) -> Result<(), ApiError> {
         let bytes = message.into_bytes();
         #[cfg(test)]
+        let recorded = bytes.to_vec();
+        self.current().broadcast(bytes).await?;
+        // The tap holds only the frames that were sent, or a test counts bytes that never left.
+        #[cfg(test)]
         if let Ok(mut tap) = self.tap.lock() {
-            tap.push(bytes.to_vec());
+            tap.push(recorded);
         }
-        self.current().broadcast(bytes).await
+        Ok(())
     }
 
     pub(crate) async fn join_peers(&self, peers: Vec<EndpointId>) -> Result<(), ApiError> {

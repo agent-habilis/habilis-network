@@ -515,6 +515,7 @@ mod tests {
             state.clock_evidence.step_back.insert(
                 nick(name),
                 StepBack {
+                    key: protocol::Identity::generate().author_key(),
                     last: protocol::UnixSecs::now(),
                     at: Instant::now(),
                     count: 1,

@@ -1,4 +1,6 @@
-//! The wire cost of one minute on a mesh of 5 peers, as bytes: metadata against data. Tests only.
+//! The application broadcast bytes of one minute with 5 peers announced locally: metadata against
+//! data. Tests only. The node has no gossip neighbors, so the per-neighbor sends and the relayed
+//! frames of a real mesh are not counted.
 //! The file uses no API that is new in PR 47 except the sender tap and `WireCounter`, so the same
 //! scenario runs on f7cd9bb (with the tap ported) and on the fixed rev.
 

@@ -3060,11 +3060,23 @@ mod first_contact_tests {
                 .add_endpoint_addr(first.clone())
                 .await
                 .expect("the endpoint takes the first address");
-            super::handle_peer_info(&peer_info(&node, &first), &mut state, &context).await;
+            let holder = Identity::generate();
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &first, &holder),
+                &mut state,
+                &context,
+            )
+            .await;
+            state.peer_keys.insert(nick("bob"), holder.author_key());
             assert!(!knows_relay().await, "no relay yet");
 
             let later = first.with_relay_url(relay.clone());
-            super::handle_peer_info(&peer_info(&node, &later), &mut state, &context).await;
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &later, &holder),
+                &mut state,
+                &context,
+            )
+            .await;
 
             assert!(
                 eventually(knows_relay).await,

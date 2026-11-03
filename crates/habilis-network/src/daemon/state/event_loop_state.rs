@@ -58,6 +58,7 @@ use tokio::sync::{mpsc, oneshot};
 /// our clock, and `count` is the number of frames that counted.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StepBack {
+    pub(crate) key: AuthorKey,
     pub(crate) last: UnixSecs,
     pub(crate) at: Instant,
     pub(crate) count: u8,

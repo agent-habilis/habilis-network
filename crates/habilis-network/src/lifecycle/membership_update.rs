@@ -6,7 +6,7 @@
 
 use crate::daemon::state::{EventLoopState, LiveRun, StepBack};
 use crate::lifecycle::heartbeat;
-use crate::protocol::{MessageKind, Nickname, PresenceSubtype, UnixSecs, Verified};
+use crate::protocol::{AuthorKey, MessageKind, Nickname, PresenceSubtype, UnixSecs, Verified};
 use crate::util::clock::Instant;
 use crate::util::tuning::{self, ALIVE_INTERVAL};
 use std::time::Duration;
@@ -40,6 +40,12 @@ pub(crate) struct MembershipUpdate {
 /// stamped within the timeout says that its author was alive within the timeout, which is all
 /// that the timeout asks.
 pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
+    let now = UnixSecs::now();
+    // A stamp ahead of our clock by more than the quiet TTL is no clock skew of an honest peer: a
+    // signed frame like that would pass the lower bound for as long as its stamp stays above it.
+    if timestamp > now + heartbeat::QUIET_TTL {
+        return false;
+    }
     match kind {
         MessageKind::Presence {
             subtype: PresenceSubtype::Left,
@@ -49,7 +55,7 @@ pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
             subtype: PresenceSubtype::Alive | PresenceSubtype::Joined,
         }
         | MessageKind::Ping
-        | MessageKind::Pong { .. } => timestamp > UnixSecs::now() - heartbeat::QUIET_TTL,
+        | MessageKind::Pong { .. } => timestamp > now - heartbeat::QUIET_TTL,
         MessageKind::PeerInfo
         | MessageKind::State
         | MessageKind::Meta
@@ -57,7 +63,7 @@ pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
         | MessageKind::StateDigest
         | MessageKind::MetaDigest
         | MessageKind::LinkState
-        | _ => timestamp > UnixSecs::now() - tuning::alive_timeout(),
+        | _ => timestamp > now - tuning::alive_timeout(),
     }
 }
 
@@ -128,26 +134,27 @@ fn step_back_window() -> Duration {
 /// would hide a live peer. When [`STEP_BACK_FRAMES`] frames, each stamped after the one before
 /// and each arriving [`step_back_spacing`] after it, have counted, the old stamp is dropped and
 /// the next check lets the peer return. Returns whether the run is complete.
-fn note_step_back(author: &Nickname, timestamp: UnixSecs, state: &mut EventLoopState) -> bool {
+fn note_step_back(
+    author: &Nickname,
+    key: AuthorKey,
+    timestamp: UnixSecs,
+    state: &mut EventLoopState,
+) -> bool {
     let now = Instant::now();
+    let start = StepBack {
+        key,
+        last: timestamp,
+        at: now,
+        count: 1,
+    };
     let Some(run) = state.clock_evidence.step_back.get_mut(author) else {
-        state.clock_evidence.step_back.insert(
-            author.clone(),
-            StepBack {
-                last: timestamp,
-                at: now,
-                count: 1,
-            },
-        );
+        state.clock_evidence.step_back.insert(author.clone(), start);
         return false;
     };
-    if now.duration_since(run.at) > step_back_window() {
-        // Frames that come far apart are not the stream of a live peer: start the run again.
-        *run = StepBack {
-            last: timestamp,
-            at: now,
-            count: 1,
-        };
+    // The run is the stream of one key, or the key of the frame that completes it takes the
+    // nickname. Frames that come far apart are not the stream of a live peer either.
+    if run.key != key || now.duration_since(run.at) > step_back_window() {
+        *run = start;
         return false;
     }
     let rises = timestamp > run.last;
@@ -344,7 +351,7 @@ pub(crate) fn compute_observed(message: &Verified, state: &mut EventLoopState) -
         && state.quiet.contains(message.author.as_str())
         && !state.key_said_goodbye(message.key())
         && proves_presence(&message.kind, message.timestamp);
-    if steps_back && note_step_back(&message.author, message.timestamp, state) {
+    if steps_back && note_step_back(&message.author, message.key(), message.timestamp, state) {
         state.peer_stamp.remove(message.author.as_str());
         return compute_for(message, state);
     }
@@ -770,6 +777,66 @@ mod tests {
             assert!(
                 !state.peer_stamp.contains_key(who.as_str()),
                 "the old newest stamp is dropped when the peer returns"
+            );
+        }
+    }
+
+    /// The run of a step back is the stream of one key. Frames of two keys under one nickname (a
+    /// live run and a replayed run, or two keys that raced for the nickname) must not complete it:
+    /// the key of the frame that completes a run would take the nickname.
+    #[test]
+    fn a_step_back_run_of_two_keys_does_not_return_the_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, who) = quiet_since_100_secs();
+        let keys = [Identity::generate(), Identity::generate()];
+        state
+            .peer_stamp
+            .insert(who.clone(), UnixSecs::now() + Duration::from_hours(1));
+        for index in 0..STEP_BACK_FRAMES + 3 {
+            let stamp = UnixSecs::now() + Duration::from_secs(u64::from(index) * 30);
+            let by = &keys[usize::from(index % 2)];
+            let update = compute_observed(&live_frame(&who, by, stamp), &mut state);
+            assert!(
+                update.stale && !update.returned,
+                "frame {index} of a run that alternates between two keys returned the peer"
+            );
+            if let Some(run) = state.clock_evidence.step_back.get_mut(who.as_str()) {
+                run.at = back_20_secs(run.at);
+            }
+        }
+    }
+
+    /// A signed frame stamped far ahead of our clock would pass the lower bound for as long as its
+    /// stamp stays above it, and put its author in the roster. The bound has an upper side as wide
+    /// as the lower one: a frame stamped further ahead than the quiet TTL proves no presence.
+    #[test]
+    fn a_frame_stamped_far_in_the_future_proves_no_presence() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let state = fresh_state();
+        let who = nick("future-fern");
+        let alive = MessageKind::Presence {
+            subtype: PresenceSubtype::Alive,
+        };
+        for kind in [alive, MessageKind::PeerInfo] {
+            let far = compute(
+                &kind,
+                &who,
+                UnixSecs::now() + Duration::from_hours(2),
+                &state,
+            );
+            assert!(
+                !far.joined_new,
+                "{kind:?} stamped 2 h ahead made an arrival"
+            );
+            let near = compute(
+                &kind,
+                &who,
+                UnixSecs::now() + Duration::from_mins(50),
+                &state,
+            );
+            assert!(
+                near.joined_new,
+                "{kind:?} stamped 50 min ahead is the clock of an honest peer"
             );
         }
     }
