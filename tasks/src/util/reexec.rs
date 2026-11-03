@@ -65,11 +65,14 @@ fn move_running_image_aside() -> Result<(), String> {
     ) else {
         return Ok(());
     };
+    let prefix = format!("{name}.");
     if let Ok(entries) = fs::read_dir(folder) {
         for entry in entries.flatten() {
+            let path = entry.path();
             let found = entry.file_name().to_string_lossy().into_owned();
-            if found.starts_with(&format!("{name}.")) && found.ends_with(".old") {
-                let _ = fs::remove_file(entry.path());
+            let is_old = path.extension().is_some_and(|extension| extension == "old");
+            if is_old && found.starts_with(&prefix) {
+                let _ = fs::remove_file(&path);
             }
         }
     }
