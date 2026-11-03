@@ -3,7 +3,8 @@
 // counters, for bytes and the ratio), each pair run in turn, the order swapped in every second pair.
 //
 // usage: bun scripts/perf/b4.ts --plain <binary> --counters <binary> [--plain-record <json>]
-//          [--counters-record <json>] [--pairs 3] [--nodes 16] [--out-root ~/bench-results/b4]
+//          [--counters-record <json>] [--plain-loaded 0] [--pairs 3] [--nodes 16] [--out-root ~/bench-results/b4]
+// A pair of two builds with the wire counters, to compare their ratio: --plain-loaded 300 gives arm a a loaded phase too.
 //
 // Every run waits for the start gate, then runs bench.ts with the same warm-up (the settle phase). A run whose
 // phase breaks the phase gate is void and runs again, twice at most. After a pair, the A/B gate compares the
@@ -20,7 +21,7 @@ const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i += 2) flags.set((argv[i] ?? "").replace(/^--/, ""), argv[i + 1] ?? "");
 const need = (name: string) => flags.get(name) ?? (console.error(`missing --${name}`), process.exit(2));
 const ARMS = {
-  plain: { binary: need("plain"), record: flags.get("plain-record"), loaded: 0 },
+  plain: { binary: need("plain"), record: flags.get("plain-record"), loaded: Number(flags.get("plain-loaded") ?? 0) },
   counters: { binary: need("counters"), record: flags.get("counters-record"), loaded: 300 },
 };
 const PAIRS = Number(flags.get("pairs") ?? 3);

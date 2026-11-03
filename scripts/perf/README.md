@@ -169,6 +169,10 @@ gives 29.7 MB show how the RSS per daemon grows with N.
 the ratio), in turn, with the order swapped in every second pair. Both arms have the same warm-up (300 s of
 settle). Arm a has no loaded phase: it has no wire counters, so it gives no ratio. Run it after `ulimit -n 10240`.
 
+To compare two builds that both have the wire counters, give arm a a loaded phase with `--plain-loaded 300`. Both
+arms then give a ratio, and the step measure of the unicast digests used it: arm a was the build before the change and
+arm b the build with it, 3 pairs at N = 16.
+
 ## Ratio test
 
 `ratio.test.ts` holds the goal: at N = 16 the frame-layer metadata bytes per delivered data byte are at most half of
