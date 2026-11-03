@@ -63,30 +63,69 @@ pub(crate) struct StepBack {
     pub(crate) count: u8,
 }
 
-/// The last live frame of a peer that was stamped before our join: its key, its stamp, and when it
-/// arrived on our clock. See `membership_update::note_pre_join_live`.
+/// The run of live frames of one key that a peer sends with stamps behind a reference: before our
+/// join, or before the goodbye of an older run of its nickname. `last` is the stamp of the latest
+/// frame that counted, `at` is when it arrived on our clock, and `count` is the number of frames
+/// that counted. See `membership_update::note_live_run`.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct PreJoinFrame {
+pub(crate) struct LiveRun {
     pub(crate) key: AuthorKey,
-    pub(crate) stamp: UnixSecs,
+    pub(crate) last: UnixSecs,
+    pub(crate) at: Instant,
+    pub(crate) count: u8,
+}
+
+/// A stretch of time that the wall clock counted and the monotonic clock did not, seen by the
+/// sweep, and not yet vouched for by a peer. See `heartbeat::note_suspend`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PendingSuspend {
+    pub(crate) missed: Duration,
     pub(crate) at: Instant,
 }
 
-/// What the lifecycle layer keeps about the stamps of the peers, beyond `peer_stamp`. Each map
-/// follows the roster in the sweep.
-#[derive(Debug, Default)]
+/// What the lifecycle layer keeps about the clocks and the stamps of the peers, beyond
+/// `peer_stamp`. Each map follows the roster in the sweep.
+#[derive(Debug)]
 pub(crate) struct ClockEvidence {
     /// The run of frames of a quiet peer that rise from a stamp below `peer_stamp`, which says
     /// that its clock stepped back. See `membership_update::note_step_back`.
     pub(crate) step_back: HashMap<Nickname, StepBack>,
-    /// The last live frame of each peer that was stamped before our join. A backlog replay and a
-    /// peer with a slow clock look the same in one frame. Two frames of one key, a time apart on
-    /// both clocks, show that the peer sends now.
-    pub(crate) pre_join: HashMap<Nickname, PreJoinFrame>,
+    /// The run of live frames of each peer whose stamps are behind our join, or behind the goodbye
+    /// of an older run of its nickname. A backlog replay and a peer with a slow clock look the same
+    /// in one frame. A run of frames of one key, each a time after the one before on both clocks
+    /// and at the pace of our clock, shows that the peer sends now.
+    pub(crate) live_run: HashMap<Nickname, LiveRun>,
     /// The stamp of the goodbye of each nickname that left the roster. A live frame stamped
     /// before it is a replay of an older run, so it makes no arrival. Entries older than the quiet
     /// TTL are pruned, because no live frame that old proves presence; at most `QUIET_CAP` stay.
     pub(crate) goodbye_stamp: HashMap<Nickname, UnixSecs>,
+    /// The peers that came back from quiet and are not shown yet, because every frame so far is
+    /// stamped before our join. When the peer is shown, it is shown as returned.
+    pub(crate) returned_unshown: HashSet<Nickname>,
+    /// The real last-heard instant of each peer. The stall forgiveness moves the eviction mark
+    /// (`last_seen`) and leaves this one, which the roster reports.
+    pub(crate) heard: HashMap<Nickname, Instant>,
+    /// Wall-clock time that the monotonic clock missed, until a live peer vouches for it.
+    pub(crate) suspend: Option<PendingSuspend>,
+    /// The peers that left `quiet` after the quiet TTL. Their dial hint stays, because a peer that
+    /// is silent for an hour and then sends again has no reason to send a `PeerInfo`: its links did
+    /// not change. Bounded FIFO (cap `QUIET_CAP`), so the hints of one-shot nicknames cannot grow
+    /// the map. The sweep drops the hint of the oldest entry that the cap pushes out.
+    pub(crate) lapsed_quiet: BoundedFifoSet<Nickname>,
+}
+
+impl Default for ClockEvidence {
+    fn default() -> Self {
+        Self {
+            step_back: HashMap::new(),
+            live_run: HashMap::new(),
+            goodbye_stamp: HashMap::new(),
+            returned_unshown: HashSet::new(),
+            heard: HashMap::new(),
+            suspend: None,
+            lapsed_quiet: BoundedFifoSet::new(QUIET_CAP),
+        }
+    }
 }
 
 use crate::{beacon, gossip, protocol, transport};
@@ -711,7 +750,8 @@ impl EventLoopState {
     /// for anti-entropy, but it is not counted: it can be a ghost that never surfaced. Every
     /// surface that shows a count (the state file, the live counter, the roster snapshot) reads it
     /// here.
-    pub(crate) fn member_count(&self) -> usize {
+    #[must_use]
+    pub fn member_count(&self) -> usize {
         let shown = self
             .peers
             .iter()
@@ -753,6 +793,10 @@ impl EventLoopState {
     pub fn roster_snapshot(&self) -> RosterSnapshot {
         let now = Instant::now();
         let secs_since = |seen: &Instant| now.duration_since(*seen).as_secs();
+        let heard_at = |nick: &Nickname| -> Option<&Instant> {
+            let heard = self.clock_evidence.heard.get(nick);
+            heard.or_else(|| self.last_seen.get(nick))
+        };
         let shown = self
             .peers
             .iter()
@@ -760,8 +804,9 @@ impl EventLoopState {
         let mut peers: Vec<RosterEntry> = shown
             .map(|nick| RosterEntry {
                 nickname: nick.clone(),
-                // Active peers: their live `last_seen`.
-                last_seen_secs_ago: self.last_seen.get(nick).map(secs_since),
+                // Active peers: when they were really heard. A stall forgiveness moves
+                // `last_seen`, not `heard`.
+                last_seen_secs_ago: heard_at(nick).map(secs_since),
                 quiet: false,
                 reach: self.reach_of(nick),
                 transport: transport::lane_for(nick, self),

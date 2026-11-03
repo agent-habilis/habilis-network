@@ -801,7 +801,7 @@ fn sweep_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, sink: &dyn N
         sweep_interval(),
     );
     lifecycle::heartbeat::forgive_stall(state, mono_gap.max(wall_gap));
-    lifecycle::heartbeat::age_quiet_peers(state, wall_gap.saturating_sub(mono_gap));
+    lifecycle::heartbeat::note_suspend(state, wall_gap.saturating_sub(mono_gap));
     lifecycle::heartbeat::tick_sweep(state, sink);
 }
 
@@ -1851,7 +1851,7 @@ fn finalize_ping_round(state: &mut EventLoopState, sink: &dyn NodeSink) {
     // `known` must never be less than the number that responded: a peer can
     // pong and then leave the roster before this ~10s finalize, which would
     // otherwise report responded > known. Clamp so the count stays coherent.
-    let known = state.peers.len().max(peers.len());
+    let known = (state.member_count() - 1).max(peers.len());
     sink.emit(NodeEvent::PingReport { peers, known });
 }
 
@@ -1989,7 +1989,8 @@ mod tests {
     use super::TickAnchors;
     use crate::daemon::state::EventLoopState;
     use crate::gossip::event::SilentSink;
-    use crate::protocol::Nickname;
+    use crate::lifecycle;
+    use crate::protocol::{Nickname, UnixSecs};
     use crate::testing::{fresh_state, nick};
     use crate::util::clock::Instant;
     use crate::util::tuning;
@@ -2060,11 +2061,100 @@ mod tests {
         anchors.sweep_wall = anchors.sweep_wall - Duration::from_mins(40);
 
         super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+        // A live peer whose clock agrees with ours vouches for the sleep: it was a sleep.
+        lifecycle::heartbeat::confirm_suspend(&mut state, UnixSecs::now());
+        lifecycle::heartbeat::tick_sweep(&mut state, &SilentSink);
 
         let kept: Vec<&Nickname> = state.quiet_since.keys().collect();
         assert!(
             state.quiet.is_empty() && kept.is_empty(),
             "a quiet peer survived 70 min of real silence: {kept:?}"
+        );
+    }
+
+    /// A live frame whose stamp is 2 h off our clock does not vouch for the stretch: our clock is
+    /// the one that is wrong, so the quiet peer keeps its time.
+    #[test]
+    fn a_frame_that_disagrees_with_our_clock_does_not_vouch_for_a_suspend() {
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn("habilis_network::lifecycle", "maintenance timer stalled");
+        let mut state = fresh_state();
+        let half_hour_ago = Instant::now()
+            .checked_sub(Duration::from_mins(30))
+            .expect("the monotonic clock has run past 30 min since boot");
+        state.quiet.insert(nick("swift-cedar"));
+        state.quiet_since.insert(nick("swift-cedar"), half_hour_ago);
+        let mut anchors = TickAnchors::now();
+        anchors.sweep_wall = anchors.sweep_wall - Duration::from_hours(2);
+
+        super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+        lifecycle::heartbeat::confirm_suspend(
+            &mut state,
+            UnixSecs::now() - Duration::from_hours(2),
+        );
+        lifecycle::heartbeat::tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.quiet.contains("swift-cedar"),
+            "a frame 2 h behind our clock vouched for a wall-clock step"
+        );
+    }
+
+    /// A vouching frame that comes after the wait is too late: the note lapses after one alive
+    /// timeout, so a later frame cannot turn a step that was long ago into a sleep.
+    #[test]
+    fn a_vouching_frame_after_the_wait_ages_nothing() {
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn("habilis_network::lifecycle", "maintenance timer stalled");
+        let mut state = fresh_state();
+        let half_hour_ago = Instant::now()
+            .checked_sub(Duration::from_mins(30))
+            .expect("the monotonic clock has run past 30 min since boot");
+        state.quiet.insert(nick("swift-cedar"));
+        state.quiet_since.insert(nick("swift-cedar"), half_hour_ago);
+        let mut anchors = TickAnchors::now();
+        anchors.sweep_wall = anchors.sweep_wall - Duration::from_hours(2);
+
+        super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+        let pending = state
+            .clock_evidence
+            .suspend
+            .as_mut()
+            .expect("the sweep noted the stretch");
+        pending.at = pending
+            .at
+            .checked_sub(tuning::alive_timeout() * 2)
+            .expect("the monotonic clock has run past the wait since boot");
+        lifecycle::heartbeat::confirm_suspend(&mut state, UnixSecs::now());
+        lifecycle::heartbeat::tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.quiet.contains("swift-cedar"),
+            "a vouching frame after the wait aged a quiet peer"
+        );
+    }
+
+    /// A step of the wall clock that the monotonic clock did not see looks like a long sleep. No
+    /// peer vouches for it, so a quiet peer of 30 min stays: the step must not remove a peer
+    /// early.
+    #[test]
+    fn a_forward_wall_clock_step_does_not_age_a_quiet_peer() {
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn("habilis_network::lifecycle", "maintenance timer stalled");
+        let mut state = fresh_state();
+        let half_hour_ago = Instant::now()
+            .checked_sub(Duration::from_mins(30))
+            .expect("the monotonic clock has run past 30 min since boot");
+        state.quiet.insert(nick("swift-cedar"));
+        state.quiet_since.insert(nick("swift-cedar"), half_hour_ago);
+        let mut anchors = TickAnchors::now();
+        anchors.sweep_wall = anchors.sweep_wall - Duration::from_hours(2);
+
+        super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+
+        assert!(
+            state.quiet.contains("swift-cedar"),
+            "a wall-clock step of 2 h removed a peer that was quiet for 30 min"
         );
     }
 

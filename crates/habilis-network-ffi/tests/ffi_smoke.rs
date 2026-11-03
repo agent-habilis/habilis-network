@@ -247,15 +247,14 @@ fn a_handle_serves_identity_state_and_roster() {
         "a lone member has no peers: {peers}"
     );
 
-    // `habilis_network_mesh_peer_count` deliberately answers the other question — how many
-    // *others* — so a lone member reads 0 where the JSON's `count` reads 1. A
-    // caller waiting for company loops on this one.
+    // `habilis_network_mesh_peer_count` answers with the same number as the JSON's `count`:
+    // a lone member reads 1. A caller waiting for company loops on this one.
     // SAFETY: live handle for the rest of this test.
-    let others = unsafe { habilis_network_mesh_peer_count(handle) };
+    let members = unsafe { habilis_network_mesh_peer_count(handle) };
     assert_eq!(
-        others,
-        0,
-        "a lone member has no peers but itself: {:?}",
+        members,
+        1,
+        "a lone member counts itself: {:?}",
         last_error()
     );
 
@@ -424,7 +423,7 @@ fn two_handles_exchange_messages() {
     let deadline = Instant::now() + Duration::from_secs(45);
     // SAFETY: both handles stay live until the end of the test.
     while unsafe {
-        habilis_network_mesh_peer_count(alice) < 1 || habilis_network_mesh_peer_count(bob) < 1
+        habilis_network_mesh_peer_count(alice) < 2 || habilis_network_mesh_peer_count(bob) < 2
     } {
         assert!(
             Instant::now() < deadline,
@@ -559,15 +558,15 @@ fn four_peers_converge(public: bool) {
             // SAFETY: each handle came from habilis_network_mesh_open and is still open.
             counts[index] = unsafe { habilis_network_mesh_peer_count(handle) };
         }
-        if counts.iter().all(|&count| count >= 3) {
+        if counts.iter().all(|&count| count >= 4) {
             break;
         }
         thread::sleep(Duration::from_millis(200));
     }
 
     assert!(
-        counts.iter().all(|&count| count >= 3),
-        "expected every peer to see ≥3 others within 45s (public={public}); peer_counts={counts:?}"
+        counts.iter().all(|&count| count >= 4),
+        "expected every member to count 4 members (itself and 3 others) within 45s (public={public}); peer_counts={counts:?}"
     );
 
     for handle in handles {

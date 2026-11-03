@@ -2,7 +2,7 @@
 //! that evicts peers we've stopped hearing from. Part of the
 //! lifecycle subsystem (it drives `peer_timeout` / the roster).
 
-use crate::daemon::state::RendezvousFlag;
+use crate::daemon::state::{PendingSuspend, RendezvousFlag};
 use crate::transport::MeshSender;
 
 use crate::daemon::state::EventLoopState;
@@ -48,9 +48,8 @@ pub(crate) async fn tick_alive(
 /// that time stays in the roster up to one alive timeout (90 s) longer. A step back of the wall
 /// clock does not trigger it. Only a gap above one alive timeout acts.
 ///
-/// Limit: the last-heard mark of every peer restarts at the stall, so the recency that the roster
-/// reports for a silent peer counts from the stall, for up to one alive timeout. The silence
-/// before the stall is ours, and the timeout is what the mark decides.
+/// The roster keeps reporting the real last-heard time of a peer, which `clock_evidence.heard`
+/// holds: the forgiveness moves the eviction mark only.
 pub(crate) fn forgive_stall(state: &mut EventLoopState, gap: Duration) {
     if gap <= alive_timeout() {
         return;
@@ -66,15 +65,53 @@ pub(crate) fn forgive_stall(state: &mut EventLoopState, gap: Duration) {
     );
 }
 
-/// The monotonic clock stops during a suspend on some hosts, and the quiet TTL runs on that clock.
-/// `missed` is the time that the wall clock counted and the monotonic clock did not (the sweep
-/// gets it from the two gaps). Each quiet peer is then older by that time, so a long sleep does
-/// not hold a quiet peer, or its endpoint binding, past one hour of real silence. A gap of one
-/// alive timeout or less is clock noise and ages nothing.
-pub(crate) fn age_quiet_peers(state: &mut EventLoopState, missed: Duration) {
+/// A sweep that sees the wall clock run on while the monotonic clock did not (a suspend, or a step
+/// of the wall clock) notes the stretch. It ages nothing yet: a suspend and a forward step look the
+/// same on this host, and a step must not remove a quiet peer early. A live peer vouches for the
+/// stretch (see [`confirm_suspend`]); until then, and for one alive timeout, it waits. A gap of one
+/// alive timeout or less is clock noise and is not noted.
+pub(crate) fn note_suspend(state: &mut EventLoopState, missed: Duration) {
     if missed <= alive_timeout() {
         return;
     }
+    let now = Instant::now();
+    let pending = match state.clock_evidence.suspend {
+        Some(before) if now.duration_since(before.at) <= alive_timeout() => PendingSuspend {
+            missed: before.missed.saturating_add(missed),
+            at: now,
+        },
+        _ => PendingSuspend { missed, at: now },
+    };
+    state.clock_evidence.suspend = Some(pending);
+}
+
+/// A live frame stamped within one alive timeout of our wall clock shows that our clock agrees with
+/// the clock of a peer that sends now. After a suspend the clock is right, so the stretch that
+/// [`note_suspend`] holds is real and the quiet peers age by it. After a forward step our clock
+/// runs ahead of every peer, so no frame agrees and the stretch lapses one alive timeout after the
+/// sweep noted it. The error is bounded by that timeout and by the skew of the clock of the peer.
+///
+/// Limit: with no live peer after a wake, nothing vouches, and a quiet peer stays past one hour of
+/// real silence until the monotonic clock has run that hour (at most `QUIET_CAP` stay).
+pub(crate) fn confirm_suspend(state: &mut EventLoopState, stamp: UnixSecs) {
+    let Some(pending) = state.clock_evidence.suspend else {
+        return;
+    };
+    if Instant::now().duration_since(pending.at) > alive_timeout() {
+        state.clock_evidence.suspend = None;
+        return;
+    }
+    let ahead: u64 = UnixSecs::now().as_secs().abs_diff(stamp.as_secs());
+    if ahead <= alive_timeout().as_secs() {
+        state.clock_evidence.suspend = None;
+        age_quiet_peers(state, pending.missed);
+    }
+}
+
+/// Each quiet peer is older by `missed`, the time that the wall clock counted and the monotonic
+/// clock did not, so a long sleep does not hold a quiet peer, or its endpoint binding, past one
+/// hour of real silence.
+fn age_quiet_peers(state: &mut EventLoopState, missed: Duration) {
     for since in state.quiet_since.values_mut() {
         if let Some(older) = since.checked_sub(missed) {
             *since = older;
@@ -92,16 +129,22 @@ pub(crate) fn age_quiet_peers(state: &mut EventLoopState, missed: Duration) {
 pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
     let now = Instant::now();
     let timeout = alive_timeout();
-    let expired: Vec<(Nickname, Instant, u64)> = state
+    let silent = state
         .last_seen
         .iter()
-        .filter_map(|(nick, seen)| {
-            let age = now.duration_since(*seen);
-            (age > timeout).then(|| (nick.clone(), *seen, age.as_secs()))
-        })
-        .collect();
-    for (nick, seen, age) in expired {
+        .filter(|(_, seen)| now.duration_since(**seen) > timeout);
+    let expired: Vec<(Nickname, Instant)> =
+        silent.map(|(nick, seen)| (nick.clone(), *seen)).collect();
+    for (nick, forgiven) in expired {
         state.last_seen.remove(nick.as_str());
+        // The eviction mark may be a stall forgiveness. The roster and the event report when the
+        // peer was really heard.
+        let seen = state
+            .clock_evidence
+            .heard
+            .remove(nick.as_str())
+            .unwrap_or(forgiven);
+        let age = now.duration_since(seen).as_secs();
         if state.peers.remove(nick.as_str()) {
             state.write_peer_count();
             // Remembered as a quiet peer, but no longer a holder: its flag was last said before it
@@ -156,7 +199,7 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
     for nick in gone {
         state.quiet.remove(nick.as_str());
         state.quiet_since.remove(nick.as_str());
-        state.forget_peer_endpoint(nick.as_str());
+        state.clock_evidence.lapsed_quiet.insert(nick);
     }
     // Keep `quiet_since` bounded to current `quiet` membership: peers that
     // returned (drained from `quiet`) or fell off the bounded `quiet` FIFO
@@ -181,29 +224,35 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         .retain(|nick, _| is_peer(nick) || is_quiet(nick));
     state
         .clock_evidence
-        .pre_join
+        .live_run
         .retain(|nick, _| is_peer(nick) || is_quiet(nick));
+    state.clock_evidence.heard.retain(|nick, _| is_peer(nick));
+    state
+        .clock_evidence
+        .returned_unshown
+        .retain(|nick| is_peer(nick));
     // A goodbye older than the quiet TTL guards nothing: no live frame that old proves presence.
     let oldest_live = UnixSecs::now() - QUIET_TTL;
     state
         .clock_evidence
         .goodbye_stamp
         .retain(|_, said| *said > oldest_live);
-    // Same bound for the endpoint dial hints: an entry lives as long as its
-    // nick is an active peer or a returnable quiet evictee, so the map
-    // is capped at |peers| + QUIET_CAP even under nickname churn.
+    // Same bound for the endpoint dial hints: an entry lives as long as its nick is an active
+    // peer, a quiet evictee, or one of the last `QUIET_CAP` that outlived the quiet TTL, so the
+    // map is capped at |peers| + 2 * QUIET_CAP even under nickname churn.
     // (Safe against a just-arrived `PeerInfo`: `lifecycle::observe` runs
     // before `handle_peer_info`, so a recorded endpoint's author is already a
     // peer.)
-    let peers = &state.peers;
-    state
-        .peer_endpoints
-        .retain(|nick, _| peers.contains(nick) || quiet.contains(nick.as_str()));
+    let (peers, lapsed) = (&state.peers, &state.clock_evidence.lapsed_quiet);
+    state.peer_endpoints.retain(|nick, _| {
+        let returnable: bool = quiet.contains(nick.as_str()) || lapsed.contains(nick.as_str());
+        peers.contains(nick) || returnable
+    });
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::daemon::state::{RendezvousFlag, StepBack};
+    use crate::daemon::state::{EventLoopState, RendezvousFlag, StepBack};
     use crate::testing::{fresh_state, nick};
     use std::collections::HashSet;
 
@@ -435,6 +484,64 @@ mod tests {
         );
     }
 
+    /// A peer that is silent for more than the quiet TTL and then sends again comes back as an
+    /// arrival, and no `PeerInfo` of its own may follow: its links did not change. Its dial hint
+    /// must be there when it returns, or a directed frame to it fails until a `PeerInfo` comes.
+    #[test]
+    fn a_peer_that_returns_after_the_quiet_ttl_keeps_its_dial_hint() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let long_gone = Instant::now()
+            .checked_sub(QUIET_TTL + Duration::from_secs(60))
+            .expect("the monotonic clock has run past the quiet TTL since boot");
+        let endpoint = iroh::SecretKey::from_bytes(&[9; 32]).public();
+        state.quiet.insert(nick("swift-cedar"));
+        state.quiet_since.insert(nick("swift-cedar"), long_gone);
+        state
+            .peer_endpoints
+            .insert(nick("swift-cedar"), iroh::EndpointAddr::new(endpoint));
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            !state.quiet.contains("swift-cedar"),
+            "the peer left the quiet set"
+        );
+        assert_eq!(
+            state.peer_endpoints.get("swift-cedar"),
+            Some(&iroh::EndpointAddr::new(endpoint)),
+            "the quiet TTL dropped the dial hint of a peer that can still come back"
+        );
+    }
+
+    /// The dial hints that outlive the quiet TTL are bounded by `QUIET_CAP`: a stream of one-shot
+    /// nicknames cannot grow the map.
+    #[test]
+    fn the_dial_hints_that_outlive_the_quiet_ttl_stay_bounded() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let long_gone = Instant::now()
+            .checked_sub(QUIET_TTL + Duration::from_secs(60))
+            .expect("the monotonic clock has run past the quiet TTL since boot");
+        let endpoint = iroh::SecretKey::from_bytes(&[9; 32]).public();
+        for index in 0..(tuning::QUIET_CAP + 50) {
+            let who = nick(&format!("peer-{index}"));
+            state.quiet.insert(who.clone());
+            state.quiet_since.insert(who.clone(), long_gone);
+            state
+                .peer_endpoints
+                .insert(who, iroh::EndpointAddr::new(endpoint));
+        }
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.peer_endpoints.len() <= tuning::QUIET_CAP,
+            "the dial hints passed the cap: {}",
+            state.peer_endpoints.len()
+        );
+    }
+
     #[test]
     fn sweep_evicts_surfaced_peer_into_quiet() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -568,6 +675,46 @@ mod tests {
         assert!(
             !state.rendezvous_wanted(),
             "a ghost of the pre-join backlog says nothing about a partition"
+        );
+    }
+
+    /// Mark `who` as last heard `ago` ago, for the eviction mark and for the recency of the roster.
+    fn heard_ago(state: &mut EventLoopState, who: &str, ago: Duration) {
+        let seen = Instant::now()
+            .checked_sub(ago)
+            .expect("the monotonic clock has run past the span since boot");
+        state.last_seen.insert(nick(who), seen);
+        state.clock_evidence.heard.insert(nick(who), seen);
+    }
+
+    /// A late sweep forgives the silence that it caused, and the roster still reports how long ago
+    /// the peer was really heard: the forgiveness moves the deadline, not the fact.
+    #[test]
+    fn a_late_sweep_keeps_the_real_recency_of_a_silent_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.peers.insert(nick("swift-cedar"));
+        state.surfaced.insert(nick("swift-cedar"));
+        heard_ago(&mut state, "swift-cedar", Duration::from_secs(100));
+
+        forgive_stall(&mut state, tuning::alive_timeout() * 2);
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.peers.contains("swift-cedar"),
+            "the forgiven peer was evicted"
+        );
+        let roster = state.roster_snapshot();
+        let found = roster
+            .peers
+            .iter()
+            .find(|entry| entry.nickname.as_str() == "swift-cedar");
+        let secs: u64 = found
+            .and_then(|entry| entry.last_seen_secs_ago)
+            .expect("the peer is in the roster with a recency");
+        assert!(
+            secs >= 100,
+            "the roster says the peer was heard {secs} s ago, but it was heard 100 s ago"
         );
     }
 

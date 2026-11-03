@@ -9,9 +9,9 @@ import type { Lane, MeshEvent, Peer, Reach } from './types.ts'
  * `habilis_network::embed::RosterSnapshot`, as serde writes it: struct fields verbatim,
  * snake_case, enum variants lowercase.
  *
- * `count` is deliberately absent. It exists in the document and includes self,
- * where `habilis_network_peer_count` excludes self — reading either alongside
- * `peers.length` would be two sources of truth that disagree by one.
+ * `count` is deliberately absent. It exists in the document and includes self, as
+ * `habilis_network_mesh_peer_count` does — reading either alongside `peers.length`
+ * (the other members, quiet ones too) would be two sources of truth that disagree.
  */
 interface RawEntry {
   nickname: string
