@@ -140,7 +140,7 @@ impl MeshPeer {
             .map_err(|_| to_js_error("mesh event loop has stopped"))
     }
 
-    /// How many peers besides this one are in the roster.
+    /// How many peers besides this one are in the mesh now: the shown peers that are not quiet.
     ///
     /// # Errors
     /// The event loop has stopped.

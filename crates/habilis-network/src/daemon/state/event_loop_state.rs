@@ -63,6 +63,32 @@ pub(crate) struct StepBack {
     pub(crate) count: u8,
 }
 
+/// The last live frame of a peer that was stamped before our join: its key, its stamp, and when it
+/// arrived on our clock. See `membership_update::note_pre_join_live`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PreJoinFrame {
+    pub(crate) key: AuthorKey,
+    pub(crate) stamp: UnixSecs,
+    pub(crate) at: Instant,
+}
+
+/// What the lifecycle layer keeps about the stamps of the peers, beyond `peer_stamp`. Each map
+/// follows the roster in the sweep.
+#[derive(Debug, Default)]
+pub(crate) struct ClockEvidence {
+    /// The run of frames of a quiet peer that rise from a stamp below `peer_stamp`, which says
+    /// that its clock stepped back. See `membership_update::note_step_back`.
+    pub(crate) step_back: HashMap<Nickname, StepBack>,
+    /// The last live frame of each peer that was stamped before our join. A backlog replay and a
+    /// peer with a slow clock look the same in one frame. Two frames of one key, a time apart on
+    /// both clocks, show that the peer sends now.
+    pub(crate) pre_join: HashMap<Nickname, PreJoinFrame>,
+    /// The stamp of the goodbye of each nickname that left the roster. A live frame stamped
+    /// before it is a replay of an older run, so it makes no arrival. Entries older than the quiet
+    /// TTL are pruned, because no live frame that old proves presence; at most `QUIET_CAP` stay.
+    pub(crate) goodbye_stamp: HashMap<Nickname, UnixSecs>,
+}
+
 use crate::{beacon, gossip, protocol, transport};
 /// All mutable state owned by the event loop.
 ///
@@ -227,9 +253,9 @@ pub struct EventLoopState {
     /// clock of that peer. A quiet peer returns only on a frame stamped after it: two stamps of
     /// one clock compare at any skew between that clock and ours.
     pub(crate) peer_stamp: HashMap<Nickname, UnixSecs>,
-    /// The run of frames of a quiet peer that rise from a stamp below `peer_stamp`, which says
-    /// that its clock stepped back. See `membership_update::note_step_back`.
-    pub(crate) step_back: HashMap<Nickname, StepBack>,
+    /// The records of the stamps of the peers beyond `peer_stamp`: the step back of a clock, the
+    /// live frames stamped before our join, and the goodbyes.
+    pub(crate) clock_evidence: ClockEvidence,
     /// Bridge from membership back to transport: nickname -> the endpoint id
     /// that nickname last self-advertised in a signed `PeerInfo`. That
     /// signature is the only thing tying a nickname to an endpoint (the
@@ -599,7 +625,7 @@ impl EventLoopState {
             quiet_since: HashMap::new(),
             peer_keys: HashMap::new(),
             peer_stamp: HashMap::new(),
-            step_back: HashMap::new(),
+            clock_evidence: ClockEvidence::default(),
             left_keys: BoundedFifoSet::new(QUIET_CAP),
             surfaced: HashSet::new(),
             last_sent_at: now,
@@ -693,7 +719,7 @@ impl EventLoopState {
         shown.count() + 1
     }
 
-    /// Write [`Self::member_count`] to the state file, if configured, carrying the current
+    /// Write `member_count` to the state file, if configured, carrying the current
     /// `ready` flag, and mirror the count into the advertise counter, if present. No-op for
     /// neither.
     pub(crate) fn write_peer_count(&self) {
@@ -707,10 +733,22 @@ impl EventLoopState {
         }
     }
 
-    /// Snapshot the live roster (active peers + quiet evictees),
-    /// sorted most-recently-seen first. Backs a consumer's roster surfaces, the MCP
-    /// `mesh_info` roster, and the task sender's target picker /
-    /// nickname validation.
+    /// Every peer that is in the roster and not quiet, shown or not, in no set order. The rows
+    /// of [`Self::roster_snapshot`] list the peers whose arrival was shown, so a peer that is live
+    /// and not shown yet (known from the backlog, or from a slow clock) is in this list and not in
+    /// the rows. A reader that has to tell an absent peer from a live one that is not shown yet
+    /// reads this list. A quiet peer and a peer that left are not in it.
+    pub fn live_nicknames(&self) -> impl Iterator<Item = &Nickname> {
+        let live = self.peers.iter();
+        live.filter(|peer| !self.quiet.contains(peer.as_str()))
+    }
+
+    /// Snapshot the roster: the active peers whose arrival was shown, and the quiet evictees,
+    /// sorted most-recently-seen first. A peer that is live and not shown yet (known from the
+    /// backlog, or from a slow clock) is left out, and so is the count that goes with it (see
+    /// `member_count`); [`Self::live_nicknames`] lists it. Backs a consumer's roster
+    /// surfaces (the MCP `mesh_info` roster, the FFI, the netplay fan-out, agent-share) and the
+    /// task sender's target picker / nickname validation.
     #[must_use]
     pub fn roster_snapshot(&self) -> RosterSnapshot {
         let now = Instant::now();
@@ -998,13 +1036,24 @@ impl EventLoopState {
         Some(address)
     }
 
-    /// A `NeighborDown` for `peer`: the gossip link is gone, the path verdict
-    /// stays. It describes the pooled unicast connection, which outlives the
-    /// link; erasing it parked every directed frame on a link flap until the
-    /// alive tick re-probed (about 40 s with the relink cooldown).
     /// Remember that `key` said goodbye. A key is minted per run, so it never speaks again.
     pub(crate) fn note_left(&mut self, key: AuthorKey) {
         self.left_keys.insert(key);
+    }
+
+    /// Remember the stamp of the goodbye of `who`, which left the roster. The newest stamp stays.
+    /// At the cap, the oldest goodbye makes room.
+    pub(crate) fn note_goodbye_stamp(&mut self, who: &Nickname, stamp: UnixSecs) {
+        let goodbyes = &mut self.clock_evidence.goodbye_stamp;
+        if !goodbyes.contains_key(who) && goodbyes.len() >= QUIET_CAP {
+            let by_age = goodbyes.iter().min_by_key(|(_, held)| **held);
+            let oldest: Option<Nickname> = by_age.map(|(nick, _)| nick.clone());
+            if let Some(nick) = oldest {
+                goodbyes.remove(&nick);
+            }
+        }
+        let held = goodbyes.entry(who.clone()).or_insert(stamp);
+        *held = (*held).max(stamp);
     }
 
     pub(crate) fn key_said_goodbye(&self, key: AuthorKey) -> bool {
@@ -1023,6 +1072,10 @@ impl EventLoopState {
         }
     }
 
+    /// A `NeighborDown` for `peer`: the gossip link is gone, the path verdict
+    /// stays. It describes the pooled unicast connection, which outlives the
+    /// link; erasing it parked every directed frame on a link flap until the
+    /// alive tick re-probed (about 40 s with the relink cooldown).
     pub(crate) fn unlink(&mut self, peer: EndpointId) {
         self.linked_endpoints.remove(&peer);
         if self.linked_endpoints.is_empty() {

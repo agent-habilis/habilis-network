@@ -31,7 +31,7 @@ use crate::util::clock;
 use crate::util::tuning;
 
 pub use event_loop_state::EventLoopState;
-pub(crate) use event_loop_state::StepBack;
+pub(crate) use event_loop_state::{PreJoinFrame, StepBack};
 
 pub(crate) use idle_counters::IdleCounters;
 pub(crate) use latch::Latch;

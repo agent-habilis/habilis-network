@@ -47,14 +47,20 @@ pub(crate) async fn handle_presence(
         state.drop_departed_presence(&message.key());
         // The nickname may belong to a newer run by now. The goodbye of an older key ends that
         // key only, and the roster entry of the newer run stays.
-        if state
-            .peer_keys
-            .get(&message.author)
-            .is_some_and(|holder| *holder != message.key())
-        {
+        let holder = state.peer_keys.get(&message.author).copied();
+        if holder.is_some_and(|held| held != message.key()) {
+            return;
+        }
+        // A goodbye for a nickname with no holder on record and no roster entry authorizes no
+        // clean-up: any key can sign a goodbye under any nickname, and there is nothing of that
+        // nickname to release.
+        let is_peer = state.peers.contains(message.author.as_str());
+        let is_quiet = state.quiet.contains(message.author.as_str());
+        if holder.is_none() && !is_peer && !is_quiet {
             return;
         }
         state.peer_keys.remove(&message.author);
+        state.note_goodbye_stamp(&message.author, message.timestamp);
         if state.peers.remove(message.author.as_str()) {
             state.write_peer_count();
         }
@@ -104,20 +110,25 @@ pub(crate) async fn handle_presence(
             gossip::broadcast_peer_info(state, context).await;
             state.last_sent_at = now;
         }
-        if update.joined_new {
-            // Suppress "has joined" when we already printed "came back"
-            // from the quiet check, or when this `joined` predates
-            // our own join (relayed backlog).
-            // Gated on `surfaced` too: a synthetic arrival may have shown this peer already.
-            if surfaceable && !update.returned && state.surfaced.insert(message.author.clone()) {
-                state.write_peer_count();
-                context.sink.emit(NodeEvent::Presence {
-                    message: Box::new(message.authored()),
-                    peer: message.key(),
-                    synthetic: false,
-                });
-                tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer joined (announced)");
-            }
+        // Suppress "has joined" when we already printed "came back" from the quiet check, or
+        // when this `joined` predates our own join (relayed backlog). Gated on `surfaced`: a
+        // synthetic arrival may have shown this peer already. A peer that is in the roster from
+        // backlog, and not shown yet, is shown by its fresh `joined`: the roster entry is not an
+        // arrival. A `joined` too old to prove presence does not put a peer in the roster, so it
+        // shows none.
+        let in_roster = state.peers.contains(message.author.as_str());
+        if surfaceable
+            && !update.returned
+            && in_roster
+            && state.surfaced.insert(message.author.clone())
+        {
+            state.write_peer_count();
+            context.sink.emit(NodeEvent::Presence {
+                message: Box::new(message.authored()),
+                peer: message.key(),
+                synthetic: false,
+            });
+            tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer joined (announced)");
         }
     }
 }

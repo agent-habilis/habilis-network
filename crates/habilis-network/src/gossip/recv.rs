@@ -3560,6 +3560,7 @@ mod left_tests {
             let mut state = fresh_state();
             state.multihop = Some(handle.clone());
             let leaver = nick("leaver");
+            state.peers.insert(leaver.clone());
             state.note_peer_endpoint(
                 leaver.clone(),
                 EndpointAddr::new(leaver_handle.app_id().get()),

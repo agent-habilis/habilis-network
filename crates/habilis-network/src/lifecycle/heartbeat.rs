@@ -7,7 +7,7 @@ use crate::transport::MeshSender;
 
 use crate::daemon::state::EventLoopState;
 use crate::gossip::event::{NodeEvent, NodeSink};
-use crate::protocol::{MeshId, Message, Nickname};
+use crate::protocol::{MeshId, Message, Nickname, UnixSecs};
 use crate::util::clock::Instant;
 use std::time::Duration;
 
@@ -42,6 +42,15 @@ pub(crate) async fn tick_alive(
 /// was suspended or starved. The silence of every peer is then our own, so each peer gets a full
 /// timeout again from now to be heard, instead of leaving the roster all at once and returning
 /// all at once. `gap` is the larger of the monotonic and the wall-clock gap between two sweeps.
+///
+/// Limit: a step forward of the wall clock (NTP, or a clock that was set) by more than one alive
+/// timeout looks like a stall. Each peer then gets a full timeout again, so a peer that died in
+/// that time stays in the roster up to one alive timeout (90 s) longer. A step back of the wall
+/// clock does not trigger it. Only a gap above one alive timeout acts.
+///
+/// Limit: the last-heard mark of every peer restarts at the stall, so the recency that the roster
+/// reports for a silent peer counts from the stall, for up to one alive timeout. The silence
+/// before the stall is ours, and the timeout is what the mark decides.
 pub(crate) fn forgive_stall(state: &mut EventLoopState, gap: Duration) {
     if gap <= alive_timeout() {
         return;
@@ -55,6 +64,22 @@ pub(crate) fn forgive_stall(state: &mut EventLoopState, gap: Duration) {
         gap_secs = gap.as_secs(),
         "the sweep came late: peers get a full alive timeout from now"
     );
+}
+
+/// The monotonic clock stops during a suspend on some hosts, and the quiet TTL runs on that clock.
+/// `missed` is the time that the wall clock counted and the monotonic clock did not (the sweep
+/// gets it from the two gaps). Each quiet peer is then older by that time, so a long sleep does
+/// not hold a quiet peer, or its endpoint binding, past one hour of real silence. A gap of one
+/// alive timeout or less is clock noise and ages nothing.
+pub(crate) fn age_quiet_peers(state: &mut EventLoopState, missed: Duration) {
+    if missed <= alive_timeout() {
+        return;
+    }
+    for since in state.quiet_since.values_mut() {
+        if let Some(older) = since.checked_sub(missed) {
+            *since = older;
+        }
+    }
 }
 
 /// Sweep `last_seen` for peers we've not heard from past the
@@ -151,8 +176,19 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         .peer_stamp
         .retain(|nick, _| is_peer(nick) || is_quiet(nick));
     state
+        .clock_evidence
         .step_back
         .retain(|nick, _| is_peer(nick) || is_quiet(nick));
+    state
+        .clock_evidence
+        .pre_join
+        .retain(|nick, _| is_peer(nick) || is_quiet(nick));
+    // A goodbye older than the quiet TTL guards nothing: no live frame that old proves presence.
+    let oldest_live = UnixSecs::now() - QUIET_TTL;
+    state
+        .clock_evidence
+        .goodbye_stamp
+        .retain(|_, said| *said > oldest_live);
     // Same bound for the endpoint dial hints: an entry lives as long as its
     // nick is an active peer or a returnable quiet evictee, so the map
     // is capped at |peers| + QUIET_CAP even under nickname churn.
@@ -167,7 +203,7 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
 
 #[cfg(test)]
 mod tests {
-    use crate::daemon::state::RendezvousFlag;
+    use crate::daemon::state::{RendezvousFlag, StepBack};
     use crate::testing::{fresh_state, nick};
     use std::collections::HashSet;
 
@@ -327,6 +363,48 @@ mod tests {
         assert!(
             !state.peer_keys.contains_key("calm-otter"),
             "a nickname that is neither a peer nor quiet drops its key"
+        );
+    }
+
+    /// `peer_stamp`, the step-back runs and the pre-join records follow the roster like the holder
+    /// keys: a nickname that is neither a peer nor quiet loses them, or they grow with every
+    /// nickname that ever spoke.
+    #[test]
+    fn the_stamp_records_follow_the_roster() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.peers.insert(nick("swift-cedar"));
+        state.quiet.insert(nick("lost-heron"));
+        for name in ["swift-cedar", "lost-heron", "calm-otter"] {
+            state
+                .peer_stamp
+                .insert(nick(name), protocol::UnixSecs::now());
+            state.clock_evidence.step_back.insert(
+                nick(name),
+                StepBack {
+                    last: protocol::UnixSecs::now(),
+                    at: Instant::now(),
+                    count: 1,
+                },
+            );
+        }
+
+        tick_sweep(&mut state, &SilentSink);
+
+        for kept in ["swift-cedar", "lost-heron"] {
+            assert!(
+                state.peer_stamp.contains_key(kept)
+                    && state.clock_evidence.step_back.contains_key(kept),
+                "{kept} is a peer or a quiet peer and keeps its stamp records"
+            );
+        }
+        assert!(
+            !state.peer_stamp.contains_key("calm-otter"),
+            "a nickname that is neither a peer nor quiet drops its newest stamp"
+        );
+        assert!(
+            !state.clock_evidence.step_back.contains_key("calm-otter"),
+            "a nickname that is neither a peer nor quiet drops its step-back run"
         );
     }
 

@@ -801,6 +801,7 @@ fn sweep_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, sink: &dyn N
         sweep_interval(),
     );
     lifecycle::heartbeat::forgive_stall(state, mono_gap.max(wall_gap));
+    lifecycle::heartbeat::age_quiet_peers(state, wall_gap.saturating_sub(mono_gap));
     lifecycle::heartbeat::tick_sweep(state, sink);
 }
 
@@ -1984,6 +1985,126 @@ mod tests {
     use tokio::sync::oneshot;
 
     use n0_future::time;
+
+    use super::TickAnchors;
+    use crate::daemon::state::EventLoopState;
+    use crate::gossip::event::SilentSink;
+    use crate::protocol::Nickname;
+    use crate::testing::{fresh_state, nick};
+    use crate::util::clock::Instant;
+    use crate::util::tuning;
+
+    /// A state with one peer that was last heard `alive_timeout() + 10 s` ago: due for eviction.
+    fn state_with_a_silent_peer() -> EventLoopState {
+        let mut state = fresh_state();
+        state.peers.insert(nick("swift-cedar"));
+        state.surfaced.insert(nick("swift-cedar"));
+        let silent = Instant::now()
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
+            .expect("the monotonic clock has run past the alive timeout since boot");
+        state.last_seen.insert(nick("swift-cedar"), silent);
+        state
+    }
+
+    /// Control. A punctual sweep tick evicts the peer that is silent past the alive timeout.
+    #[test]
+    fn a_punctual_sweep_tick_evicts_a_silent_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = state_with_a_silent_peer();
+        let mut anchors = TickAnchors::now();
+
+        super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+
+        assert!(
+            state.quiet.contains("swift-cedar") && !state.peers.contains("swift-cedar"),
+            "a punctual tick must evict a silent peer"
+        );
+    }
+
+    /// A sweep tick that comes late on the monotonic clock (the process was starved) gives every
+    /// peer a new timeout: the silence is ours.
+    #[test]
+    fn a_sweep_tick_late_on_the_monotonic_clock_keeps_the_peer() {
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn("habilis_network::lifecycle", "maintenance timer stalled");
+        let mut state = state_with_a_silent_peer();
+        let mut anchors = TickAnchors::now();
+        anchors.sweep = Instant::now()
+            .checked_sub(tuning::alive_timeout() * 2)
+            .expect("the monotonic clock has run past two alive timeouts since boot");
+
+        super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+
+        assert!(
+            state.peers.contains("swift-cedar") && !state.quiet.contains("swift-cedar"),
+            "a stalled sweep evicted a peer whose silence is ours"
+        );
+    }
+
+    /// The monotonic clock stops during a suspend on some hosts, so the quiet TTL on that clock
+    /// would hold a quiet peer through a long sleep. The wall-clock time that the monotonic clock
+    /// missed counts toward the TTL: a peer quiet for 30 min that sleeps for 40 min is gone.
+    #[test]
+    fn a_suspend_ages_a_quiet_peer_toward_the_quiet_ttl() {
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn("habilis_network::lifecycle", "maintenance timer stalled");
+        let mut state = fresh_state();
+        let half_hour_ago = Instant::now()
+            .checked_sub(Duration::from_mins(30))
+            .expect("the monotonic clock has run past 30 min since boot");
+        for name in ["swift-cedar", "lost-heron"] {
+            state.quiet.insert(nick(name));
+            state.quiet_since.insert(nick(name), half_hour_ago);
+        }
+        let mut anchors = TickAnchors::now();
+        anchors.sweep_wall = anchors.sweep_wall - Duration::from_mins(40);
+
+        super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+
+        let kept: Vec<&Nickname> = state.quiet_since.keys().collect();
+        assert!(
+            state.quiet.is_empty() && kept.is_empty(),
+            "a quiet peer survived 70 min of real silence: {kept:?}"
+        );
+    }
+
+    /// Control: a punctual sweep leaves a quiet peer of 30 min where it is.
+    #[test]
+    fn a_punctual_sweep_keeps_a_quiet_peer_inside_the_quiet_ttl() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let half_hour_ago = Instant::now()
+            .checked_sub(Duration::from_mins(30))
+            .expect("the monotonic clock has run past 30 min since boot");
+        state.quiet.insert(nick("swift-cedar"));
+        state.quiet_since.insert(nick("swift-cedar"), half_hour_ago);
+        let mut anchors = TickAnchors::now();
+
+        super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+
+        assert!(
+            state.quiet.contains("swift-cedar"),
+            "a quiet peer of 30 min left the roster"
+        );
+    }
+
+    /// A sweep tick that comes late only on the wall clock (the process was suspended, and the
+    /// monotonic clock stopped with it) gives every peer a new timeout too.
+    #[test]
+    fn a_sweep_tick_late_on_the_wall_clock_keeps_the_peer() {
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn("habilis_network::lifecycle", "maintenance timer stalled");
+        let mut state = state_with_a_silent_peer();
+        let mut anchors = TickAnchors::now();
+        anchors.sweep_wall = anchors.sweep_wall - tuning::alive_timeout() * 2;
+
+        super::sweep_arm(&mut anchors, &mut state, &SilentSink);
+
+        assert!(
+            state.peers.contains("swift-cedar") && !state.quiet.contains("swift-cedar"),
+            "a suspended sweep evicted a peer whose silence is ours"
+        );
+    }
     /// The wake for the close of a shed beacon: pending with no shed, ready when the close reports,
     /// ready when the close task is lost.
     async fn wakes_within_a_moment(closing: &mut Option<oneshot::Receiver<()>>) -> bool {

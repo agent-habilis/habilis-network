@@ -4,7 +4,7 @@
 //! transport, presentation, or surfacing concern. See the Concept
 //! Glossary in AGENTS.md for the layer split.
 
-use crate::daemon::state::{EventLoopState, StepBack};
+use crate::daemon::state::{EventLoopState, PreJoinFrame, StepBack};
 use crate::lifecycle::heartbeat;
 use crate::protocol::{MessageKind, Nickname, PresenceSubtype, UnixSecs, Verified};
 use crate::util::clock::Instant;
@@ -110,7 +110,7 @@ const STEP_BACK_FRAMES: u8 = 3;
 /// one that counted, on our clock. A live peer sends a frame every alive interval, so half of it
 /// is met in a second or two; a relay that answers an anti-entropy digest sends its frames in one
 /// burst, so only the first counts.
-fn step_back_spacing() -> Duration {
+pub(crate) fn step_back_spacing() -> Duration {
     ALIVE_INTERVAL / 2
 }
 
@@ -130,8 +130,8 @@ fn step_back_window() -> Duration {
 /// the next check lets the peer return. Returns whether the run is complete.
 fn note_step_back(author: &Nickname, timestamp: UnixSecs, state: &mut EventLoopState) -> bool {
     let now = Instant::now();
-    let Some(run) = state.step_back.get_mut(author) else {
-        state.step_back.insert(
+    let Some(run) = state.clock_evidence.step_back.get_mut(author) else {
+        state.clock_evidence.step_back.insert(
             author.clone(),
             StepBack {
                 last: timestamp,
@@ -158,7 +158,7 @@ fn note_step_back(author: &Nickname, timestamp: UnixSecs, state: &mut EventLoopS
         run.count += 1;
     }
     if run.count >= STEP_BACK_FRAMES {
-        state.step_back.remove(author);
+        state.clock_evidence.step_back.remove(author);
         return true;
     }
     false
@@ -238,7 +238,59 @@ pub(crate) fn compute_for(message: &Verified, state: &EventLoopState) -> Members
             stale: true,
         };
     }
+    if is_replay_after_goodbye(message, state) {
+        return MembershipUpdate {
+            returned: false,
+            joined_new: false,
+            stale: true,
+        };
+    }
     compute(&message.kind, &message.author, message.timestamp, state)
+}
+
+/// Whether `message` is a frame of an older run of a nickname that said goodbye and is gone: it
+/// is stamped before that goodbye, and nobody holds the nickname now. A frame of a killed run
+/// that a relay still holds is not an arrival. A new run stamps its frames at or after the goodbye
+/// of the old one.
+fn is_replay_after_goodbye(message: &Verified, state: &EventLoopState) -> bool {
+    let author = message.author.as_str();
+    let gone = !state.peers.contains(author) && !state.quiet.contains(author);
+    gone && state
+        .clock_evidence
+        .goodbye_stamp
+        .get(&message.author)
+        .is_some_and(|said| message.timestamp < *said)
+}
+
+/// Record a live frame that is stamped before our join, and say whether its sender is sending
+/// now. One such frame looks like backlog. The frame of the same key that comes
+/// [`step_back_spacing`] later on our clock, stamped that much later on the clock of the sender,
+/// does not: a backlog burst arrives in one moment, and the stamps of a replay do not follow our
+/// clock. The record holds the latest frame, so a replay with gaps shorter than the spacing never
+/// builds up.
+pub(crate) fn note_pre_join_live(message: &Verified, state: &mut EventLoopState) -> bool {
+    if message.timestamp >= state.joined_at
+        || !is_live_kind(&message.kind)
+        || !proves_presence(&message.kind, message.timestamp)
+    {
+        return false;
+    }
+    let now = Instant::now();
+    let latest = PreJoinFrame {
+        key: message.key(),
+        stamp: message.timestamp,
+        at: now,
+    };
+    let spacing = step_back_spacing();
+    state
+        .clock_evidence
+        .pre_join
+        .insert(message.author.clone(), latest)
+        .is_some_and(|before| {
+            before.key == latest.key
+                && now.duration_since(before.at) >= spacing
+                && latest.stamp >= before.stamp + spacing
+        })
 }
 
 /// [`compute_for`] for the receive path, which may also complete a step back (see
@@ -659,6 +711,7 @@ mod tests {
                     );
                     // The next frame comes one alive interval later on our clock.
                     let run = state
+                        .clock_evidence
                         .step_back
                         .get_mut(who.as_str())
                         .expect("the run is on record");
@@ -726,7 +779,7 @@ mod tests {
                 update.stale && !update.returned,
                 "replay {index} of a slow series returned the peer"
             );
-            if let Some(run) = state.step_back.get_mut(who.as_str()) {
+            if let Some(run) = state.clock_evidence.step_back.get_mut(who.as_str()) {
                 // The next replay comes 5 min later on our clock.
                 run.at = run
                     .at
@@ -753,7 +806,7 @@ mod tests {
                 update.stale && !update.returned,
                 "frame {index} of a key that said goodbye returned the peer"
             );
-            if let Some(run) = state.step_back.get_mut(who.as_str()) {
+            if let Some(run) = state.clock_evidence.step_back.get_mut(who.as_str()) {
                 run.at = back_20_secs(run.at);
             }
         }

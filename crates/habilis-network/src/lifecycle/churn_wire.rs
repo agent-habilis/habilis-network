@@ -153,6 +153,11 @@ fn wire_cost_of_one_minute_with_5_peers() {
             2,
             "the idle minute needs one keepalive per ALIVE_INTERVAL: {counter}"
         );
+        assert_eq!(
+            counter.frames(FrameClass::Data),
+            5,
+            "the 5 data frames of the workload were not all counted: {counter}"
+        );
         endpoint.close().await;
     });
 }

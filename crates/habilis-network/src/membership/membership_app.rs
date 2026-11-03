@@ -318,7 +318,8 @@ pub enum Inspect {
         /// Gets the text of the answer.
         reply: oneshot::Sender<String>,
     },
-    /// How many members there are.
+    /// How many peers other than this member are in the mesh now: the shown peers that are not
+    /// quiet.
     PeerCount {
         /// Gets the count.
         reply: oneshot::Sender<usize>,
@@ -908,10 +909,11 @@ impl MembershipApp {
                 false
             }
             Inspect::PeerCount { reply } => {
-                // `peers.len()`, not the snapshot's `count` — that one includes
-                // self, and a caller asking "is anyone else here?" wants zero
-                // when it is alone.
-                let _ = reply.send(state.roster_snapshot().peers.len());
+                // The peers other than self whose arrival was shown and that are not quiet: the
+                // count minus self. Not the rows of the snapshot (they hold the quiet peers too),
+                // and not the snapshot's `count` (it includes self). A caller asking "is anyone
+                // else here?" wants zero when it is alone, and a quiet peer is not here now.
+                let _ = reply.send(state.member_count() - 1);
                 false
             }
         }
@@ -1446,6 +1448,47 @@ fn route_diag(state: &EventLoopState) -> String {
         edges.join(" "),
         writers.join(" ")
     )
+}
+
+#[cfg(test)]
+mod peer_count_tests {
+    use super::{Inspect, MembershipApp};
+    use crate::daemon::state::EventLoopState;
+    use crate::testing::{fresh_state, nick};
+    use tokio::sync::oneshot;
+
+    /// How many peers the consumer reads for `Inspect::PeerCount`.
+    fn peer_count_of(state: &mut EventLoopState) -> usize {
+        let (reply, mut answer) = oneshot::channel();
+        MembershipApp::handle_inspect(Inspect::PeerCount { reply }, state);
+        answer.try_recv().expect("the handler answers at once")
+    }
+
+    /// `PeerCount` answers "how many other peers are in the mesh right now; 0 means alone". A
+    /// quiet peer is a row of the roster, but it is not in the mesh now: a lone member whose
+    /// only peer went quiet reads 0.
+    #[test]
+    fn the_peer_count_leaves_out_quiet_peers() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.peers.insert(nick("swift-cedar"));
+        state.surfaced.insert(nick("swift-cedar"));
+        state.quiet.insert(nick("lost-heron"));
+
+        assert_eq!(
+            peer_count_of(&mut state),
+            1,
+            "a quiet peer counts as a peer that is in the mesh"
+        );
+
+        state.peers.remove("swift-cedar");
+        state.quiet.insert(nick("swift-cedar"));
+        assert_eq!(
+            peer_count_of(&mut state),
+            0,
+            "a member whose peers are all quiet reads as not alone"
+        );
+    }
 }
 
 #[cfg(test)]
