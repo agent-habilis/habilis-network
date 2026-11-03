@@ -1453,7 +1453,6 @@ mod tests {
 
             let (bob_endpoint, _bob_sender) = loopback_node().await;
             let (net, mut state, frames) = holder(bob_endpoint.addr(), 3).await;
-            state.state_digest_serves.unicast.enabled = true;
             state.state_digest_serves.unicast.arrived_from = Some(bob_endpoint.id());
             let received = read_frames(bob_endpoint, 4);
             let asker = Identity::generate();
@@ -1502,7 +1501,6 @@ mod tests {
 
             let (bob_endpoint, _bob_sender) = loopback_node().await;
             let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
-            state.state_digest_serves.unicast.enabled = true;
             let members: Vec<_> = (0..30)
                 .map(|index| nick(&format!("member-{index}")))
                 .collect();
@@ -1553,7 +1551,6 @@ mod tests {
 
             let (bob_endpoint, _bob_sender) = loopback_node().await;
             let (net, mut state, _frames) = holder(bob_endpoint.addr(), 2).await;
-            state.state_digest_serves.unicast.enabled = true;
             state.linked_endpoints.insert(bob_endpoint.id());
             state.standing.insert(Standing::Meshed);
             state.message_log.push(directed_msg());
@@ -1602,7 +1599,6 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (bob_endpoint, _bob_sender) = loopback_node().await;
             let (net, mut state, _frames) = holder(bob_endpoint.addr(), 2).await;
-            state.state_digest_serves.unicast.enabled = true;
             state.standing.insert(Standing::Meshed);
             state.message_log.push(directed_msg());
 
@@ -1618,28 +1614,6 @@ mod tests {
         });
     }
 
-    /// With the form off the tick broadcasts, and a linked peer gets nothing by unicast.
-    #[test]
-    fn with_the_form_off_the_tick_broadcasts_and_sends_nothing_by_unicast() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let (bob_endpoint, _bob_sender) = loopback_node().await;
-            let (net, mut state, _frames) = holder(bob_endpoint.addr(), 2).await;
-            state.state_digest_serves.unicast.enabled = false;
-            state.linked_endpoints.insert(bob_endpoint.id());
-            state.standing.insert(Standing::Meshed);
-            state.message_log.push(directed_msg());
-
-            antientropy::tick_digests(&mut state, &net.context()).await;
-
-            assert!(state.idle.broadcasts >= 1, "the digests are broadcast");
-            let nothing =
-                tokio_time::timeout(std_Duration::from_millis(500), bob_endpoint.accept()).await;
-            assert!(nothing.is_err(), "bob got no connection for a unicast");
-            bob_endpoint.close().await;
-            net.endpoint.close().await;
-        });
-    }
-
     /// A chat ask whose answer was full (the log grew by the resend cap) is repeated to the same peer,
     /// and it is not repeated once its own cap is reached: the retry cannot loop.
     #[test]
@@ -1649,7 +1623,6 @@ mod tests {
 
             let (bob_endpoint, _bob_sender) = loopback_node().await;
             let (net, mut state, _frames) = holder(bob_endpoint.addr(), 1).await;
-            state.state_digest_serves.unicast.enabled = true;
             state.standing.insert(Standing::Meshed);
             state.message_log.push(directed_msg());
             let long_ago = clock::Instant::now()

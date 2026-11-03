@@ -259,8 +259,7 @@ fn handle_digest_at(message: &Verified, state: &mut EventLoopState, me: &Nicknam
     };
     // Only a few members answer one digest (see `answers_digest`). A digest that came to this node
     // alone, by unicast, is for it to answer.
-    let unicast = &state.state_digest_serves.unicast;
-    let asked_alone = unicast.enabled && unicast.arrived_from.is_some();
+    let asked_alone = state.state_digest_serves.unicast.arrived_from.is_some();
     let members = state.peers.iter().chain(iter::once(me));
     if !asked_alone && !answers_digest(me, &message.author, message.id.as_str(), members) {
         return;
@@ -549,9 +548,7 @@ fn heads_key_of(state: &EventLoopState, channel: Channel) -> u64 {
 /// peer refused us. Runs on a short timer; asks one peer that is still ahead
 /// and reachable now, once nothing was asked for a retry interval.
 pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
-    if state.state_digest_serves.unicast.enabled {
-        retry_chat_ask(state, context).await;
-    }
+    retry_chat_ask(state, context).await;
     for channel in [Channel::State, Channel::Meta] {
         let now = Instant::now();
         let ahead = state.fast_rounds.ahead(channel);
@@ -656,9 +653,8 @@ pub(crate) async fn handle_state_digest(
     let serve = |plane| (author, channel, plane);
     // The unicast form: a digest that came by gossip is answered by a few members, as a chat digest is,
     // and every answer goes to the connection that the asker's digest came on, or to its proven endpoint.
-    let unicast = &state.state_digest_serves.unicast;
-    let (enabled, arrived_from) = (unicast.enabled, unicast.arrived_from);
-    if enabled && arrived_from.is_none() {
+    let arrived_from = state.state_digest_serves.unicast.arrived_from;
+    if arrived_from.is_none() {
         let members = state.peers.iter().chain(iter::once(context.author));
         if !answers_digest(
             context.author,
@@ -670,7 +666,7 @@ pub(crate) async fn handle_state_digest(
         }
     }
     let target = transport::unicast_answer_target(&author, state)
-        .or_else(|| arrived_from.filter(|eid| enabled && transport::can_unicast(*eid, state)));
+        .or_else(|| arrived_from.filter(|eid| transport::can_unicast(*eid, state)));
     let plane = if target.is_some() {
         Plane::Unicast
     } else {
@@ -768,23 +764,21 @@ fn missing_frames(channel: Channel, digest: &Verified, state: &EventLoopState) -
 }
 
 /// Where an answer in the unicast form goes: the connection that the digest at hand came on, or the
-/// proven endpoint of its signer, where a unicast can start. `None` when the form is off, or when no
-/// such path exists: the answer then goes as it always did.
+/// proven endpoint of its signer, where a unicast can start. `None` when no such path exists: the
+/// answer then goes as it always did.
 fn unicast_reply_to(signer: &AuthorKey, state: &EventLoopState) -> Option<EndpointId> {
-    let unicast = &state.state_digest_serves.unicast;
-    if !unicast.enabled {
-        return None;
-    }
-    unicast
+    state
+        .state_digest_serves
+        .unicast
         .arrived_from
         .filter(|eid| transport::can_unicast(*eid, state))
         .or_else(|| transport::unicast_answer_target(signer, state))
 }
 
-/// The anti-entropy tick: the chat digest and both channel digests. In the unicast form they go to one
+/// The anti-entropy tick: the chat digest and both channel digests. They go to one
 /// random linked peer; with no such peer, or when the send cannot start, they are broadcast as before.
 pub(crate) async fn tick_digests(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
-    if state.state_digest_serves.unicast.enabled && digests_to_one_peer(state, context).await {
+    if digests_to_one_peer(state, context).await {
         return;
     }
     broadcast_digest(state, context.sender, context.mesh, context.author).await;
@@ -1410,7 +1404,6 @@ mod budget_tests {
 mod tests {
     use crate::daemon::state::{RendezvousFlag, Standing};
     use std::collections::HashSet;
-    use std::hint::black_box;
     use std::time::Duration;
 
     use super::{
@@ -1691,16 +1684,6 @@ mod tests {
         .expect("a digest serializes")
     }
 
-    /// The unicast form is on by default: the const says so, and the switch of a fresh state follows it.
-    #[test]
-    fn the_unicast_form_is_on_by_default() {
-        assert!(black_box(tuning::UNICAST_DIGESTS), "the const is on");
-        assert!(
-            fresh_state().state_digest_serves.unicast.enabled,
-            "a fresh state has the unicast form on"
-        );
-    }
-
     /// A state with a log of `count` messages, a peer `asker` known by its key and proven at
     /// `asker_endpoint`, linked, and a drained outbox.
     fn holder_for_unicast(
@@ -1709,7 +1692,6 @@ mod tests {
         asker_endpoint: iroh::EndpointId,
     ) -> (EventLoopState, mpsc::Receiver<Resend>) {
         let mut state = fresh_state();
-        state.state_digest_serves.unicast.enabled = true;
         state.relay_transport = transport::PayloadPath::RelayAllowed;
         state.peers.insert(nick("asker"));
         for index in 0..count {
@@ -1761,31 +1743,6 @@ mod tests {
             let (_parsed, nonce) = Message::parse_wire(frame.as_bytes()).expect("a frame parses");
             assert_eq!(nonce, None, "the frame goes as it was signed");
         }
-    }
-
-    /// The same digest with the form off is answered as always: a broadcast with a nonce.
-    #[test]
-    fn with_the_unicast_form_off_a_chat_digest_is_answered_by_broadcast() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let asker_identity = Identity::generate();
-        let asker_endpoint = endpoint_id(7);
-        let (mut state, mut resends) = holder_for_unicast(3, &asker_identity, asker_endpoint);
-        state.state_digest_serves.unicast.enabled = false;
-        state.state_digest_serves.unicast.arrived_from = Some(asker_endpoint);
-        let digest =
-            Message::new_digest(&MeshId::from("test"), &nick("asker"), empty_digest_body())
-                .sign(&asker_identity);
-
-        super::handle_digest(&digest, &mut state, &nick("holder"));
-
-        let answers = drained(&mut resends);
-        assert_eq!(answers.len(), 3, "3 frames are resent");
-        assert!(
-            answers
-                .iter()
-                .all(|answer| matches!(answer, Resend::Broadcast(_))),
-            "{answers:?}"
-        );
     }
 
     /// The rule that a few members answer one digest (`answers_digest`) is for a digest that all of

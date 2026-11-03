@@ -1,9 +1,7 @@
-//! A member that missed traffic catches up by anti-entropy, with the unicast form of the digests
-//! on and off.
+//! A member that missed traffic catches up by anti-entropy, with the unicast form of the digests.
 //!
 //! Three nodes on a loopback mesh. One node is frozen, its event loop blocked, while the others
-//! send chat and state changes, and one sender leaves before the frozen node wakes. Each test runs
-//! in both forms: the repair must not depend on the form.
+//! send chat and state changes, and one sender leaves before the frozen node wakes.
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
@@ -41,7 +39,6 @@ enum Request {
     Merge(serde_json::Value, oneshot::Sender<()>),
     Read(oneshot::Sender<serde_json::Value>),
     Freeze(Duration, oneshot::Sender<()>),
-    Unicast(oneshot::Sender<()>),
 }
 
 // Shared: the node owns the app, so the test reads the frames through this handle.
@@ -122,11 +119,6 @@ impl NodeDriver for Chat {
                 thread::sleep(span);
                 false
             }
-            Request::Unicast(done) => {
-                state.set_unicast_digests(true);
-                let _ = done.send(());
-                false
-            }
         }
     }
 }
@@ -135,7 +127,7 @@ fn nick(name: &str) -> Nickname {
     Nickname::try_new(name).expect("valid nickname")
 }
 
-async fn spawn(topic: &str, name: &str, unicast: bool) -> (Node<Chat>, Read) {
+async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Read) {
     // The same handle goes to the app and comes back to the caller.
     let read = Arc::new(Mutex::new(Vec::new()));
     let mesh =
@@ -157,9 +149,6 @@ async fn spawn(topic: &str, name: &str, unicast: bool) -> (Node<Chat>, Read) {
         None,
         SignalHandling::Leave,
     );
-    if unicast {
-        ask(&node, Request::Unicast).await;
-    }
     (node, read)
 }
 
@@ -208,13 +197,10 @@ async fn waits(deadline: Duration, mut done: impl AsyncFnMut() -> bool) -> bool 
 }
 
 /// Three members, all meshed: the first chat of alice reaches bob and carol.
-async fn trio(
-    topic: &str,
-    unicast: bool,
-) -> ((Node<Chat>, Read), (Node<Chat>, Read), (Node<Chat>, Read)) {
-    let alice = spawn(topic, "alice", unicast).await;
-    let bob = spawn(topic, "bob", unicast).await;
-    let carol = spawn(topic, "carol", unicast).await;
+async fn trio(topic: &str) -> ((Node<Chat>, Read), (Node<Chat>, Read), (Node<Chat>, Read)) {
+    let alice = spawn(topic, "alice").await;
+    let bob = spawn(topic, "bob").await;
+    let carol = spawn(topic, "carol").await;
     let meeting = Instant::now();
     while !(has_read(&bob.1, "hello") && has_read(&carol.1, "hello")) {
         assert!(meeting.elapsed() < MEETING, "the trio never meshed");
@@ -224,7 +210,8 @@ async fn trio(
     (alice, bob, carol)
 }
 
-fn frozen_member_catches_up(unicast: bool) {
+#[test]
+fn a_member_frozen_75_s_catches_up_chat_and_state_by_unicast_digests() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
     // The freeze is the subject: the stalled maintenance timers are what a frozen process logs.
     guard.expect_warn("habilis_network::lifecycle", "maintenance timer stalled");
@@ -238,8 +225,8 @@ fn frozen_member_catches_up(unicast: bool) {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _one_at_a_time = serial().lock().await;
         let nonce: u64 = rand::random();
-        let topic = format!("unicast-frozen-{nonce}-{unicast}");
-        let (alice, bob, carol) = trio(&topic, unicast).await;
+        let topic = format!("unicast-frozen-{nonce}");
+        let (alice, bob, carol) = trio(&topic).await;
 
         ask(&carol.0, |done| Request::Freeze(FROZEN, done)).await;
         for index in 0..5 {
@@ -263,15 +250,16 @@ fn frozen_member_catches_up(unicast: bool) {
     });
 }
 
-fn sender_that_left_is_repaired_by_the_others(unicast: bool) {
+#[test]
+fn a_sender_that_left_is_repaired_by_the_others_by_unicast_digests() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
     // The freeze is the subject: the stalled maintenance timers are what a frozen process logs.
     guard.expect_warn("habilis_network::lifecycle", "maintenance timer stalled");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _one_at_a_time = serial().lock().await;
         let nonce: u64 = rand::random();
-        let topic = format!("unicast-left-{nonce}-{unicast}");
-        let (alice, bob, carol) = trio(&topic, unicast).await;
+        let topic = format!("unicast-left-{nonce}");
+        let (alice, bob, carol) = trio(&topic).await;
 
         ask(&carol.0, |done| {
             Request::Freeze(Duration::from_secs(20), done)
@@ -296,24 +284,4 @@ fn sender_that_left_is_repaired_by_the_others(unicast: bool) {
         bob.0.leave().await.expect("bob leaves");
         carol.0.leave().await.expect("carol leaves");
     });
-}
-
-#[test]
-fn a_member_frozen_75_s_catches_up_chat_and_state() {
-    frozen_member_catches_up(false);
-}
-
-#[test]
-fn a_member_frozen_75_s_catches_up_chat_and_state_by_unicast_digests() {
-    frozen_member_catches_up(true);
-}
-
-#[test]
-fn a_sender_that_left_is_repaired_by_the_others() {
-    sender_that_left_is_repaired_by_the_others(false);
-}
-
-#[test]
-fn a_sender_that_left_is_repaired_by_the_others_by_unicast_digests() {
-    sender_that_left_is_repaired_by_the_others(true);
 }
