@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::time::Duration;
 
 use crate::protocol::{AuthorKey, Channel, Nickname};
 use crate::util::clock::Instant;
@@ -25,10 +24,6 @@ pub(super) struct Waiting {
     pub(super) author: Nickname,
     pub(super) heads: Vec<String>,
     pub(super) noted: Instant,
-    /// The retries in a row that found our heads unmoved.
-    pub(super) stalls: u32,
-    /// Not before this: the retry of this peer waits out its backoff.
-    pub(super) not_before: Option<Instant>,
 }
 
 /// This node's fast rounds: when a linked neighbor's digest shows heads we do
@@ -48,18 +43,9 @@ pub(crate) struct FastRounds {
     pub(super) ahead: HashMap<Channel, Vec<Waiting>>,
     /// When a change last landed per channel: an answer's frames still arrive.
     pub(super) last_change: HashMap<Channel, Instant>,
-    /// The longest backoff of a stalled retry (see `FAST_ROUND_STALL_BACKOFF_CAP`). Zero is off.
-    pub(super) stall_cap: Duration,
 }
 
 impl FastRounds {
-    pub(crate) fn new(stall_cap: Duration) -> Self {
-        Self {
-            stall_cap,
-            ..Self::default()
-        }
-    }
-
     /// The peer of the running round may be asked at once once a full answer
     /// landed since the last ask: the heads that close an answer are the cue
     /// to go on. New heads alone are not, because two answers can be in
@@ -157,17 +143,9 @@ impl FastRounds {
             author,
             heads,
             noted: now,
-            stalls: 0,
-            not_before: None,
         };
         if let Some(known) = ahead.iter_mut().find(|known| known.key == peer.key) {
-            // The same heads again are the same stall: a peer that is stuck says so at every
-            // digest. Other heads are news, so the backoff starts again.
-            if known.heads == peer.heads {
-                known.noted = now;
-            } else {
-                *known = peer;
-            }
+            *known = peer;
         } else if ahead.len() < FAST_ROUND_AHEAD_MAX {
             ahead.push(peer);
         }
@@ -212,10 +190,7 @@ impl FastRounds {
         if waiting {
             return None;
         }
-        let candidates: Vec<&Waiting> = ahead
-            .iter()
-            .filter(|peer| reachable(&peer.key) && peer.not_before.is_none_or(|until| now >= until))
-            .collect();
+        let candidates: Vec<&Waiting> = ahead.iter().filter(|peer| reachable(&peer.key)).collect();
         let round_index =
             round.and_then(|round| candidates.iter().position(|peer| peer.key == round.peer));
         let progress = round.is_none_or(|round| round.heads != ours);
@@ -225,38 +200,7 @@ impl FastRounds {
             Some(index) => candidates.get((index + 1) % candidate_count),
             None => candidates.first(),
         };
-        let picked = pick.map(|peer| (peer.key, peer.author.clone()));
-        if !self.stall_cap.is_zero() {
-            self.back_off(channel, picked.as_ref().map(|(key, _)| key), progress, now);
-        }
-        picked
-    }
-
-    /// A pick after progress starts every peer of the channel afresh. A pick without it is a stall
-    /// of that peer: its next retry waits twice as long, up to the cap.
-    fn back_off(
-        &mut self,
-        channel: Channel,
-        picked: Option<&AuthorKey>,
-        progress: bool,
-        now: Instant,
-    ) {
-        let Some(ahead) = self.ahead.get_mut(&channel) else {
-            return;
-        };
-        if progress {
-            for peer in ahead.iter_mut() {
-                peer.stalls = 0;
-                peer.not_before = None;
-            }
-            return;
-        }
-        let Some(peer) = ahead.iter_mut().find(|peer| Some(&peer.key) == picked) else {
-            return;
-        };
-        peer.stalls = peer.stalls.saturating_add(1);
-        let wait = FAST_ROUND_RETRY.saturating_mul(2_u32.saturating_pow(peer.stalls));
-        peer.not_before = Some(now + wait.min(self.stall_cap));
+        pick.map(|peer| (peer.key, peer.author.clone()))
     }
 
     /// Whether a direct round runs for `channel`: we asked a peer within

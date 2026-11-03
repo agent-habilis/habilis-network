@@ -879,8 +879,7 @@ mod budget_tests {
     use crate::testing::{author_of, nick};
     use crate::util::clock::Instant;
     use crate::util::tuning::{
-        ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE, FAST_ROUND_RETRY,
-        FAST_ROUND_STALL_BACKOFF_CAP, antientropy_max_resend,
+        ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE, FAST_ROUND_RETRY, antientropy_max_resend,
     };
 
     use crate::{protocol, testing, transport};
@@ -1125,134 +1124,6 @@ mod budget_tests {
             heads_key_of(&state, Channel::State),
             heads_key(&digest),
             "our heads key matches the key of our digest"
-        );
-    }
-
-    /// Picks of the retry over 60 s, at 100 ms steps, with one peer that is ahead and an answer that
-    /// never moves our heads (`progress` false) or always does (`progress` true).
-    fn retry_picks(stall_cap: Duration, progress: bool) -> Vec<Duration> {
-        let t0 = Instant::now();
-        let state = Channel::State;
-        let mut rounds = FastRounds::new(stall_cap);
-        rounds.note_ahead(
-            state,
-            author_of("alice"),
-            nick("alice"),
-            vec!["a".to_owned()],
-            t0,
-        );
-        let mut ours = 1;
-        let mut picks = Vec::new();
-        for step in 0..=600 {
-            let at = t0 + Duration::from_millis(100 * step);
-            // The digest of the peer comes again, with the same heads, as it does every 10 s.
-            if step % 100 == 0 {
-                rounds.note_ahead(
-                    state,
-                    author_of("alice"),
-                    nick("alice"),
-                    vec!["a".to_owned()],
-                    at,
-                );
-            }
-            if rounds
-                .retry_target(state, at, ours, |_| false, |_| true)
-                .is_some()
-            {
-                picks.push(at - t0);
-                rounds.note_asked(author_of("alice"), state, ours, 0, at);
-                if progress {
-                    ours += 1;
-                }
-            }
-        }
-        picks
-    }
-
-    /// A peer that advertises heads we can never hold, and answers that move nothing, was asked
-    /// 2.5 times per second for ever.
-    #[test]
-    fn a_stalled_retry_waits_longer_each_time_up_to_the_cap() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let seconds: Vec<f64> = retry_picks(Duration::from_secs(16), false)
-            .iter()
-            .map(Duration::as_secs_f64)
-            .collect();
-        assert_eq!(
-            seconds,
-            [0.0, 0.4, 1.2, 2.8, 6.0, 12.4, 25.2, 41.2, 57.2],
-            "9 asks in 60 s, the waits 0.4 s doubled up to 16 s"
-        );
-    }
-
-    /// Control: answers that move our heads keep the retry at its own pace.
-    #[test]
-    fn a_retry_that_brings_progress_is_not_backed_off() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let picks = retry_picks(Duration::from_secs(16), true);
-        assert_eq!(picks.len(), 151, "one ask each 400 ms for 60 s");
-    }
-
-    /// A daemon runs with the cap that the const gives, so a stalled retry costs 9 asks in 60 s.
-    #[test]
-    fn the_const_backs_off_a_stalled_retry() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let picks = retry_picks(FAST_ROUND_STALL_BACKOFF_CAP, false);
-        assert_eq!(picks.len(), 9, "9 asks in 60 s, not 151");
-    }
-
-    /// With the cap off, zero keeps the timing of before.
-    #[test]
-    fn with_the_cap_off_a_stalled_retry_keeps_its_pace() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let picks = retry_picks(Duration::ZERO, false);
-        assert_eq!(picks.len(), 151, "one ask each 400 ms for 60 s");
-        assert_eq!(picks, retry_picks(Duration::ZERO, true), "as with progress");
-    }
-
-    /// Other heads from the peer are news: the backoff starts again.
-    #[test]
-    fn fresh_heads_from_the_peer_end_the_backoff() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let t0 = Instant::now();
-        let state = Channel::State;
-        let ms = Duration::from_millis;
-        let mut rounds = FastRounds::new(Duration::from_secs(16));
-        let note = |fast: &mut FastRounds, head: &str, at| {
-            fast.note_ahead(
-                state,
-                author_of("alice"),
-                nick("alice"),
-                vec![head.to_owned()],
-                at,
-            );
-        };
-        let retry =
-            |fast: &mut FastRounds, at| fast.retry_target(state, at, 1, |_| false, |_| true);
-        note(&mut rounds, "a", t0);
-        assert!(
-            retry(&mut rounds, t0).is_some(),
-            "the first retry is due once a head is known"
-        );
-        rounds.note_asked(author_of("alice"), state, 1, 0, t0);
-        assert!(
-            retry(&mut rounds, t0 + ms(400)).is_some(),
-            "the first stall"
-        );
-        rounds.note_asked(author_of("alice"), state, 1, 0, t0 + ms(400));
-        assert!(
-            retry(&mut rounds, t0 + ms(900)).is_none(),
-            "backing off for 800 ms"
-        );
-        note(&mut rounds, "a", t0 + ms(900));
-        assert!(
-            retry(&mut rounds, t0 + ms(950)).is_none(),
-            "the same heads again are the same stall"
-        );
-        note(&mut rounds, "b", t0 + ms(950));
-        assert!(
-            retry(&mut rounds, t0 + ms(1_000)).is_some(),
-            "other heads are news: asked at once"
         );
     }
 
