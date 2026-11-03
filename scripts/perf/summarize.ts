@@ -18,8 +18,8 @@
 //   deltas of every census line, which is the total over the run.
 // - census_lines: the census lines of all nodes. Divide a total below by it for a mean per node
 //   and interval (10 s).
-// - cpu_user_ms / cpu_sys_ms / wakeups / dup / fresh / fr_asks / fr_retries / answers /
-//   frames_uni / frames_bc / rejected: the sums of the `cpu_user_ms`, `cpu_sys_ms`, `idle_wakeups`,
+// - cpu_ms / wakeups / dup / fresh / fr_asks / fr_retries / answers /
+//   frames_uni / frames_bc / rejected: the sums of the `cpu_ms`, `idle_wakeups`,
 //   `idle_duplicates`, `idle_fresh`, `idle_fr_asks`, `idle_fr_retries`, `idle_state_answers`,
 //   `idle_state_frames_unicast`, `idle_state_frames_broadcast` and `idle_state_rejected` deltas of
 //   every census line.
@@ -63,7 +63,6 @@
 // - ext_<arm>: the sums of the `idle_ext_<arm>` deltas, the wakes of each arm that is not a timer.
 //   Only the arms that woke.
 // - ahead_max: the largest `idle_ahead_peers` gauge of any census line.
-// - node_load_max: the largest `load_1m` that a node logged.
 // - mem_med / mem_max: peak resident memory of the nodes, in MB.
 // - load1 median and max, from host.log; canary pauses of the host over 0.5 s.
 
@@ -81,8 +80,7 @@ const sum = (values: number[]): number => values.reduce((a, b) => a + b, 0);
 // The census fields that are per-interval deltas, summed over a run: the summary name, then the
 // census field.
 const TOTALS: [string, string][] = [
-  ["cpu_user_ms", "cpu_user_ms"],
-  ["cpu_sys_ms", "cpu_sys_ms"],
+  ["cpu_ms", "cpu_ms"],
   ["wakeups", "idle_wakeups"],
   ["dup", "idle_duplicates"],
   ["fresh", "idle_fresh"],
@@ -190,7 +188,6 @@ function summarize(run: string): string {
     gmCountIn: new Map<string, number>(),
   };
   const ahead: number[] = [];
-  const nodeLoads: number[] = [];
   for (const file of readdirSync(run).filter((f) => /^n.*\.err$/.test(f))) {
     const text = clean(readFileSync(`${run}/${file}`, "utf8"));
     stalls.push(...numbers(text, /timer stalled[^\n]*?mono_gap_ms=(\d+)/));
@@ -220,7 +217,6 @@ function summarize(run: string): string {
     addPairs(text, "idle_gm_nout", kinds.gmCountOut);
     addPairs(text, "idle_gm_nin", kinds.gmCountIn);
     ahead.push(...numbers(text, /\bidle_ahead_peers=(\d+)/));
-    nodeLoads.push(...numbers(text, /\bload_1m=([0-9.]+)/));
   }
 
   const loads: number[] = [];
@@ -309,8 +305,8 @@ function summarize(run: string): string {
     `| up=${up} down=${down} | drop_nodes=${drops.size} worst_drop=${maxOf([...drops.values()])} ` +
     `| disc_nodes=${discs.size} worst_disc=${maxOf([...discs.values()])} ` +
     `| resent=${resent} resend_dropped=${resendDropped} ` +
-    `| census_lines=${censusLines} ${totalsText} ahead_max=${maxOf(ahead)} ` +
-    `node_load_max=${show({ value: maxOf(nodeLoads), float: true })} | ${wireText} | ${gossipText} | ${ratioText} | ${extText} ` +
+    `| census_lines=${censusLines} ${totalsText} ahead_max=${maxOf(ahead)} | ` +
+    `${wireText} | ${gossipText} | ${ratioText} | ${extText} ` +
     `| mem_med=${memMed} mem_max=${memMax} ` +
     `| load1 median=${loadMed} max=${loadMax} ` +
     `| canary_pauses=${gaps.length}`

@@ -17,7 +17,6 @@ use super::state::{
 };
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::util::clock::{Instant, millis_saturating};
-use crate::util::process_usage::load_average_1m;
 use crate::util::{resident_memory, tuning, unix_secs};
 
 use crate::gossip::PathSummary;
@@ -176,9 +175,8 @@ pub(crate) async fn tick_state_refresh(
         // Off the loop: their own tasks, so they are not in `idle_wakeups`.
         idle_ppid = reading.ppid,
         idle_sampler = reading.sampler,
-        // Process CPU time of the interval, from `getrusage`; 0 where it is unreadable.
-        cpu_user_ms = millis_saturating(cpu.user),
-        cpu_sys_ms = millis_saturating(cpu.system),
+        // Process CPU time of the interval, user and system together; 0 where it is unreadable.
+        cpu_ms = millis_saturating(cpu),
         idle_duplicates = idle.duplicates,
         idle_fresh = idle.fresh,
         idle_fr_asks = idle.fr_asks,
@@ -190,8 +188,6 @@ pub(crate) async fn tick_state_refresh(
         // A gauge, not a delta: the peers that a fast round still counts as ahead of us.
         idle_ahead_peers = state.fast_rounds.ahead_count(),
         idle_resent_top = %top_requesters(&idle.resent_by),
-        // The 1-minute load average of the host: a reading taken under load is void.
-        load_1m = load_average_1m().unwrap_or(0.0),
         idle_broadcasts = idle.broadcasts,
         idle_resent = idle.resent,
         idle_resend_dropped = idle.resend_dropped,

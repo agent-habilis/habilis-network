@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::mem;
+use std::time::Duration;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use iroh_gossip::api::{ApiError, Event};
@@ -12,7 +13,7 @@ use super::gossip_msgs::GossipMsgs;
 use super::socket_bytes::{GossipPathBytes, SocketBytes};
 use super::wire_tally::{WireIn, WireOut, WireOutTally};
 use crate::protocol::Nickname;
-use crate::util::process_usage::{CpuTimes, cpu_times};
+use crate::util::process_usage::cpu_time;
 
 /// The most requesters that `resent_by` names in one interval. The census line names 3, so 32 is
 /// ample, and a map of 32 nicknames stays small. A requester past it is refused.
@@ -94,7 +95,7 @@ pub(crate) struct IdleCounters {
     /// counted here. `take` empties the map each interval; the total of resends is `resent`.
     pub resent_by: HashMap<Nickname, u64>,
     /// The process CPU time at the last census. It is not reset by `take`.
-    cpu_mark: CpuTimes,
+    cpu_mark: Duration,
     /// The readings of the socket, the gossip transport and the gossip actor at the last census.
     /// They belong to this loop, whose endpoint they read, so two loops in one process do not
     /// take each other's bytes. `take` keeps them.
@@ -176,8 +177,8 @@ pub(crate) struct IdleReading {
     pub sampler: u64,
     /// The frames sent in the interval. They are kept off the loop, where the send paths run.
     pub wire_out: WireOut,
-    /// `None` where the platform gives no `getrusage`.
-    pub cpu: Option<CpuTimes>,
+    /// `None` where the platform gives no process CPU clock.
+    pub cpu: Option<Duration>,
 }
 
 impl IdleCounters {
@@ -185,7 +186,7 @@ impl IdleCounters {
     /// interval's own work rather than a running total a reader has to
     /// difference (and that a rotated log would corrupt).
     pub(crate) fn take(&mut self) -> IdleReading {
-        let cpu_now = cpu_times();
+        let cpu_now = cpu_time();
         let mark = self.cpu_mark;
         let mut loop_arms = mem::take(self);
         self.cpu_mark = cpu_now.unwrap_or(mark);
@@ -199,7 +200,7 @@ impl IdleCounters {
             ppid: PPID_WAKES.swap(0, Ordering::Relaxed),
             sampler: SAMPLER_WAKES.swap(0, Ordering::Relaxed),
             wire_out,
-            cpu: cpu_now.map(|now| now.since(mark)),
+            cpu: cpu_now.map(|now| now.saturating_sub(mark)),
         }
     }
 
@@ -396,20 +397,19 @@ mod tests {
     fn take_reports_the_cpu_time_of_the_interval() {
         let _drain = TAKES.lock().unwrap_or_else(PoisonError::into_inner);
         let mut counters = IdleCounters::default();
-        let first = counters.take().cpu.expect("getrusage works on a unix host");
-        // A busy loop of 50 ms, so the next interval holds user time.
+        let first = counters.take().cpu.expect("the CPU clock works on a unix host");
+        // A busy loop of 50 ms, so the next interval holds CPU time.
         let start = Instant::now();
         let mut spin = 0_u64;
         while start.elapsed() < Duration::from_millis(50) {
             spin = black_box(spin.wrapping_add(1));
         }
-        let second = counters.take().cpu.expect("getrusage works on a unix host");
+        let second = counters.take().cpu.expect("the CPU clock works on a unix host");
         assert!(
-            second.user >= Duration::from_millis(20),
+            second >= Duration::from_millis(20),
             "the interval holds the busy loop: {second:?}"
         );
         // Deltas add up to the last mark; totals would count the first interval twice.
-        assert_eq!(first.user + second.user, counters.cpu_mark.user);
-        assert_eq!(first.system + second.system, counters.cpu_mark.system);
+        assert_eq!(first + second, counters.cpu_mark);
     }
 }
