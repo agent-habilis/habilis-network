@@ -38,8 +38,9 @@ use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
-    KNOWN_ENDPOINTS_CAP, LANE_WANTED, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP,
-    RECLAIM_WINDOW, REGRAFT_AFTER, RELINK_COOLDOWN, SEEN_IDS_CAP, STARVED,
+    FAST_ROUND_STALL_BACKOFF_CAP, KNOWN_ENDPOINTS_CAP, LANE_WANTED, MESSAGE_LOG_SIZE,
+    PENDING_OUTBOUND_CAP, QUIET_CAP, RECLAIM_WINDOW, REGRAFT_AFTER, RELINK_COOLDOWN, SEEN_IDS_CAP,
+    STARVED,
 };
 
 use crate::gossip::{antientropy, lan};
@@ -576,7 +577,7 @@ impl EventLoopState {
             test_drops_fired: 0,
             resend_receiver: Some(resend_receiver),
             state_digest_serves: antientropy::ServeBudget::default(),
-            fast_rounds: antientropy::FastRounds::default(),
+            fast_rounds: antientropy::FastRounds::new(FAST_ROUND_STALL_BACKOFF_CAP),
             peers: HashSet::new(),
             last_seen: HashMap::new(),
             peer_endpoints: HashMap::new(),
@@ -1842,6 +1843,13 @@ impl EventLoopState {
         if let Some(endpoint) = self.peer_endpoints.get(peer).map(|address| address.id) {
             self.proven_endpoints.forget_endpoint(endpoint);
         }
+    }
+
+    /// Tests only: switch the unicast form of the anti-entropy digests, which the const
+    /// `UNICAST_DIGESTS` sets for a real run.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub fn set_unicast_digests(&mut self, enabled: bool) {
+        self.state_digest_serves.unicast.enabled = enabled;
     }
 
     /// Frames queued for send while the topic was closed.
