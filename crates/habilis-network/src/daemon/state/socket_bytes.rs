@@ -153,8 +153,8 @@ pub(crate) struct GossipPathBytes {
     pub(crate) dropped: u64,
 }
 
-impl GossipPathBytes {
-    pub(crate) fn from_stats(stats: Stats) -> Self {
+impl From<Stats> for GossipPathBytes {
+    fn from(stats: Stats) -> Self {
         let dropped = [
             stats.queue_full,
             stats.dropped_no_sink,
@@ -176,7 +176,9 @@ impl GossipPathBytes {
                 .fold(0, |sum, count| sum.saturating_add(*count)),
         }
     }
+}
 
+impl GossipPathBytes {
     /// The counts since `earlier`, field by field. Zero, not a wrap, if a field went back.
     pub(crate) fn since(self, earlier: Self) -> Self {
         Self {
@@ -200,7 +202,7 @@ pub(crate) fn gossip_path_delta(
     let Some(handle) = handle else {
         return GossipPathBytes::default();
     };
-    let now = GossipPathBytes::from_stats(handle.stats());
+    let now = GossipPathBytes::from(handle.stats());
     now.since(mem::replace(mark, now))
 }
 
@@ -268,7 +270,7 @@ mod tests {
         stats.queue_full = 1;
         stats.dropped_budget = 2;
         stats.dropped_empty = 3;
-        let reading = GossipPathBytes::from_stats(stats);
+        let reading = GossipPathBytes::from(stats);
         assert_eq!(reading.dropped, 6, "every kind of drop is in the sum");
         assert_eq!(
             reading.bytes_in, 9_000,
@@ -277,7 +279,7 @@ mod tests {
 
         stats.frames_out = 7;
         stats.bytes_out = 5_500;
-        let later = GossipPathBytes::from_stats(stats).since(reading);
+        let later = GossipPathBytes::from(stats).since(reading);
         assert_eq!(
             (later.frames_out, later.bytes_out),
             (3, 1_500),

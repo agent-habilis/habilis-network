@@ -8,7 +8,7 @@ mod mesh_secrets;
 mod ping_round;
 mod socket_bytes;
 mod state_init;
-mod wire_tally;
+mod wire_out_tally;
 
 mod beacon_note;
 mod direct_counts;
@@ -47,8 +47,8 @@ pub(crate) use ping_round::PingRound;
 pub(crate) use socket_bytes::{GossipPathBytes, SocketBytes, gossip_path_delta, socket_delta};
 pub(crate) use state_init::StateInit;
 #[cfg(test)]
-pub(crate) use wire_tally::app_frame_with_tag;
-pub(crate) use wire_tally::{FrameShape, WireOut, WireOutTally, by_class};
+pub(crate) use wire_out_tally::app_frame_with_tag;
+pub(crate) use wire_out_tally::{FrameShape, WireOut, WireOutTally, by_class};
 
 pub(crate) use beacon_note::BeaconNote;
 pub(crate) use direct_counts::DirectCounts;

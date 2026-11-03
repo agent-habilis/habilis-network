@@ -338,7 +338,7 @@ fn resend_one(message: &Verified, state: &mut EventLoopState) -> bool {
     resend_one_to(message, state, None)
 }
 
-/// [`resend_one`], with the asker that the unicast form answers to.
+/// What the test helper `resend_one` does, with the asker that the unicast form answers to.
 fn resend_one_to(
     message: &Verified,
     state: &mut EventLoopState,
@@ -1226,7 +1226,7 @@ mod budget_tests {
 
     /// Other heads from the peer are news: the backoff starts again.
     #[test]
-    fn new_heads_from_the_peer_end_the_backoff() {
+    fn fresh_heads_from_the_peer_end_the_backoff() {
         let _guard = ::habilis_network_test_tracing::init();
         let t0 = Instant::now();
         let state = Channel::State;

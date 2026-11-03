@@ -86,7 +86,7 @@ fn warn_on_high_resident_memory(
 /// snapshot which skews `relay`. Gated on `debug` being live so the
 /// per-peer `remote_info` round-trips are skipped at the default level.
 ///
-/// Takes `&mut` because it also drains [`IdleCounters`](super::state::IdleCounters)
+/// Takes `&mut` because it also drains [`IdleCounters`]
 /// onto the census line — this tick is the reporting interval for them.
 pub(crate) async fn tick_state_refresh(
     state: &mut EventLoopState,

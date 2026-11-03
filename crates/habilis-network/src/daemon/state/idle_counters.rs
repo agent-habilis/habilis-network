@@ -11,7 +11,7 @@ use iroh_gossip::api::{ApiError, Event};
 
 use super::gossip_msgs::GossipMsgs;
 use super::socket_bytes::{GossipPathBytes, SocketBytes};
-use super::wire_tally::{WireIn, WireOut, WireOutTally};
+use super::wire_out_tally::{WireIn, WireOut, WireOutTally};
 use crate::protocol::Nickname;
 use crate::util::process_usage;
 
