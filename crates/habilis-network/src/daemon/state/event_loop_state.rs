@@ -1109,6 +1109,7 @@ impl EventLoopState {
         self.direct.remove(&endpoint);
         self.path_watchers.remove(&endpoint);
         self.path_kinds.remove(&endpoint);
+        self.unicast_pool.forget_addr(endpoint);
     }
 
     /// Remember that `key` said goodbye. A key is minted per run, so it never speaks again.

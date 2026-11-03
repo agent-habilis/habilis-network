@@ -161,6 +161,16 @@ mod tests {
         );
     }
 
+    /// A peer info frame is announce traffic, so the join-burst report counts it.
+    #[test]
+    fn a_peer_info_is_announce_traffic() {
+        assert_eq!(
+            FrameClass::of(&MessageKind::PeerInfo),
+            FrameClass::Announce,
+            "a peer info frame counted as another class"
+        );
+    }
+
     /// The anti-entropy digest of the chat log is plumbing, not a change of a shared document.
     #[test]
     fn a_message_log_digest_is_not_document_traffic() {

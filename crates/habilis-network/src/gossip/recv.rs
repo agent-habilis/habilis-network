@@ -718,7 +718,10 @@ async fn dispatch_infra(
 ) -> ControlFlow<()> {
     match &message.kind {
         MessageKind::PeerInfo => {
-            handle_peer_info(message, state, context).await;
+            // A stale frame proves no presence: it registers no endpoint and starts no dial.
+            if !update.stale {
+                handle_peer_info(message, state, context).await;
+            }
             return ControlFlow::Break(());
         }
         MessageKind::Digest => {
@@ -3206,6 +3209,34 @@ mod first_contact_tests {
             assert!(
                 !state.peer_endpoints.contains_key("bob"),
                 "a replayed PeerInfo of a departed key restored the dial hint"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A stale `PeerInfo` proves no presence, so it registers no endpoint and starts no dial. The
+    /// frame comes through `ingest`, which is where the lifecycle verdict is known.
+    #[test]
+    fn a_stale_peer_info_registers_no_endpoint() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            // the app and the test share the counter
+            let mut app = Counting(Arc::new(atomic::AtomicUsize::new(0)));
+            let departed = Identity::generate();
+            let endpoint = iroh::SecretKey::generate().public();
+            let address = iroh::EndpointAddr::new(endpoint).with_ip_addr(test_ip());
+            state.note_left(departed.author_key());
+            let frame = peer_info_signed_by(&node, &address, &departed)
+                .serialize()
+                .expect("serialize");
+
+            ingest(frame.into_bytes(), &mut state, &mut app, &context).await;
+
+            assert!(
+                !state.known_endpoints.contains(&endpoint),
+                "a stale PeerInfo registered its endpoint for a dial"
             );
             node.endpoint.close().await;
         });

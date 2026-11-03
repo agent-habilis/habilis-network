@@ -769,6 +769,42 @@ mod tests {
         );
     }
 
+    /// The dial address in the unicast pool goes with the dial hint of a pruned endpoint, or the
+    /// pool grows with each endpoint that ever lapsed without a goodbye. A linked endpoint keeps
+    /// it until the link ends and a later sweep runs.
+    #[test]
+    fn pruning_a_dial_hint_drops_the_pool_address_of_its_endpoint() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let unlinked = iroh::SecretKey::from_bytes(&[8; 32]).public();
+        let linked = iroh::SecretKey::from_bytes(&[9; 32]).public();
+        for (name, endpoint) in [("gone-fern", unlinked), ("gone-moss", linked)] {
+            let address = iroh::EndpointAddr::new(endpoint);
+            state.unicast_pool.note_addr(&address);
+            state.peer_endpoints.insert(nick(name), address);
+        }
+        state.linked_endpoints.insert(linked);
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            !state.unicast_pool.has_addr(unlinked),
+            "the pool kept the address of a pruned endpoint"
+        );
+        assert!(
+            state.unicast_pool.has_addr(linked),
+            "the pool lost the address of a pruned endpoint that still has a link"
+        );
+        state.unlink(linked);
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            !state.unicast_pool.has_addr(linked),
+            "the pool kept the address after the link ended and a later sweep ran"
+        );
+    }
+
     /// A nickname that binds the endpoint again after the prune keeps the state when the link ends.
     #[test]
     fn a_later_sweep_keeps_the_state_of_an_endpoint_that_a_nickname_binds_again() {

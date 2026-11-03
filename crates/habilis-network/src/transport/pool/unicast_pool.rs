@@ -281,6 +281,23 @@ impl UnicastPool {
         }
     }
 
+    /// Drop the remembered dial address of `eid`. The pooled connection stays open: the caller
+    /// uses this when only the address has no owner left.
+    pub(crate) fn forget_addr(&self, eid: EndpointId) {
+        if let Ok(mut addrs) = self.inner.addrs.lock() {
+            addrs.remove(&eid);
+        }
+    }
+
+    /// Whether a dial address of `eid` is remembered.
+    #[cfg(test)]
+    pub(crate) fn has_addr(&self, eid: EndpointId) -> bool {
+        self.inner
+            .addrs
+            .lock()
+            .is_ok_and(|addrs| addrs.contains_key(&eid))
+    }
+
     /// The open pooled connection to `eid`, whoever opened it. A contended lock
     /// reads as none.
     #[cfg(test)]
