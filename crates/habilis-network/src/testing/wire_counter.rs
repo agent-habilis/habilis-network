@@ -21,7 +21,7 @@ pub(crate) enum FrameClass {
     Membership,
     /// A change or a digest of the shared state or meta document.
     Document,
-    /// Anything else: probes and unknown kinds.
+    /// Anything else: the digest of the message log, probes and unknown kinds.
     Other,
 }
 
@@ -43,9 +43,8 @@ impl FrameClass {
             MessageKind::State
             | MessageKind::Meta
             | MessageKind::StateDigest
-            | MessageKind::MetaDigest
-            | MessageKind::Digest => Self::Document,
-            MessageKind::Ping | MessageKind::Pong { .. } | _ => Self::Other,
+            | MessageKind::MetaDigest => Self::Document,
+            MessageKind::Digest | MessageKind::Ping | MessageKind::Pong { .. } | _ => Self::Other,
         }
     }
 }
@@ -104,5 +103,29 @@ impl fmt::Display for WireCounter {
             self.metadata_percent(),
             self.total_bytes()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FrameClass;
+    use crate::protocol::MessageKind;
+
+    /// The anti-entropy digest of the chat log is plumbing, not a change of a shared document.
+    #[test]
+    fn a_message_log_digest_is_not_document_traffic() {
+        assert_eq!(
+            FrameClass::of(&MessageKind::Digest),
+            FrameClass::Other,
+            "a message log digest counted as document traffic"
+        );
+        for kind in [
+            MessageKind::State,
+            MessageKind::Meta,
+            MessageKind::StateDigest,
+            MessageKind::MetaDigest,
+        ] {
+            assert_eq!(FrameClass::of(&kind), FrameClass::Document, "{kind:?}");
+        }
     }
 }

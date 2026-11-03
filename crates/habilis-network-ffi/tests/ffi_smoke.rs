@@ -569,6 +569,36 @@ fn four_peers_converge(public: bool) {
         "expected every member to count 4 members (itself and 3 others) within 45s (public={public}); peer_counts={counts:?}"
     );
 
+    // One member leaves: every member that stays must count 3, so a count that never falls
+    // after a departure fails here.
+    let leaver = handles.remove(0);
+    // SAFETY: the handle came from habilis_network_mesh_open and is not used after this.
+    unsafe {
+        assert_eq!(
+            habilis_network_mesh_close(leaver),
+            0,
+            "habilis_network_mesh_close failed: {:?}",
+            last_error()
+        );
+    }
+    let leave_deadline = Instant::now() + Duration::from_secs(45);
+    let mut left_counts = vec![0_i64; handles.len()];
+    let staying: Vec<(usize, &*mut HabilisNetworkMesh)> = handles.iter().enumerate().collect();
+    while Instant::now() < leave_deadline {
+        for &(index, &handle) in &staying {
+            // SAFETY: each handle came from habilis_network_mesh_open and is still open.
+            left_counts[index] = unsafe { habilis_network_mesh_peer_count(handle) };
+        }
+        if left_counts.iter().all(|&count| count == 3) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    assert!(
+        left_counts.iter().all(|&count| count == 3),
+        "expected every member that stayed to count 3 members after one left within 45s (public={public}); peer_counts={left_counts:?}"
+    );
+
     for handle in handles {
         // SAFETY: each handle came from habilis_network_mesh_open and is not used after this.
         unsafe {

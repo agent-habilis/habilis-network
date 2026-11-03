@@ -1531,8 +1531,17 @@ async fn handle_peer_info(
     // fresh endpoint replaces the old. The beacon gossips *as* the rendezvous,
     // so it advertises `rendezvous_id` here — record that too, so a joiner can
     // tell its rendezvous link belongs to the beacon's nickname.
-    let changed = state.peer_endpoints.get(&message.author) != Some(&peer_addr);
-    state.bind_peer_endpoint(message.author.clone(), peer_addr.clone());
+    // The hint belongs to the key that holds the nickname: a `PeerInfo` of another key (a frame of
+    // the same second that lost the nickname) binds nothing, or a directed send reaches a node
+    // that does not hold it. A nickname with no holder takes the first hint.
+    let may_bind = state
+        .peer_keys
+        .get(&message.author)
+        .is_none_or(|held| *held == message.key());
+    let changed = may_bind && state.peer_endpoints.get(&message.author) != Some(&peer_addr);
+    if may_bind {
+        state.bind_peer_endpoint(message.author.clone(), peer_addr.clone());
+    }
     // The rendezvous is overlay plumbing, not a dialable member peer:
     // the binding above is recorded, but skip the known-endpoints/re-bridge
     // dial path for it.
@@ -3085,15 +3094,79 @@ mod first_contact_tests {
         "192.0.2.10:4000".parse().expect("an address")
     }
 
-    /// A `PeerInfo` of the author `bob` that carries `addr`.
+    /// A `PeerInfo` of the author `bob` that carries `addr`, signed by a key that is new.
     fn peer_info(node: &Node, address: &iroh::EndpointAddr) -> Verified {
+        peer_info_signed_by(node, address, &Identity::generate())
+    }
+
+    /// A `PeerInfo` of the author `bob` that carries `addr`, signed by `by`.
+    fn peer_info_signed_by(node: &Node, address: &iroh::EndpointAddr, by: &Identity) -> Verified {
         use crate::protocol::messages::MessageBody;
         use crate::protocol::peer_addr_error;
 
         let body =
             MessageBody::try_new(&peer_addr_error::endpoint_addr_to_json(address).to_string())
                 .expect("an address body");
-        Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&Identity::generate())
+        Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(by)
+    }
+
+    /// The dial hint of a nickname belongs to the key that holds it. A `PeerInfo` of another key
+    /// under the same nickname (a frame of one second that lost the nickname) must not move the
+    /// hint, or a directed send reaches a node that does not hold the nickname. The holder may
+    /// rebind (a restart), and a nickname with no holder takes the first hint.
+    #[test]
+    fn a_peer_info_of_a_key_that_does_not_hold_the_nickname_binds_no_endpoint() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = Node::spawn().await;
+            let context = node.context();
+            let mut state = fresh_state();
+            let holder = Identity::generate();
+            let rival = Identity::generate();
+            let held = iroh::EndpointAddr::new(iroh::SecretKey::generate().public())
+                .with_ip_addr(test_ip());
+            let taken = iroh::EndpointAddr::new(iroh::SecretKey::generate().public())
+                .with_ip_addr(test_ip());
+            let restarted = iroh::EndpointAddr::new(iroh::SecretKey::generate().public())
+                .with_ip_addr(test_ip());
+
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &held, &holder),
+                &mut state,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                state.peer_endpoints.get("bob"),
+                Some(&held),
+                "a nickname with no holder takes the first hint"
+            );
+            state.peer_keys.insert(nick("bob"), holder.author_key());
+
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &taken, &rival),
+                &mut state,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                state.peer_endpoints.get("bob"),
+                Some(&held),
+                "a key that does not hold the nickname moved the dial hint"
+            );
+
+            super::handle_peer_info(
+                &peer_info_signed_by(&node, &restarted, &holder),
+                &mut state,
+                &context,
+            )
+            .await;
+            assert_eq!(
+                state.peer_endpoints.get("bob"),
+                Some(&restarted),
+                "the holder could not rebind its hint"
+            );
+            node.endpoint.close().await;
+        });
     }
 
     /// A relayed `PeerInfo` is re-serialized from its verified form, so the bytes that go out are the

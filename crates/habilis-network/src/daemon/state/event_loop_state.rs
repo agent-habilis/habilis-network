@@ -1076,13 +1076,19 @@ impl EventLoopState {
     /// connection, which outlives a gossip link but not the peer.
     pub(crate) fn forget_peer_endpoint(&mut self, nick: &str) -> Option<EndpointAddr> {
         let address = self.peer_endpoints.remove(nick)?;
-        self.graft_backoff.reset(address.id);
-        self.proven_endpoints.forget_endpoint(address.id);
-        self.forget_rival_holder(address.id);
-        self.direct.remove(&address.id);
-        self.path_watchers.remove(&address.id);
-        self.path_kinds.remove(&address.id);
+        self.forget_endpoint_state(address.id);
         Some(address)
+    }
+
+    /// Drop every state that is keyed by `endpoint`: the backoff, the proof, the rival flag, the
+    /// direct state and the path state.
+    pub(crate) fn forget_endpoint_state(&mut self, endpoint: EndpointId) {
+        self.graft_backoff.reset(endpoint);
+        self.proven_endpoints.forget_endpoint(endpoint);
+        self.forget_rival_holder(endpoint);
+        self.direct.remove(&endpoint);
+        self.path_watchers.remove(&endpoint);
+        self.path_kinds.remove(&endpoint);
     }
 
     /// Remember that `key` said goodbye. A key is minted per run, so it never speaks again.

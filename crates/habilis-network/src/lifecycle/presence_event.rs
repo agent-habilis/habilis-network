@@ -58,6 +58,10 @@ pub(crate) async fn handle_presence(
             return;
         }
         state.peer_keys.remove(&message.author);
+        // The goodbye stamp guards against the replays of the run that ended. The newest stamp of
+        // that run is no ceiling for the next one: a clock that stepped back would leave the new
+        // run in the roster without a holder.
+        state.peer_stamp.remove(&message.author);
         state.note_goodbye_stamp(&message.author, message.timestamp);
         if state.peers.remove(message.author.as_str()) {
             state.write_peer_count();
@@ -81,6 +85,7 @@ pub(crate) async fn handle_presence(
             }
         }
         state.quiet.remove(message.author.as_str());
+        state.quiet_since.remove(message.author.as_str());
         // Only announce a departure for a peer whose arrival we
         // surfaced — keeps the join-horizon view symmetric. A `left`
         // for a peer known only through pre-join backlog (or one we

@@ -10,6 +10,7 @@ use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::{MeshId, Message, Nickname, UnixSecs};
 use crate::util::clock::Instant;
 use iroh::EndpointId;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use crate::util::tuning::{ALIVE_INTERVAL, alive_timeout};
@@ -250,6 +251,12 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         .clock_evidence
         .returned_unshown
         .retain(|nick| is_peer(nick));
+    prune_dial_hints(state);
+}
+
+/// Prune the dial hints and the state that is keyed by their endpoints.
+fn prune_dial_hints(state: &mut EventLoopState) {
+    let quiet = &state.quiet;
     // Same bound for the endpoint dial hints: an entry lives as long as its nick is an active
     // peer, a quiet evictee, or one of the last `QUIET_CAP` that outlived the quiet TTL, so the
     // map is capped at |peers| + 2 * QUIET_CAP even under nickname churn.
@@ -268,12 +275,18 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         .map(|(_, address)| address.id)
         .collect();
     state.peer_endpoints.retain(|nick, _| is_kept(nick));
-    // The path state of a pruned endpoint goes with it. The proof and the direct path stay with
-    // the binding that a lapsed nickname keeps, so the pruning does not call
-    // `forget_peer_endpoint`.
+    // The state of a pruned endpoint goes with it, or the maps that it keys grow with each
+    // endpoint that ever bound a nickname. An endpoint that a kept nickname still binds, or that
+    // has a live link, keeps its state.
+    let kept_ids: HashSet<EndpointId> = state
+        .peer_endpoints
+        .values()
+        .map(|address| address.id)
+        .collect();
     for endpoint in pruned {
-        state.path_kinds.remove(&endpoint);
-        state.path_watchers.remove(&endpoint);
+        if !kept_ids.contains(&endpoint) && !state.linked_endpoints.contains(&endpoint) {
+            state.forget_endpoint_state(endpoint);
+        }
     }
     let lapsed_names = &state.clock_evidence.lapsed_quiet;
     state
@@ -284,7 +297,9 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
 
 #[cfg(test)]
 mod tests {
-    use crate::daemon::state::{EventLoopState, PendingSuspend, RendezvousFlag, StepBack};
+    use crate::daemon::state::{
+        DirectState, EventLoopState, PendingSuspend, RendezvousFlag, StepBack,
+    };
     use crate::testing::{fresh_state, nick};
     use crate::transport::probe::PathKind;
     use std::collections::HashSet;
@@ -593,6 +608,93 @@ mod tests {
             !state.path_kinds.contains_key(&endpoint)
                 && !state.path_watchers.contains_key(&endpoint),
             "the path state of a pruned endpoint stays"
+        );
+    }
+
+    /// A pruned binding takes every state that is keyed by its endpoint, or the maps grow with each
+    /// distinct endpoint that ever bound a nickname.
+    #[test]
+    fn pruning_a_dial_hint_drops_the_direct_and_backoff_state_of_its_endpoint() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let endpoint = iroh::SecretKey::from_bytes(&[8; 32]).public();
+        state
+            .peer_endpoints
+            .insert(nick("gone-fern"), iroh::EndpointAddr::new(endpoint));
+        state.direct.insert(endpoint, DirectState::Direct);
+        let asked = Instant::now();
+        state.graft_backoff.asked(endpoint, asked);
+        let settled = asked + Duration::from_secs(600);
+        state.graft_backoff.settle(settled, |_| false, 0.0);
+        assert!(
+            state.graft_backoff.is_blocked(&endpoint, settled),
+            "the refusal is on record"
+        );
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            !state.direct.contains_key(&endpoint),
+            "the direct state of a pruned endpoint stays"
+        );
+        assert!(
+            !state.graft_backoff.is_blocked(&endpoint, settled),
+            "the backoff of a pruned endpoint stays"
+        );
+    }
+
+    /// Two nicknames can bind one endpoint (a node that restarted under a new name). The pruning
+    /// of the old name must leave the state of the endpoint to the name that is kept.
+    #[test]
+    fn pruning_a_dial_hint_keeps_the_state_of_an_endpoint_that_a_kept_nickname_binds() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let endpoint = iroh::SecretKey::from_bytes(&[8; 32]).public();
+        state
+            .peer_endpoints
+            .insert(nick("gone-fern"), iroh::EndpointAddr::new(endpoint));
+        state
+            .peer_endpoints
+            .insert(nick("kept-fern"), iroh::EndpointAddr::new(endpoint));
+        state.peers.insert(nick("kept-fern"));
+        state.last_seen.insert(nick("kept-fern"), Instant::now());
+        state.path_kinds.insert(endpoint, PathKind::WebRtc);
+        state.path_watchers.insert(endpoint, None);
+        state.direct.insert(endpoint, DirectState::Direct);
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.peer_endpoints.contains_key("kept-fern")
+                && !state.peer_endpoints.contains_key("gone-fern"),
+            "only the old name is pruned"
+        );
+        assert!(
+            state.path_kinds.contains_key(&endpoint)
+                && state.path_watchers.contains_key(&endpoint)
+                && state.direct.contains_key(&endpoint),
+            "the state of an endpoint that a kept nickname binds went with the pruned one"
+        );
+    }
+
+    /// A live link keeps its state whatever the roster says about the nickname that bound it.
+    #[test]
+    fn pruning_a_dial_hint_keeps_the_state_of_a_linked_endpoint() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let endpoint = iroh::SecretKey::from_bytes(&[8; 32]).public();
+        state
+            .peer_endpoints
+            .insert(nick("gone-fern"), iroh::EndpointAddr::new(endpoint));
+        state.linked_endpoints.insert(endpoint);
+        state.path_kinds.insert(endpoint, PathKind::WebRtc);
+        state.direct.insert(endpoint, DirectState::Direct);
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.path_kinds.contains_key(&endpoint) && state.direct.contains_key(&endpoint),
+            "the state of a linked endpoint went with the pruned dial hint"
         );
     }
 

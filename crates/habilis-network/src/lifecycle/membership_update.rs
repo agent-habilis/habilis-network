@@ -357,6 +357,9 @@ pub(crate) fn compute_observed(message: &Verified, state: &mut EventLoopState) -
 pub(crate) fn apply(update: &MembershipUpdate, author: &Nickname, state: &mut EventLoopState) {
     if update.returned {
         state.quiet.remove(author.as_str());
+        // A peer that is back is not quiet any more: its old recency must not make the sweep read
+        // it as a peer that outlived the quiet TTL.
+        state.quiet_since.remove(author.as_str());
         state.peers.insert(author.clone());
     }
     if update.joined_new {
