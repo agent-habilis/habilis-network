@@ -189,3 +189,13 @@ A host with too little memory for N = 16 fails the host tests and prints `SKIPPE
   log the uptime beside the timings (`series.ts` does).
 - `peak_resident_memory_mb` in the census is a peak: it includes the burst at join time.
   Use `rss_mb` for growth.
+
+## Ratio test
+
+`ratio.test.ts` is a benchmark, not a unit test. It runs `bench.ts` for about 20 min and needs a quiet host, so CI skips it (`package.json`, `test` script). Run it by hand:
+
+```bash
+RATIO_BIN=<binary> bun test scripts/perf/ratio.test.ts
+```
+
+Set `RATIO_ALLOW_SKIP=1` on a host with too little memory to skip the two host tests.
