@@ -26,7 +26,6 @@ mod answered;
 mod digest_trigger;
 mod fast_rounds;
 mod plane;
-mod resend_memory;
 mod serve_budget;
 mod unicast_digests;
 
@@ -55,7 +54,6 @@ pub(crate) use answered::Answered;
 pub(crate) use digest_trigger::DigestTrigger;
 pub(crate) use fast_rounds::FastRounds;
 pub(crate) use plane::Plane;
-pub(crate) use resend_memory::ResendMemory;
 pub(crate) use serve_budget::ServeBudget;
 pub(crate) use unicast_digests::{ChatAsk, UnicastDigests};
 /// One window on the wire: its `[lo, hi]` bounds (`hi` timestamp `i64::MAX` ⇒
@@ -248,10 +246,6 @@ fn report_unreadable_digest(message: &Verified, state: &mut EventLoopState) {
 /// under the *other* window — wasting the shared resend budget on messages the
 /// peer already has and starving the genuinely-missing tail.
 pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, me: &Nickname) {
-    handle_digest_at(message, state, me, Instant::now());
-}
-
-fn handle_digest_at(message: &Verified, state: &mut EventLoopState, me: &Nickname, now: Instant) {
     let decoded: serde_json::Result<DigestBody> = serde_json::from_str(message.body.as_str());
     let Ok(body) = decoded else {
         report_unreadable_digest(message, state);
@@ -268,7 +262,7 @@ fn handle_digest_at(message: &Verified, state: &mut EventLoopState, me: &Nicknam
     // `ANTIENTROPY_MAX_RESEND` mesh-wide broadcasts, so ungated this turns one
     // small frame into that much flooding from every member that hears it —
     // the cost scaling with the mesh rather than with the sender.
-    if !state.admit_digest(message.key(), now) {
+    if !state.admit_digest(message.key(), Instant::now()) {
         tracing::debug!(
             target: "habilis_network::gossip",
             author = %message.author,
@@ -282,10 +276,6 @@ fn handle_digest_at(message: &Verified, state: &mut EventLoopState, me: &Nicknam
             have.extend(ids);
         }
     }
-    state
-        .state_digest_serves
-        .resends
-        .extend_have(&message.key(), now, &mut have);
     let reply_to = unicast_reply_to(&message.key(), state);
     let mut budget = antientropy_max_resend();
     let mut resent = 0usize;
@@ -312,10 +302,6 @@ fn handle_digest_at(message: &Verified, state: &mut EventLoopState, me: &Nicknam
             // yet must not be retried inside this digest; it retries next round.
             have.insert(missing.dedup_key());
             state.idle.note_resend_for(&message.author);
-            state
-                .state_digest_serves
-                .resends
-                .note(message.key(), missing.dedup_key(), now);
             resent += 1;
             budget -= 1;
         }
@@ -1404,7 +1390,6 @@ mod budget_tests {
 mod tests {
     use crate::daemon::state::{RendezvousFlag, Standing};
     use std::collections::HashSet;
-    use std::time::Duration;
 
     use super::{
         ANTIENTROPY_DIGEST_WINDOW_IDS, DigestBody, DigestOrigin, HeadsBody, WireWindow,
@@ -1421,7 +1406,6 @@ mod tests {
 
     use crate::protocol::messages;
     use crate::transport::Resend;
-    use crate::util::clock::Instant;
     use crate::util::{consts, tuning};
     use crate::{gossip, protocol, transport};
     use tokio::sync::mpsc;
@@ -1531,143 +1515,6 @@ mod tests {
             state.resend_outbox.dropped(),
             tuning::ANTIENTROPY_MAX_RESEND as u64 - 4,
             "the rest of the answer is dropped, and counted"
-        );
-    }
-
-    /// The resends that one digest round put in the outbox, as the dedup keys of the frames.
-    fn round_resends(
-        state: &mut EventLoopState,
-        resends: &mut mpsc::Receiver<Resend>,
-        digest: &Verified,
-        me: &Nickname,
-        at: Instant,
-    ) -> Vec<DedupKey> {
-        super::handle_digest_at(digest, state, me, at);
-        let mut sent = Vec::new();
-        while let Ok(Resend::Broadcast(bytes)) = resends.try_recv() {
-            let (parsed, _nonce) = Message::parse_wire(bytes.as_bytes()).expect("a resend parses");
-            sent.push(parsed.dedup_key());
-        }
-        sent
-    }
-
-    /// An asker that cannot keep a frame lists it as missing in every digest, so the holder
-    /// re-floods it in every round, for as long as the asker runs. Without a memory the holder
-    /// has no way to know that it already sent the frame.
-    #[test]
-    fn a_frame_the_asker_cannot_keep_is_resent_in_every_round() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let (me, asker) = (nick("holder"), nick("asker"));
-        let asker_identity = Identity::generate();
-        let digest = Message::new_digest(&MeshId::from("test"), &asker, empty_digest_body())
-            .sign(&asker_identity);
-        let mut state = fresh_state();
-        state.peers.insert(asker);
-        state.state_digest_serves.resends = super::ResendMemory::new(0, Duration::from_secs(300));
-        let (outbox, mut resends) = transport::ResendOutbox::new(64);
-        state.resend_outbox = outbox;
-        state.message_log.push(chat_at("never kept", 1_700_000_000));
-        let start = Instant::now();
-
-        let window = tuning::ANTIENTROPY_SERVE_COOLDOWN + Duration::from_secs(1);
-        let rounds: Vec<usize> = (0..5)
-            .map(|index| {
-                round_resends(
-                    &mut state,
-                    &mut resends,
-                    &digest,
-                    &me,
-                    start + window * index,
-                )
-                .len()
-            })
-            .collect();
-
-        assert_eq!(
-            rounds,
-            vec![1; 5],
-            "the same frame goes out in each of 5 rounds"
-        );
-    }
-
-    /// A node that a daemon starts keeps the memory on: it is the state the const gives, with no override.
-    #[test]
-    fn a_fresh_state_sends_a_frame_to_an_asker_twice_in_the_window() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let (me, asker) = (nick("holder"), nick("asker"));
-        let asker_identity = Identity::generate();
-        let digest = Message::new_digest(&MeshId::from("test"), &asker, empty_digest_body())
-            .sign(&asker_identity);
-        let mut state = fresh_state();
-        state.peers.insert(asker);
-        let (outbox, mut resends) = transport::ResendOutbox::new(64);
-        state.resend_outbox = outbox;
-        state.message_log.push(chat_at("never kept", 1_700_000_000));
-        let start = Instant::now();
-
-        let step = tuning::ANTIENTROPY_SERVE_COOLDOWN + Duration::from_secs(1);
-        let rounds: Vec<usize> = (0..3)
-            .map(|index| {
-                round_resends(&mut state, &mut resends, &digest, &me, start + step * index).len()
-            })
-            .collect();
-
-        assert_eq!(
-            rounds,
-            vec![1, 1, 0],
-            "the frame goes out twice, and the 3rd round skips it"
-        );
-    }
-
-    /// With the memory a frame goes to an asker `repeats` times in the window. The round after
-    /// the last repeat skips it, the budget of the round goes to the frames that were sent less
-    /// often, and a frame that is still missing when the window ends is sent again.
-    #[test]
-    fn a_frame_is_sent_to_an_asker_at_most_k_times_in_the_window() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let (me, asker) = (nick("holder"), nick("asker"));
-        let asker_identity = Identity::generate();
-        let digest = Message::new_digest(&MeshId::from("test"), &asker, empty_digest_body())
-            .sign(&asker_identity);
-        let window = Duration::from_secs(300);
-        let mut state = fresh_state();
-        state.peers.insert(asker);
-        state.state_digest_serves.resends = super::ResendMemory::new(2, window);
-        let (outbox, mut resends) = transport::ResendOutbox::new(64);
-        state.resend_outbox = outbox;
-        let first = chat_at("never kept", 1_700_000_000);
-        let second = chat_at("new", 1_700_000_100);
-        state.message_log.push(first.clone());
-        let start = Instant::now();
-        let step = tuning::ANTIENTROPY_SERVE_COOLDOWN + Duration::from_secs(1);
-        let mut round = |node: &mut EventLoopState, at: Instant| -> HashSet<DedupKey> {
-            round_resends(node, &mut resends, &digest, &me, at)
-                .into_iter()
-                .collect()
-        };
-
-        let one = round(&mut state, start);
-        state.message_log.push(second.clone());
-        let two = round(&mut state, start + step);
-        let three = round(&mut state, start + step * 2);
-        let four = round(&mut state, start + window + step * 2);
-
-        let (first, second) = (first.dedup_key(), second.dedup_key());
-        assert_eq!(one, HashSet::from([first]), "the 1st round sends the frame");
-        assert_eq!(
-            two,
-            HashSet::from([first, second]),
-            "the 2nd round sends it again, in case the 1st did not arrive, and the new frame"
-        );
-        assert_eq!(
-            three,
-            HashSet::from([second]),
-            "the 3rd round skips the frame that was sent twice, and sends the other once more"
-        );
-        assert_eq!(
-            four,
-            HashSet::from([first, second]),
-            "when the window ends, both frames are sent again, in case they did not arrive"
         );
     }
 
