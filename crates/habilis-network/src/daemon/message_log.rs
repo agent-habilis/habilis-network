@@ -492,8 +492,10 @@ mod tests {
         log.push(message("m333"));
         let held: usize = log.messages.iter().map(hand_counted_wire_len).sum();
         assert_eq!(log.size(), (2, held), "the evicted frame leaves the count");
+        // The frames share author and timestamp, and the id is random, so any of the three can be
+        // the victim: the one that just came in is as likely as the others.
         assert!(
-            held == 426 + 427 || held == 425 + 427,
+            (425 + 426..=426 + 427).contains(&held),
             "two of the three frames stay: {held}"
         );
     }
