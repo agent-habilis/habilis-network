@@ -97,6 +97,91 @@ The marginal memory of one session is (the delta with the leg on minus the delta
 leg off) divided by the mean number of underlay sessions per node. Each run takes about
 6 min, so the two cells take about 36 min.
 
+## Oracle file
+
+The oracle file is the record of the user data that the runner sent. It is the only
+source of the data bytes in the ratio. The engine counters do not name data.
+
+The file is `oracle.jsonl` in the run folder. It has one JSON line per user payload that
+the runner sends. Each line has these keys, and no other key:
+
+| Key | Type | Meaning |
+| -- | -- | -- |
+| `sender` | string | the nickname of the sending daemon |
+| `kind` | string | `broadcast`, `msg`, `task_brief`, `task_status` or `task_artifact` |
+| `receivers` | integer | how many daemons must receive the payload: 63 for a broadcast in a mesh of 64, 1 for a `msg` |
+| `bytes` | integer | the length of the user text that the runner sent, in bytes of UTF-8 |
+| `seq` | integer | the number of the line, from 0, one count for the whole run |
+| `ts` | integer | the send time, in milliseconds since the epoch |
+
+The runner writes the line when the send command returns without an error. A payload
+that failed to send has no line.
+
+### Rules for the ratio
+
+- Data is the exact user text that the runner sent. The envelope of a frame is not data:
+  the header, the signature, the ids and the nonce are metadata.
+- Delivered data bytes are the sum of `bytes` times `receivers` over all lines.
+- A duplicate copy of a data frame counts as metadata. The first copy that a receiver
+  gets is data.
+- Metadata bytes are the wire bytes minus the delivered data bytes.
+- The runner plays the worker of each task. Each task makes one `task_brief`, one or more
+  `task_status`, and one `task_artifact`. Each of them has a line.
+
+### Two layers
+
+- Frame layer: the wire bytes of the frames, from the `idle_wire_*` census fields. The
+  summary asserts this layer. It fails if the metadata bytes are negative.
+- UDP layer: the bytes of the iroh socket, from the `idle_net_*` census fields. The
+  summary reports this layer and asserts nothing, because QUIC adds its own framing.
+
+### Two phases
+
+- Idle phase (no workload): the result is the metadata bytes per second per daemon. It
+  is an absolute number. There is no data, so there is no ratio.
+- Loaded phase (workload): the result is the metadata bytes per delivered data byte. The
+  window of the phase comes from `result.json`.
+
+### Example
+
+A mesh of 2 daemons. The runner sends one broadcast of 200 bytes and one `msg` of
+200 bytes. Then `receivers` is 1 for both lines, and the delivered data bytes are
+200 + 200 = 400. If the wire bytes are 1000, the metadata bytes are 600, and the ratio
+is 1.5.
+
+### Memory by N
+
+`summarize.ts` also reads `host.jsonl` of the run folder, which the runner writes every 10 s. The sample with
+the largest RSS sum gives `rss_n` (the daemon count), `rss_mean_mb_per_daemon`, `rss_max_mb` (the largest
+daemon in the run) and `rss_sum_mb`. A run of 16 daemons that gives 52.6 MB per daemon and a run of 8 that
+gives 29.7 MB show how the RSS per daemon grows with N.
+
+## Load gates
+
+`gate.ts` holds the numbers, from the idle meshes on nyc-macmini1 (8 cores, 8 GiB). `b4.ts` applies them.
+
+- Start gate: load1 is at most 2.0 now, and at most 2.5 in the 3 min before. (First values 1.5 and 2.0: the host idles at 1.5 to 1.76 with no daemon of ours, so that gate never opened.) The driver waits up to 20 min.
+- Phase gate: the median load1 of a phase is at most 4.0, and the max is at most 6.0. A run with a phase over
+  the gate is void and runs again, twice at most.
+- A/B gate: the idle1 medians of the two arms of a pair are within 35 percent. A pair that fails runs once more. A void run or a failed pair stays on disk, and its folder name starts with `void-`.
+
+`b4.ts` runs pairs of arm a (the plain baseline, for CPU) and arm b (the baseline with counters, for bytes and
+the ratio), in turn, with the order swapped in every second pair. Both arms have the same warm-up (300 s of
+settle). Arm a has no loaded phase: it has no wire counters, so it gives no ratio. Run it after `ulimit -n 10240`.
+
+## Ratio test
+
+`ratio.test.ts` holds the goal: at N = 16 the frame-layer metadata bytes per delivered data byte are at most half of
+the baseline (`baseline-ratio.json`: 78.9, from pairs 2 and 3 of B4 on nyc-macmini1). A second test is the regression
+budget: at most the `head_value` of that file plus 10 percent. Both tests run `bench.ts` for about 20 min on the
+binary in `RATIO_BIN` (a build with the wire counters), so run them on a quiet host:
+
+```bash
+RATIO_BIN=<binary> bun test scripts/perf/ratio.test.ts
+```
+
+A host with too little memory for N = 16 fails the host tests and prints `SKIPPED`. `RATIO_ALLOW_SKIP=1` lets it skip.
+
 ## What it does not do
 
 - The nodes are native processes. A browser costs more.
