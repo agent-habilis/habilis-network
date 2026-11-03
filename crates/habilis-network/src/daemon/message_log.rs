@@ -476,15 +476,26 @@ mod tests {
         let second = message("m22");
         log.push(message("m1"));
         log.push(second.clone());
-        assert_eq!(log.size(), (2, 425 + 426), "two frames of 425 and 426 bytes");
+        assert_eq!(
+            log.size(),
+            (2, 425 + 426),
+            "two frames of 425 and 426 bytes"
+        );
 
         log.push(second);
-        assert_eq!(log.size(), (2, 425 + 426), "a frame that is held twice counts once");
+        assert_eq!(
+            log.size(),
+            (2, 425 + 426),
+            "a frame that is held twice counts once"
+        );
 
         log.push(message("m333"));
         let held: usize = log.messages.iter().map(hand_counted_wire_len).sum();
         assert_eq!(log.size(), (2, held), "the evicted frame leaves the count");
-        assert!(held == 426 + 427 || held == 425 + 427, "two of the three frames stay: {held}");
+        assert!(
+            held == 426 + 427 || held == 425 + 427,
+            "two of the three frames stay: {held}"
+        );
     }
 
     fn message(id: &str) -> Verified {

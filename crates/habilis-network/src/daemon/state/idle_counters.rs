@@ -4,8 +4,8 @@
 
 use std::collections::HashMap;
 use std::mem;
-use std::time::Duration;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use iroh_gossip::api::{ApiError, Event};
 
@@ -397,14 +397,20 @@ mod tests {
     fn take_reports_the_cpu_time_of_the_interval() {
         let _drain = TAKES.lock().unwrap_or_else(PoisonError::into_inner);
         let mut counters = IdleCounters::default();
-        let first = counters.take().cpu.expect("the CPU clock works on a unix host");
+        let first = counters
+            .take()
+            .cpu
+            .expect("the CPU clock works on a unix host");
         // A busy loop of 50 ms, so the next interval holds CPU time.
         let start = Instant::now();
         let mut spin = 0_u64;
         while start.elapsed() < Duration::from_millis(50) {
             spin = black_box(spin.wrapping_add(1));
         }
-        let second = counters.take().cpu.expect("the CPU clock works on a unix host");
+        let second = counters
+            .take()
+            .cpu
+            .expect("the CPU clock works on a unix host");
         assert!(
             second >= Duration::from_millis(20),
             "the interval holds the busy loop: {second:?}"
