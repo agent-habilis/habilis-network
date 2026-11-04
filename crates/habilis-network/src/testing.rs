@@ -160,16 +160,14 @@ mod log_capture_tests {
 /// name map. A nickname holds up to 32 characters, so the key is a digest of the whole text.
 #[cfg(test)]
 mod test_key_tests {
-    use super::test_key;
-
     #[test]
     fn a_nickname_that_repeats_another_gets_its_own_key() {
         let _guard = ::habilis_network_test_tracing::init();
         let thirty_two = "x".repeat(32);
         for (short, long) in [("a", "aa"), ("ab", "abab"), ("x", thirty_two.as_str())] {
             assert_ne!(
-                test_key(short),
-                test_key(long),
+                super::test_key(short),
+                super::test_key(long),
                 "{short:?} and {long:?} share a key"
             );
         }
@@ -178,6 +176,10 @@ mod test_key_tests {
     #[test]
     fn the_same_nickname_always_gives_the_same_key() {
         let _guard = ::habilis_network_test_tracing::init();
-        assert_eq!(test_key("swift-cedar"), test_key("swift-cedar"));
+        assert_eq!(
+            super::test_key("swift-cedar"),
+            super::test_key("swift-cedar"),
+            "the same text gave two keys"
+        );
     }
 }
