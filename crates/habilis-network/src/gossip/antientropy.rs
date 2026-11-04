@@ -743,6 +743,7 @@ pub(crate) async fn handle_state_digest(
         heads,
         unicast = answered.unicast,
         broadcast = answered.broadcast,
+        arrived_unicast = arrived_from.is_some(),
         on_gossip_because = fallback.unwrap_or("-"),
         "state anti-entropy: resent frames a peer lacked"
     );
