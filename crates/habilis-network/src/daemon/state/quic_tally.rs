@@ -60,7 +60,19 @@ pub(crate) struct QuicCounts {
 }
 
 impl QuicCounts {
-    /// What `self` counted after `mark`. A counter that went down reads 0.
+    /// Whether a counter of `self` is below the same counter of `mark`. A counter of one
+    /// connection never goes down, so this says that `mark` is the mark of another connection.
+    fn is_below(self, mark: Self) -> bool {
+        self.ping_tx < mark.ping_tx
+            || self.ping_rx < mark.ping_rx
+            || self.ack_tx < mark.ack_tx
+            || self.dgram_tx < mark.dgram_tx
+            || self.dgram_rx < mark.dgram_rx
+            || self.bytes_tx < mark.bytes_tx
+            || self.bytes_rx < mark.bytes_rx
+    }
+
+    /// What `self` counted after `mark`.
     fn since(self, mark: Self) -> Self {
         let diff = |now: u64, then: u64| now.saturating_sub(then);
         Self {
@@ -189,7 +201,8 @@ pub(crate) struct QuicTally {
 impl QuicTally {
     /// What the live connections did since the last call. The first call only reads the marks, so
     /// it reports no movement: a connection that is older than the census has no window yet.
-    /// What a connection did between the last call and its close is not counted.
+    /// What a connection did between the last call and its close is not counted. An id whose
+    /// counters went down is a new connection, which counts from zero.
     pub(crate) fn take(&mut self, readings: &[QuicReading]) -> QuicWindow {
         let mut window = QuicWindow::default();
         let mut marks: HashMap<usize, QuicCounts> = HashMap::with_capacity(readings.len());
@@ -197,7 +210,12 @@ impl QuicTally {
             let index = reading.kind.index();
             window.live[index] += 1;
             if self.started {
-                let mark = self.marks.get(&reading.id).copied().unwrap_or_default();
+                let seen = self.marks.get(&reading.id).copied().unwrap_or_default();
+                let mark = if reading.counts.is_below(seen) {
+                    QuicCounts::default()
+                } else {
+                    seen
+                };
                 window.moved[index].add(reading.counts.since(mark));
             }
             marks.insert(reading.id, reading.counts);
@@ -288,6 +306,30 @@ mod tests {
             fourth.moved_of(ConnKind::Gossip).ping_tx,
             1,
             "an id that came back counts from zero: its old mark was dropped"
+        );
+    }
+
+    /// An id can be reused: the stable id is the address of the connection, so a new connection
+    /// can take the id of one that is gone between two calls. QUIC counters never go down, so a
+    /// counter below its mark says that the connection is new, and it counts from zero.
+    #[test]
+    fn a_reused_id_with_a_lower_counter_counts_from_zero() {
+        let mut tally = QuicTally::default();
+        let old = [reading(1, ConnKind::Gossip, 10, 100)];
+        tally.take(&old);
+
+        let reused = [reading(1, ConnKind::Gossip, 2, 9)];
+        let window = tally.take(&reused);
+
+        assert_eq!(
+            window.moved_of(ConnKind::Gossip).ping_tx,
+            2,
+            "the new connection sent 2 pings, not 0"
+        );
+        assert_eq!(
+            window.moved_of(ConnKind::Gossip).dgram_tx,
+            9,
+            "the new connection sent 9 datagrams, not 0"
         );
     }
 
