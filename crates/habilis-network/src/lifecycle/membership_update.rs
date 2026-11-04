@@ -934,25 +934,20 @@ mod tests {
     #[test]
     fn a_goodbye_is_not_undone_by_a_run_of_rising_frames() {
         let _guard = ::habilis_network_test_tracing::init();
-        let (mut state, who) = quiet_since_100_secs();
         let by = Identity::generate();
+        let (mut state, who) = quiet_since_100_secs_of(by.author_key());
         state.note_left(by.author_key());
-        state.peer_stamp.insert(
-            test_key(who.as_str()),
-            UnixSecs::now() + Duration::from_hours(1),
-        );
+        state
+            .peer_stamp
+            .insert(by.author_key(), UnixSecs::now() + Duration::from_hours(1));
         for index in 0..STEP_BACK_FRAMES + 2 {
-            let stamp = UnixSecs::now() + Duration::from_secs(u64::from(index) * 30);
+            let stamp = UnixSecs::now() + Duration::from_secs(u64::from(index) * 20);
             let update = compute_observed(&live_frame(&who, &by, stamp), &mut state);
             assert!(
                 update.stale && !update.returned,
                 "frame {index} of a key that said goodbye returned the peer"
             );
-            if let Some(run) = state
-                .clock_evidence
-                .step_back
-                .get_mut(&test_key(who.as_str()))
-            {
+            if let Some(run) = state.clock_evidence.step_back.get_mut(&by.author_key()) {
                 run.at = back_20_secs(run.at);
             }
         }
