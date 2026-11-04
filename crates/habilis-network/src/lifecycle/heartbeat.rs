@@ -305,16 +305,7 @@ fn forget_pruned_endpoints(
         if kept_ids.contains(&endpoint) {
             continue;
         }
-        if state.linked_endpoints.contains(&endpoint) {
-            // The proof, the direct path and the backoff stay for the regraft after the link
-            // loss. The path watch goes: nothing names this endpoint, and a stale entry nudges it
-            // on each tick. A later sweep drops the rest.
-            state.path_kinds.remove(&endpoint);
-            state.path_watchers.remove(&endpoint);
-            state.orphaned_endpoints.insert(endpoint);
-        } else {
-            state.forget_endpoint_state(endpoint);
-        }
+        state.release_unbound_endpoint(endpoint);
     }
 }
 
@@ -718,6 +709,80 @@ mod tests {
         assert!(
             !state.graft_backoff.is_blocked(&endpoint, settled),
             "the backoff of a pruned endpoint stays"
+        );
+    }
+
+    /// A nickname that moves to a new endpoint leaves the old one with no name. The sweep only sees
+    /// the endpoints that it removes from the dial hints, so the move must drop the state of the old
+    /// endpoint itself.
+    #[test]
+    fn a_hint_that_moves_to_a_new_endpoint_drops_the_state_of_the_old_one() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let old = iroh::SecretKey::from_bytes(&[8; 32]).public();
+        let new = iroh::SecretKey::from_bytes(&[9; 32]).public();
+        state.bind_peer_endpoint(
+            test_key("moved-fern"),
+            nick("moved-fern"),
+            iroh::EndpointAddr::new(old),
+        );
+        state.direct.insert(old, DirectState::Direct);
+        state.path_kinds.insert(old, PathKind::WebRtc);
+        state.path_watchers.insert(old, None);
+        let asked = Instant::now();
+        state.graft_backoff.asked(old, asked);
+        let settled = asked + Duration::from_secs(600);
+        state.graft_backoff.settle(settled, |_| false, 0.0);
+
+        state.bind_peer_endpoint(
+            test_key("moved-fern"),
+            nick("moved-fern"),
+            iroh::EndpointAddr::new(new),
+        );
+
+        assert!(
+            !state.direct.contains_key(&old)
+                && !state.path_kinds.contains_key(&old)
+                && !state.path_watchers.contains_key(&old)
+                && !state.graft_backoff.is_blocked(&old, settled),
+            "the state of the endpoint that the nickname left stays"
+        );
+    }
+
+    /// The move keeps the state of an old endpoint that another nickname still binds, and the
+    /// proof, direct path and backoff of one that a gossip link still holds.
+    #[test]
+    fn a_hint_that_moves_away_keeps_an_endpoint_that_is_still_in_use() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let shared = iroh::SecretKey::from_bytes(&[8; 32]).public();
+        let linked = iroh::SecretKey::from_bytes(&[7; 32]).public();
+        let new = iroh::SecretKey::from_bytes(&[9; 32]).public();
+        for (who, endpoint) in [("mover-fern", shared), ("stayer-fern", shared)] {
+            state.bind_peer_endpoint(test_key(who), nick(who), iroh::EndpointAddr::new(endpoint));
+        }
+        state.bind_peer_endpoint(
+            test_key("linked-fern"),
+            nick("linked-fern"),
+            iroh::EndpointAddr::new(linked),
+        );
+        state.linked_endpoints.insert(linked);
+        for endpoint in [shared, linked] {
+            state.direct.insert(endpoint, DirectState::Direct);
+        }
+        state.path_kinds.insert(linked, PathKind::WebRtc);
+
+        for who in ["mover-fern", "linked-fern"] {
+            state.bind_peer_endpoint(test_key(who), nick(who), iroh::EndpointAddr::new(new));
+        }
+
+        assert!(
+            state.direct.contains_key(&shared) && state.direct.contains_key(&linked),
+            "an endpoint in use lost its direct state"
+        );
+        assert!(
+            !state.path_kinds.contains_key(&linked),
+            "a linked endpoint that no name binds keeps its path kind"
         );
     }
 

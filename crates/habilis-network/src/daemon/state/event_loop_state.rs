@@ -1125,6 +1125,20 @@ impl EventLoopState {
             .any(|address| address.id == endpoint)
     }
 
+    /// Drop the state of an endpoint that no nickname binds any more. A linked endpoint keeps its
+    /// proof, direct path and backoff for the regraft after the link loss. The path watch goes:
+    /// nothing names this endpoint, and a stale entry nudges it on each tick. A later sweep drops
+    /// the rest.
+    pub(crate) fn release_unbound_endpoint(&mut self, endpoint: EndpointId) {
+        if self.linked_endpoints.contains(&endpoint) {
+            self.path_kinds.remove(&endpoint);
+            self.path_watchers.remove(&endpoint);
+            self.orphaned_endpoints.insert(endpoint);
+        } else {
+            self.forget_endpoint_state(endpoint);
+        }
+    }
+
     /// Drop every state that is keyed by `endpoint`: the backoff, the proof, the rival flag, the
     /// direct state and the path state.
     pub(crate) fn forget_endpoint_state(&mut self, endpoint: EndpointId) {
@@ -2036,13 +2050,22 @@ impl EventLoopState {
         nickname: Nickname,
         endpoint: EndpointAddr,
     ) {
+        let bound_id = endpoint.id;
         #[cfg(feature = "multihop")]
-        let (parked, bound) = (self.parked_link_states.take(&nickname), endpoint.id);
+        let (parked, bound) = (self.parked_link_states.take(&nickname), bound_id);
         match owner {
             Some(key) => self.hint_owner.insert(nickname.clone(), key),
             None => self.hint_owner.remove(&nickname),
         };
-        self.peer_endpoints.insert(nickname, endpoint);
+        let replaced = self.peer_endpoints.insert(nickname, endpoint);
+        // The endpoint that the nickname left has no name now, unless another nickname binds it.
+        // The sweep drops only the bindings that it removes, so it never sees this one.
+        if let Some(old) = replaced
+            && old.id != bound_id
+            && !self.endpoint_is_bound(old.id)
+        {
+            self.release_unbound_endpoint(old.id);
+        }
         // The vector that came before this binding is fed now, not at the next tick.
         #[cfg(feature = "multihop")]
         if let Some(vector) = parked {
