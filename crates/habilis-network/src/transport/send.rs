@@ -620,11 +620,59 @@ mod tests {
         }
         state.peers.insert(live);
         state.quiet.insert(quiet);
+        // The live key owns the hint: a hint of a key outside the roster is stale.
+        state.bind_peer_endpoint(live, nick("bob"), iroh::EndpointAddr::new(bob));
 
         assert_eq!(
             route(&directed_msg(), &state),
             Route::Unicast(bob),
             "one live key and one quiet key is one member"
+        );
+    }
+
+    /// The dial hint of a nickname belongs to one key. When that key is quiet and another key is
+    /// live under the nickname, the hint names a dead endpoint: the send waits for the live key to
+    /// rebind it, and does not dial the dead one.
+    #[test]
+    fn a_hint_owned_by_a_quiet_key_is_no_target_while_another_key_is_live() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let dead = endpoint_id(1);
+        let (owner, live) = (test_key("bob#owner"), test_key("bob#live"));
+        for key in [owner, live] {
+            state.names.insert(key, nick("bob"));
+        }
+        state.quiet.insert(owner);
+        state.peers.insert(live);
+        state.bind_peer_endpoint(owner, nick("bob"), iroh::EndpointAddr::new(dead));
+        state.direct.insert(dead, DirectState::Direct);
+
+        assert_eq!(
+            route(&directed_msg(), &state),
+            Route::Undeliverable,
+            "the send followed the hint of a quiet key to a dead endpoint"
+        );
+    }
+
+    /// Control. With no live key under the nickname the hint of the quiet key stays the target: the
+    /// peer may return.
+    #[test]
+    fn a_hint_owned_by_a_quiet_key_stays_the_target_when_no_key_is_live() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.standing.insert(Standing::Meshed);
+        let bob = endpoint_id(1);
+        let owner = test_key("bob#owner");
+        state.names.insert(owner, nick("bob"));
+        state.quiet.insert(owner);
+        state.bind_peer_endpoint(owner, nick("bob"), iroh::EndpointAddr::new(bob));
+        state.direct.insert(bob, DirectState::Direct);
+
+        assert_eq!(
+            route(&directed_msg(), &state),
+            Route::Unicast(bob),
+            "a quiet peer that may return keeps its hint"
         );
     }
 

@@ -51,10 +51,11 @@ pub(super) fn held(eid: EndpointId, state: &EventLoopState) -> bool {
 
 /// The endpoint a directed message to `nick` can be sent to, or `None` for an
 /// addressee we hold no endpoint for or the rendezvous pseudo-node (never a
-/// directed target), or a nickname that two live peers use. Reachability is left to iroh's connect
-/// (direct or multihop).
+/// directed target), a nickname that two live peers use, or a nickname whose hint names a peer that
+/// went quiet while another key is live under it. Reachability is left to iroh's connect (direct or
+/// multihop).
 pub(super) fn directed_endpoint(nick: &Nickname, state: &EventLoopState) -> Option<EndpointId> {
-    if state.nickname_is_ambiguous(nick) {
+    if state.nickname_is_ambiguous(nick) || state.hint_is_stale(nick) {
         return None;
     }
     let eid = state.peer_endpoints.get(nick)?.id;
