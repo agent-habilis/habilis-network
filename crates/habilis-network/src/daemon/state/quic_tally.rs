@@ -234,25 +234,38 @@ mod tests {
     use super::{ConnKind, QuicCounts, QuicReading, QuicTally, QuicWindow};
     use iroh::endpoint::ConnectionStats;
 
-    fn reading(id: usize, kind: ConnKind, ping_tx: u64, dgram_tx: u64) -> QuicReading {
-        let counts = QuicCounts {
-            ping_tx,
-            dgram_tx,
-            ..QuicCounts::default()
-        };
-        QuicReading { id, kind, counts }
+    /// Counts of `unit` times a weight that is different for each field (1, 2, 4, 8, 16, 32, 64),
+    /// so that a test sees a field read from another field, and no two fields hold one value.
+    fn counts(unit: u64) -> QuicCounts {
+        QuicCounts {
+            ping_tx: unit,
+            ping_rx: 2 * unit,
+            ack_tx: 4 * unit,
+            dgram_tx: 8 * unit,
+            dgram_rx: 16 * unit,
+            bytes_tx: 32 * unit,
+            bytes_rx: 64 * unit,
+        }
+    }
+
+    fn reading(id: usize, kind: ConnKind, unit: u64) -> QuicReading {
+        QuicReading {
+            id,
+            kind,
+            counts: counts(unit),
+        }
     }
 
     /// The first call reads the marks and reports no movement. The next calls report the delta of
-    /// each connection, a connection born in the window counts from zero, and a connection that
-    /// is gone leaves no mark.
+    /// each connection in every field, a connection born in the window counts from zero, and a
+    /// connection that is gone leaves no mark.
     #[test]
     fn a_window_is_the_delta_of_each_live_connection_since_the_last_call() {
         let mut tally = QuicTally::default();
 
         let first_readings = [
-            reading(1, ConnKind::Gossip, 10, 100),
-            reading(2, ConnKind::Unicast, 20, 200),
+            reading(1, ConnKind::Gossip, 10),
+            reading(2, ConnKind::Unicast, 20),
         ];
         let first = tally.take(&first_readings);
         assert_eq!(first.live_of(ConnKind::Gossip), 1, "live is a gauge");
@@ -264,35 +277,29 @@ mod tests {
         );
 
         let second_readings = [
-            reading(1, ConnKind::Gossip, 13, 130),
-            reading(2, ConnKind::Unicast, 20, 207),
-            reading(3, ConnKind::Gossip, 2, 9),
+            reading(1, ConnKind::Gossip, 13),
+            reading(2, ConnKind::Unicast, 27),
+            reading(3, ConnKind::Gossip, 2),
         ];
         let second = tally.take(&second_readings);
         assert_eq!(second.live_of(ConnKind::Gossip), 2, "1 old and 1 new");
         assert_eq!(
-            second.moved_of(ConnKind::Gossip).ping_tx,
-            3 + 2,
-            "3 more, and 2 new"
+            second.moved_of(ConnKind::Gossip),
+            counts(3 + 2),
+            "3 more units on the old connection, and the 2 of the new one, in every field"
         );
         assert_eq!(
-            second.moved_of(ConnKind::Gossip).dgram_tx,
-            30 + 9,
-            "30 more, and 9 new"
+            second.moved_of(ConnKind::Unicast),
+            counts(7),
+            "7 more units, in every field"
         );
-        assert_eq!(
-            second.moved_of(ConnKind::Unicast).ping_tx,
-            0,
-            "no ping in the window"
-        );
-        assert_eq!(second.moved_of(ConnKind::Unicast).dgram_tx, 7, "7 more");
         assert_eq!(
             second.moved_of(ConnKind::Other),
             QuicCounts::default(),
             "no such connection"
         );
 
-        let third = tally.take(&[reading(3, ConnKind::Gossip, 2, 9)]);
+        let third = tally.take(&[reading(3, ConnKind::Gossip, 2)]);
         assert_eq!(
             third.live_of(ConnKind::Unicast),
             0,
@@ -304,46 +311,57 @@ mod tests {
             "3 did nothing"
         );
 
-        let fourth = tally.take(&[reading(1, ConnKind::Gossip, 1, 5)]);
+        let fourth = tally.take(&[reading(1, ConnKind::Gossip, 1)]);
         assert_eq!(
-            fourth.moved_of(ConnKind::Gossip).ping_tx,
-            1,
+            fourth.moved_of(ConnKind::Gossip),
+            counts(1),
             "an id that came back counts from zero: its old mark was dropped"
         );
     }
 
     /// An id can be reused: the stable id is the address of the connection, so a new connection
     /// can take the id of one that is gone between two calls. QUIC counters never go down, so a
-    /// counter below its mark says that the connection is new, and it counts from zero.
+    /// counter below its mark says that the connection is new, and it counts from zero. One
+    /// counter below is enough.
     #[test]
     fn a_reused_id_with_a_lower_counter_counts_from_zero() {
         let mut tally = QuicTally::default();
-        let old = [reading(1, ConnKind::Gossip, 10, 100)];
+        let old = [reading(1, ConnKind::Gossip, 10)];
         tally.take(&old);
 
-        let reused = [reading(1, ConnKind::Gossip, 2, 9)];
+        let reused = [reading(1, ConnKind::Gossip, 2)];
         let window = tally.take(&reused);
-
         assert_eq!(
-            window.moved_of(ConnKind::Gossip).ping_tx,
-            2,
-            "the new connection sent 2 pings, not 0"
+            window.moved_of(ConnKind::Gossip),
+            counts(2),
+            "the new connection counts all it has, not 0"
         );
+
+        let one_down = QuicCounts {
+            bytes_rx: 1,
+            ..counts(30)
+        };
+        let reused = [QuicReading {
+            id: 1,
+            kind: ConnKind::Gossip,
+            counts: one_down,
+        }];
+        let window = tally.take(&reused);
         assert_eq!(
-            window.moved_of(ConnKind::Gossip).dgram_tx,
-            9,
-            "the new connection sent 9 datagrams, not 0"
+            window.moved_of(ConnKind::Gossip),
+            one_down,
+            "1 counter below its mark is enough: the others count from zero too"
         );
     }
 
-    /// The text of the census line: one pair per kind, in the order of the kinds.
+    /// The text of one field: one pair per kind, in the order of the kinds.
     #[test]
     fn a_field_reads_as_one_pair_per_kind() {
         let mut tally = QuicTally::default();
-        tally.take(&[reading(1, ConnKind::Gossip, 0, 0)]);
+        tally.take(&[reading(1, ConnKind::Gossip, 0)]);
         let readings = [
-            reading(1, ConnKind::Gossip, 4, 0),
-            reading(2, ConnKind::Other, 6, 0),
+            reading(1, ConnKind::Gossip, 4),
+            reading(2, ConnKind::Other, 6),
         ];
         let window = tally.take(&readings);
         let pings = window.pairs(|window, kind| window.moved_of(kind).ping_tx);
@@ -356,50 +374,50 @@ mod tests {
         assert_eq!(live, "gossip:1,unicast:0,other:1", "the live connections");
     }
 
-    /// The census line holds every field, in one string, with the live gauge first.
+    /// The census line holds every field once, with its own value, with the live gauge first.
     #[test]
     fn the_census_line_names_each_field_once() {
         let mut tally = QuicTally::default();
-        tally.take(&[reading(1, ConnKind::Unicast, 0, 0)]);
-        let readings = [reading(1, ConnKind::Unicast, 2, 3)];
+        tally.take(&[reading(1, ConnKind::Unicast, 0)]);
+        let readings = [reading(1, ConnKind::Unicast, 2)];
         let line = tally.take(&readings).line().to_string();
 
         assert_eq!(
             line,
             "live=gossip:0,unicast:1,other:0 ping_tx=gossip:0,unicast:2,other:0 \
-             ping_rx=gossip:0,unicast:0,other:0 ack_tx=gossip:0,unicast:0,other:0 \
-             dgram_tx=gossip:0,unicast:3,other:0 dgram_rx=gossip:0,unicast:0,other:0 \
-             bytes_tx=gossip:0,unicast:0,other:0 bytes_rx=gossip:0,unicast:0,other:0",
-            "the line of one unicast connection that sent 2 pings and 3 datagrams"
+             ping_rx=gossip:0,unicast:4,other:0 ack_tx=gossip:0,unicast:8,other:0 \
+             dgram_tx=gossip:0,unicast:16,other:0 dgram_rx=gossip:0,unicast:32,other:0 \
+             bytes_tx=gossip:0,unicast:64,other:0 bytes_rx=gossip:0,unicast:128,other:0",
+            "the line of one unicast connection that moved 2 units: each field has its weight"
         );
     }
 
     /// The counters of a connection come from the stats of QUIC: the ACK frames of a path are
-    /// ACK frames.
+    /// ACK frames. Each stat has a value of its own, so no field reads another one.
     #[test]
     fn the_counts_read_the_stats_of_a_connection() {
         let mut stats = ConnectionStats::default();
         stats.frame_tx.ping = 1;
         stats.frame_rx.ping = 2;
-        stats.frame_tx.acks = 3;
-        stats.frame_tx.path_acks = 4;
-        stats.udp_tx.datagrams = 5;
-        stats.udp_rx.datagrams = 6;
-        stats.udp_tx.bytes = 7;
-        stats.udp_rx.bytes = 8;
+        stats.frame_tx.acks = 4;
+        stats.frame_tx.path_acks = 8;
+        stats.udp_tx.datagrams = 16;
+        stats.udp_rx.datagrams = 32;
+        stats.udp_tx.bytes = 64;
+        stats.udp_rx.bytes = 128;
 
         assert_eq!(
             QuicCounts::of(&stats),
             QuicCounts {
                 ping_tx: 1,
                 ping_rx: 2,
-                ack_tx: 7,
-                dgram_tx: 5,
-                dgram_rx: 6,
-                bytes_tx: 7,
-                bytes_rx: 8,
+                ack_tx: 12,
+                dgram_tx: 16,
+                dgram_rx: 32,
+                bytes_tx: 64,
+                bytes_rx: 128,
             },
-            "each stat lands in its field, and the 2 kinds of ACK add up"
+            "each stat lands in its field, and the 2 kinds of ACK add up to 12"
         );
     }
 }
