@@ -664,13 +664,14 @@ pub(crate) async fn handle_state_digest(
         return Answered::default();
     }
     let missing = missing_frames(channel, message, state);
-    let serialize = |frame: &Verified| frame.serialize().ok();
-    let frames: Vec<WireFrame> = missing.iter().filter_map(serialize).collect();
+    let serialized: Vec<(&Verified, WireFrame)> =
+        missing.iter().filter_map(with_wire_frame).collect();
+    let frames: Vec<WireFrame> = serialized.iter().map(|(_, wire)| wire.clone()).collect();
     let mut answered = Answered::default();
     if frames.is_empty() {
         return answered;
     }
-    let (total, absent) = answer_bytes(&missing, &state.peers, context.author);
+    let (total, absent) = answer_bytes(&serialized, &state.peers, context.author);
     let count = frames.len();
     // A point-to-point answer ends with our own heads: the asker compares them
     // with its document and asks again while it is behind (see `ask_back`).
@@ -737,14 +738,23 @@ pub(crate) async fn handle_state_digest(
     answered
 }
 
+/// A frame with its serialized form, `None` for a frame that does not serialize.
+fn with_wire_frame(frame: &Verified) -> Option<(&Verified, WireFrame)> {
+    let wire = frame.serialize().ok()?;
+    Some((frame, wire))
+}
+
 /// The wire bytes of the frames of an answer, and the part of them that a member signed who is
-/// neither on the roster nor `me`.
-fn answer_bytes(frames: &[Verified], roster: &HashSet<Nickname>, me: &Nickname) -> (u64, u64) {
+/// neither on the roster nor `me`. Each frame is read as it was serialized for the answer.
+fn answer_bytes(
+    frames: &[(&Verified, WireFrame)],
+    roster: &HashSet<Nickname>,
+    me: &Nickname,
+) -> (u64, u64) {
     let mut total = 0;
     let mut absent = 0;
-    for frame in frames {
-        let wire_len: usize = frame.serialize().map_or(0, |wire| wire.as_bytes().len());
-        let len = u64::try_from(wire_len).unwrap_or(u64::MAX);
+    for (frame, wire) in frames {
+        let len = u64::try_from(wire.as_bytes().len()).unwrap_or(u64::MAX);
         total += len;
         if frame.author != *me && !roster.contains(&frame.author) {
             absent += len;
