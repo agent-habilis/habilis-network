@@ -2081,6 +2081,45 @@ mod tests {
         );
     }
 
+    /// `known` is the roster that was shown, read from the roster and not from the pongs: a shown
+    /// peer that sent no pong is known, and a live peer whose arrival was not shown is not.
+    #[test]
+    fn the_ping_report_counts_a_shown_peer_that_sent_no_pong_and_not_an_unshown_one() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        for name in ["answering", "silent", "unshown"] {
+            state.peer_for_test(name);
+        }
+        for name in ["answering", "silent"] {
+            state.surfaced_for_test(name);
+        }
+        let started = TokioInstant::now();
+        let probe = Message::new_ping(&MeshId::from("test"), &nick("us"));
+        let mut round = PingRound::new(&probe, started, started + Duration::from_secs(10), None);
+        assert!(
+            round.record_pong(
+                test_key("answering"),
+                nick("answering"),
+                &probe.id,
+                started + Duration::from_millis(30)
+            ),
+            "a pong that names the probe is recorded"
+        );
+        state.arm_ping_round(round);
+        let sink = ReportSink::default();
+
+        super::finalize_ping_round(&mut state, &sink);
+
+        assert_eq!(
+            *sink.0.lock().expect("the sink lock"),
+            vec![Report {
+                peers: vec![(nick("answering"), 30)],
+                known: 2
+            }],
+            "one row for the peer that answered; `known` counts the silent shown peer, not the unshown one"
+        );
+    }
+
     /// Control. A punctual sweep tick evicts the peer that is silent past the alive timeout.
     #[test]
     fn a_punctual_sweep_tick_evicts_a_silent_peer() {
