@@ -539,40 +539,38 @@ impl MeshDoc {
             self.frame_cap.saturating_mul(2)
         };
         if self.gate.is_some() && self.frame_bytes >= threshold {
+            if self.candidate.is_some() {
+                return self.adopt(me);
+            }
             return Some(self.switch_to(self.epoch.saturating_add(1), me));
         }
         None
     }
 
-    /// Switch to the epoch of the candidate and apply its root frame.
+    /// Switch to the epoch of the candidate and apply its root frame. The candidate is a root of its
+    /// epoch, and a peer sent it once, so a switch that dropped it would leave its dedup key seen
+    /// with no frame behind it. A node that crosses the threshold with a candidate adopts it for
+    /// that reason, and does not start an epoch of its own.
     fn adopt(&mut self, me: &Nickname) -> Option<EpochSwitch> {
         let candidate = self.candidate.take()?;
         let switch = self.switch_to(candidate.epoch, me);
-        let _ = self.ingest(&candidate.frame);
+        let taken = self.ingest(&candidate.frame);
+        debug_assert!(
+            matches!(taken, Ingested::Applied { .. }),
+            "a candidate is a root that passed the gate, so its epoch takes it: {taken:?}"
+        );
         Some(switch)
     }
 
     /// Drop every frame and start `epoch`, and hand back the entry of `me`, which only `me` can
     /// write again.
-    ///
-    /// A candidate that this node holds is not lost with the old epoch. A candidate of `epoch` is
-    /// applied in the new one, because a peer that reset first sent it once and its dedup key stays
-    /// seen. Any other candidate is forgotten, so its re-send is not a repeat.
     fn switch_to(&mut self, epoch: u64, me: &Nickname) -> EpochSwitch {
-        let held = self.candidate.take();
         let gate_map = self.gate.as_ref().map(|gate| gate.map.clone());
         let map: String = gate_map.unwrap_or_default();
         let json = self.to_json();
         let peers = json.get(&map);
         let own_entry: Option<Value> = peers.and_then(|peers| peers.get(me.as_str())).cloned();
         self.restart(epoch);
-        if let Some(held) = held {
-            if held.epoch == epoch {
-                let _ = self.ingest(&held.frame);
-            } else {
-                self.dropped.push(held.frame.dedup_key());
-            }
-        }
         EpochSwitch {
             epoch,
             map,
@@ -2415,6 +2413,32 @@ mod tests {
         assert!(
             holds_entry(&doc, "alice") || forgotten,
             "the card of alice is in epoch 1 or its re-send is not a repeat"
+        );
+    }
+
+    #[test]
+    fn a_node_that_crosses_the_cap_with_a_higher_candidate_goes_to_the_epoch_of_the_candidate() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (alice, bob) = (nick("alice"), nick("bob"));
+        let mut doc = doc_over_the_cap(&bob);
+        let from_alice = root_of(3, &alice, "hers");
+        assert!(
+            matches!(doc.ingest(&from_alice), Ingested::NewEpoch { epoch: 3 }),
+            "the root of epoch 3 is the candidate"
+        );
+        let switch = doc.tick_epoch(&bob).expect("over the cap: a switch");
+        assert_eq!(
+            switch.epoch, 3,
+            "the switch goes to the epoch of the candidate"
+        );
+        assert_eq!(
+            doc.epoch(),
+            3,
+            "the document holds the epoch of the candidate"
+        );
+        assert!(
+            holds_entry(&doc, "alice"),
+            "the card of the candidate is in the new epoch"
         );
     }
 
