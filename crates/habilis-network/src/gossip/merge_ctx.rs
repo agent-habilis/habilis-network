@@ -956,10 +956,9 @@ mod tests {
                         .expect("the write is taken");
                 }
                 let before = state.doc(Channel::Meta).to_json();
-                let own = state.identity.author_key();
                 let switch = state
                     .doc_mut(Channel::Meta)
-                    .tick_epoch(&author, &own)
+                    .tick_epoch(&author)
                     .expect("over the cap: a reset");
                 assert_eq!(
                     state.doc(Channel::Meta).to_json(),
@@ -1054,10 +1053,9 @@ mod tests {
                         .expect("the write is taken");
                 }
                 let before = state.doc(Channel::Meta).to_json();
-                let own = state.identity.author_key();
                 let switch = state
                     .doc_mut(Channel::Meta)
-                    .tick_epoch(&author, &own)
+                    .tick_epoch(&author)
                     .expect("over the cap: a reset");
                 state.note_epoch_switch(switch);
 
@@ -1127,10 +1125,9 @@ mod tests {
                         .await
                         .expect("the write is taken");
                 }
-                let own = state.identity.author_key();
                 let switch = state
                     .doc_mut(Channel::Meta)
-                    .tick_epoch(&author, &own)
+                    .tick_epoch(&author)
                     .expect("over the cap: a reset");
                 state.note_epoch_switch(switch);
                 // The agent writes a new status before the sweep.

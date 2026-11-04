@@ -4120,8 +4120,7 @@ mod dedup_counter_tests {
         let sender_nick = nick("sender");
         // A document that went through 1 reset: its first write is a root of epoch 1.
         let mut writer = MeshDoc::new_gated(gate.clone()).epoch_cap(0);
-        let own = sender_identity.author_key();
-        assert!(writer.tick_epoch(&sender_nick, &own).is_some(), "the reset");
+        assert!(writer.tick_epoch(&sender_nick).is_some(), "the reset");
         let seed = *sender_identity.public().as_bytes();
         let change = writer
             .build_change(

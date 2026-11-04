@@ -1150,7 +1150,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         self.state.idle.prune += 1;
         timers::tick_prune(&mut self.state, self.parts.sink);
         let context = self.parts.handler_ctx(&self.sender);
-        timers::tick_epoch(&mut self.state, context.author, &context.our_pubkey);
+        timers::tick_epoch(&mut self.state, context.author);
         timers::tick_doc_census(&mut self.state, context.author);
         timers::tick_collection_census(&self.state);
     }

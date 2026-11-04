@@ -21,7 +21,7 @@ use crate::util::{resident_memory, tuning, unix_secs};
 
 use crate::gossip::PathSummary;
 use crate::net;
-use crate::protocol::{AuthorKey, Channel, Nickname};
+use crate::protocol::{Channel, Nickname};
 use crate::transport::payload_path;
 /// The warn-only resident-memory leak check, run on the slow (1-minute)
 /// housekeeping tick (see `run`'s `intervals.prune`). Kept on this tick now
@@ -355,8 +355,8 @@ fn warn_silent_partition(state: &EventLoopState, roster_len: usize, link_len: us
 /// One tick of the minute timer for the epoch of the meta document: it adopts a higher epoch after
 /// its wait, or starts a new one when its frames reach the threshold. The sweep tick writes the
 /// entry of this node again.
-pub(crate) fn tick_epoch(state: &mut EventLoopState, me: &Nickname, own: &AuthorKey) {
-    if let Some(switch) = state.doc_mut(Channel::Meta).tick_epoch(me, own) {
+pub(crate) fn tick_epoch(state: &mut EventLoopState, me: &Nickname) {
+    if let Some(switch) = state.doc_mut(Channel::Meta).tick_epoch(me) {
         state.note_epoch_switch(switch);
     }
 }

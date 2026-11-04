@@ -497,6 +497,10 @@ impl MeshDoc {
     /// Adopt the candidate epoch at once when this node holds no frame of another author: it has
     /// nothing to lose, so it need not wait. `None` when there is no candidate or the node holds
     /// the frames of others.
+    ///
+    /// A fresh joiner holds nothing, so one frame can move it up to `DOC_EPOCH_JUMP_MAX` epochs. The
+    /// mesh then follows it within one wait, because that jump is inside the bound of the mesh, and
+    /// the joiner holds frames of others after that, so it waits the next time.
     pub fn adopt_if_alone(&mut self, me: &Nickname, own: &AuthorKey) -> Option<EpochSwitch> {
         self.candidate.as_ref()?;
         let alone = self.frames.values().all(|frame| frame.key() == *own);
@@ -512,10 +516,12 @@ impl MeshDoc {
     ///
     /// A node that holds the frames of others adopts after the wait, so for up to
     /// `DOC_EPOCH_ADOPT_WAIT_TICKS` minutes after a reset the writes of the two epochs do not cross,
-    /// and a reader can see a peer with no entry. Only a gated channel has epochs: the free-form
-    /// `state` channel keeps every frame.
-    pub fn tick_epoch(&mut self, me: &Nickname, own: &AuthorKey) -> Option<EpochSwitch> {
-        let _ = own;
+    /// and a reader can see a peer with no entry. An entry comes back smallest field first, so the
+    /// capabilities of a card can land after its other fields. The size of the epoch is taken one
+    /// tick after the wait: a node adopts at the end of the wait and writes its entry on the next
+    /// sweep, so the entries are back in that margin, whatever the phase of the two timers. Only a
+    /// gated channel has epochs: the free-form `state` channel keeps every frame.
+    pub fn tick_epoch(&mut self, me: &Nickname) -> Option<EpochSwitch> {
         self.epoch_ticks = self.epoch_ticks.saturating_add(1);
         if self.candidate.is_some() {
             self.candidate_ticks = self.candidate_ticks.saturating_add(1);
@@ -523,10 +529,10 @@ impl MeshDoc {
                 return self.adopt(me);
             }
         }
-        if self.epoch_ticks == DOC_EPOCH_ADOPT_WAIT_TICKS + 1 {
+        if self.epoch_ticks == DOC_EPOCH_ADOPT_WAIT_TICKS + 2 {
             self.settled_bytes = self.frame_bytes;
         }
-        let settled = self.epoch_ticks > DOC_EPOCH_ADOPT_WAIT_TICKS;
+        let settled = self.epoch_ticks > DOC_EPOCH_ADOPT_WAIT_TICKS + 1;
         let threshold = if settled {
             self.frame_cap.max(self.settled_bytes.saturating_mul(2))
         } else {
@@ -2091,9 +2097,7 @@ mod tests {
             write(&mut doc, &ghost, &filler("ghost", field));
         }
         write(&mut doc, &me, &entry("me", "mine"));
-        let switch = doc
-            .tick_epoch(&me, &signer(&me))
-            .expect("over the cap: a reset");
+        let switch = doc.tick_epoch(&me).expect("over the cap: a reset");
         assert_eq!(switch.epoch, 1, "the reset starts the next epoch");
         assert_eq!(doc.epoch(), 1, "the document holds the new epoch");
         assert_eq!(
@@ -2122,7 +2126,7 @@ mod tests {
         let mut doc = MeshDoc::new_gated(card_gate()).epoch_cap(1_000_000);
         write(&mut doc, &me, &entry("me", "mine"));
         assert_eq!(
-            doc.tick_epoch(&me, &signer(&me)),
+            doc.tick_epoch(&me),
             None,
             "a document under the cap does not reset"
         );
@@ -2135,13 +2139,13 @@ mod tests {
         let (me, ann, bob, cat) = (nick("me"), nick("ann"), nick("bob"), nick("cat"));
         let mut doc = MeshDoc::new_gated(card_gate()).epoch_cap(4_000);
         write(&mut doc, &me, &entry("me", "mine"));
-        for _ in 0..=super::DOC_EPOCH_ADOPT_WAIT_TICKS {
-            assert!(doc.tick_epoch(&me, &signer(&me)).is_none(), "under the cap");
+        for _ in 0..super::DOC_EPOCH_ADOPT_WAIT_TICKS + 2 {
+            assert!(doc.tick_epoch(&me).is_none(), "under the cap");
         }
         for field in ["a", "b"] {
             write(&mut doc, &ann, &filler("ann", field));
         }
-        let switch = doc.tick_epoch(&me, &signer(&me)).expect("over the cap");
+        let switch = doc.tick_epoch(&me).expect("over the cap");
         assert_eq!(switch.epoch, 1, "the first reset starts epoch 1");
         // The live entries come back, and they alone are over the cap.
         for who in [&me, &ann, &bob, &cat] {
@@ -2150,10 +2154,7 @@ mod tests {
         let live = doc.census(false).frame_bytes;
         assert!(live > 4_000, "the live entries fill the cap: {live}");
         for tick in 0..30 {
-            assert!(
-                doc.tick_epoch(&me, &signer(&me)).is_none(),
-                "no reset at tick {tick}"
-            );
+            assert!(doc.tick_epoch(&me).is_none(), "no reset at tick {tick}");
         }
         assert_eq!(
             doc.epoch(),
@@ -2173,7 +2174,7 @@ mod tests {
         for round in 0..200 {
             let merge = json!({ "peers": { "me": { "status": format!("{round}{}", long(300)) } } });
             write(&mut doc, &me, &merge);
-            if let Some(switch) = doc.tick_epoch(&me, &signer(&me)) {
+            if let Some(switch) = doc.tick_epoch(&me) {
                 resets += 1;
                 let again = json!({ "peers": { "me": switch.own_entry } });
                 write(&mut doc, &me, &again);
@@ -2235,10 +2236,7 @@ mod tests {
             "a node that holds frames of others does not adopt at once"
         );
         for tick in 1..5 {
-            assert!(
-                doc.tick_epoch(&quiet, &signer(&quiet)).is_none(),
-                "tick {tick} waits"
-            );
+            assert!(doc.tick_epoch(&quiet).is_none(), "tick {tick} waits");
         }
         assert!(
             matches!(
@@ -2247,9 +2245,7 @@ mod tests {
             ),
             "the root of epoch 2 takes the place of the root of epoch 1"
         );
-        let switch = doc
-            .tick_epoch(&quiet, &signer(&quiet))
-            .expect("the wait is over");
+        let switch = doc.tick_epoch(&quiet).expect("the wait is over");
         assert_eq!(switch.epoch, 2, "it jumps to the highest epoch that it saw");
         assert_eq!(
             switch.own_entry,
@@ -2312,7 +2308,7 @@ mod tests {
         }
         for _ in 0..20 {
             assert!(
-                doc.tick_epoch(&me, &signer(&me)).is_none(),
+                doc.tick_epoch(&me).is_none(),
                 "a refused frame never starts a reset"
             );
         }
