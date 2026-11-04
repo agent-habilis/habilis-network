@@ -548,12 +548,14 @@ pub(crate) async fn ingest_from(
 ) {
     let shape = FrameShape::of(&frame);
     state.idle.wire_in.note_received(&shape);
-    let Ok((message, resend_nonce)) = Message::parse_wire(&frame) else {
-        context
-            .sink
-            .emit(NodeEvent::Error("Failed to parse message".to_owned()));
-        tracing::warn!(target: "habilis_network::gossip", "failed to parse inbound gossip message");
-        return;
+    let (message, resend_nonce) = match Message::parse_wire(&frame) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            let reason = NodeEvent::Error(format!("Failed to parse message: {error}"));
+            context.sink.emit(reason);
+            tracing::warn!(target: "habilis_network::gossip", %error, "failed to parse inbound gossip message");
+            return;
+        }
     };
     // Authenticity gate, **before** the self-echo drop, dedup, and every other step: every inbound
     // message must carry a valid signature over its canonical bytes. Verifying before `mark_seen`

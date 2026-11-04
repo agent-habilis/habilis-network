@@ -427,7 +427,7 @@ impl WireOutTally {
 #[cfg(test)]
 pub(crate) fn app_frame_with_tag(tag: &str) -> Vec<u8> {
     format!(
-        r#"{{"v":"12.0","id":"i","type":"app","tag":"{tag}","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{{}}}}"#
+        r#"{{"v":"13.0","id":"i","type":"app","tag":"{tag}","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{{}}}}"#
     )
     .into_bytes()
 }
@@ -442,7 +442,7 @@ mod tests {
     use crate::protocol::{Channel, MeshId, Message, MessageBody};
     use crate::testing;
 
-    const APP: &[u8] = br#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca","seq":3,"ext":{}}"#;
+    const APP: &[u8] = br#"{"v":"13.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca","seq":3,"ext":{}}"#;
 
     #[test]
     fn an_app_frame_has_its_tag_its_body_and_its_wire_size() {
@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn a_quoted_body_does_not_end_the_body_early() {
-        let frame = br#"{"v":"12.0","id":"i","type":"state","mesh":"m","author":"a","ts":1,"body":"say \",\"pubkey\":\" now","pubkey":"ab","sig":"cd","ext":{}}"#;
+        let frame = br#"{"v":"13.0","id":"i","type":"state","mesh":"m","author":"a","ts":1,"body":"say \",\"pubkey\":\" now","pubkey":"ab","sig":"cd","ext":{}}"#;
         let shape = FrameShape::of(frame);
         assert_eq!(
             shape.class,
@@ -569,7 +569,7 @@ mod tests {
             ("nonsense", FrameClass::Other),
         ] {
             let frame = format!(
-                r#"{{"v":"12.0","id":"i","type":"{wire_type}","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{{}}}}"#
+                r#"{{"v":"13.0","id":"i","type":"{wire_type}","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","ext":{{}}}}"#
             );
             assert_eq!(FrameShape::of(frame.as_bytes()).class, class, "{wire_type}");
         }
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn a_frame_with_a_shard_header_is_a_shard() {
-        let frame = br#"{"v":"12.0","id":"i","type":"app","tag":"t","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","shard":{"group":"g","idx":0,"total":2},"ext":{}}"#;
+        let frame = br#"{"v":"13.0","id":"i","type":"app","tag":"t","mesh":"m","author":"a","ts":1,"body":"b","pubkey":"ab","sig":"cd","shard":{"group":"g","idx":0,"total":2},"ext":{}}"#;
         assert_eq!(
             FrameShape::of(frame).class,
             FrameClass::Shard,

@@ -1,6 +1,7 @@
 //! The wire version of the message envelope.
 
-/// Protocol version embedded in every message, `12.0` for the engine's
+/// Protocol version embedded in every message, `13.0`. The change body of a gated channel carries
+/// an epoch, and the digest window ids are Base64 (see below). `12.0` was the engine's
 /// de-branding. The crypto byte-domains are mixed into signature and
 /// key-derivation transcripts, so any rebrand changes the bytes an older build
 /// derives and its signature verification fails *silently*. The exact-match gate
@@ -31,6 +32,13 @@
 /// only because it lands inside the same interop break rather than needing one
 /// of its own.
 ///
+/// - `13.0` — the change body of the `state` and `meta` channels may carry an epoch key `e` (left
+///   out at epoch 0), and the digest window ids are Base64 and not Base58. A `12.0` peer and a
+///   `13.0` peer do not form a mesh: the join succeeds, then each side refuses every frame of the
+///   other, with an error that names the wire version and its own. Without the bump an old peer
+///   would read a change of epoch above 0 as a change of epoch 0 whose dependency is missing, keep
+///   it as an orphan, and be sent the same frames again and again, while a new peer would ignore
+///   the frames of the old one.
 /// - `11.0` — a product rebrand (the product's name was in the byte-domains).
 /// - `10.0` / `9.0` — the agent-mesh → agent-square and swarm → mesh renames.
 ///   `9.0` also moved the identity wire key to `"mesh"` and the JSON-RPC
@@ -46,4 +54,4 @@
 /// - `4.0` — the native application-payload port.
 /// - `3.0` — the application-payload migration.
 /// - `2.0` — RFC 6902 → RFC 7386 shared state.
-pub(crate) const VERSION: &str = "12.0";
+pub(crate) const VERSION: &str = "13.0";

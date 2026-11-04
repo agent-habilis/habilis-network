@@ -1244,7 +1244,7 @@ mod tests {
     /// that can only ever happen on purpose.
     ///
     /// It last moved when the byte-domains dropped the product name for the
-    /// engine's, which is why `messages::VERSION` is `12.0`.
+    /// engine's, which moved `messages::VERSION` to `12.0`.
     #[test]
     fn genesis_bytes_are_pinned() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -1352,7 +1352,7 @@ mod tests {
     }
 
     /// The bytes that one fixture frame takes on the wire, counted by hand from its JSON, on the
-    /// mesh `test`: 103 bytes of fixed text (the keys, the quotes, the commas and `{"v":"12.0"`
+    /// mesh `test`: 103 bytes of fixed text (the keys, the quotes, the commas and `{"v":"13.0"`
     /// through `"ext":{}}`), a 36 byte id, a 62 byte mesh id, a 10 digit timestamp, a 64 byte hex
     /// key and a 128 byte hex signature, which is 300 bytes, and then the author and the body. The
     /// body is written as a JSON string, so each of its quotes costs one more byte for the

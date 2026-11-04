@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt;
 
-use super::MAX_MESSAGE_SIZE;
+use super::{MAX_MESSAGE_SIZE, VERSION};
 
 /// The source of a failed step. A parser's own error goes in whole.
 type BoxedError = Box<dyn Error + Send + Sync>;
@@ -66,9 +66,10 @@ impl fmt::Display for MessageError {
                 formatter,
                 "message too large: {bytes} bytes (max {MAX_MESSAGE_SIZE})"
             ),
-            Self::UnsupportedVersion(version) => {
-                write!(formatter, "unsupported protocol version: {version}")
-            }
+            Self::UnsupportedVersion(version) => write!(
+                formatter,
+                "unsupported protocol version: {version} (this build reads {VERSION})"
+            ),
             Self::Invalid(reason) => formatter.write_str(reason),
             Self::Source { step, .. } => formatter.write_str(step),
         }
