@@ -64,15 +64,16 @@ mod departed_tests {
     use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::EventLoopState;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
-    use crate::gossip::event::{CountingSink, SilentSink};
+    use crate::gossip::event::{CountingSink, NodeEvent, NodeSink, SilentSink};
     use crate::lookup::{TransportOpts, build_peer_multihop};
     use crate::protocol::identity::Identity;
     use crate::protocol::meshes::LookupOpts;
     use crate::protocol::messages::Authored;
-    use crate::protocol::{MeshId, Message, PresenceSubtype};
+    use crate::protocol::{MeshId, Message, MessageKind, PresenceSubtype};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::{MeshSender, PayloadPath};
     use crate::util::tuning::QUIET_CAP;
+    use std::sync::Mutex;
 
     use super::{PresenceEvent, handle_presence, membership_update, observe};
 
@@ -387,6 +388,89 @@ mod departed_tests {
                 app.0,
                 vec![recorded],
                 "the app was told of a nickname that the departed key did not hold"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// Keeps the nickname of each departure that the engine surfaces to the operator.
+    #[derive(Default)]
+    struct DepartureSink(Mutex<Vec<protocol::Nickname>>);
+
+    impl NodeSink for DepartureSink {
+        fn emit(&self, event: NodeEvent) {
+            if let NodeEvent::Presence { message, .. } = event
+                && matches!(
+                    message.kind,
+                    MessageKind::Presence {
+                        subtype: PresenceSubtype::Left
+                    }
+                )
+            {
+                self.0
+                    .lock()
+                    .expect("the sink lock")
+                    .push(message.author.clone());
+            }
+        }
+    }
+
+    /// The whole path of a goodbye, `observe` first. A `Left` can name any nickname, so neither
+    /// `observe` nor the departure may take the nickname of the key from the frame: the app and the
+    /// operator hear of the peer that the roster removed.
+    #[test]
+    fn a_goodbye_that_names_another_nickname_ends_the_key_under_its_recorded_nickname() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = endpoint_and_sender().await;
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let mesh = MeshId::from("test");
+            let us = nick("us");
+            let sink = DepartureSink::default();
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &us,
+                identity: &identity,
+                our_pubkey,
+                max_peers: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let run = Identity::generate();
+            let recorded = nick("swift-cedar");
+            let mut state = fresh_state();
+            state.names.insert(run.author_key(), recorded.clone());
+            state.peers.insert(run.author_key());
+            state.surfaced.insert(run.author_key());
+
+            let left = Message::new_left(&mesh, &nick("lost-heron")).sign(&run);
+            let observed = observe(&left, &mut state, &context);
+            let mut app = Recorder(Vec::new());
+            handle_presence(
+                PresenceEvent {
+                    message: &left,
+                    subtype: PresenceSubtype::Left,
+                    update: &observed.update,
+                    surfaceable: observed.surfaceable,
+                },
+                &mut state,
+                &mut app,
+                &context,
+            )
+            .await;
+
+            assert_eq!(
+                app.0,
+                vec![recorded.clone()],
+                "the app was told of a nickname that the departed key did not hold"
+            );
+            assert_eq!(
+                *sink.0.lock().expect("the sink lock"),
+                vec![recorded],
+                "the operator was told of a nickname that the departed key did not hold"
             );
             endpoint.close().await;
         });

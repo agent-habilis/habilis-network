@@ -2,8 +2,8 @@ use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
-use crate::protocol::PresenceSubtype;
 use crate::protocol::messages::Verified;
+use crate::protocol::{Message, Nickname, PresenceSubtype};
 
 use super::membership_update;
 
@@ -20,6 +20,26 @@ pub(crate) struct PresenceEvent<'message> {
     pub(crate) subtype: PresenceSubtype,
     pub(crate) update: &'message membership_update::MembershipUpdate,
     pub(crate) surfaceable: bool,
+}
+
+/// The presence that reports a departure. The roster knows the key by `departed`, and a goodbye can
+/// name another nickname. Then this node signs the `left` that reports it, as it does for an
+/// arrival, so that the proof names the peer that was removed.
+fn departure(message: &Verified, departed: &Nickname, context: &HandlerCtx<'_>) -> NodeEvent {
+    let key = message.key();
+    if message.author == *departed {
+        return NodeEvent::Presence {
+            message: Box::new(message.authored()),
+            peer: key,
+            synthetic: false,
+        };
+    }
+    let left = Message::new_left(context.mesh, departed).sign(context.identity);
+    NodeEvent::Presence {
+        message: Box::new(left.authored()),
+        peer: key,
+        synthetic: true,
+    }
 }
 
 pub(crate) async fn handle_presence(
@@ -79,12 +99,8 @@ pub(crate) async fn handle_presence(
         // for a peer known only through pre-join backlog (or one we
         // already showed going quiet) is dropped.
         if was_surfaced {
-            context.sink.emit(NodeEvent::Presence {
-                message: Box::new(message.authored()),
-                peer: key,
-                synthetic: false,
-            });
-            tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer left");
+            context.sink.emit(departure(message, &departed, context));
+            tracing::info!(target: "habilis_network::lifecycle", nickname = %departed, "peer left");
         }
         state.write_peer_count();
         // App cleanup last, with the roster already consistent. The app tracks peers by nickname,

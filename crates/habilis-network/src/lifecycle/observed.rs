@@ -37,8 +37,16 @@ pub(crate) fn observe(
     let proves = membership_update::proves_presence(&message.kind, message.timestamp);
     let update = membership_update::compute_observed_proving(message, proves, state);
     if !update.stale {
-        // The roster is keyed by author key. The nickname is the label that the key uses now.
-        if state.names.get(&key) != Some(&message.author) {
+        // The roster is keyed by author key. The nickname is the label that the key uses now. A
+        // goodbye is not a rename: it can name any nickname, and the departure reads the one that
+        // the roster recorded.
+        let goodbye = matches!(
+            message.kind,
+            MessageKind::Presence {
+                subtype: PresenceSubtype::Left
+            }
+        );
+        if !goodbye && state.names.get(&key) != Some(&message.author) {
             state.names.insert(key, message.author.clone());
         }
         // A frame of a live kind from a peer that is in the roster refreshes it at any stamp: a
