@@ -860,6 +860,7 @@ impl EventLoopState {
         RosterSnapshot {
             peers,
             count: self.member_count(),
+            live: self.live_nicknames().cloned().collect(),
         }
     }
 

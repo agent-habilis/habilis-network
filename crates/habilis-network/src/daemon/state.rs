@@ -1616,6 +1616,42 @@ mod tests {
         );
     }
 
+    /// A live peer that is not shown yet has no row, but a send to its nickname still counts it. A
+    /// nickname that a shown peer and an unshown live peer use is ambiguous, and no lobby packet is
+    /// sent to it.
+    #[test]
+    fn a_nickname_of_a_shown_peer_and_an_unshown_live_peer_is_no_addressee() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        state.peer_for_test("solo");
+        state.surfaced_for_test("solo");
+        let shown = test_key("bob#shown");
+        let hidden = test_key("bob#hidden");
+        for key in [shown, hidden] {
+            state.names.insert(key, nick("bob"));
+            state.peers.insert(key);
+        }
+        state.surfaced.insert(shown);
+
+        let snapshot = state.roster_snapshot();
+        let addressed: Vec<&str> = snapshot.addressees().map(Nickname::as_str).collect();
+        let shared: Vec<&str> = snapshot
+            .ambiguous_nicknames()
+            .map(Nickname::as_str)
+            .collect();
+
+        assert_eq!(
+            addressed,
+            vec!["solo"],
+            "the engine refuses a send to bob, so the lobby must not address it: {snapshot:?}"
+        );
+        assert_eq!(
+            shared,
+            vec!["bob"],
+            "the unshown live peer counts toward the ambiguity: {snapshot:?}"
+        );
+    }
+
     #[test]
     fn roster_reach_tags_only_live_links_direct() {
         let _guard = ::habilis_network_test_tracing::init();
