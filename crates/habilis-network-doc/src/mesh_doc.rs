@@ -554,13 +554,25 @@ impl MeshDoc {
 
     /// Drop every frame and start `epoch`, and hand back the entry of `me`, which only `me` can
     /// write again.
+    ///
+    /// A candidate that this node holds is not lost with the old epoch. A candidate of `epoch` is
+    /// applied in the new one, because a peer that reset first sent it once and its dedup key stays
+    /// seen. Any other candidate is forgotten, so its re-send is not a repeat.
     fn switch_to(&mut self, epoch: u64, me: &Nickname) -> EpochSwitch {
+        let held = self.candidate.take();
         let gate_map = self.gate.as_ref().map(|gate| gate.map.clone());
         let map: String = gate_map.unwrap_or_default();
         let json = self.to_json();
         let peers = json.get(&map);
         let own_entry: Option<Value> = peers.and_then(|peers| peers.get(me.as_str())).cloned();
         self.restart(epoch);
+        if let Some(held) = held {
+            if held.epoch == epoch {
+                let _ = self.ingest(&held.frame);
+            } else {
+                self.dropped.push(held.frame.dedup_key());
+            }
+        }
         EpochSwitch {
             epoch,
             map,
@@ -2370,6 +2382,88 @@ mod tests {
             vec![late_one.dedup_key()],
             "a lower candidate is forgotten, so its re-send is not a repeat"
         );
+    }
+
+    /// A doc over its cap with one ghost frame and the entry of `who`, so the next tick resets it.
+    fn doc_over_the_cap(who: &Nickname) -> MeshDoc {
+        let ghost = nick("ghost");
+        let mut doc = MeshDoc::new_gated(card_gate()).epoch_cap(2_000);
+        for field in ["a", "b", "c"] {
+            write(&mut doc, &ghost, &filler("ghost", field));
+        }
+        write(&mut doc, who, &entry(who.as_str(), "mine"));
+        doc
+    }
+
+    fn holds_entry(doc: &MeshDoc, who: &str) -> bool {
+        doc.to_json()["peers"].get(who).is_some()
+    }
+
+    #[test]
+    fn a_candidate_of_the_epoch_a_node_resets_to_is_not_lost_by_the_reset() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (alice, bob) = (nick("alice"), nick("bob"));
+        let mut doc = doc_over_the_cap(&bob);
+        let from_alice = root_of(1, &alice, "hers");
+        assert!(
+            matches!(doc.ingest(&from_alice), Ingested::NewEpoch { epoch: 1 }),
+            "the root of epoch 1 is the candidate of a node that is still at epoch 0"
+        );
+        doc.tick_epoch(&bob)
+            .expect("over the cap: a reset to epoch 1");
+        let forgotten = dropped_keys(&mut doc).contains(&from_alice.dedup_key());
+        assert!(
+            holds_entry(&doc, "alice") || forgotten,
+            "the card of alice is in epoch 1 or its re-send is not a repeat"
+        );
+    }
+
+    /// Eight nodes at epoch 0 that all cross the cap in one minute: the first resets and writes its
+    /// card, each of the others gets that frame while it is still at epoch 0, then resets in turn.
+    #[test]
+    fn eight_nodes_that_reset_in_one_minute_all_hold_the_eight_cards() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let names: Vec<Nickname> = (0..8).map(|index| nick(&format!("n{index}"))).collect();
+        let mut docs: Vec<MeshDoc> = names.iter().map(doc_over_the_cap).collect();
+        let mut seen: Vec<HashSet<DedupKey>> = names.iter().map(|_| HashSet::new()).collect();
+        let mut sent: Vec<Verified> = Vec::new();
+        for first in 0..names.len() {
+            docs[first]
+                .tick_epoch(&names[first])
+                .expect("over the cap: a reset");
+            let card = entry(names[first].as_str(), "mine");
+            sent.push(write(&mut docs[first], &names[first], &card));
+            for index in 0..docs.len() {
+                if index != first {
+                    receive(&mut docs[index], &mut seen[index], &sent);
+                }
+            }
+        }
+        for _ in 0..3 {
+            for index in 0..docs.len() {
+                receive(&mut docs[index], &mut seen[index], &sent);
+            }
+        }
+        for doc in &docs {
+            let cards: usize = names
+                .iter()
+                .filter(|name| holds_entry(doc, name.as_str()))
+                .count();
+            assert_eq!(cards, 8, "a node holds every card after the resets");
+        }
+    }
+
+    /// A receiver in the engine: a repeat of a seen frame is not ingested, and a key that the
+    /// document drops is forgotten, so the re-send lands.
+    fn receive(doc: &mut MeshDoc, seen: &mut HashSet<DedupKey>, frames: &[Verified]) {
+        for frame in frames {
+            if seen.insert(frame.dedup_key()) {
+                let _ = doc.ingest(frame);
+            }
+            for key in doc.take_dropped() {
+                seen.remove(&key);
+            }
+        }
     }
 
     #[test]
