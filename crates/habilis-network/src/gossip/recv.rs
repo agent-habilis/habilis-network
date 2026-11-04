@@ -2279,6 +2279,7 @@ mod first_contact_tests {
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
     use crate::lifecycle::membership_update::MembershipUpdate;
+    use crate::ops;
     use crate::protocol::identity::Identity;
     use crate::protocol::messages::{Authored, MessageBody, Verified};
     use crate::protocol::{Channel, MeshId, Message, MessageKind, Nickname};
@@ -2518,7 +2519,7 @@ mod first_contact_tests {
             )
             .sign(&Identity::generate());
 
-            let sent = crate::ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
+            let sent = ops::send_app(&mut state, &context, frame, AppClass::NONE).await;
 
             assert!(
                 matches!(sent, Err(transport::SendError::Ambiguous(_))),
