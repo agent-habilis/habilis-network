@@ -1196,10 +1196,11 @@ mod tests {
             let empty = serde_json::json!([]);
             let meta_digest = digest(&net.mesh, Channel::Meta, &empty, &asker);
             let held: Vec<_> = state.doc(Channel::Meta).changes_since(&[], 100).collect();
-            let held_lens = held
-                .iter()
-                .map(|frame| frame.serialize().expect("serialize"));
-            let held_total: usize = held_lens.map(|wire| wire.as_bytes().len()).sum();
+            let wire_len = |frame: &Verified| {
+                let wire = frame.serialize().expect("serialize");
+                wire.as_bytes().len()
+            };
+            let held_total: usize = held.iter().map(wire_len).sum();
 
             let answered =
                 antientropy::handle_state_digest(Channel::Meta, &meta_digest, &mut state, &context)
